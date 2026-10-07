@@ -341,9 +341,6 @@ pub fn run_offline_handoff_conformance(
     engine_type: EngineType,
     transfer_timing_mode: crate::common::protocols::KvTransferTimingMode,
 ) -> Result<NormalizedHandoffConformance> {
-    if engine_type == EngineType::Trtllm {
-        anyhow::bail!("TRT-LLM does not support destination handoff");
-    }
     let build_args = |worker_type| {
         let mut builder = MockEngineArgs::builder()
             .engine_type(engine_type)
@@ -465,6 +462,7 @@ pub(crate) fn simulate_trace_workload_with_scaling_policy(
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
     emit_session_metadata: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
@@ -473,7 +471,12 @@ pub(crate) fn simulate_trace_workload_with_scaling_policy(
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    let mut driver = trace_workload_driver(trace, args.block_size, router_mode, false)?;
+    let mut driver = trace_workload_driver(
+        trace,
+        args.block_size,
+        router_mode,
+        accumulate_session_deltas,
+    )?;
     if !emit_session_metadata {
         driver = driver.without_session_metadata();
     }
@@ -528,37 +531,6 @@ pub(crate) fn simulate_trace_workload_with_capture_options(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn simulate_trace_workload_accumulating_deltas(
-    args: MockEngineArgs,
-    router_config: Option<ReplayKvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace: Trace,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: SlaThresholds,
-    telemetry: Option<ReplayTelemetryOptions>,
-) -> Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let driver = trace_workload_driver(trace, args.block_size, router_mode, true)?;
-    run_aggregated(
-        args,
-        router_config,
-        prefill_load_estimator,
-        ReplayRuntimeInput::Workload(driver),
-        num_workers,
-        None,
-        router_mode,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-        None,
-        telemetry,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_workload_with_scaling_policy(
     args: MockEngineArgs,
     router_config: Option<ReplayKvRouterConfig>,
@@ -567,6 +539,7 @@ pub(crate) fn simulate_concurrency_workload_with_scaling_policy(
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
@@ -574,8 +547,13 @@ pub(crate) fn simulate_concurrency_workload_with_scaling_policy(
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    let driver =
-        concurrency_workload_driver(trace, args.block_size, max_in_flight, router_mode, false)?;
+    let driver = concurrency_workload_driver(
+        trace,
+        args.block_size,
+        max_in_flight,
+        router_mode,
+        accumulate_session_deltas,
+    )?;
     run_aggregated(
         args,
         router_config,
@@ -593,39 +571,6 @@ pub(crate) fn simulate_concurrency_workload_with_scaling_policy(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
-    args: MockEngineArgs,
-    router_config: Option<ReplayKvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace: Trace,
-    max_in_flight: usize,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: SlaThresholds,
-    telemetry: Option<ReplayTelemetryOptions>,
-) -> Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let driver =
-        concurrency_workload_driver(trace, args.block_size, max_in_flight, router_mode, true)?;
-    run_aggregated(
-        args,
-        router_config,
-        prefill_load_estimator,
-        ReplayRuntimeInput::Workload(driver),
-        num_workers,
-        Some(max_in_flight),
-        router_mode,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-        None,
-        telemetry,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_agentic_trace_workload(
     args: MockEngineArgs,
     router_config: Option<ReplayKvRouterConfig>,
@@ -637,6 +582,7 @@ pub(crate) fn simulate_agentic_trace_workload(
     max_sim_time_ms: Option<f64>,
     agentic_lanes: Option<usize>,
     sla: SlaThresholds,
+    scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
@@ -657,7 +603,7 @@ pub(crate) fn simulate_agentic_trace_workload(
         record_per_request,
         max_sim_time_ms,
         sla,
-        None,
+        scaling_policy,
         telemetry,
     )
 }
@@ -673,6 +619,7 @@ pub(crate) fn simulate_agentic_trace_workload_disagg(
     max_sim_time_ms: Option<f64>,
     agentic_lanes: Option<usize>,
     sla: SlaThresholds,
+    scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
@@ -692,7 +639,7 @@ pub(crate) fn simulate_agentic_trace_workload_disagg(
         record_per_request,
         max_sim_time_ms,
         sla,
-        None,
+        scaling_policy,
         telemetry,
     )
 }
@@ -763,6 +710,7 @@ pub(crate) fn simulate_trace_workload_disagg_with_scaling_policy(
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
     emit_session_metadata: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
@@ -771,8 +719,12 @@ pub(crate) fn simulate_trace_workload_disagg_with_scaling_policy(
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
-    let mut driver =
-        trace_workload_driver(trace, config.prefill_args.block_size, router_mode, false)?;
+    let mut driver = trace_workload_driver(
+        trace,
+        config.prefill_args.block_size,
+        router_mode,
+        accumulate_session_deltas,
+    )?;
     if !emit_session_metadata {
         driver = driver.without_session_metadata();
     }
@@ -832,6 +784,7 @@ pub(crate) fn simulate_concurrency_workload_disagg_with_scaling_policy(
     trace: Trace,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
@@ -844,7 +797,7 @@ pub(crate) fn simulate_concurrency_workload_disagg_with_scaling_policy(
         config.prefill_args.block_size,
         max_in_flight,
         router_mode,
-        false,
+        accumulate_session_deltas,
     )?;
     run_disaggregated(
         config,

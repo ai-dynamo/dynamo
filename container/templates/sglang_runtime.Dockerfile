@@ -190,6 +190,94 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     [ "$CUDA_MAJOR" = "13" ] || { echo "ERROR: requirements.sglang.txt hardcodes the mooncake-transfer-engine-cuda13 distribution; got CUDA_MAJOR=$CUDA_MAJOR" >&2; exit 1; } && \
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
+
+# Assert what the install left. The upstream SGLang image ships no
+# PyNvVideoCodec, so nothing is removed first -- but that is a property of the
+# current base rather than a guarantee, and checking the result is what keeps it
+# honest. PINNED is duplicated from the requirements file deliberately: this stage
+# must not parse the file it is checking; a test asserts the two agree.
+RUN python3 - <<'PYEOF'
+import csv
+import glob
+import os
+import re
+import sys
+from importlib.metadata import distributions
+
+PINNED = "2.2.3"
+NAME = "pynvvideocodec"
+# Mirrors the deny globs in container/compliance/policy/codec_policy.yaml. Kept as
+# families rather than the four this package happens to have shed, so a future
+# release vendoring libpostproc or libx264 is caught here -- beside the install
+# that introduced it -- instead of as an unattributed scan violation later.
+DENIED = (
+    "libavcodec",
+    "libavdevice",
+    "libavfilter",
+    "libswscale",
+    "libswresample",
+    "libpostproc",
+    "libx264",
+    "libx265",
+    "libfdk-aac",
+)
+
+
+def canonical(name):
+    return re.sub(r"[-_.]+", "-", name or "").lower()
+
+
+# Enumerated over sys.path rather than one scheme directory: these images carry
+# both /usr/local/lib/python3.12/dist-packages and /usr/lib/python3/dist-packages,
+# and the wheel declares Root-Is-Purelib: false, so neither purelib nor platlib
+# alone is guaranteed to be the install target or the only place a copy can hide.
+# A surviving base copy beside the new one is the failure being looked for, which
+# is also why this counts distributions instead of asking for one version.
+installed = [d for d in distributions() if canonical(d.metadata["Name"]) == NAME]
+versions = sorted(d.version for d in installed)
+print("PyNvVideoCodec distributions on sys.path:", versions)
+if len(installed) != 1:
+    sys.exit(f"ERROR: expected exactly one PyNvVideoCodec, found {versions}")
+if versions[0] != PINNED:
+    sys.exit(f"ERROR: PyNvVideoCodec is {versions[0]}, but the requirements file "
+             f"pins {PINNED}")
+
+site = os.path.normpath(str(installed[0].locate_file("")))
+pkg = os.path.join(site, "PyNvVideoCodec")
+bundled = sorted(
+    os.path.relpath(p, pkg)
+    for p in glob.glob(os.path.join(pkg, "**", "lib*.so*"), recursive=True)
+)
+print("PyNvVideoCodec bundles:", bundled)
+# Positive first, and on both libraries: an empty package directory satisfies
+# every negative check below while shipping no demuxer at all.
+for required in ("libavformat", "libavutil"):
+    if not any(os.path.basename(n).startswith(required) for n in bundled):
+        sys.exit(
+            f"ERROR: PyNvVideoCodec bundles no {required}, so the checks below "
+            f"would pass vacuously; found {bundled}"
+        )
+denied = [n for n in bundled if os.path.basename(n).startswith(DENIED)]
+if denied:
+    sys.exit(f"ERROR: PyNvVideoCodec bundles libraries the codec gate denies: {denied}")
+
+# The FFmpeg source tarball lands outside site-packages, so its directory is read
+# from the wheel's own RECORD rather than guessed from a sysconfig path -- the
+# RECORD is what the installer actually wrote, and it moves if the layout does.
+record = installed[0].read_text("RECORD") or ""
+declared = [
+    row[0]
+    for row in csv.reader(record.splitlines())
+    if row and row[0].endswith((".tar.xz", ".tar.gz", ".tar.bz2"))
+]
+if len(declared) != 1:
+    sys.exit(f"ERROR: expected one source tarball in the RECORD, found {declared}")
+external = os.path.dirname(os.path.normpath(os.path.join(site, declared[0])))
+tarballs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(external, "ffmpeg-*.tar.*")))
+print("bundled FFmpeg source tarballs in", external, "->", tarballs)
+if len(tarballs) != 1:
+    sys.exit(f"ERROR: expected exactly one bundled FFmpeg source tarball, found {tarballs}")
+PYEOF
 {% else %}
 # mooncake and PyNvVideoCodec are CUDA-only. The mooncake floor names the CUDA 13
 # distribution, and PyNvVideoCodec decodes on NVDEC through libnvcuvid, so both
@@ -238,6 +326,14 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 # equivalent purge in vllm_runtime.Dockerfile.
 {% if device == "cuda" %}
 RUN set -eux; \
+    # SGLang 0.5.21's runtime image installs Ubuntu's full GPL/LGPL ffmpeg
+    # dependency closure. Remove the packages (and their dpkg metadata) before
+    # copying Dynamo's separately built VP9-only ffmpeg below. File deletion
+    # alone is insufficient because the compliance generator inventories dpkg.
+    apt-get purge -y --auto-remove \
+        ffmpeg \
+        libwayland-server0; \
+    rm -rf /var/lib/apt/lists/*; \
     python3 -m pip uninstall --yes \
         av \
         decord \
@@ -273,6 +369,12 @@ RUN set -eux; \
         /usr/local/lib/pkgconfig/libsw*.pc \
         /usr/local/src/ffmpeg \
         /root/.cache/pip; \
+    find /usr /opt /workspace /sgl-workspace -xdev \
+        \( -type f -o -type l \) \
+        \( -name 'libx264*.so*' -o -name 'libx265*.so*' \
+        -o -name 'libopenh264*.so*' -o -name 'libfdk-aac*.so*' \
+        -o -name 'libfaac*.so*' -o -name 'libvo-aacenc*.so*' \
+        -o -name 'libaacplus*.so*' \) -delete; \
     ldconfig
 {% endif %}
 
@@ -319,6 +421,12 @@ RUN set -eu; \
         echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
         exit 1; \
     fi
+
+# Frontend video decoding is part of the shipped SGLang CUDA contract. Fail the
+# image build if the runtime wheel was accidentally compiled without it.
+{% if target not in ("dev", "local-dev") %}
+RUN python3 -c 'from dynamo.llm import MediaDecoder; assert hasattr(MediaDecoder(), "enable_video")'
+{% endif %}
 {% else %}
 ENV IMAGEIO_FFMPEG_EXE=
 {% endif %}

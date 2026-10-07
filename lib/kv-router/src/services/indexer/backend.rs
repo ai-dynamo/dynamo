@@ -1236,6 +1236,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "standalone-selection")]
     impl Indexer {
         pub(crate) async fn flush(&self) {
             flush(self).await

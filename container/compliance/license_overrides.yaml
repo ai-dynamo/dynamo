@@ -153,6 +153,11 @@ overrides:
     source: "NVIDIA NVSHMEM License — https://docs.nvidia.com/nvshmem/api/eula.html"
 
   - ecosystem: python
+    name: nvshmem4py-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA NVSHMEM License — https://docs.nvidia.com/nvshmem/api/eula.html"
+
+  - ecosystem: python
     name: nvidia-cudnn-cu13
     license: LicenseRef-NVIDIA-Proprietary
     source: "NVIDIA cuDNN Software License Agreement — https://docs.nvidia.com/deeplearning/cudnn/sla/index.html"
