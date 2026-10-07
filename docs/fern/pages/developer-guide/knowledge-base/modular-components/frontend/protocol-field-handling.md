@@ -54,13 +54,13 @@ response handling.
 These examples illustrate the ownership model; they do not declare support on every backend or
 endpoint:
 
-| Example | Ownership lesson |
-| --- | --- |
-| `continue_final_message` | Dynamo uses the value while preparing the chat template. The original field does not need to reach the engine after preprocessing. |
-| `temperature` | Backend sampling behavior can use a typed frontend representation. Typed storage does not make the sampling semantics frontend-owned. |
-| `prompt_logprobs` | The backend computes the values while Dynamo carries, aggregates, and exposes the response payload. Document the streaming and non-streaming projections separately. |
-| Backend processor option | Backend-owned semantics can use opaque transport, but only on explicitly supported paths. Opaque transport is not unrestricted passthrough. |
-| `nvext.extra_fields` | This Dynamo-owned option selects response metadata. It is not a catch-all request map. |
+| Example | Category | Ownership lesson |
+| --- | --- | --- |
+| `continue_final_message` | Dynamo-handled | Dynamo uses the value while preparing the chat template. The original field does not need to reach the engine after preprocessing. |
+| `temperature` | Backend-handled | Backend sampling behavior can use a typed frontend representation. Typed storage does not make the sampling semantics frontend-owned. |
+| `prompt_logprobs` | Jointly handled | The backend computes the values while Dynamo carries, aggregates, and exposes the response payload. Document the streaming and non-streaming projections separately. |
+| Backend processor option | Backend-handled | Backend-owned semantics can use opaque transport, but only on explicitly supported paths. Opaque transport is not unrestricted passthrough. |
+| `nvext.extra_fields` | Dynamo-handled | This Dynamo-owned option selects response metadata. It is not a catch-all request map. |
 
 ## Trace the Complete Field Lifecycle
 
