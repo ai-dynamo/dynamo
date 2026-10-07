@@ -776,8 +776,8 @@ export const ARTIFACTS: Artifact[] = [
     description: "Async OpenAI-compatible API client",
     meta: "Independently versioned",
     group: "consumed",
-    href: "https://crates.io/crates/dynamo-protocols/5.0.1",
-    tags: [{ label: "cargo add dynamo-protocols@5.0.1", clipboard: "cargo add dynamo-protocols@5.0.1" }],
+    href: "https://crates.io/crates/dynamo-protocols/5.4.1",
+    tags: [{ label: "cargo add dynamo-protocols@5.4.1", clipboard: "cargo add dynamo-protocols@5.4.1" }],
   },
   {
     category: "crate",
@@ -828,8 +828,8 @@ export const ARTIFACTS: Artifact[] = [
     description: "Tokenizer library for LLM inference",
     meta: "Independently versioned",
     group: "consumed",
-    href: "https://crates.io/crates/dynamo-tokenizers/1.5.4",
-    tags: [{ label: "cargo add dynamo-tokenizers@1.5.4", clipboard: "cargo add dynamo-tokenizers@1.5.4" }],
+    href: "https://crates.io/crates/dynamo-tokenizers/1.8.1",
+    tags: [{ label: "cargo add dynamo-tokenizers@1.8.1", clipboard: "cargo add dynamo-tokenizers@1.8.1" }],
   },
   {
     category: "crate",
@@ -941,8 +941,8 @@ export const ARTIFACTS: Artifact[] = [
     description: "Chat-template rendering used by the Dynamo Frontend",
     meta: "Independently versioned",
     group: "consumed",
-    href: "https://crates.io/crates/dynamo-renderer/4.0.0",
-    tags: [{ label: "cargo add dynamo-renderer@4.0.0", clipboard: "cargo add dynamo-renderer@4.0.0" }],
+    href: "https://crates.io/crates/dynamo-renderer/5.1.2",
+    tags: [{ label: "cargo add dynamo-renderer@5.1.2", clipboard: "cargo add dynamo-renderer@5.1.2" }],
   },
   {
     category: "crate",
@@ -1384,6 +1384,7 @@ export interface ReleaseStats {
    published 930/603/896, missing in both directions, so it cannot be trusted
    to fill the rest. Leave them absent unless a method reproduces all three. */
 export const RELEASE_STATS: Record<string, ReleaseStats> = {
+  "v1.5.1": { breaking: 2, knownIssues: 2 },
   "v1.5.0": { prs: 658, contributors: 123, breaking: 44, knownIssues: 12 },
   "v1.4.0": { prs: 640, contributors: 127, firstTimers: 29, breaking: 51, knownIssues: 19 },
   "v1.3.0": { prs: 930, contributors: 125, firstTimers: 24, breaking: 24, knownIssues: 10 },
