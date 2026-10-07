@@ -614,7 +614,17 @@ jobs:
     name: Recipe tests
     needs: [compute-release-mode, resolve-source-sha, trtllm-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: $/.github/workflows/kimi-k25-agg-nightly.yml
+    uses: ./.github/workflows/kimi-k25-agg-nightly.yml
+    with:
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
+    secrets: inherit
+
+  kimi-k25-disagg-perf:
+    name: Recipe tests
+    needs: [compute-release-mode, resolve-source-sha, trtllm-copy-to-acr]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/kimi-k25-disagg-nightly.yml
     with:
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
@@ -1708,7 +1718,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test, deploy-cleanup, deepseek-v4-pro-agg-perf, deepseek-v4-pro-disagg-perf, rust-tests, kimi-k25-agg-perf]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test, deploy-cleanup, deepseek-v4-pro-agg-perf, deepseek-v4-pro-disagg-perf, rust-tests, kimi-k25-agg-perf, kimi-k25-disagg-perf]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs

@@ -128,7 +128,14 @@ pub(crate) fn engine_components(
         emit_kv_events,
         emit_kv_token_ids,
         kv_transfer_bytes_per_token: args.kv_bytes_per_token,
-        kv_cache_bytes_per_token: args.kv_cache_bytes_per_token,
+        // G2 host blocks hold the engine's KV footprint, which kv_bytes_per_token
+        // already describes unless the cache geometry is set separately.
+        kv_cache_bytes_per_token: if args.native_host_offload.is_some() {
+            args.kv_cache_bytes_per_token.or(args.kv_bytes_per_token)
+        } else {
+            args.kv_cache_bytes_per_token
+        },
+        native_host_offload: args.native_host_offload.clone(),
         kv_transfer_bandwidth: args.kv_transfer_bandwidth,
         kv_transfer_timing_mode,
         timing_model,
@@ -253,7 +260,7 @@ mod tests {
 
     use super::*;
     use crate::common::perf_model::{AisCallback, DecodeInterpolator, PrefillInterpolator};
-    use crate::common::protocols::{SglangArgs, TrtllmArgs};
+    use crate::common::protocols::{NativeHostOffloadConfig, SglangArgs, TrtllmArgs};
 
     struct EchoPrefill;
 
@@ -316,6 +323,24 @@ mod tests {
         let components = engine_components(args, false, false).unwrap();
         assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(4096));
         assert_eq!(components.rank.kv_cache_bytes_per_token, Some(1024));
+    }
+
+    #[test]
+    fn native_host_offload_cache_geometry_follows_a_later_kv_bytes_override() {
+        let mut args = MockEngineArgs::builder()
+            .kv_bytes_per_token(Some(4096))
+            .native_host_offload(Some(NativeHostOffloadConfig::new(8)))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+        args.kv_bytes_per_token = Some(8192);
+        let components = engine_components(args.clone(), false, false).unwrap();
+        assert_eq!(components.rank.kv_cache_bytes_per_token, Some(8192));
+
+        args.kv_cache_bytes_per_token = Some(2048);
+        let components = engine_components(args, false, false).unwrap();
+        assert_eq!(components.rank.kv_cache_bytes_per_token, Some(2048));
     }
 
     #[test]

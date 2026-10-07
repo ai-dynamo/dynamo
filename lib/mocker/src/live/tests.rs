@@ -84,6 +84,27 @@ async fn wait_for_idle(engine: &LiveEngine) {
 }
 
 #[test]
+fn deterministic_tokens_match_cached_random_access_and_bulk_generation() {
+    let expected = [3006, 5022, 28000, 21974, 1646, 7038, 26107, 20719];
+    let generator = DeterministicTokenGenerator::new(42, "request-42");
+    assert_eq!(generator.token_id(32_767), 29_248);
+    for position in (0..expected.len()).rev() {
+        assert_eq!(generator.token_id(position), expected[position]);
+        assert_eq!(
+            deterministic_token_id(42, "request-42", position),
+            expected[position]
+        );
+    }
+    assert_eq!(
+        deterministic_output_tokens(42, "request-42", expected.len()),
+        expected
+    );
+    assert!(deterministic_output_tokens(42, "request-42", 0).is_empty());
+    assert_ne!(deterministic_output_tokens(43, "request-42", 8), expected);
+    assert_ne!(deterministic_output_tokens(42, "request-43", 8), expected);
+}
+
+#[test]
 fn failed_output_batch_reports_the_scheduler_id() {
     let client_id = Uuid::from_u128(1);
     let scheduler_id = Uuid::from_u128(2);
@@ -374,6 +395,7 @@ async fn streams_planned_tokens_to_the_owning_request() {
             ]
         );
         assert!(request.recv().await.is_none());
+        assert!(!request.is_aborted());
         assert_eq!(engine.active_request_count(), 0);
     }
 }
@@ -407,6 +429,7 @@ async fn dropping_engine_closes_outstanding_request_streams() {
     })
     .await
     .expect("engine shutdown should close every outstanding output route");
+    assert!(!request.is_aborted());
 }
 
 #[tokio::test]
@@ -564,6 +587,145 @@ async fn typed_handoff_routes_output_and_lifecycle_for_supported_engines() {
         assert!(destination_output.completed);
         destination.shutdown().await.unwrap();
         assert!(destination_events.recv().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn decode_admission_reserves_kv_without_recomputing_the_prompt() {
+    #[derive(Default)]
+    struct Passes(Mutex<Vec<crate::common::protocols::ForwardPassSnapshot>>);
+
+    impl FpmSink for Passes {
+        fn publish(
+            &self,
+            snapshot: crate::common::protocols::ForwardPassSnapshot,
+        ) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(snapshot);
+            Ok(())
+        }
+    }
+
+    for engine_type in [EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm] {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut engine_args = args(engine_type);
+            engine_args.num_gpu_blocks = 3;
+            let passes = Arc::new(Passes::default());
+            let engine = LiveEngine::start_with_config(
+                engine_args,
+                0,
+                LiveEngineConfig {
+                    fpm_publisher: FpmPublisher::new(Some(passes.clone())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let (held_control, mut held_events) =
+                engine.register_handoff(HandoffId::new()).unwrap();
+            let (registration, held_request) = engine
+                .prepare_request(DirectRequest {
+                    tokens: vec![1; 8],
+                    max_output_tokens: 1,
+                    ..Default::default()
+                })
+                .unwrap();
+            held_control
+                .reserve_destination(registration)
+                .await
+                .unwrap();
+            assert!(matches!(
+                held_events.recv().await,
+                Some(LiveHandoffEvent::DestinationReserved { .. })
+            ));
+            let mut metrics = engine.metrics_receiver();
+            metrics
+                .wait_for(|snapshot| snapshot.active_decode_blocks == 2)
+                .await
+                .unwrap();
+
+            let request_id = Uuid::new_v4();
+            let decode = DirectRequest {
+                tokens: vec![2; 5],
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![41, 42]),
+                uuid: Some(request_id),
+                ..Default::default()
+            };
+            let mut pending = Box::pin(engine.submit_decode(decode.clone()));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut pending)
+                    .await
+                    .is_err(),
+                "decode must wait for prompt KV capacity"
+            );
+            assert_eq!(engine.active_request_count(), 2);
+            assert!(engine.cancel(request_id).await.unwrap());
+            let mut cancelled = pending.await.unwrap();
+            assert!(cancelled.is_aborted());
+            assert!(cancelled.recv().await.is_none());
+            assert_eq!(engine.active_request_count(), 1);
+
+            let mut dropped = Box::pin(engine.submit_decode(decode.clone()));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut dropped)
+                    .await
+                    .is_err()
+            );
+            drop(dropped);
+            while engine.active_request_count() != 1 {
+                tokio::task::yield_now().await;
+            }
+            held_request.cancel().await.unwrap();
+            drop(held_events);
+            drop(held_control);
+            wait_for_idle(&engine).await;
+            assert_eq!(engine.metrics_receiver().borrow().active_decode_blocks, 0);
+
+            let mut live = engine.submit_decode(decode).await.unwrap();
+            let mut tokens = Vec::new();
+            while let Some(output) = live.recv().await {
+                assert!(!output.rejected);
+                assert_eq!(output.cached_tokens.unwrap_or(0), 0);
+                tokens.push(output.token_id.unwrap());
+            }
+            assert_eq!(tokens, [41, 42]);
+            wait_for_idle(&engine).await;
+
+            let oversized = DirectRequest {
+                tokens: vec![3; 13],
+                max_output_tokens: 1,
+                ..Default::default()
+            };
+            assert!(engine.submit_decode(oversized).await.is_err());
+            if engine_type == EngineType::Trtllm {
+                let mut limited = engine
+                    .submit_decode(DirectRequest {
+                        tokens: vec![3; 5],
+                        max_output_tokens: 8,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                for position in 0..7 {
+                    let output = limited.recv().await.unwrap();
+                    assert!(!output.rejected);
+                    assert_eq!(output.completed, position == 6);
+                }
+                assert!(limited.recv().await.is_none());
+                wait_for_idle(&engine).await;
+            }
+            assert_eq!(engine.active_request_count(), 0);
+            {
+                let snapshots = passes.0.lock().unwrap();
+                assert!(!snapshots.is_empty());
+                assert!(snapshots.iter().all(|pass| {
+                    pass.num_prefill_requests == 0 && pass.sum_prefill_tokens == 0
+                }));
+                assert!(snapshots.iter().any(|pass| pass.num_decode_requests > 0));
+            }
+            engine.shutdown().await.unwrap();
+        })
+        .await
+        .expect("decode admission and cancellation must finish promptly");
     }
 }
 
@@ -768,6 +930,7 @@ async fn pass_boundary_waits_for_gated_route_delivery_before_id_reuse() {
         old_output.is_none(),
         "cancellation abandons the old stream before route cleanup"
     );
+    assert!(old.is_aborted());
     assert!(!cancellation.await.unwrap().unwrap());
     drop(old);
 
@@ -788,6 +951,7 @@ async fn pass_boundary_waits_for_gated_route_delivery_before_id_reuse() {
     assert_eq!(output.token_id, Some(22));
     assert!(output.completed);
     assert!(replacement.recv().await.is_none());
+    assert!(!replacement.is_aborted());
 }
 
 #[tokio::test]
@@ -834,6 +998,7 @@ async fn full_output_stream_is_cancelled_without_stalling_an_unrelated_request()
     assert!(fast_output.completed);
     assert_eq!(slow.recv().await.unwrap().token_id, Some(7));
     assert!(slow.recv().await.is_none());
+    assert!(!slow.is_aborted());
     wait_for_idle(&engine).await;
     assert_eq!(
         fpm.0.load(Ordering::Relaxed),

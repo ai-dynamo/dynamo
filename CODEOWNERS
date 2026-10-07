@@ -171,6 +171,7 @@
 /examples/diffusers/                                                                                    @ai-dynamo/dynamo-diffusion-codeowners
 
 # === planner  (@ai-dynamo/dynamo-planner-codeowners) ===
+/gyms/planner-gym/                                                                                      @ai-dynamo/dynamo-planner-codeowners
 /examples/global_planner/                                                                               @ai-dynamo/dynamo-planner-codeowners
 /examples/power-aware-budget/                                                                           @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/                                                                         @ai-dynamo/dynamo-planner-codeowners
