@@ -30,6 +30,7 @@ See [`launch/`](launch/) for all topologies. For example, aggregated serving on
 one GPU:
 
 ```bash
+docker compose -f dev/docker-compose.yml up -d
 lib/sidecar/trtllm/launch/agg.sh
 curl -s localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
