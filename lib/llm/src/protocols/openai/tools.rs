@@ -250,7 +250,6 @@ fn build_required_schema(
         map.insert("maxItems".to_string(), json!(1));
     }
 
-    // Keep each parameter document in its own definition scope.
     if !defs.is_empty()
         && let Value::Object(map) = &mut result
     {
