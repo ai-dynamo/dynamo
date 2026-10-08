@@ -351,6 +351,7 @@ impl DistributedRuntime {
             );
         }
         if response_plane == ResponsePlaneMode::Velo {
+            distributed_runtime.velo_response_service().await?;
             crate::pipeline::network::velo_response::register_metrics(
                 distributed_runtime.get_metrics_registry(),
             );
@@ -863,6 +864,45 @@ impl DistributedRuntime {
 #[cfg(test)]
 mod parser_env_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn distributed_runtime_validates_velo_at_startup() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::distributed_runtime_validates_velo_at_startup"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let mut cases = vec![
+            ("invalid", "127.0.0.1", "DYN_VELO_RESPONSE_TRANSPORT"),
+            ("tcp", "invalid host", "invalid host"),
+            ("tcp", "192.0.2.1", "Failed to pre-bind TCP listener"), // Valid address, but not assigned to this host.
+        ];
+        if !cfg!(all(target_os = "linux", feature = "velo-ucx")) {
+            cases.push(("ucx", "127.0.0.1", "velo-ucx"));
+        }
+        for (transport, host, message) in cases {
+            temp_env::async_with_vars(
+                [
+                    ("DYN_VELO_RESPONSE_TRANSPORT", Some(transport)),
+                    ("DYN_TCP_RESPONSE_STREAM_HOST", Some(host)),
+                ],
+                async {
+                    let runtime = Runtime::from_current().unwrap();
+                    let mut config = DistributedConfig::process_local();
+                    config.response_plane = Some(ResponsePlaneMode::Velo);
+                    let error = DistributedRuntime::new(runtime, config)
+                        .await
+                        .expect_err("Velo configuration must fail before serving endpoints");
+                    assert!(error.to_string().contains(message), "{error:#}");
+                },
+            )
+            .await;
+        }
+    }
 
     #[tokio::test]
     async fn distributed_runtime_rejects_invalid_parser_version() {
