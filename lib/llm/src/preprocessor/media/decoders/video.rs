@@ -64,13 +64,18 @@ pub struct VideoMetadata {
     pub(crate) sampled_timestamps: Vec<f64>,
 }
 
-fn get_source_duration_from_video_packets(
+struct SourceVideoTiming {
+    start_time_secs: f64,
+    duration_secs: f64,
+}
+
+fn get_source_timing_from_video_packets(
     input: &mut ffmpeg_next::format::context::Input,
     stream_index: usize,
     stream_time_base: Rational,
     frame_rate: f64,
     total_frames: u64,
-) -> Result<f64> {
+) -> Result<SourceVideoTiming> {
     let mut first_pts = None;
     let mut max_pts = None;
     let mut max_packet_end = None;
@@ -102,9 +107,13 @@ fn get_source_duration_from_video_packets(
         0.0
     };
     let (Some(first_pts), Some(max_pts)) = (first_pts, max_pts) else {
-        return Ok(frame_count_duration);
+        return Ok(SourceVideoTiming {
+            start_time_secs: 0.0,
+            duration_secs: frame_count_duration,
+        });
     };
 
+    let start_time_secs = Time::new(Some(first_pts), stream_time_base).as_secs() as f64;
     let pts_duration =
         Time::new(Some(max_pts.saturating_sub(first_pts)), stream_time_base).as_secs() as f64;
     let packet_duration = max_packet_end
@@ -113,12 +122,15 @@ fn get_source_duration_from_video_packets(
         })
         .filter(|duration| *duration > 0.0);
 
-    Ok(select_video_duration_secs(
-        pts_duration,
-        packet_duration,
-        frame_rate,
-        frame_count_duration,
-    ))
+    Ok(SourceVideoTiming {
+        start_time_secs,
+        duration_secs: select_video_duration_secs(
+            pts_duration,
+            packet_duration,
+            frame_rate,
+            frame_count_duration,
+        ),
+    })
 }
 
 /// Selects packet or frame-count duration without overriding a valid PTS span.
@@ -330,10 +342,13 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
             input_stream.parameters(),
         )
     };
-    let source_duration = if stream_duration > 0 {
-        Time::new(Some(stream_duration), stream_time_base).as_secs() as f64
+    let source_timing = if stream_duration > 0 {
+        SourceVideoTiming {
+            start_time_secs: 0.0,
+            duration_secs: Time::new(Some(stream_duration), stream_time_base).as_secs() as f64,
+        }
     } else {
-        get_source_duration_from_video_packets(
+        get_source_timing_from_video_packets(
             &mut input,
             stream_index,
             stream_time_base,
@@ -343,9 +358,13 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
     };
 
     // Duration and frame count come from file metadata and might be inaccurate.
-    let requested_frames =
-        get_num_requested_frames(config, source_duration, source_fps, total_frames)?;
-    let target_times = get_target_times(requested_frames, source_duration, source_fps)?;
+    let requested_frames = get_num_requested_frames(
+        config,
+        source_timing.duration_secs,
+        source_fps,
+        total_frames,
+    )?;
+    let target_times = get_target_times(requested_frames, source_timing.duration_secs, source_fps)?;
 
     let mut decoder_context = Context::new();
     decoder_context.set_time_base(stream_time_base);
@@ -392,7 +411,7 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
                 Ok(()) => {
                     let timestamp =
                         match get_sample_timestamp(config, &decoded_frame, decoder_time_base)? {
-                            Some(timestamp) => timestamp,
+                            Some(timestamp) => timestamp - source_timing.start_time_secs,
                             None => continue,
                         };
                     if timestamp < target_times[*target_index].as_secs() as f64 {
@@ -486,7 +505,7 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
     let mut decoded: DecodedMediaData = array.try_into()?;
     decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Video(VideoMetadata {
         source_fps,
-        source_duration,
+        source_duration: source_timing.duration_secs,
         sampled_timestamps,
     }));
     Ok(decoded)
@@ -691,6 +710,38 @@ mod tests {
             panic!("missing video metadata");
         };
         assert!((metadata.source_duration - 3.0).abs() < 0.01);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_decode_video_samples_relative_to_nonzero_stream_start() {
+        let path = format!(
+            "{}/tests/data/media/webm_nonzero_start_6.webm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|_| panic!("Failed to read test video: {}", path));
+        let decoder = VideoDecoder {
+            num_frames: Some(3),
+            ..Default::default()
+        };
+
+        let decoded = decoder
+            .decode(EncodedMediaData {
+                bytes,
+                b64_encoded: false,
+            })
+            .unwrap();
+
+        assert_eq!(decoded.tensor_info.shape, vec![3, 224, 224, 3]);
+        let Some(DecodedMediaMetadata::Video(metadata)) = decoded.tensor_info.metadata else {
+            panic!("missing video metadata");
+        };
+        assert!((metadata.source_duration - 3.0).abs() < 0.01);
+        assert_eq!(metadata.sampled_timestamps.len(), 3);
+        for (actual, expected) in metadata.sampled_timestamps.iter().zip([0.0, 1.5, 2.5]) {
+            assert!((actual - expected).abs() < 0.01);
+        }
     }
 
     #[cfg(target_os = "linux")]
