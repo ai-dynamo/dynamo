@@ -221,11 +221,21 @@ def render_provider_inputs(groups: list[Group]) -> list[str]:
 
 
 def render_provider_chips(groups: list[Group]) -> list[str]:
-    return [
-        f'<label className="dynamo-recipe-chip" '
-        f'htmlFor="provider-{g.provider.key}">{g.provider.chip}</label>'
-        for g in groups
+    """Render the whole Provider filter row.
+
+    MDX parses the row as one paragraph of inline JSX, so its closing tags must
+    stay on the last chip's line and no marker comment may sit inside it; the
+    markers wrap the row from outside instead.
+    """
+    chip = '<label className="dynamo-recipe-chip" htmlFor="provider-{}">{}</label>'
+    lines = [
+        '<div className="dynamo-filter-row">'
+        '<span className="dynamo-recipe-label">Provider</span>'
+        '<div className="dynamo-filter-options">' + chip.format("all", "All")
     ]
+    lines += [chip.format(g.provider.key, g.provider.chip) for g in groups]
+    lines[-1] += "</div></div>"
+    return lines
 
 
 def render_family_count(recipes: list[Recipe], indent: str) -> list[str]:

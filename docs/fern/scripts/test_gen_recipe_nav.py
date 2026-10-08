@@ -175,5 +175,16 @@ def test_render_nav_matches_the_sidebar_shape():
     ]
 
 
+def test_provider_row_closes_on_the_last_chip_line():
+    # MDX parses the row as one paragraph: a line that starts with `{` or with
+    # the closing tags ends the paragraph before the <div>s close, and Fern
+    # fails to parse the page.
+    lines = gen.render_provider_chips(groups_for("zai", "qwen"))
+    assert lines[0].startswith('<div className="dynamo-filter-row">')
+    assert lines[0].endswith('htmlFor="provider-all">All</label>')
+    assert lines[-1].endswith('htmlFor="provider-qwen">Qwen</label></div></div>')
+    assert all(line.startswith("<") and not line.startswith("</") for line in lines)
+
+
 def test_committed_outputs_are_current():
     assert gen.main(["--check"]) == 0
