@@ -100,6 +100,8 @@ fn fill_missing_top_logprob_text(
         for entry in position.iter_mut() {
             if entry.token.is_none()
                 && let Ok(decoded) = tokenizer.decode(&[entry.token_id], skip_special_tokens)
+                && decoded.is_complete()
+                && !decoded.as_str().contains('\u{fffd}')
             {
                 let token: String = decoded.into();
                 if entry.bytes.is_none() && !token.is_empty() {
@@ -346,11 +348,42 @@ impl
                     }
 
                     // if we have a data field without an event, then we might need to update the data
-                    if let Some(data) = &output.data
+                    if let Some(data) = &mut output.data
                         && data.text.is_some()
                         && !state.validate_engine_decode
                         && !state.no_stop_trim
                     {
+                        if data.log_probs.is_some() && data.tokens.is_none() {
+                            let tokens = data
+                                .token_ids
+                                .iter()
+                                .map(|token_id| {
+                                    state
+                                        .tokenizer
+                                        .decode(&[*token_id], state.skip_special_tokens)
+                                        .map(|decoded| {
+                                            (decoded.is_complete()
+                                                && !decoded.as_str().contains('\u{fffd}'))
+                                            .then(|| decoded.into())
+                                        })
+                                })
+                                .collect::<anyhow::Result<Vec<_>>>();
+                            match tokens {
+                                Ok(tokens) => data.tokens = Some(tokens),
+                                Err(e) => {
+                                    tracing::error!("Failed to decode logprob token: {e}");
+                                    let choice_idx = data.index.unwrap_or(0);
+                                    state.finished_choices.insert(choice_idx);
+                                    if state.finished_choices.len() >= state.decoders.len() {
+                                        state.stream.context().stop_generating();
+                                        state.finished = true;
+                                    }
+                                    data.finish_reason =
+                                        Some(FinishReason::Error(format!("decode error: {e}")));
+                                    return Some((output, state));
+                                }
+                            }
+                        }
                         // Text already decoded; track finish for this choice
                         let choice_idx = data.index.unwrap_or(0);
                         let has_finish = data.finish_reason.is_some();
@@ -1299,10 +1332,9 @@ mod tests {
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
             let output = LLMEngineOutput {
                 token_ids: vec![101],
-                tokens: self
+                text: self
                     .engine_decodes_text
-                    .then(|| vec![Some("Okay".to_string())]),
-                text: self.engine_decodes_text.then(|| "Okay".to_string()),
+                    .then(|| "Engine-decoded text".to_string()),
                 log_probs: Some(vec![-0.125]),
                 top_logprobs: Some(vec![vec![
                     TopLogprob {
@@ -1393,6 +1425,15 @@ mod tests {
             .data
             .expect("response contains backend output");
 
+        assert_eq!(
+            output.text.as_deref(),
+            Some(if engine_decodes_text {
+                "Engine-decoded text"
+            } else {
+                "Okay"
+            })
+        );
+
         let options = DeltaGeneratorOptions::new(None, None, true, None);
         let mut generator = DeltaGenerator::new(
             "test-model".to_string(),
@@ -1409,6 +1450,11 @@ mod tests {
             .content
             .as_ref()
             .expect("client-visible logprob content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0].token_id, Some(101));
+        assert_eq!(content[0].token, "Okay");
+        assert_eq!(content[0].bytes, Some(b"Okay".to_vec()));
+        assert_eq!(content[0].logprob, -0.125);
         let candidates = &content[0].top_logprobs;
 
         assert_eq!(candidates[0].token, "Okay");
@@ -1427,6 +1473,132 @@ mod tests {
     #[tokio::test]
     async fn test_sglang_top_logprobs_are_decoded_before_engine_text_fast_path() {
         assert_sglang_top_logprobs_are_decoded_in_openai_response(true).await;
+    }
+
+    #[tokio::test]
+    async fn engine_text_logprob_decode_error_finishes_the_choice() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(FailingDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: Some(2),
+                ..Default::default()
+            })
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangEngine {
+                engine_decodes_text: true,
+            });
+
+        let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let output = stream
+            .next()
+            .await
+            .expect("backend emits a response")
+            .data
+            .expect("response contains backend output");
+        assert!(
+            matches!(output.finish_reason.as_ref(), Some(FinishReason::Error(error)) if error.contains("incomplete utf-8 byte sequence")),
+            "token decode failure must end the choice: {:?}",
+            output.finish_reason
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_text_logprobs_do_not_fabricate_split_token_bytes() {
+        let mut tokenizer = tokenizers::Tokenizer::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
+        ))
+        .expect("TinyLlama tokenizer");
+        tokenizer.add_tokens(&[tokenizers::AddedToken::from("\u{fffd}suffix", false)]);
+        let replacement_id = tokenizer.token_to_id("\u{fffd}suffix").unwrap();
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(
+            crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(tokenizer),
+        );
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        // The first three byte-fallback IDs represent the euro sign together.
+        let token_ids = vec![229, 133, 175, replacement_id];
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: Some(1),
+                ..Default::default()
+            })
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine {
+                outputs: Some(vec![LLMEngineOutput {
+                    token_ids: token_ids.clone(),
+                    text: Some("€\u{fffd}suffix".to_string()),
+                    log_probs: Some(vec![-0.125; token_ids.len()]),
+                    top_logprobs: Some(
+                        token_ids
+                            .iter()
+                            .enumerate()
+                            .map(|(index, &token_id)| {
+                                vec![TopLogprob {
+                                    rank: 1,
+                                    token_id,
+                                    token: None,
+                                    logprob: -0.125,
+                                    bytes: (index == 0).then(|| vec![0xe2]),
+                                }]
+                            })
+                            .collect(),
+                    ),
+                    finish_reason: Some(FinishReason::Length),
+                    ..Default::default()
+                }]),
+            });
+        let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let output = stream
+            .next()
+            .await
+            .expect("backend emits a response")
+            .data
+            .expect("response contains backend output");
+        assert_eq!(output.text.as_deref(), Some("€\u{fffd}suffix"));
+        assert_eq!(output.tokens, vec![None; token_ids.len()]);
+
+        let options = DeltaGeneratorOptions::new(None, None, true, None);
+        let mut generator =
+            DeltaGenerator::new("test-model".to_string(), options, "unicode".to_string());
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("OpenAI response conversion succeeds");
+        let content = response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("logprobs")
+            .content
+            .as_ref()
+            .expect("selected logprobs");
+        assert_eq!(content.len(), token_ids.len());
+        for (index, entry) in content.iter().enumerate() {
+            assert_eq!(entry.token_id, Some(token_ids[index]));
+            assert_eq!(entry.token, "");
+            assert_eq!(entry.bytes, None);
+            assert_eq!(entry.top_logprobs[0].token, "");
+            assert_eq!(
+                entry.top_logprobs[0].bytes,
+                (index == 0).then(|| vec![0xe2]),
+                "preserve known candidate bytes without fabricating unknown bytes"
+            );
+        }
     }
 
     #[tokio::test]
