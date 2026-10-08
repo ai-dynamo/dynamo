@@ -260,6 +260,7 @@ RUN set -eux; \
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
+    --mount=type=bind,source=./container/deps/vllm/protected_overrides.txt,target=/tmp/vllm_omni_protected_overrides.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eux; \

@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# XPU only. vllm-openai-xpu ships these at versions that contradict the == pins of
+# its torch==*+xpu (its Dockerfile.xpu force-upgrades them as a last step). A
+# constraint cannot hold them (the solve becomes unsatisfiable), so
+# install_vllm_omni.sh freezes them as uv overrides, which replace every
+# requirement on the package. Names not installed are skipped. Without this the
+# Omni solve downgrades them, the downgraded versions miss the baseline SBOM, and
+# the licenses stage rejects them as UNKNOWN.
+#
+# Keep in sync with the force-upgrade block in upstream docker/Dockerfile.xpu.
+# Remove once the base image declares these packages through UV_OVERRIDE.
+dpcpp-cpp-rt
+intel-cmplr-lib-rt
+intel-cmplr-lib-ur
+intel-cmplr-lic-rt
+intel-opencl-rt
+intel-openmp
+intel-sycl-rt
+intel-pti
+oneccl
+oneccl-devel
