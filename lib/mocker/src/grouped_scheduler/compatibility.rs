@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use aisimulate_core::engine::{
-    HandoffId as EngineHandoffId, LifecycleEvent, Output, Request,
+    Admission, HandoffId as EngineHandoffId, LifecycleEvent, Output, Request,
     TransferTimingMode as EngineTransferTimingMode,
 };
 use anyhow::{Result, anyhow};
@@ -27,29 +27,53 @@ pub(super) enum Cleanup {
 
 pub(super) struct CompatibilityState {
     args: MockerConfig,
-    request_prompt_lengths: Mutex<HashMap<Uuid, usize>>,
+    request_accounting: Mutex<HashMap<Uuid, RequestAccounting>>,
     handoffs: Mutex<HandoffMap>,
+}
+
+#[derive(Clone, Copy)]
+struct RequestAccounting {
+    prompt_len: usize,
+    cached_tokens: Option<usize>,
+    cache_usage_reported: bool,
 }
 
 impl CompatibilityState {
     pub(super) fn new(args: MockerConfig) -> Self {
         Self {
             args,
-            request_prompt_lengths: Mutex::new(HashMap::new()),
+            request_accounting: Mutex::new(HashMap::new()),
             handoffs: Mutex::new(HandoffMap::default()),
         }
     }
 
     pub(super) fn native_request(&self, request: DirectRequest) -> Request {
         let request_id = request.uuid.unwrap_or_else(Uuid::new_v4);
-        self.request_prompt_lengths
-            .lock()
-            .insert(request_id, request.tokens.len());
+        self.request_accounting.lock().insert(
+            request_id,
+            RequestAccounting {
+                prompt_len: request.tokens.len(),
+                cached_tokens: None,
+                cache_usage_reported: false,
+            },
+        );
         Request {
             request_id,
             tokens: request.tokens,
             max_output_tokens: request.max_output_tokens,
             output_token_ids: request.output_token_ids,
+        }
+    }
+
+    pub(super) fn record_admissions(&self, admissions: &[Admission]) {
+        let mut requests = self.request_accounting.lock();
+        for admission in admissions {
+            if let Some(request) = requests.get_mut(&admission.request_id) {
+                // Recomputing or readmitting a request must not count its own KV as a hit.
+                request
+                    .cached_tokens
+                    .get_or_insert(admission.reused_input_tokens);
+            }
         }
     }
 
@@ -74,7 +98,7 @@ impl CompatibilityState {
     pub(super) fn apply_cleanup(&self, cleanup: Cleanup) {
         match cleanup {
             Cleanup::Request(request_id) => {
-                self.request_prompt_lengths.lock().remove(&request_id);
+                self.request_accounting.lock().remove(&request_id);
                 self.handoffs.lock().cancel_request(request_id);
             }
             Cleanup::SourceHandoff(handoff_id) => self.handoffs.lock().finish_source(handoff_id),
@@ -85,10 +109,25 @@ impl CompatibilityState {
     }
 
     pub(super) fn output_signal(&self, output: Output) -> OutputSignal {
-        let prompt_len = output.completed.then(|| {
-            self.request_prompt_lengths
-                .lock()
-                .remove(&output.request_id)
+        let accounting = {
+            let mut requests = self.request_accounting.lock();
+            if output.completed {
+                requests.remove(&output.request_id)
+            } else {
+                requests.get_mut(&output.request_id).map(|request| {
+                    let snapshot = *request;
+                    request.cache_usage_reported |=
+                        output.cached_tokens.is_some() || request.cached_tokens.is_some();
+                    snapshot
+                })
+            }
+        };
+        let cached_tokens = output.cached_tokens.or_else(|| {
+            accounting
+                .filter(|request| {
+                    !output.rejected && (output.completed || !request.cache_usage_reported)
+                })
+                .and_then(|request| request.cached_tokens)
         });
         if output.completed {
             self.handoffs
@@ -100,16 +139,16 @@ impl CompatibilityState {
             token_id: output.token_id,
             completed: output.completed,
             rejected: output.rejected,
-            handoff_delay_ms: prompt_len.flatten().and_then(|prompt_len| {
+            handoff_delay_ms: accounting.filter(|_| output.completed).and_then(|request| {
                 compute_prefill_handoff_delay_ms(
                     self.args.worker_type,
                     output.completed,
-                    prompt_len,
+                    request.prompt_len,
                     self.args.kv_transfer_bandwidth,
                     self.args.kv_transfer_bytes_per_token,
                 )
             }),
-            cached_tokens: output.cached_tokens,
+            cached_tokens,
         }
     }
 
