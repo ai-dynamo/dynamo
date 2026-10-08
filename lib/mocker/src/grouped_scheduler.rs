@@ -33,8 +33,7 @@ use uuid::Uuid;
 #[cfg(test)]
 use crate::common::protocols::ForwardPassSnapshot;
 use crate::common::protocols::{
-    DirectRequest, FpmPublisher, G2Scope, KvEventPublishers, MockEngineArgs, OutputSignal,
-    RawKvEvent,
+    DirectRequest, FpmPublisher, G2Scope, KvEventPublishers, MockerConfig, OutputSignal, RawKvEvent,
 };
 use crate::engine_adapter::{EngineComponents, engine_components, engine_factory};
 use crate::engine_observations::{
@@ -177,7 +176,7 @@ impl CompletionBoundaryTestControl {
 /// Construct one generalized engine and a rank-fixed compatibility handle for
 /// each attention-DP rank.
 pub fn create_grouped_scheduler(
-    args: MockEngineArgs,
+    args: MockerConfig,
     rank_sinks: Vec<GroupedSchedulerRankSinks>,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<GroupedSchedulers> {
@@ -210,7 +209,7 @@ pub(crate) struct RankSinks {
 }
 
 pub(crate) fn create_grouped_scheduler_with_rank_sinks(
-    args: MockEngineArgs,
+    args: MockerConfig,
     rank_sinks: Vec<RankSinks>,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<GroupedSchedulers> {
@@ -245,7 +244,7 @@ pub(crate) fn create_grouped_scheduler_with_rank_sinks(
 /// Construct the historical one-rank scheduler facade while retaining the
 /// caller's externally visible DP-rank identity.
 pub(crate) fn create_single_rank_scheduler_with_rank_sink(
-    args: MockEngineArgs,
+    args: MockerConfig,
     dp_rank: u32,
     rank_sink: RankSinks,
     cancellation_token: Option<CancellationToken>,

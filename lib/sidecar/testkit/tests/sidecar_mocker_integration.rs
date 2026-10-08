@@ -585,7 +585,7 @@ async fn request_fields<F: ProcessFixture>() {
     finish(&mut fixture, &engine).await;
 }
 
-async fn native_rejection<F: WireFixture>() -> DynamoError {
+async fn native_rejection<F: WireFixture>(max_tokens: u32) -> DynamoError {
     let control = Controller::<F::Protocol>::default();
     let mut fixture = F::start(control.clone(), FixtureConfig::default()).await;
     let engine = fixture.engine().await;
@@ -594,7 +594,7 @@ async fn native_rejection<F: WireFixture>() -> DynamoError {
     let handle = control.request(ctx.id(), RequestPlan::default());
     let opening = engine
         .generate(
-            request("mocker-model", vec![1, 2, 3], 32_769),
+            request("mocker-model", vec![1, 2, 3], max_tokens),
             GenerateContext::new(ctx, None),
         )
         .await;
@@ -618,14 +618,14 @@ async fn native_rejection<F: WireFixture>() -> DynamoError {
 async fn vllm_native_rejection_recovers_on_same_engine() {
     let error = bounded(
         "native rejection and recovery",
-        native_rejection::<vllm_fixture::Fixture>(),
+        native_rejection::<vllm_fixture::Fixture>(1_000_001),
     )
     .await;
     assert!(error.to_string().contains("GenerateStream"));
     assert!(
         error
             .to_string()
-            .contains("max_new_tokens must not exceed 32768")
+            .contains("max_new_tokens must not exceed 1000000")
     );
 }
 
@@ -633,7 +633,7 @@ async fn vllm_native_rejection_recovers_on_same_engine() {
 async fn sglang_native_rejection_recovers_on_same_engine() {
     let error = bounded(
         "native rejection and recovery",
-        native_rejection::<support::sglang::Fixture>(),
+        native_rejection::<support::sglang::Fixture>(32_769),
     )
     .await;
     assert!(error.to_string().contains("Generate"));

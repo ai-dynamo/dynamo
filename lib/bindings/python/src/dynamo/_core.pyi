@@ -1965,224 +1965,10 @@ class ReasoningConfig:
     ) -> None:
         ...
 
-class SglangArgs:
-    def __init__(
-        self,
-        schedule_policy: Optional[str] = None,
-        page_size: Optional[int] = None,
-        max_prefill_tokens: Optional[int] = None,
-        chunked_prefill_size: Optional[int] = None,
-        clip_max_new_tokens: Optional[int] = None,
-        schedule_conservativeness: Optional[float] = None,
-    ) -> None:
-        ...
+def _normalize_mocker_config(config: Mapping[str, Any] | str) -> Dict[str, Any]:
+    """Validate canonical AISimulate config and materialize Dynamo runtime options."""
+    ...
 
-class TrtllmArgs:
-    def __init__(
-        self,
-        capacity_scheduler_policy: Optional[str] = None,
-    ) -> None:
-        ...
-
-class MockEngineArgs:
-    def __init__(
-        self,
-        engine_type: str = "vllm",
-        num_gpu_blocks: Optional[int] = None,
-        block_size: int = 0,
-        max_num_seqs: Optional[int] = 256,
-        max_num_batched_tokens: Optional[int] = 8192,
-        enable_prefix_caching: bool = True,
-        enable_chunked_prefill: bool = True,
-        speedup_ratio: float = 1.0,
-        decode_speedup_ratio: float = 1.0,
-        dp_size: int = 1,
-        startup_time: Optional[float] = None,
-        worker_type: str = "aggregated",
-        planner_profile_data: Optional[str | os.PathLike[str]] = None,
-        ais_nextn: Optional[int] = None,
-        ais_nextn_accept_rates: Optional[str] = None,
-        ais_mtp_seed: Optional[int] = None,
-        gpu_memory_utilization: Optional[float] = None,
-        mem_fraction_static: Optional[float] = None,
-        free_gpu_memory_fraction: Optional[float] = None,
-        enable_local_indexer: bool = False,
-        bootstrap_port: Optional[int] = None,
-        handoff_session_timeout_ms: int = 300000,
-        kv_bytes_per_token: Optional[int] = None,
-        kv_transfer_bandwidth: Optional[float] = None,
-        kv_transfer_timing_mode: str = "full_prompt",
-        reasoning: Optional[ReasoningConfig] = None,
-        response_replay_trace_path: Optional[str | os.PathLike[str]] = None,
-        zmq_kv_events_port: Optional[int] = None,
-        zmq_replay_port: Optional[int] = None,
-        preemption_mode: str = "lifo",
-        router_queue_policy: Optional[str] = None,
-        sglang: Optional[SglangArgs] = None,
-        trtllm: Optional[TrtllmArgs] = None,
-        max_model_len: Optional[int] = None,
-        ais_perf_config: Optional[Mapping[str, Any]] = None,
-        kv_cache_bytes_per_token: Optional[int] = None,
-        native_host_offload: Optional[Mapping[str, Any]] = None,
-    ) -> None:
-        ...
-
-    @staticmethod
-    def from_json(config_json: str) -> "MockEngineArgs":
-        ...
-
-    def copy(self) -> "MockEngineArgs": ...
-
-    @property
-    def block_size(self) -> int: ...
-
-    @property
-    def num_gpu_blocks(self) -> int: ...
-
-    @num_gpu_blocks.setter
-    def num_gpu_blocks(self, value: int) -> None: ...
-
-    @property
-    def max_model_len(self) -> Optional[int]: ...
-
-    @property
-    def max_num_seqs(self) -> Optional[int]: ...
-
-    @property
-    def max_num_batched_tokens(self) -> Optional[int]: ...
-
-    @property
-    def enable_prefix_caching(self) -> bool: ...
-
-    @enable_prefix_caching.setter
-    def enable_prefix_caching(self, value: bool) -> None: ...
-
-    @property
-    def enable_local_indexer(self) -> bool: ...
-
-    @property
-    def dp_size(self) -> int: ...
-
-    @property
-    def bootstrap_port(self) -> Optional[int]: ...
-
-    @property
-    def handoff_session_timeout_ms(self) -> int: ...
-
-    @property
-    def kv_transfer_timing_mode(self) -> str: ...
-
-    @property
-    def engine_type(self) -> str: ...
-
-    @property
-    def kv_cache_bytes_per_token(self) -> Optional[int]:
-        """KV-cache bytes per token for G2 host blocks; defaults to kv_bytes_per_token."""
-        ...
-
-    @property
-    def native_host_offload(self) -> Optional[Dict[str, Any]]:
-        """AISimulate native G2 host-offload config (vLLM), or None when disabled."""
-        ...
-
-    @property
-    def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
-
-    @property
-    def ais_perf_config(self) -> Optional[Dict[str, Any]]: ...
-
-    @property
-    def ais_backend(self) -> Optional[str]: ...
-
-    @property
-    def ais_system(self) -> Optional[str]: ...
-
-    @property
-    def ais_backend_version(self) -> Optional[str]: ...
-
-    @property
-    def ais_tp_size(self) -> Optional[int]: ...
-
-    @property
-    def ais_model_path(self) -> Optional[str]: ...
-
-    @property
-    def ais_moe_tp_size(self) -> Optional[int]: ...
-
-    @property
-    def ais_moe_ep_size(self) -> Optional[int]: ...
-
-    @property
-    def ais_attention_dp_size(self) -> Optional[int]: ...
-
-    @property
-    def ais_gemm_dtype(self) -> Optional[str]: ...
-
-    @property
-    def ais_moe_dtype(self) -> Optional[str]: ...
-
-    @property
-    def ais_fmha_dtype(self) -> Optional[str]: ...
-
-    @property
-    def ais_kv_cache_dtype(self) -> Optional[str]: ...
-
-    @property
-    def ais_comm_dtype(self) -> Optional[str]: ...
-
-    @property
-    def ais_nextn(self) -> Optional[int]: ...
-
-    @property
-    def ais_nextn_accept_rates(self) -> Optional[str]: ...
-
-    @property
-    def ais_mtp_seed(self) -> int: ...
-
-    @property
-    def gpu_memory_utilization(self) -> Optional[float]: ...
-
-    @gpu_memory_utilization.setter
-    def gpu_memory_utilization(self, value: Optional[float]) -> None: ...
-
-    @property
-    def mem_fraction_static(self) -> Optional[float]: ...
-
-    @mem_fraction_static.setter
-    def mem_fraction_static(self, value: Optional[float]) -> None: ...
-
-    @property
-    def free_gpu_memory_fraction(self) -> Optional[float]: ...
-
-    @free_gpu_memory_fraction.setter
-    def free_gpu_memory_fraction(self, value: Optional[float]) -> None: ...
-
-    @property
-    def worker_type(self) -> str: ...
-
-    @worker_type.setter
-    def worker_type(self, value: str) -> None: ...
-
-    def is_prefill(self) -> bool: ...
-
-    def is_decode(self) -> bool: ...
-
-    def with_overrides(
-        self,
-        bootstrap_port: Optional[int] = None,
-        zmq_kv_events_port: Optional[int] = None,
-        zmq_replay_port: Optional[int] = None,
-        kv_bytes_per_token: Optional[int] = None,
-        num_gpu_blocks: Optional[int] = None,
-        ais_nextn: Optional[int] = None,
-        ais_nextn_accept_rates: Optional[str] = None,
-        ais_mtp_seed: Optional[int] = None,
-        gpu_memory_utilization: Optional[float] = None,
-        mem_fraction_static: Optional[float] = None,
-        free_gpu_memory_fraction: Optional[float] = None,
-        enable_prefix_caching: Optional[bool] = None,
-        worker_type: Optional[str] = None,
-    ) -> "MockEngineArgs": ...
 
 class WorkerType:
     """
@@ -2514,9 +2300,9 @@ def run_mocker_trace_replay(
 @overload
 def run_mocker_trace_replay(
     trace_files: Sequence[str | os.PathLike[str]],
-    extra_engine_args: Optional[MockEngineArgs] = None,
-    prefill_engine_args: Optional[MockEngineArgs] = None,
-    decode_engine_args: Optional[MockEngineArgs] = None,
+    extra_engine_args: Optional[Mapping[str, Any]] = None,
+    prefill_engine_args: Optional[Mapping[str, Any]] = None,
+    decode_engine_args: Optional[Mapping[str, Any]] = None,
     router_config: Optional[KvRouterConfig] = None,
     ais_perf_config: Optional[AisPerfConfig] = None,
     num_workers: int = 1,
@@ -2625,9 +2411,9 @@ def run_mocker_synthetic_trace_replay(
     input_tokens: int,
     output_tokens: int,
     request_count: int,
-    extra_engine_args: Optional[MockEngineArgs] = None,
-    prefill_engine_args: Optional[MockEngineArgs] = None,
-    decode_engine_args: Optional[MockEngineArgs] = None,
+    extra_engine_args: Optional[Mapping[str, Any]] = None,
+    prefill_engine_args: Optional[Mapping[str, Any]] = None,
+    decode_engine_args: Optional[Mapping[str, Any]] = None,
     router_config: Optional[KvRouterConfig] = None,
     ais_perf_config: Optional[AisPerfConfig] = None,
     num_workers: int = 1,
@@ -3245,7 +3031,7 @@ class EntrypointArgs:
         tls_cert_path: Optional[str] = None,
         tls_key_path: Optional[str] = None,
         extra_engine_args: Optional[str] = None,
-        mocker_engine_args: Optional[MockEngineArgs] = None,
+        mocker_engine_args: Optional[Mapping[str, Any]] = None,
         runtime_config: Optional[ModelRuntimeConfig] = None,
         namespace: Optional[str] = None,
         namespace_prefix: Optional[str] = None,
@@ -3283,7 +3069,8 @@ class EntrypointArgs:
             tls_key_path: TLS key path (PEM format)
             tls_client_ca_cert_path: Client CA certificate path for mutual TLS (PEM format)
             extra_engine_args: Optional path to mocker engine arguments JSON
-            mocker_engine_args: Typed mocker engine arguments
+            mocker_engine_args: Canonical mocker configuration mapping with an ``engine``
+                section and optional ``dynamo`` runtime options
             runtime_config: Optional runtime configuration for discovery registration
             namespace: Dynamo namespace for model discovery scoping
             namespace_prefix: Optional namespace prefix

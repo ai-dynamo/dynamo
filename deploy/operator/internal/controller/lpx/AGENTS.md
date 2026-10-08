@@ -61,7 +61,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Observation and Retries
 
-- Read through the cached client. Observe dependencies and validate them once
+- Read workload dependencies through the cached client and validate them once
   per reconciliation; do not add uncached reads or pre-write revalidation.
 - Observations are not an atomic snapshot. Publishing previously observed
   intent during a concurrent edit is accepted; watches drive convergence.
@@ -74,6 +74,15 @@ SPDX-License-Identifier: Apache-2.0
   a deadline is active, and external download checks. The other deliberate use
   is the follow-up after recording `SchedulingFailed`, because status-only
   LPXGD updates are filtered. Ordinary errors use controller-runtime backoff.
+- Synchronize the desired PCS before any replica write, including scale-down and
+  deadline cleanup. After a PCS write, wait for its watched cache observation. Use
+  the shared scaling predicate to defer Coherent replica writes until Grove's
+  observed generation matches the current PCS generation and no rollout is active.
+  Completed progress from an older generation does not acknowledge a new spec.
+  Apply this generation wait only to Coherent: observed generation can lag
+  throughout RollingRecreate without blocking its scaling. Initial Coherent
+  configuration acknowledgement does not require scheduler requests or Ready pods.
+  Continue observing readiness and component status while scaling is deferred.
 - After writing a PCS, wait for its watched observation before publishing LPRs.
   An LPR `AlreadyExists` response means wait for observation, not adopt an
   unverified object. Never adopt a foreign resource with the expected name.

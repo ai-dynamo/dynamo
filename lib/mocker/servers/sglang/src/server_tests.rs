@@ -5,16 +5,18 @@ use super::*;
 use dynamo_sglang_sidecar::proto::sglang_service_server::SglangService;
 use futures::StreamExt;
 
-fn engine_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .engine_type(EngineType::Sglang)
-        .block_size(4)
-        .num_gpu_blocks(128)
-        .max_num_seqs(Some(8))
-        .max_num_batched_tokens(Some(64))
-        .speedup_ratio(0.0)
-        .build()
-        .unwrap()
+fn engine_args() -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Sglang,
+            "block_size": 4,
+            "num_gpu_blocks": 128,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 64,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap()
 }
 
 fn request(request_id: &str) -> pb::GenerateRequest {
@@ -48,15 +50,24 @@ async fn engine_state_watch_is_explicitly_unsupported() {
 
 #[tokio::test]
 async fn service_rejects_normalized_multi_rank_ais_args() {
-    let mut args = engine_args();
-    args.ais_perf_config = Some(json!({
-        "model": "model",
-        "system": "h200_sxm",
-        "backend": "sglang",
-        "worker_type": "aggregated",
-        "attention_dp": 2,
-    }));
-    assert_eq!(args.dp_size, 1);
+    let args = MockerConfig::from_value(json!({
+        "engine": {
+            "backend": "sglang",
+            "timing_model": {
+                "type": "external",
+                "provider": "ais",
+                "config": {
+                    "model": "model",
+                    "system": "h200_sxm",
+                    "backend": "sglang",
+                    "worker_type": "aggregated",
+                    "attention_dp": 2
+                }
+            }
+        }
+    }))
+    .unwrap();
+    assert_eq!(args.dp_size, 2);
 
     let error = SglangMockerService::new(MockerServerConfig::default(), args)
         .err()
@@ -277,11 +288,32 @@ async fn kv_event_discovery_follows_regular_mocker_rules() {
 }
 
 #[tokio::test]
+async fn discovery_uses_sglang_prefill_limit_for_unbounded_batches() {
+    for (batch_limit, expected) in [(64, 64), (usize::MAX, 4096)] {
+        let mut args = engine_args();
+        args.enable_prefix_caching = false;
+        args.max_num_batched_tokens = batch_limit;
+        args.sglang.max_prefill_tokens = 4096;
+        let service = SglangMockerService::new(MockerServerConfig::default(), args).unwrap();
+        let info: serde_json::Value = serde_json::from_str(
+            &service
+                .get_server_info(Request::new(pb::GetServerInfoRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .json_info,
+        )
+        .unwrap();
+        assert_eq!(info["max_prefill_tokens"], expected);
+    }
+}
+
+#[tokio::test]
 async fn failed_kv_publisher_is_not_advertised() {
     let occupied = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let mut args = engine_args();
     args.enable_prefix_caching = true;
-    args.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
+    args.runtime.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
     let service = SglangMockerService::new(MockerServerConfig::default(), args).unwrap();
     let info: serde_json::Value = serde_json::from_str(
         &service
