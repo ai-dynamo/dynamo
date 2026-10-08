@@ -39,10 +39,7 @@ func classifyManifestPartitions(filename string, partitions []BuildPartition, pa
 		seen[partition.SourcePartitionID] = struct{}{}
 
 		// Retain both deployment geometries during the mandatory artifact traversal.
-		nodes := partition.Topology.Replicas()
-		if len(partition.HXExtent) == 4 {
-			nodes = int(partition.HXExtent[1] * partition.HXExtent[2] * partition.HXExtent[3])
-		}
+		nodes := partition.effectiveNodeCount()
 		packagedNodes += nodes
 		if partition.SourcePartitionID == 0 {
 			partitionZeroNodes += nodes
@@ -58,50 +55,35 @@ func classifyManifestPartitions(filename string, partitions []BuildPartition, pa
 	return family, packagedNodes, partitionZeroNodes, nil
 }
 
-func buildXTPartition(subject, value string, raw manifestcapnpv2.LpuPartitionArtifact) (BuildPartition, error) {
-	// Decode XT's named topology before checking its declared geometry.
-	topology, err := parse(value)
-	if err != nil {
-		return BuildPartition{}, fmt.Errorf("parsing %s topology %q: %w", subject, value, err)
-	}
-
-	// Reject nonpositive chip counts and nonintegral multi-node XT topologies.
-	if topology.ChipCount <= 0 {
-		return BuildPartition{}, fmt.Errorf("%s topology has invalid chip count %d", subject, topology.ChipCount)
-	}
-	if topology.ChipCount%lpuChipsPerNode != 0 && topology.ChipCount > lpuChipsPerNode {
-		return BuildPartition{}, fmt.Errorf("%s topology has %d chips, not divisible by %d LPU devices per node", subject, topology.ChipCount, lpuChipsPerNode)
-	}
-
-	// Require the manifest's chip count and device count to agree with XT geometry.
+func buildXTPartition(subject, topology string, raw manifestcapnpv2.LpuPartitionArtifact) (BuildPartition, error) {
+	// Derive XT geometry from numeric manifest fields, never the topology name.
 	numChips, err := positiveManifestUInt32ToInt(subject+" numChips", raw.NumChips())
 	if err != nil {
 		return BuildPartition{}, err
-	}
-	if topology.ChipCount != numChips {
-		return BuildPartition{}, fmt.Errorf("%s topology chip count %d does not match numChips %d", subject, topology.ChipCount, numChips)
 	}
 	devicesPerNode, err := positiveManifestUInt32ToInt(subject+" devicesPerNode", raw.DevicesPerNode())
 	if err != nil {
 		return BuildPartition{}, err
 	}
-	if devicesPerNode != lpuChipsPerNode {
-		return BuildPartition{}, fmt.Errorf("%s devicesPerNode %d, want %d for LPU device version 2", subject, devicesPerNode, lpuChipsPerNode)
+	if numChips > devicesPerNode && numChips%devicesPerNode != 0 {
+		return BuildPartition{}, fmt.Errorf("%s has %d chips, not divisible by %d LPU devices per node", subject, numChips, devicesPerNode)
 	}
-	return BuildPartition{Topology: topology}, nil
+	return BuildPartition{Topology: Topology{Raw: topology, ChipCount: numChips}, DevicesPerNode: devicesPerNode}, nil
 }
 
-func buildHXPartition(subject, value string, raw manifestcapnpv2.LpuPartitionArtifact) (BuildPartition, bool, error) {
-	// HX topology names are opaque; metadata supplies the geometry when present.
-	topology := strings.TrimSpace(value)
-	if topology == "" {
-		return BuildPartition{}, false, fmt.Errorf("V3 %s topology must not be empty", subject)
+func buildHXPartition(subject, topology string, raw manifestcapnpv2.LpuPartitionArtifact) (BuildPartition, bool, error) {
+	devicesPerNode, err := positiveManifestUInt32ToInt(subject+" devicesPerNode", raw.DevicesPerNode())
+	if err != nil {
+		return BuildPartition{}, false, err
 	}
-	partition := BuildPartition{Topology: Topology{Raw: topology, ChipCount: int(raw.NumChips())}}
+	partition := BuildPartition{Topology: Topology{Raw: topology, ChipCount: int(raw.NumChips())}, DevicesPerNode: devicesPerNode}
 	if !raw.HasTopologyMetadata() {
-		// The caller selects metadata-less HX only for the 16-chip, 16-device case.
-		partition.HXExtent = []int64{16, 1, 1, 1}
-		return partition, true, nil
+		chips := partition.Topology.ChipCount
+		if chips <= 0 || chips > devicesPerNode || devicesPerNode%chips != 0 {
+			return BuildPartition{}, false, fmt.Errorf("V3 %s without topologyMetadata requires a one-node stage whose chip count divides %d", subject, devicesPerNode)
+		}
+		partition.HXExtent = []int64{int64(devicesPerNode), 1, 1, 1}
+		return partition, chips == devicesPerNode, nil
 	}
 
 	// Decode HX metadata directly and report read errors at their source.
@@ -125,18 +107,20 @@ func buildHXPartition(subject, value string, raw manifestcapnpv2.LpuPartitionArt
 		extent[index] = int64(shape.At(index))
 	}
 
-	// Preserve every supported HX shape and its chip/device consistency checks.
-	if len(extent) != 4 || extent[0] != 16 || extent[1] < 1 || extent[1] > 8 ||
-		(!((extent[2] == 1 || extent[2] == 2) && extent[3] == 1) && !(extent[1] == 8 && extent[2] == 2 && extent[3] == 2)) {
+	// A partial-node shape describes its logical chips; physical HX reservations use full nodes.
+	subnode := len(extent) == 4 && extent[0] > 0 && extent[0] < int64(devicesPerNode) &&
+		int64(devicesPerNode)%extent[0] == 0 && extent[1] == 1 && extent[2] == 1 && extent[3] == 1
+	if !subnode && (len(extent) != 4 || extent[0] != int64(devicesPerNode) || extent[1] < 1 || extent[1] > 8 ||
+		(!((extent[2] == 1 || extent[2] == 2) && extent[3] == 1) && !(extent[1] == 8 && extent[2] == 2 && extent[3] == 2))) {
 		return BuildPartition{}, false, fmt.Errorf("V3 %s has unsupported HX extent %v", subject, extent)
 	}
+
+	// Match the source chip count before rounding its scheduler reservation up to a whole node.
 	count := extent[0] * extent[1] * extent[2] * extent[3]
 	if count != int64(raw.NumChips()) {
 		return BuildPartition{}, false, fmt.Errorf("V3 %s topologyMetadata.partitionShape contains %d chips, want numChips %d", subject, count, raw.NumChips())
 	}
-	if extent[0] != int64(raw.DevicesPerNode()) {
-		return BuildPartition{}, false, fmt.Errorf("V3 %s topologyMetadata.partitionShape first dimension %d does not match devicesPerNode %d", subject, extent[0], raw.DevicesPerNode())
-	}
+	extent[0] = int64(devicesPerNode)
 	partition.HXExtent = extent
 	return partition, false, nil
 }
@@ -191,6 +175,19 @@ func validateManifestPartitionNodeCount(
 	hxDoubleNodeCount bool,
 	packagedNodes, partitionZeroNodes int,
 ) error {
+	if build.CompilationMode == BuildCompilationModeLPUOnly && len(build.SelectedPropSyncChains) == 1 {
+		configured := *build
+		if configured.Family == BuildFamilyXT {
+			if err := configured.selectXTRuntimePartitions(); err != nil {
+				return err
+			}
+		}
+		packed := packPropSyncPartitions(configured.Partitions)
+		if len(packed) < len(configured.Partitions) && want == packed[0].effectiveNodeCount() {
+			return nil
+		}
+	}
+
 	// Compare the declaration with the packaged and host-embedding partition inventories.
 	hostEmbeddingNodes := packagedNodes
 	if build.SupportsCPUEmbeddings && build.StandaloneTokenEmbeddings {

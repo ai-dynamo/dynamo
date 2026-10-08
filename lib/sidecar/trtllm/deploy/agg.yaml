@@ -17,6 +17,9 @@ metadata:
   name: trtllm-engine-config
 data:
   config.yaml: |
+    # Dynamo sends a required or named tool_choice as a JSON schema, which
+    # TensorRT-LLM enforces only with a guided-decoding backend.
+    guided_decoding_backend: xgrammar
     # One gRPC chunk per N decode steps, not per token: N>1 cuts per-token gRPC
     # serialization for a throughput win, at the cost of bursty delivery.
     stream_interval: 5
