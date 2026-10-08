@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from tests.utils.vllm_omni import vllm_omni_skip_reason
+
+if _omni_skip_reason := vllm_omni_skip_reason():
+    pytest.skip(_omni_skip_reason, allow_module_level=True)
+
 try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
 except (ImportError, OSError, NotImplementedError):
@@ -18,6 +23,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.utils.device import detect_target_device
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payloads import (
     AudioSpeechPayload,
@@ -174,10 +180,6 @@ vllm_omni_configs = {
             pytest.mark.xpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
-            pytest.mark.skip(
-                reason="vLLM-Omni audio release/v0.19.0rc1 uses the pre-vLLM 0.20 "
-                "GPUModelRunner._bookkeeping_sync signature"
-            ),
         ],
         model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         request_payloads=[
@@ -189,6 +191,59 @@ vllm_omni_configs = {
                     "language": "English",
                 },
                 repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
+    "omni_audex": VLLMOmniConfig(
+        name="omni_audex",
+        directory=vllm_dir,
+        # Audex shares the audio launch script; only the model differs.
+        script_name="agg_omni_audio.sh",
+        script_args=["--model", "nvidia/Nemotron-Labs-Audex-2B"],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+            # Profiled with tests/utils/profile_pytest.py on 1x H200: peak
+            # 117.6 GiB, unchanged at every probed KV cap (9-75 GiB). vLLM-Omni's
+            # audex_tts.yaml sizes each stage as a fraction of *total* device
+            # memory (0.4 for the thinker, 0.25 for code2wav) and the aggregated
+            # worker forwards no engine memory args to AsyncOmni, so neither
+            # --kv-cache-memory-bytes nor --gpu-memory-utilization can cap the
+            # footprint from the CLI. Both VRAM markers are therefore omitted:
+            # the H200 number is card-relative, not a portable requirement.
+            # Re-enable once per-stage memory overrides are plumbed through
+            # omni's _build_omni_kwargs, then re-profile on a 24 GiB card.
+            pytest.mark.skip(
+                reason="Audex peaked at 117.6 GiB on 1x H200; the shipped stage "
+                "config sizes stages as a fraction of total device memory and "
+                "the worker cannot cap it, so it exceeds CI capacity (24GB)"
+            ),
+        ],
+        model="nvidia/Nemotron-Labs-Audex-2B",
+        request_payloads=[
+            AudioSpeechPayload(
+                body={
+                    "model": "nvidia/Nemotron-Labs-Audex-2B",
+                    "input": "Hey, this is generated using Dynamo!",
+                    # Audex is the only audio model that takes cfg_scale, so it
+                    # travels in nvext rather than as an OpenAI field: unknown
+                    # keys are dropped silently, so a plumbing regression would
+                    # leave guidance unapplied without failing the request.
+                    "nvext": {"cfg_scale": 1.5},
+                },
+                repeat_count=1,
+                # Stage 1 is a streaming causal decoder: it emits one ~100 ms
+                # delta per yield, the first of which is empty, and the worker
+                # concatenates them. Mis-assembling that stream yields a short
+                # or silent WAV that still parses, so check the waveform itself:
+                # this prompt decodes to ~2.3s at rms ~0.055.
+                min_duration_s=1.0,
+                min_rms=0.01,
+                expected_sample_rate=16000,
                 expected_response=[],
                 expected_log=[],
             ),
@@ -260,4 +315,11 @@ def test_omni_serve_deployment(
     config = dataclasses.replace(
         vllm_omni_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
-    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+    extra_env = (
+        {"_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES": "536870912"}
+        if config.name == "omni_audio" and detect_target_device() == "xpu"
+        else None
+    )
+    run_serve_deployment(
+        config, request, ports=dynamo_dynamic_ports, extra_env=extra_env
+    )

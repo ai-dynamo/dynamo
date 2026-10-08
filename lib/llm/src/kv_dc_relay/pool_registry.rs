@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use dynamo_kv_router::identity::PoolId;
@@ -11,7 +11,8 @@ use dynamo_kv_router::indexer::cuckoo::{CkfBuildError, CkfConfig, DcCkfState, Pr
 use dynamo_kv_router::protocols::{ActiveLoad, WorkerId};
 use dynamo_runtime::protocols::EndpointId;
 use parking_lot::Mutex;
-use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, TryAcquireError};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::actor::{ActorFault, KvDcRelayHandle, StreamScope};
@@ -21,9 +22,14 @@ use super::identity::{
     KvQuerySemantics, ModelAlias, WorkerRole,
 };
 use super::load::{LoadObservationOutcome, PoolLoadSnapshot, PoolLoadState};
+use super::publication::{
+    PublicationHub, PublicationHubConfig, PublicationHubError, PublicationHubSubscription,
+    TerminalFailure, publication_lease,
+};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 const DEFAULT_CKF_ALLOCATION_CONCURRENCY: usize = 2;
+const DEFAULT_INITIALIZED_POOL_HUBS: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PoolActorConfig {
@@ -71,10 +77,479 @@ struct PoolEntry {
     cancel: CancellationToken,
     state: PoolEntryState,
     serving: Option<PoolServingState>,
+    hub: Arc<PoolHubSlot>,
 }
 
 struct PoolServingState {
     load: PoolLoadState,
+}
+
+#[derive(Clone)]
+pub(super) struct PoolPublicationConfig {
+    pub(super) hub: PublicationHubConfig,
+    pub(super) max_initialized_pool_hubs: usize,
+    #[cfg(test)]
+    pub(super) eviction_gate: Option<Arc<Semaphore>>,
+}
+
+impl Default for PoolPublicationConfig {
+    fn default() -> Self {
+        Self {
+            hub: PublicationHubConfig::default(),
+            max_initialized_pool_hubs: DEFAULT_INITIALIZED_POOL_HUBS,
+            #[cfg(test)]
+            eviction_gate: None,
+        }
+    }
+}
+
+enum PoolHubState {
+    Vacant,
+    Initializing,
+    Ready(InitializedPublicationHub),
+    Evicting,
+    Failed(String),
+    Retired,
+}
+
+struct InitializedPublicationHub {
+    hub: PublicationHub,
+    permit: OwnedSemaphorePermit,
+}
+
+struct PoolHubSlotState {
+    phase: PoolHubState,
+    pending_admissions: usize,
+    retirement_requested: bool,
+}
+
+struct PoolHubSlot {
+    state: Mutex<PoolHubSlotState>,
+    changed: Notify,
+}
+
+impl PoolHubSlot {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(PoolHubSlotState {
+                phase: PoolHubState::Vacant,
+                pending_admissions: 0,
+                retirement_requested: false,
+            }),
+            changed: Notify::new(),
+        }
+    }
+
+    fn begin_admission(self: &Arc<Self>) -> Result<PoolHubAdmission, PublicationHubError> {
+        let mut state = self.state.lock();
+        if state.retirement_requested || matches!(state.phase, PoolHubState::Retired) {
+            return Err(PublicationHubError::Unavailable(
+                "pool generation retired".to_string(),
+            ));
+        }
+        let Some(pending_admissions) = state.pending_admissions.checked_add(1) else {
+            return Err(PublicationHubError::Unavailable(
+                "pool publication admission counter exhausted".to_string(),
+            ));
+        };
+        state.pending_admissions = pending_admissions;
+        Ok(PoolHubAdmission { slot: self.clone() })
+    }
+
+    async fn get_or_start(
+        self: &Arc<Self>,
+        registry: &Arc<PoolRegistry>,
+        actor: KvDcRelayHandle,
+        generation_cancel: CancellationToken,
+        terminal_failure: TerminalFailure,
+    ) -> Result<PublicationHub, PublicationHubError> {
+        let config = registry.publication_config.clone();
+        let initialization_permits = registry.publication_hub_permits.clone();
+        let max_initialized_hubs = registry.max_initialized_pool_hubs;
+        let registry = Arc::downgrade(registry);
+        let mut attempted_initialization = false;
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let initialization_permit = {
+                let mut state = self.state.lock();
+                match &state.phase {
+                    PoolHubState::Ready(initialized) => return Ok(initialized.hub.clone()),
+                    PoolHubState::Failed(reason) => {
+                        return Err(PublicationHubError::Unavailable(reason.clone()));
+                    }
+                    PoolHubState::Retired => {
+                        return Err(PublicationHubError::Unavailable(
+                            "pool generation retired".to_string(),
+                        ));
+                    }
+                    PoolHubState::Initializing | PoolHubState::Evicting => None,
+                    PoolHubState::Vacant => {
+                        if attempted_initialization {
+                            return Err(PublicationHubError::InitializedHubLimit {
+                                limit: max_initialized_hubs,
+                            });
+                        }
+                        let permit = initialization_permits.clone().try_acquire_owned().ok();
+                        state.phase = PoolHubState::Initializing;
+                        attempted_initialization = true;
+                        Some(permit)
+                    }
+                }
+            };
+            if let Some(initialization_permit) = initialization_permit {
+                let slot = self.clone();
+                let registry = registry.clone();
+                let cancel = generation_cancel.clone();
+                let failure = terminal_failure.clone();
+                let lease = publication_lease(actor.identity());
+                let actor = actor.clone();
+                let cleanup_actor = actor.clone();
+                let config = config.clone();
+                tokio::spawn(async move {
+                    let initialization_permit = match initialization_permit {
+                        Some(permit) => permit,
+                        None => {
+                            let Some(registry) = registry.upgrade() else {
+                                slot.state.lock().phase = PoolHubState::Retired;
+                                slot.changed.notify_waiters();
+                                return;
+                            };
+                            match registry
+                                .reclaim_publication_hub_permit(&slot, &cancel)
+                                .await
+                            {
+                                Ok(permit) => permit,
+                                Err(PublicationHubError::InitializedHubLimit { .. }) => {
+                                    let mut state = slot.state.lock();
+                                    if matches!(state.phase, PoolHubState::Initializing) {
+                                        state.phase = if state.retirement_requested
+                                            || cancel.is_cancelled()
+                                        {
+                                            PoolHubState::Retired
+                                        } else {
+                                            PoolHubState::Vacant
+                                        };
+                                    }
+                                    drop(state);
+                                    slot.changed.notify_waiters();
+                                    return;
+                                }
+                                Err(_error) if cancel.is_cancelled() => {
+                                    slot.state.lock().phase = PoolHubState::Retired;
+                                    slot.changed.notify_waiters();
+                                    return;
+                                }
+                                Err(error) => {
+                                    let reason = format!(
+                                        "failed to reserve publication hub capacity: {error}"
+                                    );
+                                    slot.state.lock().phase = PoolHubState::Failed(reason.clone());
+                                    failure(reason);
+                                    slot.changed.notify_waiters();
+                                    return;
+                                }
+                            }
+                        }
+                    };
+                    let mut start =
+                        tokio::spawn(PublicationHub::start(actor, lease, config, failure.clone()));
+                    let result = tokio::select! {
+                        result = &mut start => match result {
+                            Ok(Ok(hub)) => Ok(hub),
+                            Ok(Err(error)) => Err(format!(
+                                "failed to initialize publication hub: {error}"
+                            )),
+                            Err(error) => Err(format!(
+                                "publication hub initialization task failed: {error}"
+                            )),
+                        },
+                        _ = cancel.cancelled() => {
+                            start.abort();
+                            if let Ok(Ok(hub)) = start.await {
+                                hub.shutdown().await;
+                            }
+                            if let Err(error) = cleanup_actor.retire_publication_lease(lease).await {
+                                tracing::debug!(
+                                    pool_id = %cleanup_actor.identity().pool_id(),
+                                    %error,
+                                    "KV DC Relay actor stopped before its cancelled publication lease retired"
+                                );
+                            }
+                            slot.state.lock().phase = PoolHubState::Retired;
+                            slot.changed.notify_waiters();
+                            return;
+                        }
+                    };
+                    if cancel.is_cancelled() {
+                        if let Ok(hub) = result {
+                            hub.shutdown().await;
+                        }
+                        if let Err(error) = cleanup_actor.retire_publication_lease(lease).await {
+                            tracing::debug!(
+                                pool_id = %cleanup_actor.identity().pool_id(),
+                                %error,
+                                "KV DC Relay actor stopped before its cancelled publication lease retired"
+                            );
+                        }
+                        slot.state.lock().phase = PoolHubState::Retired;
+                        slot.changed.notify_waiters();
+                        return;
+                    }
+                    match result {
+                        Ok(hub) => {
+                            let hub = {
+                                let mut state = slot.state.lock();
+                                if state.retirement_requested || cancel.is_cancelled() {
+                                    state.phase = PoolHubState::Retired;
+                                    Some(hub)
+                                } else {
+                                    state.phase = PoolHubState::Ready(InitializedPublicationHub {
+                                        hub,
+                                        permit: initialization_permit,
+                                    });
+                                    None
+                                }
+                            };
+                            if let Some(hub) = hub {
+                                hub.shutdown().await;
+                                if let Err(error) =
+                                    cleanup_actor.retire_publication_lease(lease).await
+                                {
+                                    tracing::debug!(
+                                        pool_id = %cleanup_actor.identity().pool_id(),
+                                        %error,
+                                        "KV DC Relay actor stopped before its cancelled publication lease retired"
+                                    );
+                                }
+                            }
+                        }
+                        Err(reason) => {
+                            let should_fail = {
+                                let mut state = slot.state.lock();
+                                if state.retirement_requested || cancel.is_cancelled() {
+                                    state.phase = PoolHubState::Retired;
+                                    false
+                                } else {
+                                    state.phase = PoolHubState::Failed(reason.clone());
+                                    true
+                                }
+                            };
+                            if should_fail {
+                                failure(reason);
+                            }
+                        }
+                    }
+                    slot.changed.notify_waiters();
+                });
+            }
+            tokio::select! {
+                _ = &mut changed => {}
+                _ = generation_cancel.cancelled() => {
+                    return Err(PublicationHubError::Unavailable(
+                        "pool generation retired".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    async fn shutdown(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let hub = {
+                let mut state = self.state.lock();
+                state.retirement_requested = true;
+                match std::mem::replace(&mut state.phase, PoolHubState::Retired) {
+                    PoolHubState::Ready(initialized) => Some(initialized),
+                    PoolHubState::Initializing => {
+                        state.phase = PoolHubState::Initializing;
+                        None
+                    }
+                    PoolHubState::Evicting => {
+                        state.phase = PoolHubState::Evicting;
+                        None
+                    }
+                    PoolHubState::Vacant | PoolHubState::Failed(_) | PoolHubState::Retired => {
+                        return;
+                    }
+                }
+            };
+            if let Some(initialized) = hub {
+                initialized.hub.shutdown().await;
+                self.changed.notify_waiters();
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    #[cfg(test)]
+    fn phase(&self) -> &'static str {
+        match &self.state.lock().phase {
+            PoolHubState::Vacant => "vacant",
+            PoolHubState::Initializing => "initializing",
+            PoolHubState::Ready(_) => "ready",
+            PoolHubState::Evicting => "evicting",
+            PoolHubState::Failed(_) => "failed",
+            PoolHubState::Retired => "retired",
+        }
+    }
+
+    fn retire(&self) {
+        let hub = {
+            let mut state = self.state.lock();
+            state.retirement_requested = true;
+            match &state.phase {
+                PoolHubState::Ready(initialized) => Some(initialized.hub.clone()),
+                PoolHubState::Vacant | PoolHubState::Failed(_) => {
+                    state.phase = PoolHubState::Retired;
+                    None
+                }
+                PoolHubState::Initializing | PoolHubState::Evicting | PoolHubState::Retired => None,
+            }
+        };
+        if let Some(hub) = hub {
+            hub.retire();
+        }
+    }
+
+    fn try_claim_idle(
+        self: &Arc<Self>,
+        identity: ProducerIdentity,
+        generation_cancel: CancellationToken,
+        registry: Weak<PoolRegistry>,
+    ) -> Option<IdlePublicationHub> {
+        if generation_cancel.is_cancelled() {
+            return None;
+        }
+        let initialized = {
+            let mut state = self.state.lock();
+            if state.retirement_requested || state.pending_admissions != 0 {
+                return None;
+            }
+            let PoolHubState::Ready(initialized) = &state.phase else {
+                return None;
+            };
+            if !initialized.hub.try_begin_idle_eviction() {
+                return None;
+            }
+            match std::mem::replace(&mut state.phase, PoolHubState::Evicting) {
+                PoolHubState::Ready(initialized) => initialized,
+                phase => {
+                    state.phase = phase;
+                    return None;
+                }
+            }
+        };
+        Some(IdlePublicationHub {
+            guard: PoolHubEvictionGuard {
+                slot: self.clone(),
+                identity,
+                generation_cancel,
+                registry,
+                is_finished: false,
+            },
+            initialized,
+        })
+    }
+
+    fn finish_eviction(&self, is_retired: bool) {
+        let mut state = self.state.lock();
+        if matches!(state.phase, PoolHubState::Evicting) {
+            state.phase = if is_retired || state.retirement_requested {
+                PoolHubState::Retired
+            } else {
+                PoolHubState::Vacant
+            };
+        }
+        drop(state);
+        self.changed.notify_waiters();
+    }
+}
+
+struct PoolHubAdmission {
+    slot: Arc<PoolHubSlot>,
+}
+
+impl Drop for PoolHubAdmission {
+    fn drop(&mut self) {
+        let mut state = self.slot.state.lock();
+        debug_assert_ne!(state.pending_admissions, 0);
+        state.pending_admissions -= 1;
+    }
+}
+
+struct IdlePublicationHub {
+    guard: PoolHubEvictionGuard,
+    initialized: InitializedPublicationHub,
+}
+
+impl IdlePublicationHub {
+    async fn evict(self) -> (OwnedSemaphorePermit, Result<(), String>) {
+        let Self {
+            mut guard,
+            initialized,
+        } = self;
+        let InitializedPublicationHub { hub, permit } = initialized;
+        let result = hub.evict_idle().await;
+        drop(hub);
+        if let Err(reason) = &result {
+            guard.fence_if_active(reason);
+        }
+        guard.finish();
+        (permit, result)
+    }
+}
+
+struct PoolHubEvictionGuard {
+    slot: Arc<PoolHubSlot>,
+    identity: ProducerIdentity,
+    generation_cancel: CancellationToken,
+    registry: Weak<PoolRegistry>,
+    is_finished: bool,
+}
+
+struct PoolHubEvictionCandidate {
+    identity: ProducerIdentity,
+    generation_cancel: CancellationToken,
+    slot: Arc<PoolHubSlot>,
+}
+
+impl PoolHubEvictionGuard {
+    fn fence_if_active(&self, reason: &str) {
+        if self.generation_cancel.is_cancelled() {
+            return;
+        }
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        let reason = format!("idle publication hub eviction failed: {reason}");
+        registry.fence_generation(
+            self.identity.pool_id(),
+            self.identity.layout_generation(),
+            &reason,
+        );
+    }
+
+    fn finish(&mut self) {
+        self.slot
+            .finish_eviction(self.generation_cancel.is_cancelled());
+        self.is_finished = true;
+    }
+}
+
+impl Drop for PoolHubEvictionGuard {
+    fn drop(&mut self) {
+        if self.is_finished {
+            return;
+        }
+        self.fence_if_active("cleanup task was abandoned");
+        self.slot.finish_eviction(true);
+    }
 }
 
 struct PoolReservation {
@@ -149,10 +624,38 @@ pub(super) struct PoolRegistry {
     state: Mutex<PoolRegistryState>,
     catalog_tx: watch::Sender<DcPoolCatalog>,
     load_tx: watch::Sender<Vec<PoolLoadSnapshot>>,
+    publication_config: PublicationHubConfig,
+    publication_hub_permits: Arc<Semaphore>,
+    publication_hub_eviction_permits: Arc<Semaphore>,
+    max_initialized_pool_hubs: usize,
+    #[cfg(test)]
+    publication_eviction_gate: Option<Arc<Semaphore>>,
 }
 
 impl PoolRegistry {
+    #[cfg(test)]
     pub(super) fn new(relay_identity: DcRelayIdentity, actor_config: PoolActorConfig) -> Self {
+        Self::new_inner(
+            relay_identity,
+            actor_config,
+            PoolPublicationConfig::default(),
+        )
+    }
+
+    pub(super) fn new_with_publication_config(
+        relay_identity: DcRelayIdentity,
+        actor_config: PoolActorConfig,
+        publication_config: PoolPublicationConfig,
+    ) -> Self {
+        Self::new_inner(relay_identity, actor_config, publication_config)
+    }
+
+    fn new_inner(
+        relay_identity: DcRelayIdentity,
+        actor_config: PoolActorConfig,
+        publication_config: PoolPublicationConfig,
+    ) -> Self {
+        debug_assert_ne!(publication_config.max_initialized_pool_hubs, 0);
         let (catalog_tx, _) = watch::channel(DcPoolCatalog::new(relay_identity, 0, Vec::new()));
         let (load_tx, _) = watch::channel(Vec::new());
         Self {
@@ -162,6 +665,14 @@ impl PoolRegistry {
             state: Mutex::new(PoolRegistryState::default()),
             catalog_tx,
             load_tx,
+            publication_config: publication_config.hub,
+            publication_hub_permits: Arc::new(Semaphore::new(
+                publication_config.max_initialized_pool_hubs,
+            )),
+            publication_hub_eviction_permits: Arc::new(Semaphore::new(1)),
+            max_initialized_pool_hubs: publication_config.max_initialized_pool_hubs,
+            #[cfg(test)]
+            publication_eviction_gate: publication_config.eviction_gate,
         }
     }
 
@@ -304,6 +815,7 @@ impl PoolRegistry {
                 cancel: cancel.clone(),
                 state: PoolEntryState::Active,
                 serving,
+                hub: Arc::new(PoolHubSlot::new()),
             },
         );
         publish_catalog_upsert(&mut state, &self.catalog_tx, descriptor);
@@ -500,12 +1012,24 @@ impl PoolRegistry {
         layout_generation: u64,
         mode: PoolRetirementMode,
     ) -> bool {
-        let mut state = self.state.lock();
-        let Some(entry) = state.pools.get_mut(&pool_id) else {
+        let Some((hub, _)) = self.withdraw_publication_visibility(pool_id, layout_generation, mode)
+        else {
             return false;
         };
+        hub.shutdown().await;
+        true
+    }
+
+    fn withdraw_publication_visibility(
+        &self,
+        pool_id: PoolId,
+        layout_generation: u64,
+        mode: PoolRetirementMode,
+    ) -> Option<(Arc<PoolHubSlot>, bool)> {
+        let mut state = self.state.lock();
+        let entry = state.pools.get_mut(&pool_id)?;
         if entry.layout_generation != layout_generation {
-            return false;
+            return None;
         }
         let was_active = entry.state == PoolEntryState::Active;
         entry.state = match (entry.state, mode) {
@@ -513,11 +1037,33 @@ impl PoolRegistry {
             _ => PoolEntryState::Withdrawn,
         };
         entry.cancel.cancel();
+        let hub = entry.hub.clone();
         if was_active {
             publish_catalog_remove(&mut state, &self.catalog_tx, pool_id);
             publish_load_if_changed(&state, &self.load_tx, pool_id);
         }
-        true
+        Some((hub, was_active))
+    }
+
+    pub(super) fn fence_generation(
+        &self,
+        pool_id: PoolId,
+        layout_generation: u64,
+        reason: &str,
+    ) -> bool {
+        let retired = self.withdraw_publication_visibility(
+            pool_id,
+            layout_generation,
+            PoolRetirementMode::Fenced,
+        );
+        let Some((hub, was_active)) = retired else {
+            return false;
+        };
+        hub.retire();
+        if was_active {
+            tracing::error!(%pool_id, layout_generation, %reason, "Fencing KV DC Relay pool after terminal publication failure");
+        }
+        was_active
     }
 
     pub(super) async fn remove(&self, pool_id: PoolId, layout_generation: u64) -> bool {
@@ -542,8 +1088,169 @@ impl PoolRegistry {
             }
             entry
         };
-        drop(entry);
+        entry.hub.shutdown().await;
         true
+    }
+
+    async fn reclaim_publication_hub_permit(
+        self: &Arc<Self>,
+        target_slot: &Arc<PoolHubSlot>,
+        target_cancel: &CancellationToken,
+    ) -> Result<OwnedSemaphorePermit, PublicationHubError> {
+        let pressure_permit = tokio::select! {
+            biased;
+            _ = target_cancel.cancelled() => {
+                return Err(PublicationHubError::Unavailable(
+                    "pool generation retired while waiting for publication hub capacity".to_string(),
+                ));
+            }
+            permit = self.publication_hub_eviction_permits.clone().acquire_owned() => {
+                permit.map_err(|_| PublicationHubError::Unavailable(
+                    "publication hub eviction coordinator is shutting down".to_string(),
+                ))?
+            }
+        };
+
+        match self.publication_hub_permits.clone().try_acquire_owned() {
+            Ok(permit) => return Ok(permit),
+            Err(TryAcquireError::Closed) => {
+                return Err(PublicationHubError::Unavailable(
+                    "publication hub capacity is shutting down".to_string(),
+                ));
+            }
+            Err(TryAcquireError::NoPermits) => {}
+        }
+
+        let candidates = {
+            let state = self.state.lock();
+            state
+                .pools
+                .values()
+                .filter(|entry| {
+                    entry.state == PoolEntryState::Active && !Arc::ptr_eq(&entry.hub, target_slot)
+                })
+                .map(|entry| PoolHubEvictionCandidate {
+                    identity: entry.identity,
+                    generation_cancel: entry.cancel.child_token(),
+                    slot: entry.hub.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let registry = Arc::downgrade(self);
+        for candidate in candidates {
+            let Some(victim) = candidate.slot.try_claim_idle(
+                candidate.identity,
+                candidate.generation_cancel,
+                registry.clone(),
+            ) else {
+                continue;
+            };
+            let (permit_tx, permit_rx) = oneshot::channel();
+            #[cfg(test)]
+            let eviction_gate = self.publication_eviction_gate.clone();
+            // Cleanup outlives the requesting admission so cancellation cannot strand the victim
+            // in Evicting or leak its permit.
+            tokio::spawn(async move {
+                let _pressure_permit = pressure_permit;
+                #[cfg(test)]
+                if let Some(gate) = eviction_gate {
+                    let _gate_permit = gate.acquire().await;
+                }
+                let (permit, result) = victim.evict().await;
+                if let Err(error) = result {
+                    tracing::debug!(%error, "Idle KV DC Relay publication hub eviction failed");
+                }
+                let _ = permit_tx.send(permit);
+            });
+            return tokio::select! {
+                biased;
+                _ = target_cancel.cancelled() => Err(PublicationHubError::Unavailable(
+                    "pool generation retired while reclaiming publication hub capacity".to_string(),
+                )),
+                permit = permit_rx => permit.map_err(|_| PublicationHubError::InitializedHubLimit {
+                    limit: self.max_initialized_pool_hubs,
+                }),
+            };
+        }
+
+        Err(PublicationHubError::InitializedHubLimit {
+            limit: self.max_initialized_pool_hubs,
+        })
+    }
+
+    pub(super) fn validate_active_producer(
+        &self,
+        expected: ProducerIdentity,
+    ) -> Result<CancellationToken, PublicationHubError> {
+        let pool_id = expected.pool_id();
+        let state = self.state.lock();
+        let entry = state
+            .pools
+            .get(&pool_id)
+            .filter(|entry| entry.state == PoolEntryState::Active)
+            .ok_or(PublicationHubError::UnknownPool(pool_id))?;
+        if entry.identity != expected {
+            return Err(PublicationHubError::ProducerMismatch(pool_id));
+        }
+        // A child observes generation retirement without giving admission code authority to retire
+        // the generation itself.
+        Ok(entry.cancel.child_token())
+    }
+
+    pub(super) async fn subscribe_pool(
+        self: &Arc<Self>,
+        expected: ProducerIdentity,
+    ) -> Result<PublicationHubSubscription, PublicationHubError> {
+        let pool_id = expected.pool_id();
+        let (identity, actor, generation_cancel, hub_slot) = {
+            let state = self.state.lock();
+            let entry = state
+                .pools
+                .get(&pool_id)
+                .filter(|entry| entry.state == PoolEntryState::Active)
+                .ok_or(PublicationHubError::UnknownPool(pool_id))?;
+            (
+                entry.identity,
+                entry.handle.clone(),
+                entry.cancel.clone(),
+                entry.hub.clone(),
+            )
+        };
+        if identity != expected {
+            return Err(PublicationHubError::ProducerMismatch(pool_id));
+        }
+        let admission = hub_slot.begin_admission()?;
+        let failure_registry = Arc::downgrade(self);
+        let terminal_failure: TerminalFailure = Arc::new(move |reason| {
+            let Some(registry) = failure_registry.upgrade() else {
+                return;
+            };
+            let reason = format!("publication hub: {reason}");
+            registry.fence_generation(pool_id, identity.layout_generation(), &reason);
+        });
+        let hub = hub_slot
+            .get_or_start(self, actor, generation_cancel, terminal_failure)
+            .await?;
+        let (current_identity, same_hub) = {
+            let state = self.state.lock();
+            let entry = state
+                .pools
+                .get(&pool_id)
+                .filter(|entry| entry.state == PoolEntryState::Active)
+                .ok_or(PublicationHubError::UnknownPool(pool_id))?;
+            (entry.identity, Arc::ptr_eq(&entry.hub, &hub_slot))
+        };
+        if current_identity != expected {
+            return Err(PublicationHubError::ProducerMismatch(pool_id));
+        }
+        if current_identity != identity || !same_hub {
+            return Err(PublicationHubError::Unavailable(
+                "pool publication generation changed".to_string(),
+            ));
+        }
+        let subscription = hub.subscribe();
+        drop(admission);
+        subscription
     }
 
     pub(super) fn catalog(&self) -> DcPoolCatalog {
@@ -583,6 +1290,7 @@ impl PoolRegistry {
         };
         for (pool_id, entry) in entries {
             entry.cancel.cancel();
+            entry.hub.shutdown().await;
             if let Err(error) = entry.handle.fence().await {
                 tracing::warn!(%pool_id, %error, "KV Relay pool actor failed to fence during registry shutdown");
             }
@@ -795,9 +1503,21 @@ mod tests {
     use dynamo_kv_router::identity::{
         CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, RoutingScopeId,
     };
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
+    };
+    use futures::StreamExt;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::kv_dc_relay::discovery::DcMembershipView;
     use crate::kv_dc_relay::identity::{KvQueryHashFormat, ModelTarget};
+    use crate::kv_dc_relay::publication::{
+        PublicationErrorKind, PublicationFrameKind, RegistryPublicationSource,
+        RelayPublicationSource,
+    };
+    use crate::kv_dc_relay::topology::TopologyPublisher;
 
     type TestCkfBuilder =
         Box<dyn FnOnce(CkfConfig) -> Result<DcCkfState, CkfBuildError> + Send + 'static>;
@@ -855,6 +1575,25 @@ mod tests {
         }
     }
 
+    fn stored_event(event_id: u64) -> RouterEvent {
+        RouterEvent::new(
+            1,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(event_id),
+                        tokens_hash: LocalBlockHash(event_id),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+        )
+    }
+
     fn gated_builder() -> GatedBuilder {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std_mpsc::channel();
@@ -905,6 +1644,44 @@ mod tests {
         assert!(registry.remove(pool_id, layout_generation).await);
     }
 
+    fn hub_slot(registry: &PoolRegistry, pool_id: PoolId) -> Arc<PoolHubSlot> {
+        registry
+            .state
+            .lock()
+            .pools
+            .get(&pool_id)
+            .expect("pool must be attached")
+            .hub
+            .clone()
+    }
+
+    async fn subscribe(
+        registry: &Arc<PoolRegistry>,
+        producer: ProducerIdentity,
+    ) -> Result<PublicationHubSubscription, PublicationHubError> {
+        registry.subscribe_pool(producer).await
+    }
+
+    fn publication_source(
+        registry: Arc<PoolRegistry>,
+        lifecycle: CancellationToken,
+        max_active_streams: usize,
+    ) -> Arc<RegistryPublicationSource> {
+        let topology = Arc::new(TopologyPublisher::new(
+            DcMembershipView::default(),
+            &registry.catalog(),
+        ));
+        Arc::new(RegistryPublicationSource::new(
+            registry,
+            topology,
+            relay_identity(),
+            lifecycle,
+            Arc::new(Semaphore::new(2)),
+            max_active_streams,
+            Duration::from_secs(1),
+        ))
+    }
+
     #[tokio::test]
     async fn one_model_binds_to_independent_pools() {
         let registry = PoolRegistry::new(relay_identity(), config());
@@ -935,6 +1712,53 @@ mod tests {
 
         registry.detach(first).await.unwrap();
         registry.detach(second).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_registry_materializes_publication_images_eagerly() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let attachment = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+
+        attachment
+            .handle
+            .admit_event(
+                0,
+                RouterEvent::new(
+                    1,
+                    KvCacheEvent {
+                        event_id: 1,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash: None,
+                            start_position: None,
+                            blocks: vec![KvCacheStoredBlockData {
+                                block_hash: ExternalSequenceBlockHash(1),
+                                tokens_hash: LocalBlockHash(1),
+                                mm_extra_info: None,
+                            }],
+                        }),
+                        dp_rank: 0,
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+        attachment.handle.flush().await.unwrap();
+        assert!(
+            attachment
+                .handle
+                .state_stats()
+                .await
+                .unwrap()
+                .0
+                .publication()
+                .emitted_images()
+                > 0
+        );
+
+        registry.detach(attachment).await.unwrap();
     }
 
     #[tokio::test]
@@ -1494,6 +2318,691 @@ mod tests {
         assert!(catalog.pools()[0].registrations()[0].aliases().is_empty());
 
         registry.detach(without_alias).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn publication_hub_is_lazy_and_shared_by_concurrent_subscribers() {
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig::default(),
+        ));
+        let attachment = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let producer = attachment.handle.identity();
+        let hub = hub_slot(&registry, attachment.pool_id);
+        assert_eq!(hub.phase(), "vacant");
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let registry = registry.clone();
+            tasks.push(tokio::spawn(
+                async move { subscribe(&registry, producer).await },
+            ));
+        }
+        let mut subscriptions = Vec::new();
+        for task in tasks {
+            let subscription = task.await.unwrap().unwrap();
+            assert_eq!(subscription.snapshot().unwrap().identity(), producer);
+            subscriptions.push(subscription);
+        }
+        assert_eq!(hub.phase(), "ready");
+
+        drop(subscriptions);
+        registry.detach(attachment).await.unwrap();
+        assert_eq!(hub.phase(), "retired");
+    }
+
+    #[tokio::test]
+    async fn initialized_hub_limit_protects_active_hubs_and_reclaims_idle_hubs() {
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig {
+                max_initialized_pool_hubs: 1,
+                ..PoolPublicationConfig::default()
+            },
+        ));
+        let first = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let second = registry
+            .attach(request(pool(2), "slow.router.generate", "llama"))
+            .await
+            .unwrap();
+        let first_hub = hub_slot(&registry, first.pool_id);
+        let second_hub = hub_slot(&registry, second.pool_id);
+
+        let first_subscription = subscribe(&registry, first.handle.identity()).await.unwrap();
+        let error = subscribe(&registry, second.handle.identity())
+            .await
+            .err()
+            .expect("second pool must hit the global initialized-hub limit");
+        assert_eq!(error, PublicationHubError::InitializedHubLimit { limit: 1 });
+
+        drop(first_subscription);
+        let second_subscription = subscribe(&registry, second.handle.identity())
+            .await
+            .unwrap();
+        assert_eq!(first_hub.phase(), "vacant");
+        assert_eq!(second_hub.phase(), "ready");
+        let catalog = registry.catalog();
+        assert_eq!(catalog.pools().len(), 2);
+        assert!(
+            catalog
+                .pools()
+                .iter()
+                .any(|descriptor| descriptor.pool_id() == first.pool_id)
+        );
+        assert!(
+            catalog
+                .pools()
+                .iter()
+                .any(|descriptor| descriptor.pool_id() == second.pool_id)
+        );
+
+        drop(second_subscription);
+        let reopened_first = subscribe(&registry, first.handle.identity()).await.unwrap();
+        assert_eq!(first_hub.phase(), "ready");
+        assert_eq!(second_hub.phase(), "vacant");
+
+        drop(reopened_first);
+        registry.detach(first).await.unwrap();
+        registry.detach(second).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_admission_prevents_idle_hub_eviction() {
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig {
+                max_initialized_pool_hubs: 1,
+                ..PoolPublicationConfig::default()
+            },
+        ));
+        let first = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let second = registry
+            .attach(request(pool(2), "slow.router.generate", "llama"))
+            .await
+            .unwrap();
+        let first_hub = hub_slot(&registry, first.pool_id);
+
+        let first_subscription = subscribe(&registry, first.handle.identity()).await.unwrap();
+        drop(first_subscription);
+        let pending_admission = first_hub.begin_admission().unwrap();
+
+        let error = subscribe(&registry, second.handle.identity())
+            .await
+            .err()
+            .expect("pending admission must protect the idle hub");
+        assert_eq!(error, PublicationHubError::InitializedHubLimit { limit: 1 });
+        assert_eq!(first_hub.phase(), "ready");
+
+        drop(pending_admission);
+        let second_subscription = subscribe(&registry, second.handle.identity())
+            .await
+            .unwrap();
+        assert_eq!(first_hub.phase(), "vacant");
+
+        drop(second_subscription);
+        registry.detach(first).await.unwrap();
+        registry.detach(second).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_pressure_claims_one_idle_victim() {
+        let eviction_gate = Arc::new(Semaphore::new(0));
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig {
+                max_initialized_pool_hubs: 1,
+                eviction_gate: Some(eviction_gate.clone()),
+                ..PoolPublicationConfig::default()
+            },
+        ));
+        let first = registry
+            .attach(request(pool(1), "first.router.generate", "llama"))
+            .await
+            .unwrap();
+        let second = registry
+            .attach(request(pool(2), "second.router.generate", "llama"))
+            .await
+            .unwrap();
+        let third = registry
+            .attach(request(pool(3), "third.router.generate", "llama"))
+            .await
+            .unwrap();
+        let first_hub = hub_slot(&registry, first.pool_id);
+
+        let subscription = subscribe(&registry, first.handle.identity()).await.unwrap();
+        drop(subscription);
+        let second_subscribe = tokio::spawn({
+            let registry = registry.clone();
+            let producer = second.handle.identity();
+            async move { subscribe(&registry, producer).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while first_hub.phase() != "evicting" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first pressure request must claim the idle hub");
+
+        let third_subscribe = tokio::spawn({
+            let registry = registry.clone();
+            let producer = third.handle.identity();
+            async move { subscribe(&registry, producer).await }
+        });
+        eviction_gate.add_permits(1);
+
+        let second_subscription = second_subscribe.await.unwrap().unwrap();
+        let third_error = third_subscribe
+            .await
+            .unwrap()
+            .err()
+            .expect("one idle victim cannot satisfy two pressure requests");
+        assert_eq!(
+            third_error,
+            PublicationHubError::InitializedHubLimit { limit: 1 }
+        );
+        assert_eq!(first_hub.phase(), "vacant");
+        assert_eq!(registry.publication_hub_permits.available_permits(), 0);
+
+        drop(second_subscription);
+        registry.detach(first).await.unwrap();
+        registry.detach(second).await.unwrap();
+        registry.detach(third).await.unwrap();
+        assert_eq!(registry.publication_hub_permits.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn generation_retirement_wins_idle_eviction_race() {
+        let eviction_gate = Arc::new(Semaphore::new(0));
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig {
+                max_initialized_pool_hubs: 1,
+                eviction_gate: Some(eviction_gate.clone()),
+                ..PoolPublicationConfig::default()
+            },
+        ));
+        let first = registry
+            .attach(request(pool(1), "first.router.generate", "llama"))
+            .await
+            .unwrap();
+        let second = registry
+            .attach(request(pool(2), "second.router.generate", "llama"))
+            .await
+            .unwrap();
+        let first_hub = hub_slot(&registry, first.pool_id);
+
+        let subscription = subscribe(&registry, first.handle.identity()).await.unwrap();
+        drop(subscription);
+        let second_subscribe = tokio::spawn({
+            let registry = registry.clone();
+            let producer = second.handle.identity();
+            async move { subscribe(&registry, producer).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while first_hub.phase() != "evicting" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pressure request must claim the idle hub");
+
+        assert!(registry.fence_generation(
+            first.pool_id,
+            first.layout_generation,
+            "test retirement during idle eviction",
+        ));
+        eviction_gate.add_permits(1);
+
+        let second_subscription = second_subscribe.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while first_hub.phase() != "retired" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retired generation must not return to the idle cache");
+
+        drop(second_subscription);
+        registry.detach(first).await.unwrap();
+        registry.detach(second).await.unwrap();
+        assert_eq!(registry.publication_hub_permits.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn requester_retirement_does_not_abandon_claimed_idle_eviction() {
+        let eviction_gate = Arc::new(Semaphore::new(0));
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig {
+                max_initialized_pool_hubs: 1,
+                eviction_gate: Some(eviction_gate.clone()),
+                ..PoolPublicationConfig::default()
+            },
+        ));
+        let first = registry
+            .attach(request(pool(1), "first.router.generate", "llama"))
+            .await
+            .unwrap();
+        let second = registry
+            .attach(request(pool(2), "second.router.generate", "llama"))
+            .await
+            .unwrap();
+        let third = registry
+            .attach(request(pool(3), "third.router.generate", "llama"))
+            .await
+            .unwrap();
+        let first_hub = hub_slot(&registry, first.pool_id);
+        let second_hub = hub_slot(&registry, second.pool_id);
+
+        let subscription = subscribe(&registry, first.handle.identity()).await.unwrap();
+        drop(subscription);
+        let second_subscribe = tokio::spawn({
+            let registry = registry.clone();
+            let producer = second.handle.identity();
+            async move { subscribe(&registry, producer).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while first_hub.phase() != "evicting" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pressure request must claim the idle hub");
+
+        assert!(registry.fence_generation(
+            second.pool_id,
+            second.layout_generation,
+            "test requester retirement during idle eviction",
+        ));
+        let second_result = tokio::time::timeout(Duration::from_secs(1), second_subscribe)
+            .await
+            .expect("retired requester must stop waiting for reclaimed capacity")
+            .expect("requester task must join");
+        let second_error = second_result
+            .err()
+            .expect("retired requester must reject publication admission");
+        assert!(matches!(second_error, PublicationHubError::Unavailable(_)));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while second_hub.phase() != "retired" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("requester slot must finish retirement");
+        assert_eq!(first_hub.phase(), "evicting");
+
+        eviction_gate.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while first_hub.phase() != "vacant"
+                || registry.publication_hub_permits.available_permits() != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached cleanup must release the idle victim and its capacity");
+
+        let third_subscription = subscribe(&registry, third.handle.identity()).await.unwrap();
+        assert_eq!(registry.publication_hub_permits.available_permits(), 0);
+
+        drop(third_subscription);
+        registry.detach(first).await.unwrap();
+        registry.detach(second).await.unwrap();
+        registry.detach(third).await.unwrap();
+        assert_eq!(registry.publication_hub_permits.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_hub_failure_withdraws_catalog_and_load_visibility() {
+        let encoding_permits = Arc::new(Semaphore::new(1));
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig {
+                hub: PublicationHubConfig {
+                    encoding_permits: encoding_permits.clone(),
+                    ..PublicationHubConfig::default()
+                },
+                ..PoolPublicationConfig::default()
+            },
+        ));
+        let attachment = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let mut subscription = subscribe(&registry, attachment.handle.identity())
+            .await
+            .unwrap();
+        assert_eq!(registry.catalog().pools().len(), 1);
+        assert_eq!(registry.load_snapshots().len(), 1);
+
+        encoding_permits.close();
+        attachment
+            .handle
+            .admit_event(0, stored_event(1))
+            .await
+            .unwrap();
+        attachment.handle.flush().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if registry.catalog().pools().is_empty()
+                    && registry.load_snapshots().is_empty()
+                    && attachment.pool_cancel.is_cancelled()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal publication failure must withdraw the generation");
+        assert!(subscription.recv().await.is_err());
+
+        registry.detach(attachment).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_generation_cannot_fence_or_initialize_replacement_hub() {
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig::default(),
+        ));
+        let first = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let stale_generation = first.layout_generation;
+        let stale_producer = first.handle.identity();
+        registry.detach(first).await.unwrap();
+
+        let replacement = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let current_producer = replacement.handle.identity();
+        let current_hub = hub_slot(&registry, replacement.pool_id);
+        assert_ne!(stale_producer, current_producer);
+
+        assert!(!registry.fence_generation(
+            replacement.pool_id,
+            stale_generation,
+            "stale terminal callback",
+        ));
+        assert!(!replacement.pool_cancel.is_cancelled());
+        assert_eq!(registry.catalog().pools().len(), 1);
+
+        assert!(matches!(
+            registry.validate_active_producer(stale_producer),
+            Err(PublicationHubError::ProducerMismatch(pool_id))
+                if pool_id == replacement.pool_id
+        ));
+        let current_generation_cancel =
+            registry.validate_active_producer(current_producer).unwrap();
+        assert!(!current_generation_cancel.is_cancelled());
+
+        let error = subscribe(&registry, stale_producer)
+            .await
+            .err()
+            .expect("stale producer subscription must fail");
+        assert_eq!(
+            error,
+            PublicationHubError::ProducerMismatch(replacement.pool_id)
+        );
+        assert_eq!(current_hub.phase(), "vacant");
+
+        let subscription = subscribe(&registry, current_producer).await.unwrap();
+        assert_eq!(
+            subscription.snapshot().unwrap().identity(),
+            current_producer
+        );
+        assert_eq!(current_hub.phase(), "ready");
+        drop(subscription);
+        registry.detach(replacement).await.unwrap();
+        assert!(current_generation_cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn publication_source_streams_snapshot_before_concurrent_delta() {
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig::default(),
+        ));
+        let attachment = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let producer = attachment.handle.identity();
+        let lifecycle = CancellationToken::new();
+        let source = publication_source(registry.clone(), lifecycle.clone(), 2);
+        let mut stream = source.subscribe_pool(producer).await.unwrap();
+
+        // Exercise the handoff race: a delta published before snapshot consumption must still
+        // follow it.
+        attachment
+            .handle
+            .admit_event(0, stored_event(1))
+            .await
+            .unwrap();
+        attachment.handle.flush().await.unwrap();
+
+        let snapshot = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("source snapshot must arrive")
+            .expect("source stream must remain open")
+            .expect("source snapshot must be valid");
+        assert_eq!(snapshot.kind(), PublicationFrameKind::SnapshotChunk);
+        assert_eq!(snapshot.identity(), producer);
+        assert_eq!(snapshot.base_sequence(), snapshot.sequence());
+
+        let delta = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("source delta must arrive")
+            .expect("source stream must remain open")
+            .expect("source delta must be valid");
+        assert_eq!(delta.kind(), PublicationFrameKind::Delta);
+        assert_eq!(delta.identity(), producer);
+        assert_eq!(delta.base_sequence(), snapshot.sequence());
+        assert_eq!(delta.sequence(), snapshot.sequence() + 1);
+
+        lifecycle.cancel();
+        tokio::time::timeout(Duration::from_secs(1), source.wait_for_shutdown())
+            .await
+            .expect("publication lifecycle must wake");
+        drop(stream);
+        registry.detach(attachment).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn publication_source_limit_and_retirement_are_generation_safe() {
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig::default(),
+        ));
+        let first = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let stale_producer = first.handle.identity();
+        let lifecycle = CancellationToken::new();
+        let source = publication_source(registry.clone(), lifecycle.clone(), 1);
+        let mut stale_stream = source.subscribe_pool(stale_producer).await.unwrap();
+
+        let error = source
+            .subscribe_pool(stale_producer)
+            .await
+            .err()
+            .expect("global stream limit must reject a second stream");
+        assert_eq!(error.kind(), PublicationErrorKind::ResourceExhausted);
+
+        registry.detach(first).await.unwrap();
+        let retired = tokio::time::timeout(Duration::from_secs(1), stale_stream.next())
+            .await
+            .expect("retired source stream must wake")
+            .expect("retired source stream must report its terminal error")
+            .expect_err("retired source stream must require a fresh snapshot");
+        assert!(matches!(
+            retired.kind(),
+            PublicationErrorKind::Unavailable | PublicationErrorKind::ResourceExhausted
+        ));
+        drop(stale_stream);
+
+        let replacement = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let current_producer = replacement.handle.identity();
+        assert_ne!(stale_producer, current_producer);
+        let stale_error = source
+            .subscribe_pool(stale_producer)
+            .await
+            .err()
+            .expect("stale producer must not attach to the replacement");
+        assert_eq!(stale_error.kind(), PublicationErrorKind::ProducerMismatch);
+        let current_stream = source.subscribe_pool(current_producer).await.unwrap();
+
+        lifecycle.cancel();
+        tokio::time::timeout(Duration::from_secs(1), source.wait_for_shutdown())
+            .await
+            .expect("publication lifecycle must wake");
+        drop(current_stream);
+        registry.detach(replacement).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retirement_cancels_in_flight_hub_initialization() {
+        let initialization_gate = Arc::new(Semaphore::new(0));
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig {
+                hub: PublicationHubConfig {
+                    initialization_gate: Some(initialization_gate),
+                    ..PublicationHubConfig::default()
+                },
+                ..PoolPublicationConfig::default()
+            },
+        ));
+        let attachment = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let producer = attachment.handle.identity();
+        let hub = hub_slot(&registry, attachment.pool_id);
+        let subscriber = tokio::spawn({
+            let registry = registry.clone();
+            async move { subscribe(&registry, producer).await }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while hub.phase() != "initializing" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hub initialization must start");
+        tokio::time::timeout(Duration::from_secs(1), registry.detach(attachment))
+            .await
+            .expect("retirement must cancel hub initialization")
+            .unwrap();
+
+        assert!(subscriber.await.unwrap().is_err());
+        assert_eq!(hub.phase(), "retired");
+        assert_eq!(registry.pool_count().await, 0);
+        assert!(registry.catalog().pools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_actor_snapshot_retires_the_publication_lease() {
+        let post_snapshot_gate = Arc::new(Semaphore::new(0));
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig {
+                hub: PublicationHubConfig {
+                    post_snapshot_gate: Some(post_snapshot_gate),
+                    ..PublicationHubConfig::default()
+                },
+                ..PoolPublicationConfig::default()
+            },
+        ));
+        let attachment = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let producer = attachment.handle.identity();
+        let hub = hub_slot(&registry, attachment.pool_id);
+        let subscriber = tokio::spawn({
+            let registry = registry.clone();
+            async move { subscribe(&registry, producer).await }
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while hub.phase() != "initializing" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hub initialization must start");
+
+        let mut event_id = 1;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                attachment
+                    .handle
+                    .admit_event(0, stored_event(event_id))
+                    .await
+                    .unwrap();
+                attachment.handle.flush().await.unwrap();
+                if attachment.handle.state_stats().await.unwrap().1 > 0 {
+                    break;
+                }
+                event_id += 1;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor publication lease must become active");
+
+        attachment.pool_cancel.cancel();
+        assert!(subscriber.await.unwrap().is_err());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while hub.phase() != "retired" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled hub initialization must retire");
+
+        let sequence_before = attachment.handle.state_stats().await.unwrap().1;
+        attachment
+            .handle
+            .admit_event(0, stored_event(event_id + 1))
+            .await
+            .unwrap();
+        attachment.handle.flush().await.unwrap();
+        let sequence_after = attachment.handle.state_stats().await.unwrap().1;
+        assert_eq!(sequence_after, sequence_before);
+
+        registry.detach(attachment).await.unwrap();
     }
 
     #[tokio::test]

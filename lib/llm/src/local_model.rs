@@ -69,6 +69,7 @@ pub struct LocalModelBuilder {
     frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
+    tls_client_ca_cert_path: Option<PathBuf>,
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     is_mocker: bool,
@@ -94,6 +95,7 @@ impl Default for LocalModelBuilder {
             frontend_api_config: Default::default(),
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
+            tls_client_ca_cert_path: Default::default(),
             model_path: Default::default(),
             source_path: Default::default(),
             model_name: Default::default(),
@@ -124,7 +126,7 @@ impl LocalModelBuilder {
         self
     }
 
-    /// The HF name of the model before we downloaded it, or a local path if
+    /// The HF name or NGC URI before we downloaded the model, or a local path if
     /// that was given on the cmd line. We need this because `model_path` is always
     /// a local path.
     pub fn source_path(&mut self, source_path: PathBuf) -> &mut Self {
@@ -233,6 +235,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn tls_client_ca_cert_path(&mut self, p: Option<PathBuf>) -> &mut Self {
+        self.tls_client_ca_cert_path = p;
+        self
+    }
+
     pub fn router_config(&mut self, router_config: Option<RouterConfig>) -> &mut Self {
         self.router_config = router_config;
         self
@@ -306,7 +313,7 @@ impl LocalModelBuilder {
     }
 
     /// Make an LLM ready for use:
-    /// - Download it from Hugging Face (and NGC in future) if necessary
+    /// - Download it from Hugging Face or NGC if necessary
     /// - Resolve the path
     /// - Load it's ModelDeploymentCard card
     /// - Name it correctly
@@ -365,6 +372,7 @@ impl LocalModelBuilder {
                 frontend_api_config: self.frontend_api_config.clone(),
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
+                tls_client_ca_cert_path: self.tls_client_ca_cert_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
@@ -421,6 +429,7 @@ impl LocalModelBuilder {
             frontend_api_config: self.frontend_api_config.clone(),
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
+            tls_client_ca_cert_path: self.tls_client_ca_cert_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
@@ -445,6 +454,7 @@ pub struct LocalModel {
     frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
+    tls_client_ca_cert_path: Option<PathBuf>,
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
@@ -479,6 +489,15 @@ pub async fn register_model_card(
         model_suffix,
     )?;
     let _instance = discovery.register(spec).await?;
+
+    // Size the process-global admission gate from this card, after registration
+    // succeeds. LoRA adapters carry no capacity of their own.
+    if lora_name.is_none() {
+        dynamo_runtime::admission_gate::record_engine_capacity(
+            card.runtime_config.max_num_seqs,
+            Some(card.runtime_config.data_parallel_size),
+        );
+    }
     Ok(())
 }
 
@@ -506,14 +525,14 @@ pub async fn update_model_taints(
 
 impl LocalModel {
     /// Ensure a model is accessible locally, returning it's path.
-    /// Downloads the model from Hugging Face if necessary.
+    /// Downloads the model from Hugging Face, or from NGC for `ngc://` names, if necessary.
     /// If ignore_weights is true, model weight files will be skipped and only the model config
     /// will be downloaded.
     /// Returns the path to the model files
     ///
     /// A reference carrying the `oci://` scheme is instead pulled from an OCI
     /// registry as a CNCF ModelPack artifact (see [`super::hub::oci`]). Every
-    /// other reference shape — a Hugging Face repo id above all — is left to
+    /// other reference shape (a Hugging Face repo id above all) is left to
     /// the Hugging Face path unchanged. `ignore_weights` has no effect on an
     /// `oci://` reference: a ModelPack image is pulled as a whole, so there is
     /// no cheaper config-only fetch to ask for.
@@ -609,6 +628,10 @@ impl LocalModel {
         self.tls_key_path.as_deref()
     }
 
+    pub fn tls_client_ca_cert_path(&self) -> Option<&Path> {
+        self.tls_client_ca_cert_path.as_deref()
+    }
+
     pub fn router_config(&self) -> &RouterConfig {
         &self.router_config
     }
@@ -689,6 +712,8 @@ impl LocalModel {
                 .context("move_to_self_host")?;
         }
 
+        // NGC retains worker HTTP/file locations; the frontend can fall back to NGC
+        // when a worker's local metadata files are not accessible there.
         if is_remote_repo_source(self.card.source_path()) {
             // The consumers of MDC (frontend) might not have the same local path as us, so
             // replace disk paths with a custom URL like "hf://Qwen/Qwen3-0.6B/config.json".
@@ -873,9 +898,11 @@ fn internal_endpoint(engine: &str) -> EndpointId {
 
 /// True if `source` names a remote Hugging Face repo rather than something on
 /// disk. An `oci://` source resolves to a local directory, so like a local
-/// model it must not be rewritten to a `hf://` URL.
+/// model it must not be rewritten to a `hf://` URL. `ngc://` sources are kept as is.
 fn is_remote_repo_source(source: &str) -> bool {
-    !Path::new(source).exists() && !super::hub::oci::is_oci_ref(source)
+    !Path::new(source).exists()
+        && !source.starts_with("ngc://")
+        && !super::hub::oci::is_oci_ref(source)
 }
 
 /// `None` when `system_status_server` isn't running (no `DYN_SYSTEM_PORT`)
@@ -887,15 +914,11 @@ pub(crate) fn self_host_base_url(
         return Ok(None);
     };
 
-    let configured = dynamo_runtime::RuntimeConfig::from_settings()
-        .unwrap_or_default()
-        .system_host;
-    let host = match configured.as_str() {
-        "0.0.0.0" | "::" | "[::]" => dynamo_runtime::utils::local_ip_for_advertise(),
-        _ => configured,
-    };
+    Ok(Some(system_status_base_url(&info)))
+}
 
-    Ok(Some(format!("http://{host}:{}", info.port())))
+fn system_status_base_url(info: &dynamo_runtime::SystemStatusServerInfo) -> String {
+    format!("http://{}", info.advertised_socket_addr())
 }
 
 /// Scan `model_dir` for files to advertise alongside the typed MDC slots.
@@ -950,6 +973,13 @@ mod self_host_metadata_default_tests {
         assert!(self_host_metadata_default(Some("garbage"))); // unrecognized
         assert!(!self_host_metadata_default(Some("false"))); // explicit opt-out
     }
+
+    #[test]
+    fn self_host_url_uses_the_bound_status_address() {
+        let info = dynamo_runtime::SystemStatusServerInfo::new("[::1]:8080".parse().unwrap(), None);
+
+        assert_eq!(system_status_base_url(&info), "http://[::1]:8080");
+    }
 }
 
 #[cfg(test)]
@@ -962,6 +992,7 @@ mod is_remote_repo_source_tests {
         assert!(is_remote_repo_source("Qwen/Qwen3-0.6B"));
         assert!(!is_remote_repo_source(dir.path().to_str().unwrap()));
         assert!(!is_remote_repo_source("oci://ghcr.io/org/model:tag"));
+        assert!(!is_remote_repo_source("ngc://org/team/model"));
     }
 }
 

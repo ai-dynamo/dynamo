@@ -31,6 +31,35 @@ def _parse_runtime_args(argv: list[str]) -> tuple[DynamoRuntimeConfig, str]:
     return config, parser.format_help()
 
 
+def test_structural_tags_default_on_for_supported_parsers(monkeypatch):
+    monkeypatch.delenv("DYN_ENABLE_STRUCTURAL_TAG", raising=False)
+    monkeypatch.delenv("DYN_STRUCTURAL_TAG_SCOPE", raising=False)
+    monkeypatch.delenv("DYN_STRUCTURAL_TAG_SCHEMA", raising=False)
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.dyn_enable_structural_tag is True
+    assert config.dyn_structural_tag_scope == "always"
+    assert config.dyn_structural_tag_schema == "auto"
+
+
+def test_structural_tag_schema_help_describes_omitted_strict(monkeypatch):
+    monkeypatch.delenv("DYN_STRUCTURAL_TAG_SCHEMA", raising=False)
+
+    _, help_text = _parse_runtime_args([])
+
+    assert "strict omitted or true" in help_text
+    assert "overriding strict=false" in help_text
+
+
+def test_structural_tag_global_opt_out(monkeypatch):
+    monkeypatch.setenv("DYN_ENABLE_STRUCTURAL_TAG", "false")
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.dyn_enable_structural_tag is False
+
+
 def test_fpm_trace_defaults_disabled(monkeypatch):
     monkeypatch.delenv("DYN_FPM_TRACE", raising=False)
 
@@ -49,6 +78,26 @@ def test_kv_state_endpoint_supports_cli_and_env(monkeypatch):
     assert cli_config.kv_state_endpoint == "other/cache/updates"
     assert "--kv-state-endpoint" in help_text
     assert "DYN_KV_STATE_ENDPOINT" in help_text
+
+
+def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
+    monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
+
+    default_config, help_text = _parse_runtime_args([])
+    quic_config, _ = _parse_runtime_args(["--response-plane", "quic"])
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
+    env_config, _ = _parse_runtime_args([])
+
+    assert default_config.response_plane == "tcp"
+    assert quic_config.response_plane == "quic"
+    assert env_config.response_plane == "quic"
+    assert os.environ["DYN_RESPONSE_PLANE"] == "quic"
+    assert "--response-plane" in help_text
+
+
+def test_response_plane_rejects_invalid_value():
+    with pytest.raises(SystemExit):
+        _parse_runtime_args(["--response-plane", "invalid"])
 
 
 def test_fpm_trace_env_enables_and_is_canonicalized(monkeypatch):

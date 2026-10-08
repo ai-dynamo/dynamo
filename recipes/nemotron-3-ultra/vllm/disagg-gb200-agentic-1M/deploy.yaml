@@ -133,7 +133,7 @@ spec:
             - name: runtime-tmp
               emptyDir: {}
 
-    - name: VllmPrefillWorker
+    - name: prefill
       type: prefill
       replicas: 1
       sharedMemorySize: 128Gi
@@ -219,7 +219,7 @@ spec:
                     --mamba-cache-mode align \
                     --mamba-ssm-cache-dtype bfloat16 \
                     --mamba-backend triton \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
                     --dyn-tool-call-parser qwen3_coder \
                     --dyn-reasoning-parser nemotron3 \
                     --reasoning-parser-plugin "${PLUGIN}" \
@@ -295,7 +295,7 @@ spec:
             - name: flashinfer-cubins
               emptyDir: {medium: Memory}
 
-    - name: VllmDecodeWorker
+    - name: decode
       type: decode
       replicas: 1
       sharedMemorySize: 128Gi
@@ -381,7 +381,7 @@ spec:
                     --mamba-cache-mode align \
                     --mamba-ssm-cache-dtype bfloat16 \
                     --mamba-backend triton \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
                     --dyn-tool-call-parser qwen3_coder \
                     --dyn-reasoning-parser nemotron3 \
                     --reasoning-parser-plugin "${PLUGIN}" \

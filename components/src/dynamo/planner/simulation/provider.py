@@ -5,24 +5,44 @@
 
 from __future__ import annotations
 
+import itertools
+import math
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from dataclasses import replace
 from enum import Enum
 from typing import Any, cast
 
+from aisimulate.config.common import Choices, IntegerRange, NumericRange
+from aisimulate.config_adapter import (
+    PredictionAdapterContext,
+    RecommendationAdapterContext,
+)
 from aisimulate.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,
     CandidateContext,
+    InfeasibleCandidate,
     JSONValue,
     RuntimeHookSpec,
     SearchSpaceFragment,
     SweepContext,
 )
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 from tqdm import tqdm  # type: ignore[import-untyped]
 
+from dynamo.planner.config.defaults import SLAPlannerDefaults
+from dynamo.planner.config.planner_config import PlannerConfig
+
+from .config import PlannerRecommendationConfig, Policy
 from .load_predictor import (
     LOAD_PREDICTOR_PRESETS,
     complete_predictor_preset,
@@ -66,6 +86,7 @@ _PLANNER_PASSTHROUGH = (
     "enable_load_scaling",
     "throughput_adjustment_interval_seconds",
     "load_adjustment_interval_seconds",
+    "max_throughput_scaling_replicas",
     "max_num_fpm_samples",
     "fpm_sample_bucket_size",
     "load_scaling_down_sensitivity",
@@ -78,6 +99,17 @@ _PLANNER_PASSTHROUGH = (
     "kalman_r",
     "kalman_min_points",
 )
+_PUBLIC_CONFIG_FIELDS = {
+    **{name: name for name in _PLANNER_PASSTHROUGH},
+    "target": "optimization_target",
+    "max_num_gpus": "max_gpu_budget",
+    "min_num_gpus": "min_gpu_budget",
+    "min_workers": "min_endpoint",
+    "prefill_min_workers": "prefill_min_endpoint",
+    "decode_min_workers": "decode_min_endpoint",
+}
+
+
 _HOOK = RuntimeHookSpec(
     provider="dynamo.planner",
     kind="scaling_policy",
@@ -99,6 +131,135 @@ def _default_load_sensitivity() -> list[str | dict[str, Any]]:
 
 def _default_load_predictors() -> list[str | dict[str, Any]]:
     return list(LOAD_PREDICTOR_PRESETS)
+
+
+def _public_values(value: Any, defaults: list[Any]) -> list[Any]:
+    if value is None:
+        return list(defaults)
+    if isinstance(value, Mapping) and set(value) == {"choices"}:
+        choices = value["choices"]
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("Planner choices must be a nonempty list")
+        if len({repr(choice) for choice in choices}) != len(choices):
+            raise ValueError("Planner choices must contain unique values")
+        return list(choices)
+    if isinstance(value, Mapping) and set(value) == {"range"}:
+        raw = value["range"]
+        if not isinstance(raw, Mapping):
+            raise ValueError("Planner range must be a mapping")
+        unknown = set(raw) - {"min", "max", "step", "scale"}
+        if unknown:
+            raise ValueError(f"Planner range has unknown fields {sorted(unknown)}")
+        if "min" not in raw or "max" not in raw:
+            raise ValueError("Planner range requires min and max")
+        minimum, maximum = raw["min"], raw["max"]
+        if (
+            isinstance(minimum, bool)
+            or isinstance(maximum, bool)
+            or not isinstance(minimum, (int, float))
+            or not isinstance(maximum, (int, float))
+            or not math.isfinite(float(minimum))
+            or not math.isfinite(float(maximum))
+            or minimum > maximum
+        ):
+            raise ValueError("Planner range requires finite numeric min <= max")
+        step = raw.get("step")
+        if raw.get("scale", "linear") == "log":
+            if isinstance(minimum, int) and isinstance(maximum, int):
+                return list(range(minimum, maximum + 1))
+            return [minimum, maximum]
+        if (
+            step is None
+            or isinstance(step, bool)
+            or not isinstance(step, (int, float))
+            or step <= 0
+        ):
+            raise ValueError("Planner independent numeric ranges require step")
+        values = []
+        current = minimum
+        while current <= maximum:
+            values.append(current)
+            current += step
+        return values
+    if isinstance(value, Mapping):
+        raise ValueError("Planner domains must contain exactly choices or range")
+    return [value]
+
+
+def _independent_preset_mappings(
+    group: str,
+    control: Mapping[str, Any],
+    planner: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    specifications: dict[str, tuple[dict[str, Any], list[Any]]] = {
+        "scaling_policy": (
+            {
+                "enable_throughput_scaling": planner.get("enable_throughput_scaling"),
+                "enable_load_scaling": planner.get("enable_load_scaling"),
+                "throughput_adjustment_interval_seconds": planner.get(
+                    "throughput_adjustment_interval_seconds"
+                ),
+                "load_adjustment_interval_seconds": planner.get(
+                    "load_adjustment_interval_seconds"
+                ),
+            },
+            [[False, True], [False, True], [180, 600], [5, 10]],
+        ),
+        "fpm_sampling": (
+            {
+                "max_num_fpm_samples": planner.get("max_num_fpm_samples"),
+                "fpm_sample_bucket_size": planner.get("fpm_sample_bucket_size"),
+            },
+            [[32, 64, 128], [4, 16, 64]],
+        ),
+        "load_sensitivity": (
+            {
+                "load_scaling_down_sensitivity": planner.get(
+                    "load_scaling_down_sensitivity"
+                ),
+                "load_min_observations": planner.get("load_min_observations"),
+            },
+            [[70, 80, 90], [3, 5, 8]],
+        ),
+        "load_predictor": (
+            {
+                "load_predictor": control.get("type"),
+                "load_predictor_log1p": planner.get("load_predictor_log1p"),
+                "prophet_window_size": planner.get("prophet_window_size"),
+                "kalman_q_level": planner.get("kalman_q_level"),
+                "kalman_q_trend": planner.get("kalman_q_trend"),
+                "kalman_r": planner.get("kalman_r"),
+                "kalman_min_points": planner.get("kalman_min_points"),
+            },
+            [
+                ["constant", "arima", "prophet", "kalman"],
+                [False, True],
+                [20, 50],
+                [1.0, 10.0],
+                [0.1, 1.0],
+                [5.0, 10.0],
+                [3, 5],
+            ],
+        ),
+    }
+    values, defaults = specifications[group]
+    names = list(values)
+    dimensions = [
+        _public_values(values[name], defaults[index])
+        for index, name in enumerate(names)
+    ]
+    mappings = [
+        dict(zip(names, combination, strict=True))
+        for combination in itertools.product(*dimensions)
+    ]
+    if group == "fpm_sampling":
+        mappings = [
+            mapping
+            for mapping in mappings
+            if math.isqrt(mapping["fpm_sample_bucket_size"]) ** 2
+            == mapping["fpm_sample_bucket_size"]
+        ]
+    return mappings
 
 
 def _validate_preset_entries(
@@ -256,6 +417,19 @@ class PlannerSearchSpace(BaseModel):
     min_endpoint: int | None = Field(default=None, ge=1)
     prefill_min_endpoint: int | None = Field(default=None, ge=1)
     decode_min_endpoint: int | None = Field(default=None, ge=1)
+    # ``None`` preserves the legacy provider behavior of inheriting the
+    # candidate's GPU budget. The public schema always supplies its default 8.
+    max_num_gpus: int | None = Field(default=None, ge=1)
+    max_throughput_scaling_replicas: int = Field(
+        default=PlannerConfig.model_fields["max_throughput_scaling_replicas"].default,
+        ge=1,
+    )
+    public_schema: bool = False
+    public_policy: list[str] | None = None
+    planner_target: str | None = None
+    public_min_workers: list[int] | None = None
+    public_prefill_min_workers: list[int | None] | None = None
+    public_decode_min_workers: list[int | None] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -265,6 +439,79 @@ class PlannerSearchSpace(BaseModel):
             return data
 
         upgraded = dict(data)
+        if "public_schema" not in upgraded:
+            public_keys = {
+                "policy",
+                "target",
+                "max_num_gpus",
+                "min_workers",
+                "prefill_min_workers",
+                "decode_min_workers",
+            }
+            public_schema = bool(public_keys.intersection(upgraded))
+            if public_schema:
+                upgraded["public_schema"] = True
+                upgraded.setdefault(
+                    "max_num_gpus", PlannerConfig.model_fields["max_gpu_budget"].default
+                )
+            public_policy = upgraded.pop("policy", None)
+            if public_schema:
+                upgraded["public_policy"] = _public_values(
+                    public_policy, ["disabled", "enabled"]
+                )
+            public_target = upgraded.pop("target", None)
+            if public_target is not None:
+                upgraded["planner_target"] = public_target
+            for public_name, normalized_name, defaults in (
+                (
+                    "min_workers",
+                    "public_min_workers",
+                    [PlannerConfig.model_fields["min_endpoint"].default],
+                ),
+                ("prefill_min_workers", "public_prefill_min_workers", [None]),
+                ("decode_min_workers", "public_decode_min_workers", [None]),
+            ):
+                if public_name in upgraded:
+                    upgraded[normalized_name] = _public_values(
+                        upgraded.pop(public_name), defaults
+                    )
+        if upgraded.get("public_schema") is True:
+            predictor_control = upgraded.get("load_predictor")
+            if isinstance(predictor_control, Mapping):
+                preset = predictor_control.get("preset")
+                if isinstance(preset, list):
+                    for entry in preset:
+                        if not isinstance(entry, Mapping):
+                            continue
+                        missing = _PREDICTOR_KEYS - set(entry)
+                        if missing:
+                            raise ValueError(
+                                "load_predictor.preset mapping is missing required "
+                                f"keys {sorted(missing)}"
+                            )
+        for group in (
+            "scaling_policy",
+            "fpm_sampling",
+            "load_sensitivity",
+            "load_predictor",
+        ):
+            control = upgraded.get(group)
+            if not isinstance(control, Mapping) or "preset" not in control:
+                continue
+            preset = control["preset"]
+            if preset == "default":
+                upgraded.pop(group)
+            elif preset is False or preset == {}:
+                upgraded[group] = {
+                    "preset": _independent_preset_mappings(group, control, upgraded)
+                }
+        for public_knob in (
+            _SCALING_KEYS
+            | _FPM_KEYS
+            | _LOAD_KEYS
+            | (_PREDICTOR_KEYS - {"load_predictor"})
+        ):
+            upgraded.pop(public_knob, None)
         legacy_fields: list[str] = []
         for name in ("scaling_policy", "fpm_sampling", "load_sensitivity"):
             value = upgraded.get(name)
@@ -291,6 +538,41 @@ class PlannerSearchSpace(BaseModel):
             )
         return upgraded
 
+    @model_validator(mode="after")
+    def _validate_public_fields(self) -> PlannerSearchSpace:
+        if self.public_policy is not None:
+            invalid = sorted(set(self.public_policy) - {"disabled", "enabled"})
+            if invalid:
+                raise ValueError(
+                    f"planner.policy choices must be disabled or enabled; got {invalid}"
+                )
+        if self.planner_target not in (None, "throughput", "latency", "sla", "load"):
+            raise ValueError("planner.target must be throughput, latency, sla, or load")
+        domains: tuple[
+            tuple[str, Sequence[int | None] | None, int],
+            ...,
+        ] = (
+            ("min_workers", self.public_min_workers, 0),
+            ("prefill_min_workers", self.public_prefill_min_workers, 1),
+            ("decode_min_workers", self.public_decode_min_workers, 1),
+        )
+        for name, worker_values, minimum in domains:
+            if worker_values is None:
+                continue
+            if not worker_values:
+                raise ValueError(f"planner.{name} choices cannot be empty")
+            worker_invalid = [
+                value
+                for value in worker_values
+                if value is not None and value < minimum
+            ]
+            if worker_invalid:
+                raise ValueError(
+                    f"planner.{name} choices must be >= {minimum}; "
+                    f"got {worker_invalid}"
+                )
+        return self
+
 
 def _plain(value: Any) -> Any:
     return value.value if isinstance(value, Enum) else value
@@ -312,6 +594,7 @@ def _planner_optimization_target(goal: Mapping[str, JSONValue]) -> str:
         "throughput": "throughput",
         "throughput_per_gpu": "throughput",
         "throughput_per_user": "throughput",
+        "ttft": "latency",
         "e2e_latency": "latency",
         "goodput": "sla",
         "goodput_per_gpu": "sla",
@@ -329,15 +612,11 @@ def _policy_filter(
     for policy in policies:
         fields = scaling_fields(policy)
         uses_throughput = bool(fields["enable_throughput_scaling"])
-        uses_scaling = uses_throughput or bool(fields["enable_load_scaling"])
         allowed = not uses_throughput or optimization_target == "sla"
-        if (
-            allowed
-            and optimization_target == "sla"
-            and sla is not None
-            and (sla.get("ttft_ms") is None or sla.get("itl_ms") is None)
+        if optimization_target == "sla" and (
+            sla is None or sla.get("ttft_ms") is None or sla.get("itl_ms") is None
         ):
-            allowed = not uses_scaling
+            allowed = not uses_throughput
         (kept if allowed else dropped).append(policy)
     return kept, dropped
 
@@ -373,9 +652,143 @@ class DynamoPlannerSweepConfigProvider:
     """Planner search-space preparation and replay-spec materialization."""
 
     name = "dynamo.planner"
+    section = "planner"
+    config_adapter_api_version = 3
     # Provider-owned constant: importing the consumer's current API_VERSION would
     # let an older wheel accidentally self-certify against a newer core package.
     api_version = _PROVIDER_API_VERSION
+
+    def compile_prediction(
+        self,
+        config: Mapping[str, JSONValue],
+        context: PredictionAdapterContext,
+    ) -> AdapterReplaySpec:
+        unknown = set(config) - _PUBLIC_CONFIG_FIELDS.keys() - {"policy"}
+        if unknown:
+            raise ValueError(f"Extra inputs are not permitted: {sorted(unknown)}")
+        policy: Policy = TypeAdapter(Policy).validate_python(
+            config.get("policy", "disabled")
+        )
+        if policy == "disabled":
+            return AdapterReplaySpec(config={"policy": "disabled"})
+        raw_sla = context.evaluation.get("sla")
+        planner_config = _planner_config_payload(
+            config,
+            sample=_prediction_sample(context.engine),
+            optimization_target=config.get(
+                "target", PlannerConfig.model_fields["optimization_target"].default
+            ),
+            sla=raw_sla if isinstance(raw_sla, Mapping) else None,
+            min_endpoint=None,
+            prefill_min_endpoint=None,
+            decode_min_endpoint=None,
+        )
+        return AdapterReplaySpec(
+            config=_public_planner_config(planner_config),
+            runtime_hooks=(replace(_HOOK, config={"planner_config": planner_config}),),
+        )
+
+    def compile_recommendation(
+        self,
+        config: Mapping[str, JSONValue],
+        context: RecommendationAdapterContext,
+    ) -> AdapterSearchPlan:
+        public = PlannerRecommendationConfig.model_validate(config)
+        policies = (
+            set(public.policy.choices)
+            if isinstance(public.policy, Choices)
+            else {public.policy}
+        )
+        if policies == {"disabled"}:
+            modes = _deployment_modes(context.sweep.core_search_space)
+            return AdapterSearchPlan(
+                fragment=SearchSpaceFragment(
+                    choices_by_branch={mode: {"policy": ["disabled"]} for mode in modes}
+                ),
+                state={"forced_disabled": True},
+            )
+        normalized = public.model_dump(mode="python", exclude_none=True)
+        plan = self.generate_search_space(normalized, context.sweep)
+        normalized_space = PlannerSearchSpace.model_validate(plan.state["search_space"])
+        independent_groups = [
+            group
+            for group in ("scaling_policy", "fpm_sampling", "load_sensitivity")
+            if (control := getattr(public, group)) is not None
+            and control.preset in (False, {})
+            and any(
+                group in choices for choices in plan.fragment.choices_by_branch.values()
+            )
+        ]
+        if not independent_groups:
+            return plan
+        choices_by_branch = deepcopy(plan.fragment.choices_by_branch)
+        log_discrete_by_branch: dict[str, list[str]] = {
+            branch: [] for branch in choices_by_branch
+        }
+        for branch, branch_choices in choices_by_branch.items():
+            for group in independent_groups:
+                if group not in branch_choices:
+                    continue
+                branch_choices.pop(group)
+                mappings = getattr(normalized_space, group).preset
+                keys = (
+                    list(mappings[0])
+                    if mappings and isinstance(mappings[0], dict)
+                    else []
+                )
+                for key in keys:
+                    values = []
+                    for mapping in mappings:
+                        assert isinstance(mapping, dict)
+                        value = mapping[key]
+                        if value not in values:
+                            values.append(value)
+                    branch_choices[key] = values
+                    domain = getattr(public, key, None)
+                    if (
+                        isinstance(domain, (IntegerRange, NumericRange))
+                        and domain.range.scale == "log"
+                    ):
+                        log_discrete_by_branch[branch].append(key)
+        state = deepcopy(plan.state)
+        assert isinstance(state, dict)
+        state["independent_groups"] = independent_groups
+        return replace(
+            plan,
+            fragment=replace(
+                plan.fragment,
+                choices_by_branch=choices_by_branch,
+                log_discrete_choices_by_branch=log_discrete_by_branch,
+            ),
+            state=state,
+        )
+
+    def materialize_candidate(
+        self,
+        plan: AdapterSearchPlan,
+        selection: Mapping[str, JSONValue],
+        context: CandidateContext,
+    ) -> AdapterReplaySpec:
+        if isinstance(plan.state, dict) and plan.state.get("forced_disabled") is True:
+            return AdapterReplaySpec(config={"policy": "disabled"})
+        materialized = dict(selection)
+        if isinstance(plan.state, dict):
+            raw_space = plan.state.get("search_space")
+            if isinstance(raw_space, dict):
+                space = PlannerSearchSpace.model_validate(raw_space)
+                for group in plan.state.get("independent_groups", []):
+                    mappings = getattr(space, group).preset
+                    keys = (
+                        list(mappings[0])
+                        if mappings and isinstance(mappings[0], dict)
+                        else []
+                    )
+                    group_mapping = {key: materialized.pop(key) for key in keys}
+                    materialized[group] = group_mapping
+        try:
+            return self.materialize_replay(plan, materialized, context)
+        except ValueError as exc:
+            raise InfeasibleCandidate(f"Planner candidate: {exc}") from exc
 
     def generate_search_space(
         self,
@@ -391,6 +804,16 @@ class DynamoPlannerSweepConfigProvider:
             optimization_target=optimization_target,
             sla=sla,
         )
+        scaling_control = search_spec.get("scaling_policy")
+        explicit_presets = isinstance(scaling_control, Mapping) and isinstance(
+            scaling_control.get("preset"), list
+        )
+        if dropped and space.public_schema and explicit_presets:
+            raise ValueError(
+                "Planner scaling_policy contains choices that "
+                "are incompatible with the selected optimization target/SLA: "
+                f"{dropped}"
+            )
         if dropped and context.show_progress:
             if optimization_target != "sla":
                 target = str(_plain(context.goal.get("target", "throughput")))
@@ -411,35 +834,56 @@ class DynamoPlannerSweepConfigProvider:
                     "which requires a goodput target"
                 )
             raise ValueError(
-                "every Planner scaling_policy enables scaling, but an e2e-only "
-                "SLA cannot seed the Planner's TTFT/ITL scaling target"
+                "Planner throughput scaling requires evaluation.sla.ttft_ms and evaluation.sla.itl_ms"
             )
 
+        space.scaling_policy = ScalingPolicySearch(preset=kept)
         trace_path = context.workload.get("trace_path")
+        trace_format = context.workload.get("trace_format")
+        raw_trace_paths = context.workload.get("trace_paths")
+        trace_paths = (
+            [str(path) for path in raw_trace_paths]
+            if isinstance(raw_trace_paths, list)
+            else None
+        )
         predictor_result = sweep_load_predictor(
             policies=kept,
             candidates=space.load_predictor.preset,
             trace_path=str(trace_path) if trace_path is not None else None,
+            trace_paths=trace_paths,
+            trace_format=str(trace_format) if trace_format is not None else None,
             show_progress=context.show_progress,
         )
-        planner_enabled = any(
+        scaling_possible = any(
             fields["enable_throughput_scaling"] or fields["enable_load_scaling"]
             for fields in (scaling_fields(policy) for policy in kept)
         )
         local_choices: dict[str, list[JSONValue]] = {
             "scaling_policy": _json_choices(kept)
         }
-        if planner_enabled:
+        if space.public_policy is not None:
+            local_choices["policy"] = cast(list[JSONValue], list(space.public_policy))
+        if any(scaling_fields(policy)["enable_throughput_scaling"] for policy in kept):
             local_choices["fpm_sampling"] = _json_choices(space.fpm_sampling.preset)
+        if any(scaling_fields(policy)["enable_load_scaling"] for policy in kept):
             local_choices["load_sensitivity"] = _json_choices(
                 space.load_sensitivity.preset
             )
-        fragment = SearchSpaceFragment(
-            choices_by_branch={
-                mode: deepcopy(local_choices)
-                for mode in _deployment_modes(context.core_search_space)
-            }
-        )
+        choices_by_branch: dict[str, dict[str, list[JSONValue]]] = {}
+        for mode in _deployment_modes(context.core_search_space):
+            branch_choices = deepcopy(local_choices)
+            if space.public_min_workers is not None:
+                branch_choices["min_workers"] = list(space.public_min_workers)
+            if mode == "disagg" and space.public_prefill_min_workers is not None:
+                branch_choices["prefill_min_workers"] = list(
+                    space.public_prefill_min_workers
+                )
+            if mode == "disagg" and space.public_decode_min_workers is not None:
+                branch_choices["decode_min_workers"] = list(
+                    space.public_decode_min_workers
+                )
+            choices_by_branch[mode] = branch_choices
+        fragment = SearchSpaceFragment(choices_by_branch=choices_by_branch)
         state: dict[str, JSONValue] = {
             "search_space": space.model_dump(mode="json"),
             "optimization_target": optimization_target,
@@ -455,7 +899,14 @@ class DynamoPlannerSweepConfigProvider:
             fragment=fragment,
             state=state,
             diagnostics=diagnostics,
-            potential_runtime_hooks=(_HOOK,) if planner_enabled else (),
+            potential_runtime_hooks=(
+                (_HOOK,)
+                if scaling_possible
+                or (
+                    space.public_policy is not None and "enabled" in space.public_policy
+                )
+                else ()
+            ),
         )
 
     def materialize_replay(
@@ -471,6 +922,7 @@ class DynamoPlannerSweepConfigProvider:
         if not isinstance(raw_space, dict):
             raise TypeError("Planner adapter search-space state must be a mapping")
         space = PlannerSearchSpace.model_validate(raw_space)
+        public_schema = space.public_schema
 
         scaling_entry = selection["scaling_policy"]
         if not isinstance(scaling_entry, (str, dict)):
@@ -478,24 +930,38 @@ class DynamoPlannerSweepConfigProvider:
                 "Planner scaling_policy selection must be a string or mapping"
             )
         scaling = scaling_fields(scaling_entry)
-        enabled = bool(
+        scaling_enabled = bool(
             scaling["enable_throughput_scaling"] or scaling["enable_load_scaling"]
         )
         candidate_config: dict[str, JSONValue] = {
             "scaling_policy": deepcopy(scaling_entry),
             **scaling,
         }
-        if not enabled:
-            return AdapterReplaySpec(config=candidate_config)
+        policy_enabled = (
+            str(selection.get("policy")) == "enabled"
+            if public_schema
+            else scaling_enabled
+        )
+        if not policy_enabled or not scaling_enabled:
+            return AdapterReplaySpec(
+                config=({"policy": "disabled"} if public_schema else candidate_config)
+            )
+        candidate_config[
+            "max_throughput_scaling_replicas"
+        ] = space.max_throughput_scaling_replicas
 
-        fpm_entry = selection["fpm_sampling"]
-        load_entry = selection["load_sensitivity"]
-        if not isinstance(fpm_entry, (str, dict)) or not isinstance(
-            load_entry, (str, dict)
-        ):
-            raise TypeError("Planner composite selections must be strings or mappings")
-        candidate_config.update(fpm_fields(fpm_entry))
-        candidate_config.update(load_sensitivity_fields(load_entry))
+        if scaling["enable_throughput_scaling"]:
+            fpm_entry = selection["fpm_sampling"]
+            if not isinstance(fpm_entry, (str, dict)):
+                raise TypeError("Planner FPM selection must be a string or mapping")
+            candidate_config.update(fpm_fields(fpm_entry))
+        if scaling["enable_load_scaling"]:
+            load_entry = selection["load_sensitivity"]
+            if not isinstance(load_entry, (str, dict)):
+                raise TypeError(
+                    "Planner load-sensitivity selection must be a string or mapping"
+                )
+            candidate_config.update(load_sensitivity_fields(load_entry))
 
         if scaling["enable_throughput_scaling"]:
             predictor_state = state["load_predictor"]
@@ -509,14 +975,31 @@ class DynamoPlannerSweepConfigProvider:
             if isinstance(winner, (str, dict)):
                 candidate_config.update(predictor_fields(winner))
 
+        min_endpoint = (
+            _int_value(selection, "min_workers")
+            if selection.get("min_workers") is not None
+            else space.min_endpoint
+        )
+        prefill_min_endpoint = (
+            _int_value(selection, "prefill_min_workers")
+            if selection.get("prefill_min_workers") is not None
+            else space.prefill_min_endpoint
+        )
+        decode_min_endpoint = (
+            _int_value(selection, "decode_min_workers")
+            if selection.get("decode_min_workers") is not None
+            else space.decode_min_endpoint
+        )
+        planner_target = space.planner_target or str(state["optimization_target"])
         planner_config = _planner_config_payload(
             candidate_config,
             sample=context.sample,
-            optimization_target=str(state["optimization_target"]),
+            optimization_target=planner_target,
             sla=state["sla"] if isinstance(state["sla"], dict) else None,
-            min_endpoint=space.min_endpoint,
-            prefill_min_endpoint=space.prefill_min_endpoint,
-            decode_min_endpoint=space.decode_min_endpoint,
+            min_endpoint=min_endpoint,
+            prefill_min_endpoint=prefill_min_endpoint,
+            decode_min_endpoint=decode_min_endpoint,
+            max_num_gpus=space.max_num_gpus,
         )
         hook = RuntimeHookSpec(
             provider=_HOOK.provider,
@@ -524,11 +1007,52 @@ class DynamoPlannerSweepConfigProvider:
             api_version=_HOOK.api_version,
             config={"planner_config": planner_config},
         )
-        reported_config: dict[str, JSONValue] = {
-            "scaling_policy": deepcopy(scaling_entry),
-            **planner_config,
-        }
-        return AdapterReplaySpec(config=reported_config, runtime_hooks=(hook,))
+        if not public_schema:
+            return AdapterReplaySpec(
+                config={
+                    "scaling_policy": deepcopy(scaling_entry),
+                    **planner_config,
+                },
+                runtime_hooks=(hook,),
+            )
+
+        return AdapterReplaySpec(
+            config=_public_planner_config(planner_config), runtime_hooks=(hook,)
+        )
+
+
+def _public_planner_config(
+    planner_config: Mapping[str, JSONValue]
+) -> dict[str, JSONValue]:
+    return {
+        "policy": "enabled",
+        **{
+            public: planner_config[runtime]
+            for public, runtime in _PUBLIC_CONFIG_FIELDS.items()
+            if planner_config.get(runtime) is not None
+        },
+    }
+
+
+def _prediction_sample(engine: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
+    public_mode = str(engine.get("mode", "aggregated"))
+    mode = "disagg" if public_mode == "disaggregated" else "agg"
+    workers = engine.get("workers")
+    if not isinstance(workers, Mapping):
+        raise TypeError("Planner prediction requires engine.workers")
+    sample: dict[str, JSONValue] = {"deployment_mode": mode}
+    roles = ("prefill", "decode") if mode == "disagg" else ("aggregated",)
+    for role in roles:
+        worker = workers.get(role)
+        if not isinstance(worker, Mapping):
+            raise TypeError(f"Planner prediction requires engine.workers.{role}")
+        parallel = worker.get("parallelism")
+        if not isinstance(parallel, Mapping):
+            raise TypeError(f"Planner prediction requires {role} parallelism")
+        prefix = "" if role == "aggregated" else f"{role}_"
+        sample[f"{prefix}tp"] = int(parallel.get("tensor", 1))
+        sample[f"{prefix}attention_dp"] = int(parallel.get("attention_data", 1))
+    return sample
 
 
 def _planner_config_payload(
@@ -540,9 +1064,8 @@ def _planner_config_payload(
     min_endpoint: int | None,
     prefill_min_endpoint: int | None,
     decode_min_endpoint: int | None,
+    max_num_gpus: int | None = None,
 ) -> dict[str, JSONValue]:
-    """Build the exact PlannerConfig payload used by the pre-refactor Sweeper."""
-
     mode = str(sample["deployment_mode"])
     payload: dict[str, JSONValue] = {
         "mode": mode,
@@ -552,9 +1075,13 @@ def _planner_config_payload(
         "metric_pulling_prometheus_extra_query_params": None,
     }
     for key in _PLANNER_PASSTHROUGH:
-        if key in candidate_config:
+        if key in candidate_config and not (
+            key.endswith("_interval_seconds") and candidate_config[key] is None
+        ):
             payload[key] = candidate_config[key]
-    if sample.get("gpu_budget") is not None:
+    if max_num_gpus is not None:
+        payload["max_gpu_budget"] = max_num_gpus
+    elif sample.get("gpu_budget") is not None:
         payload["max_gpu_budget"] = _int_value(sample, "gpu_budget")
     if sample.get("min_gpu_budget") is not None:
         payload["min_gpu_budget"] = _int_value(sample, "min_gpu_budget")
@@ -577,12 +1104,59 @@ def _planner_config_payload(
             sample, "attention_dp"
         )
 
+    for public, runtime in _PUBLIC_CONFIG_FIELDS.items():
+        if public != runtime and public in candidate_config:
+            payload[runtime] = candidate_config[public]
+
     if optimization_target == "sla" and sla is not None:
         if sla.get("ttft_ms") is not None:
             payload["ttft_ms"] = _float_value(sla, "ttft_ms")
         if sla.get("itl_ms") is not None:
             payload["itl_ms"] = _float_value(sla, "itl_ms")
-    return payload
+    if optimization_target == "load":
+        if mode in ("disagg", "prefill"):
+            payload["prefill_scale_up_queue_tokens"] = 1
+            payload["prefill_scale_down_queue_tokens"] = 0
+        if mode in ("agg", "disagg", "decode"):
+            payload["decode_scale_up_kv_rate"] = 90.0
+            payload["decode_scale_down_kv_rate"] = 70.0
+    # Offline materialization must not read the live Prometheus connection settings.
+    resolved = PlannerConfig.model_validate(
+        {
+            **payload,
+            "metric_pulling_prometheus_endpoint": "",
+            "metric_pulling_prometheus_token": None,
+            "metric_pulling_prometheus_token_file": None,
+            "metric_pulling_prometheus_ssl_verify": False,
+            "metric_pulling_prometheus_ca_bundle": None,
+            "metric_pulling_prometheus_request_timeout_seconds": (
+                SLAPlannerDefaults.metric_pulling_prometheus_request_timeout_seconds
+            ),
+            "metric_reporting_prometheus_port": 0,
+        }
+    )
+    for interval, enabled in (
+        ("throughput_adjustment_interval_seconds", resolved.enable_throughput_scaling),
+        ("load_adjustment_interval_seconds", resolved.enable_load_scaling),
+    ):
+        if (
+            enabled
+            and interval in candidate_config
+            and candidate_config[interval] is None
+        ):
+            raise ValueError(
+                f"{interval} cannot be null while its scaling mode is enabled"
+            )
+    if resolved.enable_throughput_scaling and (
+        sla is None or sla.get("ttft_ms") is None or sla.get("itl_ms") is None
+    ):
+        raise ValueError(
+            "Planner throughput scaling requires evaluation.sla.ttft_ms and evaluation.sla.itl_ms"
+        )
+    # Serialize only adapter-owned fields, never environment-derived connection credentials.
+    return resolved.model_dump(
+        mode="json", include=set(payload) | set(_PUBLIC_CONFIG_FIELDS.values())
+    )
 
 
 def create_provider() -> DynamoPlannerSweepConfigProvider:

@@ -3,16 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Two aggregated SGLang native-gRPC sidecars behind Dynamo's KV-aware router.
-# Requires two GPUs and an SGLang build that exposes KV-event discovery over GetServerInfo.
+# Requires an SGLang build that exposes KV-event discovery over GetServerInfo.
 
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/gpu_utils.sh"
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -39,7 +38,8 @@ while [[ $# -gt 0 ]]; do
             echo "  SGLANG_WORKER1_GPU            First GPU assignment (default: 0)"
             echo "  SGLANG_WORKER2_GPU            Second GPU assignment (default: 1)"
             echo "  DYN_HTTP_PORT                 Dynamo frontend port (default: 8000)"
-            echo "  DYN_SYSTEM_PORT1              First sidecar system port (default: 8081)"
+            echo "  DYN_SYSTEM_PORT               First sidecar system port fallback (default: 8081)"
+            echo "  DYN_SYSTEM_PORT1              First sidecar system port override (default: DYN_SYSTEM_PORT)"
             echo "  DYN_SYSTEM_PORT2              Second sidecar system port (default: 8082)"
             echo "  SGLANG_WORKER1_HTTP_PORT      First SGLang HTTP port (default: 30000)"
             echo "  SGLANG_WORKER1_GRPC_PORT      First SGLang gRPC port (default: 30001)"
@@ -74,6 +74,8 @@ SGLANG_WORKER2_KV_EVENT_PORT="${SGLANG_WORKER2_KV_EVENT_PORT:-5567}"
 SGLANG_PAGE_SIZE="${SGLANG_PAGE_SIZE:-16}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
+SYSTEM_PORT1="${DYN_SYSTEM_PORT1:-${DYN_SYSTEM_PORT:-8081}}"
+SYSTEM_PORT2="${DYN_SYSTEM_PORT2:-8082}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
@@ -81,7 +83,7 @@ GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 KV_EVENTS_CONFIG_1="{\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:${SGLANG_WORKER1_KV_EVENT_PORT}\",\"topic\":\"\"}"
 KV_EVENTS_CONFIG_2="{\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:${SGLANG_WORKER2_KV_EVENT_PORT}\",\"topic\":\"\"}"
 
-print_launch_banner "Launching SGLang Native-gRPC Sidecars with KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT" \
+print_launch_banner "Launching SGLang Native-gRPC Sidecars with KV Routing (2 workers)" "$MODEL" "$HTTP_PORT" \
     "Worker 1: GPU ${SGLANG_WORKER1_GPU}, gRPC ${SGLANG_HOST}:${SGLANG_WORKER1_GRPC_PORT}, KV events tcp://*:${SGLANG_WORKER1_KV_EVENT_PORT}" \
     "Worker 2: GPU ${SGLANG_WORKER2_GPU}, gRPC ${SGLANG_HOST}:${SGLANG_WORKER2_GRPC_PORT}, KV events tcp://*:${SGLANG_WORKER2_KV_EVENT_PORT}"
 
@@ -117,13 +119,11 @@ CUDA_VISIBLE_DEVICES="$SGLANG_WORKER2_GPU" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
-OTEL_SERVICE_NAME=dynamo-worker-1 \
-DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
+DYN_SYSTEM_PORT="$SYSTEM_PORT1" \
     dynamo-sglang-sidecar \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_WORKER1_GRPC_PORT}" &
 
-OTEL_SERVICE_NAME=dynamo-worker-2 \
-DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
+DYN_SYSTEM_PORT="$SYSTEM_PORT2" \
     dynamo-sglang-sidecar \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_WORKER2_GRPC_PORT}" &
 

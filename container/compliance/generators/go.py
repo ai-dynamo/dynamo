@@ -3,7 +3,7 @@
 """NOTICES-Go.txt generator.
 
 Reads CycloneDX SBOMs produced by `cyclonedx-gomod app -licenses -json` in
-each Go builder stage (operator/EPP). Same shape as rust.py:
+each Go builder stage (the operator). Same shape as rust.py:
 walk components, filter by purl prefix, normalize licenses, dedupe.
 
 Expected upstream Dockerfile pattern (in each Go builder):
@@ -132,11 +132,10 @@ def collect_components(
 ) -> list[Component]:
     """Read one or more Go SBOMs, return deduped Components.
 
-    cyclonedx-gomod produces one SBOM per Go binary. Multi-SBOM inputs arise
-    when an image combines binaries from upstream stages — e.g. frontend
-    pulls EPP's SBOM in alongside any Go SBOM produced in the frontend
-    build itself. Components present in multiple inputs dedupe by
-    (name, version) and merge license info via dedupe_by_name_version.
+    cyclonedx-gomod produces one SBOM per Go binary, so an image that combines
+    Go binaries from several upstream stages passes one --go-sbom each.
+    Components present in multiple inputs dedupe by (name, version) and merge
+    license info via dedupe_by_name_version.
     """
     components: list[Component] = []
     for sbom_path in sbom_paths:

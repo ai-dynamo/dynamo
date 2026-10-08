@@ -39,31 +39,35 @@ impl crate::common::protocols::KvCacheEventSink for NoopKvSink {
     }
 }
 
-fn args(engine_type: EngineType) -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .engine_type(engine_type)
-        .block_size(4)
-        .num_gpu_blocks(128)
-        .max_num_seqs(Some(8))
-        .max_num_batched_tokens(Some(64))
-        .speedup_ratio(1000.0)
-        .dp_size(1)
-        .build()
-        .unwrap()
+fn args(engine_type: EngineType) -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": engine_type,
+            "block_size": 4,
+            "num_gpu_blocks": 128,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 64,
+            "speedup_ratio": 1000.0
+        }
+    }))
+    .unwrap()
 }
 
-fn handoff_args(engine_type: EngineType, worker_type: WorkerType) -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .engine_type(engine_type)
-        .worker_type(worker_type)
-        .block_size(4)
-        .num_gpu_blocks(128)
-        .max_num_seqs(Some(8))
-        .max_num_batched_tokens(Some(64))
-        .speedup_ratio(1000.0)
-        .dp_size(1)
-        .build()
-        .unwrap()
+fn handoff_args(engine_type: EngineType, worker_type: WorkerType) -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": engine_type,
+            "worker_type": worker_type,
+            "block_size": 4,
+            "num_gpu_blocks": 128,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 64,
+            "speedup_ratio": 1000.0
+        }
+    }))
+    .unwrap()
 }
 
 async fn wait_for_idle(engine: &LiveEngine) {
@@ -81,6 +85,55 @@ async fn wait_for_idle(engine: &LiveEngine) {
     })
     .await
     .expect("live request state should return to idle");
+}
+
+#[test]
+fn deterministic_tokens_match_cached_random_access_and_bulk_generation() {
+    let expected = [3006, 5022, 28000, 21974, 1646, 7038, 26107, 20719];
+    let generator = DeterministicTokenGenerator::new(42, "request-42");
+    assert_eq!(generator.token_id(32_767), 29_248);
+    for position in (0..expected.len()).rev() {
+        assert_eq!(generator.token_id(position), expected[position]);
+        assert_eq!(
+            deterministic_token_id(42, "request-42", position),
+            expected[position]
+        );
+    }
+    assert_eq!(
+        deterministic_output_tokens(42, "request-42", expected.len()),
+        expected
+    );
+    assert!(deterministic_output_tokens(42, "request-42", 0).is_empty());
+    assert_ne!(deterministic_output_tokens(43, "request-42", 8), expected);
+    assert_ne!(deterministic_output_tokens(42, "request-43", 8), expected);
+}
+
+#[test]
+fn failed_output_batch_reports_the_scheduler_id() {
+    let client_id = Uuid::from_u128(1);
+    let scheduler_id = Uuid::from_u128(2);
+    let routes = Arc::new(RequestRoutes::default());
+    let (output_tx, _output_rx) = mpsc::channel(1);
+    let route = Arc::new(RequestRoute::new(client_id, scheduler_id, output_tx));
+    routes.by_client.insert(client_id, Arc::clone(&route));
+    routes.by_scheduler.insert(scheduler_id, route);
+    let signal = |token_id| OutputSignal {
+        uuid: scheduler_id,
+        token_id: Some(token_id),
+        completed: false,
+        rejected: false,
+        handoff_delay_ms: None,
+        cached_tokens: None,
+    };
+
+    assert_eq!(
+        dispatch_output_batch(vec![signal(10)], &routes, &CancellationToken::new()).unwrap(),
+        Vec::<Uuid>::new()
+    );
+    assert_eq!(
+        dispatch_output_batch(vec![signal(20)], &routes, &CancellationToken::new()).unwrap(),
+        vec![scheduler_id]
+    );
 }
 
 async fn submit_and_finish(engine: &LiveEngine, tokens: Vec<u32>, uuid: Uuid) {
@@ -103,8 +156,8 @@ async fn submit_and_finish(engine: &LiveEngine, tokens: Vec<u32>, uuid: Uuid) {
     })
     .await
     .expect("request should complete");
-    // The ordered output lane acknowledges terminal delivery before the
-    // grouped pass dispatcher publishes its completion metrics. Wait for the
+    // Direct route delivery completes before the grouped pass dispatcher
+    // publishes its completion metrics. Wait for the
     // whole boundary so the assertion below observes the same semantic point
     // as the historical single-rank live boundary.
     engine.drain_completion_boundary().await.unwrap();
@@ -235,6 +288,86 @@ async fn attention_dp_live_handles_share_one_grouped_engine() {
 }
 
 #[tokio::test]
+async fn dropping_one_attention_dp_rank_retires_its_native_requests() {
+    let mut grouped_args = args(EngineType::Vllm);
+    grouped_args.dp_size = 2;
+    let (gate_tx, gate_rx) = watch::channel(false);
+    let mut engines = LiveEngine::start_grouped_with_options(
+        grouped_args,
+        (0..2)
+            .map(|_| LiveEngineOptions {
+                output_gate: Some(gate_rx.clone()),
+                ..LiveEngineOptions::default()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let rank1 = engines.pop().unwrap();
+    let rank0 = engines.pop().unwrap();
+    let mut rank1_metrics = rank1.metrics_receiver();
+
+    let rank0_request = rank0.submit(DirectRequest {
+        tokens: vec![1, 2, 3, 4],
+        max_output_tokens: 1,
+        output_token_ids: Some(vec![101]),
+        dp_rank: 0,
+        ..Default::default()
+    });
+    let rank1_request = rank1.submit(DirectRequest {
+        tokens: vec![5, 6, 7, 8],
+        max_output_tokens: 1,
+        output_token_ids: Some(vec![202]),
+        dp_rank: 1,
+        ..Default::default()
+    });
+    let (rank0_request, rank1_request) = tokio::join!(rank0_request, rank1_request);
+    let mut rank0_request = rank0_request.unwrap();
+    let mut rank1_request = rank1_request.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let metrics = rank1_metrics.borrow().clone();
+            if metrics.running_requests > 0 || metrics.waiting_requests > 0 {
+                break;
+            }
+            rank1_metrics.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the rank 1 request should reach the native scheduler");
+
+    drop(rank1);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), rank1_request.recv())
+            .await
+            .expect("dropping one rank should close its response stream")
+            .is_none()
+    );
+    gate_tx.send(true).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), rank0_request.recv())
+            .await
+            .expect("the retained rank should continue")
+            .unwrap()
+            .token_id,
+        Some(101)
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let metrics = rank1_metrics.borrow().clone();
+            if metrics.running_requests == 0 && metrics.waiting_requests == 0 {
+                break;
+            }
+            rank1_metrics.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the dropped rank's native request should retire");
+
+    submit_and_finish(&rank0, vec![9, 10, 11, 12], Uuid::from_u128(303)).await;
+    rank0.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn streams_planned_tokens_to_the_owning_request() {
     for engine_type in [EngineType::Vllm, EngineType::Sglang] {
         let engine = LiveEngine::start(args(engine_type), 0).unwrap();
@@ -266,6 +399,7 @@ async fn streams_planned_tokens_to_the_owning_request() {
             ]
         );
         assert!(request.recv().await.is_none());
+        assert!(!request.is_aborted());
         assert_eq!(engine.active_request_count(), 0);
     }
 }
@@ -299,6 +433,7 @@ async fn dropping_engine_closes_outstanding_request_streams() {
     })
     .await
     .expect("engine shutdown should close every outstanding output route");
+    assert!(!request.is_aborted());
 }
 
 #[tokio::test]
@@ -456,6 +591,145 @@ async fn typed_handoff_routes_output_and_lifecycle_for_supported_engines() {
         assert!(destination_output.completed);
         destination.shutdown().await.unwrap();
         assert!(destination_events.recv().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn decode_admission_reserves_kv_without_recomputing_the_prompt() {
+    #[derive(Default)]
+    struct Passes(Mutex<Vec<crate::common::protocols::ForwardPassSnapshot>>);
+
+    impl FpmSink for Passes {
+        fn publish(
+            &self,
+            snapshot: crate::common::protocols::ForwardPassSnapshot,
+        ) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(snapshot);
+            Ok(())
+        }
+    }
+
+    for engine_type in [EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm] {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut engine_args = args(engine_type);
+            engine_args.num_gpu_blocks = 3;
+            let passes = Arc::new(Passes::default());
+            let engine = LiveEngine::start_with_config(
+                engine_args,
+                0,
+                LiveEngineConfig {
+                    fpm_publisher: FpmPublisher::new(Some(passes.clone())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let (held_control, mut held_events) =
+                engine.register_handoff(HandoffId::new()).unwrap();
+            let (registration, held_request) = engine
+                .prepare_request(DirectRequest {
+                    tokens: vec![1; 8],
+                    max_output_tokens: 1,
+                    ..Default::default()
+                })
+                .unwrap();
+            held_control
+                .reserve_destination(registration)
+                .await
+                .unwrap();
+            assert!(matches!(
+                held_events.recv().await,
+                Some(LiveHandoffEvent::DestinationReserved { .. })
+            ));
+            let mut metrics = engine.metrics_receiver();
+            metrics
+                .wait_for(|snapshot| snapshot.active_decode_blocks == 2)
+                .await
+                .unwrap();
+
+            let request_id = Uuid::new_v4();
+            let decode = DirectRequest {
+                tokens: vec![2; 5],
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![41, 42]),
+                uuid: Some(request_id),
+                ..Default::default()
+            };
+            let mut pending = Box::pin(engine.submit_decode(decode.clone()));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut pending)
+                    .await
+                    .is_err(),
+                "decode must wait for prompt KV capacity"
+            );
+            assert_eq!(engine.active_request_count(), 2);
+            assert!(engine.cancel(request_id).await.unwrap());
+            let mut cancelled = pending.await.unwrap();
+            assert!(cancelled.is_aborted());
+            assert!(cancelled.recv().await.is_none());
+            assert_eq!(engine.active_request_count(), 1);
+
+            let mut dropped = Box::pin(engine.submit_decode(decode.clone()));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut dropped)
+                    .await
+                    .is_err()
+            );
+            drop(dropped);
+            while engine.active_request_count() != 1 {
+                tokio::task::yield_now().await;
+            }
+            held_request.cancel().await.unwrap();
+            drop(held_events);
+            drop(held_control);
+            wait_for_idle(&engine).await;
+            assert_eq!(engine.metrics_receiver().borrow().active_decode_blocks, 0);
+
+            let mut live = engine.submit_decode(decode).await.unwrap();
+            let mut tokens = Vec::new();
+            while let Some(output) = live.recv().await {
+                assert!(!output.rejected);
+                assert_eq!(output.cached_tokens.unwrap_or(0), 0);
+                tokens.push(output.token_id.unwrap());
+            }
+            assert_eq!(tokens, [41, 42]);
+            wait_for_idle(&engine).await;
+
+            let oversized = DirectRequest {
+                tokens: vec![3; 13],
+                max_output_tokens: 1,
+                ..Default::default()
+            };
+            assert!(engine.submit_decode(oversized).await.is_err());
+            if engine_type == EngineType::Trtllm {
+                let mut limited = engine
+                    .submit_decode(DirectRequest {
+                        tokens: vec![3; 5],
+                        max_output_tokens: 8,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                for position in 0..7 {
+                    let output = limited.recv().await.unwrap();
+                    assert!(!output.rejected);
+                    assert_eq!(output.completed, position == 6);
+                }
+                assert!(limited.recv().await.is_none());
+                wait_for_idle(&engine).await;
+            }
+            assert_eq!(engine.active_request_count(), 0);
+            {
+                let snapshots = passes.0.lock().unwrap();
+                assert!(!snapshots.is_empty());
+                assert!(snapshots.iter().all(|pass| {
+                    pass.num_prefill_requests == 0 && pass.sum_prefill_tokens == 0
+                }));
+                assert!(snapshots.iter().any(|pass| pass.num_decode_requests > 0));
+            }
+            engine.shutdown().await.unwrap();
+        })
+        .await
+        .expect("decode admission and cancellation must finish promptly");
     }
 }
 
@@ -660,6 +934,7 @@ async fn pass_boundary_waits_for_gated_route_delivery_before_id_reuse() {
         old_output.is_none(),
         "cancellation abandons the old stream before route cleanup"
     );
+    assert!(old.is_aborted());
     assert!(!cancellation.await.unwrap().unwrap());
     drop(old);
 
@@ -680,6 +955,7 @@ async fn pass_boundary_waits_for_gated_route_delivery_before_id_reuse() {
     assert_eq!(output.token_id, Some(22));
     assert!(output.completed);
     assert!(replacement.recv().await.is_none());
+    assert!(!replacement.is_aborted());
 }
 
 #[tokio::test]
@@ -726,6 +1002,7 @@ async fn full_output_stream_is_cancelled_without_stalling_an_unrelated_request()
     assert!(fast_output.completed);
     assert_eq!(slow.recv().await.unwrap().token_id, Some(7));
     assert!(slow.recv().await.is_none());
+    assert!(!slow.is_aborted());
     wait_for_idle(&engine).await;
     assert_eq!(
         fpm.0.load(Ordering::Relaxed),
@@ -915,50 +1192,7 @@ async fn aborting_a_deferred_submit_cleans_up_after_admission() {
 }
 
 #[tokio::test]
-async fn dispatcher_exit_shuts_down_the_engine_and_closes_streams() {
-    let (gate_tx, gate_rx) = watch::channel(false);
-    let engine = LiveEngine::start_with_output_gate(
-        args(EngineType::Vllm),
-        0,
-        Some(gate_rx),
-        DEFAULT_REQUEST_OUTPUT_CAPACITY,
-    )
-    .unwrap();
-    let mut request = engine
-        .submit(DirectRequest {
-            tokens: vec![1],
-            max_output_tokens: 3,
-            output_token_ids: Some(vec![7; 3]),
-            uuid: Some(Uuid::from_u128(12)),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-    drop(gate_tx);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), request.recv())
-            .await
-            .expect("dispatcher failure should close request streams")
-            .is_none()
-    );
-    let error = engine
-        .submit(DirectRequest {
-            tokens: vec![2],
-            max_output_tokens: 1,
-            output_token_ids: Some(vec![22]),
-            uuid: Some(Uuid::from_u128(13)),
-            ..Default::default()
-        })
-        .await
-        .err()
-        .expect("dispatcher failure should stop new submissions");
-    assert!(error.to_string().contains("not running"));
-    assert_eq!(engine.active_request_count(), 0);
-}
-
-#[tokio::test]
-async fn ordered_lane_forwards_admission_before_releasing_output() {
+async fn direct_delivery_forwards_admission_before_releasing_output() {
     let (gate_tx, gate_rx) = watch::channel(false);
     let (admission_tx, mut admission_rx) = mpsc::unbounded_channel();
     let engine = LiveEngine::start_internal(
@@ -966,9 +1200,9 @@ async fn ordered_lane_forwards_admission_before_releasing_output() {
         0,
         LiveEngineOptions {
             admission_tx: Some(admission_tx),
+            output_gate: Some(gate_rx),
             ..LiveEngineOptions::default()
         },
-        Some(gate_rx),
     )
     .unwrap();
     let uuid = Uuid::from_u128(20);

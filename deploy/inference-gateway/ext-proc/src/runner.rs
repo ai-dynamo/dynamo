@@ -3,17 +3,17 @@
 
 //! Standard Rust EPP process bootstrap.
 //!
-//! Replaces the Go EPP + CGO bridge with a single native Rust binary that
-//! implements the Envoy ext_proc gRPC service and uses Dynamo's KV-aware
-//! router for endpoint selection.
+//! A native Rust binary implementing the Envoy ext_proc gRPC service, using
+//! Dynamo's KV-aware router for endpoint selection.
 //!
-//! The ext-proc port (9002) serves TLS (self-signed cert, matching the Go EPP).
-//! The health port (9003) is plaintext (K8s probes don't need TLS).
+//! The ext-proc port (9002) serves TLS (self-signed cert). The health port
+//! (9003) is plaintext (K8s probes don't need TLS).
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
@@ -43,15 +43,17 @@ const GRACEFUL_SHUTDOWN_PROPAGATION_ENV: &str = "DYN_EPP_GRACEFUL_SHUTDOWN_PROPA
 const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 struct Config {
-    namespace: String,
+    namespace_filter: NamespaceFilter,
+    namespace_prefix_mode: NamespacePrefixMode,
     component: String,
 }
 
 impl Config {
     fn from_env() -> Self {
-        let namespace = env_or("DYN_NAMESPACE_PREFIX", "")
-            .or_else(|| env_or("DYN_NAMESPACE", ""))
-            .unwrap_or_else(|| "vllm-agg".to_string());
+        let namespace = env_or("DYN_NAMESPACE", "").unwrap_or_else(|| "vllm-agg".to_string());
+        let prefix = env_or("DYN_NAMESPACE_PREFIX", "");
+        let namespace_filter =
+            NamespaceFilter::from_namespace_and_prefix(Some(&namespace), prefix.as_deref());
 
         if parse_env("DYN_ENFORCE_DISAGG", false) {
             tracing::warn!(
@@ -60,7 +62,8 @@ impl Config {
         }
 
         Self {
-            namespace,
+            namespace_filter,
+            namespace_prefix_mode: NamespacePrefixMode::from_env(),
             component: env_or("DYN_COMPONENT_NAME", "").unwrap_or_else(|| "backend".to_string()),
         }
     }
@@ -201,7 +204,8 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
     tracing::info!(
         port = GRPC_PORT,
         health_port = HEALTH_PORT,
-        namespace = %config.namespace,
+        namespace_filter = ?config.namespace_filter,
+        namespace_prefix_mode = ?config.namespace_prefix_mode,
         component = %config.component,
         standalone,
         "Starting Dynamo Rust EPP"
@@ -313,7 +317,7 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
                     tracing::info!("Shutdown received during Dynamo discovery initialization");
                     return Ok(());
                 }
-                router = Router::from_discovery(&config.namespace, &config.component) => router?,
+                router = Router::from_discovery(config.namespace_filter, config.namespace_prefix_mode, &config.component) => router?,
             };
             if draining.is_cancelled() {
                 tracing::info!("Shutdown received before Dynamo discovery serving started");
@@ -403,10 +407,10 @@ async fn serve<P: crate::EndpointPicker>(
     };
 
     let server = ExtProcServer::new(picker);
-    // Default to TLS to match the Go EPP behavior. Verified working with
-    // kGateway (`appProtocol: http2` upstreams negotiate h2 over TLS via ALPN
-    // when the cert is presented). Set DYN_SECURE_SERVING=false to fall back
-    // to plaintext h2c, e.g. for local debugging or non-TLS gateways.
+    // Default to TLS. Verified working with kGateway (`appProtocol: http2`
+    // upstreams negotiate h2 over TLS via ALPN when the cert is presented).
+    // Set DYN_SECURE_SERVING=false to fall back to plaintext h2c, e.g. for
+    // local debugging or non-TLS gateways.
     let secure_serving = parse_env("DYN_SECURE_SERVING", true);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{GRPC_PORT}").parse()?;
 
@@ -504,6 +508,49 @@ mod tests {
     use crate::epp_standalone_config::{DYN_EPP_MODE, DYNAMO_RUNTIME_MODE};
 
     static EPP_MODE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+    #[test]
+    fn namespace_environment_preserves_exact_and_prefix_intent() {
+        for (prefix, namespace, strict, generation, sibling) in [
+            (None, Some("default-foo"), None, false, false),
+            (None, Some("default-foo"), Some("true"), false, false),
+            (Some("default-foo"), Some("ignored"), None, true, true),
+            (
+                Some("default-foo"),
+                Some("ignored"),
+                Some("true"),
+                true,
+                false,
+            ),
+            (Some(" "), Some("default-foo"), Some("true"), false, false),
+            (Some(" dynamo "), Some("ignored"), Some("true"), true, true),
+            (None, Some("dynamo"), Some("true"), true, true),
+        ] {
+            temp_env::with_vars(
+                [
+                    ("DYN_NAMESPACE_PREFIX", prefix),
+                    ("DYN_NAMESPACE", namespace),
+                    ("DYN_NAMESPACE_PREFIX_STRICT", strict),
+                ],
+                || {
+                    let config = Config::from_env();
+                    let filter = config.namespace_filter;
+                    let mode = config.namespace_prefix_mode;
+                    assert!(filter.matches_with_prefix_mode("default-foo", mode));
+                    assert_eq!(
+                        filter.matches_with_prefix_mode("default-foo-1a2b3c4d", mode),
+                        generation,
+                        "{filter:?}"
+                    );
+                    assert_eq!(
+                        filter.matches_with_prefix_mode("default-foo-bar", mode),
+                        sibling,
+                        "{filter:?}"
+                    );
+                },
+            );
+        }
+    }
 
     #[tokio::test]
     async fn linked_policy_registry_requires_standalone_mode() {

@@ -23,7 +23,7 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
     ```yaml
     spec:
       services:
-        VllmDecodeWorker:
+        decode:
           extraPodSpec:
             mainContainer:
               command:
@@ -80,16 +80,27 @@ If workers do not publish KV events, configure the frontend with `--no-router-kv
 A worker started with `--disaggregation-mode prefill` must be passed `--kv-transfer-config` explicitly. Without it, the worker raises a `ValueError` during argument parsing and never starts. All non-prefill modes — `agg`, `pd`, `decode`, and `encode` — do not enforce this check.
 </Warning>
 
-The value is a JSON object. For NIXL-based prefill/decode disaggregation:
+The value is a JSON object. For NIXL-based prefill/decode disaggregation, configure each worker with its role.
+
+Prefill worker:
 
 ```bash
 python -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --disaggregation-mode prefill \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
 ```
 
-Only the prefill worker is required to set it, but both halves of a NIXL pair must agree on a connector for transfers to succeed. Pass the same `--kv-transfer-config` value to the decode worker, as the [disaggregated vLLM launch script](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg.sh) does.
+Decode worker:
+
+```bash
+python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --disaggregation-mode decode \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+```
+
+Only prefill workers must set `--kv-transfer-config` to pass Dynamo's startup check. Decode workers also need `NixlConnector` with `kv_consumer` to receive transferred KV, as the [disaggregated vLLM launch script](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg.sh) shows.
 
 The earlier `--connector` flag is no longer accepted by the vLLM backend. Setting it — on the command line or through the `DYN_CONNECTOR` environment variable — raises a `ValueError` during argument parsing. The message depends on the value:
 
@@ -306,6 +317,7 @@ With `--benchmark-mode` set and no points file, passing a legacy flag together w
 ## Validation rules
 
 - `--embedding-worker` is only valid with `--disaggregation-mode=agg` (or the default aggregated mode) and cannot be combined with `--enable-multimodal` or `--benchmark-mode`.
+- `--benchmark-mode` cannot be combined with `--data-parallel-size` greater than `1` unless the model is a mixture-of-experts (MoE) model. The attention-DP self-benchmark needs the data-parallel ranks to run as one coordinated group, which vLLM does only for MoE models; the worker rejects this combination at startup, before it loads the model.
 
 ## Related pages
 

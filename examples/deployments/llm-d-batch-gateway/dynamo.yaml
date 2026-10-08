@@ -26,7 +26,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
               command:
                 - python3
                 - -m
@@ -42,14 +42,14 @@ spec:
                   cpu: "1"
                 limits:
                   cpu: "2"
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
               command:
                 - python3
                 - -m

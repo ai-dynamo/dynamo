@@ -30,6 +30,7 @@ class DynamoRuntimeConfig(ConfigBase):
     kv_state_endpoint: Optional[str] = None
     discovery_backend: str
     request_plane: str
+    response_plane: str = "tcp"
     event_plane: Optional[str] = None
     fpm_trace: bool = False
     connector: list[str]
@@ -39,8 +40,8 @@ class DynamoRuntimeConfig(ConfigBase):
     dyn_reasoning_parser: Optional[str] = None
     dyn_default_thinking_mode: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
-    dyn_enable_structural_tag: bool = False
-    dyn_structural_tag_scope: str = "auto"
+    dyn_enable_structural_tag: bool = True
+    dyn_structural_tag_scope: str = "always"
     dyn_structural_tag_schema: str = "auto"
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
@@ -104,6 +105,8 @@ class DynamoRuntimeConfig(ConfigBase):
             raise ValueError(
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
             )
+
+        os.environ["DYN_RESPONSE_PLANE"] = self.response_plane
 
         # Propagate TCP TLS CLI flags to env vars so the Rust runtime picks them up.
         if self.tcp_tls_cert_path:
@@ -215,6 +218,14 @@ class DynamoRuntimeArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--response-plane",
+            env_var="DYN_RESPONSE_PLANE",
+            default="tcp",
+            help="Select the response transport. Frontend and workers must match.",
+            choices=["tcp", "quic"],
+        )
+        add_argument(
+            g,
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
             default=None,
@@ -282,16 +293,18 @@ class DynamoRuntimeArgGroup(ArgGroup):
             g,
             flag_name="--dyn-enable-structural-tag",
             env_var="DYN_ENABLE_STRUCTURAL_TAG",
-            default=False,
-            help="Enable structural tag guided decoding for tool calls. "
-            "Named Kimi K3 tool_choice requests always activate their required "
-            "XTML structural tag even when this flag is off.",
+            default=True,
+            help="Enable structural tag guided decoding for tool calls when the configured "
+            "parser and backend support it. Disabling this flag suppresses optional "
+            "guidance; Rust retains native tags for Kimi K2 required/named and "
+            "Kimi K3 named tool choices. Python vLLM and SGLang respect the opt-out. "
+            "Unsupported schema constructs can cause backend grammar compilation errors.",
         )
         add_argument(
             g,
             flag_name="--dyn-structural-tag-scope",
             env_var="DYN_STRUCTURAL_TAG_SCOPE",
-            default="auto",
+            default="always",
             choices=["auto", "always"],
             help="Controls when structural tags are activated. "
             "'auto': for required/named tool_choice, and if any tool has strict=true "
@@ -306,9 +319,10 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default="auto",
             choices=["auto", "strict"],
             help="Controls parameter schema strictness inside structural tags. "
-            "'auto': real schema only for tools with strict=true; "
-            "syntactically constrained but schema-unconstrained for all other tools. "
-            "'strict': real parameter schema for all tools.",
+            "'auto': declared parameter schema for tools with strict omitted or true; "
+            "tools with strict=false keep the native tool envelope constrained but use "
+            "schema-unconstrained arguments. "
+            "'strict': declared parameter schema for all tools, overriding strict=false.",
         )
         add_argument(
             g,

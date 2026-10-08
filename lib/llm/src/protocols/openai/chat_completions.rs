@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,6 @@ use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::engines::ValidateRequest;
-use crate::preprocessor::media::MediaDecoder;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
@@ -85,7 +84,7 @@ pub(crate) fn tool_call_response_chunk_to_protocol(
 /// - `common`: Common extension fields (ignore_eos, min_tokens) at root level, embedded using `serde(flatten)`.
 /// - `nvext`: The optional NVIDIA extension field. See [`NvExt`] for more details.
 ///   Note: If ignore_eos is specified in both common and nvext, the common (root-level) value takes precedence.
-#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone, Default)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
     #[schema(value_type = Object)]
@@ -112,11 +111,18 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<serde_json::Value>,
 
-    /// Runtime media decoding parameters.
-    /// When provided, these override the MDC defaults
+    /// OpenAI-style thinking token budget: bounds the number of thinking
+    /// tokens generated per request. Forwarded to the backend's
+    /// `thinking_token_budget` sampling parameter when supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_token_budget: Option<u32>,
+
+    /// Runtime media decoding parameters, forwarded verbatim to the worker when the
+    /// worker owns decoding. When the frontend decodes, these override the MDC defaults.
+    /// Kept opaque so options the frontend does not own pass through untouched.
     /// Example: `{"video": {"num_frames": 16}}`
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_io_kwargs: Option<MediaDecoder>,
+    pub media_io_kwargs: Option<serde_json::Value>,
 
     /// When true, logprob token fields are returned as "token_id:`<id>`" instead
     /// of decoded text.
@@ -124,7 +130,12 @@ pub struct NvCreateChatCompletionRequest {
     pub return_tokens_as_token_ids: Option<bool>,
 
     /// Catch-all for unsupported fields - checked during validation
-    #[serde(flatten, default, skip_serializing)]
+    #[serde(
+        flatten,
+        default,
+        skip_serializing,
+        deserialize_with = "validate::deserialize_extra_fields"
+    )]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
@@ -267,8 +278,18 @@ fn openai_thinking_mode(value: &serde_json::Value) -> anyhow::Result<Option<Open
 pub struct NvCreateChatCompletionResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+}
+
+/// Parser lifecycle evidence carried between serving components, never to OpenAI clients.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallCompletion {
+    pub choice_index: u32,
+    pub tool_index: u32,
+    pub complete: bool,
 }
 
 /// A response structure for streamed chat completions, embedding OpenAI's
@@ -279,10 +300,17 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+    /// Internal prompt logprobs payload for non-streaming response aggregation.
+    /// This must never be serialized to client-facing streams.
+    #[serde(skip)]
+    pub prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
-    #[serde(skip)]
+    #[serde(default, skip_serializing)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
+    /// Internal transport evidence; the HTTP chat converter removes it before SSE serialization.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_call_completion: Vec<ToolCallCompletion>,
 }
 
 /// Synthetic chunks reuse a real response envelope but consume no backend data.
@@ -296,7 +324,9 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     let data = response.data.as_mut()?;
     data.inner.usage = None;
     data.llm_metrics = None;
+    data.tool_call_completion.clear();
     data.nvext = None;
+    data.prompt_logprobs = None;
     Some(())
 }
 
@@ -554,6 +584,11 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     fn get_ignore_eos(&self) -> Option<bool> {
         self.common.ignore_eos
     }
+
+    /// Returns the root-level thinking token budget if set.
+    fn get_thinking_token_budget(&self) -> Option<u32> {
+        self.thinking_token_budget
+    }
 }
 
 impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
@@ -591,6 +626,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_guided_decoding(self)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
@@ -623,8 +659,8 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for stream_options
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
-        validate::validate_tools(&self.inner.tools.as_deref())?;
-        validate::validate_tool_choice(&self.inner.tool_choice, self.inner.tools.as_deref())?;
+        let effective_tools = validate::validated_effective_tools(&self.inner)?;
+        validate::validate_tool_choice(&self.inner.tool_choice, Some(effective_tools.as_ref()))?;
         // none for parallel_tool_calls
         validate::validate_user(self.inner.user.as_deref())?;
         // none for function call
@@ -649,10 +685,121 @@ mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
     use crate::protocols::common::{
-        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+        GuidedDecodingOptions, OutputOptionsProvider, SamplingOptionsProvider,
+        StopConditionsProvider,
     };
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
+
+    /// Builds a minimal chat request and merges `extra` into its top-level fields.
+    fn chat_request_with(extra: &serde_json::Value) -> NvCreateChatCompletionRequest {
+        let mut body = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 20
+        });
+        for (key, value) in extra.as_object().expect("fixture is an object") {
+            body[key] = value.clone();
+        }
+        serde_json::from_value(body).expect("Failed to deserialize request")
+    }
+
+    /// Extracts sampling options for `extra` and returns the guided-decoding options it
+    /// produced, failing if extraction rejected the request or engaged nothing.
+    fn guided_for(extra: &serde_json::Value) -> GuidedDecodingOptions {
+        chat_request_with(extra)
+            .extract_sampling_options()
+            .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"))
+            .guided_decoding
+            .unwrap_or_else(|| panic!("{extra} must produce guided decoding options"))
+    }
+
+    #[test]
+    fn test_conflicting_guided_decoding_options_return_invalid_argument() {
+        // Each pair is two constraints set at once; every one of them must be rejected.
+        let conflicts = [
+            json!({"guided_json": {"type": "object"}, "guided_regex": "a+"}),
+            json!({"guided_regex": "a+", "guided_choice": ["x", "y"]}),
+            json!({"guided_grammar": "root ::= \"a\"", "guided_json": {"type": "object"}}),
+        ];
+
+        for extra in conflicts {
+            let request = chat_request_with(&extra);
+            let error = ValidateRequest::validate(&request).expect_err("constraints conflict");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Only one guided-decoding constraint"),
+                "validation error should name the conflict, got: {error}"
+            );
+        }
+    }
+
+    /// The guard for the above: a legal request must keep validating, so the conflict
+    /// check cannot be satisfied by rejecting guided decoding outright.
+    ///
+    /// `whitespace_pattern` is a modifier, not a constraint -- it changes how a JSON
+    /// grammar is applied. `GuidedDecodingOptions::validate` used to count it toward the
+    /// exclusivity limit, which rejected `guided_json` + `guided_whitespace_pattern` even
+    /// though the error text never named `whitespace_pattern` and the Python frontend
+    /// (`components/src/dynamo/frontend/prepost.py`) builds that exact pair. Every case
+    /// asserts the resulting options, not merely that extraction returned `Ok`.
+    #[test]
+    fn test_guided_decoding_constraint_with_modifier_stays_valid() {
+        let json_only = guided_for(&json!({"guided_json": {"type": "object"}}));
+        assert!(json_only.json.is_some());
+
+        let regex_only = guided_for(&json!({"guided_regex": "a+"}));
+        assert_eq!(regex_only.regex.as_deref(), Some("a+"));
+
+        let choice_only = guided_for(&json!({"guided_choice": ["x", "y"]}));
+        assert_eq!(
+            choice_only.choice,
+            Some(vec!["x".to_string(), "y".to_string()])
+        );
+
+        // The companion pair: whitespace_pattern modifies the JSON grammar rather than
+        // being a second grammar, so setting both is one constraint, not two.
+        let json_with_modifier = guided_for(
+            &json!({"guided_json": {"type": "object"}, "guided_whitespace_pattern": "[\n ]?"}),
+        );
+        assert!(json_with_modifier.json.is_some());
+        assert_eq!(
+            json_with_modifier.whitespace_pattern.as_deref(),
+            Some("[\n ]?")
+        );
+
+        let regex_with_modifier =
+            guided_for(&json!({"guided_regex": "a+", "guided_whitespace_pattern": "[\n ]?"}));
+        assert_eq!(regex_with_modifier.regex.as_deref(), Some("a+"));
+        assert_eq!(
+            regex_with_modifier.whitespace_pattern.as_deref(),
+            Some("[\n ]?")
+        );
+    }
+
+    /// A modifier on its own describes how to apply a constraint that was never supplied.
+    /// It must engage no guided decoding at all: emitting a constraint-less
+    /// `GuidedDecodingOptions` makes vLLM raise `ValueError` on the worker and disables
+    /// request migration, for a request the caller never meant as structured output.
+    #[test]
+    fn test_guided_decoding_modifier_alone_engages_nothing() {
+        for extra in [
+            json!({"guided_whitespace_pattern": "[\n ]?"}),
+            json!({"guided_decoding_backend": "xgrammar"}),
+        ] {
+            let request = chat_request_with(&extra);
+            ValidateRequest::validate(&request)
+                .unwrap_or_else(|e| panic!("{extra} must pass request validation, got: {e}"));
+            let sampling = request
+                .extract_sampling_options()
+                .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"));
+            assert!(
+                sampling.guided_decoding.is_none(),
+                "{extra} sets no constraint, so guided decoding must not be engaged",
+            );
+        }
+    }
 
     #[test]
     fn test_top_k_sentinel_contract() {
@@ -839,6 +986,73 @@ mod tests {
     }
 
     #[test]
+    fn test_stop_sequence_limit_enforced_consistently() {
+        use crate::protocols::openai::validate::MAX_STOP_SEQUENCES;
+
+        let max_stops: Vec<String> = (0..MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": max_stops,
+        }))
+        .expect("Failed to deserialize request");
+        ValidateRequest::validate(&request).expect("max stops must validate");
+        request
+            .extract_stop_conditions()
+            .expect("max stops must extract");
+
+        let over_max_stops: Vec<String> = (0..=MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": over_max_stops,
+        }))
+        .expect("Failed to deserialize request");
+        let err =
+            ValidateRequest::validate(&request).expect_err("over-max stops must fail validation");
+        let expected = format!(
+            "InvalidRequest: Maximum of {} stop sequences allowed, got {}",
+            MAX_STOP_SEQUENCES,
+            MAX_STOP_SEQUENCES + 1
+        );
+        assert_eq!(err.to_string(), expected);
+        let err = request
+            .extract_stop_conditions()
+            .expect_err("over-max stops must fail extraction");
+        assert_eq!(err.to_string(), expected);
+
+        let over_max_token_ids: Vec<u32> = (0..=MAX_STOP_SEQUENCES as u32).collect();
+        let expected_token_ids = format!(
+            "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
+            MAX_STOP_SEQUENCES,
+            MAX_STOP_SEQUENCES + 1
+        );
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": over_max_token_ids,
+        }))
+        .expect("Failed to deserialize request");
+        let err = ValidateRequest::validate(&request)
+            .expect_err("over-max stop token IDs must fail validation");
+        assert_eq!(err.to_string(), expected_token_ids);
+        let err = request
+            .extract_stop_conditions()
+            .expect_err("over-max stop token IDs must fail extraction");
+        assert_eq!(err.to_string(), expected_token_ids);
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop_token_ids": over_max_token_ids,
+        }))
+        .expect("Failed to deserialize request");
+        let err = ValidateRequest::validate(&request)
+            .expect_err("over-max passthrough stop token IDs must fail validation");
+        assert_eq!(err.to_string(), expected_token_ids);
+    }
+
+    #[test]
     fn test_passthrough_token_constraints_validate() {
         let request_json = json!({
             "model": "test-model",
@@ -918,6 +1132,157 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("tool named \"search\" in tool_choice is not present in tools")
+        );
+    }
+
+    #[test]
+    fn test_kimi_extensions_survive_nv_request_roundtrip() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {"role": "system", "tools": [{"name": "lookup"}]},
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "The answer is", "partial": true}
+            ],
+            "prompt_cache_key": "session-key"
+        }))
+        .expect("Kimi extensions must deserialize through the Dynamo wrapper");
+
+        assert!(request.unsupported_fields.is_empty());
+        ValidateRequest::validate(&request).expect("Kimi extensions must pass request validation");
+        assert!(request.inner.has_effective_tools());
+        assert!(request.inner.effective_tool_contains("lookup"));
+
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(serialized["messages"][0]["tools"][0]["name"], "lookup");
+        assert_eq!(serialized["messages"][2]["partial"], true);
+        assert_eq!(serialized["messages"][2]["content"], "The answer is");
+        assert_eq!(serialized["prompt_cache_key"], "session-key");
+    }
+
+    #[test]
+    fn test_system_message_without_content_or_tools_is_still_rejected() {
+        let request = serde_json::from_value::<NvCreateChatCompletionRequest>(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "system"},
+                {"role": "user", "content": "Hello"}
+            ]
+        }));
+        assert!(request.is_err());
+    }
+
+    #[test]
+    fn test_validate_forced_tool_choice_accepts_dynamic_system_tools() {
+        for tool_choice in [
+            json!("required"),
+            json!({"type": "function", "function": {"name": "lookup"}}),
+        ] {
+            let request_json = json!({
+                "model": "test-model",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "",
+                        "tools": [{"name": "lookup", "parameters": {"type": "object"}}]
+                    },
+                    {"role": "user", "content": "Hello"}
+                ],
+                "tool_choice": tool_choice
+            });
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(request_json)
+                .expect("dynamic-tool request must deserialize");
+            ValidateRequest::validate(&request)
+                .expect("dynamic tools must satisfy forced tool_choice validation");
+        }
+    }
+
+    #[test]
+    fn test_validate_named_tool_choice_rejects_absent_dynamic_tool() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "",
+                    "tools": [{"name": "lookup"}]
+                },
+                {"role": "user", "content": "Hello"}
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "missing"}
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("request must deserialize");
+        let error = ValidateRequest::validate(&request).expect_err("missing tool must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("tool named \"missing\" in tool_choice is not present in tools")
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_dynamic_tool_names() {
+        for (name, expected_error) in [
+            ("bad name".to_string(), "has an invalid name".to_string()),
+            (
+                "x".repeat(validate::MAX_FUNCTION_NAME_LENGTH + 1),
+                format!(
+                    "exceeds {} character limit",
+                    validate::MAX_FUNCTION_NAME_LENGTH
+                ),
+            ),
+        ] {
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "tools": [{"name": name}]},
+                    {"role": "user", "content": "Hello"}
+                ]
+            }))
+            .expect("dynamic-tool request must deserialize");
+
+            let error = ValidateRequest::validate(&request)
+                .expect_err("invalid dynamic tool name must fail validation");
+            assert!(
+                error.to_string().contains(&expected_error),
+                "unexpected validation error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_combined_effective_tool_count_over_limit() {
+        let tools = (0..validate::MAX_TOOLS)
+            .map(|index| {
+                json!({
+                    "type": "function",
+                    "function": {"name": format!("tool_{index}")}
+                })
+            })
+            .collect::<Vec<_>>();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "system", "tools": [{"name": "dynamic_tool"}]},
+                {"role": "user", "content": "Hello"}
+            ],
+            "tools": tools
+        }))
+        .expect("combined-tool request must deserialize");
+
+        let error = ValidateRequest::validate(&request)
+            .expect_err("combined effective tool count over the limit must fail validation");
+        assert!(
+            error.to_string().contains(&format!(
+                "Maximum of {} tools are supported, got {}",
+                validate::MAX_TOOLS,
+                validate::MAX_TOOLS + 1
+            )),
+            "unexpected validation error: {error}"
         );
     }
 
@@ -1717,5 +2082,70 @@ mod tests {
                 serde_json::from_value(json_str).expect("Failed to deserialize request");
             assert!(request.normalize_reasoning_template_args().is_err());
         }
+    }
+
+    #[test]
+    fn test_thinking_token_budget_reaches_stop_conditions() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking_token_budget": 32
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        ValidateRequest::validate(&request).expect("thinking_token_budget must be valid");
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("Failed to extract stop conditions");
+        assert_eq!(stop_conditions.max_thinking_tokens, Some(32));
+    }
+
+    #[test]
+    fn test_thinking_token_budget_overrides_nvext() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking_token_budget": 32,
+            "nvext": {"max_thinking_tokens": 16}
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("Failed to extract stop conditions");
+        assert_eq!(stop_conditions.max_thinking_tokens, Some(32));
+    }
+
+    #[test]
+    fn test_nvext_max_thinking_tokens_fallback() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "nvext": {"max_thinking_tokens": 16}
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("Failed to extract stop conditions");
+        assert_eq!(stop_conditions.max_thinking_tokens, Some(16));
+    }
+
+    #[test]
+    fn test_omitted_thinking_token_budget_is_none() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("Failed to extract stop conditions");
+        assert_eq!(stop_conditions.max_thinking_tokens, None);
     }
 }

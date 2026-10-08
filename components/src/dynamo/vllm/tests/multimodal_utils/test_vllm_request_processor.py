@@ -1,13 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 from PIL import Image
 
+import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.utils.video_utils import encode_to_video_bytes
 from dynamo.vllm.multimodal_utils import request_processor as mod
 from dynamo.vllm.multimodal_utils.models import qwen as qwen_mod
 
@@ -25,6 +30,7 @@ def _processor(
     model: str = "Qwen/Qwen3-VL-2B-Instruct",
     enabled: bool = True,
     unified_vision_chunk: bool = False,
+    video_loader=None,
     frontend_decoding: bool = False,
 ) -> mod.VllmMultimodalRequestProcessor:
     return mod.VllmMultimodalRequestProcessor(
@@ -32,7 +38,8 @@ def _processor(
         enable_multimodal=enabled,
         enable_frontend_decoding=frontend_decoding,
         image_loader=SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
-        video_loader=SimpleNamespace(load_video_batch=AsyncMock(return_value=[])),
+        video_loader=video_loader
+        or SimpleNamespace(load_video_batch=AsyncMock(return_value=[])),
         audio_loader=SimpleNamespace(
             load_audio_batch=AsyncMock(return_value=[]),
             load_audio=AsyncMock(return_value=None),
@@ -92,11 +99,174 @@ async def test_extracts_mixed_url_data_url_and_decoded_media():
 
     assert result == {"image": image, "video": video, "audio": [audio_a, audio_b]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True
     )
-    processor.video_loader.load_video_batch.assert_awaited_once_with(video_items)
+    processor.video_loader.load_video_batch.assert_awaited_once_with(video_items, {})
     processor.audio_loader.load_audio_batch.assert_awaited_once_with(audio_items)
     processor.audio_loader.load_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_image_cache_uses_frontend_scope():
+    processor = _processor()
+    image_items = [{"Url": "https://example.com/image.png"}]
+
+    await processor.extract_multimodal_data(
+        {
+            "image_cache_scope": " session-42 ",
+            "multi_modal_data": {"image_url": image_items},
+        },
+        "request-1",
+        None,
+    )
+
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope="session-42", preserve_uuid_slots=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_image_cache_has_no_scope_for_malformed_scope():
+    processor = _processor()
+    image_items = [{"Url": "https://example.com/image.png"}]
+
+    await processor.extract_multimodal_data(
+        {
+            "image_cache_scope": "   ",
+            "multi_modal_data": {"image_url": image_items},
+        },
+        "request-1",
+        None,
+    )
+
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_worker_video_media_io_kwargs_control_vllm_decode(monkeypatch):
+    """Request-level video kwargs reach vLLM's media decoder.
+
+    The fixture is VP9, which is not in HW_ROUTED_CODECS, so should_use_nvdec is
+    False and the clip goes to vLLM -- the path that owns the media_io_kwargs
+    contract. With num_frames=2 vLLM linspace-samples the endpoints of a 4-frame
+    clip, so it must return source frames 0 and 3.
+    """
+    size = 16
+    colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]]
+    expected_sampled_frame_indices = [0, 3]
+
+    frames = np.array(
+        [np.full((size, size, 3), color, dtype=np.uint8) for color in colors],
+    )
+    video_uri = "data:video/mp4;base64," + base64.b64encode(
+        encode_to_video_bytes(frames, fps=4, output_format="mp4")
+    ).decode("ascii")
+    processor = _processor(
+        video_loader=VideoLoader(),
+    )
+
+    # Imported here, not at module scope: the file must stay collectable where
+    # vLLM is absent (pre-commit runs the test-collection hooks on the host).
+    from vllm.multimodal.media import VideoMediaIO
+
+    # VideoMediaIO.load_bytes' OpenCV backend was removed from the vLLM runtime image in #11836
+    def _fake_load_bytes(self, data):
+        indices = np.linspace(0, len(frames) - 1, self.num_frames).astype(int)
+        return frames[indices], {"frames_indices": indices.tolist()}
+
+    monkeypatch.setattr(VideoMediaIO, "load_bytes", _fake_load_bytes)
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"video_url": [{"Url": video_uri}]},
+            "media_io_kwargs": {
+                "video": {
+                    "num_frames": 2,
+                }
+            },
+        },
+        "real-video-request",
+        None,
+        DisaggregationMode.AGGREGATED,
+    )
+
+    decoded_frames, metadata = prepared.prompt["multi_modal_data"]["video"]
+
+    assert decoded_frames.shape == (2, 16, 16, 3)
+    assert metadata["frames_indices"] == expected_sampled_frame_indices
+    expected_frames = np.stack(
+        [
+            np.full((16, 16, 3), colors[i], dtype=np.uint8)
+            for i in expected_sampled_frame_indices
+        ]
+    )
+    np.testing.assert_allclose(
+        decoded_frames,
+        expected_frames,
+        atol=16,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "video_io_kwargs,expected_num_frames,expected_fps",
+    [
+        # A bare cap: the request's count reaches the decoder, not the
+        # loader's startup default of 32.
+        ({"num_frames": 4}, 4, -1.0),
+        # fps instead: vLLM's merge_kwargs drops num_frames when only fps is
+        # given, so the cap stays at the default and fps rides along to be
+        # applied against the clip's duration.
+        ({"fps": 1}, 32, 1.0),
+    ],
+)
+async def test_worker_video_media_io_kwargs_control_nvdec_decode(
+    monkeypatch, video_io_kwargs, expected_num_frames, expected_fps
+):
+    """Request-level video kwargs reach the NVDEC decoder too.
+
+    Sibling of ``test_worker_video_media_io_kwargs_control_vllm_decode``: same
+    request shape, but routed to hardware decode, which used to sample the
+    loader's startup default and ignore the request entirely. NVDEC needs a
+    GPU, so the decode is stubbed -- what is asserted is the sampling request
+    handed to it. How it resolves those two caps against the clip is covered in
+    ``test_nvdec_decoder.py``.
+    """
+    frames = np.zeros((8, 16, 16, 3), dtype=np.uint8)
+    video_uri = "data:video/mp4;base64," + base64.b64encode(
+        encode_to_video_bytes(frames, fps=4, output_format="mp4")
+    ).decode("ascii")
+
+    # Route to NVDEC regardless of what the fixture encoder produced: it does
+    # not let the test pick H.264, and codec probing has its own unit tests.
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda data: "h264")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda codec: True)
+    requested = {}
+
+    def _decode(content, num_frames, fps):
+        requested.update(num_frames=num_frames, fps=fps)
+        return frames[:1], {"frames_indices": [0]}
+
+    monkeypatch.setattr(video_loader_module, "decode_video_nvdec", _decode)
+
+    processor = _processor(video_loader=VideoLoader())
+    await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"video_url": [{"Url": video_uri}]},
+            "media_io_kwargs": {"video": video_io_kwargs},
+        },
+        "real-nvdec-video-request",
+        None,
+        DisaggregationMode.AGGREGATED,
+    )
+
+    assert requested == {"num_frames": expected_num_frames, "fps": expected_fps}
 
 
 @pytest.mark.asyncio
@@ -111,10 +281,11 @@ async def test_merges_encoder_images_with_local_video_and_decoded_fallback():
 
     result = await processor.extract_multimodal_data(
         {
+            "image_cache_scope": "session-42",
             "multi_modal_data": {
                 "image_url": [{"Url": "https://example.com/image.png"}],
                 "video_url": [{"Url": "https://example.com/video.mp4"}],
-            }
+            },
         },
         "request-encoder",
         None,
@@ -133,11 +304,20 @@ async def test_merges_encoder_images_with_local_video_and_decoded_fallback():
 
     assert result == {"image": decoded_image}
     processor.embedding_loader.load_multimodal_embeddings.assert_awaited_once()
+    assert (
+        processor.embedding_loader.load_multimodal_embeddings.call_args.kwargs[
+            "cache_scope"
+        ]
+        == "session-42"
+    )
 
 
 @pytest.mark.asyncio
 async def test_extracts_uuid_only_media_as_aligned_none_slots():
     processor = _processor()
+    processor.embedding_loader = SimpleNamespace(
+        load_multimodal_embeddings=AsyncMock(return_value={})
+    )
     image = Image.new("RGB", (1, 1))
     image_items = [
         {"Url": "https://example.com/image.png"},
@@ -153,8 +333,9 @@ async def test_extracts_uuid_only_media_as_aligned_none_slots():
 
     assert result == {"image": [image, None]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True
     )
+    processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -171,7 +352,7 @@ async def test_extracts_uuid_only_unified_vision_chunk_as_bare_none_slot():
 
     assert result == {"vision_chunk": [None]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True
     )
 
 
@@ -231,7 +412,7 @@ async def test_rejects_malformed_encoder_image_item_before_dispatch():
 async def test_rejects_media_when_multimodal_is_disabled():
     processor = _processor(enabled=False)
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -243,7 +424,7 @@ async def test_rejects_media_when_multimodal_is_disabled():
             DisaggregationMode.AGGREGATED,
         )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -255,7 +436,7 @@ async def test_rejects_media_when_multimodal_is_disabled():
             DisaggregationMode.AGGREGATED,
         )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -275,7 +456,7 @@ async def test_decode_cannot_hide_disabled_media_with_expanded_tokens():
         enabled=False,
     )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -367,6 +548,74 @@ async def test_audio_in_video_preserves_order_and_merges_standalone_audio():
         "video": [video_a, video_b],
         "audio": [standalone_audio, audio_a, audio_b],
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("standalone_audio_uuid", "video_uuids", "expected_uuids"),
+    [
+        (
+            "audio-key",
+            ["video-key", None],
+            {
+                "video": ["video-key", None],
+                "audio": ["audio-key", "video-key", None],
+            },
+        ),
+        (
+            None,
+            ["video-key", None],
+            {
+                "video": ["video-key", None],
+                "audio": [None, "video-key", None],
+            },
+        ),
+        (
+            "audio-key",
+            None,
+            {"audio": ["audio-key", None, None]},
+        ),
+    ],
+    ids=["all-modalities", "audio-without-uuid", "video-modality-omitted"],
+)
+async def test_audio_in_video_aligns_derived_audio_uuids(
+    standalone_audio_uuid, video_uuids, expected_uuids
+):
+    processor = _processor()
+    video_a, video_b = object(), object()
+    standalone_audio, audio_a, audio_b = object(), object(), object()
+    processor.video_loader.load_video_batch.return_value = [video_a, video_b]
+    processor.audio_loader.load_audio_batch.return_value = [standalone_audio]
+    processor.audio_loader.load_audio.side_effect = [audio_a, audio_b]
+
+    raw_uuids = {"audio_url": [standalone_audio_uuid]}
+    if video_uuids is not None:
+        raw_uuids["video_url"] = video_uuids
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {
+                "audio_url": [{"Url": "https://example.com/audio.wav"}],
+                "video_url": [
+                    {"Url": "https://example.com/a.mp4"},
+                    {"Url": "https://example.com/b.mp4"},
+                ],
+            },
+            "multi_modal_uuids": raw_uuids,
+            "mm_processor_kwargs": {"use_audio_in_video": True},
+        },
+        "request-audio-uuid-alignment",
+        None,
+        DisaggregationMode.AGGREGATED,
+    )
+
+    assert prepared.prompt["multi_modal_data"] == {
+        "video": [video_a, video_b],
+        "audio": [standalone_audio, audio_a, audio_b],
+    }
+    assert prepared.prompt["multi_modal_uuids"] == expected_uuids
 
 
 @pytest.mark.asyncio
@@ -491,7 +740,9 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
 
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
-    parse_mm_data.assert_called_once_with({"vision_chunk": []}, validate=False)
+    parse_mm_data.assert_called_once()
+    assert parse_mm_data.call_args.args[0] in ({}, {"vision_chunk": []})
+    assert parse_mm_data.call_args.kwargs == {"validate": False}
 
     cache.is_cached.return_value = [False]
     parse_mm_data.reset_mock()
@@ -508,30 +759,35 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
     parse_mm_data.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "unsupported_uuids",
-    [
-        {"video_url": ["video-key"]},
-        {"audio_url": "audio-key"},
-    ],
-)
-def test_build_tokens_prompt_rejects_user_audio_video_uuids(
-    unsupported_uuids: dict[str, object],
-) -> None:
+def test_build_tokens_prompt_forwards_user_uuids_for_each_modality() -> None:
     processor = _processor(unified_vision_chunk=True)
+    mm_data = {
+        "vision_chunk": [object(), object()],
+        "video": [object()],
+        "audio": [object(), object(), object()],
+    }
 
-    with pytest.raises(ValueError, match="must use the 'image_url' modality key"):
-        processor.build_tokens_prompt(
-            {
-                "token_ids": [1, 2, 3],
-                "multi_modal_uuids": {
-                    "image_url": ["image-key"],
-                    **unsupported_uuids,
-                },
+    prompt = processor.build_tokens_prompt(
+        {
+            "token_ids": [1, 2, 3],
+            "multi_modal_uuids": {
+                "image_url": ["image-key", None],
+                "video_url": ["video-key"],
+                "audio_url": [None, None, None],
             },
-            {"vision_chunk": [None], "video": [None], "audio": [None]},
-            None,
-        )
+        },
+        mm_data,
+        None,
+    )
+
+    assert prompt["multi_modal_uuids"] == {
+        "vision_chunk": ["image-key", None],
+        "video": ["video-key"],
+    }
+
+
+def test_build_user_mm_uuids_returns_none_for_all_null() -> None:
+    assert mod._build_user_mm_uuids({"image_url": [None, None]}, False) is None
 
 
 @pytest.mark.parametrize(
@@ -539,7 +795,6 @@ def test_build_tokens_prompt_rejects_user_audio_video_uuids(
     [
         ("image-key", "must be an object"),
         ({"image_url": "image-key"}, "must be a list"),
-        ({"image": ["image-key"]}, "must use the 'image_url' modality key"),
         ({"image_url": [""]}, "non-empty strings or null"),
         ({"image_url": [123]}, "non-empty strings or null"),
     ],
@@ -846,14 +1101,67 @@ async def test_qwen_decode_reconstructs_placeholder_embeddings(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_non_qwen_decode_uses_expanded_prompt_tokens():
-    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+async def test_qwen_decode_merges_placeholder_image_with_reloaded_video(monkeypatch):
+    processor = _processor()
+    image = {"placeholder": object()}
+    video = object()
+    processor.video_loader.load_video_batch.return_value = [video]
+    monkeypatch.setattr(
+        mod,
+        "construct_qwen_decode_mm_data",
+        lambda grid, shape, request_id: {"image": image},
+    )
+    video_items = [{"Url": "https://example.com/video.mp4"}]
 
     prepared = await _prepare_prompt(
         processor,
         {
             "token_ids": [1, 2],
-            "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
+            "multi_modal_data": {
+                "image_url": [{"Url": "https://example.com/image.png"}],
+                "video_url": video_items,
+            },
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {
+                        "image_grid_thw": [[1, 2, 2]],
+                        "embeddings_shape": [1, 16],
+                    }
+                }
+            },
+        },
+        "request-mixed-decode",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["multi_modal_data"] == {
+        "image": image,
+        "video": video,
+    }
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.video_loader.load_video_batch.assert_awaited_once_with(video_items, {})
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_keeps_original_tokens_when_image_loads():
+    """Loaded image media keeps the placeholder token ids.
+
+    Substituting expanded_prompt_token_ids as well makes vLLM expand the
+    image placeholder a second time. Decode's prompt then grows by N-1 and
+    NIXL asserts num_decode_blocks <= len(prefill_group).
+    """
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    image = Image.new("RGB", (2, 2), color=(1, 2, 3))
+    processor.image_loader.load_image_batch.return_value = [image]
+    image_items = [{"Url": "https://image"}]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
             "prefill_result": {
                 "disaggregated_params": {
                     "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
@@ -865,9 +1173,230 @@ async def test_non_qwen_decode_uses_expanded_prompt_tokens():
         DisaggregationMode.DECODE,
     )
 
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    assert prepared.prompt.get("type") != "multimodal"
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_uses_expanded_tokens_without_image():
+    """No image to expand: still use prefill's expanded token ids."""
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-expanded-only",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
     assert prepared.prompt["prompt_token_ids"] == [1, 99, 99, 2]
-    assert prepared.prompt["multi_modal_data"] is None
+    assert prepared.prompt.get("multi_modal_data") is None
     processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+def _engine_cache_identity(prompt) -> tuple:
+    """What vLLM folds into the KV block hash for this prompt's media.
+
+    vLLM reads multi_modal_uuids only when multi_modal_data is present
+    (renderers/base.py::_process_tokens).
+    """
+    if prompt.get("multi_modal_data"):
+        return ("multi_modal_uuids", repr(prompt.get("multi_modal_uuids")))
+    return ("tokens_only", None)
+
+
+async def _non_qwen_decode_prompt(
+    *,
+    mm_hash: str,
+    image=None,
+    image_item=None,
+    processor=None,
+):
+    """A non-Qwen decode request: same text, one image, forwarded hash."""
+    if processor is None:
+        processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    if image is None:
+        image = Image.new("RGB", (4, 4), color=(ord(mm_hash[0]) % 256, 0, 0))
+    if image_item is None:
+        image_item = {"Url": f"https://example.com/{mm_hash}.png"}
+    processor.image_loader.load_image_batch.return_value = [image]
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": [image_item]},
+            "extra_args": {
+                "mm_hashes": [mm_hash],
+                "expanded_token_ids": [1, 99, 99, 2],
+            },
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        f"request-{mm_hash}",
+        None,
+        DisaggregationMode.DECODE,
+    )
+    return prepared, processor
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_keeps_distinct_images_distinct():
+    """Distinct images yield distinct engine identity via multi_modal_data + hashes."""
+    image_a = Image.new("RGB", (8, 8), color=(10, 20, 30))
+    image_b = Image.new("RGB", (8, 8), color=(200, 100, 50))
+    a, proc_a = await _non_qwen_decode_prompt(
+        mm_hash="a1b2c3d4e5f60718",
+        image=image_a,
+    )
+    b, proc_b = await _non_qwen_decode_prompt(
+        mm_hash="f0e1d2c3b4a59687",
+        image=image_b,
+    )
+
+    assert a.prompt.get("type") != "multimodal"
+    assert b.prompt.get("type") != "multimodal"
+    assert "cache_salt" not in a.prompt
+    assert "cache_salt" not in b.prompt
+    assert a.prompt["multi_modal_data"] == {"image": image_a}
+    assert b.prompt["multi_modal_data"] == {"image": image_b}
+    assert a.prompt["multi_modal_uuids"] == {"image": ["a1b2c3d4e5f60718" + "0" * 48]}
+    assert b.prompt["multi_modal_uuids"] == {"image": ["f0e1d2c3b4a59687" + "0" * 48]}
+    assert _engine_cache_identity(a.prompt) != _engine_cache_identity(b.prompt), (
+        "two different images give the decode engine the same cache identity "
+        f"({_engine_cache_identity(a.prompt)}); with identical token ids their KV "
+        "block hashes collide and decode can serve one request's image KV to the other"
+    )
+    proc_a.image_loader.load_image_batch.assert_awaited()
+    proc_b.image_loader.load_image_batch.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_awaits_image_loader_for_url():
+    """Non-Qwen decode loads the original http(s) Url via ImageLoader, like prefill."""
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    image = Image.new("RGB", (3, 3), color=(7, 8, 9))
+    processor.image_loader.load_image_batch.return_value = [image]
+    image_items = [{"Url": "https://example.com/a1b2c3d4e5f60718.png"}]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {
+                "mm_hashes": ["a1b2c3d4e5f60718"],
+                "expanded_token_ids": [1, 99, 99, 2],
+            },
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-a1b2c3d4e5f60718",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+    called_items = processor.image_loader.load_image_batch.call_args[0][0]
+    assert called_items[0]["Url"] == "https://example.com/a1b2c3d4e5f60718.png"
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_loads_data_url_via_image_loader():
+    """Client-supplied data: URLs are handed to ImageLoader unchanged."""
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    image = Image.new("RGB", (2, 2), color=(11, 22, 33))
+    processor.image_loader.load_image_batch.return_value = [image]
+    data_url = "data:image/png;base64,iVBORw0KGgo="
+    image_items = [{"Url": data_url}]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-data-url",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+    called_items = processor.image_loader.load_image_batch.call_args[0][0]
+    assert called_items[0]["Url"] == data_url
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_loads_decoded_nixl_when_frontend_decoding():
+    """Decoded/NIXL slots load via ImageLoader when enable_frontend_decoding is on."""
+    processor = _processor(
+        model="llava-hf/llava-1.5-7b-hf",
+        frontend_decoding=True,
+    )
+    image = Image.new("RGB", (2, 2), color=(40, 50, 60))
+    processor.image_loader.load_image_batch.return_value = [image]
+    image_items = [
+        {"Decoded": {"shape": [2, 2, 3], "content_hash": "0123456789abcdef"}}
+    ]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-decoded-nixl",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
 
 
 @pytest.mark.asyncio
@@ -900,7 +1429,7 @@ async def test_receive_transferred_kwargs_injects_vllm_cache(monkeypatch):
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -933,7 +1462,7 @@ async def test_receive_transferred_kwargs_marks_vllm_feature_hash(monkeypatch):
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -969,7 +1498,7 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
     processor = _processor(unified_vision_chunk=True)
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1009,7 +1538,7 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
 async def test_receive_transferred_kwargs_falls_back_to_metadata_hashes(monkeypatch):
     processor = _processor()
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1034,7 +1563,7 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1052,6 +1581,164 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
 
     assert result is None
     input_processor.inject_into_mm_cache.assert_not_called()
+
+
+def _real_kwargs_item(key: str = "pixel_values"):
+    """Build a real vLLM ``MultiModalKwargsItem`` for the transfer tests."""
+    import torch
+    from vllm.multimodal.inputs import (
+        MultiModalBatchedField,
+        MultiModalFieldElem,
+        MultiModalKwargsItem,
+    )
+
+    elem = MultiModalFieldElem(
+        data=torch.arange(8, dtype=torch.float32),
+        field=MultiModalBatchedField(),
+    )
+    return MultiModalKwargsItem({key: elem})
+
+
+@pytest.mark.asyncio
+async def test_receive_transferred_kwargs_rejects_pickle_payload():
+    """A pickle-format payload must fall back, not deserialize.
+
+    The transfer uses vLLM's typed msgpack decoder, so a payload in the old
+    pickle wire format (or any foreign bytes) fails the decode and the receive
+    path returns ``None``, which is its fallback. The pre-fix worker ran
+    pickle.loads on this payload and accepted the item, so this assertion fails
+    there.
+    """
+    import pickle
+
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    payload = pickle.dumps(_real_kwargs_item())
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
+    )
+
+    result = await processor._receive_mm_kwargs(
+        {
+            "mm_hashes": ["0123456789abcdef"],
+            "mm_placeholders": [[1, 2]],
+            "expanded_token_ids": [10, 11, 12],
+        },
+        "shm",
+        receiver,
+        SimpleNamespace(modality="image", mm_hashes=[]),
+    )
+
+    assert result is None
+
+
+_LOG_SENTINEL = "zzsentinelzz"
+
+
+def _undecodable_payload(case: str) -> bytes:
+    """Return a payload that fails to decode and carries the log sentinel."""
+    import pickle
+    import struct
+
+    from msgspec import msgpack
+    from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+    from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
+
+    sentinel = _LOG_SENTINEL.encode()
+    if case == "pickle_format":
+        # The wire format of a frontend on the previous release.
+        return pickle.dumps(_real_kwargs_item(key=_LOG_SENTINEL))
+    if case == "short_frame":
+        # The declared buffer length runs past the end of the frame.
+        return struct.pack("<I", 1) + struct.pack("<Q", 999) + sentinel
+    if case == "wrong_structure":
+        # A well-formed frame whose message is not a kwargs item.
+        return _pack_buffers([msgpack.encode(_LOG_SENTINEL)])
+    # A frame that carries the serializer's pickle extension code.
+    return _pack_buffers([msgpack.encode(msgpack.Ext(CUSTOM_TYPE_PICKLE, sentinel))])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["pickle_format", "short_frame", "wrong_structure", "pickle_ext_code"]
+)
+async def test_receive_transfer_failure_log_omits_payload_bytes(case, caplog):
+    """A payload that fails to decode falls back without logging its bytes."""
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    payload = _undecodable_payload(case)
+    # The sentinel is in the payload, so an echo of the bytes would show it.
+    assert _LOG_SENTINEL.encode() in payload
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
+    )
+
+    with caplog.at_level("DEBUG"):
+        result = await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["0123456789abcdef"],
+                "mm_placeholders": [[1, 2]],
+                "expanded_token_ids": [10, 11, 12],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
+
+    assert result is None
+    # Positive control: the failure itself was logged and captured.
+    assert "falling back" in caplog.text
+    assert _LOG_SENTINEL not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_receive_refuses_pickle_extension_code_with_insecure_flag(
+    monkeypatch, caplog
+):
+    """With VLLM_ALLOW_INSECURE_SERIALIZATION set, the worker still refuses.
+
+    The frame carries the pickle extension code with dummy bytes, not a pickle
+    object. vLLM's own decoder would try to unpickle them when the variable is
+    set. The worker must refuse the code instead and take its fallback path.
+    """
+    import vllm.envs as envs
+    from msgspec import msgpack
+    from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+    from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
+
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    assert envs.VLLM_ALLOW_INSECURE_SERIALIZATION is True
+
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    ext = msgpack.Ext(CUSTOM_TYPE_PICKLE, b"\x00 not a pickle")
+    receiver = SimpleNamespace(
+        receive=AsyncMock(
+            return_value={
+                "__pickled_kwargs_item__": [_pack_buffers([msgpack.encode(ext)])]
+            }
+        )
+    )
+
+    with caplog.at_level("DEBUG"):
+        result = await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["0123456789abcdef"],
+                "mm_placeholders": [[1, 2]],
+                "expanded_token_ids": [10, 11, 12],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
+
+    assert result is None
+    assert "falling back" in caplog.text
+    # The logged cause is the refusal, not an attempt to unpickle the data.
+    assert "Extension type code 1 is not supported" in caplog.text
 
 
 def test_build_prefill_handoff_dispatches_by_model_and_forwards_processor_kwargs(
@@ -1094,6 +1781,7 @@ def test_qwen_handoff_applies_per_request_pixel_overrides(monkeypatch):
         min_pixels=65536,
         max_pixels=16777216,
         vision_hidden_dim=2048,
+        decode_embedding_dim=2048,
     )
     captured = {}
 
@@ -1139,12 +1827,13 @@ def test_qwen_handoff_computes_grid_for_pil_images():
             min_pixels=65536,
             max_pixels=16777216,
             vision_hidden_dim=2048,
+            decode_embedding_dim=8192,
         ),
     )
 
     assert result == {
         "image_grid_thw": [[1, 30, 40]],
-        "embeddings_shape": [300, 2048],
+        "embeddings_shape": [300, 8192],
     }
 
 
@@ -1365,3 +2054,44 @@ def test_k3_long_prompt_splices_only_rare_pads():
     assert result[10 : 10 + len(_K3_NATIVE_IDS)] == _K3_NATIVE_IDS
     assert result[-(len(_K3_NATIVE_IDS) + 9) : -9] == _K3_NATIVE_IDS
     assert len(result) == len(tokens) + 2 * (len(_K3_NATIVE_IDS) - 1)
+
+
+class TestLoadQwenGridParams:
+    """Tests for embedding dimensions loaded from Qwen vision configs."""
+
+    @pytest.mark.parametrize(
+        ("deepstack_config", "expected_decode_embedding_dim"),
+        [
+            pytest.param(
+                {"deepstack_visual_indexes": [8, 16, 24]}, 8192, id="deepstack"
+            ),
+            pytest.param({"deepstack_visual_indexes": []}, 2048, id="empty"),
+            pytest.param({"deepstack_visual_indexes": None}, 2048, id="none"),
+            pytest.param({}, 2048, id="missing"),
+        ],
+    )
+    def test_decode_embedding_dim(
+        self, deepstack_config, expected_decode_embedding_dim
+    ):
+        processor = SimpleNamespace(
+            patch_size=16, merge_size=2, min_pixels=65536, max_pixels=16777216
+        )
+        vision_config = SimpleNamespace(
+            hidden_size=1024, out_hidden_size=2048, **deepstack_config
+        )
+        with (
+            patch.object(
+                qwen_mod.AutoImageProcessor, "from_pretrained", return_value=processor
+            ),
+            patch.object(
+                qwen_mod.AutoConfig,
+                "from_pretrained",
+                return_value=SimpleNamespace(vision_config=vision_config),
+            ),
+        ):
+            params = qwen_mod.load_qwen_grid_params("Qwen/Qwen3-VL-2B-Instruct")
+
+        assert params is not None
+        assert params.vision_hidden_dim == 2048
+        # DeepStack concatenates intermediate outputs with the final vision output.
+        assert params.decode_embedding_dim == expected_decode_embedding_dim

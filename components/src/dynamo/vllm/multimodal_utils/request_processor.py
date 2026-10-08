@@ -12,7 +12,6 @@ multimodal UUIDs, and the model-specific prefill/decode handoff.
 from __future__ import annotations
 
 import logging
-import pickle
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -27,6 +26,7 @@ from dynamo.common.multimodal.image_loader import (
     URL_VARIANT_KEY,
     UUID_ONLY_VARIANT_KEY,
     ImageLoader,
+    image_cache_scope_from_request,
 )
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlReceiver,
@@ -34,9 +34,11 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsShmReceiver,
     MmKwargsShmTransferMetadata,
     MmKwargsTransferMetadata,
+    decode_mm_kwargs_item,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.llm.exceptions import InvalidArgument
 
 from .hash_utils import compute_mm_uuids_from_images
 from .model import ModelFamily, construct_qwen_decode_mm_data, resolve_model_family
@@ -118,47 +120,82 @@ def _build_forwarded_mm_uuids(
     return None
 
 
+def _video_media_io_kwargs(request: dict) -> dict:
+    """Request-level video decode options, shape-checked the way vLLM does.
+
+    vLLM types this field as `dict[str, dict[str, Any]] | None` on its own
+    OpenAI schemas, so pydantic rejects a malformed value before any handler
+    runs. Dynamo's frontend forwards the field verbatim by design, so the
+    same check has to land here -- otherwise a non-object reaches
+    `VideoMediaIO(**kwargs)` and surfaces as a server error instead of a
+    request error.
+    """
+    media_io_kwargs = request.get("media_io_kwargs")
+    if media_io_kwargs is None:
+        return {}
+    if not isinstance(media_io_kwargs, dict):
+        raise ValueError("media_io_kwargs must be an object")
+
+    video_kwargs = media_io_kwargs.get("video")
+    if video_kwargs is None:
+        return {}
+    if not isinstance(video_kwargs, dict):
+        raise ValueError("media_io_kwargs['video'] must be an object")
+    return video_kwargs
+
+
 def _build_user_mm_uuids(
     raw_uuids: Any,
     use_unified_vision_chunk: bool,
+    use_audio_in_video: bool = False,
+    explicit_audio_count: int | None = None,
+    video_count: int | None = None,
 ) -> Optional[dict[str, list[str | None]]]:
-    """Normalize vLLM image cache identities without changing opaque values."""
+    """Map Dynamo media keys to vLLM cache identities."""
+    if use_audio_in_video and (explicit_audio_count is None or video_count is None):
+        raise ValueError(
+            "explicit_audio_count and video_count are required when "
+            "use_audio_in_video is enabled"
+        )
     if raw_uuids is None:
         return None
     if not isinstance(raw_uuids, dict):
         raise ValueError("multi_modal_uuids must be an object")
 
+    mm_uuids: dict[str, list[str | None]] = {}
     for modality, values in raw_uuids.items():
-        if modality == IMAGE_URL_KEY:
-            continue
-        has_uuid = (
-            any(value is not None for value in values)
-            if isinstance(values, list)
-            else values is not None
-        )
-        if has_uuid:
-            raise ValueError(
-                "multimodal cache UUIDs must use the 'image_url' modality key"
-            )
+        if not isinstance(values, list):
+            raise ValueError(f"multi_modal_uuids[{modality!r}] must be a list")
+        for index, value in enumerate(values):
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(
+                    f"multi_modal_uuids[{modality!r}] entries must be non-empty "
+                    f"strings or null; got invalid entry at index {index}"
+                )
 
-    if IMAGE_URL_KEY not in raw_uuids:
-        return None
-    image_uuids = raw_uuids[IMAGE_URL_KEY]
-    if not isinstance(image_uuids, list):
-        raise ValueError("multi_modal_uuids['image_url'] must be a list")
-    for index, value in enumerate(image_uuids):
-        if value is not None and (not isinstance(value, str) or not value):
-            raise ValueError(
-                "multi_modal_uuids['image_url'] entries must be non-empty "
-                f"strings or null; got invalid entry at index {index}"
-            )
-    if not any(value is not None for value in image_uuids):
-        return None
-    backend_modality = _normalize_forwarded_mm_modality(
-        "image",
-        use_unified_vision_chunk,
-    )
-    return {backend_modality: list(image_uuids)}
+        backend_modality = str(modality)
+        if backend_modality.endswith("_url"):
+            backend_modality = backend_modality.removesuffix("_url")
+        backend_modality = _normalize_forwarded_mm_modality(
+            backend_modality,
+            use_unified_vision_chunk,
+        )
+        mm_uuids.setdefault(backend_modality, []).extend(values)
+
+    if use_audio_in_video:
+        explicit_audio_count = explicit_audio_count or 0
+        video_count = video_count or 0
+        if "video" in mm_uuids or "audio" in mm_uuids:
+            video_uuids = mm_uuids.get("video", [None] * video_count)
+            audio_uuids = mm_uuids.get("audio", [None] * explicit_audio_count)
+            mm_uuids["audio"] = audio_uuids + video_uuids
+
+    mm_uuids = {
+        modality: uuids
+        for modality, uuids in mm_uuids.items()
+        if any(uuid is not None for uuid in uuids)
+    }
+    return mm_uuids or None
 
 
 def _get_modality_extra_values(
@@ -426,8 +463,8 @@ class VllmMultimodalRequestProcessor:
         return expanded
 
     @staticmethod
-    def _multimodal_disabled_error() -> ValueError:
-        return ValueError(
+    def _multimodal_disabled_error() -> InvalidArgument:
+        return InvalidArgument(
             "Received multimodal data but multimodal processing is not enabled. "
             "Use --enable-multimodal flag to enable multimodal processing."
         )
@@ -517,6 +554,7 @@ class VllmMultimodalRequestProcessor:
                             request_id,
                             model=self.model,
                             context=context,
+                            cache_scope=image_cache_scope_from_request(request),
                         )
                     )
 
@@ -525,7 +563,9 @@ class VllmMultimodalRequestProcessor:
             if image_key not in vllm_mm_data and image_items:
                 with _nvtx.annotate("mm_backend:image_download", color="green"):
                     images = await self.image_loader.load_image_batch(
-                        image_items, preserve_uuid_slots=True
+                        image_items,
+                        cache_scope=image_cache_scope_from_request(request),
+                        preserve_uuid_slots=True,
                     )
                 if images:
                     if self.use_unified_vision_chunk:
@@ -553,7 +593,10 @@ class VllmMultimodalRequestProcessor:
 
             video_items = mm_map.get(VIDEO_URL_KEY, [])
             if video_items:
-                videos = await self.video_loader.load_video_batch(video_items)
+                video_io_kwargs = _video_media_io_kwargs(request)
+                videos = await self.video_loader.load_video_batch(
+                    video_items, video_io_kwargs
+                )
                 if videos:
                     vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
 
@@ -675,10 +718,10 @@ class VllmMultimodalRequestProcessor:
 
             kwargs_items = []
             for payload in pickled_items:
-                # The sender is Dynamo's internal frontend transfer service,
-                # which deliberately serializes vLLM's Python-only kwargs
-                # objects. External request payloads never supply these bytes.
-                item = pickle.loads(payload)
+                # Decode with the typed msgpack decoder. It yields only
+                # MultiModalKwargsItem values and refuses the pickle extension
+                # codes, whatever VLLM_ALLOW_INSECURE_SERIALIZATION says.
+                item = decode_mm_kwargs_item(payload)
                 if not isinstance(item, MultiModalKwargsItem):
                     logger.warning(
                         "%s transfer produced %s instead of MultiModalKwargsItem",
@@ -745,9 +788,16 @@ class VllmMultimodalRequestProcessor:
     ) -> TokensPrompt:
         """Create a TokensPrompt with stable multimodal UUIDs."""
         extra_args = request.get("extra_args") or {}
+        raw_mm_data = request.get("multi_modal_data") or {}
         mm_uuids = _build_user_mm_uuids(
             request.get("multi_modal_uuids"),
             self.use_unified_vision_chunk,
+            use_audio_in_video=bool(
+                mm_processor_kwargs
+                and mm_processor_kwargs.get("use_audio_in_video", False)
+            ),
+            explicit_audio_count=len(raw_mm_data.get(AUDIO_URL_KEY, [])),
+            video_count=len(raw_mm_data.get(VIDEO_URL_KEY, [])),
         )
         if mm_uuids is None:
             mm_uuids = _build_forwarded_mm_uuids(
@@ -815,23 +865,52 @@ class VllmMultimodalRequestProcessor:
                         "embedding metadata (image_grid_thw) for Qwen-VL decode"
                     )
                     raise MissingMultimodalHandoffError(message)
-            elif embedding_params and embedding_params.get("expanded_prompt_token_ids"):
-                request_for_prompt["token_ids"] = embedding_params[
-                    "expanded_prompt_token_ids"
-                ]
-                has_mm_data = False
-
-            # Preserve the fallback: video/audio media is loaded again
-            # on decode because the handoff currently carries image metadata only.
-            if multi_modal_data is None and has_mm_data:
+            # Reload media on decode. Qwen reconstructs image placeholders from
+            # the prefill handoff, so only video/audio are loaded again and
+            # merged. Non-Qwen keeps multi_modal_data and loads images (and
+            # other modalities) via ImageLoader so forwarded uuids/hashes are
+            # honored. Do not also substitute expanded_prompt_token_ids when
+            # an image is loaded: vLLM expands the placeholder again and the
+            # decode prompt grows by N-1 tokens, which trips NIXL
+            # num_decode_blocks <= len(prefill_group) (#15343).
+            if has_mm_data:
                 mm_map = request["multi_modal_data"]
-                if mm_map.get(VIDEO_URL_KEY) or mm_map.get(AUDIO_URL_KEY):
-                    multi_modal_data = await self.extract_multimodal_data(
-                        request,
+                if self._model_family is ModelFamily.QWEN_VL:
+                    local_mm_map = {
+                        key: mm_map[key]
+                        for key in (VIDEO_URL_KEY, AUDIO_URL_KEY)
+                        if mm_map.get(key)
+                    }
+                else:
+                    local_mm_map = mm_map
+                if local_mm_map:
+                    local_request = dict(request)
+                    local_request["multi_modal_data"] = local_mm_map
+                    local_mm_data = await self.extract_multimodal_data(
+                        local_request,
                         request_id,
                         context,
                         mm_processor_kwargs,
                     )
+                    if local_mm_data:
+                        if multi_modal_data is None:
+                            multi_modal_data = local_mm_data
+                        else:
+                            multi_modal_data.update(local_mm_data)
+            # Expanded prefill tokens only when decode loaded no media.
+            # With media present, the original placeholder ids are what
+            # vLLM should expand, once, matching prefill's prompt length.
+            # vision_chunk counts too, not only the image key.
+            media_loaded = bool(multi_modal_data)
+            if (
+                self._model_family is not ModelFamily.QWEN_VL
+                and not media_loaded
+                and embedding_params
+                and embedding_params.get("expanded_prompt_token_ids")
+            ):
+                request_for_prompt["token_ids"] = embedding_params[
+                    "expanded_prompt_token_ids"
+                ]
         elif mode == DisaggregationMode.AGGREGATED:
             pre_rendered = await self.try_receive_mm_kwargs(request)
             if pre_rendered is None:

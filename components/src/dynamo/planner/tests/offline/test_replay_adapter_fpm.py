@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Optional-dependency preflight must run before replay CLI imports.
 # ruff: noqa: E402
+# Optional-dependency preflight must run before replay CLI imports.
 
 """Regression tests for planner replay FPM handling."""
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -14,7 +16,7 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import (
     EngineCapabilities,
@@ -28,7 +30,8 @@ from dynamo.planner.offline.replay_adapter import (
     _update_fpm_cache,
 )
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
-from dynamo.replay.main import _engine_caps
+from dynamo.replay import planner as replay_planner
+from dynamo.replay.planner import _engine_caps
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -54,6 +57,21 @@ def _agg_config_sla() -> PlannerConfig:
         optimization_target="sla",
         served_model_name="test",
     )
+
+
+def test_bootstrap_metadata_rejects_a_different_worker_role():
+    args = normalize_mocker_config(
+        {"engine": {"worker_type": "aggregated", "num_gpu_blocks": 1024}}
+    )
+    metadata = {
+        "model": "Qwen/Qwen3-32B",
+        "system": "h200_sxm",
+        "backend": "vllm",
+        "worker_type": "decode",
+        "estimation_mode": "op_level",
+    }
+    with pytest.raises(ValueError, match="worker_type does not match replay role"):
+        replay_planner._ais_session_kwargs(metadata, args)
 
 
 def _snap(worker_id: str, wall_time: float, dp_rank: int = 0) -> dict:
@@ -346,19 +364,53 @@ def test_build_tick_input_keeps_only_latest_fpm_until_fpm_tick():
     assert second.fpm_observations.decode[("0", 1)].wall_time == 2.0
 
 
-def test_replay_engine_caps_exposes_aic_nextn():
-    caps = _engine_caps(MockEngineArgs(aic_nextn=2))
+def test_replay_engine_caps_exposes_canonical_nextn():
+    caps = _engine_caps(
+        normalize_mocker_config(
+            {
+                "engine": {
+                    "num_gpu_blocks": 128,
+                    "timing_model": {
+                        "type": "external",
+                        "provider": "ais",
+                        "config": {
+                            "model": "example/model",
+                            "system": "h200_sxm",
+                            "backend": "vllm",
+                            "worker_type": "aggregated",
+                            "nextn": 2,
+                        },
+                    },
+                }
+            }
+        )
+    )
 
     assert caps.speculative_nextn == 2
 
 
 def test_replay_engine_caps_aggregates_attention_dp_capacity_and_gpu_width():
     caps = _engine_caps(
-        MockEngineArgs(
-            num_gpu_blocks=100,
-            block_size=16,
-            dp_size=4,
-            aic_tp_size=2,
+        normalize_mocker_config(
+            {
+                "dp_size": 4,
+                "engine": {
+                    "num_gpu_blocks": 100,
+                    "block_size": 16,
+                    "timing_model": {
+                        "type": "external",
+                        "provider": "ais",
+                        "config": {
+                            "model": "example/model",
+                            "system": "h200_sxm",
+                            "backend": "vllm",
+                            "worker_type": "aggregated",
+                            "tp": 2,
+                            "attention_dp": 4,
+                        },
+                    },
+                },
+            }
         )
     )
 
@@ -367,10 +419,181 @@ def test_replay_engine_caps_aggregates_attention_dp_capacity_and_gpu_width():
 
 
 def test_replay_engine_caps_keeps_single_rank_defaults():
-    caps = _engine_caps(MockEngineArgs(num_gpu_blocks=100, block_size=16))
+    caps = _engine_caps(
+        normalize_mocker_config({"engine": {"num_gpu_blocks": 100, "block_size": 16}})
+    )
 
     assert caps.max_kv_tokens == 100 * 16
     assert caps.num_gpu == 1
+
+
+@pytest.mark.parametrize(
+    "identity_source", ["legacy_metadata", "canonical_metadata", "engine_config"]
+)
+def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
+    monkeypatch,
+    tmp_path,
+    identity_source,
+):
+    class _Session:
+        def __init__(self, tp_size):
+            self.tp_size = tp_size
+
+        def predict_prefill(self, batch_size, isl, prefix):
+            del batch_size, isl, prefix
+            return float(self.tp_size)
+
+        def predict_decode(self, batch_size, isl, osl):
+            del batch_size, isl, osl
+            return float(self.tp_size)
+
+    class _Adapter:
+        def __init__(self):
+            self.bootstrap_metadata = None
+            self.prefill_fpms = None
+            self.decode_fpms = None
+
+        def set_bootstrap_metadata(self, metadata):
+            self.bootstrap_metadata = metadata
+
+        def _is_easy_mode(self):
+            return False
+
+        def install_benchmark_fpms(
+            self, *, agg_fpms=None, prefill_fpms=None, decode_fpms=None
+        ):
+            assert agg_fpms is None
+            self.prefill_fpms = prefill_fpms
+            self.decode_fpms = decode_fpms
+
+    adapter = _Adapter()
+    session_requests = []
+
+    def create_session(**kwargs):
+        session_requests.append(kwargs)
+        return _Session(kwargs["config"]["tp"])
+
+    monkeypatch.setattr(replay_planner, "create_session", create_session)
+    monkeypatch.setattr(
+        "dynamo.planner.offline.replay_adapter.create_replay_planner_adapter",
+        lambda **kwargs: adapter,
+    )
+    prefill_args = normalize_mocker_config(
+        {
+            "engine": {
+                "worker_type": "prefill",
+                "max_num_batched_tokens": 128,
+                "max_num_seqs": 1,
+                "num_gpu_blocks": 64,
+                "block_size": 16,
+            }
+        }
+    )
+    decode_args = normalize_mocker_config(
+        {
+            "engine": {
+                "worker_type": "decode",
+                "max_num_batched_tokens": 128,
+                "max_num_seqs": 2,
+                "num_gpu_blocks": 64,
+                "block_size": 16,
+            }
+        }
+    )
+    metadata = {
+        "prefill": {
+            "provider": "aic",
+            "config": {
+                "backend": "vllm",
+                "system": "h200_sxm",
+                "model_path": "example/model",
+                "tp_size": 2,
+                "attention_dp_size": 1,
+            },
+        },
+        "decode": {
+            "provider": "aic",
+            "config": {
+                "backend": "vllm",
+                "system": "h200_sxm",
+                "model_path": "example/model",
+                "tp_size": 1,
+                "attention_dp_size": 1,
+            },
+        },
+    }
+
+    if identity_source != "legacy_metadata":
+        for role, raw in metadata.items():
+            config = raw["config"]
+            config["model"] = config.pop("model_path")
+            config["tp"] = config.pop("tp_size")
+            config["attention_dp"] = config.pop("attention_dp_size")
+            config["worker_type"] = role
+            root = tmp_path / f"data-{role}"
+            root.mkdir()
+            config["systems_paths"] = [str(root)]
+            config["estimator_config"] = {"correction": {"enabled": False}}
+        if identity_source == "engine_config":
+
+            def role_args(role, seqs):
+                return normalize_mocker_config(
+                    {
+                        "engine": {
+                            "worker_type": role,
+                            "max_num_batched_tokens": 128,
+                            "max_num_seqs": seqs,
+                            "num_gpu_blocks": 64,
+                            "block_size": 16,
+                            "timing_model": {
+                                "type": "external",
+                                "provider": "ais",
+                                "config": metadata[role]["config"],
+                            },
+                        }
+                    }
+                )
+
+            prefill_args = role_args("prefill", 1)
+            decode_args = role_args("decode", 2)
+            metadata = None
+
+    if metadata is not None:
+        for raw in metadata.values():
+            raw["config"]["nextn"] = None
+
+    result = replay_planner.prepare_planner_replay(
+        extra_engine_args=None,
+        prefill_engine_args=prefill_args,
+        decode_engine_args=decode_args,
+        planner_config_arg=json.dumps(
+            {
+                "mode": "disagg",
+                "optimization_target": "sla",
+                "enable_throughput_scaling": True,
+                "enable_load_scaling": False,
+            }
+        ),
+        benchmark_granularity=1,
+        performance_model_metadata=metadata,
+    )
+
+    assert result is adapter
+    assert all(set(request) == {"config"} for request in session_requests)
+    assert [request["config"]["tp"] for request in session_requests] == [2, 1]
+    if identity_source != "legacy_metadata":
+        assert [request["config"]["worker_type"] for request in session_requests] == [
+            "prefill",
+            "decode",
+        ]
+        assert [request["config"]["systems_paths"] for request in session_requests] == [
+            [str(tmp_path / "data-prefill")],
+            [str(tmp_path / "data-decode")],
+        ]
+    assert adapter.prefill_fpms
+    assert adapter.decode_fpms
+    assert adapter.prefill_fpms[0].wall_time == pytest.approx(0.002)
+    assert adapter.decode_fpms[0].wall_time == pytest.approx(0.001)
 
 
 def test_merge_traffic_weights_ratio_fields_by_native_counts():

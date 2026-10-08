@@ -48,18 +48,17 @@ const (
 	ConditionTypeDeploymentReady = "DeploymentReady"
 
 	// Event reasons
-	EventReasonInitialized          = "Initialized"
-	EventReasonValidationFailed     = "ValidationFailed"
-	EventReasonProfilingJobCreated  = "ProfilingJobCreated"
-	EventReasonProfilingJobFailed   = "ProfilingJobFailed"
-	EventReasonAIConfiguratorFailed = "AIConfiguratorFailed"
-	EventReasonSpecGenerated        = "SpecGenerated"
-	EventReasonSpecChangeRejected   = "SpecChangeRejected"
-	EventReasonDeploymentCreated    = "DeploymentCreated"
-	EventReasonDeploymentReady      = "DeploymentReady"
-	EventReasonDeploymentDegraded   = "DeploymentDegraded"
-	EventReasonDeploymentDeleted    = "DeploymentDeleted"
-	EventReasonImagePullFailed      = "ImagePullFailed"
+	EventReasonInitialized         = "Initialized"
+	EventReasonValidationFailed    = "ValidationFailed"
+	EventReasonProfilingJobCreated = "ProfilingJobCreated"
+	EventReasonProfilingJobFailed  = "ProfilingJobFailed"
+	EventReasonSpecGenerated       = "SpecGenerated"
+	EventReasonSpecChangeRejected  = "SpecChangeRejected"
+	EventReasonDeploymentCreated   = "DeploymentCreated"
+	EventReasonDeploymentReady     = "DeploymentReady"
+	EventReasonDeploymentDegraded  = "DeploymentDegraded"
+	EventReasonDeploymentDeleted   = "DeploymentDeleted"
+	EventReasonImagePullFailed     = "ImagePullFailed"
 
 	// Label keys
 	LabelApp           = "app"
@@ -70,7 +69,6 @@ const (
 
 	// Label values
 	LabelValueDynamoProfiler = "dynamo-profiler"
-	LabelValueAICProfiler    = "aic-profiler"
 	LabelValueDynamoOperator = "dynamo-operator"
 )
 
@@ -175,14 +173,18 @@ const (
 	SearchStrategyThorough SearchStrategy = "thorough"
 )
 
-// GPUSKUType is the AIC hardware system identifier for a supported GPU.
-// +kubebuilder:validation:Enum=gb200_sxm;gb10;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
+// GPUSKUType identifies a supported GPU for discovery and profiling.
+// +kubebuilder:validation:Enum=gb200;gb200_sxm;gb10;b300_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 type GPUSKUType string
 
 const (
 	// --- Blackwell ---
+	GPUSKUTypeGB200 GPUSKUType = "gb200"
+
+	// Deprecated: use GPUSKUTypeGB200. GB200 systems use NVL rather than SXM.
 	GPUSKUTypeGB200SXM GPUSKUType = "gb200_sxm"
 	GPUSKUTypeGB10     GPUSKUType = "gb10"
+	GPUSKUTypeB300SXM  GPUSKUType = "b300_sxm"
 	GPUSKUTypeB200SXM  GPUSKUType = "b200_sxm"
 	// --- Hopper ---
 	GPUSKUTypeH200SXM  GPUSKUType = "h200_sxm"
@@ -298,8 +300,33 @@ type ModelCacheSpec struct {
 type OverridesSpec struct {
 	// ProfilingJob allows overriding the profiling Job specification.
 	// Fields set here are merged into the controller-generated Job spec.
+	//
+	// Security: creating a DGDR is workload-creation authority in its namespace —
+	// these overrides carry the same blast radius as creating a Job or Pod directly
+	// there, by design. Pod security is enforced centrally by Kubernetes Pod Security
+	// Admission on the resulting Pods once the namespace is labeled (see
+	// pod-security.kubernetes.io/enforce): it applies the full Pod Security Standards —
+	// covering privileged, host namespaces, and hostPath, not only securityContext —
+	// not this API. ServiceAccount identity is a separate layer: these overrides can
+	// set serviceAccountName and automountServiceAccountToken, which are bounded by
+	// RBAC and namespace membership rather than PSA — the same authority any Pod author
+	// in the namespace already holds. Grant create/update on DGDRs only to principals
+	// trusted to create Pods in the namespace. The profiling Job always runs in the
+	// DGDR's own namespace and overrides cannot change that — but namespace containment
+	// is not node or cross-tenant isolation. Dynamo's workloads, including this Job,
+	// satisfy the baseline standard, so enforce baseline (non-exempt) on every resulting
+	// Pod to close the privileged, host-namespace, host-device, and hostPath paths.
 	// +optional
 	ProfilingJob *batchv1.JobSpec `json:"profilingJob,omitempty"`
+
+	// TrustRemoteCode explicitly permits generated vLLM and SGLang workers to
+	// execute custom code from the configured model repository. When enabled,
+	// the profiler adds --trust-remote-code to every generated worker component
+	// after the deployment topology has been generated. Enable this setting only
+	// for model repositories you trust.
+	// +optional
+	// +kubebuilder:default=false
+	TrustRemoteCode bool `json:"trustRemoteCode,omitempty"`
 
 	// DGD provides a partial, versioned DynamoGraphDeployment override for the
 	// profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or
@@ -381,8 +408,9 @@ type HardwareSpec struct {
 	// node count, then highest VRAM. In mixed-GPU clusters, set this to
 	// choose which GPU type to use. Discovery and totalGpus are then
 	// restricted to nodes matching this SKU.
+	// The legacy value gb200_sxm is deprecated; use gb200 instead.
 	// +optional
-	// +kubebuilder:validation:Enum=gb200_sxm;gb10;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
+	// +kubebuilder:validation:Enum=gb200;gb200_sxm;gb10;b300_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.

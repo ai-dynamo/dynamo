@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 type componentProgram struct {
@@ -68,6 +69,25 @@ func (p *componentProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
+	clearComponentGPUShapes(programResult.Status.Components)
+	clearComponentRuntimeStatuses(programResult.Status.Components)
+
+	// Admission prevents this combination; guard previously stored or admission-bypassed objects.
+	for i := range req.DGD.Spec.Components {
+		component := &req.DGD.Spec.Components[i]
+		if !component.ManagedByExternalController() {
+			continue
+		}
+		err := fmt.Errorf(
+			"component %q of type %q requires the Grove workload provider",
+			component.ComponentName,
+			component.ComponentType,
+		)
+		programResult.Fail(req.DGD.Generation, "UnsupportedComponent", err)
+		return programResult, reconcile.TerminalError(err)
+	}
+
+	// Classify failures from normal component reconciliation.
 	defer func() {
 		if retErr == nil {
 			return
@@ -78,6 +98,7 @@ func (p *componentProgram) Reconcile(
 		}
 		programResult.Fail(req.DGD.Generation, reason, retErr)
 	}()
+
 	log.FromContext(ctx).Info(
 		"Reconciling Dynamo components deployments",
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
@@ -124,6 +145,10 @@ func (p *componentProgram) Reconcile(
 		checkpoints.Infos,
 	)
 	if err != nil {
+		// Preserve newly observed component status while leaving the generation unobserved.
+		if result.ComponentStatus != nil {
+			programResult.Status.Components = result.ComponentStatus
+		}
 		return programResult, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
@@ -147,11 +172,37 @@ func (p *componentProgram) reconcileWorkerRollout(
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
-
 	if supportsManagedRollingUpdate(dgd) {
 		return p.reconcileManagedWorkerRollout(ctx, dgd, status)
 	}
-	return p.rollout.ReconcileUnsupported(ctx, dgd, false)
+	return p.reconcileMultinodeWorkerRollout(ctx, dgd)
+}
+
+// reconcileMultinodeWorkerRollout gates hash projection on informer observation of the target DCD.
+func (p *componentProgram) reconcileMultinodeWorkerRollout(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	transition, err := p.rollout.planUnsupportedWorkerHashTransition(dgd)
+	if err != nil {
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	if !transition.needsCommit() {
+		return nil
+	}
+
+	observed, err := p.rollout.dcdObservesWorkerHash(ctx, dgd, transition.next.v2)
+	if err != nil {
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	if !observed {
+		return nil
+	}
+
+	if err := p.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, transition, false); err != nil {
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	return nil
 }
 
 // supportsManagedRollingUpdate checks whether the component pathway can use

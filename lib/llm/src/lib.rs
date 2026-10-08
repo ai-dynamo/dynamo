@@ -9,6 +9,7 @@
 pub mod backend;
 pub mod common;
 mod direct_zmq_fan_in;
+mod direct_zmq_sub_pool;
 pub mod discovery;
 pub mod endpoint_type;
 pub mod engines;
@@ -51,6 +52,10 @@ pub mod block_manager;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
+
+#[cfg(test)]
+#[path = "../../runtime/src/test_utils.rs"]
+mod test_utils;
 
 #[cfg(test)]
 mod file_json_field_tests {

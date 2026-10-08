@@ -3,8 +3,8 @@
 
 """Power actuation is DGD-owned: read/resolve, never mutate.
 
-The planner reads per-GPU caps from the DGD worker podTemplate annotations and
-projects a power budget. It does NOT patch Pods. These tests pin the
+The operator projects DGD-owned per-GPU caps into component status; the Planner
+projects a power budget from that status. It does NOT patch Pods. These tests pin the
 read/resolve path — ``KubernetesConnector.get_component_power_configs``
 resolves per-role ``ComponentPowerConfig`` from a DGD dict (disagg + agg) and
 propagates the typed parser errors. The no-mutation guarantee is enforced by
@@ -74,7 +74,23 @@ def _worker(name, comp_type, watts, gpus):
 
 
 def _dgd(*components):
-    return {"spec": {"components": list(components)}}
+    statuses = {}
+    for component in components:
+        template = component.get("podTemplate", {})
+        annotations = template.get("metadata", {}).get("annotations", {})
+        container = template.get("spec", {}).get("containers", [{}])[0]
+        gpu = int(
+            container.get("resources", {}).get("limits", {}).get("nvidia.com/gpu")
+        )
+        status = {"gpusPerEngine": gpu, "gpusPerReplica": gpu}
+        if POWER_ANNOTATION_KEY in annotations:
+            status["gpuPowerLimitWatts"] = annotations[POWER_ANNOTATION_KEY]
+        statuses[component["name"]] = status
+    return {
+        "metadata": {"generation": 1},
+        "spec": {"components": list(components)},
+        "status": {"observedGeneration": 1, "components": statuses},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +101,8 @@ def _dgd(*components):
 class TestGetComponentPowerConfigs:
     def test_resolves_disagg_from_annotations(self, connector, mock_kube_api):
         mock_kube_api.get_graph_deployment.return_value = _dgd(
-            _worker("VllmPrefillWorker", "prefill", "350", "2"),
-            _worker("VllmDecodeWorker", "decode", "300", "4"),
+            _worker("prefill", "prefill", "350", "2"),
+            _worker("decode", "decode", "300", "4"),
         )
 
         prefill, decode = connector.get_component_power_configs(
@@ -102,7 +118,7 @@ class TestGetComponentPowerConfigs:
         # is rejected by PlannerConfig validation because the shared deployment-
         # validation and GPU-count paths do not follow this fallback.
         mock_kube_api.get_graph_deployment.return_value = _dgd(
-            _worker("VllmWorker", "worker", "300", "4"),
+            _worker("worker", "worker", "300", "4"),
         )
 
         prefill, decode = connector.get_component_power_configs(
@@ -114,7 +130,7 @@ class TestGetComponentPowerConfigs:
 
     def test_missing_annotation_propagates(self, connector, mock_kube_api):
         mock_kube_api.get_graph_deployment.return_value = _dgd(
-            _worker("VllmDecodeWorker", "decode", None, "4"),
+            _worker("decode", "decode", None, "4"),
         )
         with pytest.raises(PowerAnnotationMissingError):
             connector.get_component_power_configs(
@@ -123,7 +139,7 @@ class TestGetComponentPowerConfigs:
 
     def test_malformed_annotation_propagates(self, connector, mock_kube_api):
         mock_kube_api.get_graph_deployment.return_value = _dgd(
-            _worker("VllmDecodeWorker", "decode", "0", "4"),
+            _worker("decode", "decode", "0", "4"),
         )
         with pytest.raises(PowerAnnotationInvalidError):
             connector.get_component_power_configs(
@@ -132,7 +148,7 @@ class TestGetComponentPowerConfigs:
 
     def test_missing_role_propagates(self, connector, mock_kube_api):
         mock_kube_api.get_graph_deployment.return_value = _dgd(
-            _worker("VllmDecodeWorker", "decode", "300", "4"),
+            _worker("decode", "decode", "300", "4"),
         )
         with pytest.raises(SubComponentNotFoundError):
             connector.get_component_power_configs(

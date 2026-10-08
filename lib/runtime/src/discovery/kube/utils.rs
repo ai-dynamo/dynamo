@@ -81,8 +81,25 @@ pub fn hash_pod_name(pod_name: &str) -> u64 {
     hasher.finish() & INSTANCE_ID_MASK
 }
 
-/// Extract (instance_id, pod_name) tuples from an EndpointSlice for ready endpoints.
-pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String)> {
+/// Hash a (pod, container) pair to get the same per-container instance ID a
+/// worker computes for itself under `DYN_KUBE_DISCOVERY_MODE=container` (see
+/// `KubeDiscoveryTarget::Container`). A container named `"main"` collapses to
+/// the pod-level identity (`hash_pod_name`), matching a container-mode
+/// frontend's ability to discover pod-mode workers.
+///
+/// Used by the Rust EPP (`deploy/inference-gateway/ext-proc`) to resolve a
+/// registered worker's per-container instance ID back to its pod's endpoint
+/// when `DYN_KUBE_DISCOVERY_MODE=container` (e.g. intra-pod GMS failover,
+/// where each engine container registers under its own container name).
+pub fn hash_container_name(pod_name: &str, container_name: &str) -> u64 {
+    KubeDiscoveryTarget::Container(pod_name.to_string(), container_name.to_string()).instance_id()
+}
+
+/// Extract (instance_id, cr_name, pod_uid) tuples from an EndpointSlice for ready endpoints.
+///
+/// Skips endpoints without a pod UID in `target_ref.uid` — never falls back to name-only
+/// identity, which could match a new Pod incarnation to a previous one's metadata.
+pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String, String)> {
     let mut result = Vec::new();
 
     for endpoint in &slice.endpoints {
@@ -96,27 +113,49 @@ pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String)>
             continue;
         }
 
-        let pod_name = match endpoint.target_ref.as_ref() {
-            Some(target_ref) => target_ref.name.as_deref().unwrap_or(""),
+        let target_ref = match endpoint.target_ref.as_ref() {
+            Some(r) => r,
             None => continue,
         };
 
+        let pod_name = target_ref.name.as_deref().unwrap_or("");
         if pod_name.is_empty() {
             continue;
         }
 
+        let pod_uid = match target_ref.uid.as_deref() {
+            Some(uid) if !uid.is_empty() => uid.to_string(),
+            _ => {
+                tracing::debug!(
+                    pod_name,
+                    "EndpointSlice endpoint missing target_ref.uid, skipping"
+                );
+                continue;
+            }
+        };
+
         let target = KubeDiscoveryTarget::Pod(pod_name.to_string());
-        result.push((target.instance_id(), target.cr_name()));
+        result.push((target.instance_id(), target.cr_name(), pod_uid));
     }
 
     result
 }
 
-/// Extract (instance_id, cr_name) tuples from a Pod for each ready container.
-pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String)> {
+/// Extract (instance_id, cr_name, pod_uid) tuples from a Pod for each ready container.
+///
+/// Skips pods without `metadata.uid` — never falls back to name-only identity.
+pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String, String)> {
     let pod_name = match pod.metadata.name.as_deref() {
         Some(name) => name,
         None => return vec![],
+    };
+
+    let pod_uid = match pod.metadata.uid.as_deref() {
+        Some(uid) if !uid.is_empty() => uid.to_string(),
+        _ => {
+            tracing::debug!(pod_name, "Pod missing metadata.uid, skipping");
+            return vec![];
+        }
     };
 
     let container_statuses = match pod
@@ -133,7 +172,7 @@ pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String)> {
         .filter(|cs| cs.ready)
         .map(|cs| {
             let target = KubeDiscoveryTarget::Container(pod_name.to_string(), cs.name.clone());
-            (target.instance_id(), target.cr_name())
+            (target.instance_id(), target.cr_name(), pod_uid.clone())
         })
         .collect()
 }
@@ -249,5 +288,25 @@ mod tests {
         assert_eq!(e1.cr_name(), "worker-0-engine-1");
         assert_ne!(e0.instance_id(), e1.instance_id());
         assert_ne!(e0.instance_id(), hash_pod_name("worker-0"));
+    }
+
+    #[test]
+    fn test_hash_container_name_matches_target_instance_id() {
+        // hash_container_name is the public entry point the Rust EPP uses; it
+        // must stay in lockstep with the KubeDiscoveryTarget a registering
+        // worker computes for itself, including the "main" pod-identity
+        // fallback and per-engine uniqueness.
+        assert_eq!(
+            hash_container_name("worker-0", "main"),
+            hash_pod_name("worker-0")
+        );
+        let e0 = hash_container_name("worker-0", "engine-0");
+        let e1 = hash_container_name("worker-0", "engine-1");
+        assert_ne!(e0, e1);
+        assert_ne!(e0, hash_pod_name("worker-0"));
+        assert_eq!(
+            e0,
+            KubeDiscoveryTarget::Container("worker-0".into(), "engine-0".into()).instance_id()
+        );
     }
 }

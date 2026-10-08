@@ -17,7 +17,12 @@ from dynamo.common.multimodal.embedding_transfer import (
     AbstractEmbeddingReceiver,
     LocalEmbeddingReceiver,
 )
-from dynamo.common.multimodal.image_loader import DECODED_VARIANT_KEY, URL_VARIANT_KEY
+from dynamo.common.multimodal.image_loader import (
+    DECODED_VARIANT_KEY,
+    URL_VARIANT_KEY,
+    image_cache_session_scoped_from_env,
+    scope_image_cache_key,
+)
 from dynamo.common.multimodal.media_descriptor import decoded_content_hash_key
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.runtime import Client
@@ -58,17 +63,33 @@ def parse_image_item(item: Any) -> tuple[str | None, Dict[str, Any] | None]:
     raise ValueError(f"Unsupported image item: {item!r}")
 
 
-def _image_item_cache_key(item: Any) -> str | None:
+def _image_item_cache_key(
+    item: Any,
+    *,
+    cache_scope: str | None = None,
+    session_scoped_cache: bool = False,
+) -> str | None:
     """Embedding-cache key for one image wire item, or ``None`` if unkeyed.
 
     URL items hash the URL; frontend-decoded items reuse the canonical
     content hash serialized by the Rust media decoder. Decoded items with a
-    missing/malformed hash return ``None`` and simply bypass the cache.
+    missing/malformed hash return ``None`` and simply bypass the cache. When
+    session scoping is enabled, the common image-cache policy partitions the
+    key or bypasses the cache if no valid scope is present.
     """
     url, decoded = parse_image_item(item)
+    cache_key: str | None
     if url is not None:
-        return get_embedding_hash(url)
-    return decoded_content_hash_key(decoded)
+        cache_key = get_embedding_hash(url)
+    else:
+        cache_key = decoded_content_hash_key(decoded)
+    if cache_key is None:
+        return None
+    return scope_image_cache_key(
+        cache_key,
+        cache_scope,
+        session_scoped_cache=session_scoped_cache,
+    )
 
 
 SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
@@ -99,6 +120,71 @@ class _PendingRelease:
         for tid in self._tensor_ids:
             self._receiver.release_tensor(tid)
         self._tensor_ids.clear()
+
+
+def _attach_received_embedding_transfers(
+    multimodal_groups: list[MultiModalGroup],
+    transfer_group_indices: list[int],
+    loaded: list[tuple[int, torch.Tensor]],
+    pending: _PendingRelease | None,
+) -> None:
+    """Attach legacy per-image or coalesced tensors to image groups.
+
+    Each group with transfer metadata starts a transfer run. A run containing
+    multiple groups is a Qwen-VL tensor coalesced along its visual-token axis;
+    the existing per-group ``embeddings_shape`` values define its boundaries.
+    """
+    if multimodal_groups and (
+        not transfer_group_indices or transfer_group_indices[0] != 0
+    ):
+        raise RuntimeError("The first multimodal group has no embedding transfer")
+    if len(transfer_group_indices) != len(loaded):
+        raise RuntimeError(
+            "Embedding transfer result count mismatch: "
+            f"transfers={len(transfer_group_indices)}, results={len(loaded)}"
+        )
+
+    for transfer_pos, (group_idx, (_tensor_id, embedding)) in enumerate(
+        zip(transfer_group_indices, loaded, strict=True)
+    ):
+        next_group_idx = (
+            transfer_group_indices[transfer_pos + 1]
+            if transfer_pos + 1 < len(transfer_group_indices)
+            else len(multimodal_groups)
+        )
+        groups = multimodal_groups[group_idx:next_group_idx]
+        if len(groups) == 1:
+            groups[0].loaded_embedding = embedding
+            continue
+
+        shapes = [group.embeddings_shape for group in groups]
+        if any(shape is None or len(shape) != 3 for shape in shapes):
+            raise RuntimeError("Coalesced embedding groups are missing 3-D shapes")
+        valid_shapes = [shape for shape in shapes if shape is not None]
+        expected_shape = (
+            1,
+            sum(shape[1] for shape in valid_shapes),
+            valid_shapes[0][2],
+        )
+        if tuple(embedding.shape) != expected_shape or any(
+            shape[0] != 1 or shape[2] != expected_shape[2] for shape in valid_shapes
+        ):
+            raise RuntimeError(
+                "Coalesced embedding token count or hidden size does not match "
+                f"group shapes: expected={expected_shape}, "
+                f"actual={tuple(embedding.shape)}"
+            )
+
+        for group, part in zip(
+            groups,
+            embedding.split([shape[1] for shape in valid_shapes], dim=1),
+            strict=True,
+        ):
+            group.loaded_embedding = part
+
+    if pending is not None:
+        for tensor_id, _ in loaded:
+            pending.track(tensor_id)
 
 
 def _accumulate_embeddings(
@@ -180,6 +266,7 @@ async def _fetch_from_encode_workers(
     request_id: str,
     receiver: AbstractEmbeddingReceiver,
     context=None,
+    cache_scope: str | None = None,
 ) -> tuple[List[MultiModalGroup], _PendingRelease | None]:
     """Fan out image items (URL or frontend-decoded) to encode workers, load
     embeddings, and return ready groups.
@@ -203,6 +290,7 @@ async def _fetch_from_encode_workers(
         sampling_params=VllmSamplingParams(),
         request_id=request_id,
         multimodal_inputs=[],
+        image_cache_scope=cache_scope,
     )
 
     with time_and_log_code_section(f"[PREFILL] request: {request_id} dispatch encode"):
@@ -243,19 +331,36 @@ async def _fetch_from_encode_workers(
     with time_and_log_code_section(
         f"[PREFILL] request: {request_id} receive embeddings"
     ):
-        tasks = [
-            asyncio.create_task(receiver.receive_embeddings(group.serialized_request))
-            for group in multimodal_groups
+        transfer_group_indices = [
+            idx
+            for idx, group in enumerate(multimodal_groups)
             if group.serialized_request is not None
+        ]
+        tasks = [
+            asyncio.create_task(
+                receiver.receive_embeddings(
+                    multimodal_groups[idx].serialized_request  # type: ignore[arg-type]
+                )
+            )
+            for idx in transfer_group_indices
         ]
         loaded = await asyncio.gather(*tasks)
 
     is_local = isinstance(receiver, LocalEmbeddingReceiver)
     pending: _PendingRelease | None = None if is_local else _PendingRelease(receiver)
-    for group, (tensor_id, embedding) in zip(multimodal_groups, loaded, strict=True):
-        group.loaded_embedding = embedding
+    try:
+        _attach_received_embedding_transfers(
+            multimodal_groups,
+            transfer_group_indices,
+            loaded,
+            pending,
+        )
+    except RuntimeError:
         if pending is not None:
-            pending.track(tensor_id)
+            for tensor_id, _ in loaded:
+                pending.track(tensor_id)
+            pending.release_all()
+        raise
 
     return multimodal_groups, pending
 
@@ -267,14 +372,16 @@ async def _fetch_embeddings(
     receiver: AbstractEmbeddingReceiver,
     cache: MultimodalEmbeddingCacheManager | None = None,
     context=None,
+    cache_scope: str | None = None,
+    session_scoped_cache: bool = False,
 ) -> tuple[list[MultiModalGroup], _PendingRelease | None]:
     """Fetch multimodal embeddings with transparent cache-through.
 
     Pipeline: check_cache → fetch misses from encode workers → update_cache.
     When *cache* is ``None`` the cache steps are no-ops and all items go
     straight to the encode workers. Items without a cache key (e.g. a
-    frontend-decoded descriptor missing its content hash) are fetched and
-    not cached.
+    frontend-decoded descriptor missing its content hash, or a request missing
+    its required session scope) are fetched and not cached.
 
     For NIXL receivers the returned embeddings are zero-copy views.  The
     returned ``_PendingRelease`` must be released after consuming the
@@ -286,7 +393,11 @@ async def _fetch_embeddings(
     # ── 1. Check cache (no-op when cache is None) ────────────────────
     for idx, item in enumerate(image_items):
         if cache is not None:
-            key = _image_item_cache_key(item)
+            key = _image_item_cache_key(
+                item,
+                cache_scope=cache_scope,
+                session_scoped_cache=session_scoped_cache,
+            )
             cached = cache.get(key) if key is not None else None
             if cached is not None:
                 logger.debug("[%s] Cache hit for image index %d", request_id, idx)
@@ -309,6 +420,7 @@ async def _fetch_embeddings(
             request_id,
             receiver,
             context=context,
+            cache_scope=cache_scope,
         )
 
         # ── 3. Update cache (no-op when cache is None) ──────────────
@@ -339,10 +451,16 @@ class MultiModalEmbeddingLoader:
         encode_worker_client: Client,
         receiver: AbstractEmbeddingReceiver,
         embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None,
+        session_scoped_cache: bool | None = None,
     ):
         self._encode_worker_client = encode_worker_client
         self._receiver = receiver
         self._embedding_cache_manager = embedding_cache_manager
+        self._session_scoped_cache = (
+            image_cache_session_scoped_from_env()
+            if session_scoped_cache is None
+            else session_scoped_cache
+        )
 
     async def load_multimodal_embeddings(
         self,
@@ -351,6 +469,7 @@ class MultiModalEmbeddingLoader:
         *,
         model: str,
         context=None,
+        cache_scope: str | None = None,
     ) -> Dict[str, Any]:
         """Fetch embeddings and build engine-ready ``multi_modal_data``.
 
@@ -372,6 +491,8 @@ class MultiModalEmbeddingLoader:
             self._receiver,
             cache=self._embedding_cache_manager,
             context=context,
+            cache_scope=cache_scope,
+            session_scoped_cache=self._session_scoped_cache,
         )
 
         multi_modal_data: Dict[str, Any] = {}

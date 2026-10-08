@@ -26,13 +26,17 @@ use crate::pipeline::network::RegisteredStream;
 use crate::pipeline::network::RequestControlMessage;
 use crate::pipeline::network::RequestPlanePayloadCodec;
 use crate::pipeline::network::RequestType;
+use crate::pipeline::network::ResponsePlaneMode;
+use crate::pipeline::network::ResponseService;
 use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
+use crate::pipeline::network::StreamPrologueError;
 use crate::pipeline::network::StreamProvider;
 use crate::pipeline::network::StreamReceiver;
 use crate::pipeline::network::StreamSender;
 use crate::pipeline::network::TwoPartCodec;
 use crate::pipeline::network::codec::TwoPartMessage;
+use crate::pipeline::network::quic_response;
 use crate::pipeline::network::tcp;
 use crate::pipeline::{ManyIn, ManyOut, PipelineError, ResponseStream, SingleIn};
 use crate::protocols::maybe_error::MaybeError;
@@ -46,6 +50,73 @@ use std::task::{Context, Poll};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
+
+/// Error reasons that must never be attached as the cause of a pre-stream
+/// failure, because migration classification walks the whole cause chain.
+///
+/// This must match `MIGRATION_BLOCKING_REASONS` in `lib/llm/src/migration.rs`.
+pub(crate) const MIGRATION_SENSITIVE_ERROR_REASONS: &[&str] = &[
+    "request.cancelled",
+    "request.deadline_exceeded",
+    "backend.cancelled",
+    "capacity.exhausted",
+    "capacity.pool_exhausted",
+];
+
+/// Whether any link of `err`'s chain carries a migration-sensitive reason.
+fn is_migration_sensitive(err: &DynamoError) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(source) = current {
+        if let Some(error) = source.downcast_ref::<DynamoError>()
+            && MIGRATION_SENSITIVE_ERROR_REASONS.contains(&error.reason().as_str())
+        {
+            return true;
+        }
+        current = source.source();
+    }
+    false
+}
+
+/// Build the error returned when the worker fails before any response bytes.
+///
+/// The outer type stays [`ErrorType::CannotConnect`], so retry classification
+/// of the outer error is unchanged. A typed error from the worker's prologue is
+/// attached as the cause, which consumers reach with
+/// the semantic migration classifier.
+///
+/// Because that walk covers the whole chain, an attached cause is as visible as
+/// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_REASONS`]
+/// are withheld rather than attached. The worker's text stays in the message
+/// either way; only the machine-readable type is withheld.
+pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
+    let builder = DynamoError::builder()
+        .error_type(ErrorType::CannotConnect)
+        .message(format!(
+            "Worker generate() failed before response stream: {error}"
+        ));
+
+    match error.typed_error {
+        Some(typed) if !is_migration_sensitive(&typed) => builder.cause(typed).build(),
+        _ => builder.build(),
+    }
+}
+
+/// White-box handles for the cross-crate tests in `dynamo-llm`. Gated so a
+/// normal build of this crate exposes no public API for them.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub mod testing {
+    use super::{DynamoError, StreamPrologueError};
+
+    /// The semantic reason set is pinned by a cross-crate test in `lib/llm/src/migration.rs`.
+    pub fn migration_sensitive_error_reasons() -> &'static [&'static str] {
+        super::MIGRATION_SENSITIVE_ERROR_REASONS
+    }
+
+    pub fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
+        super::pre_stream_failure_error(error)
+    }
+}
 
 const FIRST_RESPONSE_GUARD_CONTEXT_KEY: &str = "dynamo.request_plane.first_response_guard";
 // A timeout cannot safely release registered memory while a remote read may
@@ -458,10 +529,7 @@ impl<S> Drop for InflightDecStream<S> {
     }
 }
 
-/// Extract the TCP stream subject from a [`ConnectionInfo`], if it carries a
-/// well-formed [`tcp::TcpStreamConnectionInfo`]. Used for the pre-dispatch
-/// tombstone check.
-fn subject_of(conn_info: &ConnectionInfo) -> Option<String> {
+fn tcp_subject_of(conn_info: &ConnectionInfo) -> Option<String> {
     serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&conn_info.info)
         .ok()
         .map(|ci| ci.subject)
@@ -509,8 +577,14 @@ pub struct AddressedPushRouter {
     // Request transport (unified trait object - works with all transports)
     req_client: Arc<dyn RequestPlaneClient>,
 
-    // Response transport (TCP streaming - unchanged)
-    resp_transport: Arc<tcp::server::TcpStreamServer>,
+    request_callbacks: Arc<tcp::server::TcpStreamServer>,
+    responses: ResponseServer,
+}
+
+#[derive(Clone)]
+enum ResponseServer {
+    Tcp(Arc<tcp::server::TcpStreamServer>),
+    Quic(Arc<quic_response::QuicResponseServer>),
 }
 
 impl AddressedPushRouter {
@@ -520,12 +594,25 @@ impl AddressedPushRouter {
     /// The client is provided as a trait object, hiding the specific implementation.
     pub fn new(
         req_client: Arc<dyn RequestPlaneClient>,
-        resp_transport: Arc<tcp::server::TcpStreamServer>,
+        responses: Arc<tcp::server::TcpStreamServer>,
     ) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             req_client,
-            resp_transport,
+            request_callbacks: responses.clone(),
+            responses: ResponseServer::Tcp(responses),
         }))
+    }
+
+    fn new_quic(
+        req_client: Arc<dyn RequestPlaneClient>,
+        request_callbacks: Arc<tcp::server::TcpStreamServer>,
+        responses: Arc<quic_response::QuicResponseServer>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            req_client,
+            request_callbacks,
+            responses: ResponseServer::Quic(responses),
+        })
     }
 
     pub async fn from_runtime_provider(
@@ -533,28 +620,52 @@ impl AddressedPushRouter {
     ) -> Result<Arc<Self>> {
         let manager = provider.drt().network_manager();
         let req_client = manager.create_client()?;
-        let resp_transport = provider.drt().tcp_server().await?;
+        let request_callbacks = provider.drt().tcp_server().await?;
 
         tracing::debug!(
             transport = req_client.transport_name(),
             "Creating AddressedPushRouter with request plane client"
         );
 
-        Self::new(req_client, resp_transport)
+        match provider.drt().response_plane() {
+            ResponsePlaneMode::Tcp => Self::new(req_client, request_callbacks),
+            ResponsePlaneMode::Quic => {
+                let responses = provider.drt().quic_response_server().await?;
+                Ok(Self::new_quic(req_client, request_callbacks, responses))
+            }
+        }
     }
 
-    /// Cancel all pending response-stream registrations for an instance.
+    /// Cancel stream registrations for an instance. The TCP response plane cancels
+    /// pending handshakes and lets established response streams drain; the QUIC
+    /// response plane also cancels active streams.
     pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
-        self.resp_transport
-            .cancel_instance_streams(instance_id)
-            .await
+        match &self.responses {
+            ResponseServer::Tcp(responses) => responses.cancel_instance_streams(instance_id).await,
+            ResponseServer::Quic(responses) => {
+                let response_count = responses.cancel_instance_streams(instance_id).await;
+                response_count
+                    + self
+                        .request_callbacks
+                        .cancel_instance_streams(instance_id)
+                        .await
+            }
+        }
     }
 
     /// Clear the tombstone after an instance reappears in discovery.
     pub async fn clear_instance_tombstone(&self, instance_id: &EndpointInstanceId) {
-        self.resp_transport
-            .clear_instance_tombstone(instance_id)
-            .await
+        match &self.responses {
+            ResponseServer::Tcp(responses) => {
+                responses.clear_instance_tombstone(instance_id).await;
+            }
+            ResponseServer::Quic(responses) => {
+                responses.clear_instance_tombstone(instance_id).await;
+                self.request_callbacks
+                    .clear_instance_tombstone(instance_id)
+                    .await;
+            }
+        }
     }
 
     /// Bidirectional generation. Note that it doesn't implement the AsyncEngine trait directly
@@ -583,6 +694,7 @@ impl AddressedPushRouter {
             Some(&instance),
             None,
             Some(input_stream),
+            false,
         )
         .await
     }
@@ -590,8 +702,8 @@ impl AddressedPushRouter {
     /// Shared dispatch core for both unary and bidirectional requests. Wire
     /// shape is inferred from the inputs:
     ///   - `input_stream = Some(_)` + `request = None` → bidirectional,
-    ///     header-only envelope. The worker dials back for both halves and
-    ///     pulls request frames off the spawned forwarder.
+    ///     header-only envelope. The worker opens the optional TCP request
+    ///     callback and sends responses over QUIC.
     ///   - `input_stream = None` + `request = Some(_)` → unary, two-part
     ///     `[ctrl, data]` envelope. The payload travels in the data part.
     async fn dispatch_and_finalize<T, U>(
@@ -601,6 +713,7 @@ impl AddressedPushRouter {
         instance: Option<&Instance>,
         request: Option<&T>,
         input_stream: Option<crate::engine::DataStream<T>>,
+        defer_cancellation_until_prologue: bool,
     ) -> Result<ManyOut<U>, Error>
     where
         T: Data + Serialize,
@@ -615,41 +728,69 @@ impl AddressedPushRouter {
         let enable_request_stream = input_stream.is_some();
         let payload_codec = payload_codec_for_worker(instance);
 
-        // Hold the `RegisteredStream` as their RAII cleanup stays armed while held,
-        // which simplifies the cancellation of registration on error. Each side is
-        // disarmed by `into_parts()` on awaiting stream provider: past that point the
-        // subject is reaped by the worker's dial-in (instance healthy) or the discovery
-        // watcher (instance dropped), so no cleanup is owed.
+        // Keep registration cleanup armed through dispatch errors. The response
+        // registration also stays armed while waiting for the response prologue;
+        // the request-stream registration is handed off to its forwarder below.
         let (send_registered, recv_registered) = self
-            .register_streams(engine_ctx.clone(), enable_request_stream, true)
+            .register_streams(
+                engine_ctx.clone(),
+                enable_request_stream,
+                defer_cancellation_until_prologue,
+            )
             .await?;
-        let recv_registered = recv_registered.ok_or_else(|| {
-            anyhow::anyhow!("response stream registration missing despite enable_response_stream")
-        })?;
 
         // Tombstone check: if discovery already removed the worker, fail fast
         // with a migratable error rather than writing to the request plane.
         // Dropping the held registrations on this return runs their cleanup.
-        let recv_subject = subject_of(&recv_registered.connection_info);
+        let response_registration = recv_registered.registration_id();
+        let response_subject = tcp_subject_of(&recv_registered.connection_info);
         let send_subject = send_registered
             .as_ref()
-            .and_then(|r| subject_of(&r.connection_info));
-        if let (Some(subject), Some(inst)) = (&recv_subject, instance)
-            && !self
-                .resp_transport
-                .associate_instance(
-                    subject,
-                    send_subject.as_deref(),
-                    &inst.endpoint_instance_id(),
-                )
-                .await
-        {
-            return Err(anyhow::anyhow!(
-                DynamoError::builder()
-                    .error_type(ErrorType::Disconnected)
-                    .message("Worker removed before request could be sent (tombstoned instance)")
-                    .build()
-            ));
+            .and_then(|r| tcp_subject_of(&r.connection_info));
+        if let Some(inst) = instance {
+            let instance_id = inst.endpoint_instance_id();
+            let associated = match &self.responses {
+                ResponseServer::Tcp(responses) => match response_subject.as_deref() {
+                    Some(subject) => {
+                        responses
+                            .associate_instance(subject, send_subject.as_deref(), &instance_id)
+                            .await
+                    }
+                    None => false,
+                },
+                ResponseServer::Quic(responses) => {
+                    let response_ok = match response_registration {
+                        Some(registration_id) => {
+                            responses
+                                .associate_instance(registration_id, &instance_id)
+                                .await
+                        }
+                        None => false,
+                    };
+                    let request_ok = match send_subject.as_deref() {
+                        Some(subject) => {
+                            self.request_callbacks
+                                .associate_request_instance(subject, &instance_id)
+                                .await
+                        }
+                        None => true,
+                    };
+                    if !request_ok && let Some(registration_id) = response_registration {
+                        responses.cancel_response(registration_id).await;
+                    }
+                    response_ok && request_ok
+                }
+            };
+            if !associated {
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message(
+                            "Worker removed before request could be sent (tombstoned instance)"
+                        )
+                        .build()
+                ));
+            }
         }
 
         let buffer = build_request_envelope(
@@ -697,31 +838,21 @@ impl AddressedPushRouter {
             .await?;
         }
 
-        let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
+        let _nvtx_wait = dynamo_nvtx_range!("transport.response.wait_backend");
         tracing::trace!(request_id = context.id(), "awaiting transport handshake");
-
-        // Disarms the recv-side cleanup; see the holding rationale above.
-        let (_recv_conn_info, response_stream_provider) = recv_registered.into_parts();
 
         // RecvError → migratable Disconnected (watcher cancelled the subject
         // or the worker died before establishing the response stream).
-        let response_stream = match response_stream_provider.await {
+        let response_stream = match recv_registered.wait().await {
             Ok(Ok(stream)) => stream,
-            Ok(Err(e)) => {
-                // generate() failed before any response bytes; migrate via
-                // CannotConnect since the dominant cause is a worker-local
-                // setup/version issue. The wire prologue carries only an
-                // opaque string today, so app-level rejections also retry
-                // -- safe because no side effects are visible yet. Follow-up:
-                // structured prologue error type for finer routing.
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::CannotConnect)
-                        .message(format!(
-                            "Worker generate() failed before response stream: {e}"
-                        ))
-                        .build()
+            Err(_) | Ok(Err(_)) if engine_ctx.is_stopped() || engine_ctx.is_killed() => {
+                return Ok(ResponseStream::new(
+                    Box::pin(futures::stream::empty()),
+                    engine_ctx,
                 ));
+            }
+            Ok(Err(e)) => {
+                return Err(anyhow::anyhow!(pre_stream_failure_error(e)));
             }
             Err(_recv_err) => {
                 // oneshot dropped: either the discovery watcher cancelled
@@ -746,32 +877,46 @@ impl AddressedPushRouter {
         ))
     }
 
-    /// Register the requested halves of a data-plane stream with the response
-    /// transport. Returns `(send_stream, recv_stream)` mirroring the
-    /// `PendingConnections::into_parts` shape — either side is `None` when not
-    /// requested. Asserts post-registration that the transport produced
-    /// exactly the requested shape; a mismatch is a transport-layer bug, not
-    /// a runtime error path.
+    /// Register the optional TCP request callback and selected response stream.
     async fn register_streams(
         &self,
         engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
         enable_request_stream: bool,
-        enable_response_stream: bool,
-    ) -> Result<
-        (
-            Option<RegisteredStream<StreamSender>>,
-            Option<RegisteredStream<StreamReceiver>>,
-        ),
-        Error,
-    > {
-        let options = StreamOptions::builder()
-            .context(engine_ctx)
-            .enable_request_stream(enable_request_stream)
-            .enable_response_stream(enable_response_stream)
-            .build()?;
-
-        let pending: PendingConnections = self.resp_transport.register(options).await;
-        let (send_stream, recv_stream) = pending.into_parts();
+        defer_cancellation_until_prologue: bool,
+    ) -> Result<(
+        Option<RegisteredStream<StreamSender>>,
+        RegisteredStream<StreamReceiver>,
+    )> {
+        let (send_stream, recv_stream) = match &self.responses {
+            ResponseServer::Tcp(responses) => {
+                let options = StreamOptions::builder()
+                    .context(engine_ctx)
+                    .enable_request_stream(enable_request_stream)
+                    .enable_response_stream(true)
+                    .defer_cancellation_until_prologue(defer_cancellation_until_prologue)
+                    .build()?;
+                let pending: PendingConnections = responses.register(options).await;
+                pending.into_parts()
+            }
+            ResponseServer::Quic(responses) => {
+                let send_stream = if enable_request_stream {
+                    let options = StreamOptions::builder()
+                        .context(engine_ctx.clone())
+                        .enable_request_stream(true)
+                        .enable_response_stream(false)
+                        .build()?;
+                    let pending: PendingConnections =
+                        self.request_callbacks.register(options).await;
+                    pending.send_stream
+                } else {
+                    None
+                };
+                (send_stream, Some(responses.register_response(engine_ctx)))
+            }
+        };
+        let recv_stream = recv_stream.ok_or_else(|| {
+            anyhow::anyhow!("response stream registration missing despite response being enabled")
+        })?;
 
         // Transport-layer invariant: the data plane produces exactly the halves
         // we requested. A mismatch is a bug in the transport, not a runtime
@@ -781,12 +926,6 @@ impl AddressedPushRouter {
             enable_request_stream,
             "data-plane registration: request-stream presence does not match request"
         );
-        debug_assert_eq!(
-            recv_stream.is_some(),
-            enable_response_stream,
-            "data-plane registration: response-stream presence does not match request"
-        );
-
         Ok((send_stream, recv_stream))
     }
 
@@ -826,15 +965,18 @@ impl AddressedPushRouter {
 /// normal responses, including the empty "queued" ACK.
 fn detect_worker_rejection_response(res_bytes: &[u8]) -> Option<DynamoError> {
     const OVERLOAD_PREFIX: &[u8] = b"Server overloaded:";
-    const UNAVAILABLE_PREFIX: &[u8] = b"Server unavailable:";
+    let unavailable_prefix = crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes();
 
     let error_type = if res_bytes.starts_with(OVERLOAD_PREFIX) {
         // This ACK came from the one worker addressed by this dispatch. It says
         // nothing about capacity elsewhere in the eligible pool, so preserve
         // worker scope for migration instead of reporting pool exhaustion.
         ErrorType::WorkerOverloaded
-    } else if res_bytes.starts_with(UNAVAILABLE_PREFIX) {
-        ErrorType::Unavailable
+    } else if res_bytes.starts_with(unavailable_prefix) {
+        // Same scope: the addressed server is up but has no handler for this
+        // instance, or is closing its worker pool. Other instances may still
+        // serve the endpoint, so this stays migratable.
+        ErrorType::WorkerUnavailable
     } else {
         return None;
     };
@@ -857,6 +999,13 @@ mod rejection_detection_tests {
         let err = detect_worker_rejection_response(b"Server overloaded: worker at capacity")
             .expect("should detect overload");
         assert_eq!(err.error_type(), ErrorType::WorkerOverloaded);
+    }
+
+    #[test]
+    fn unavailable_payload_maps_to_worker_unavailable() {
+        let err = detect_worker_rejection_response(b"Server unavailable: unknown endpoint x")
+            .expect("should detect unavailable");
+        assert_eq!(err.error_type(), ErrorType::WorkerUnavailable);
     }
 
     #[test]
@@ -905,6 +1054,7 @@ where
                         instance_info.as_ref(),
                         Some(&request),
                         None,
+                        true,
                     )
                     .await
             };
@@ -917,6 +1067,7 @@ where
             instance_info.as_ref(),
             Some(&request),
             None,
+            false,
         )
         .await
     }
@@ -955,8 +1106,7 @@ where
         input: ManyIn<T>,
     ) -> Result<ManyOut<U>, Error>;
 
-    /// Discovery-driven cleanup when an instance leaves — the request plane
-    /// cancels its call-home streams; another transport frees per-instance state.
+    /// Release per-instance transport state when discovery removes an instance.
     async fn on_instance_removed(&self, _id: &EndpointInstanceId) {}
 
     /// Discovery-driven notification when an instance (re)appears — the request
@@ -997,7 +1147,7 @@ where
                 endpoint = %id.endpoint,
                 instance_id = id.instance_id,
                 cancelled = n,
-                "Cancelled pending response streams for removed instance (discovery-driven cleanup)"
+                "Cancelled stream registrations for removed instance (discovery-driven cleanup)"
             );
         }
     }
@@ -1010,17 +1160,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, FIRST_RESPONSE_GUARD_CONTEXT_KEY,
-        FirstResponseGuard, RequestControlMessage, RequestPlanePayloadCodec, RequestType,
-        ResponseType, TwoPartCodec, attach_first_response_guard, build_request_envelope,
-        dispatch_with_first_response_guard, payload_codec_for_worker,
-        propagate_first_response_guard, serialize_control_message,
+        AddressedPushRouter, AddressedRequest, CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo,
+        FIRST_RESPONSE_GUARD_CONTEXT_KEY, FirstResponseGuard, RequestControlMessage,
+        RequestPlaneClient, RequestPlanePayloadCodec, RequestType, ResponseType, TwoPartCodec,
+        attach_first_response_guard, build_request_envelope, dispatch_with_first_response_guard,
+        payload_codec_for_worker, propagate_first_response_guard, serialize_control_message,
         try_acquire_retained_dispatch_permit,
     };
     use crate::{
         component::{Instance, TransportType},
+        engine::AsyncEngine,
         error::{ErrorType, match_error_chain},
-        pipeline::{AsyncEngineContextProvider, Context, ManyOut, ResponseStream},
+        pipeline::{
+            AsyncEngineContextProvider, Context, ManyOut, ResponseStream,
+            network::{
+                egress::unified_client::Headers,
+                tcp::{client::TcpClient, server::TcpStreamServer},
+            },
+        },
         protocols::annotated::Annotated,
     };
     use serde::{Deserialize, Serialize};
@@ -1057,6 +1214,134 @@ mod tests {
     #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
     struct TestRequest {
         value: u64,
+    }
+
+    #[tokio::test]
+    async fn quic_router_delivers_data_after_successful_wait() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::quic_router_delivers_data_after_successful_wait"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
+        use super::{
+            AddressedPushRouter, AddressedRequest, RequestPlaneClient, quic_response, tcp,
+        };
+        use crate::pipeline::{AsyncEngine, SingleIn};
+        use bytes::Bytes;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+
+        // Capture the request envelope, but exercise the real router and QUIC response plane.
+        struct CaptureRequest(mpsc::Sender<RequestControlMessage>);
+
+        #[async_trait::async_trait]
+        impl RequestPlaneClient for CaptureRequest {
+            async fn send_request(
+                &self,
+                _address: String,
+                payload: Bytes,
+                _headers: super::super::unified_client::Headers,
+            ) -> anyhow::Result<Bytes> {
+                let message = TwoPartCodec::default().decode_message(payload)?;
+                let control = serde_json::from_slice(&message.header)?;
+                self.0.send(control).await?;
+                Ok(Bytes::new())
+            }
+
+            fn transport_name(&self) -> &'static str {
+                "test"
+            }
+
+            fn is_healthy(&self) -> bool {
+                true
+            }
+        }
+
+        let shutdown = CancellationToken::new();
+        let _shutdown_guard = shutdown.clone().drop_guard();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let address = "127.0.0.1:0".parse().unwrap();
+            let responses =
+                quic_response::QuicResponseServer::new(address, address, shutdown).unwrap();
+            // The router also needs a TCP request-callback server. Isolate its TLS
+            // configuration from tests that change the process-wide environment.
+            let callbacks = temp_env::async_with_vars(
+                [
+                    ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
+                    ("DYN_TCP_TLS_KEY_PATH", None),
+                    ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
+                ],
+                tcp::server::TcpStreamServer::new(
+                    tcp::server::ServerOptions::builder()
+                        .interface(Some("127.0.0.1".to_string()))
+                        .build()
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+            let (request_tx, mut request_rx) = mpsc::channel(1);
+            let router = AddressedPushRouter::new_quic(
+                Arc::new(CaptureRequest(request_tx)),
+                callbacks,
+                responses,
+            );
+            let request = SingleIn::new(AddressedRequest::new(42_u64, "test".to_string()));
+            let pool = quic_response::QuicResponseClientPool::from_env().unwrap();
+            let (response, (mut sender, payload_codec)) =
+                tokio::join!(router.generate(request), async {
+                    let control = request_rx.recv().await.unwrap();
+                    let worker_context =
+                        Context::with_id_and_metadata((), control.id, control.metadata);
+                    let mut sender = pool
+                        .sender(worker_context.context(), control.connection_info)
+                        .await
+                        .unwrap();
+                    sender.send_prologue(None).await.unwrap();
+                    (sender, control.payload_codec)
+                });
+
+            // Send data only after generate() returns through wait(), so cleanup on
+            // success cannot be hidden by data buffered before the handshake finishes.
+            let mut response: ManyOut<Annotated<u64>> = response.unwrap();
+            // The first item uses QUIC's priority lane; the second uses its bulk lane.
+            for value in [1_u64, 2] {
+                sender
+                    .send(
+                        payload_codec
+                            .encode(&super::NetworkStreamWrapper {
+                                data: Some(Annotated::from_data(value)),
+                                complete_final: value == 2,
+                            })
+                            .unwrap()
+                            .into(),
+                    )
+                    .await
+                    .unwrap();
+                let item = response
+                    .next()
+                    .await
+                    .expect("QUIC stream ended before delivering data");
+                assert!(
+                    item.error.is_none(),
+                    "unexpected QUIC response error: {:?}",
+                    item.error
+                );
+                assert_eq!(item.data, Some(value));
+            }
+            sender.finish().await.unwrap();
+            assert!(
+                response.next().await.is_none(),
+                "QUIC stream must end after all data"
+            );
+        })
+        .await
+        .expect("QUIC router did not deliver the established response stream");
     }
 
     #[test]
@@ -1144,6 +1429,116 @@ mod tests {
 
         drop(retained);
         assert_eq!(guard_dropped_rx.try_recv(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn first_response_guard_defers_tcp_cancellation_until_prologue() {
+        struct CapturingClient(tokio::sync::mpsc::Sender<ConnectionInfo>);
+
+        #[async_trait::async_trait]
+        impl RequestPlaneClient for CapturingClient {
+            async fn send_request(
+                &self,
+                _address: String,
+                payload: bytes::Bytes,
+                _headers: Headers,
+            ) -> anyhow::Result<bytes::Bytes> {
+                let message = TwoPartCodec::default().decode_message(payload)?;
+                let control: RequestControlMessage = serde_json::from_slice(&message.header)?;
+                self.0.send(control.connection_info).await?;
+                Ok(bytes::Bytes::new())
+            }
+
+            fn transport_name(&self) -> &'static str {
+                "capturing"
+            }
+
+            fn is_healthy(&self) -> bool {
+                true
+            }
+        }
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_INSECURE", None),
+                ("DYN_TCP_TLS_CLIENT_CERT_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_KEY_PATH", None),
+            ],
+            async {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let server = TcpStreamServer::new(
+                        TcpStreamServer::options_builder()
+                            .interface(Some("127.0.0.1".to_string()))
+                            .build()
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                    let (connection_tx, mut connection_rx) = tokio::sync::mpsc::channel(1);
+                    let router =
+                        AddressedPushRouter::new(Arc::new(CapturingClient(connection_tx)), server)
+                            .unwrap();
+                    let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+                    let mut request = Context::new(AddressedRequest::new(1_u64, "worker".into()));
+                    attach_first_response_guard(
+                        &mut request,
+                        Arc::new(DropSignal(Some(guard_dropped_tx))),
+                    );
+                    let context = request.context();
+                    let mut generation = tokio::spawn(async move {
+                        let response: ManyOut<Annotated<u64>> = router.generate(request).await?;
+                        Ok::<_, anyhow::Error>(response)
+                    });
+                    let connection_info = connection_rx.recv().await.unwrap();
+                    let worker_context = Context::with_id_and_metadata(
+                        (),
+                        context.id().to_string(),
+                        Default::default(),
+                    )
+                    .context();
+                    let mut sender = TcpClient::create_response_stream(
+                        worker_context.clone(),
+                        connection_info,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+
+                    for kill in [false, true] {
+                        if kill {
+                            context.kill();
+                        } else {
+                            context.stop_generating();
+                        }
+                        tokio::select! {
+                            _ = worker_context.stopped() => panic!("guarded worker was cancelled before prologue"),
+                            _ = &mut guard_dropped_rx => panic!("guard was released before prologue"),
+                            _ = &mut generation => panic!("guarded generation completed before prologue"),
+                            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                        }
+                        assert!(!worker_context.is_stopped());
+                        assert_eq!(guard_dropped_rx.try_recv(), Err(TryRecvError::Empty));
+                        assert!(!generation.is_finished());
+                    }
+
+                    sender
+                        .send_prologue(Some("worker setup failed".into()))
+                        .await
+                        .unwrap();
+                    let mut response = generation.await.unwrap().unwrap();
+                    assert!(response.context().is_killed());
+                    assert!(response.next().await.is_none());
+                    guard_dropped_rx.await.unwrap();
+                })
+                .await
+                .expect("guarded TCP dispatch did not complete after the error prologue");
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

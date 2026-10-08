@@ -1,72 +1,218 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{collections::BTreeMap, sync::Arc};
+
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput, MultimodalData,
     PrefillResult, PreprocessedRequest, StopReason, TopLogprob, usage,
 };
+use dynamo_llm::protocols::common::{preprocessed_mm_identifier, preprocessed_mm_routing_hash};
+use serde::{Deserialize, de::DeserializeOwned};
 
 use crate::client;
-use crate::json::{json_to_struct, struct_to_json};
+use dynamo_sidecar_common::{json_to_struct_v14, struct_to_json_v14};
+
+/// Payload names and peer, used only to name the source in codec errors.
+const PEER: &str = "vLLM";
+const KV_TRANSFER_PARAMS: &str = "kv_transfer_params";
+const EC_TRANSFER_PARAMS: &str = "ec_transfer_params";
 use crate::proto as pb;
 
 const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
 const MULTIMODAL_PROMPT_TOKEN_IDS_KEY: &str = "_dynamo_sidecar_multimodal_prompt_token_ids";
 const MM_HASHES_KEY: &str = "mm_hashes";
+const IMAGE_URL_KEY: &str = "image_url";
+const VIDEO_URL_KEY: &str = "video_url";
+const AUDIO_URL_KEY: &str = "audio_url";
 // Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
+
+const MAX_PREPROCESSED_MM_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmTitoFeatures {
+    mm_hashes: BTreeMap<String, Vec<String>>,
+    mm_placeholders: BTreeMap<String, Vec<VllmTitoPlaceholder>>,
+    kwargs_data: BTreeMap<String, Vec<String>>,
+    #[serde(default, rename = "mm_metadata")]
+    _mm_metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmTitoPlaceholder {
+    offset: u64,
+    length: u64,
+    #[serde(default)]
+    is_embed: Option<Vec<bool>>,
+}
+
+fn request_has_raw_media(request: &PreprocessedRequest) -> bool {
+    request
+        .multi_modal_data
+        .as_ref()
+        .is_some_and(|media| media.values().any(|items| !items.is_empty()))
+}
+
+fn request_has_preprocessed_media(request: &PreprocessedRequest) -> bool {
+    request
+        .extra_args
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|extra| extra.get("vllm_tito"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|envelope| envelope.get("features"))
+        .is_some_and(|features| !features.is_null())
+}
+
+pub(crate) fn request_has_multimodal_input(request: &PreprocessedRequest) -> bool {
+    request_has_raw_media(request) || request_has_preprocessed_media(request)
+}
 
 pub(crate) fn build_generate_request(
     request: PreprocessedRequest,
     request_id: String,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
+    let request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
+    validate_multimodal_cache_uuids(&request)?;
+    // Legacy envelopes may only carry controls preserved by the typed request.
+    if !mode.is_prefill()
+        && !mode.is_encode()
+        && let Some(sampling) = vllm_tito_sampling(&request.extra_args)?
+    {
+        if legacy_bool(sampling, "return_token_ids")? == Some(false) {
+            return Err(client::invalid_argument(
+                "extra_args.vllm_tito.sampling_params.return_token_ids must be true for vLLM gRPC",
+            ));
+        }
+        if let Some(key) = sampling.keys().find(|key| {
+            !matches!(
+                key.as_str(),
+                "temperature"
+                    | "top_p"
+                    | "top_k"
+                    | "seed"
+                    | "max_tokens"
+                    | "min_tokens"
+                    | "min_p"
+                    | "frequency_penalty"
+                    | "presence_penalty"
+                    | "repetition_penalty"
+                    | "stop_token_ids"
+                    | "ignore_eos"
+                    | "logprobs"
+                    | "prompt_logprobs"
+                    | "skip_special_tokens"
+                    | "return_token_ids"
+                    | "skip_reading_prefix_cache"
+            )
+        }) {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.sampling_params.{key} is not supported by the sidecar; use the chat/completions API"
+            )));
+        }
+    }
 
-    let has_media = request
+    let has_raw_media = request_has_raw_media(&request);
+    let has_preprocessed_media = request_has_preprocessed_media(&request);
+    let has_raw_media_metadata = has_raw_media
+        || request
+            .multi_modal_uuids
+            .as_ref()
+            .is_some_and(|uuids| uuids.values().any(|items| !items.is_empty()));
+    if has_raw_media && has_preprocessed_media {
+        return Err(client::invalid_argument(
+            "raw multimodal data and preprocessed features cannot be mixed",
+        ));
+    }
+    let has_media = has_raw_media || has_preprocessed_media;
+    let has_images = request
         .multi_modal_data
         .as_ref()
-        .is_some_and(|media| media.values().any(|items| !items.is_empty()));
-    // Decode reuses the prefill-expanded tokens without reprocessing media.
-    let forwarded_mm_uuids = if has_media && !mode.is_decode() {
-        forwarded_mm_uuids(&request)?
+        .and_then(|media| media.get(IMAGE_URL_KEY))
+        .is_some_and(|items| !items.is_empty());
+    let forwarded_image_uuids = if has_images {
+        forwarded_image_uuids(&request)?
     } else {
         None
     };
-    let media = if mode.is_decode() {
-        Vec::new()
+    let raw_media = if has_raw_media_metadata {
+        build_media(&request, forwarded_image_uuids.as_deref())?
     } else {
-        build_media(&request, forwarded_mm_uuids.as_deref())?
+        Vec::new()
     };
+    let prompt_token_count = request.token_ids.len();
     let mut prefill_result = request.prefill_result;
-    let mut token_ids = request.token_ids;
+    let token_ids = Arc::unwrap_or_clone(request.token_ids);
     if mode.is_decode() && has_media {
-        token_ids = take_multimodal_prompt_token_ids(&mut prefill_result)?;
+        // Remove sidecar-private prefill metadata before the KV handoff is
+        // serialized to vLLM. Decode rebuilds the expanded prompt and
+        // multimodal positions from the original prompt and media while NIXL
+        // supplies the prompt KV.
+        strip_multimodal_prompt_token_ids(&mut prefill_result);
     }
+    let skip_special_tokens = request.output_options.skip_special_tokens;
     let prompt_logprobs = request.output_options.prompt_logprobs;
     let output_logprobs = request.output_options.logprobs;
-    let max_new_tokens = if mode.is_prefill() {
+    let max_new_tokens = if mode.is_prefill() || mode.is_encode() {
         1
     } else {
         request.stop_conditions.max_tokens.unwrap_or(0)
     };
-    let min_new_tokens = if mode.is_prefill() {
+    let min_new_tokens = if mode.is_prefill() || mode.is_encode() {
         1
     } else {
         request.stop_conditions.min_tokens.unwrap_or(0)
     };
     let mut routing = request.routing;
-    let priority = routing
+    let dynamo_priority = routing
         .as_ref()
         .and_then(|routing| routing.priority)
         .unwrap_or(0);
+    let priority = dynamo_priority.saturating_neg();
+    let lora_name = routing
+        .as_mut()
+        .and_then(|routing| routing.lora_name.take())
+        .unwrap_or_default();
     let cache_salt = routing
         .as_mut()
         .and_then(|routing| routing.cache_namespace.take());
 
     let sampling = request.sampling_options;
     let stop_conditions = request.stop_conditions;
+    let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
+    let features = consume_vllm_tito(&mut extra_args)?;
+    let routing_hashes = consume_preprocessed_mm_routing_hashes(&mut extra_args)?;
+    if features.is_none() && routing_hashes.is_some() {
+        return Err(client::invalid_argument(
+            "dynamo_mm_routing_hashes requires preprocessed multimodal features",
+        ));
+    }
+    let media = if let Some(features) = features {
+        build_preprocessed_media(
+            features,
+            prompt_token_count,
+            routing_hashes.as_deref(),
+            &lora_name,
+        )?
+    } else {
+        raw_media
+    };
+    if mode.is_encode()
+        && media
+            .iter()
+            .any(|item| !matches!(item.modality(), pb::Modality::Image | pb::Modality::Video))
+    {
+        return Err(client::invalid_argument(
+            "encode requests support image and video media only",
+        ));
+    }
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
     if has_media && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
         // These fields are already represented by token_ids and media.
@@ -74,7 +220,7 @@ pub(crate) fn build_generate_request(
         extra.remove("formatted_prompt");
         extra.remove(MM_HASHES_KEY);
     }
-    let kv = build_kv_parameters(extra_args, prefill_result, cache_salt, mode)?;
+    let kv = build_kv_parameters(extra_args, prefill_result, encoder_result, cache_salt, mode)?;
 
     Ok(pb::GenerateRequest {
         request_id,
@@ -82,7 +228,7 @@ pub(crate) fn build_generate_request(
         prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
             ids: token_ids,
         })),
-        temperature: sampling.temperature,
+        temperature: sampling.temperature.or(Some(1.0)),
         sampling: Some(pb::RandomSampling {
             num_sequences: 1,
             top_k: normalize_top_k(sampling.top_k)?,
@@ -117,12 +263,15 @@ pub(crate) fn build_generate_request(
             output_token_ids: true,
             output_logprobs: output_logprobs.is_some(),
             output_candidates: output_logprobs.map(top_n_candidates).transpose()?,
+            skip_special_tokens,
         }),
         kv: Some(kv),
         truncate_prompt_tokens: 0,
         priority,
         session_id: None,
         media,
+        lora_name,
+        watermarking: None,
     })
 }
 
@@ -130,13 +279,270 @@ pub(crate) fn data_parallel_rank(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,
 ) -> Option<u32> {
-    request.routing.as_ref().and_then(|routing| {
-        if mode.is_prefill() {
-            routing.prefill_dp_rank.or(routing.dp_rank)
-        } else {
-            routing.dp_rank
-        }
+    request.routing.as_ref().and_then(|routing| match mode {
+        DisaggregationMode::Encode => None,
+        DisaggregationMode::Prefill => routing.prefill_dp_rank.or(routing.dp_rank),
+        DisaggregationMode::Aggregated | DisaggregationMode::Decode => routing.dp_rank,
     })
+}
+
+/// Compatibility with v1.4 frontends during v1.5 and v1.6 rolling upgrades.
+/// TODO(v1.7): Remove after v1.4 falls outside the N-2 compatibility window.
+pub(crate) fn normalize_response_options(
+    mut request: PreprocessedRequest,
+) -> Result<PreprocessedRequest, DynamoError> {
+    let Some(sampling) = vllm_tito_sampling(&request.extra_args)?.cloned() else {
+        return Ok(request);
+    };
+    let legacy_kv_transfer = request
+        .extra_args
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|extra| extra.get("vllm_tito"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|envelope| envelope.get("kv_transfer_params"))
+        .cloned();
+    let legacy_skip_prefix_cache = legacy_bool(&sampling, "skip_reading_prefix_cache")?;
+    hydrate_option(
+        &mut request.sampling_options.temperature,
+        &sampling,
+        "temperature",
+    )?;
+    hydrate_option(&mut request.sampling_options.top_p, &sampling, "top_p")?;
+    hydrate_option(&mut request.sampling_options.top_k, &sampling, "top_k")?;
+    hydrate_option(&mut request.sampling_options.min_p, &sampling, "min_p")?;
+    hydrate_option(&mut request.sampling_options.seed, &sampling, "seed")?;
+    hydrate_option(
+        &mut request.sampling_options.presence_penalty,
+        &sampling,
+        "presence_penalty",
+    )?;
+    hydrate_option(
+        &mut request.sampling_options.frequency_penalty,
+        &sampling,
+        "frequency_penalty",
+    )?;
+    hydrate_option(
+        &mut request.sampling_options.repetition_penalty,
+        &sampling,
+        "repetition_penalty",
+    )?;
+    hydrate_option(
+        &mut request.stop_conditions.max_tokens,
+        &sampling,
+        "max_tokens",
+    )?;
+    hydrate_option(
+        &mut request.stop_conditions.min_tokens,
+        &sampling,
+        "min_tokens",
+    )?;
+    if request.stop_conditions.stop_token_ids.is_none()
+        && request.stop_conditions.stop_token_ids_hidden.is_none()
+    {
+        hydrate_option(
+            &mut request.stop_conditions.stop_token_ids,
+            &sampling,
+            "stop_token_ids",
+        )?;
+    }
+    hydrate_option(
+        &mut request.stop_conditions.ignore_eos,
+        &sampling,
+        "ignore_eos",
+    )?;
+    if request.output_options.logprobs.is_none() {
+        request.output_options.logprobs = legacy_logprob_count(&sampling, "logprobs")?;
+    }
+    if request.output_options.prompt_logprobs.is_none() {
+        request.output_options.prompt_logprobs =
+            legacy_logprob_count(&sampling, "prompt_logprobs")?;
+    }
+    if request.output_options.skip_special_tokens.is_none() {
+        request.output_options.skip_special_tokens = legacy_bool(&sampling, "skip_special_tokens")?;
+    }
+    if let Some(legacy_kv_transfer) = legacy_kv_transfer
+        && let Some(extra) = request
+            .extra_args
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        && !extra.contains_key("kv_transfer_params")
+    {
+        extra.insert("kv_transfer_params".to_string(), legacy_kv_transfer);
+    }
+    if let Some(legacy_skip_prefix_cache) = legacy_skip_prefix_cache
+        && let Some(extra) = request
+            .extra_args
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        && !extra.contains_key("skip_reading_prefix_cache")
+    {
+        extra.insert(
+            "skip_reading_prefix_cache".to_string(),
+            serde_json::Value::Bool(legacy_skip_prefix_cache),
+        );
+    }
+    Ok(request)
+}
+
+fn hydrate_option<T: DeserializeOwned>(
+    target: &mut Option<T>,
+    sampling: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<(), DynamoError> {
+    if target.is_some() {
+        return Ok(());
+    }
+    let Some(value) = sampling.get(field).filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    *target = Some(serde_json::from_value(value.clone()).map_err(|error| {
+        client::invalid_argument(format!(
+            "extra_args.vllm_tito.sampling_params.{field} is invalid: {error}"
+        ))
+    })?);
+    Ok(())
+}
+
+fn vllm_tito_sampling(
+    extra_args: &Option<serde_json::Value>,
+) -> Result<Option<&serde_json::Map<String, serde_json::Value>>, DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args else {
+        return Ok(None);
+    };
+    let Some(envelope) = extra.get("vllm_tito") else {
+        return Ok(None);
+    };
+    let serde_json::Value::Object(envelope) = envelope else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito must be a JSON object",
+        ));
+    };
+    let sampling = envelope.get("sampling_params").ok_or_else(|| {
+        client::invalid_argument("extra_args.vllm_tito.sampling_params is required")
+    })?;
+    let serde_json::Value::Object(sampling) = sampling else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params must be a JSON object",
+        ));
+    };
+    Ok(Some(sampling))
+}
+
+fn legacy_bool(
+    sampling: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<bool>, DynamoError> {
+    match sampling.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.sampling_params.{field} must be a boolean"
+        ))),
+    }
+}
+
+fn legacy_logprob_count(
+    sampling: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<u32>, DynamoError> {
+    match sampling.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => match value.as_i64() {
+            Some(-1) => Ok(Some(u32::MAX)),
+            Some(value) if value >= 0 => u32::try_from(value).map(Some).map_err(|_| {
+                client::invalid_argument(format!(
+                    "extra_args.vllm_tito.sampling_params.{field} exceeds u32"
+                ))
+            }),
+            _ => Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.sampling_params.{field} must be non-negative or -1"
+            ))),
+        },
+    }
+}
+
+fn consume_vllm_tito(
+    extra_args: &mut Option<serde_json::Value>,
+) -> Result<Option<VllmTitoFeatures>, DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return Ok(None);
+    };
+    let Some(envelope) = extra.remove("vllm_tito") else {
+        return Ok(None);
+    };
+    let serde_json::Value::Object(mut envelope) = envelope else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito must be a JSON object",
+        ));
+    };
+    for (key, value) in &envelope {
+        let supported = matches!(
+            key.as_str(),
+            "request_id"
+                | "sampling_params"
+                | "model"
+                | "stream"
+                | "stream_options"
+                | "cache_salt"
+                | "priority"
+                | "kv_transfer_params"
+                | "features"
+        );
+        let nullable_renderer_metadata = value.is_null()
+            && matches!(
+                key.as_str(),
+                "assistant_tokens_mask"
+                    | "token_offsets"
+                    | "content_parts"
+                    | "return_token_ids"
+                    | "ec_transfer_params"
+            );
+        if !supported && !nullable_renderer_metadata {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.{key} is not supported by vLLM gRPC"
+            )));
+        }
+    }
+    let Some(features) = envelope.remove("features") else {
+        return Ok(None);
+    };
+    if features.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(features).map(Some).map_err(|error| {
+        client::invalid_argument(format!("extra_args.vllm_tito.features is invalid: {error}"))
+    })
+}
+
+fn consume_preprocessed_mm_routing_hashes(
+    extra_args: &mut Option<serde_json::Value>,
+) -> Result<Option<Vec<String>>, DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return Ok(None);
+    };
+    let Some(value) = extra.remove("dynamo_mm_routing_hashes") else {
+        return Ok(None);
+    };
+    let hashes: Vec<String> = serde_json::from_value(value).map_err(|error| {
+        client::invalid_argument(format!("dynamo_mm_routing_hashes is invalid: {error}"))
+    })?;
+    if hashes.iter().any(String::is_empty) {
+        return Err(client::invalid_argument(
+            "dynamo_mm_routing_hashes entries must not be empty",
+        ));
+    }
+    Ok(Some(hashes))
+}
+
+/// The frontend adds these for vLLM's structured-output reasoning gate, which
+/// the gRPC proto cannot carry. Drop them only when vLLM runs no reasoning
+/// parser, so nothing reads them.
+pub(crate) fn consume_reasoning_parser_args(extra_args: &mut Option<serde_json::Value>) {
+    if let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
+        extra.remove("reasoning_parser_kwargs");
+        extra.remove("reasoning_ended");
+    }
 }
 
 fn consume_redundant_nvext(
@@ -180,6 +586,16 @@ fn consume_redundant_nvext(
                 "extra_args.nvext.token_in must be true when present",
             ));
         }
+        // Worker attribution and timing are produced by the frontend.
+        if let Some(fields) = nvext.get_mut("extra_fields") {
+            let fields = fields.as_array_mut().ok_or_else(|| {
+                client::invalid_argument("extra_args.nvext.extra_fields must be an array")
+            })?;
+            fields.retain(|field| !matches!(field.as_str(), Some("worker_id" | "timing")));
+            if fields.is_empty() {
+                nvext.remove("extra_fields");
+            }
+        }
         nvext.is_empty()
     };
     if remove_nvext {
@@ -188,54 +604,55 @@ fn consume_redundant_nvext(
     Ok(())
 }
 
-fn take_multimodal_prompt_token_ids(
-    prefill_result: &mut Option<PrefillResult>,
-) -> Result<Vec<u32>, DynamoError> {
-    let params = &mut prefill_result
+fn strip_multimodal_prompt_token_ids(prefill_result: &mut Option<PrefillResult>) {
+    if let Some(params) = prefill_result
         .as_mut()
-        .ok_or_else(|| {
-            client::invalid_argument("multimodal decode request is missing the prefill result")
-        })?
-        .disaggregated_params;
-    let value = params
-        .as_object_mut()
-        .and_then(|params| params.remove(MULTIMODAL_PROMPT_TOKEN_IDS_KEY))
-        .ok_or_else(|| {
-            client::invalid_argument(
-                "multimodal decode request is missing expanded prefill token IDs",
-            )
-        })?;
-    let token_ids: Vec<u32> = serde_json::from_value(value).map_err(|error| {
-        client::invalid_argument(format!("multimodal prefill token IDs are invalid: {error}"))
-    })?;
-    if token_ids.is_empty() {
-        return Err(client::invalid_argument(
-            "multimodal prefill token IDs must not be empty",
-        ));
+        .and_then(|result| result.disaggregated_params.as_object_mut())
+    {
+        params.remove(MULTIMODAL_PROMPT_TOKEN_IDS_KEY);
     }
-    Ok(token_ids)
 }
 
-fn media_source(source: &str) -> Result<pb::media_item::Source, DynamoError> {
+fn media_source(modality: &str, source: &str) -> Result<pb::media_item::Source, DynamoError> {
     if source.starts_with("data:") {
         Ok(pb::media_item::Source::DataUri(source.to_string()))
     } else if source.starts_with("http://") || source.starts_with("https://") {
         Ok(pb::media_item::Source::Url(source.to_string()))
     } else {
-        Err(client::invalid_argument(
-            "vLLM gRPC image input must use an http://, https://, or data: URI",
-        ))
+        Err(client::invalid_argument(format!(
+            "vLLM gRPC {modality} input must use an http://, https://, or data: URI"
+        )))
     }
 }
 
-fn forwarded_mm_uuids(request: &PreprocessedRequest) -> Result<Option<Vec<String>>, DynamoError> {
+fn validate_multimodal_cache_uuids(request: &PreprocessedRequest) -> Result<(), DynamoError> {
+    let Some(uuids_by_modality) = request.multi_modal_uuids.as_ref() else {
+        return Ok(());
+    };
+    for (modality, uuids) in uuids_by_modality {
+        if modality != IMAGE_URL_KEY
+            && uuids
+                .iter()
+                .any(|uuid| uuid.as_ref().is_some_and(|uuid| !uuid.is_empty()))
+        {
+            return Err(client::invalid_argument(format!(
+                "multimodal cache UUIDs are supported only for {IMAGE_URL_KEY}; got non-empty multi_modal_uuids.{modality}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn forwarded_image_uuids(
+    request: &PreprocessedRequest,
+) -> Result<Option<Vec<String>>, DynamoError> {
     let has_user_uuid = request
         .multi_modal_uuids
         .as_ref()
-        .is_some_and(|by_modality| {
-            by_modality
-                .values()
-                .flatten()
+        .and_then(|by_modality| by_modality.get(IMAGE_URL_KEY))
+        .is_some_and(|uuids| {
+            uuids
+                .iter()
                 .any(|uuid| uuid.as_ref().is_some_and(|uuid| !uuid.is_empty()))
         });
     if has_user_uuid {
@@ -277,6 +694,20 @@ fn forwarded_mm_uuids(request: &PreprocessedRequest) -> Result<Option<Vec<String
         .map(Some)
 }
 
+fn validate_media_uuid(uuid: &str) -> Result<(), DynamoError> {
+    if uuid == "."
+        || uuid == ".."
+        || uuid
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '\0'))
+    {
+        return Err(client::invalid_argument(
+            "multimodal media uuid must be a safe identifier without path separators, NUL bytes, or dot path components",
+        ));
+    }
+    Ok(())
+}
+
 fn build_media(
     request: &PreprocessedRequest,
     forwarded_uuids: Option<&[String]>,
@@ -299,11 +730,16 @@ fn build_media(
         if items.is_empty() {
             continue;
         }
-        if key != "image_url" {
-            return Err(client::invalid_argument(format!(
-                "vLLM gRPC currently supports image_url media only; got `{key}`"
-            )));
-        }
+        let modality = match key.as_str() {
+            IMAGE_URL_KEY => pb::Modality::Image,
+            VIDEO_URL_KEY => pb::Modality::Video,
+            AUDIO_URL_KEY => pb::Modality::Audio,
+            _ => {
+                return Err(client::invalid_argument(format!(
+                    "vLLM gRPC does not support media modality `{key}`"
+                )));
+            }
+        };
         let uuids = request
             .multi_modal_uuids
             .as_ref()
@@ -317,7 +753,8 @@ fn build_media(
                 items.len()
             )));
         }
-        if let Some(uuids) = forwarded_uuids
+        if modality == pb::Modality::Image
+            && let Some(uuids) = forwarded_uuids
             && uuids.len() != items.len()
         {
             return Err(client::invalid_argument(format!(
@@ -329,8 +766,8 @@ fn build_media(
 
         for (index, item) in items.iter().enumerate() {
             let source = match item {
-                MultimodalData::Url(url) => media_source(url.as_str())?,
-                MultimodalData::RawUrl(source) => media_source(source)?,
+                MultimodalData::Url(url) => media_source(key, url.as_str())?,
+                MultimodalData::RawUrl(source) => media_source(key, source)?,
                 MultimodalData::Decoded(_) => {
                     return Err(client::invalid_argument(
                         "vLLM sidecar cannot dereference pre-decoded RDMA media; configure URL passthrough",
@@ -342,13 +779,20 @@ fn build_media(
                     ));
                 }
             };
-            let uuid = uuids
-                .and_then(|uuids| uuids.get(index))
-                .and_then(Clone::clone)
-                .or_else(|| forwarded_uuids.and_then(|uuids| uuids.get(index)).cloned())
-                .unwrap_or_default();
+            let uuid = if modality == pb::Modality::Image {
+                uuids
+                    .and_then(|uuids| uuids.get(index))
+                    .and_then(Clone::clone)
+                    .or_else(|| forwarded_uuids.and_then(|uuids| uuids.get(index)).cloned())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            if !uuid.is_empty() {
+                validate_media_uuid(&uuid)?;
+            }
             media.push(pb::MediaItem {
-                modality: pb::Modality::Image as i32,
+                modality: modality as i32,
                 source: Some(source),
                 mime_type: String::new(),
                 uuid,
@@ -358,7 +802,176 @@ fn build_media(
     Ok(media)
 }
 
+fn build_preprocessed_media(
+    features: VllmTitoFeatures,
+    prompt_token_count: usize,
+    routing_hashes: Option<&[String]>,
+    lora_name: &str,
+) -> Result<Vec<pb::MediaItem>, DynamoError> {
+    if features.mm_hashes.is_empty() {
+        return Err(client::invalid_argument(
+            "preprocessed multimodal features must not be empty",
+        ));
+    }
+    if features
+        .mm_hashes
+        .keys()
+        .ne(features.mm_placeholders.keys())
+        || features.mm_hashes.keys().ne(features.kwargs_data.keys())
+    {
+        return Err(client::invalid_argument(
+            "preprocessed multimodal feature modalities must match",
+        ));
+    }
+
+    let image_count = features.mm_hashes.get("image").map_or(0, Vec::len);
+    if let Some(routing_hashes) = routing_hashes
+        && routing_hashes.len() != image_count
+    {
+        return Err(client::invalid_argument(format!(
+            "dynamo_mm_routing_hashes has {} entries for {image_count} images",
+            routing_hashes.len()
+        )));
+    }
+
+    let mut decoded_bytes = 0usize;
+    let mut media = Vec::new();
+    for (modality_name, producer_hashes) in &features.mm_hashes {
+        let modality = match modality_name.as_str() {
+            "image" => pb::Modality::Image,
+            "video" => pb::Modality::Video,
+            "audio" => pb::Modality::Audio,
+            _ => {
+                return Err(client::invalid_argument(format!(
+                    "vLLM gRPC does not support preprocessed modality `{modality_name}`"
+                )));
+            }
+        };
+        let placeholders = &features.mm_placeholders[modality_name];
+        let kwargs_data = &features.kwargs_data[modality_name];
+        if producer_hashes.len() != placeholders.len() || producer_hashes.len() != kwargs_data.len()
+        {
+            return Err(client::invalid_argument(format!(
+                "preprocessed modality `{modality_name}` has mismatched item counts"
+            )));
+        }
+
+        for (index, ((producer_hash, placeholder), encoded_kwargs)) in producer_hashes
+            .iter()
+            .zip(placeholders)
+            .zip(kwargs_data)
+            .enumerate()
+        {
+            if producer_hash.is_empty() {
+                return Err(client::invalid_argument(format!(
+                    "preprocessed modality `{modality_name}` item {index} has an empty hash"
+                )));
+            }
+            if placeholder.length == 0 {
+                return Err(client::invalid_argument(format!(
+                    "preprocessed modality `{modality_name}` item {index} has an empty placeholder"
+                )));
+            }
+            let end = placeholder
+                .offset
+                .checked_add(placeholder.length)
+                .ok_or_else(|| client::invalid_argument("multimodal placeholder range overflow"))?;
+            if end > prompt_token_count as u64 {
+                return Err(client::invalid_argument(format!(
+                    "preprocessed modality `{modality_name}` item {index} placeholder exceeds the prompt"
+                )));
+            }
+            // An empty mask is vLLM's dense-placeholder representation. Sparse
+            // layouts require a renderer that preserves `is_embed` on the wire.
+            let is_embed = placeholder.is_embed.clone().unwrap_or_default();
+            if !is_embed.is_empty() && is_embed.len() as u64 != placeholder.length {
+                return Err(client::invalid_argument(format!(
+                    "preprocessed modality `{modality_name}` item {index} is_embed length does not match its placeholder"
+                )));
+            }
+
+            let kwargs = decode_preprocessed_kwargs(encoded_kwargs, &mut decoded_bytes)?;
+            let mm_hash = preprocessed_mm_identifier(modality_name, &kwargs);
+            let expected_routing_marker = (modality == pb::Modality::Image)
+                .then(|| routing_hashes.and_then(|hashes| hashes.get(index)))
+                .flatten();
+            if let Some(expected) = expected_routing_marker
+                && expected != &preprocessed_mm_routing_hash(modality_name, &kwargs)
+            {
+                return Err(client::invalid_argument(format!(
+                    "dynamo_mm_routing_hashes[{index}] does not match the preprocessed image payload"
+                )));
+            }
+            let identifier = if lora_name.is_empty() {
+                expected_routing_marker
+                    .cloned()
+                    .unwrap_or_else(|| mm_hash.clone())
+            } else {
+                format!("{lora_name}:{mm_hash}")
+            };
+            media.push(pb::MediaItem {
+                modality: modality as i32,
+                source: Some(pb::media_item::Source::Features(
+                    pb::PreprocessedMediaFeatures {
+                        kwargs: Some(kwargs),
+                        identifier: identifier.clone(),
+                        offset: placeholder.offset,
+                        length: placeholder.length,
+                        mm_hash: Some(mm_hash),
+                        is_embed,
+                    },
+                )),
+                mime_type: String::new(),
+                uuid: String::new(),
+            });
+        }
+    }
+    Ok(media)
+}
+
+fn decode_preprocessed_kwargs(
+    encoded: &str,
+    decoded_bytes: &mut usize,
+) -> Result<Vec<u8>, DynamoError> {
+    if encoded.is_empty() {
+        return Err(client::invalid_argument(
+            "preprocessed multimodal kwargs must not be empty",
+        ));
+    }
+    let remaining = MAX_PREPROCESSED_MM_BYTES.saturating_sub(*decoded_bytes);
+    let max_encoded = remaining.saturating_add(2) / 3 * 4 + 4;
+    if encoded.len() > max_encoded {
+        return Err(client::invalid_argument(format!(
+            "preprocessed multimodal kwargs exceed {MAX_PREPROCESSED_MM_BYTES} decoded bytes"
+        )));
+    }
+    let kwargs = BASE64_STANDARD.decode(encoded).map_err(|error| {
+        client::invalid_argument(format!(
+            "preprocessed multimodal kwargs are not valid base64: {error}"
+        ))
+    })?;
+    if kwargs.is_empty() {
+        return Err(client::invalid_argument(
+            "preprocessed multimodal kwargs must not decode to an empty payload",
+        ));
+    }
+    *decoded_bytes = decoded_bytes
+        .checked_add(kwargs.len())
+        .filter(|total| *total <= MAX_PREPROCESSED_MM_BYTES)
+        .ok_or_else(|| {
+            client::invalid_argument(format!(
+                "preprocessed multimodal kwargs exceed {MAX_PREPROCESSED_MM_BYTES} decoded bytes"
+            ))
+        })?;
+    Ok(kwargs)
+}
+
 fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
+    if count == u32::MAX {
+        return Ok(pb::CandidateTokens {
+            select: Some(pb::candidate_tokens::Select::All(true)),
+        });
+    }
     i32::try_from(count).map_err(|_| {
         client::invalid_argument(format!(
             "vLLM logprobs request must fit in i32; got {count}"
@@ -397,7 +1010,7 @@ fn structured_output(
     };
     if guided.backend.is_some() || guided.whitespace_pattern.is_some() {
         return Err(client::invalid_argument(
-            "guided decoding backend and whitespace_pattern are not supported by vLLM gRPC v0.25.1",
+            "guided decoding backend and whitespace_pattern are not supported by vLLM gRPC",
         ));
     }
 
@@ -434,6 +1047,7 @@ fn structured_output(
 fn build_kv_parameters(
     extra_args: Option<serde_json::Value>,
     prefill_result: Option<PrefillResult>,
+    encoder_result: Option<serde_json::Value>,
     cache_salt: Option<String>,
     mode: DisaggregationMode,
 ) -> Result<pb::KvCacheParameters, DynamoError> {
@@ -451,7 +1065,7 @@ fn build_kv_parameters(
                 "bypass_prefix_cache" | "skip_reading_prefix_cache" | "kv_transfer_params"
             ) {
                 return Err(client::invalid_argument(format!(
-                    "extra_args.{key} is not supported by vLLM gRPC v0.25.1"
+                    "extra_args.{key} is not supported by vLLM gRPC"
                 )));
             }
         }
@@ -495,11 +1109,22 @@ fn build_kv_parameters(
             stringify_remote_port(&mut params);
             Some(params)
         }
-        DisaggregationMode::Encode => {
-            return Err(client::invalid_argument(
-                "encode mode is not supported by the vLLM sidecar",
-            ));
-        }
+        DisaggregationMode::Encode => None,
+    };
+
+    let ec_transfer_params = match mode {
+        DisaggregationMode::Aggregated
+        | DisaggregationMode::Prefill
+        | DisaggregationMode::Decode => match encoder_result {
+            None => None,
+            Some(serde_json::Value::Object(params)) => Some(serde_json::Value::Object(params)),
+            Some(_) => {
+                return Err(client::invalid_argument(
+                    "encoder_result must be a JSON object",
+                ));
+            }
+        },
+        DisaggregationMode::Encode => None,
     };
 
     Ok(pb::KvCacheParameters {
@@ -507,8 +1132,12 @@ fn build_kv_parameters(
         cache_salt: cache_salt
             .map(|cache_salt| format!("{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"))
             .unwrap_or_default(),
-        kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
-        ec_transfer_params: None,
+        kv_transfer_params: kv_transfer_params
+            .map(|value| json_to_struct_v14(value, KV_TRANSFER_PARAMS))
+            .transpose()?,
+        ec_transfer_params: ec_transfer_params
+            .map(|value| json_to_struct_v14(value, EC_TRANSFER_PARAMS))
+            .transpose()?,
     })
 }
 
@@ -562,27 +1191,23 @@ fn validate_request(
     }
     if request.prompt_embeds.is_some() {
         return Err(client::invalid_argument(
-            "prompt embeddings are not supported by vLLM gRPC v0.25.1",
+            "prompt embeddings are not supported by vLLM gRPC",
         ));
     }
-    if request.mm_processor_kwargs.is_some() || request.encoder_result.is_some() {
+    if request.mm_processor_kwargs.is_some() {
         return Err(client::invalid_argument(
-            "preprocessed multimodal features are not supported by vLLM gRPC",
+            "mm_processor_kwargs are not supported by vLLM gRPC",
         ));
     }
-    if mode.is_encode() {
+    let has_media = request_has_multimodal_input(request);
+    if mode.is_encode() && !has_media {
         return Err(client::invalid_argument(
-            "encode mode is not supported by the vLLM sidecar",
+            "encode requests require multimodal media",
         ));
     }
-    if request
-        .routing
-        .as_ref()
-        .and_then(|routing| routing.lora_name.as_deref())
-        .is_some_and(|name| !name.is_empty())
-    {
+    if mode.is_encode() && request.encoder_result.is_some() {
         return Err(client::invalid_argument(
-            "LoRA request selection is not supported by vLLM gRPC v0.25.1",
+            "encode requests must not include encoder_result",
         ));
     }
     if request.bootstrap_info.is_some() {
@@ -597,17 +1222,12 @@ fn validate_request(
         .is_some_and(|ids| !ids.is_empty())
     {
         return Err(client::invalid_argument(
-            "visible stop token IDs are not supported by vLLM gRPC v0.25.1",
+            "visible stop token IDs are not supported by vLLM gRPC",
         ));
     }
     if request.stop_conditions.max_thinking_tokens.is_some() {
         return Err(client::invalid_argument(
-            "max_thinking_tokens is not supported by vLLM gRPC v0.25.1",
-        ));
-    }
-    if request.output_options.skip_special_tokens == Some(false) {
-        return Err(client::invalid_argument(
-            "skip_special_tokens=false is not supported by vLLM gRPC v0.25.1",
+            "max_thinking_tokens is not supported by vLLM gRPC",
         ));
     }
     let sampling = &request.sampling_options;
@@ -619,6 +1239,18 @@ fn validate_request(
     }
     if sampling.use_beam_search.unwrap_or(false) {
         return Err(client::invalid_argument("beam search is not supported"));
+    }
+    if !mode.is_prefill() && !mode.is_encode() {
+        if matches!(sampling.top_k, Some(-1 | 0)) {
+            return Err(client::invalid_argument(
+                "top_k=-1 or top_k=0 cannot be represented by vllm-proto 0.3",
+            ));
+        }
+        if sampling.min_p == Some(0.0) {
+            return Err(client::invalid_argument(
+                "min_p=0 cannot be represented by vllm-proto 0.3",
+            ));
+        }
     }
     if let Some(length_penalty) = sampling.length_penalty
         && (length_penalty - 1.0).abs() > f32::EPSILON
@@ -635,10 +1267,12 @@ pub(crate) struct ResponseState {
     has_media: bool,
     multimodal_prompt_token_ids: Option<Vec<u32>>,
     completion_tokens: u32,
-    is_prefill: bool,
+    mode: DisaggregationMode,
     output_logprobs: Option<u32>,
     expect_prompt_logprobs: bool,
     prompt_info: Option<pb::PromptInfo>,
+    user_stop_token_ids: Vec<u32>,
+    hidden_stop_token_ids: Vec<u32>,
 }
 
 impl ResponseState {
@@ -651,15 +1285,25 @@ impl ResponseState {
                 .is_some_and(|media| media.values().any(|items| !items.is_empty())),
             multimodal_prompt_token_ids: None,
             completion_tokens: 0,
-            is_prefill: mode.is_prefill(),
+            mode,
             output_logprobs: request.output_options.logprobs,
             expect_prompt_logprobs: request.output_options.prompt_logprobs.is_some(),
             prompt_info: None,
+            user_stop_token_ids: request
+                .stop_conditions
+                .stop_token_ids
+                .clone()
+                .unwrap_or_default(),
+            hidden_stop_token_ids: request
+                .stop_conditions
+                .stop_token_ids_hidden
+                .clone()
+                .unwrap_or_default(),
         }
     }
 
     pub(crate) fn reported_completion_tokens(&self) -> u32 {
-        if self.is_prefill {
+        if self.mode.is_prefill() || self.mode.is_encode() {
             0
         } else {
             self.completion_tokens
@@ -694,8 +1338,15 @@ impl ResponseState {
             )));
         }
 
+        if self.mode.is_encode() && output.num_tokens > 0 {
+            return Err(client::protocol_error(
+                "encode response produced output tokens",
+            ));
+        }
+
         let mapped_logprobs = if let Some(count) = self.output_logprobs
-            && !self.is_prefill
+            && !self.mode.is_prefill()
+            && !self.mode.is_encode()
         {
             Some(map_output_logprobs(&output, count > 0)?)
         } else {
@@ -711,14 +1362,16 @@ impl ResponseState {
 
         self.completion_tokens = self.completion_tokens.saturating_add(num_tokens);
         let mut mapped = LLMEngineOutput {
-            token_ids: if self.is_prefill {
+            token_ids: if self.mode.is_prefill() || self.mode.is_encode() {
                 Vec::new()
             } else {
                 token_ids
             },
-            text: if self.is_prefill || text.is_empty() {
+            text: if self.mode.is_prefill() || self.mode.is_encode() {
                 None
             } else {
+                // vLLM may buffer text while matching stop strings. Preserve an
+                // empty delta so the frontend does not detokenize its IDs again.
                 Some(text)
             },
             index: Some(0),
@@ -730,7 +1383,7 @@ impl ResponseState {
         }
 
         let Some(finish) = finish_info else {
-            return if self.is_prefill || num_tokens == 0 {
+            return if self.mode.is_prefill() || self.mode.is_encode() || num_tokens == 0 {
                 Ok(None)
             } else {
                 Ok(Some(mapped))
@@ -760,19 +1413,59 @@ impl ResponseState {
                 ));
             }
         });
-        mapped.stop_reason = finish.stop_reason.map(|reason| match reason {
-            pb::finish_info::StopReason::StopTokenId(id)
-            | pb::finish_info::StopReason::EosTokenId(id) => StopReason::Int(i64::from(id)),
-            pb::finish_info::StopReason::StopString(value) => StopReason::String(value),
+        mapped.stop_reason = finish.stop_reason.and_then(|reason| match reason {
+            pb::finish_info::StopReason::StopTokenId(id) => {
+                (!self.hidden_stop_token_ids.contains(&id)
+                    || self.user_stop_token_ids.contains(&id))
+                .then_some(StopReason::Int(i64::from(id)))
+            }
+            pb::finish_info::StopReason::EosTokenId(id) => self
+                .user_stop_token_ids
+                .contains(&id)
+                .then_some(StopReason::Int(i64::from(id))),
+            pb::finish_info::StopReason::StopString(value) => Some(StopReason::String(value)),
         });
         mapped.completion_usage = Some(usage(self.prompt_tokens, completion_tokens));
-        mapped.disaggregated_params = finish.kv_transfer_params.map(struct_to_json).transpose()?;
-        if self.is_prefill && mapped.disaggregated_params.is_none() {
+        if self.mode.is_encode() {
+            if matches!(
+                mapped.finish_reason,
+                Some(dynamo_backend_common::FinishReason::Cancelled)
+            ) {
+                return Ok(Some(mapped));
+            }
+            if !matches!(
+                mapped.finish_reason,
+                Some(dynamo_backend_common::FinishReason::Stop)
+            ) {
+                return Err(client::protocol_error(format!(
+                    "encode terminal has invalid finish reason {:?}; expected stop or cancelled",
+                    mapped.finish_reason
+                )));
+            }
+            let params = finish
+                .ec_transfer_params
+                .map(|value| struct_to_json_v14(value, PEER, EC_TRANSFER_PARAMS))
+                .transpose()?
+                .and_then(|value| value.as_object().cloned())
+                .ok_or_else(|| {
+                    client::protocol_error("encode terminal is missing valid ec_transfer_params")
+                })?;
+            return Ok(Some(LLMEngineOutput::encode_terminal(params)));
+        }
+        if self.mode.is_prefill() && reason == pb::finish_info::FinishReason::Aborted {
+            self.attach_prompt_data(&mut mapped);
+            return Ok(Some(mapped));
+        }
+        mapped.disaggregated_params = finish
+            .kv_transfer_params
+            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS))
+            .transpose()?;
+        if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
                 "prefill terminal is missing kv_transfer_params",
             ));
         }
-        if self.is_prefill && self.has_media {
+        if self.mode.is_prefill() && self.has_media {
             let token_ids = self.multimodal_prompt_token_ids.take().ok_or_else(|| {
                 client::protocol_error(
                     "multimodal prefill did not return expanded prompt token IDs",
@@ -815,7 +1508,7 @@ impl ResponseState {
             // vLLM's count includes expanded media tokens.
             self.prompt_tokens = prompt.num_prompt_tokens;
         }
-        if self.is_prefill && self.has_media {
+        if self.mode.is_prefill() && self.has_media {
             if prompt.token_ids.len() != prompt.num_prompt_tokens as usize {
                 return Err(client::protocol_error(format!(
                     "multimodal prefill returned {} prompt token IDs for {} prompt tokens",
@@ -963,3 +1656,9 @@ fn normalize_logprob(logprob: f32) -> f64 {
         VLLM_LOGPROB_FLOOR
     }
 }
+
+#[cfg(test)]
+mod request_tests;
+
+#[cfg(test)]
+mod response_tests;

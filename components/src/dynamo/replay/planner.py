@@ -1,0 +1,397 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Planner preparation for Dynamo offline replay SDK callers."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
+
+import msgspec
+
+from dynamo._internal.ais import create_session
+from dynamo.common.forward_pass_metrics import (
+    ForwardPassMetrics,
+    ScheduledRequestMetrics,
+)
+from dynamo.mocker.config import (
+    engine_limit,
+    normalize_mocker_config,
+    performance_config,
+)
+from dynamo.replay.config import canonical_upstream_config
+
+if TYPE_CHECKING:
+    from dynamo.planner.core.types import EngineCapabilities
+
+logger = logging.getLogger(__name__)
+
+
+def _engine_caps(args: dict[str, Any]) -> EngineCapabilities:
+    """Derive Planner engine capabilities from mock-engine arguments."""
+
+    from dynamo.planner.core.types import EngineCapabilities
+
+    dp_size = max(args["dp_size"], 1)
+    config = performance_config(args) or {}
+    max_kv_tokens = (
+        args["engine"]["num_gpu_blocks"] * args["engine"]["block_size"] * dp_size
+    )
+    return EngineCapabilities(
+        num_gpu=(args["tensor_parallel_size"] or 1) * config.get("pp", 1) * dp_size,
+        max_num_batched_tokens=engine_limit(args, "max_num_batched_tokens"),
+        max_num_seqs=engine_limit(args, "max_num_seqs"),
+        context_length=args["engine"]["max_model_len"],
+        max_kv_tokens=max_kv_tokens if max_kv_tokens > 0 else None,
+        speculative_nextn=args["engine"]["aic_nextn"],
+    )
+
+
+def _generate_ais_prefill_fpms(
+    ais_session,
+    engine_args: dict[str, Any],
+    granularity: int = 8,
+) -> list[ForwardPassMetrics]:
+    prefill_max = (
+        engine_limit(engine_args, "max_num_batched_tokens")
+        or normalize_mocker_config()["engine"]["max_num_batched_tokens"]
+    )
+    prefill_step = max(1, (prefill_max - 100) // granularity)
+    prefill_fpms: list[ForwardPassMetrics] = []
+    for isl in range(100, prefill_max + 1, prefill_step):
+        ttft_ms = ais_session.predict_prefill(1, isl, 0)
+        if ttft_ms > 0:
+            prefill_fpms.append(
+                ForwardPassMetrics(
+                    wall_time=ttft_ms / 1000.0,
+                    scheduled_requests=ScheduledRequestMetrics(
+                        num_prefill_requests=1,
+                        sum_prefill_tokens=isl,
+                    ),
+                )
+            )
+    return prefill_fpms
+
+
+def _generate_ais_decode_fpms(
+    ais_session,
+    engine_args: dict[str, Any],
+    granularity: int = 8,
+) -> list[ForwardPassMetrics]:
+    max_kv_tokens = (
+        engine_args["engine"]["num_gpu_blocks"] * engine_args["engine"]["block_size"]
+    )
+    if max_kv_tokens <= 0:
+        max_kv_tokens = 16384 * 16
+
+    decode_fpms: list[ForwardPassMetrics] = []
+    ctx_lengths = [500, 2000, 4000, 8000]
+    bs_max = (
+        engine_limit(engine_args, "max_num_seqs")
+        or normalize_mocker_config()["engine"]["max_num_seqs"]
+    )
+    bs_step = max(1, bs_max // granularity)
+    for ctx_len in ctx_lengths:
+        for bs in range(1, bs_max + 1, bs_step):
+            sum_kv = bs * ctx_len
+            if sum_kv > max_kv_tokens:
+                break
+            itl_ms = ais_session.predict_decode(bs, ctx_len, 2)
+            if itl_ms > 0:
+                decode_fpms.append(
+                    ForwardPassMetrics(
+                        wall_time=itl_ms / 1000.0,
+                        scheduled_requests=ScheduledRequestMetrics(
+                            num_decode_requests=bs,
+                            sum_decode_kv_tokens=sum_kv,
+                        ),
+                    )
+                )
+    return decode_fpms
+
+
+def _ais_fpm_digest(
+    prefill_fpms: list[ForwardPassMetrics],
+    decode_fpms: list[ForwardPassMetrics],
+) -> str:
+    payload = {
+        "prefill": [msgspec.to_builtins(fpm) for fpm in prefill_fpms],
+        "decode": [msgspec.to_builtins(fpm) for fpm in decode_fpms],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _ais_performance_model_config(
+    metadata: dict[str, Any], roles: tuple[str, ...]
+) -> dict[str, Any] | None:
+    """Select one runner-neutral AIS identity from equivalent role aliases."""
+
+    for role in roles:
+        raw = metadata.get(role)
+        if raw is None:
+            continue
+        if not isinstance(raw, dict):
+            raise TypeError(f"performance_model_metadata.{role} must be a mapping")
+        if raw.get("provider") not in {"aic", "ais"}:
+            continue
+        config = raw.get("config")
+        if not isinstance(config, dict):
+            raise TypeError(
+                f"performance_model_metadata.{role}.config must be a mapping"
+            )
+        # Runner metadata uses None for unset options; omit them so AIS applies defaults.
+        return {key: value for key, value in config.items() if value is not None}
+    return None
+
+
+def _ais_performance_model_configs(
+    metadata: dict[str, Any] | None, mode: str
+) -> dict[str, dict[str, Any]]:
+    """Return the AIS identity used for each generated Planner FPM role."""
+
+    if not metadata:
+        return {}
+    if mode == "agg":
+        config = _ais_performance_model_config(metadata, ("aggregated", "agg"))
+        return {} if config is None else {"prefill": config, "decode": config}
+
+    configs = {
+        role: config
+        for role in ("prefill", "decode")
+        if (config := _ais_performance_model_config(metadata, (role,))) is not None
+    }
+    if configs and set(configs) != {"prefill", "decode"}:
+        missing = sorted({"prefill", "decode"} - set(configs))
+        raise ValueError(
+            "disagg performance_model_metadata must provide AIS identities for "
+            f"both prefill and decode; missing {missing}"
+        )
+    return configs
+
+
+def _ais_session_kwargs(
+    perf_config: dict[str, Any] | None,
+    engine_args: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Preserve complete canonical identity when bootstrapping a role."""
+
+    canonical = performance_config(engine_args)
+    if canonical is not None:
+        return {"config": dict(canonical)}
+    if perf_config is None:
+        return None
+    return {
+        "config": canonical_upstream_config(
+            perf_config, worker_type=engine_args["engine"]["worker_type"]
+        )
+    }
+
+
+def prepare_planner_replay(
+    extra_engine_args: dict[str, Any] | None,
+    prefill_engine_args: dict[str, Any] | None,
+    decode_engine_args: dict[str, Any] | None,
+    planner_config_arg: str,
+    benchmark_granularity: int = 8,
+    capture_details: bool = True,
+    performance_model_metadata: dict[str, Any] | None = None,
+):
+    """Create and bootstrap the scaling component for an offline replay."""
+
+    from dynamo.planner.config.planner_config import PlannerConfig
+    from dynamo.planner.core.types import WorkerCapabilities
+    from dynamo.planner.offline.replay_adapter import create_replay_planner_adapter
+    from dynamo.planner.offline.trace_data import (
+        extract_traffic_observations_from_trace,
+    )
+
+    planner_config = PlannerConfig.from_config_arg(planner_config_arg)
+    planner_config.advisory = True
+
+    if planner_config.mode == "agg":
+        extra_engine_args = normalize_mocker_config(extra_engine_args)
+        capabilities = WorkerCapabilities(decode=_engine_caps(extra_engine_args))
+    elif planner_config.mode == "disagg":
+        if prefill_engine_args is None or decode_engine_args is None:
+            raise ValueError(
+                "disagg planner replay requires prefill and decode engine arguments"
+            )
+        prefill_engine_args = normalize_mocker_config(prefill_engine_args)
+        decode_engine_args = normalize_mocker_config(decode_engine_args)
+        capabilities = WorkerCapabilities(
+            prefill=_engine_caps(prefill_engine_args),
+            decode=_engine_caps(decode_engine_args),
+        )
+    else:
+        raise ValueError(
+            "planner-in-the-loop replay supports mode='agg' or 'disagg', "
+            f"got {planner_config.mode!r}"
+        )
+
+    warmup_observations = None
+    if planner_config.load_predictor_warmup_trace is not None:
+        warmup_observations = extract_traffic_observations_from_trace(
+            planner_config.load_predictor_warmup_trace,
+            planner_config.throughput_adjustment_interval_seconds,
+        )
+
+    adapter = create_replay_planner_adapter(
+        planner_config=planner_config,
+        capabilities=capabilities,
+        benchmark_granularity=benchmark_granularity,
+        warmup_observations=warmup_observations,
+        capture_details=capture_details,
+    )
+    adapter.set_bootstrap_metadata({"status": "not_required"})
+    if adapter._is_easy_mode():
+        return adapter
+
+    perf_configs = _ais_performance_model_configs(
+        performance_model_metadata, planner_config.mode
+    )
+    if perf_configs:
+        ref_args = (
+            extra_engine_args
+            or decode_engine_args
+            or prefill_engine_args
+            or normalize_mocker_config()
+        )
+    else:
+        ref_args = (
+            extra_engine_args
+            or (
+                decode_engine_args
+                if decode_engine_args is not None
+                and performance_config(decode_engine_args) is not None
+                else None
+            )
+            or prefill_engine_args
+            or decode_engine_args
+            or normalize_mocker_config()
+        )
+    p_args = (
+        extra_engine_args if planner_config.mode == "agg" else prefill_engine_args
+    ) or ref_args
+    d_args = (
+        extra_engine_args if planner_config.mode == "agg" else decode_engine_args
+    ) or ref_args
+    if perf_configs:
+        prefill_session_kwargs = _ais_session_kwargs(perf_configs["prefill"], p_args)
+        decode_session_kwargs = _ais_session_kwargs(perf_configs["decode"], d_args)
+    else:
+        prefill_session_kwargs = _ais_session_kwargs(None, p_args)
+        decode_session_kwargs = _ais_session_kwargs(None, d_args)
+    if prefill_session_kwargs is None or decode_session_kwargs is None:
+        adapter.set_bootstrap_metadata(
+            {
+                "status": "not_configured_load_only",
+                "benchmark_granularity": benchmark_granularity,
+            }
+        )
+        logger.warning(
+            "throughput-based scaling regression requires AIS perf model; "
+            "falling back to load-based scaling only"
+        )
+        return adapter
+
+    try:
+        prefill_session = create_session(**prefill_session_kwargs)
+        decode_session = (
+            prefill_session
+            if decode_session_kwargs == prefill_session_kwargs
+            else create_session(**decode_session_kwargs)
+        )
+    except (
+        ImportError,
+        RuntimeError,
+        ValueError,
+        KeyError,
+        FileNotFoundError,
+    ) as exc:
+        logger.warning(
+            "AIS session creation failed (%s); throughput regression will not "
+            "be bootstrapped",
+            exc,
+        )
+        adapter.set_bootstrap_metadata(
+            {
+                "status": "session_failed_load_only",
+                "benchmark_granularity": benchmark_granularity,
+            }
+        )
+        return adapter
+
+    try:
+        prefill_fpms = _generate_ais_prefill_fpms(
+            prefill_session, p_args, benchmark_granularity
+        )
+        decode_fpms = _generate_ais_decode_fpms(
+            decode_session, d_args, benchmark_granularity
+        )
+    except (RuntimeError, ValueError, KeyError, ArithmeticError) as exc:
+        logger.warning(
+            "AIS benchmark generation failed (%s); throughput regression will "
+            "not be bootstrapped",
+            exc,
+        )
+        prefill_fpms, decode_fpms = [], []
+
+    bootstrap_metadata = {
+        "status": "installed",
+        "benchmark_granularity": benchmark_granularity,
+        "prefill_fpm_count": len(prefill_fpms),
+        "decode_fpm_count": len(decode_fpms),
+        "fpm_sha256": _ais_fpm_digest(prefill_fpms, decode_fpms),
+    }
+    if planner_config.mode == "agg":
+        agg_fpms = prefill_fpms + decode_fpms
+        if agg_fpms:
+            adapter.install_benchmark_fpms(agg_fpms=agg_fpms)
+        else:
+            bootstrap_metadata["status"] = "empty"
+            logger.warning("AIS produced no agg benchmark FPMs")
+    elif prefill_fpms and decode_fpms:
+        adapter.install_benchmark_fpms(
+            prefill_fpms=prefill_fpms,
+            decode_fpms=decode_fpms,
+        )
+    else:
+        bootstrap_metadata["status"] = "empty"
+        logger.warning(
+            "AIS produced empty benchmark FPMs (prefill=%d, decode=%d)",
+            len(prefill_fpms),
+            len(decode_fpms),
+        )
+    adapter.set_bootstrap_metadata(bootstrap_metadata)
+    return adapter
+
+
+@contextmanager
+def planner_replay_adapter(
+    extra_engine_args: dict[str, Any] | None,
+    prefill_engine_args: dict[str, Any] | None,
+    decode_engine_args: dict[str, Any] | None,
+    planner_config_arg: str,
+    benchmark_granularity: int = 8,
+    capture_details: bool = True,
+    performance_model_metadata: dict[str, Any] | None = None,
+) -> Iterator:
+    """Own Planner preparation, replay execution, and cleanup as one scope."""
+
+    adapter = prepare_planner_replay(
+        extra_engine_args=extra_engine_args,
+        prefill_engine_args=prefill_engine_args,
+        decode_engine_args=decode_engine_args,
+        planner_config_arg=planner_config_arg,
+        performance_model_metadata=performance_model_metadata,
+        benchmark_granularity=benchmark_granularity,
+        capture_details=capture_details,
+    )
+    with adapter:
+        yield adapter

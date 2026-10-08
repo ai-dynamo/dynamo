@@ -18,10 +18,7 @@ except Exception:
 __all__ = ["__version__"]
 
 try:
-    from dynamo._core import MockEngineArgs as MockEngineArgs
     from dynamo._core import ReasoningConfig as ReasoningConfig
-    from dynamo._core import SglangArgs as SglangArgs
-    from dynamo._core import TrtllmArgs as TrtllmArgs
 except ImportError:
     # The Rust extension is provided by ai-dynamo-runtime. Keep importing the
     # package itself cheap in static tooling environments where _core is absent.
@@ -31,10 +28,7 @@ else:
 
     __all__.extend(
         [
-            "MockEngineArgs",
             "ReasoningConfig",
-            "SglangArgs",
-            "TrtllmArgs",
             "run_mocker_trace_replay",
         ]
     )
@@ -56,6 +50,8 @@ else:
         sla_itl_ms=None,
         sla_e2e_ms=None,
         capture_per_request=False,
+        agentic_lanes=None,
+        execution_model=None,
     ):
         if isinstance(trace_files, (str, os.PathLike)):
             trace_files = [trace_files]
@@ -67,6 +63,8 @@ else:
             router_config=router_config,
             num_workers=num_workers,
             replay_concurrency=replay_concurrency,
+            agentic_lanes=agentic_lanes,
+            execution_model=execution_model,
             replay_mode="offline",
             router_mode=router_mode,
             arrival_speedup_ratio=arrival_speedup_ratio,

@@ -4,11 +4,13 @@
 //! Publication of neutral generalized-engine effects through Dynamo sinks.
 
 use super::*;
+use aisimulate_core::engine::PassStartEffects;
+use dynamo_kv_router::protocols::StorageTier;
 
 #[derive(Clone)]
 pub(super) struct RankDispatch {
     pub(super) external_dp_rank: u32,
-    pub(super) event_tx: Option<SchedulerEventSender>,
+    pub(super) output: RankOutputSink,
     pub(super) kv_event_publishers: KvEventPublishers,
     pub(super) fpm_publisher: FpmPublisher,
     pub(super) lifecycle_tx: mpsc::Sender<SchedulerLifecycleEvent>,
@@ -83,6 +85,9 @@ pub(super) async fn run_effect_dispatcher(
                     dispatch.publish_admissions(rank.effects.admissions).await?;
                     dispatch.publish_kv(rank.effects.kv_events);
                 }
+            }
+            GroupedLiveEvent::InternalWorkCompleted(effects) => {
+                publish_internal_work(effects, &ranks).await?;
             }
             GroupedLiveEvent::PassCompleted {
                 completed,
@@ -169,7 +174,7 @@ async fn dispatch_pass_completion(
         }
 
         for (dp_rank, request_id) in delivery_failures {
-            let command_result = boundary
+            let outcome = boundary
                 .apply_command(EngineSchedulerCommand::new(
                     dp_rank,
                     Command::CancelRequest {
@@ -181,7 +186,11 @@ async fn dispatch_pass_completion(
             // The output transport no longer owns this request regardless of
             // whether the engine had already retired it.
             compatibility.apply_cleanup(Cleanup::Request(request_id));
-            let effects = command_result?;
+            let outcome = outcome?;
+            for effects in outcome.internal {
+                publish_internal_work(effects, ranks).await?;
+            }
+            let effects = outcome.command?;
             merge_boundary_command_effects(effects, ranks, compatibility, &mut publications)?;
         }
 
@@ -196,8 +205,8 @@ async fn dispatch_pass_completion(
 
     // Always release the actor, including sink/conversion error paths. The
     // primary publication error remains the one returned to the supervisor.
-    // A cancellation observed by the ordered output lane means the actor is
-    // already shutting down, so there is no boundary left to release.
+    // A cancelled direct-delivery sink means the actor is already shutting
+    // down, so there is no boundary left to release.
     let finish_result = if matches!(&dispatch_result, Ok(CompletionDispatch::Cancelled)) {
         Ok(())
     } else {
@@ -209,6 +218,18 @@ async fn dispatch_pass_completion(
         Ok(CompletionDispatch::Cancelled) => Ok(()),
         Ok(CompletionDispatch::Completed) => finish_result,
     }
+}
+
+async fn publish_internal_work(
+    effects: EngineEffects<PassStartEffects>,
+    ranks: &[RankDispatch],
+) -> Result<()> {
+    for rank in effects.by_rank {
+        let dispatch = rank_dispatch(ranks, rank.dp_rank)?;
+        dispatch.publish_admissions(rank.effects.admissions).await?;
+        dispatch.publish_kv(rank.effects.kv_events);
+    }
+    Ok(())
 }
 
 async fn finish_boundary_or_cancel<F>(finish: F, cancel: &CancellationToken) -> Result<()>
@@ -390,9 +411,12 @@ fn rank_dispatch(ranks: &[RankDispatch], dp_rank: u32) -> Result<&RankDispatch> 
 
 impl RankDispatch {
     async fn publish_admissions(&self, admissions: Vec<Admission>) -> Result<()> {
-        let Some(sender) = self.event_tx.as_ref() else {
+        let RankOutputSink::Routes(delivery) = &self.output else {
             return Ok(());
         };
+        if !delivery.wants_admissions() {
+            return Ok(());
+        }
         let admissions = admissions
             .into_iter()
             .map(|admission| AdmissionEvent {
@@ -400,41 +424,38 @@ impl RankDispatch {
                 reused_input_tokens: admission.reused_input_tokens,
             })
             .collect::<Vec<_>>();
-        match sender.send_admissions(&admissions).await {
-            Ok(()) | Err(SchedulerEventSendError::Cancelled) => Ok(()),
-            Err(SchedulerEventSendError::OrderedLaneClosed) => {
-                bail!("grouped live ordered admission lane is closed")
-            }
-            Err(SchedulerEventSendError::OutputClosed(_)) => {
-                bail!("grouped live admission unexpectedly used an output-only lane")
-            }
-        }
+        delivery.publish_admissions(admissions)
     }
 
     /// Publish output and return requests whose output-only consumer closed.
     async fn publish_outputs(&self, outputs: Vec<OutputSignal>) -> Result<OutputPublication> {
-        let Some(sender) = self.event_tx.as_ref() else {
-            return Ok(OutputPublication::Delivered(Vec::new()));
-        };
         if outputs.is_empty() {
             return Ok(OutputPublication::Delivered(Vec::new()));
         }
-        match sender.send_outputs(outputs).await {
-            Ok(()) => Ok(OutputPublication::Delivered(Vec::new())),
-            Err(SchedulerEventSendError::OutputClosed(signals)) => {
-                Ok(OutputPublication::Delivered(
-                    signals
+        match &self.output {
+            RankOutputSink::Routes(delivery) => match delivery.publish_outputs(outputs).await? {
+                Some(failed) => Ok(OutputPublication::Delivered(
+                    failed
+                        .into_iter()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                )),
+                None => Ok(OutputPublication::Cancelled),
+            },
+            RankOutputSink::Channel(sender) => match sender.send(outputs) {
+                Ok(()) => Ok(OutputPublication::Delivered(Vec::new())),
+                Err(error) => Ok(OutputPublication::Delivered(
+                    error
+                        .0
                         .into_iter()
                         .map(|signal| signal.uuid)
                         .collect::<BTreeSet<_>>()
                         .into_iter()
                         .collect(),
-                ))
-            }
-            Err(SchedulerEventSendError::OrderedLaneClosed) => {
-                bail!("grouped live ordered output lane is closed")
-            }
-            Err(SchedulerEventSendError::Cancelled) => Ok(OutputPublication::Cancelled),
+                )),
+            },
+            RankOutputSink::None => Ok(OutputPublication::Delivered(Vec::new())),
         }
     }
 
@@ -452,17 +473,23 @@ impl RankDispatch {
                 );
                 continue;
             }
+            let storage_tier = dynamo_storage_tier(event.tier);
             let (event, block_token_ids) = dynamo_kv_event(event);
             raw_events.push(RawKvEvent {
                 event,
                 block_token_ids,
-                storage_tier: StorageTier::Device,
+                storage_tier,
             });
         }
         let normal_events = raw_events
             .iter()
             .map(|event| (event.event.clone(), event.storage_tier))
             .collect();
+        // The vLLM wire format needs each block's token IDs, which AISimulate
+        // does not carry for G2 residency; those events use only the event sink.
+        raw_events.retain(|event| {
+            event.storage_tier == StorageTier::Device || event.block_token_ids.is_some()
+        });
         if let Err(error) = self
             .kv_event_publishers
             .publish_event_sink_batch_only(normal_events)

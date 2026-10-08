@@ -1,18 +1,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use tonic_health_v14 as tonic_health;
+use tonic_v14 as tonic;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
-    DisaggregationMode, FinishReason, GenerateContext, LLMEngine, MultimodalData, OutputOptions,
-    PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
+    BackendError, DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine,
+    MultimodalData, OutputOptions, PrefillResult, PreprocessedRequest, RlAdminBaseUrl,
+    RlWorkerMetadata,
 };
+use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec};
+use dynamo_runtime::distributed::DistributedConfig;
+use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::{DistributedRuntime, Runtime};
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
 use serde_json::json;
@@ -23,18 +31,23 @@ use tonic::{Request, Response, Status};
 use tonic_health::ServingStatus as HealthServingStatus;
 
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
-use crate::convert::{ResponseState, build_generate_request};
 use crate::engine::VllmSidecarEngine;
-use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
+use crate::test_fixtures::*;
+use dynamo_sidecar_common::{json_to_struct_v14, struct_to_json_v14};
 
 #[derive(Clone, Default)]
 struct FakeVllm {
+    sequence_outputs: Option<Vec<pb::SequenceOutput>>,
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     data_parallel_rank_metadata: Arc<Mutex<Vec<Option<String>>>>,
+    loras: Arc<Mutex<Vec<pb::LoraAdapter>>>,
+    next_lora_id: Arc<AtomicI64>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     model_info_override: Arc<Mutex<Option<pb::ModelInfo>>>,
+    server_info_override: Arc<Mutex<Option<pb::ServerInfo>>>,
+    kv_ranks_override: Arc<Mutex<Option<Vec<u32>>>>,
     reject: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
     hang_before_headers: Arc<AtomicBool>,
@@ -49,9 +62,34 @@ struct FakeVllm {
     paused: Arc<AtomicBool>,
     sleeping_tags: Arc<Mutex<BTreeSet<String>>>,
     weight_version: Arc<Mutex<String>>,
+    load_commit_error: Arc<AtomicBool>,
+    unload_commit_error: Arc<AtomicBool>,
+    lora_disabled: Arc<AtomicBool>,
+    is_lora_unavailable: Arc<AtomicBool>,
+    hold_load: Arc<AtomicBool>,
+    load_pending: Arc<AtomicBool>,
+    release_load: Arc<Notify>,
+    hold_unload: Arc<AtomicBool>,
+    unload_pending: Arc<AtomicBool>,
+    release_unload: Arc<Notify>,
+    encoder_response: Arc<AtomicBool>,
+    omit_encoder_metadata: Arc<AtomicBool>,
 }
 
 impl FakeVllm {
+    #[allow(clippy::result_large_err)]
+    fn ensure_lora_enabled(&self) -> Result<(), Status> {
+        if self.is_lora_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("injected LoRA outage"));
+        }
+        if self.lora_disabled.load(Ordering::SeqCst) {
+            return Err(Status::failed_precondition(
+                "engine was not started with LoRA enabled",
+            ));
+        }
+        Ok(())
+    }
+
     async fn record_control(&self, name: &str, body: serde_json::Value) {
         self.control_calls
             .lock()
@@ -107,6 +145,25 @@ impl pb::inference_server::Inference for FakeVllm {
         if self.reject.load(Ordering::SeqCst) {
             return Err(Status::invalid_argument("rejected by fake vLLM"));
         }
+        if !request.lora_name.is_empty() {
+            if self.lora_disabled.load(Ordering::SeqCst) {
+                return Err(Status::failed_precondition(
+                    "engine was not started with LoRA enabled",
+                ));
+            }
+            if !self
+                .loras
+                .lock()
+                .await
+                .iter()
+                .any(|adapter| adapter.lora_name == request.lora_name)
+            {
+                return Err(Status::not_found(format!(
+                    "LoRA adapter `{}` is not loaded",
+                    request.lora_name
+                )));
+            }
+        }
 
         let prompt_tokens = match request.prompt.as_ref() {
             Some(pb::generate_request::Prompt::TokenIds(ids)) => ids.ids.len() as u32,
@@ -136,7 +193,7 @@ impl pb::inference_server::Inference for FakeVllm {
             .kv
             .as_ref()
             .and_then(|kv| kv.kv_transfer_params.clone())
-            .map(struct_to_json)
+            .map(|value| struct_to_json_v14(value, "vLLM", "kv_transfer_params"))
             .transpose()
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let is_prefill = request_kv
@@ -157,12 +214,20 @@ impl pb::inference_server::Inference for FakeVllm {
             "remote_block_ids": [7, 8],
             "nested": {"flags": [true, null, "opaque"]},
         });
+        let has_media = |modality| request.media.iter().any(|item| item.modality() == modality);
+        let encoder_handoff = encoder_handoff_for(
+            has_media(pb::Modality::Image),
+            has_media(pb::Modality::Video),
+        );
+        let encoder_response = self.encoder_response.load(Ordering::SeqCst);
+        let omit_encoder_metadata = self.omit_encoder_metadata.load(Ordering::SeqCst);
         let hang = self.hang.load(Ordering::SeqCst);
         let hold_before_first_token = self.hold_before_first_token.load(Ordering::SeqCst);
         let close_before_first_token = self.close_before_first_token.load(Ordering::SeqCst);
         let first_token_pending = self.first_token_pending.clone();
         let release_first_token = self.release_first_token.clone();
         let dropped = self.server_stream_dropped.clone();
+        let sequence_outputs = self.sequence_outputs.clone();
 
         let stream = async_stream::try_stream! {
             let _drop_signal = DropSignal(dropped);
@@ -208,9 +273,21 @@ impl pb::inference_server::Inference for FakeVllm {
                     yield sequence_response(false, wants_logprobs, None);
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
+            } else if encoder_response {
+                let ec = (!omit_encoder_metadata).then(|| {
+                    json_to_struct_v14(encoder_handoff, "ec_transfer_params").expect("encoder handoff")
+                });
+                yield encode_response(ec);
+            } else if let Some(outputs) = sequence_outputs {
+                for output in outputs {
+                    yield pb::GenerateResponse {
+                        prompt_info: None,
+                        outputs: Some(output),
+                    };
+                }
             } else {
                 let kv = is_prefill.then(|| {
-                    json_to_struct(handoff.clone()).expect("encode handoff")
+                    json_to_struct_v14(handoff.clone(), "kv_transfer_params").expect("encode handoff")
                 });
                 yield sequence_response(true, wants_logprobs, kv);
             }
@@ -225,7 +302,13 @@ impl pb::control_server::Control for FakeVllm {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
-        Ok(Response::new(server_info()))
+        Ok(Response::new(
+            self.server_info_override
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(server_info),
+        ))
     }
 
     async fn get_model_info(
@@ -248,12 +331,94 @@ impl pb::control_server::Control for FakeVllm {
         Ok(Response::new(pb::AbortResponse {}))
     }
 
+    async fn load_lora(
+        &self,
+        request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        let request = request.into_inner();
+        self.record_control("load_lora", json!({"lora_name": request.lora_name}))
+            .await;
+        self.ensure_lora_enabled()?;
+        if self.hold_load.load(Ordering::SeqCst) {
+            self.load_pending.store(true, Ordering::SeqCst);
+            self.release_load.notified().await;
+            self.load_pending.store(false, Ordering::SeqCst);
+        }
+        let mut loras = self.loras.lock().await;
+        if let Some(existing) = loras
+            .iter()
+            .find(|loaded| loaded.lora_name == request.lora_name)
+        {
+            return Err(Status::already_exists(format!(
+                "adapter `{}` is already loaded with id {}",
+                existing.lora_name, existing.lora_id
+            )));
+        }
+        let adapter = pb::LoraAdapter {
+            lora_id: self.next_lora_id.fetch_add(1, Ordering::SeqCst) + 1,
+            lora_name: request.lora_name,
+            source_path: request.source_path,
+        };
+        loras.push(adapter.clone());
+        if self.load_commit_error.swap(false, Ordering::SeqCst) {
+            return Err(Status::unavailable("injected error after load commit"));
+        }
+        Ok(Response::new(pb::LoadLoraResponse {
+            adapter: Some(adapter),
+        }))
+    }
+
+    async fn unload_lora(
+        &self,
+        request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        let name = request.into_inner().lora_name;
+        self.record_control("unload_lora", json!({"lora_name": name}))
+            .await;
+        self.ensure_lora_enabled()?;
+        if self.hold_unload.load(Ordering::SeqCst) {
+            self.unload_pending.store(true, Ordering::SeqCst);
+            self.release_unload.notified().await;
+            self.ensure_lora_enabled()?;
+            return Err(Status::failed_precondition("injected unload rejection"));
+        }
+        let mut loras = self.loras.lock().await;
+        let index = loras
+            .iter()
+            .position(|adapter| adapter.lora_name == name)
+            .ok_or_else(|| Status::not_found("adapter not found"))?;
+        let adapter = loras.remove(index);
+        if self.unload_commit_error.swap(false, Ordering::SeqCst) {
+            return Err(Status::unavailable("injected error after unload commit"));
+        }
+        Ok(Response::new(pb::UnloadLoraResponse {
+            adapter: Some(adapter),
+        }))
+    }
+
+    async fn list_loras(
+        &self,
+        _request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        self.record_control("list_loras", json!({})).await;
+        self.ensure_lora_enabled()?;
+        Ok(Response::new(pb::ListLorasResponse {
+            adapters: self.loras.lock().await.clone(),
+        }))
+    }
+
     async fn get_kv_event_sources(
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
         Ok(Response::new(pb::GetKvEventSourcesResponse {
-            sources: (0..2)
+            sources: self
+                .kv_ranks_override
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(|| vec![0, 1])
+                .into_iter()
                 .map(|rank| pb::KvEventSource {
                     transport: "zmq".to_string(),
                     endpoint: format!("tcp://*:{}", 20081 + rank),
@@ -420,196 +585,6 @@ impl pb::control_server::Control for FakeVllm {
     }
 }
 
-fn model_info() -> pb::ModelInfo {
-    pb::ModelInfo {
-        model_id: "model-source".to_string(),
-        served_model_name: "served-model".to_string(),
-        served_model_aliases: vec!["model-alias".to_string()],
-        supports_text_input: true,
-        supports_token_ids_input: true,
-        supports_multimodal: false,
-        reasoning_parser: "deepseek_r1".to_string(),
-        tool_call_parser: "hermes".to_string(),
-    }
-}
-
-fn server_info() -> pb::ServerInfo {
-    pb::ServerInfo {
-        engine_version: "test-vllm".to_string(),
-        api_version: "vllm".to_string(),
-        instance_id: "test-instance".to_string(),
-        parallelism: Some(pb::ParallelismInfo {
-            tensor_parallel_size: 2,
-            pipeline_parallel_size: 1,
-            data_parallel_size: 2,
-            data_parallel_rank: 0,
-            decode_context_parallel_size: 1,
-        }),
-        max_model_len: 8192,
-        kv_block_size: 16,
-        total_kv_blocks: 4096,
-        max_running_requests: 128,
-        max_batched_tokens: 2048,
-        rl_capabilities: Some(pb::RlCapabilities {
-            weight_transfer_enabled: true,
-            weight_transfer_backend: "nccl".to_string(),
-            sleep_mode_enabled: true,
-            draft_weight_updates_enabled: true,
-        }),
-    }
-}
-
-fn sequence_response(
-    terminal: bool,
-    logprobs: bool,
-    kv_transfer_params: Option<prost_types::Struct>,
-) -> pb::GenerateResponse {
-    pb::GenerateResponse {
-        prompt_info: None,
-        outputs: Some(pb::SequenceOutput {
-            index: 0,
-            text: " token".to_string(),
-            num_tokens: 1,
-            token_ids: vec![42],
-            logprobs: logprobs.then_some(vec![-0.25]).unwrap_or_default(),
-            ranks: logprobs.then_some(vec![1]).unwrap_or_default(),
-            candidate_tokens: logprobs
-                .then_some(vec![pb::CandidateTokenInfo {
-                    tokens: vec![pb::candidate_token_info::TokenInfo {
-                        id: 43,
-                        logprob: -0.5,
-                        rank: 2,
-                    }],
-                }])
-                .unwrap_or_default(),
-            finish_info: terminal.then_some(pb::FinishInfo {
-                num_output_tokens: 1,
-                finish_reason: pb::finish_info::FinishReason::Stop as i32,
-                stop_reason: Some(pb::finish_info::StopReason::StopTokenId(2)),
-                kv_transfer_params,
-                ec_transfer_params: None,
-            }),
-        }),
-    }
-}
-
-#[test]
-fn prompt_logprobs_are_retained_for_the_terminal_chunk() {
-    let request = request();
-    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
-    let mut first_response = sequence_response(false, true, None);
-    first_response.prompt_info = Some(pb::PromptInfo {
-        num_prompt_tokens: 3,
-        token_ids: vec![11, 22, 33],
-        logprobs: vec![0.0, -0.2, -0.3],
-        ranks: vec![0, 1, 2],
-        candidate_tokens: vec![pb::CandidateTokenInfo::default(); 3],
-    });
-
-    let first = state
-        .convert(first_response)
-        .expect("convert first chunk")
-        .expect("first chunk");
-    assert!(first.finish_reason.is_none());
-    assert!(first.engine_data.is_none());
-
-    let mut terminal_response = sequence_response(true, true, None);
-    terminal_response
-        .outputs
-        .as_mut()
-        .unwrap()
-        .finish_info
-        .as_mut()
-        .unwrap()
-        .num_output_tokens = 2;
-    let terminal = state
-        .convert(terminal_response)
-        .expect("convert terminal chunk")
-        .expect("terminal chunk");
-    assert!(terminal.finish_reason.is_some());
-    assert!(terminal.engine_data.as_ref().unwrap()["prompt_logprobs"].is_array());
-}
-
-#[test]
-fn negative_infinity_logprobs_are_normalized() {
-    let request = request();
-    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
-    let mut response = sequence_response(true, true, None);
-    response.prompt_info = Some(pb::PromptInfo {
-        num_prompt_tokens: 3,
-        token_ids: vec![11, 22, 33],
-        logprobs: vec![0.0, f32::NEG_INFINITY, -0.3],
-        ranks: vec![0, 1, 2],
-        candidate_tokens: vec![
-            pb::CandidateTokenInfo::default(),
-            pb::CandidateTokenInfo {
-                tokens: vec![pb::candidate_token_info::TokenInfo {
-                    id: 23,
-                    logprob: f32::NEG_INFINITY,
-                    rank: 2,
-                }],
-            },
-            pb::CandidateTokenInfo::default(),
-        ],
-    });
-    let output = response.outputs.as_mut().unwrap();
-    output.logprobs[0] = f32::NEG_INFINITY;
-    output.candidate_tokens[0].tokens[0].logprob = f32::NEG_INFINITY;
-
-    let mapped = state
-        .convert(response)
-        .expect("convert response")
-        .expect("terminal output");
-    assert_eq!(mapped.log_probs.as_deref(), Some(&[-9999.0][..]));
-    assert!(
-        mapped.top_logprobs.as_ref().unwrap()[0]
-            .iter()
-            .all(|entry| entry.logprob == -9999.0)
-    );
-    let prompt = &mapped.engine_data.as_ref().unwrap()["prompt_logprobs"][1];
-    assert_eq!(prompt["22"]["logprob"], json!(-9999.0));
-    assert_eq!(prompt["23"]["logprob"], json!(-9999.0));
-}
-
-#[test]
-fn zero_output_logprobs_omits_top_logprobs() {
-    let mut request = request();
-    request.output_options.logprobs = Some(0);
-    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
-    let mapped = state
-        .convert(sequence_response(true, true, None))
-        .expect("convert response")
-        .expect("terminal output");
-
-    assert_eq!(mapped.log_probs.as_deref(), Some(&[-0.25][..]));
-    assert!(mapped.top_logprobs.is_none());
-}
-
-#[test]
-fn oversized_logprob_counts_are_rejected() {
-    let oversized = i32::MAX as u32 + 1;
-
-    let mut output_request = request();
-    output_request.output_options.logprobs = Some(oversized);
-    let output_error = build_generate_request(
-        output_request,
-        "output-logprobs".to_string(),
-        DisaggregationMode::Aggregated,
-    )
-    .expect_err("oversized output logprobs must fail");
-    assert!(output_error.to_string().contains("must fit in i32"));
-
-    let mut prompt_request = request();
-    prompt_request.output_options.prompt_logprobs = Some(oversized);
-    let prompt_error = build_generate_request(
-        prompt_request,
-        "prompt-logprobs".to_string(),
-        DisaggregationMode::Aggregated,
-    )
-    .expect_err("oversized prompt logprobs must fail");
-    assert!(prompt_error.to_string().contains("must fit in i32"));
-}
-
 struct FakeServer {
     endpoint: String,
     service: FakeVllm,
@@ -661,71 +636,6 @@ impl Drop for FakeServer {
     }
 }
 
-fn request() -> PreprocessedRequest {
-    PreprocessedRequest::builder()
-        .model("served-model".to_string())
-        .token_ids(vec![11, 22, 33])
-        .stop_conditions(StopConditions {
-            max_tokens: Some(1),
-            min_tokens: Some(1),
-            stop: Some(vec!["done".to_string()]),
-            stop_token_ids_hidden: Some(vec![2]),
-            ignore_eos: Some(true),
-            ..Default::default()
-        })
-        .sampling_options(SamplingOptions {
-            temperature: Some(0.2),
-            top_p: Some(0.9),
-            top_k: Some(4),
-            min_p: Some(0.1),
-            seed: Some(123),
-            presence_penalty: Some(0.3),
-            frequency_penalty: Some(0.4),
-            repetition_penalty: Some(1.1),
-            include_stop_str_in_output: Some(true),
-            guided_decoding: Some(dynamo_backend_common::GuidedDecodingOptions {
-                json: Some(json!({"type": "object"})),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .output_options(OutputOptions {
-            logprobs: Some(1),
-            prompt_logprobs: Some(1),
-            ..Default::default()
-        })
-        .mdc_sum(Some("model-checksum".to_string()))
-        .routing(Some(RoutingHints {
-            cache_namespace: Some("cache-salt".to_string()),
-            ..Default::default()
-        }))
-        .extra_args(Some(json!({
-            "nvext": {"cache_salt": "cache-salt", "token_in": true},
-            "bypass_prefix_cache": true,
-            "kv_transfer_params": {
-                "connector_data": {"values": [1, true, null]}
-            }
-        })))
-        .build()
-        .expect("request")
-}
-
-fn decode_request() -> PreprocessedRequest {
-    let mut request = request();
-    request.prefill_result = Some(PrefillResult {
-        disaggregated_params: json!({
-            "do_remote_decode": false,
-            "do_remote_prefill": true,
-            "remote_engine_id": "prefill-0",
-            "remote_host": "127.0.0.1",
-            "remote_port": 20097,
-            "remote_block_ids": [7, 8],
-        }),
-        prompt_tokens_details: None,
-    });
-    request
-}
-
 fn engine(
     endpoint: &str,
     mode: DisaggregationMode,
@@ -754,13 +664,76 @@ fn engine_with_server_info(
     )
 }
 
+async fn runtime_endpoint(namespace: &str) -> dynamo_runtime::component::Endpoint {
+    runtime_endpoint_with_config(namespace, DistributedConfig::process_local()).await
+}
+
+async fn runtime_endpoint_with_config(
+    namespace: &str,
+    config: DistributedConfig,
+) -> dynamo_runtime::component::Endpoint {
+    let runtime = Runtime::from_current().expect("current runtime");
+    let drt = DistributedRuntime::new(runtime, config)
+        .await
+        .expect("process-local DRT");
+    let endpoint = drt
+        .namespace(namespace)
+        .expect("namespace")
+        .component("backend")
+        .expect("component")
+        .endpoint("generate");
+    let mut base = ModelDeploymentCard::with_name_only("model-source");
+    base.source_path = Some("model-source".to_string());
+    endpoint
+        .drt()
+        .discovery()
+        .register(
+            DiscoverySpec::from_model(
+                namespace.to_string(),
+                "backend".to_string(),
+                "generate".to_string(),
+                &base,
+            )
+            .expect("base discovery spec"),
+        )
+        .await
+        .expect("register base model");
+    endpoint
+}
+
 async fn engine_from_args(
     endpoint: &str,
 ) -> (VllmSidecarEngine, dynamo_backend_common::WorkerConfig) {
-    let argv = vec![
+    try_engine_from_args(endpoint, "http://worker:8120")
+        .await
+        .expect("bootstrap discovery")
+}
+
+async fn try_engine_from_args(
+    endpoint: &str,
+    http_endpoint: &str,
+) -> Result<
+    (VllmSidecarEngine, dynamo_backend_common::WorkerConfig),
+    dynamo_backend_common::DynamoError,
+> {
+    try_engine_from_args_with_world_size(endpoint, http_endpoint, None).await
+}
+
+async fn try_engine_from_args_with_world_size(
+    endpoint: &str,
+    http_endpoint: &str,
+    world_size: Option<u32>,
+) -> Result<
+    (VllmSidecarEngine, dynamo_backend_common::WorkerConfig),
+    dynamo_backend_common::DynamoError,
+> {
+    let mut argv = vec![
         "dynamo-vllm-sidecar".to_string(),
         "--grpc-endpoint".to_string(),
         endpoint.to_string(),
+        "--vllm-http-endpoint".to_string(),
+        http_endpoint.to_string(),
+        "--enable-rl".to_string(),
         "--grpc-connections".to_string(),
         "2".to_string(),
         "--grpc-startup-deadline-secs".to_string(),
@@ -768,51 +741,34 @@ async fn engine_from_args(
         "--grpc-connect-attempt-timeout-secs".to_string(),
         "1".to_string(),
     ];
+    if let Some(world_size) = world_size {
+        argv.extend(["--vllm-rl-world-size".to_string(), world_size.to_string()]);
+    }
     tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
         .await
         .expect("bootstrap task")
-        .expect("bootstrap discovery")
 }
 
 async fn collect(
     engine: &VllmSidecarEngine,
     request: PreprocessedRequest,
 ) -> Vec<dynamo_backend_common::LLMEngineOutput> {
-    let context = dynamo_backend_common::testing::mock_context();
-    engine
-        .generate(request, GenerateContext::new(context, None))
+    collect_result(engine, request)
         .await
-        .expect("generate")
-        .map(|item| item.expect("stream item"))
-        .collect()
-        .await
+        .expect("collect stream")
 }
 
-#[test]
-fn discovery_rejects_incompatible_model_metadata() {
-    let mut unsupported_api = server_info();
-    unsupported_api.api_version = "unsupported".to_string();
-
-    let mut missing_model_id = model_info();
-    missing_model_id.model_id.clear();
-
-    let mut missing_served_name = model_info();
-    missing_served_name.served_model_name.clear();
-
-    let mut unsupported_input = model_info();
-    unsupported_input.supports_token_ids_input = false;
-
-    for (case, model, server) in [
-        ("unsupported API", model_info(), unsupported_api),
-        ("missing model ID", missing_model_id, server_info()),
-        ("missing served name", missing_served_name, server_info()),
-        ("unsupported input", unsupported_input, server_info()),
-    ] {
-        assert!(
-            DiscoveredModel::from_proto(model, server).is_err(),
-            "{case} metadata should be rejected"
-        );
-    }
+async fn collect_result(
+    engine: &VllmSidecarEngine,
+    request: PreprocessedRequest,
+) -> Result<Vec<dynamo_backend_common::LLMEngineOutput>, dynamo_backend_common::DynamoError> {
+    let context = dynamo_backend_common::testing::mock_context();
+    let items = engine
+        .generate(request, GenerateContext::new(context, None))
+        .await?
+        .collect::<Vec<_>>()
+        .await;
+    items.into_iter().collect()
 }
 
 #[tokio::test]
@@ -828,6 +784,211 @@ async fn startup_rejects_model_identity_change_after_bootstrap() {
 }
 
 #[tokio::test]
+async fn rl_startup_uses_configured_v028_world_size() {
+    let service = FakeVllm::default();
+    let mut legacy_server = server_info();
+    legacy_server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .world_size = 0;
+    *service.server_info_override.lock().await = Some(legacy_server);
+    let grpc = FakeServer::start(service).await;
+
+    let (_, worker) =
+        try_engine_from_args_with_world_size(&grpc.endpoint, "http://worker:8120", Some(8))
+            .await
+            .expect("configured vLLM 0.28 world size should allow RL discovery");
+
+    assert_eq!(
+        worker.rl_metadata,
+        Some(
+            RlWorkerMetadata::new(
+                8,
+                Some(RlAdminBaseUrl::parse("http://worker:8120/").expect("admin URL")),
+            )
+            .expect("worker metadata")
+        )
+    );
+}
+
+#[tokio::test]
+async fn rl_startup_prefers_authoritative_grpc_world_size() {
+    let grpc = FakeServer::start(FakeVllm::default()).await;
+
+    let (_, worker) =
+        try_engine_from_args_with_world_size(&grpc.endpoint, "http://worker:8120", Some(8))
+            .await
+            .expect("nonzero gRPC world size should remain authoritative");
+
+    assert_eq!(
+        worker.rl_metadata,
+        Some(
+            RlWorkerMetadata::new(
+                4,
+                Some(RlAdminBaseUrl::parse("http://worker:8120/").expect("admin URL")),
+            )
+            .expect("worker metadata")
+        )
+    );
+}
+
+#[tokio::test]
+async fn rl_startup_requires_configured_v028_world_size() {
+    let service = FakeVllm::default();
+    let mut legacy_server = server_info();
+    legacy_server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .world_size = 0;
+    *service.server_info_override.lock().await = Some(legacy_server);
+    let grpc = FakeServer::start(service).await;
+
+    let error = match try_engine_from_args(&grpc.endpoint, "http://worker:8120").await {
+        Ok(_) => panic!("missing configured vLLM 0.28 world size must fail"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("--vllm-rl-world-size"));
+}
+
+#[tokio::test]
+async fn rl_startup_rejects_incompatible_configured_v028_world_size() {
+    let service = FakeVllm::default();
+    let mut legacy_server = server_info();
+    legacy_server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .world_size = 0;
+    *service.server_info_override.lock().await = Some(legacy_server);
+    let grpc = FakeServer::start(service).await;
+
+    let error =
+        match try_engine_from_args_with_world_size(&grpc.endpoint, "http://worker:8120", Some(7))
+            .await
+        {
+            Ok(_) => panic!("configured world size must match the discovered topology"),
+            Err(error) => error,
+        };
+
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(BackendError::InvalidArgument)
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("must be divisible by TP * PP * DP")
+    );
+}
+
+#[tokio::test]
+async fn rl_startup_rejects_zero_configured_world_size() {
+    let error = match try_engine_from_args_with_world_size(
+        "http://127.0.0.1:1",
+        "http://worker:8120",
+        Some(0),
+    )
+    .await
+    {
+        Ok(_) => panic!("configured world size must be positive"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("--vllm-rl-world-size"));
+}
+
+#[tokio::test]
+async fn encode_startup_rejects_non_multimodal_engine() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let argv = vec![
+        "dynamo-vllm-sidecar".to_string(),
+        "--grpc-endpoint".to_string(),
+        server.endpoint.clone(),
+        "--disaggregation-mode".to_string(),
+        "encode".to_string(),
+    ];
+    let result = tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
+        .await
+        .expect("bootstrap task");
+    let error = result.err().expect("text-only Encode startup must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("encode mode requires a multimodal engine")
+    );
+}
+
+#[tokio::test]
+async fn generation_preserves_empty_engine_text_while_stop_text_is_buffered() {
+    // Example: vLLM emits token 42 with `text: ""` while buffering a long,
+    // nonmatching stop string, then emits token 43 with `text: " buffered text"`.
+    // Expect the first delta to remain `Some("")`, so the frontend waits for
+    // vLLM's buffered text instead of detokenizing token 42 and duplicating it.
+    let outputs = [
+        (vec![42], ""),
+        (vec![43], " buffered text"),
+        (Vec::new(), ""),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (token_ids, text))| pb::SequenceOutput {
+        num_tokens: token_ids.len() as u32,
+        token_ids,
+        text: text.to_string(),
+        finish_info: (index == 2).then_some(pb::FinishInfo {
+            num_output_tokens: 2,
+            finish_reason: pb::finish_info::FinishReason::Length as i32,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .collect();
+    let server = FakeServer::start(FakeVllm {
+        sequence_outputs: Some(outputs),
+        ..Default::default()
+    })
+    .await;
+
+    for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
+        let engine = engine(&server.endpoint, mode, 1, model_info());
+        engine.start(0).await.expect("start");
+        let mut request = if mode.is_decode() {
+            decode_request()
+        } else {
+            request()
+        };
+        request.output_options = OutputOptions::default();
+        request.stop_conditions.max_tokens = Some(2);
+        let outputs = collect(&engine, request).await;
+
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|output| output.text.as_deref())
+                .collect::<Vec<_>>(),
+            [Some(""), Some(" buffered text"), Some("")],
+            "{mode}: preserve engine text presence, including the empty terminal"
+        );
+        assert_eq!(outputs[0].token_ids, [42]);
+        assert_eq!(outputs[1].token_ids, [43]);
+        assert!(outputs[2].token_ids.is_empty());
+        assert_eq!(outputs[2].finish_reason, Some(FinishReason::Length));
+        assert_eq!(
+            outputs[2]
+                .completion_usage
+                .as_ref()
+                .unwrap()
+                .completion_tokens,
+            2
+        );
+        engine.cleanup().await.expect("cleanup");
+    }
+}
+
+#[tokio::test]
 async fn aggregated_generation_converts_request_stream_and_usage() {
     let server = FakeServer::start(FakeVllm::default()).await;
     let (engine, worker) = engine_from_args(&server.endpoint).await;
@@ -835,6 +996,16 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(worker.served_model_name.as_deref(), Some("served-model"));
     assert!(worker.reasoning_parser.is_none());
     assert!(worker.tool_call_parser.is_none());
+    assert_eq!(
+        worker.rl_metadata,
+        Some(
+            RlWorkerMetadata::new(
+                4,
+                Some(RlAdminBaseUrl::parse("http://worker:8120/").expect("valid admin base URL"),),
+            )
+            .expect("valid RL metadata")
+        )
+    );
     let config = engine.start(0).await.expect("start");
     assert_eq!(config.model, "model-source");
     assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
@@ -842,9 +1013,10 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     let registration = config.llm.expect("LLM registration");
     assert_eq!(registration.context_length, Some(8192));
     assert_eq!(registration.kv_cache_block_size, Some(16));
-    assert_eq!(registration.total_kv_blocks, Some(4096));
+    assert_eq!(registration.total_kv_blocks, Some(2048));
     assert_eq!(registration.max_num_seqs, Some(128));
     assert_eq!(registration.max_num_batched_tokens, Some(2048));
+    assert_eq!(registration.max_gpu_lora_count, Some(4));
     assert_eq!(registration.data_parallel_size, Some(2));
     assert_eq!(registration.data_parallel_start_rank, Some(0));
 
@@ -893,42 +1065,106 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     let requests = server.service.requests.lock().await;
     let sent = requests.first().expect("recorded request");
     assert_eq!(sent.model, "served-model");
-    assert_eq!(sent.priority, 0);
     assert_eq!(
         server.service.data_parallel_rank_metadata.lock().await[0],
         Some("1".to_string())
     );
-    let sampling = sent.sampling.as_ref().unwrap();
-    assert_eq!(
-        (sampling.top_k, sampling.top_p, sampling.min_p),
-        (4, 0.9, 0.1)
+}
+
+#[tokio::test]
+async fn reasoning_parser_args_reach_only_an_engine_without_a_reasoning_parser() {
+    let mut request = request();
+    let extra = request.extra_args.as_mut().unwrap();
+    extra["reasoning_parser_kwargs"] = json!({"chat_template_kwargs": {"enable_thinking": false}});
+    extra["reasoning_ended"] = json!(false);
+
+    // The fixture engine runs vLLM's `deepseek_r1` reasoning parser, which
+    // would gate the JSON schema without these settings.
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let parsing = engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
     );
-    assert_eq!(sampling.seed, Some(123));
-    let decoding = sent.decoding.as_ref().unwrap();
+    parsing.start(0).await.expect("start");
+    let error = collect_result(&parsing, request.clone())
+        .await
+        .expect_err("an engine reasoning parser needs these settings");
+    assert!(error.to_string().contains("is not supported by vLLM gRPC"));
+    parsing.cleanup().await.expect("cleanup");
+
+    let mut info = model_info();
+    info.reasoning_parser = String::new();
+    let server = FakeServer::start(FakeVllm::default()).await;
+    *server.service.model_info_override.lock().await = Some(info.clone());
+    let token_only = engine(&server.endpoint, DisaggregationMode::Aggregated, 1, info);
+    token_only.start(0).await.expect("start");
+    collect(&token_only, request).await;
+    assert_eq!(server.service.requests.lock().await.len(), 1);
+    token_only.cleanup().await.expect("cleanup");
+}
+
+// Regression: a frontend hosting ranks 4..8 must register and route that local
+// range, or hybrid deployments reject discovery or advertise unreachable engines.
+#[tokio::test]
+async fn hybrid_discovery_routes_and_tracks_only_local_absolute_dp_ranks() {
+    let service = FakeVllm::default();
+    let mut info = server_info();
+    let parallelism = info.parallelism.as_mut().unwrap();
+    parallelism.data_parallel_size = 8;
+    parallelism.data_parallel_rank = 4;
+    parallelism.data_parallel_size_local = 4;
+    *service.server_info_override.lock().await = Some(info);
+    *service.kv_ranks_override.lock().await = Some(vec![4, 5, 6, 7]);
+    let server = FakeServer::start(service).await;
+    let (engine, worker) = engine_from_args(&server.endpoint).await;
     assert_eq!(
-        (
-            decoding.presence_penalty,
-            decoding.frequency_penalty,
-            decoding.repetition_penalty,
-        ),
-        (0.3, 0.4, 1.1)
+        worker.rl_metadata,
+        Some(
+            RlWorkerMetadata::new(
+                16,
+                Some(RlAdminBaseUrl::parse("http://worker:8120/").unwrap())
+            )
+            .unwrap()
+        )
     );
-    assert!(matches!(
-        decoding.structured_output,
-        Some(pb::decoding_parameters::StructuredOutput::Json(_))
-    ));
-    let stopping = sent.stopping.as_ref().unwrap();
-    assert_eq!((stopping.max_new_tokens, stopping.min_new_tokens), (1, 1));
-    assert_eq!(stopping.stop_strings, ["done"]);
-    assert!(stopping.include_stop_strings);
-    assert!(stopping.ignore_eos);
-    let kv = sent.kv.as_ref().unwrap();
-    assert!(kv.bypass_prefix_cache);
-    assert_eq!(kv.cache_salt, "dynamo-cache-salt:cache-salt");
+    let registration = engine.start(0).await.expect("hybrid startup").llm.unwrap();
+    assert_eq!(registration.data_parallel_size, Some(4));
+    assert_eq!(registration.data_parallel_start_rank, Some(4));
+    assert_eq!(registration.total_kv_blocks, Some(1024));
+    let sources = engine.kv_event_sources().await.expect("local KV sources");
     assert_eq!(
-        struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
-        json!({"connector_data": {"values": [1, true, null]}})
+        sources
+            .iter()
+            .map(|source| source.dp_rank())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([4, 5, 6, 7])
     );
+    let mut routed_request = request();
+    routed_request
+        .routing
+        .get_or_insert_with(Default::default)
+        .dp_rank = Some(7);
+    let outputs = collect(&engine, routed_request).await;
+    assert_eq!(outputs[0].token_ids, [42]);
+    assert_eq!(
+        *server.service.data_parallel_rank_metadata.lock().await,
+        vec![Some("7".to_string())]
+    );
+
+    for invalid_ranks in [
+        vec![3, 5, 6, 7],
+        vec![4, 5, 6, 8],
+        vec![4, 5, 6],
+        vec![4, 5, 6, 6],
+    ] {
+        *server.service.kv_ranks_override.lock().await = Some(invalid_ranks);
+        assert!(
+            engine.kv_event_sources().await.is_err(),
+            "KV sources must cover exactly the local range"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1161,24 +1397,37 @@ async fn sleep_status_remains_advertised_without_sleep_mode() {
 }
 
 #[tokio::test]
-async fn multimodal_image_is_forwarded_with_uuid() {
+async fn mixed_multimodal_media_is_forwarded_with_image_uuid_only() {
     let service = FakeVllm::default();
-    let mut discovered = model_info();
-    discovered.supports_multimodal = true;
+    let discovered = multimodal_model_info();
     *service.model_info_override.lock().await = Some(discovered.clone());
     let server = FakeServer::start(service).await;
     let (aggregate, _) = engine_from_args(&server.endpoint).await;
     aggregate.start(0).await.expect("start");
 
-    let mut image_request = request();
-    image_request.multi_modal_data = Some(std::collections::HashMap::from([(
-        "image_url".to_string(),
-        vec![MultimodalData::RawUrl(
-            "data:image/png;base64,iVBORw0KGgo=".to_string(),
-        )],
-    )]));
-    image_request.output_options.prompt_logprobs = None;
-    image_request
+    let mut multimodal_request = request();
+    multimodal_request.multi_modal_data = Some(std::collections::HashMap::from([
+        (
+            "image_url".to_string(),
+            vec![MultimodalData::RawUrl(
+                "data:image/png;base64,iVBORw0KGgo=".to_string(),
+            )],
+        ),
+        (
+            "video_url".to_string(),
+            vec![MultimodalData::RawUrl(
+                "https://example.com/sample.mp4".to_string(),
+            )],
+        ),
+        (
+            "audio_url".to_string(),
+            vec![MultimodalData::RawUrl(
+                "data:audio/wav;base64,UklGRg==".to_string(),
+            )],
+        ),
+    ]));
+    multimodal_request.output_options.prompt_logprobs = None;
+    multimodal_request
         .extra_args
         .as_mut()
         .and_then(serde_json::Value::as_object_mut)
@@ -1192,7 +1441,7 @@ async fn multimodal_image_is_forwarded_with_uuid() {
             ("mm_hashes".to_string(), json!(["0123456789abcdef"])),
         ]);
 
-    let outputs = collect(&aggregate, image_request.clone()).await;
+    let outputs = collect(&aggregate, multimodal_request.clone()).await;
     assert_eq!(outputs[0].finish_reason, Some(FinishReason::Stop));
     assert_eq!(
         outputs[0]
@@ -1205,14 +1454,35 @@ async fn multimodal_image_is_forwarded_with_uuid() {
 
     let requests = server.service.requests.lock().await;
     let media = &requests.last().expect("recorded request").media;
-    assert_eq!(media.len(), 1);
-    assert_eq!(media[0].modality(), pb::Modality::Image);
+    assert_eq!(media.len(), 3);
+    let image = media
+        .iter()
+        .find(|item| item.modality() == pb::Modality::Image)
+        .expect("image media");
+    let video = media
+        .iter()
+        .find(|item| item.modality() == pb::Modality::Video)
+        .expect("video media");
+    let audio = media
+        .iter()
+        .find(|item| item.modality() == pb::Modality::Audio)
+        .expect("audio media");
     assert_eq!(
-        media[0].uuid,
+        image.uuid,
         "0123456789abcdef000000000000000000000000000000000000000000000000"
     );
+    assert!(video.uuid.is_empty());
+    assert!(audio.uuid.is_empty());
     assert!(matches!(
-        media[0].source.as_ref(),
+        image.source.as_ref(),
+        Some(pb::media_item::Source::DataUri(_))
+    ));
+    assert!(matches!(
+        video.source.as_ref(),
+        Some(pb::media_item::Source::Url(_))
+    ));
+    assert!(matches!(
+        audio.source.as_ref(),
         Some(pb::media_item::Source::DataUri(_))
     ));
     drop(requests);
@@ -1227,20 +1497,13 @@ async fn multimodal_image_is_forwarded_with_uuid() {
     prefill.start(1).await.expect("start prefill");
     decode.start(2).await.expect("start decode");
 
-    let prefill_outputs = collect(&prefill, image_request.clone()).await;
+    let prefill_outputs = collect(&prefill, multimodal_request.clone()).await;
     let handoff = prefill_outputs[0]
         .disaggregated_params
         .clone()
         .expect("multimodal handoff");
-    assert_eq!(
-        handoff["_dynamo_sidecar_multimodal_prompt_token_ids"]
-            .as_array()
-            .expect("expanded prompt token IDs")
-            .len(),
-        601
-    );
 
-    let mut decode_request = image_request;
+    let mut decode_request = multimodal_request;
     decode_request.prefill_result = Some(PrefillResult {
         disaggregated_params: handoff,
         prompt_tokens_details: None,
@@ -1258,7 +1521,7 @@ async fn multimodal_image_is_forwarded_with_uuid() {
     let requests = server.service.requests.lock().await;
     let prefill_wire = &requests[requests.len() - 2];
     let decode_wire = &requests[requests.len() - 1];
-    assert_eq!(prefill_wire.media.len(), 1);
+    assert_eq!(prefill_wire.media.len(), 3);
     assert!(
         prefill_wire
             .response
@@ -1266,46 +1529,939 @@ async fn multimodal_image_is_forwarded_with_uuid() {
             .expect("prefill response options")
             .prompt_token_ids
     );
-    assert!(decode_wire.media.is_empty());
+    assert_eq!(decode_wire.media.len(), 3);
     assert_eq!(
         decode_wire.prompt.as_ref(),
         Some(&pb::generate_request::Prompt::TokenIds(pb::TokenIds {
-            ids: (0..601).collect(),
+            ids: vec![11, 22, 33],
         }))
     );
-    let decode_kv = struct_to_json(
-        decode_wire
-            .kv
-            .as_ref()
-            .and_then(|kv| kv.kv_transfer_params.clone())
-            .expect("decode KV handoff"),
-    )
-    .expect("decode KV JSON");
-    assert!(
-        decode_kv["_dynamo_sidecar_multimodal_prompt_token_ids"].is_null(),
-        "sidecar metadata must not reach vLLM"
+    let decode_image = decode_wire
+        .media
+        .iter()
+        .find(|item| item.modality() == pb::Modality::Image)
+        .expect("decode image media");
+    assert_eq!(
+        decode_image.uuid,
+        "0123456789abcdef000000000000000000000000000000000000000000000000"
     );
 }
 
 #[tokio::test]
-async fn grpc_request_errors_are_propagated() {
-    let service = FakeVllm::default();
-    service.reject.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        model_info(),
+async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
+    assert_encoder_cache_handoff(epd_image_request()).await;
+}
+
+#[tokio::test]
+async fn video_encoder_cache_handoff_for_e_pd_and_e_p_d() {
+    assert_encoder_cache_handoff(epd_video_request()).await;
+    assert_encoder_cache_handoff(epd_image_video_request()).await;
+}
+
+async fn assert_encoder_cache_handoff(mut source_request: PreprocessedRequest) {
+    let expected_media = expected_wire_media(&source_request);
+    let has_media = |modality| expected_media.iter().any(|(kind, _, _)| *kind == modality);
+    let expected_ec = encoder_handoff_for(
+        has_media(pb::Modality::Image),
+        has_media(pb::Modality::Video),
     );
+    let service = FakeVllm::default();
+    service.encoder_response.store(true, Ordering::SeqCst);
+    let discovered = multimodal_model_info();
+    *service.model_info_override.lock().await = Some(discovered.clone());
+    let server = FakeServer::start(service).await;
+
+    let encoder = engine(
+        &server.endpoint,
+        DisaggregationMode::Encode,
+        1,
+        discovered.clone(),
+    );
+    encoder.start(0).await.expect("start encoder");
+    source_request
+        .routing
+        .as_mut()
+        .expect("routing hints")
+        .dp_rank = Some(1);
+    let encode_outputs = collect(&encoder, source_request.clone()).await;
+    assert_eq!(encode_outputs.len(), 1);
+    assert!(encode_outputs[0].token_ids.is_empty());
+    assert!(encode_outputs[0].text.is_none());
+    assert_eq!(encode_outputs[0].finish_reason, Some(FinishReason::Stop));
+    let encoder_result = encode_outputs[0]
+        .encoder_result
+        .clone()
+        .expect("encoder result");
+    assert_eq!(encoder_result, expected_ec);
+    assert_eq!(
+        server
+            .service
+            .data_parallel_rank_metadata
+            .lock()
+            .await
+            .last()
+            .cloned(),
+        Some(None),
+        "Encode must not reuse the downstream worker's DP rank"
+    );
+
+    {
+        let requests = server.service.requests.lock().await;
+        let encode_wire = requests.last().expect("encode request");
+        assert_eq!(wire_media(encode_wire), expected_media);
+        assert!(
+            encode_wire
+                .kv
+                .as_ref()
+                .expect("encode cache parameters")
+                .ec_transfer_params
+                .is_none()
+        );
+    }
+
+    server
+        .service
+        .encoder_response
+        .store(false, Ordering::SeqCst);
+    for (mode, topology) in [
+        (DisaggregationMode::Aggregated, "E+PD"),
+        (DisaggregationMode::Prefill, "E+P+D"),
+    ] {
+        let downstream = engine(&server.endpoint, mode, 1, discovered.clone());
+        downstream.start(1).await.expect("start downstream");
+        let mut downstream_request = source_request.clone();
+        downstream_request.encoder_result = Some(encoder_result.clone());
+        let outputs = collect(&downstream, downstream_request.clone()).await;
+        if mode.is_prefill() {
+            assert!(outputs[0].token_ids.is_empty(), "{topology}");
+            assert!(outputs[0].disaggregated_params.is_some(), "{topology}");
+        } else {
+            assert_eq!(outputs[0].token_ids, [42], "{topology}");
+        }
+
+        let downstream_wire = server
+            .service
+            .requests
+            .lock()
+            .await
+            .last()
+            .cloned()
+            .expect("downstream request");
+        assert_eq!(wire_media(&downstream_wire), expected_media, "{topology}");
+        let forwarded_ec = struct_to_json_v14(
+            downstream_wire
+                .kv
+                .as_ref()
+                .and_then(|kv| kv.ec_transfer_params.clone())
+                .expect("forwarded EC metadata"),
+            "vLLM",
+            "ec_transfer_params",
+        )
+        .expect("EC metadata JSON");
+        assert_eq!(forwarded_ec, expected_ec, "{topology}");
+
+        if mode.is_prefill() {
+            let mut decode_request = downstream_request;
+            let mut disaggregated_params = outputs[0]
+                .disaggregated_params
+                .clone()
+                .expect("prefill KV handoff");
+            disaggregated_params
+                .as_object_mut()
+                .expect("prefill KV object")
+                .remove("_dynamo_sidecar_multimodal_prompt_token_ids");
+            decode_request.prefill_result = Some(PrefillResult {
+                disaggregated_params,
+                prompt_tokens_details: None,
+            });
+            let decode = engine(
+                &server.endpoint,
+                DisaggregationMode::Decode,
+                1,
+                discovered.clone(),
+            );
+            decode.start(2).await.expect("start decode");
+            let decode_outputs = collect(&decode, decode_request).await;
+            assert_eq!(decode_outputs[0].token_ids, [42]);
+            let decode_wire = server
+                .service
+                .requests
+                .lock()
+                .await
+                .last()
+                .cloned()
+                .expect("decode request");
+            assert_eq!(wire_media(&decode_wire), expected_media);
+            let decode_cache = decode_wire.kv.expect("decode cache parameters");
+            assert!(decode_cache.kv_transfer_params.is_some());
+            let decode_ec = struct_to_json_v14(
+                decode_cache.ec_transfer_params.expect("decode EC metadata"),
+                "vLLM",
+                "ec_transfer_params",
+            )
+            .expect("decode EC metadata JSON");
+            assert_eq!(decode_ec, expected_ec);
+        }
+    }
+}
+
+#[tokio::test]
+async fn encode_terminal_without_encoder_cache_metadata_is_rejected() {
+    let service = FakeVllm::default();
+    service.encoder_response.store(true, Ordering::SeqCst);
+    service.omit_encoder_metadata.store(true, Ordering::SeqCst);
+    let discovered = multimodal_model_info();
+    *service.model_info_override.lock().await = Some(discovered.clone());
+    let server = FakeServer::start(service).await;
+    let encoder = engine(&server.endpoint, DisaggregationMode::Encode, 1, discovered);
+    encoder.start(0).await.expect("start encoder");
+
+    let error = collect_result(&encoder, epd_image_request())
+        .await
+        .expect_err("missing EC metadata must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("encode terminal is missing valid ec_transfer_params")
+    );
+}
+
+fn lora_engine(endpoint: &str) -> VllmSidecarEngine {
+    engine(endpoint, DisaggregationMode::Aggregated, 1, model_info()).with_lora_enabled(true)
+}
+
+fn adapter_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("adapter tempdir");
+    std::fs::write(dir.path().join("adapter_config.json"), "{}").unwrap();
+    std::fs::write(dir.path().join("adapter_model.safetensors"), []).unwrap();
+    dir
+}
+
+fn load_body(name: &str, dir: &tempfile::TempDir) -> serde_json::Value {
+    json!({
+        "lora_name": name,
+        "source": {"uri": format!("file://{}", dir.path().display())},
+    })
+}
+
+async fn load(
+    engine: &VllmSidecarEngine,
+    name: &str,
+    dir: &tempfile::TempDir,
+) -> serde_json::Value {
+    engine
+        .engine_update("load_lora".to_string(), load_body(name, dir))
+        .await
+        .expect("load_lora envelope")
+}
+
+async fn unload(engine: &VllmSidecarEngine, name: &str) -> serde_json::Value {
+    engine
+        .engine_update("unload_lora".to_string(), json!({"lora_name": name}))
+        .await
+        .expect("unload_lora envelope")
+}
+
+async fn lora_siblings(endpoint: &dynamo_runtime::component::Endpoint) -> Vec<String> {
+    let endpoint_id = endpoint.id();
+    endpoint
+        .drt()
+        .discovery()
+        .list(DiscoveryQuery::EndpointModels {
+            namespace: endpoint_id.namespace.clone(),
+            component: endpoint_id.component.clone(),
+            endpoint: endpoint_id.name.clone(),
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|instance| match instance {
+            DiscoveryInstance::Model {
+                model_suffix: Some(suffix),
+                ..
+            } => Some(suffix),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn started_lora_engine(
+    service: FakeVllm,
+    namespace: &str,
+) -> (
+    FakeServer,
+    VllmSidecarEngine,
+    dynamo_runtime::component::Endpoint,
+) {
+    let server = FakeServer::start(service).await;
+    let engine = lora_engine(&server.endpoint);
+    engine.start(0).await.expect("start");
+    let endpoint = runtime_endpoint(namespace).await;
+    engine
+        .on_endpoint_ready(endpoint.clone())
+        .await
+        .expect("endpoint ready");
+    (server, engine, endpoint)
+}
+
+#[tokio::test]
+async fn lora_enablement_and_rl_coexistence() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    for (flag, support, capacity) in [
+        (false, true, 4),
+        (true, false, 4),
+        (true, true, 0),
+        (true, true, 4),
+    ] {
+        let mut model = model_info();
+        model.supports_lora = support;
+        *server.service.model_info_override.lock().await = Some(model.clone());
+        let mut info = server_info();
+        info.max_loras = capacity;
+        *server.service.server_info_override.lock().await = Some(info.clone());
+        let engine = engine_with_server_info(
+            &server.endpoint,
+            DisaggregationMode::Aggregated,
+            1,
+            model,
+            info,
+        )
+        .with_lora_enabled(flag);
+        let registration = engine.start(0).await.unwrap();
+        let updates = engine.supported_updates().await.unwrap();
+        assert_eq!(
+            updates.contains(&"load_lora".to_string()),
+            flag && support && capacity > 0
+        );
+        assert!(updates.contains(&"update_weight_version".to_string()));
+        if support && capacity > 0 {
+            assert_eq!(registration.llm.unwrap().max_gpu_lora_count, Some(capacity));
+        }
+        if !support {
+            assert!(
+                generate_error(&engine, "math-r8")
+                    .await
+                    .to_string()
+                    .contains("did not advertise")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn lora_lifecycle_preserves_identity_and_routing_metadata() {
+    use dynamo_llm::worker_type::WorkerType;
+    let (server, engine, endpoint) =
+        started_lora_engine(FakeVllm::default(), "lora_lifecycle").await;
+    for card in endpoint
+        .drt()
+        .discovery()
+        .list(DiscoveryQuery::AllModels)
+        .await
+        .unwrap()
+    {
+        endpoint.drt().discovery().unregister(card).await.unwrap();
+    }
+    let mut base = ModelDeploymentCard::with_name_only("model-source");
+    base.worker_type = Some(WorkerType::Decode);
+    base.needs = vec![vec![WorkerType::Prefill]];
+    base.kv_cache_block_size = 32;
+    base.migration_limit = 3;
+    base.runtime_config.context_length = Some(2048);
+    base.runtime_config.max_num_seqs = Some(8);
+    endpoint
+        .drt()
+        .discovery()
+        .register(
+            DiscoverySpec::from_model(
+                "lora_lifecycle".into(),
+                "backend".into(),
+                "generate".into(),
+                &base,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let dir = adapter_dir();
+    let first = load(&engine, "math-r8", &dir).await;
+    assert_eq!(first["status"], "success");
+    let assigned = server.service.loras.lock().await[0].lora_id;
+    assert_eq!(first["lora_id"], assigned);
+    assert!(
+        !crate::lora::unpublish_lora_model(&endpoint, "Math-R8")
+            .await
+            .unwrap()
+    );
+    let cards = endpoint
+        .drt()
+        .discovery()
+        .list(DiscoveryQuery::AllModels)
+        .await
+        .unwrap();
+    let sibling = cards
+        .iter()
+        .find(|card| {
+            matches!(
+                card,
+                DiscoveryInstance::Model {
+                    model_suffix: Some(_),
+                    ..
+                }
+            )
+        })
+        .unwrap()
+        .deserialize_model::<ModelDeploymentCard>()
+        .unwrap();
+    assert_eq!(sibling.worker_type, base.worker_type);
+    assert_eq!(sibling.needs, base.needs);
+    assert_eq!(sibling.kv_cache_block_size, base.kv_cache_block_size);
+    assert_eq!(sibling.runtime_config, base.runtime_config);
+    assert_eq!(sibling.migration_limit, base.migration_limit);
+    assert_eq!(sibling.source_path.as_deref(), Some("model-source"));
+    assert!(sibling.aliases.is_empty());
+    assert_eq!(sibling.lora.unwrap().max_gpu_lora_count, Some(4));
+    assert_eq!(sibling.user_data.unwrap()["lora_id"], assigned);
+    for source in [&dir, &adapter_dir()] {
+        assert_eq!(load(&engine, "math-r8", source).await["lora_id"], assigned);
+    }
+    assert_eq!(
+        collect(&engine, request_selecting("math-r8")).await.len(),
+        1
+    );
+    {
+        let requests = server.service.requests.lock().await;
+        let sent = requests.last().unwrap();
+        assert_eq!(sent.lora_name, "math-r8");
+        assert!(!sent.kv.as_ref().unwrap().bypass_prefix_cache);
+    }
+    let listed = engine
+        .engine_update("list_loras".into(), json!({}))
+        .await
+        .unwrap();
+    assert_eq!(listed["loras"], json!({"math-r8": assigned}));
+    assert_eq!(unload(&engine, "math-r8").await["status"], "success");
+    assert!(lora_siblings(&endpoint).await.is_empty());
+    assert!(server.service.loras.lock().await.is_empty());
+    assert!(
+        generate_error(&engine, "math-r8")
+            .await
+            .to_string()
+            .contains("unknown model")
+    );
+}
+
+#[tokio::test]
+async fn replicas_publish_the_same_adapter_independently() {
+    let registry = tempfile::tempdir().unwrap();
+    let config = || DistributedConfig {
+        discovery_backend: dynamo_runtime::distributed::DiscoveryBackend::KvStore(
+            dynamo_runtime::storage::kv::Selector::File(registry.path().to_path_buf()),
+        ),
+        ..DistributedConfig::process_local()
+    };
+    let first_endpoint = runtime_endpoint_with_config("lora_replicas", config()).await;
+    let second_endpoint = runtime_endpoint_with_config("lora_replicas", config()).await;
+    assert_ne!(
+        first_endpoint.drt().connection_id(),
+        second_endpoint.drt().connection_id()
+    );
+    let first_server = FakeServer::start(FakeVllm::default()).await;
+    let second_server = FakeServer::start(FakeVllm::default()).await;
+    let first = lora_engine(&first_server.endpoint);
+    let second = lora_engine(&second_server.endpoint);
+    first.start(0).await.unwrap();
+    second.start(0).await.unwrap();
+    first
+        .on_endpoint_ready(first_endpoint.clone())
+        .await
+        .unwrap();
+    second.on_endpoint_ready(second_endpoint).await.unwrap();
+    let dir = adapter_dir();
+    assert_eq!(load(&first, "math-r8", &dir).await["status"], "success");
+    assert_eq!(load(&second, "math-r8", &dir).await["status"], "success");
+    assert_eq!(lora_siblings(&first_endpoint).await.len(), 2);
+    assert_eq!(unload(&first, "math-r8").await["status"], "success");
+    assert_eq!(lora_siblings(&first_endpoint).await.len(), 1);
+    assert_eq!(
+        collect(&second, request_selecting("math-r8")).await.len(),
+        1
+    );
+}
+
+async fn wait_pending(pending: &AtomicBool, future: &mut (impl std::future::Future + Unpin)) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !pending.load(Ordering::SeqCst) {
+            assert!(
+                futures::future::poll_immediate(&mut *future)
+                    .await
+                    .is_none()
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("RPC reached barrier");
+}
+
+#[tokio::test]
+async fn concurrent_lora_loads_use_fresh_inventory() {
+    for (second_name, capacity, expected) in [
+        ("Math-R8", 4, "error"),
+        ("other", 1, "error"),
+        ("other", 2, "success"),
+    ] {
+        let service = FakeVllm::default();
+        service.hold_load.store(true, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let mut info = server_info();
+        info.max_loras = capacity;
+        *server.service.server_info_override.lock().await = Some(info.clone());
+        let engine = engine_with_server_info(
+            &server.endpoint,
+            DisaggregationMode::Aggregated,
+            1,
+            model_info(),
+            info,
+        )
+        .with_lora_enabled(true);
+        engine.start(0).await.unwrap();
+        engine
+            .on_endpoint_ready(runtime_endpoint("lora_concurrent").await)
+            .await
+            .unwrap();
+        engine.supported_updates().await.unwrap();
+        let dir = adapter_dir();
+        let mut first = Box::pin(load(&engine, "math-r8", &dir));
+        wait_pending(&server.service.load_pending, &mut first).await;
+        let calls_before = server.service.control_calls.lock().await.len();
+        let mut second = Box::pin(load(&engine, second_name, &dir));
+        assert!(futures::future::poll_immediate(&mut second).await.is_none());
+        for _ in 0..20 {
+            assert!(futures::future::poll_immediate(&mut second).await.is_none());
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            server.service.control_calls.lock().await.len(),
+            calls_before
+        );
+        server.service.hold_load.store(false, Ordering::SeqCst);
+        server.service.release_load.notify_one();
+        assert_eq!(first.await["status"], "success");
+        let result = second.await;
+        assert_eq!(result["status"], expected, "{result}");
+        assert_eq!(
+            server.service.loras.lock().await.len(),
+            if expected == "success" { 2 } else { 1 }
+        );
+        assert_eq!(load(&engine, "model-alias", &dir).await["status"], "error");
+    }
+}
+
+#[tokio::test]
+async fn same_name_load_and_unload_are_ordered() {
+    let service = FakeVllm::default();
+    service.hold_load.store(true, Ordering::SeqCst);
+    let (server, engine, _) = started_lora_engine(service, "lora_order").await;
+    engine.supported_updates().await.unwrap();
+    let dir = adapter_dir();
+    let mut loading = Box::pin(load(&engine, "math-r8", &dir));
+    wait_pending(&server.service.load_pending, &mut loading).await;
+    let mut unloading = Box::pin(unload(&engine, "math-r8"));
+    assert!(
+        futures::future::poll_immediate(&mut unloading)
+            .await
+            .is_none()
+    );
+    assert!(
+        !server
+            .service
+            .control_calls
+            .lock()
+            .await
+            .iter()
+            .any(|(name, _)| name == "unload_lora")
+    );
+    server.service.hold_load.store(false, Ordering::SeqCst);
+    server.service.release_load.notify_one();
+    assert_eq!(loading.await["status"], "success");
+    assert_eq!(unloading.await["status"], "success");
+    assert!(server.service.loras.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn committed_lora_errors_reconcile_against_inventory() {
+    let service = FakeVllm::default();
+    service.load_commit_error.store(true, Ordering::SeqCst);
+    service.unload_commit_error.store(true, Ordering::SeqCst);
+    let (server, engine, endpoint) = started_lora_engine(service, "lora_ambiguous").await;
+    let dir = adapter_dir();
+    assert_eq!(load(&engine, "math-r8", &dir).await["status"], "success");
+    assert_eq!(server.service.loras.lock().await.len(), 1);
+    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
+    assert_eq!(unload(&engine, "math-r8").await["status"], "success");
+    assert!(server.service.loras.lock().await.is_empty());
+    assert!(lora_siblings(&endpoint).await.is_empty());
+}
+
+#[tokio::test]
+async fn publication_failure_rolls_back_a_committed_native_load() {
+    let service = FakeVllm::default();
+    service.hold_load.store(true, Ordering::SeqCst);
+    let (server, engine, endpoint) = started_lora_engine(service, "lora_rollback").await;
+    engine.supported_updates().await.unwrap();
+    let dir = adapter_dir();
+    let mut loading = Box::pin(load(&engine, "math-r8", &dir));
+    wait_pending(&server.service.load_pending, &mut loading).await;
+    // Simulate a record written before publication returns an error.
+    crate::lora::publish_lora_model(
+        &endpoint,
+        &pb::LoraAdapter {
+            lora_id: 1,
+            lora_name: "math-r8".into(),
+            source_path: dir.path().to_string_lossy().into_owned(),
+        },
+        4,
+    )
+    .await
+    .unwrap();
+    let discovery = endpoint.drt().discovery();
+    for card in discovery.list(DiscoveryQuery::AllModels).await.unwrap() {
+        if matches!(
+            &card,
+            DiscoveryInstance::Model {
+                model_suffix: None,
+                ..
+            }
+        ) {
+            discovery.unregister(card).await.unwrap();
+        }
+    }
+    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
+    server.service.hold_load.store(false, Ordering::SeqCst);
+    server.service.release_load.notify_one();
+    assert_eq!(loading.await["status"], "error");
+    let calls: Vec<_> = server
+        .service
+        .control_calls
+        .lock()
+        .await
+        .iter()
+        .filter(|(name, _)| name != "list_loras")
+        .map(|(name, _)| name.clone())
+        .collect();
+    assert_eq!(calls, ["load_lora", "unload_lora"]);
+    assert_eq!(server.service.next_lora_id.load(Ordering::SeqCst), 1);
+    assert!(server.service.loras.lock().await.is_empty());
+    assert!(lora_siblings(&endpoint).await.is_empty());
+}
+
+#[tokio::test]
+async fn failed_unload_restores_the_removed_discovery_record() {
+    for is_unavailable in [false, true] {
+        let (server, engine, endpoint) =
+            started_lora_engine(FakeVllm::default(), "lora_restore").await;
+        let dir = adapter_dir();
+        assert_eq!(load(&engine, "math-r8", &dir).await["status"], "success");
+        server.service.hold_unload.store(true, Ordering::SeqCst);
+        let mut unloading = Box::pin(unload(&engine, "math-r8"));
+        wait_pending(&server.service.unload_pending, &mut unloading).await;
+        assert!(lora_siblings(&endpoint).await.is_empty());
+        assert_eq!(server.service.loras.lock().await.len(), 1);
+        server
+            .service
+            .is_lora_unavailable
+            .store(is_unavailable, Ordering::SeqCst);
+        server.service.release_unload.notify_one();
+        assert_eq!(unloading.await["status"], "error");
+        if is_unavailable {
+            assert!(lora_siblings(&endpoint).await.is_empty());
+            server
+                .service
+                .is_lora_unavailable
+                .store(false, Ordering::SeqCst);
+            assert_eq!(
+                engine
+                    .engine_update("list_loras".into(), json!({}))
+                    .await
+                    .unwrap()["status"],
+                "success"
+            );
+        }
+        assert_eq!(lora_siblings(&endpoint).await.len(), 1);
+        assert_eq!(
+            collect(&engine, request_selecting("math-r8")).await.len(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn restart_republishes_resident_adapters_and_shutdown_unpublishes() {
+    let service = FakeVllm::default();
+    service.loras.lock().await.push(pb::LoraAdapter {
+        lora_id: 7,
+        lora_name: "math-r8".into(),
+        source_path: "/shared/loras/math-r8".into(),
+    });
+    let (server, engine, endpoint) = started_lora_engine(service, "lora_restart").await;
+    assert!(
+        generate_error(&engine, "math-r8")
+            .await
+            .to_string()
+            .contains("unknown model")
+    );
+    assert!(server.service.requests.lock().await.is_empty());
+    engine.supported_updates().await.unwrap();
+    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
+    assert_eq!(
+        collect(&engine, request_selecting("math-r8")).await.len(),
+        1
+    );
+    engine.cleanup().await.unwrap();
+    assert!(lora_siblings(&endpoint).await.is_empty());
+    assert_eq!(server.service.loras.lock().await[0].lora_id, 7);
+}
+
+#[tokio::test]
+async fn restart_inventory_keeps_base_serving_and_allows_exact_unload() {
+    for (conflicting_name, initial_siblings) in
+        [("Math-R8", 0), ("model-source", 0), ("math-r8 ", 2)]
+    {
+        let service = FakeVllm::default();
+        for (id, name) in [(1, "math-r8"), (2, conflicting_name)] {
+            service.loras.lock().await.push(pb::LoraAdapter {
+                lora_id: id,
+                lora_name: name.into(),
+                source_path: "/shared/loras/math-r8".into(),
+            });
+        }
+        let (server, engine, endpoint) =
+            started_lora_engine(service, "lora_restart_collision").await;
+        assert!(
+            engine
+                .supported_updates()
+                .await
+                .unwrap()
+                .contains(&"load_lora".to_string())
+        );
+        assert_eq!(lora_siblings(&endpoint).await.len(), initial_siblings);
+        assert_eq!(collect(&engine, request()).await.len(), 1);
+        assert_eq!(unload(&engine, conflicting_name).await["status"], "success");
+        assert_eq!(server.service.loras.lock().await.len(), 1);
+        assert_eq!(server.service.loras.lock().await[0].lora_name, "math-r8");
+        assert_eq!(
+            engine
+                .engine_update("list_loras".into(), json!({}))
+                .await
+                .unwrap()["status"],
+            "success"
+        );
+        assert_eq!(lora_siblings(&endpoint).await.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn base_aliases_and_unknown_adapters_do_not_select_lora() {
+    let (server, engine, _) =
+        started_lora_engine(FakeVllm::default(), "lora_admission_names").await;
+    for name in ["model-source", "served-model", "model-alias"] {
+        assert_eq!(collect(&engine, request_selecting(name)).await.len(), 1);
+        let requests = server.service.requests.lock().await;
+        let sent = requests.last().unwrap();
+        assert_eq!(sent.lora_name, "");
+        assert!(!sent.kv.as_ref().unwrap().bypass_prefix_cache);
+    }
+    let count = server.service.requests.lock().await.len();
+    assert!(
+        generate_error(&engine, "absent")
+            .await
+            .to_string()
+            .contains("unknown model")
+    );
+    assert_eq!(server.service.requests.lock().await.len(), count);
+}
+
+#[tokio::test]
+async fn hot_swap_is_refused() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let engine = lora_engine(&server.endpoint).with_hot_swap_requested(true);
+    engine.start(0).await.unwrap();
+    engine
+        .on_endpoint_ready(runtime_endpoint("lora_hot_swap").await)
+        .await
+        .unwrap();
+    let dir = adapter_dir();
+    assert_eq!(load(&engine, "math-r8", &dir).await["status"], "success");
+    let response = load(&engine, "math-r8", &dir).await;
+    assert_eq!(response["status"], "error");
+    assert!(
+        response["message"]
+            .as_str()
+            .unwrap()
+            .contains("hot swap is not supported")
+    );
+}
+
+fn request_selecting(lora_name: &str) -> PreprocessedRequest {
+    let mut value = serde_json::to_value(request()).unwrap();
+    value["routing"]["lora_name"] = json!(lora_name);
+    value["extra_args"]["bypass_prefix_cache"] = json!(false);
+    serde_json::from_value(value).unwrap()
+}
+
+fn generate_context() -> GenerateContext {
+    GenerateContext::new(dynamo_backend_common::testing::mock_context(), None)
+}
+
+async fn generate_error(
+    engine: &VllmSidecarEngine,
+    name: &str,
+) -> dynamo_backend_common::DynamoError {
+    match engine
+        .generate(request_selecting(name), generate_context())
+        .await
+    {
+        Ok(_) => panic!("unexpected generation success for {name}"),
+        Err(error) => error,
+    }
+}
+
+#[tokio::test]
+async fn request_admission_and_unload_cannot_race() {
+    let (server, engine, endpoint) =
+        started_lora_engine(FakeVllm::default(), "lora_admission").await;
+    let dir = adapter_dir();
+    assert_eq!(load(&engine, "math-r8", &dir).await["status"], "success");
+    server
+        .service
+        .hang_before_headers
+        .store(true, Ordering::SeqCst);
+    let mut generating =
+        Box::pin(engine.generate(request_selecting("math-r8"), generate_context()));
+    wait_pending(&server.service.headers_pending, &mut generating).await;
+    server
+        .service
+        .headers_pending
+        .store(false, Ordering::SeqCst);
+    let mut second = Box::pin(engine.generate(request_selecting("math-r8"), generate_context()));
+    wait_pending(&server.service.headers_pending, &mut second).await;
+    assert_eq!(server.service.requests.lock().await.len(), 2);
+    let mut unloading = Box::pin(unload(&engine, "math-r8"));
+    assert!(
+        futures::future::poll_immediate(&mut unloading)
+            .await
+            .is_none()
+    );
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut waiting = Box::pin(engine.generate(
+        request_selecting("math-r8"),
+        GenerateContext::new(context.clone(), None),
+    ));
+    assert!(
+        futures::future::poll_immediate(&mut waiting)
+            .await
+            .is_none()
+    );
+    context.stop_generating();
+    let mut cancelled = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+        .await
+        .expect("cancel admission wait")
+        .unwrap();
+    assert_eq!(
+        cancelled.next().await.unwrap().unwrap().finish_reason,
+        Some(FinishReason::Cancelled)
+    );
+    assert_eq!(server.service.requests.lock().await.len(), 2);
+    assert!(
+        !server
+            .service
+            .control_calls
+            .lock()
+            .await
+            .iter()
+            .any(|(name, _)| name == "unload_lora")
+    );
+    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
+    server
+        .service
+        .hang_before_headers
+        .store(false, Ordering::SeqCst);
+    server.service.release_headers.notify_waiters();
+    let _stream = generating.await.unwrap();
+    assert!(
+        futures::future::poll_immediate(&mut unloading)
+            .await
+            .is_none()
+    );
+    let _second_stream = second.await.unwrap();
+    assert_eq!(unloading.await["status"], "success");
+}
+
+#[cfg(feature = "mm-routing")]
+#[tokio::test]
+async fn multimodal_kv_sources_carry_the_resolved_image_token() {
+    let model_dir = tempfile::tempdir().expect("temporary model directory");
+    std::fs::write(
+        model_dir.path().join("config.json"),
+        json!({
+            "model_type": "qwen2_5_vl",
+            "vision_token_id": 151654,
+            "image_token_id": 151655
+        })
+        .to_string(),
+    )
+    .expect("write model config");
+    std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}")
+        .expect("write processor config");
+
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.model_id = model_dir.path().to_string_lossy().into_owned();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered);
+    let server = FakeServer::start(service).await;
+    let (engine, _) = engine_from_args(&server.endpoint).await;
     engine.start(0).await.expect("start");
 
-    let context = dynamo_backend_common::testing::mock_context();
-    let result = engine
-        .generate(request(), GenerateContext::new(context, None))
-        .await;
-    assert!(result.is_err());
-    assert_eq!(server.service.requests.lock().await.len(), 1);
+    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    assert!(!sources.is_empty());
+    assert!(sources.iter().all(|source| matches!(
+        source,
+        dynamo_backend_common::KvEventSource::Zmq {
+            image_token_id: Some(151655),
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn unresolved_multimodal_routing_token_falls_back_without_source_metadata() {
+    let model_dir = tempfile::tempdir().expect("temporary model directory");
+    std::fs::write(
+        model_dir.path().join("config.json"),
+        json!({"model_type": "qwen2_5_vl", "image_token_id": 151655}).to_string(),
+    )
+    .expect("write model config");
+
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.model_id = model_dir.path().to_string_lossy().into_owned();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered);
+    let server = FakeServer::start(service).await;
+    let (engine, _) = engine_from_args(&server.endpoint).await;
+
+    engine.start(0).await.expect("start without routing token");
+    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    assert!(!sources.is_empty());
+    assert!(sources.iter().all(|source| matches!(
+        source,
+        dynamo_backend_common::KvEventSource::Zmq {
+            image_token_id: None,
+            ..
+        }
+    )));
 }
 
 #[tokio::test]
@@ -1345,7 +2501,12 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
 
         let requests = server.service.requests.lock().await;
         let decode_wire = requests.last().unwrap().kv.as_ref().unwrap();
-        let decoded = struct_to_json(decode_wire.kv_transfer_params.clone().unwrap()).unwrap();
+        let decoded = struct_to_json_v14(
+            decode_wire.kv_transfer_params.clone().unwrap(),
+            "vLLM",
+            "kv_transfer_params",
+        )
+        .unwrap();
         // Every field round-trips opaquely except remote_port, which the sidecar
         // stringifies so vLLM builds a valid NIXL side-channel URL (a protobuf
         // Struct number would reach the engine as `20097.0`).
@@ -1357,11 +2518,20 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
 
 #[tokio::test]
 async fn component_honors_config_for_aggregated_but_fixes_disagg_roles() {
-    let server = FakeServer::start(FakeVllm::default()).await;
-    for (extra, expected) in [
-        (Vec::<&str>::new(), "custom"),
-        (vec!["--disaggregation-mode", "prefill"], "prefill"),
-        (vec!["--disaggregation-mode", "decode"], "backend"),
+    let service = FakeVllm::default();
+    let discovered = multimodal_model_info();
+    *service.model_info_override.lock().await = Some(discovered);
+    let server = FakeServer::start(service).await;
+    for (extra, expected_component, expected_route_to_encoder) in [
+        (Vec::<&str>::new(), "custom", false),
+        (vec!["--route-to-encoder"], "custom", true),
+        (
+            vec!["--disaggregation-mode", "prefill", "--route-to-encoder"],
+            "prefill",
+            true,
+        ),
+        (vec!["--disaggregation-mode", "decode"], "backend", false),
+        (vec!["--disaggregation-mode", "encode"], "encode", false),
     ] {
         let mut argv = vec![
             "dynamo-vllm-sidecar".to_string(),
@@ -1371,14 +2541,13 @@ async fn component_honors_config_for_aggregated_but_fixes_disagg_roles() {
             "custom".to_string(),
         ];
         argv.extend(extra.into_iter().map(str::to_string));
-        let component =
-            tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
-                .await
-                .expect("bootstrap task")
-                .expect("from_args")
-                .1
-                .component;
-        assert_eq!(component, expected);
+        let config = tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
+            .await
+            .expect("bootstrap task")
+            .expect("from_args")
+            .1;
+        assert_eq!(config.component, expected_component);
+        assert_eq!(config.route_to_encoder, expected_route_to_encoder);
     }
 }
 
@@ -1391,7 +2560,7 @@ async fn pool_uses_each_configured_connection() {
     };
     let endpoint = GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").unwrap();
     let deadline = crate::client::startup_deadline(transport.startup_deadline).unwrap();
-    let client = VllmClient::connect(&endpoint, transport, deadline)
+    let client = VllmClient::connect(&endpoint, transport, deadline, false)
         .await
         .expect("connect pool");
     assert_eq!(client.connection_count(), 2);
@@ -1429,76 +2598,6 @@ async fn pool_uses_each_configured_connection() {
             .iter()
             .all(Option::is_none)
     );
-}
-
-#[tokio::test]
-async fn cancellation_drops_the_remote_stream() {
-    let service = FakeVllm::default();
-    service.hang.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        model_info(),
-    );
-    engine.start(0).await.expect("start");
-
-    let context = dynamo_backend_common::testing::mock_context();
-    let mut stream = engine
-        .generate(request(), GenerateContext::new(context.clone(), None))
-        .await
-        .expect("generate");
-    let first = stream.next().await.unwrap().unwrap();
-    assert_eq!(first.token_ids, [42]);
-    context.stop_generating();
-    let terminal = stream.next().await.unwrap().unwrap();
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
-    drop(stream);
-
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !server.service.server_stream_dropped.load(Ordering::SeqCst) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("server stream dropped");
-}
-
-#[tokio::test]
-async fn cancellation_interrupts_pending_response_headers() {
-    let service = FakeVllm::default();
-    service.hang_before_headers.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        model_info(),
-    );
-    engine.start(0).await.expect("start");
-
-    let context = dynamo_backend_common::testing::mock_context();
-    let generate = engine.generate(request(), GenerateContext::new(context.clone(), None));
-    tokio::pin!(generate);
-
-    tokio::select! {
-        _ = &mut generate => panic!("generate returned before cancellation"),
-        _ = async {
-            while !server.service.headers_pending.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        } => {}
-    }
-
-    context.stop_generating();
-    let mut stream = tokio::time::timeout(std::time::Duration::from_secs(2), &mut generate)
-        .await
-        .expect("cancel pending headers")
-        .expect("generate cancellation stream");
-    let terminal = stream.next().await.unwrap().unwrap();
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
-    server.service.release_headers.notify_waiters();
 }
 
 #[tokio::test]
@@ -1614,13 +2713,42 @@ async fn decode_cancellation_maps_premature_eof_to_cancelled() {
 }
 
 #[tokio::test]
+async fn preprocessed_multimodal_features_require_model_support() {
+    let engine = engine(
+        "http://127.0.0.1:9",
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
+    let context = dynamo_backend_common::testing::mock_context();
+    let result = engine
+        .generate(
+            request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64)),
+            GenerateContext::new(context, None),
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("text-only model must reject preprocessed media before RPC submission"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise multimodal support")
+    );
+}
+
+#[tokio::test]
 async fn unsupported_features_fail_before_rpc_submission() {
-    let server = FakeServer::start(FakeVllm::default()).await;
+    let service = FakeVllm::default();
+    let discovered = multimodal_model_info();
+    *service.model_info_override.lock().await = Some(discovered.clone());
+    let server = FakeServer::start(service).await;
     let engine = engine(
         &server.endpoint,
         DisaggregationMode::Aggregated,
         1,
-        model_info(),
+        discovered,
     );
     engine.start(0).await.expect("start");
 
@@ -1638,9 +2766,18 @@ async fn unsupported_features_fail_before_rpc_submission() {
     multimodal.mm_processor_kwargs = Some(json!({"use_audio_in_video": true}));
     requests.push(multimodal);
 
-    let mut lora_request = serde_json::to_value(request()).expect("serialize request");
-    lora_request["routing"] = json!({"lora_name": "adapter"});
-    requests.push(serde_json::from_value(lora_request).expect("deserialize request"));
+    let mut audio_uuid = request();
+    audio_uuid.multi_modal_data = Some(std::collections::HashMap::from([(
+        "audio_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/sample.wav".to_string(),
+        )],
+    )]));
+    audio_uuid.multi_modal_uuids = Some(std::collections::HashMap::from([(
+        "audio_url".to_string(),
+        vec![Some("audio-cache-id".to_string())],
+    )]));
+    requests.push(audio_uuid);
 
     let mut mismatched_cache_salt = request();
     mismatched_cache_salt.extra_args.as_mut().unwrap()["nvext"]["cache_salt"] =

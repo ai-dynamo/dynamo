@@ -74,6 +74,29 @@ func TestConvertFromSharedMemorySpec(t *testing.T) {
 	}
 }
 
+func TestBugDGD_ExplicitFalseForceScalingGroupRoundTrips(t *testing.T) {
+	t.Log("Build a hub DGD with forceScalingGroup explicitly disabled")
+	in := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "explicit-false", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{
+					Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(false)},
+				},
+			}},
+		},
+	}
+
+	t.Log("Round-trip through the v1alpha1 conversion webhook representation")
+	out := roundTripFromV1beta1(t, in)
+	got := out.Spec.Components[0].Experimental.Grove.ForceScalingGroup
+	if got == nil || *got {
+		t.Fatalf("forceScalingGroup = %v, want explicit false", got)
+	}
+}
+
 func TestBugDGD_SpokeServiceAndExtraVolumeMountsCompose(t *testing.T) {
 	in := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "volume-mounts", Namespace: "ns"},
@@ -153,6 +176,129 @@ func TestBugDGD_SpokeServiceAndExtraVolumeMountsCompose(t *testing.T) {
 	}
 	if diff := cmp.Diff(in.Spec.Services["worker"].ExtraPodSpec.PodSpec.Volumes, got.ExtraPodSpec.PodSpec.Volumes); diff != "" {
 		t.Fatalf("extra pod volumes changed after round-trip (-want +got):\n%s", diff)
+	}
+}
+
+func TestBugDGD_HubVolumeMountOrderWithCompilationCacheRoundTrip(t *testing.T) {
+	t.Log("Build a hub component whose non-cache mount precedes its compilation-cache mount")
+	in := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "volume-mount-order", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				CompilationCache: &v1beta1.CompilationCacheConfig{
+					PVCName:   "model-cache",
+					MountPath: "/models",
+				},
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: "main",
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "config", MountPath: "/config", ReadOnly: true, SubPath: "settings"},
+						{Name: "model-cache", MountPath: "/models"},
+					},
+				}}}},
+			}},
+		},
+	}
+
+	t.Log("Round-trip the hub component through v1alpha1")
+	out := roundTripFromV1beta1(t, in)
+	if diff := cmp.Diff(in, out); diff != "" {
+		t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBugDGD_HubCarrierMountOrderRespectsLiveEdits(t *testing.T) {
+	t.Log("Define a compilation cache and native mounts with complete optional fields")
+	recursiveReadOnly := corev1.RecursiveReadOnlyEnabled
+	spoke := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "live-volume-mount-order", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					VolumeMounts: []VolumeMount{{
+						Name:                  "compile-cache",
+						MountPoint:            "/compile",
+						UseAsCompilationCache: true,
+					}},
+					ExtraPodSpec: &ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Ports: []corev1.ContainerPort{},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:              "config-a",
+									MountPath:         "/config-a",
+									ReadOnly:          true,
+									RecursiveReadOnly: &recursiveReadOnly,
+									SubPath:           "worker",
+								},
+								{Name: "config-b", MountPath: "/config-b", SubPath: "worker"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Create a hub carrier whose mount order is lossy in v1alpha1")
+	carrier := &v1beta1.DynamoGraphDeployment{}
+	if err := spoke.ConvertTo(carrier); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	t.Log("Renaming invalidates the alpha-origin save; the hub payload must preserve mount order")
+	carrier.Spec.Components[0].ComponentName = "renamed-worker"
+	originalMain, ok := findContainerByName(carrier.Spec.Components[0].PodTemplate.Spec.Containers, mainContainerName)
+	if !ok {
+		t.Fatalf("expected carrier main container, got %#v", carrier.Spec.Components[0].PodTemplate.Spec.Containers)
+	}
+	originalMounts := cloneNativeVolumeMounts(originalMain.VolumeMounts)
+
+	t.Log("Preserve explicit empty ports in the native hub carrier")
+	if originalMain.Ports == nil {
+		t.Fatalf("main.Ports = nil, want explicit empty slice")
+	}
+	if len(originalMain.Ports) != 0 {
+		t.Fatalf("main.Ports = %#v, want empty", originalMain.Ports)
+	}
+
+	t.Log("Convert to the cache-first spoke projection")
+	converted := &DynamoGraphDeployment{}
+	if err := converted.ConvertFrom(carrier); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	service := converted.Spec.Services["renamed-worker"]
+	if service == nil || len(service.VolumeMounts) != 3 {
+		t.Fatalf("expected three projected volume mounts, got %#v", service)
+	}
+
+	t.Log("Restore the saved hub order while the live projection is unchanged")
+	unedited := &v1beta1.DynamoGraphDeployment{}
+	if err := converted.ConvertTo(unedited); err != nil {
+		t.Fatalf("ConvertTo() unedited error = %v", err)
+	}
+	if diff := cmp.Diff(originalMounts, unedited.Spec.Components[0].PodTemplate.Spec.Containers[0].VolumeMounts); diff != "" {
+		t.Fatalf("main volume-mount order changed across hub carrier round-trip (-want +got):\n%s", diff)
+	}
+
+	t.Log("Reorder the live mounts without deleting the saved hub payload")
+	service.VolumeMounts[1], service.VolumeMounts[2] = service.VolumeMounts[2], service.VolumeMounts[1]
+
+	t.Log("Convert back without allowing the stale hub save to override the live order")
+	restored := &v1beta1.DynamoGraphDeployment{}
+	if err := converted.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() restored error = %v", err)
+	}
+	restoredMain, ok := findContainerByName(restored.Spec.Components[0].PodTemplate.Spec.Containers, mainContainerName)
+	if !ok {
+		t.Fatalf("expected restored main container, got %#v", restored.Spec.Components[0].PodTemplate.Spec.Containers)
+	}
+	want := []corev1.VolumeMount{originalMounts[2], originalMounts[1], originalMounts[0]}
+	if diff := cmp.Diff(want, restoredMain.VolumeMounts); diff != "" {
+		t.Fatalf("live main volume-mount order was overridden (-want +got):\n%s", diff)
 	}
 }
 
