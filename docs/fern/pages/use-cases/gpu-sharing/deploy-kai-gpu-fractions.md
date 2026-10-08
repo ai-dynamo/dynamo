@@ -17,7 +17,7 @@ This is the third configuration in [Interpreting GPU Sharing Results](gpu-sharin
 | KAI + HAMi | 16 | Two models per GPU | Memory cap only; compute is time-sliced | [Deploy the KAI + HAMi Experiment](deploy-kai-hami.md) |
 | KAI + GPU fractions (this page) | 16 | Two models per GPU (`gpu-fraction: "0.5"` plus `sm-sharing`) | Memory cap (19,968 MiB) and 50% of the SMs | This page |
 
-All commands run from `examples/many-models` in a checkout of the [Dynamo repository](https://github.com/ai-dynamo/dynamo). The files this guide uses are in [`examples/many-models/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/many-models).
+All commands run from `examples/gpu-sharing` in a checkout of the [Dynamo repository](https://github.com/ai-dynamo/dynamo). The files this guide uses are in [`examples/gpu-sharing/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/gpu-sharing).
 
 > [!NOTE]
 > Any performance results on this page are purely illustrative and are not indicative of optimal performance. Your deployment or configuration may vary.
@@ -53,7 +53,7 @@ kubectl get node "$GPU_NODE" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{
 ## Step 1: Install the Dynamo Platform
 
 ```bash
-cd examples/many-models
+cd examples/gpu-sharing
 common/install-dynamo-platform.sh
 ```
 
@@ -73,7 +73,7 @@ Follow [Build the KAI-Scheduler and GPU Fractioning Forks](build-gpu-fractioning
 
 ### Queues
 
-The experiment's workers use the `default-queue` queue, which the KAI-Scheduler chart creates. The KAI + HAMi install script patches both default queues to unlimited quota, but the fork chart creates them with quota `0` and limit `-1`, which admits over-quota work, and the published run's records show no queue patch. If workers stay `Pending` with a queue-quota reason, apply the same patch that [`install-kai-hami.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/kai-hami/install-kai-hami.sh) uses:
+The experiment's workers use the `default-queue` queue, which the KAI-Scheduler chart creates. The KAI + HAMi install script patches both default queues to unlimited quota, but the fork chart creates them with quota `0` and limit `-1`, which admits over-quota work, and the published run's records show no queue patch. If workers stay `Pending` with a queue-quota reason, apply the same patch that [`install-kai-hami.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-hami/install-kai-hami.sh) uses:
 
 ```bash
 for q in default-parent-queue default-queue; do
@@ -86,7 +86,7 @@ done
 
 ### Verify the Caps With the Smoke Test
 
-[`smoke-test-half-gpu.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/kai-gpu-fractions/smoke-test-half-gpu.yaml) starts two idle pods, `fraction-smoke-a` and `fraction-smoke-b`, each requesting `gpu-fraction: "0.5"`, the same pods as the [build guide smoke test](build-gpu-fractioning-forks.md#step-5-verify-with-a-two-pod-smoke-test). Run it before you commit eight GPUs to the full experiment:
+[`smoke-test-half-gpu.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/smoke-test-half-gpu.yaml) starts two idle pods, `fraction-smoke-a` and `fraction-smoke-b`, each requesting `gpu-fraction: "0.5"`, the same pods as the [build guide smoke test](build-gpu-fractioning-forks.md#step-5-verify-with-a-two-pod-smoke-test). Run it before you commit eight GPUs to the full experiment:
 
 ```bash
 kubectl apply -f kai-gpu-fractions/smoke-test-half-gpu.yaml
@@ -104,14 +104,14 @@ kubectl delete -f kai-gpu-fractions/smoke-test-half-gpu.yaml
 
 ## Step 4: Deploy the 16 DGDs
 
-[`kai-gpu-fractions/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/kai-gpu-fractions/gen-dgds.sh) renders the 16 DGDs. With `NODE_NAME` set, it pins every frontend and worker to that node, where the model cache is. Render and apply in one step:
+[`kai-gpu-fractions/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/gen-dgds.sh) renders the 16 DGDs. With `NODE_NAME` set, it pins every frontend and worker to that node, where the model cache is. Render and apply in one step:
 
 ```bash
 NODE_NAME="$GPU_NODE" kai-gpu-fractions/gen-dgds.sh | kubectl apply -f -
 kubectl get dgd -n default      # wait until all 16 DGDs are Ready
 ```
 
-The generator also reads `NAMESPACE` (default `default`) and `HF_CACHE_DIR` (default `/opt/hf-cache`); set them to the values you used in Step 2. It takes an optional model snapshot path as its first argument. The checked-in [`kai-gpu-fractions/dgds-16x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/kai-gpu-fractions/dgds-16x.yaml) is the same output without a node pin, for reference.
+The generator also reads `NAMESPACE` (default `default`) and `HF_CACHE_DIR` (default `/opt/hf-cache`); set them to the values you used in Step 2. It takes an optional model snapshot path as its first argument. The checked-in [`kai-gpu-fractions/dgds-16x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/dgds-16x.yaml) is the same output without a node pin, for reference.
 
 `NUM_MODELS` (default `16`) sets the number of DGDs. Each worker carries the label `kai.scheduler/queue: default-queue`, the annotations `gpu-fraction: "0.5"` and `nvidia.com/container.main.gpu-compute.mode: sm-sharing`, `schedulerName: kai-scheduler`, `runtimeClassName: nvidia`, and a non-root security context. It has no `nvidia.com/gpu` resource.
 
@@ -147,7 +147,7 @@ The worker reports `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=50` and `CUDA_MPS_PINNED_D
 
 ## Step 5: Run the Concurrency Sweep
 
-The frontends' ClusterIPs are reachable only from inside the cluster, so the sweep runs in a load-generator pod, [`common/aiperf-client-pod.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/common/aiperf-client-pod.yaml). The pod requests 16 CPUs, one per concurrent AIPerf process, and its node affinity keeps it off `$GPU_NODE`, so load generation does not compete with the workers for host CPU.
+The frontends' ClusterIPs are reachable only from inside the cluster, so the sweep runs in a load-generator pod, [`common/aiperf-client-pod.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/common/aiperf-client-pod.yaml). The pod requests 16 CPUs, one per concurrent AIPerf process, and its node affinity keeps it off `$GPU_NODE`, so load generation does not compete with the workers for host CPU.
 
 Start the pod and copy the scripts into it:
 

@@ -787,17 +787,17 @@ navigation:
         slug: many-model-serving
         contents:
           - page: Interpreting GPU Sharing Results
-            path: pages/use-cases/many-model-serving/gpu-sharing-results.mdx
+            path: pages/use-cases/gpu-sharing/gpu-sharing-results.mdx
           - page: Deploy the Baseline Experiment
-            path: pages/use-cases/many-model-serving/deploy-baseline.md
+            path: pages/use-cases/gpu-sharing/deploy-baseline.md
           - page: Deploy the KAI + HAMi Experiment
-            path: pages/use-cases/many-model-serving/deploy-kai-hami.md
+            path: pages/use-cases/gpu-sharing/deploy-kai-hami.md
           - page: Build the KAI-Scheduler and GPU Fractioning Forks
-            path: pages/use-cases/many-model-serving/build-gpu-fractioning-forks.md
+            path: pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md
           - page: Deploy the KAI + GPU Fractions Experiment
-            path: pages/use-cases/many-model-serving/deploy-kai-gpu-fractions.md
+            path: pages/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md
           - page: Per-GPU Compute and Memory Limits with MPS
-            path: pages/use-cases/many-model-serving/mps-per-gpu-limits.md
+            path: pages/use-cases/gpu-sharing/mps-per-gpu-limits.md
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================

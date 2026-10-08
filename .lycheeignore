@@ -112,6 +112,6 @@
 # GLM-5.3/5.2 recipe page 404 until the glm-5.3 rename merges. Remove after merge.
 ^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/recipes/glm-5\.3/
 
-# examples/many-models is added in the same PR as the many-model-serving docs
+# examples/gpu-sharing is added in the same PR as the GPU sharing docs
 # that link to it on main. Remove this rule once that PR merges.
-^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/examples/many-models
+^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/examples/gpu-sharing

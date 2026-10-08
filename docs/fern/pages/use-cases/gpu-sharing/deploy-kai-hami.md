@@ -17,7 +17,7 @@ This is the middle configuration in [Interpreting GPU Sharing Results](gpu-shari
 | KAI + HAMi (this page) | 16 | Two models per GPU (`gpu-fraction: "0.5"`) | Memory cap only; compute is time-sliced | This page |
 | KAI + GPU fractions | 16 | Two models per GPU | Memory cap and 50% of the SMs | [Deploy the KAI + GPU Fractions Experiment](deploy-kai-gpu-fractions.md) |
 
-All commands run from `examples/many-models` in a checkout of the [Dynamo repository](https://github.com/ai-dynamo/dynamo). The files this guide uses are in [`examples/many-models/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/many-models).
+All commands run from `examples/gpu-sharing` in a checkout of the [Dynamo repository](https://github.com/ai-dynamo/dynamo). The files this guide uses are in [`examples/gpu-sharing/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/gpu-sharing).
 
 > [!NOTE]
 > Any performance results on this page are purely illustrative and are not indicative of optimal performance. Your deployment or configuration may vary.
@@ -50,7 +50,7 @@ kubectl get node "$GPU_NODE" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{
 ## Step 1: Install the Dynamo Platform
 
 ```bash
-cd examples/many-models
+cd examples/gpu-sharing
 common/install-dynamo-platform.sh
 ```
 
@@ -70,7 +70,7 @@ The script runs a Kubernetes Job on `$GPU_NODE` that downloads `Qwen/Qwen3-4B` a
 kai-hami/install-kai-hami.sh
 ```
 
-[`install-kai-hami.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/kai-hami/install-kai-hami.sh) runs three stages and waits for the pods of each to be Ready:
+[`install-kai-hami.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-hami/install-kai-hami.sh) runs three stages and waits for the pods of each to be Ready:
 
 | Stage | What it installs | Notes |
 |---|---|---|
@@ -82,14 +82,14 @@ The script waits up to 30 attempts at 2 seconds for each queue to exist before i
 
 ## Step 4: Deploy the 16 DGDs
 
-[`kai-hami/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/kai-hami/gen-dgds.sh) renders the 16 DGDs. With `NODE_NAME` set, it pins every frontend and worker to that node, where the model cache is. Render and apply in one step:
+[`kai-hami/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-hami/gen-dgds.sh) renders the 16 DGDs. With `NODE_NAME` set, it pins every frontend and worker to that node, where the model cache is. Render and apply in one step:
 
 ```bash
 NODE_NAME="$GPU_NODE" kai-hami/gen-dgds.sh | kubectl apply -f -
 kubectl get dgd -n default      # wait until all 16 DGDs are Ready
 ```
 
-The generator also reads `NAMESPACE` (default `default`) and `HF_CACHE_DIR` (default `/opt/hf-cache`); set them to the values you used in Step 2. It takes an optional model snapshot path as its first argument. The checked-in [`kai-hami/dgds-16x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/kai-hami/dgds-16x.yaml) is the same output without a node pin, for reference.
+The generator also reads `NAMESPACE` (default `default`) and `HF_CACHE_DIR` (default `/opt/hf-cache`); set them to the values you used in Step 2. It takes an optional model snapshot path as its first argument. The checked-in [`kai-hami/dgds-16x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-hami/dgds-16x.yaml) is the same output without a node pin, for reference.
 
 `NUM_MODELS` (default `16`) sets the number of DGDs. Each worker carries the label `kai.scheduler/queue: default-queue`, the annotation `gpu-fraction: "0.5"`, and `schedulerName: kai-scheduler`. It has no `nvidia.com/gpu` resource.
 
@@ -124,7 +124,7 @@ kubectl exec -n default "${POD#pod/}" -- env | grep CUDA_DEVICE_MEMORY_LIMIT
 
 ## Step 5: Run the Concurrency Sweep
 
-The frontends' ClusterIPs are reachable only from inside the cluster, so the sweep runs in a load-generator pod, [`common/aiperf-client-pod.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/common/aiperf-client-pod.yaml). The pod requests 16 CPUs, one per concurrent AIPerf process, and its node affinity keeps it off `$GPU_NODE`, so load generation does not compete with the workers for host CPU.
+The frontends' ClusterIPs are reachable only from inside the cluster, so the sweep runs in a load-generator pod, [`common/aiperf-client-pod.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/common/aiperf-client-pod.yaml). The pod requests 16 CPUs, one per concurrent AIPerf process, and its node affinity keeps it off `$GPU_NODE`, so load generation does not compete with the workers for host CPU.
 
 Start the pod and copy the scripts into it:
 

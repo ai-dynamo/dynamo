@@ -17,7 +17,7 @@ The baseline uses the stock Kubernetes scheduler and whole-GPU requests, so it n
 | KAI + HAMi | 16 | Two models per GPU | Memory cap only; compute is time-sliced | [Deploy the KAI + HAMi Experiment](deploy-kai-hami.md) |
 | KAI + GPU fractions | 16 | Two models per GPU | Memory cap and 50% of the SMs | [Deploy the KAI + GPU Fractions Experiment](deploy-kai-gpu-fractions.md) |
 
-All commands run from `examples/many-models` in a checkout of the [Dynamo repository](https://github.com/ai-dynamo/dynamo). The files this guide uses are in [`examples/many-models/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/many-models).
+All commands run from `examples/gpu-sharing` in a checkout of the [Dynamo repository](https://github.com/ai-dynamo/dynamo). The files this guide uses are in [`examples/gpu-sharing/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/gpu-sharing).
 
 > [!NOTE]
 > Any performance results on this page are purely illustrative and are not indicative of optimal performance. Your deployment or configuration may vary.
@@ -50,7 +50,7 @@ kubectl get node "$GPU_NODE" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{
 ## Step 1: Install the Dynamo Platform
 
 ```bash
-cd examples/many-models
+cd examples/gpu-sharing
 common/install-dynamo-platform.sh
 ```
 
@@ -76,7 +76,7 @@ The script runs a Kubernetes Job on `$GPU_NODE` that downloads `Qwen/Qwen3-4B` a
 
 ## Step 3: Deploy the Eight DGDs
 
-[`baseline/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/baseline/gen-dgds.sh) renders the eight DGDs. With `NODE_NAME` set, it pins every frontend and worker to that node, where the model cache is. Render and apply in one step:
+[`baseline/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/baseline/gen-dgds.sh) renders the eight DGDs. With `NODE_NAME` set, it pins every frontend and worker to that node, where the model cache is. Render and apply in one step:
 
 ```bash
 NODE_NAME="$GPU_NODE" baseline/gen-dgds.sh | kubectl apply -f -
@@ -90,7 +90,7 @@ kubectl get dgd -n default      # wait until all eight DGDs are Ready
 | `HF_CACHE_DIR` | `/opt/hf-cache` | Model cache the pods mount read-only. Use the value from Step 2 |
 | `NUM_MODELS` | `8` | Number of DGDs (`qwen3-4b-01` and up) |
 
-The generator also takes an optional model snapshot path as its first argument. The checked-in [`baseline/dgds-8x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/baseline/dgds-8x.yaml) is the same output without a node pin, for reference.
+The generator also takes an optional model snapshot path as its first argument. The checked-in [`baseline/dgds-8x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/baseline/dgds-8x.yaml) is the same output without a node pin, for reference.
 
 Each DGD has one frontend and one aggregated vLLM worker named `qwen3-4b-NN`. The worker requests and is limited to `nvidia.com/gpu: "1"`, so the default scheduler gives each model its own GPU and the pod sees the full 40,960 MiB.
 
@@ -118,7 +118,7 @@ kubectl get svc -n default | grep frontend      # 8 services, qwen3-4b-NN-fronte
 
 ## Step 4: Run the Concurrency Sweep
 
-The frontends' ClusterIPs are reachable only from inside the cluster, so the sweep runs in a load-generator pod, [`common/aiperf-client-pod.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/common/aiperf-client-pod.yaml). The pod requests 16 CPUs, and its node affinity keeps it off `$GPU_NODE`, so load generation does not compete with the workers for host CPU.
+The frontends' ClusterIPs are reachable only from inside the cluster, so the sweep runs in a load-generator pod, [`common/aiperf-client-pod.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/common/aiperf-client-pod.yaml). The pod requests 16 CPUs, and its node affinity keeps it off `$GPU_NODE`, so load generation does not compete with the workers for host CPU.
 
 Start the pod and copy the scripts into it:
 

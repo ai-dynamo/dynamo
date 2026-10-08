@@ -297,7 +297,7 @@ Adjust for your environment:
 >   --set fractioningAgent.nriSocketPath=/var/snap/microk8s/common/run/nri.sock
 > ```
 >
-> Set the paths through the chart rather than by editing the `default` `GpuFractioningConfig`. The chart recreates that object from its values on every `helm upgrade`, which overwrites a manual `kubectl apply`. [`microk8s-gpu-fractioning-config.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/kai-gpu-fractions/microk8s-gpu-fractioning-config.yaml) shows the resulting configuration for reference.
+> Set the paths through the chart rather than by editing the `default` `GpuFractioningConfig`. The chart recreates that object from its values on every `helm upgrade`, which overwrites a manual `kubectl apply`. [`microk8s-gpu-fractioning-config.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/microk8s-gpu-fractioning-config.yaml) shows the resulting configuration for reference.
 >
 > MicroK8s can also register the containerd runtime as `nvidia-container-runtime` while the GPU Operator's RuntimeClass handler is `nvidia`. If operands fail with `no runtime for "nvidia" is configured`, align the two names.
 
@@ -336,7 +336,7 @@ Expect `Adding server 'shared' [multiuser enabled]` and a line capping the `defa
 
 ## Step 5: Verify With a Two-Pod Smoke Test
 
-This step proves that the caps are enforced, not just requested. It puts two half-GPU pods on one GPU. The manifests for the full experiment are in [`examples/many-models/kai-gpu-fractions`](https://github.com/ai-dynamo/dynamo/tree/main/examples/many-models/kai-gpu-fractions), and a ready-made version of this test, with the same pod names, is [`smoke-test-half-gpu.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/many-models/kai-gpu-fractions/smoke-test-half-gpu.yaml). The minimal form is below, for readers without a checkout:
+This step proves that the caps are enforced, not just requested. It puts two half-GPU pods on one GPU. The manifests for the full experiment are in [`examples/gpu-sharing/kai-gpu-fractions`](https://github.com/ai-dynamo/dynamo/tree/main/examples/gpu-sharing/kai-gpu-fractions), and a ready-made version of this test, with the same pod names, is [`smoke-test-half-gpu.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/smoke-test-half-gpu.yaml). The minimal form is below, for readers without a checkout:
 
 ```bash
 for n in a b; do
