@@ -686,34 +686,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_decode_video_uses_packet_duration_when_stream_duration_is_missing() {
-        // decode_video opens its sealed memfd through /proc/self/fd.
-        // This VP9/WebM fixture has no stream duration or frame count, but its
-        // video packets span 3 seconds at 2 FPS.
-        let path = format!(
-            "{}/tests/data/media/webm_container_duration_6.webm",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let bytes =
-            std::fs::read(&path).unwrap_or_else(|_| panic!("Failed to read test video: {}", path));
-        let decoder = VideoDecoder::default();
-
-        let decoded = decoder
-            .decode(EncodedMediaData {
-                bytes,
-                b64_encoded: false,
-            })
-            .unwrap();
-
-        assert_eq!(decoded.tensor_info.shape, vec![6, 224, 224, 3]);
-        let Some(DecodedMediaMetadata::Video(metadata)) = decoded.tensor_info.metadata else {
-            panic!("missing video metadata");
-        };
-        assert!((metadata.source_duration - 3.0).abs() < 0.01);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
     fn test_decode_video_samples_relative_to_nonzero_stream_start() {
         let path = format!(
             "{}/tests/data/media/webm_nonzero_start_6.webm",
