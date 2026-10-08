@@ -275,7 +275,14 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=536_870_912,
                 tests=[
-                    MmCase(payload=make_image_payload(["green"])),
+                    # Pre-merge regression gate for Qwen3-VL dependency updates:
+                    # all three NIXL-backed EngineCores must initialize and
+                    # complete an image request. This case averages ~90s; keep
+                    # the frontend-decoding variant post-merge to bound PR time.
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        marks=[pytest.mark.pre_merge],
+                    ),
                     # Rust frontend decode -> NIXL RGB transfer -> Encode ->
                     # Prefill embedding handoff -> Decode generation.
                     MmCase(
