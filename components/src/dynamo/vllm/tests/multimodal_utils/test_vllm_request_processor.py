@@ -32,9 +32,22 @@ def _processor(
     unified_vision_chunk: bool = False,
     video_loader=None,
     frontend_decoding: bool = False,
+    media_limits: dict[str, int] | None = None,
 ) -> mod.VllmMultimodalRequestProcessor:
+    engine_client = None
+    if media_limits is not None:
+        from vllm.config.multimodal import MultiModalConfig
+
+        engine_client = SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(
+                    multimodal_config=MultiModalConfig(limit_per_prompt=media_limits)
+                )
+            )
+        )
     return mod.VllmMultimodalRequestProcessor(
         model=model,
+        engine_client=engine_client,
         enable_multimodal=enabled,
         enable_frontend_decoding=frontend_decoding,
         image_loader=SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
@@ -2095,3 +2108,59 @@ class TestLoadQwenGridParams:
         assert params.vision_hidden_dim == 2048
         # DeepStack concatenates intermediate outputs with the final vision output.
         assert params.decode_embedding_dim == expected_decode_embedding_dim
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_variant", ["Url", "Decoded"])
+@pytest.mark.parametrize(
+    "mode",
+    [DisaggregationMode.AGGREGATED, DisaggregationMode.PREFILL],
+)
+async def test_zero_video_limit_rejects_before_any_media_loader(media_variant, mode):
+    processor = _processor(media_limits={"image": 8, "video": 0})
+    processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}],
+            "video_url": [{media_variant: "rejected-video"}],
+        },
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="At most 0 video"):
+        await processor.prepare_input(request, "rejected-video", None, mode)
+
+    processor.video_loader.load_video_batch.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "modality,limit,count",
+    [("image", 8, 9), ("video", 1, 2), ("audio", 2, 3)],
+)
+def test_media_item_limits_are_checked_before_loading(modality, limit, count):
+    processor = _processor(media_limits={modality: limit})
+    request = {
+        "multi_modal_data": {
+            f"{modality}_url": [{"Url": "https://example.com/media"}] * count
+        }
+    }
+    with pytest.raises(mod.InvalidArgument, match=f"At most {limit} {modality}"):
+        processor.validate_multimodal_request(request)
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_video_at_configured_limit_is_allowed(count):
+    processor = _processor(media_limits={"video": 1})
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"video_url": [{"Url": "video"}] * count}}
+    )
+
+
+def test_zero_video_limit_preserves_image_only_requests():
+    processor = _processor(media_limits={"image": 8, "video": 0})
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"image_url": [{"Url": "image"}] * 8}}
+    )

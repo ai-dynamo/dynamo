@@ -470,7 +470,7 @@ class VllmMultimodalRequestProcessor:
         )
 
     def validate_multimodal_request(self, request: dict[str, Any]) -> None:
-        """Enforce the multimodal opt-in on the unmodified inbound request."""
+        """Enforce opt-in and engine item limits before loading any media."""
         extra_args = request.get("extra_args")
         has_transfer = isinstance(extra_args, dict) and any(
             extra_args.get(key) is not None
@@ -482,6 +482,32 @@ class VllmMultimodalRequestProcessor:
             or has_transfer
         ) and not self.enable_multimodal:
             raise self._multimodal_disabled_error()
+
+        mm_map = request.get("multi_modal_data")
+        if not mm_map:
+            return
+        vllm_config = getattr(self.engine_client, "vllm_config", None)
+        if vllm_config is None:
+            return
+        mm_config = vllm_config.model_config.multimodal_config
+        if mm_config is None:
+            return
+
+        # These are inbound media items, not decoded frames or image crops.
+        # Validate every modality before any loader or encoder gets to run.
+        for modality, key in (
+            ("image", IMAGE_URL_KEY),
+            ("video", VIDEO_URL_KEY),
+            ("audio", AUDIO_URL_KEY),
+        ):
+            items = mm_map.get(key, [])
+            count = len(items)
+            limit = mm_config.get_limit_per_prompt(modality)
+            if count > limit:
+                raise InvalidArgument(
+                    f"At most {limit} {modality}(s) may be provided in one prompt. "
+                    "Set `--limit-mm-per-prompt` to increase this limit."
+                )
 
     def initialize_prefill_handoff(self) -> None:
         """Load model policy needed to construct the P/D decode handoff."""
@@ -838,6 +864,7 @@ class VllmMultimodalRequestProcessor:
         request before invoking this transformation. The handler validates at
         ``generate`` so text and token modes share the same security boundary.
         """
+        self.validate_multimodal_request(request)
         mm_processor_kwargs = get_mm_processor_kwargs(request)
         request_for_prompt = dict(request)
         has_mm_data = request.get("multi_modal_data") is not None
