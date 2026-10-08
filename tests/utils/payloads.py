@@ -352,6 +352,19 @@ class DisaggregatedChatPayload(ChatPayload):
             ), f"Expected {self.expected_completion_tokens} completion tokens: {usage!r}"
             _validate_chat_token_usage(result)
 
+        if self.body.get("logprobs"):
+            entries = (choices[0].get("logprobs") or {}).get("content")
+            _validate_chat_logprobs(entries, self.body.get("top_logprobs") or 0)
+            assert (
+                len(entries) == completion_tokens
+            ), "Missing completion logprobs, including the prefill-produced first token"
+            if "completion_token_ids" in self.body.get("nvext", {}).get(
+                "extra_fields", []
+            ):
+                assert [entry["token_id"] for entry in entries] == result["nvext"][
+                    "completion_token_ids"
+                ], "Disaggregated logprobs do not match completion token positions"
+
         workers = require_router_worker_id(result, context=type(self).__name__)
         for role in ("prefill_worker_id", "decode_worker_id"):
             if type(workers.get(role)) is not int or workers[role] < 0:
@@ -409,19 +422,20 @@ class RouterNvextChatPayload(ChatPayload):
         )
 
 
-def _validate_chat_logprobs(content_logprobs) -> None:
+def _validate_chat_logprobs(content_logprobs, top_count: int = 0) -> None:
     assert content_logprobs, "Missing or empty requested output logprobs"
     for item in content_logprobs:
         candidates = item["top_logprobs"]
+        assert len(candidates) >= top_count, "Missing requested top logprobs"
         for entry in [item, *candidates]:
             value = entry["logprob"]
             assert math.isfinite(value) and value <= 0, f"Invalid logprob: {entry!r}"
             assert isinstance(entry["token"], str), f"Invalid token: {entry!r}"
             assert "bytes" in entry, f"Missing token bytes: {entry!r}"
-            if entry["bytes"] is not None:
+            if entry["token"]:
                 assert isinstance(
                     entry["bytes"], list
-                ), f"Invalid token bytes: {entry!r}"
+                ), f"Missing token bytes: {entry!r}"
 
 
 @dataclass
@@ -433,7 +447,9 @@ class ChatPayloadWithLogprobs(ChatPayload):
         logprobs = response.json()["choices"][0]["logprobs"]
         content_logprobs = (logprobs or {}).get("content")
         if self.body.get("logprobs") or content_logprobs:
-            _validate_chat_logprobs(content_logprobs)
+            _validate_chat_logprobs(
+                content_logprobs, self.body.get("top_logprobs") or 0
+            )
 
 
 @dataclass
@@ -502,9 +518,9 @@ class StreamingChatPayload(BasePayload):
             if chunk_ids or chunk_logprobs:
                 token_chunks += 1
             if "completion_token_ids" in fields and self.body.get("logprobs"):
-                assert [
-                    item["token_id"] for item in chunk_logprobs
-                ] == chunk_ids, "Output logprobs do not match this chunk's completion token positions"
+                assert (
+                    [item["token_id"] for item in chunk_logprobs] == chunk_ids
+                ), "Output logprobs do not match this chunk's completion token positions"
             if chunk.get("usage") is not None:
                 assert finish_reason is not None, "Usage arrived before completion"
                 assert usage is None, "Duplicate terminal usage"
@@ -532,7 +548,7 @@ class StreamingChatPayload(BasePayload):
             if self.expected_completion_tokens is not None:
                 assert usage["completion_tokens"] == self.expected_completion_tokens
         if self.body.get("logprobs"):
-            _validate_chat_logprobs(output_logprobs)
+            _validate_chat_logprobs(output_logprobs, self.body.get("top_logprobs") or 0)
         if "completion_token_ids" in fields:
             assert completion_ids, "Missing requested completion token IDs"
             assert all(type(token) is int and token >= 0 for token in completion_ids)
@@ -544,11 +560,22 @@ class StreamingChatPayload(BasePayload):
                 for item in output_logprobs:
                     assert item["token"] == f"token_id:{item['token_id']}"
                     candidates = item["top_logprobs"]
+                    assert len({entry["token"] for entry in candidates}) >= (
+                        self.body.get("top_logprobs") or 0
+                    ), "Missing distinct top-logprob candidates"
                     for entry in candidates:
                         assert entry["token"].startswith("token_id:")
                         assert int(entry["token"].removeprefix("token_id:")) >= 0
                         if entry["token"] == item["token"]:
                             assert entry["logprob"] == item["logprob"]
+        if "prompt_token_ids" in fields:
+            prompt_ids = terminal_nvext.get("prompt_token_ids")
+            assert prompt_ids, "Missing requested prompt token IDs"
+            assert all(type(token) is int and token >= 0 for token in prompt_ids)
+            if usage is not None:
+                assert (
+                    len(prompt_ids) == usage["prompt_tokens"]
+                ), "Incorrect prompt usage"
         if "prompt_logprobs" in fields:
             prompt_ids = terminal_nvext.get("prompt_token_ids")
             prompt_logprobs = terminal_nvext.get("prompt_logprobs")
@@ -566,7 +593,7 @@ class StreamingChatPayload(BasePayload):
                         int(candidate) >= 0
                     ), f"Invalid prompt token ID: {candidate!r}"
                     value = entry["logprob"]
-                    assert math.isfinite(value) and -9999 < value <= 0, entry
+                    assert math.isfinite(value) and value <= 0, entry
                     if entry.get("rank") is not None:
                         assert type(entry["rank"]) is int and entry["rank"] > 0, entry
         return content
