@@ -2362,17 +2362,19 @@ _Appears in:_
 
 _Underlying type:_ _string_
 
-GPUSKUType is the AIC hardware system identifier for a supported GPU.
+GPUSKUType identifies a supported GPU for discovery and profiling.
 
 _Validation:_
-- Enum: [gb200_sxm gb10 b300_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
+- Enum: [vr_nvl72 gb200 gb200_sxm gb10 b300_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
 
 _Appears in:_
 - [HardwareSpec](#hardwarespec)
 
 | Field | Description |
 | --- | --- |
-| `gb200_sxm` | --- Blackwell ---<br /> |
+| `vr_nvl72` | --- Vera Rubin ---<br /> |
+| `gb200` | --- Blackwell ---<br /> |
+| `gb200_sxm` | Deprecated: use GPUSKUTypeGB200. GB200 systems use NVL rather than SXM.<br /> |
 | `gb10` |  |
 | `b300_sxm` |  |
 | `b200_sxm` |  |
@@ -2426,7 +2428,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU selects the GPU type to target.<br />When omitted, auto-detected by selecting the GPU with the highest<br />node count, then highest VRAM. In mixed-GPU clusters, set this to<br />choose which GPU type to use. Discovery and totalGpus are then<br />restricted to nodes matching this SKU. |  | Enum: [gb200_sxm gb10 b300_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
+| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU selects the GPU type to target.<br />When omitted, auto-detected by selecting the GPU with the highest<br />node count, then highest VRAM. In mixed-GPU clusters, set this to<br />choose which GPU type to use. Discovery and totalGpus are then<br />restricted to nodes matching this SKU.<br />The legacy value gb200_sxm is deprecated; use gb200 instead. |  | Enum: [vr_nvl72 gb200 gb200_sxm gb10 b300_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
 | `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB.<br />When omitted, auto-detected from cluster GPU nodes. |  | Optional: \{\} <br /> |
 | `totalGpus` _integer_ | TotalGPUs is the GPU budget for profiling and deployment.<br />The profiler uses this to determine parallelism and replica count.<br />When omitted, computed by counting GPUs on discovered nodes<br />(filtered by gpuSku when set), temporarily capped at 32 to<br />limit profiler search space. This cap may be removed in a future<br />release. Set this field explicitly to override. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node.<br />When omitted, auto-detected from cluster GPU nodes. |  | Optional: \{\} <br /> |
@@ -3856,6 +3858,17 @@ These are injected into all components when the corresponding infrastructure ser
 | `DYNAMO_PORT` | HTTP port the frontend listens on | `8000` | `int` |
 | `DYN_HTTP_PORT` | HTTP port for the frontend service (alias) | `8000` | `int` |
 | `DYN_NAMESPACE_PREFIX` | Namespace prefix used for frontend request routing | Same as `DYN_NAMESPACE` | `string` |
+| `DYN_NAMESPACE_PREFIX_STRICT` | Limits prefix discovery to the base namespace, eight-character lowercase hexadecimal worker generations, and the `legacy` migration generation | `true` for supported runtimes; otherwise unset | `string` (boolean) |
+
+DGDs named `foo` and `foo-bar` in the same Kubernetes namespace can cross-discover workers: the frontend in `foo` can route requests to workers in `foo-bar`. Strict matching excludes the other deployment for ordinary overlapping names. This issue affects deployments sharing a name prefix in the same Kubernetes namespace.
+
+Runtime image 1.6.0 introduces `DYN_NAMESPACE_PREFIX_STRICT`. Upgrade both the operator and affected frontend and native Rust EPP images to 1.6.0 or later; the operator enables strict matching for supported images. An operator-only upgrade leaves older runtime images affected. With a compatible older operator, set `DYN_NAMESPACE_PREFIX_STRICT=true` explicitly on those containers after upgrading their images. For custom images, set `runtimeVersionOverride` to the image's Dynamo runtime version when the tag does not identify it.
+
+For frontend sidecars, support is determined from the sidecar's own image tag. The component's `runtimeVersionOverride` applies only to its runtime container. If a sidecar image tag does not identify the runtime version, set `DYN_NAMESPACE_PREFIX_STRICT=true` in that sidecar's environment when its image contains this fix.
+
+Manual namespace prefixes retain literal matching unless strict mode is enabled. Exact frontend `DYN_NAMESPACE` selection and global frontend discovery are unchanged. EPP uses exact `DYN_NAMESPACE` selection when no prefix is provided, except that `dynamo` selects global discovery.
+
+This filter follows the operator's namespace naming contract. A separate deployment whose name ends in an accepted worker-generation suffix can still produce an indistinguishable namespace, so do not use this filter as an authorization boundary.
 
 ### Worker Components
 
@@ -3882,6 +3895,8 @@ These are injected into all components when the corresponding infrastructure ser
 | --- | --- | --- | --- |
 | `USE_STREAMING` | Enables streaming mode for inference request proxying | `true` | `string` (boolean) |
 | `RUST_LOG` | Rust log level and filter configuration | `info` | `string` |
+| `DYN_NAMESPACE_PREFIX` | Namespace prefix used for EPP request routing | Same as `DYN_NAMESPACE` | `string` |
+| `DYN_NAMESPACE_PREFIX_STRICT` | Limits prefix discovery to operator worker-generation namespaces; does not modify exact `DYN_NAMESPACE` selection | `true` for supported runtimes; otherwise unset | `string` (boolean) |
 
 ### VLLM Backend
 

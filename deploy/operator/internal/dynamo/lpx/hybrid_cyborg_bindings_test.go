@@ -10,8 +10,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
@@ -113,6 +116,93 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 				servers[index] = prefix + strconv.Itoa(offset)
 			}
 			require.Equal(t, strings.Join(servers, "\n"), configMap.Data["lpu_servers"])
+		})
+	}
+}
+
+func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
+	t.Parallel()
+
+	prefix := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-" + testAgentTemplateName + "-"
+	tests := []struct {
+		name        string
+		selection   *dynamov1beta1.LPXLocalPartitions
+		wantServers string
+	}{
+		{
+			name:        "every partition on LPUs addresses chain 2-3 through partition 2",
+			wantServers: prefix + "0\n" + prefix + "1\n" + prefix + "3",
+		},
+		{
+			name:        "partition 1 on the GPU",
+			selection:   &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{1}},
+			wantServers: prefix + "0\n" + prefix + "2",
+		},
+		{
+			name:        "chain 2-3 on the GPU",
+			selection:   &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{2}},
+			wantServers: prefix + "0\n" + prefix + "1",
+		},
+		{
+			name:      "every partition on the GPU",
+			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Create a hybrid HX build with partitions 1-4, a selected chain 2-3, and one CUDA artifact")
+			fixture := newV3CompilerFixture()
+			fixture.compilationMode = manifestcapnp.CompilationMode_lpx
+			fixture.numLPUNodes = 4
+			for id := uint32(2); id <= 4; id++ {
+				partition := fixture.partitions[0]
+				partition.id = id
+				fixture.partitions = append(fixture.partitions, partition)
+			}
+			fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 5, deviceType: manifestcapnp.DeviceType_cuda})
+			fixture.selectedPropSyncChains = [][]uint32{{2, 3}}
+			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+			projections, err := appendModelProjections(nil, ModelProjectionInput{
+				Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+				RuntimeBuildRef: "model-build", LocalPartitions: test.selection,
+			})
+			require.NoError(t, err)
+			require.Equal(t, BuildFamilyHX, projections[0].configuredBuild.Family)
+
+			t.Log("Render the hybrid workload with an authored Cyborg configuration mount")
+			projections[0].stage = testRenderComponentName
+			workload := &Workload{modelProjections: projections, scalingGroupReplicas: 1}
+			workload.digest, err = workloadSetDigest(projections)
+			require.NoError(t, err)
+			plan, err := workload.PlanNodeLocalMaterialization("test-pcs")
+			require.NoError(t, err)
+			pcs := renderTestPCS(true)
+			rendered, err := RenderNodeLocal(workload, plan, RenderInput{
+				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+				Cyborg: pcs.Spec.Template.Cliques[0],
+			})
+			require.NoError(t, err)
+
+			t.Log("Publish one Agent per remote runtime partition, as for XT")
+			require.Len(t, rendered.Resources, 2)
+			servers, ok := rendered.Resources[0].(*corev1.ConfigMap)
+			require.True(t, ok)
+			require.Equal(t, map[string]string{"lpu_servers": test.wantServers}, servers.Data)
+
+			t.Log("Mount the Agent addresses, not the Agents' partition table, into Cyborg")
+			cyborg := rendered.Cliques[0]
+			require.Equal(t, "cond", cyborg.Name)
+			require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/configs"})
+			require.Contains(t, cyborg.Spec.PodSpec.Volumes, corev1.Volume{
+				Name: lpuConfigVolumeName,
+				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: servers.Name},
+				}},
+			})
+			require.NotEmpty(t, cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash])
 		})
 	}
 }
