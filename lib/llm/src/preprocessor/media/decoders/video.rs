@@ -194,6 +194,23 @@ fn get_num_requested_frames(
     Ok(requested_frames)
 }
 
+fn check_max_alloc(width: u32, height: u32, requested_frames: u64, max_alloc: u64) -> Result<()> {
+    let requested_alloc = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|size| size.checked_mul(requested_frames))
+        .and_then(|size| size.checked_mul(3))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Video dimensions {requested_frames}x{width}x{height}x3 exceed max alloc {max_alloc}"
+            )
+        })?;
+    anyhow::ensure!(
+        requested_alloc <= max_alloc,
+        "Video dimensions {requested_frames}x{width}x{height}x3 exceed max alloc {max_alloc}"
+    );
+    Ok(())
+}
+
 fn get_target_times(
     requested_frames: u64,
     duration_secs: f64,
@@ -366,8 +383,6 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
         source_fps,
         total_frames,
     )?;
-    let target_times = get_target_times(requested_frames, source_timing.duration_secs, source_fps)?;
-
     let mut decoder_context = Context::new();
     decoder_context.set_time_base(stream_time_base);
     decoder_context.set_parameters(parameters)?;
@@ -383,10 +398,8 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
     );
 
     let max_alloc = config.limits.max_alloc.unwrap_or(u64::MAX);
-    anyhow::ensure!(
-        (width as u64) * (height as u64) * requested_frames * 3 <= max_alloc,
-        "Video dimensions {requested_frames}x{width}x{height}x3 exceed max alloc {max_alloc}"
-    );
+    check_max_alloc(width, height, requested_frames, max_alloc)?;
+    let target_times = get_target_times(requested_frames, source_timing.duration_secs, source_fps)?;
 
     let frame_size = width as usize * height as usize * 3;
     let mut all_frames = vec![0u8; requested_frames as usize * frame_size];
@@ -634,6 +647,17 @@ mod tests {
         // A known variable-rate extent is more reliable than a contradictory
         // stream frame-rate estimate.
         assert_eq!(select_video_duration_secs(2.0, Some(2.25), 2.0, 10.0), 2.25);
+    }
+
+    #[test]
+    fn test_max_alloc_uses_checked_multiplication() {
+        assert!(check_max_alloc(224, 224, u64::MAX, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn test_max_alloc_checks_total_rgb_frame_bytes() {
+        assert!(check_max_alloc(2, 2, 10, 120).is_ok());
+        assert!(check_max_alloc(2, 2, 10, 119).is_err());
     }
 
     #[test]
