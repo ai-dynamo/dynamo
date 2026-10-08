@@ -60,7 +60,3 @@ dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]
-
-[patch.crates-io]
-# Temporary until frontend-crates #322 is released.
-dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "rmccormick/anthropic-tool-strict" }

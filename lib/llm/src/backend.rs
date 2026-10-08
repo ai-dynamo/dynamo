@@ -81,7 +81,7 @@ struct DecoderUnfoldState {
     /// Text flushed from a choice's decoder because the underlying engine stream ended
     /// without ever sending that choice a terminal `finish_reason`, queued here so each
     /// flushed choice can be emitted as its own synthetic final chunk.
-    pending_flush: Vec<(u32, String)>,
+    pending_flush: Vec<Annotated<LLMEngineOutput>>,
     /// Set once `stream` has yielded `None`, so it is never polled again -- a `Stream` is
     /// not guaranteed to be safely pollable past its first `None`.
     stream_ended: bool,
@@ -248,15 +248,7 @@ impl
             // `stream` already yielded `None` once; do not poll it again (unspecified
             // behavior for most `Stream` impls). Only drain the flush queue from here on.
             if state.stream_ended {
-                return state.pending_flush.pop().map(|(idx, flushed)| {
-                    let output = Annotated::from_data(LLMEngineOutput {
-                        index: Some(idx),
-                        text: Some(flushed),
-                        finish_reason: Some(FinishReason::Stop),
-                        ..Default::default()
-                    });
-                    (output, state)
-                });
+                return state.pending_flush.pop().map(|output| (output, state));
             }
 
             let output = loop {
@@ -370,11 +362,31 @@ impl
                             // which would reorder output (e.g. "there" + withheld "o" must
                             // come out as "othere", not "thereo").
                             if has_finish
-                                && let Some(flushed) = decoder.flush_jailed()
                                 && let Some(data) = &mut output.data
                             {
-                                let newer = data.text.take().unwrap_or_default();
-                                data.text = Some(flushed + &newer);
+                                match decoder.finish() {
+                                    Ok(result) => {
+                                        if let Some(trigger) = result.stop_trigger {
+                                            data.text = result.released_text;
+                                            if !matches!(
+                                                data.finish_reason,
+                                                Some(FinishReason::Error(_))
+                                            ) {
+                                                let (reason, stop) = trigger.reasons();
+                                                data.finish_reason = Some(reason);
+                                                data.stop_reason = stop;
+                                            }
+                                        } else if let Some(flushed) = result.released_text {
+                                            let newer = data.text.take().unwrap_or_default();
+                                            data.text = Some(flushed + &newer);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        data.finish_reason = Some(FinishReason::Error(
+                                            format!("decode error: {error}")
+                                        ));
+                                    }
+                                }
                             }
                             // Mirror the decoder's current withheld state on every chunk
                             // (terminal or not), even though this chunk didn't change it, so
@@ -413,7 +425,17 @@ impl
                         return Some((output, state));
                     };
 
-                    let mut result = match decoder.process_token_ids(&data.token_ids) {
+                    let result = decoder.process_token_ids(&data.token_ids).and_then(|mut result| {
+                        if result.stop_trigger.is_none() && data.finish_reason.is_some() {
+                            let final_step = decoder.finish()?;
+                            if let Some(text) = final_step.released_text {
+                                result.text.get_or_insert_default().push_str(&text);
+                            }
+                            result.stop_trigger = final_step.stop_trigger;
+                        }
+                        Ok(result)
+                    });
+                    let result = match result {
                         Ok(result) => result,
                         Err(e) => {
                             tracing::error!("Failed to process token_ids for choice {choice_idx}: {e}");
@@ -431,19 +453,6 @@ impl
                         }
                     };
 
-                    // The engine can report its own completion (e.g. it hit `max_tokens`)
-                    // without our decoder ever detecting a local stop condition. Any text
-                    // still withheld as a partial hidden-stop-sequence match can never
-                    // complete at that point, so flush it now rather than silently dropping
-                    // it -- this is the last chance before the decoder for this choice is
-                    // discarded.
-                    if result.stop_trigger.is_none()
-                        && data.finish_reason.is_some()
-                        && let Some(flushed) = decoder.flush_jailed()
-                    {
-                        result.text.get_or_insert_with(String::new).push_str(&flushed);
-                    }
-
                     // NOTE: the `finish_reason` is computed from the generated `token_ids` alone.
                     // The `data` field can have a `finish_reason` set, coming from the underlying
                     // LLM inference `Engine`, and empty `token_ids`. See comment below for more details.
@@ -451,42 +460,12 @@ impl
                     // stop_reason is only set for user-provided stop sequences, not for system
                     // EOS tokens (HiddenStopTokenDetected). This matches OpenAI API behavior where
                     // stop_reason is only present when a user-specified stop sequence is matched.
-                    let (finish_reason, stop_reason) = match &result.stop_trigger {
-                        Some(StopTrigger::MaxTokensLimit) => (Some(FinishReason::Length), None),
-                        Some(StopTrigger::HiddenStopTokenDetected(_)) => {
-                            // System EOS token - no stop_reason (user didn't request this stop)
-                            (Some(FinishReason::Stop), None)
-                        }
-                        Some(StopTrigger::UserStopTokenDetected(token_id)) => {
-                            // User-provided token stop (hidden from output)
-                            (
-                                Some(FinishReason::Stop),
-                                Some(StopReason::Int((*token_id).into())),
-                            )
-                        }
-                        Some(StopTrigger::VisibleStopTokenDetected(token_id)) => {
-                            // Token stop included in output.
-                            (
-                                Some(FinishReason::Stop),
-                                Some(StopReason::Int((*token_id).into())),
-                            )
-                        }
-                        Some(StopTrigger::HiddenStopSequenceDetected(seq)) => {
-                            // User-provided stop sequence (hidden from output)
-                            (
-                                Some(FinishReason::Stop),
-                                Some(StopReason::String(seq.clone())),
-                            )
-                        }
-                        Some(StopTrigger::VisibleStopSequenceDetected(seq)) => {
-                            // User-provided stop sequence (included in output)
-                            (
-                                Some(FinishReason::Stop),
-                                Some(StopReason::String(seq.clone())),
-                            )
-                        }
-                        None => (None, None),
-                    };
+                    let (finish_reason, stop_reason) = result.stop_trigger.as_ref()
+                        .map(|trigger| {
+                            let (reason, stop) = trigger.reasons();
+                            (Some(reason), stop)
+                        })
+                        .unwrap_or((None, None));
 
                     // If we detected a local stop condition, mark this choice as finished.
                     // Once all expected choices are finished, stop the upstream generator.
@@ -584,19 +563,31 @@ impl
                         if state.finished_choices.contains(idx) {
                             continue;
                         }
-                        if let Some(flushed) = decoder.flush_jailed() {
-                            state.pending_flush.push((*idx, flushed));
-                        }
+                        let data = match decoder.finish() {
+                            Ok(result) if result.released_text.is_some() || result.stop_trigger.is_some() => {
+                                let (reason, stop) = result.stop_trigger.as_ref()
+                                    .map(StopTrigger::reasons)
+                                    .unwrap_or((FinishReason::Stop, None));
+                                LLMEngineOutput {
+                                    index: Some(*idx),
+                                    text: result.released_text,
+                                    finish_reason: Some(reason),
+                                    stop_reason: stop,
+                                    ..Default::default()
+                                }
+                            }
+                            Ok(_) => continue,
+                            Err(error) => LLMEngineOutput {
+                                index: Some(*idx),
+                                finish_reason: Some(FinishReason::Error(
+                                    format!("decode error: {error}")
+                                )),
+                                ..Default::default()
+                            },
+                        };
+                        state.pending_flush.push(Annotated::from_data(data));
                     }
-                    state.pending_flush.pop().map(|(idx, flushed)| {
-                        let output = Annotated::from_data(LLMEngineOutput {
-                            index: Some(idx),
-                            text: Some(flushed),
-                            finish_reason: Some(FinishReason::Stop),
-                            ..Default::default()
-                        });
-                        (output, state)
-                    })
+                    state.pending_flush.pop().map(|output| (output, state))
                 }
             }
         })
@@ -722,6 +713,21 @@ pub enum StopTrigger {
     VisibleStopTokenDetected(TokenIdType),
     HiddenStopSequenceDetected(String),
     VisibleStopSequenceDetected(String),
+}
+
+impl StopTrigger {
+    fn reasons(&self) -> (FinishReason, Option<StopReason>) {
+        match self {
+            Self::MaxTokensLimit => (FinishReason::Length, None),
+            Self::HiddenStopTokenDetected(_) => (FinishReason::Stop, None),
+            Self::UserStopTokenDetected(id) | Self::VisibleStopTokenDetected(id) => {
+                (FinishReason::Stop, Some(StopReason::Int((*id).into())))
+            }
+            Self::HiddenStopSequenceDetected(text) | Self::VisibleStopSequenceDetected(text) => {
+                (FinishReason::Stop, Some(StopReason::String(text.clone())))
+            }
+        }
+    }
 }
 
 pub struct StepResult {
@@ -867,9 +873,27 @@ impl Decoder {
         // increment the generated tokens
         self.generated_tokens += 1;
 
+        // Finalize older text before dropping a hidden stop token.
+        if !below_min_tokens
+            && self.hidden_stop_ids.contains(&token_id)
+            && !self.visible_stop_ids.contains(&token_id)
+            && !self.no_stop_trim
+        {
+            let mut result = self.finish()?;
+            result.token = None;
+            result.stop_trigger.get_or_insert_with(|| {
+                if self.user_stop_ids.contains(&token_id) {
+                    StopTrigger::UserStopTokenDetected(token_id)
+                } else {
+                    StopTrigger::HiddenStopTokenDetected(token_id)
+                }
+            });
+            return Ok(result);
+        }
+
         // decode the token
         let detokenize_start = self.tracker.as_ref().map(|_| Instant::now());
-        let token = {
+        let mut token = {
             let _nvtx = dynamo_nvtx_range!("detokenize");
             self.decode_stream.step(token_id)?
         };
@@ -880,6 +904,12 @@ impl Decoder {
         // stop conditions to not apply until the minimum number of tokens have been generated
         if below_min_tokens {
             return Ok(StepResult::ok(token));
+        }
+
+        if (self.visible_stop_ids.contains(&token_id) || self.hidden_stop_ids.contains(&token_id))
+            && let Some(tail) = self.decode_stream.finish()?
+        {
+            token.get_or_insert_default().push_str(&tail);
         }
 
         // Check token stops. Visible token IDs are included in output.
@@ -920,6 +950,10 @@ impl Decoder {
             return Ok(StepResult::with_stop_trigger(token, released, trigger));
         }
 
+        self.process_decoded_text(token)
+    }
+
+    fn process_decoded_text(&mut self, token: Option<String>) -> Result<StepResult> {
         // check stop sequences - the jail will always hold at least the largest stop sequence
         // if jail_max_bytes is 0, then there are no stop sequences
         if self.jail_max_bytes > 0
@@ -994,6 +1028,25 @@ impl Decoder {
         }
 
         Ok(StepResult::ok(token))
+    }
+
+    /// Finalize tokenizer bytes through the same stop-string filter as ordinary tokens.
+    fn finish(&mut self) -> Result<StepResult> {
+        let tail = self.decode_stream.finish()?;
+        let mut result = if self.generated_tokens <= self.min_tokens {
+            StepResult::ok(tail)
+        } else {
+            self.process_decoded_text(tail)?
+        };
+        if result.stop_trigger.is_none()
+            && let Some(jailed) = self.flush_jailed()
+        {
+            result
+                .released_text
+                .get_or_insert_default()
+                .push_str(&jailed);
+        }
+        Ok(result)
     }
 
     /// Releases any text still withheld as a partial hidden-stop-sequence match. Call this
@@ -1242,6 +1295,102 @@ mod tests {
     }
 
     impl traits::Tokenizer for CandidateDecoder {}
+
+    #[tokio::test]
+    async fn backend_finalizes_byte_fallback_at_each_terminal_boundary() {
+        let hf: tokenizers::Tokenizer = serde_json::from_value(serde_json::json!({
+            "version": "1.0", "truncation": null, "padding": null,
+            "added_tokens": [{"id": 1, "content": "<eos>", "special": true,
+                "single_word": false, "lstrip": false, "rstrip": false, "normalized": false}],
+            "normalizer": null, "pre_tokenizer": null, "post_processor": null,
+            "decoder": {"type": "Sequence", "decoders": [
+                {"type": "ByteFallback"}, {"type": "Fuse"}]},
+            "model": {"type": "BPE", "vocab": {"<0x61>": 0, "<eos>": 1},
+                "merges": [], "byte_fallback": true}
+        }))
+        .unwrap();
+        let tokenizer: Arc<dyn traits::Tokenizer> =
+            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf));
+
+        for boundary in ["length", "eof", "text", "hidden_token", "visible_token"] {
+            for stop in [None, Some("a")] {
+                let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer.clone()));
+                let mut request = jailing_request(1);
+                request.output_options.skip_special_tokens = Some(false);
+                request.stop_conditions = StopConditions {
+                    stop: stop.map(|text| vec![text.to_string()]),
+                    ..Default::default()
+                };
+                let mut outputs = vec![LLMEngineOutput {
+                    token_ids: vec![0],
+                    ..Default::default()
+                }];
+                match boundary {
+                    "eof" => {}
+                    "hidden_token" => {
+                        request.stop_conditions.stop_token_ids_hidden = Some(vec![1]);
+                        outputs.push(LLMEngineOutput {
+                            token_ids: vec![1],
+                            ..Default::default()
+                        });
+                    }
+                    "visible_token" => {
+                        request.stop_conditions.stop_token_ids_visible = Some(vec![1]);
+                        request.stop_conditions.stop_token_ids_hidden = Some(vec![1]);
+                        outputs.push(LLMEngineOutput {
+                            token_ids: vec![1],
+                            ..Default::default()
+                        });
+                    }
+                    _ => outputs.push(LLMEngineOutput {
+                        text: (boundary == "text").then(|| "!".to_string()),
+                        finish_reason: Some(FinishReason::Length),
+                        ..Default::default()
+                    }),
+                }
+                let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+                    Arc::new(SyntheticSglangStopEngine {
+                        outputs: Some(outputs),
+                    });
+                let outputs: Vec<_> =
+                    Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+                        .await
+                        .unwrap()
+                        .collect()
+                        .await;
+                let text: String = outputs
+                    .iter()
+                    .filter_map(|item| item.data.as_ref()?.text.as_deref())
+                    .collect();
+                let expected = if boundary == "visible_token" {
+                    "a<eos>"
+                } else if stop.is_some() {
+                    ""
+                } else if boundary == "text" {
+                    "a!"
+                } else {
+                    "a"
+                };
+                assert_eq!(text, expected, "boundary={boundary}, stop={stop:?}");
+                let terminal: Vec<_> = outputs
+                    .iter()
+                    .filter_map(|item| item.data.as_ref())
+                    .filter(|data| data.finish_reason.is_some())
+                    .collect();
+                assert_eq!(terminal.len(), 1, "boundary={boundary}, stop={stop:?}");
+                assert!(!matches!(
+                    terminal[0].finish_reason,
+                    Some(FinishReason::Error(_))
+                ));
+                if stop.is_some() && boundary != "visible_token" {
+                    assert_eq!(
+                        terminal[0].stop_reason,
+                        Some(StopReason::String("a".into()))
+                    );
+                }
+            }
+        }
+    }
 
     struct SyntheticSglangEngine {
         engine_decodes_text: bool,

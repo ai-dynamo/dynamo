@@ -159,6 +159,7 @@ fn cached_prompt_tokens_reach_the_client_on_both_paths() {
         prompt_tokens_details: Some(dynamo_backend_common::PromptTokensDetails {
             audio_tokens: None,
             cached_tokens: Some(5),
+            ..Default::default()
         }),
     });
     let state = ResponseState::new(&decode_request, DisaggregationMode::Decode);
