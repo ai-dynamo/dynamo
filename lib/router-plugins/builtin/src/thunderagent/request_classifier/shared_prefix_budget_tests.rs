@@ -284,6 +284,51 @@ mod shared_prefix_budget_tests {
             );
         }
     }
+    fn pinned_continuation_status(enabled: bool, over_capacity: usize) -> WaitStatus {
+        let w0 = WorkerWithDpRank::new(7, 0);
+        let now = Instant::now();
+        let initial = capacities(&[w0], 64_000);
+        let mut state = state(enabled);
+        state
+            .register(
+                main_request("old", "session", Some(w0), Some(hashes())),
+                &initial,
+                now,
+            )
+            .unwrap();
+        complete(&mut state, &initial, "old", w0, now);
+        let charge = INPUT + 100 + if enabled { 256 } else { 0 };
+        assert_eq!(state.normal_usage[&w0], charge);
+        let boundary = capacities(&[w0], charge - over_capacity);
+        state
+            .register(
+                main_request("next", "session", Some(w0), Some(hashes())),
+                &boundary,
+                now,
+            )
+            .unwrap();
+        assert!(state.normal_usage.get(&w0).copied().unwrap_or(0) <= charge - over_capacity);
+        state.request_status("next")
+    }
+
+    #[test]
+    fn same_worker_pinned_continuation_fits_exact_capacity() {
+        for enabled in [false, true] {
+            assert_eq!(
+                pinned_continuation_status(enabled, 0),
+                WaitStatus::Released(Some(WorkerWithDpRank::new(7, 0))),
+                "shared mode {enabled} must replace its existing charge exactly"
+            );
+        }
+    }
+
+    #[test]
+    fn same_worker_pinned_continuation_waits_one_token_over_capacity() {
+        for enabled in [false, true] {
+            assert_eq!(pinned_continuation_status(enabled, 1), WaitStatus::Waiting);
+        }
+    }
+
     #[test]
     fn final_rechecks_live_target_progress_after_worker_loss() {
         let w0 = WorkerWithDpRank::new(7, 0);
@@ -291,15 +336,52 @@ mod shared_prefix_budget_tests {
         let now = Instant::now();
         let both = capacities(&[w0, w1], 20_356);
         let mut state = state(true);
-        state.register(main_request("owner", "owner", Some(w0), Some(hashes())), &both, now).unwrap();
+        state
+            .register(
+                main_request("owner", "owner", Some(w0), Some(hashes())),
+                &both,
+                now,
+            )
+            .unwrap();
         complete(&mut state, &both, "owner", w0, now);
         let (progress, updater) = RequestProgress::new(20_000);
-        state.register(RequestRegistration::new("background".into(), "background".into(),
-            20_000, progress, false).with_pinned_worker(Some(w1)), &both, now).unwrap();
-        state.on_event(ClassifyEvent::Sent { request_id: "background".into(), worker: w1 }, &both, now);
+        state
+            .register(
+                RequestRegistration::new(
+                    "background".into(),
+                    "background".into(),
+                    20_000,
+                    progress,
+                    false,
+                )
+                .with_pinned_worker(Some(w1)),
+                &both,
+                now,
+            )
+            .unwrap();
+        state.on_event(
+            ClassifyEvent::Sent {
+                request_id: "background".into(),
+                worker: w1,
+            },
+            &both,
+            now,
+        );
         let lost = capacities(&[w1], 20_356);
-        state.register(RequestRegistration::new("final".into(), "owner".into(),
-            1, RequestProgress::new(1).0, true).with_pinned_worker(Some(w1)), &lost, now).unwrap();
+        state
+            .register(
+                RequestRegistration::new(
+                    "final".into(),
+                    "owner".into(),
+                    1,
+                    RequestProgress::new(1).0,
+                    true,
+                )
+                .with_pinned_worker(Some(w1)),
+                &lost,
+                now,
+            )
+            .unwrap();
         assert_eq!(state.request_status("final"), WaitStatus::Waiting);
         assert_eq!(state.programs["owner"].assigned_worker, None);
         // Model progress arriving after the event's initial accounting snapshot.
@@ -311,5 +393,4 @@ mod shared_prefix_budget_tests {
         assert!(state.programs.contains_key("owner"));
         assert!(state.final_reservations.is_empty());
     }
-
 }

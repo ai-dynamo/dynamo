@@ -386,10 +386,7 @@ impl State {
         } else {
             current_token_total(program)
         };
-        Some((
-            worker,
-            tokens.saturating_add(self.config.buffer_per_program),
-        ))
+        Some((worker, self.request_cost(tokens)))
     }
 
     fn subtract_charge(&mut self, charge: Option<(WorkerWithDpRank, usize)>) {

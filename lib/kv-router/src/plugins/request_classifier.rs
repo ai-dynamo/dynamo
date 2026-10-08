@@ -108,7 +108,6 @@ impl ClassifyRequest {
         self
     }
 
-    /// Copy tracking hashes into storage owned by this classification attempt.
     pub(crate) fn with_sequence_hashes(mut self, hashes: Option<&[SequenceHash]>) -> Self {
         self.sequence_hashes = hashes.map(<[SequenceHash]>::to_vec);
         self
