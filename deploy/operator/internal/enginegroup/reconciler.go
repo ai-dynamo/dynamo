@@ -68,7 +68,7 @@ func (c *Coordinator) Reconcile(
 
 	// Recover an acknowledgment already present in durable observations before validating terminal state after restart.
 	promoteAcceptedTargets(&next)
-	if err := validateGroupStatus(next); err != nil {
+	if err := ValidateGroupStatus(next); err != nil {
 		return ReconcileResult{Status: next}, fmt.Errorf("validate durable status: %w", err)
 	}
 

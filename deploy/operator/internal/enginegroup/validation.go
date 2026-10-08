@@ -22,7 +22,9 @@ import (
 	"fmt"
 )
 
-func validateGroupStatus(status GroupStatus) error {
+// ValidateGroupStatus checks persisted recovery state before it can authorize observations or effects.
+// It does not mutate the supplied state or promote acknowledgments.
+func ValidateGroupStatus(status GroupStatus) error {
 	if status.ControlRevision < 0 {
 		return errors.New("control revision must not be negative")
 	}
