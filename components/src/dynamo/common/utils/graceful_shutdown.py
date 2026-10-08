@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 from typing import Any, Callable, Coroutine, Iterable, Optional
 
 from dynamo._core import DistributedRuntime
@@ -204,6 +205,7 @@ def install_signal_handlers(
 
     async def wait_for_shutdown() -> None:
         """Join the shutdown task, if a signal started one. No-op otherwise."""
+        application_error = sys.exc_info()[1]
         task = shutdown_task
         if task is None:
             return
@@ -215,9 +217,10 @@ def install_signal_handlers(
             # semantics are unchanged.
             raise
         except Exception:
-            # Already reported by the done-callback; never let a failed
-            # teardown mask the serve loop's own result.
-            pass
+            # Preserve an exception unwinding through the caller's finally,
+            # but do not report success when only teardown failed.
+            if application_error is None:
+                raise
 
     def signal_handler() -> None:
         nonlocal shutdown_task
