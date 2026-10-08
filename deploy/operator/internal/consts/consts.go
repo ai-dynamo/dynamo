@@ -92,13 +92,23 @@ const (
 	// so v1-compatible releases continue to generate new DCDs with the v1 value.
 	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
 
-	// Engine Group labels correlate capacity and the allocation-count Scale selector.
+	// Workload managers preserve the group and scale-selector labels. Native
+	// stable slot indices establish allocation identity; Pod UIDs bind incarnations.
 	KubeLabelDynamoEngineGroup            = "nvidia.com/dynamo-engine-group"
+	KubeLabelDynamoEngineGroupWorldIndex  = "nvidia.com/dynamo-engine-group-world-index"
+	KubeLabelDynamoEngineGroupRuntime     = "nvidia.com/dynamo-engine-group-runtime"
 	KubeLabelDynamoScaleRepresentative    = "nvidia.com/dynamo-scale-representative"
+	KubeLabelDynamoEngineGroupSGLang      = "sglang-elastic-ep"
 	KubeLabelDynamoScaleRepresentativeYes = "true"
 
-	// Bind private recovery authority to an exact physical workload incarnation.
+	// Engine Group annotations carry runtime endpoints that cannot be selected
+	// with Kubernetes labels. The DGD binds a generated world to the exact Grove clique UID.
+	KubeAnnotationDynamoEngineGroupControlPort  = "nvidia.com/dynamo-engine-group-control-port"
+	KubeAnnotationDynamoEngineGroupVerifyURL    = "nvidia.com/dynamo-engine-group-verify-url"
+	KubeAnnotationDynamoEngineGroupVerifyModel  = "nvidia.com/dynamo-engine-group-verify-model"
+	KubeAnnotationDynamoEngineGroupPodClique    = "nvidia.com/dynamo-engine-group-pod-clique"
 	KubeAnnotationDynamoEngineGroupPodCliqueUID = "nvidia.com/dynamo-engine-group-pod-clique-uid"
+	KubeAnnotationDynamoEngineGroupProfile      = "nvidia.com/dynamo-engine-group-profile"
 
 	// CheckpointAutoAnnotation marks operator-created checkpoints whose
 	// lifecycle is tied to an owning DGD generation.

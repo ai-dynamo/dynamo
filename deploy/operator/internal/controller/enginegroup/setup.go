@@ -19,10 +19,10 @@ type SetupOptions struct {
 
 // Setup registers the Engine Group subsystem with the operator manager.
 func Setup(mgr ctrl.Manager, opts SetupOptions) error {
-	// Fail closed until a production provider is registered by the integration layer.
+	// Resolve the production provider unless the caller supplies another implementation.
 	provider := opts.RuntimeProvider
 	if provider == nil {
-		provider = unavailableEngineGroupRuntimeProvider{}
+		provider = newEngineGroupRuntimeProvider(mgr.GetClient())
 	}
 
 	// Register reconciliation and watches together at the subsystem composition root.
