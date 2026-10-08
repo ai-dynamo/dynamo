@@ -1054,6 +1054,10 @@ fn build_engine_config(
     let enable_eagle = sglang_eagle_enabled(&discovery.server_info);
 
     let mut runtime_data = HashMap::new();
+    runtime_data.extend(crate::kv_hints::discovery_runtime_data(
+        &discovery.server_info,
+        mode,
+    )?);
     runtime_data.insert(
         "grpc_service".to_string(),
         Value::String("sglang.runtime.v1.SglangService".to_string()),
@@ -1711,6 +1715,39 @@ mod tests {
 
         assert_eq!(registration.data_parallel_start_rank, Some(0));
         assert_eq!(registration.data_parallel_size, Some(16));
+    }
+
+    #[test]
+    fn kvcr_engine_configuration_publishes_hint_discovery_metadata() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "enable_unified_cache_external_linker": true,
+                "unified_cache_external_linker_backend": "kvcr",
+                "unified_cache_external_linker_extra_config": {
+                    "enable_remote_hint": true,
+                    "control_advertise_host": "peer.example",
+                    "control_port": 12000,
+                },
+                "tp_size": 8, "dp_size": 2, "enable_dp_attention": true,
+            })),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.runtime_data["router_hint"], true);
+        assert_eq!(config.runtime_data["router_hint_worker_type"], "aggregated");
+        assert_eq!(
+            config.runtime_data["router_hint_source_control_endpoints"],
+            json!({
+                "0": "tcp://peer.example:12000", "1": "tcp://peer.example:12004",
+            })
+        );
+        assert_eq!(
+            config.runtime_data["grpc_service"],
+            "sglang.runtime.v1.SglangService"
+        );
+        assert_eq!(config.llm.unwrap().data_parallel_size, Some(2));
     }
 
     #[test]
