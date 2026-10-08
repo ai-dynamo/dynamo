@@ -157,6 +157,41 @@ and update any runtime override in the same change. Retain `eppConfig` for older
 updates. Changing the component type, image, override, or `eppConfig` revalidates the EPP
 configuration requirement.
 
+#### LPX runtime contract migration
+
+LPX runtimes resolve artifacts, host counts, pod ranks, and partition leaders
+from the binary manifest. An absent remote selection uses the normal manifest
+and pipeline placement. An explicit ordered selection is authoritative; an
+explicitly empty selection runs no remote partitions or Agent Pods. Invalid
+selections fail instead of falling back to defaults.
+
+The operator supplies a model path on each Agent and Cyborg clique. When
+`experimental.localPartitions` changes normal placement, it also supplies
+`LPX_REMOTE_PARTITION_IDS`, using compiler source IDs or collapsed XT chain roots.
+Nova receives independent per-model selections through `NOVA_REMOTE_PARTITION_IDS`,
+or `NOVA_DRAFT_REMOTE_PARTITION_IDS` and `NOVA_TARGET_REMOTE_PARTITION_IDS`.
+Cyborg receives `LPX_AGENT_HOST_TEMPLATE` and retains `LPX_LOCAL_PARTITION_IDS`
+for GPU execution.
+
+Upgrade runtime images first. The current operator can run the new images:
+ordinary placement uses manifest defaults; hybrid deployments temporarily use
+its peer-name metadata, and GPU-local Hydra placement uses its source-ID metadata.
+Those adapters translate inputs into the same manifest resolver and launch path.
+Remove authored `NOVA_*RESOLVED_PARTITIONS_DIR`, `LPU_CONFIG_DIR`,
+`NOVA_NODE_NAME_TEMPLATE`, Quasar's `--partition-metadata`, Cyborg's `--expand-hosts`,
+host-file renderers, and `LPX_RUNTIME_CONTRACT` when updating the images.
+
+Next deploy the additive operator that publishes canonical selections and peer
+templates while retaining ConfigMap output. Remove authored runtime `config`
+mounts and roll the Pods before deploying this ConfigMap-free operator. Existing
+runtime ConfigMaps can then be deleted; this operator does not reconcile them.
+Template and compiler/workload identity changes still trigger rollouts.
+
+Rollback to the additive operator needs no runtime or template changes. Before
+rolling back to the pre-contract operator, restore only the required hybrid
+peer-name and GPU-local source-ID mounts. Keep the new images and commands.
+Older runtime images require their matching operator and role templates.
+
 #### Dependency compatibility
 
 **Affected:** Deployments using Grove or KAI Scheduler, whether bundled with this chart or managed

@@ -92,10 +92,6 @@ func RenderLPXWorkloadTemplates(
 		return nil, err
 	}
 
-	// Scope the rendered resources to the graph's Kubernetes namespace.
-	for _, resource := range rendered.Resources {
-		resource.SetNamespace(source.Namespace)
-	}
 	return rendered, nil
 }
 

@@ -1,146 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-data:
-  lpu_servers: |-
-    lpx-${GROVE_PCSG_INDEX}-agt-0
-    lpx-${GROVE_PCSG_INDEX}-agt-1
-    lpx-${GROVE_PCSG_INDEX}-agt-2
-    lpx-${GROVE_PCSG_INDEX}-agt-3
-    lpx-${GROVE_PCSG_INDEX}-agt-4
-    lpx-${GROVE_PCSG_INDEX}-agt-5
-    lpx-${GROVE_PCSG_INDEX}-agt-6
-    lpx-${GROVE_PCSG_INDEX}-agt-7
-    lpx-${GROVE_PCSG_INDEX}-agt-8
-    lpx-${GROVE_PCSG_INDEX}-agt-9
-    lpx-${GROVE_PCSG_INDEX}-agt-10
-    lpx-${GROVE_PCSG_INDEX}-agt-11
-    lpx-${GROVE_PCSG_INDEX}-agt-12
-    lpx-${GROVE_PCSG_INDEX}-agt-13
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: lpx-v2-local-partitions
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpx-v2-local-partitions-a708-decode-df54a9803233327f
-  namespace: inference-engine
----
-data:
-  nodes_per_partition: |-
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-  partition_ids: |-
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
-    10
-    11
-    12
-    13
-    14
-  partition_indices: |-
-    0
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
-    10
-    11
-    12
-    13
-  partition_models: |-
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-  partition_node_offsets: |-
-    0
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
-    10
-    11
-    12
-    13
-  partition_paths: |-
-    part-1
-    part-2
-    part-3
-    part-4
-    part-5
-    part-6
-    part-7
-    part-8
-    part-9
-    part-10
-    part-11
-    part-12
-    part-13
-    part-14
-  topologies: |-
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: lpx-v2-local-partitions
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpx-v2-local-partitions-a708-lpu-2c2f74b5dc9e0648
-  namespace: inference-engine
----
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpx-v2-local-partitions
@@ -156,7 +16,6 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v2-local-partitions
-        nvidia.com/extra-resources-hash: 2c2f74b5dc9e06482ae806feeca59ef92588bd41dfe19531e33da0f5c6d0e224
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:ddd723d746da78065c032312c775dd3ad545eb3ddddaf6d3d81fb04bd4d849ba
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7df77aa0b1fe9e9a0fc937051e0f78cb5f86e80f95797db7fa21b4f2d24bafb8
         scheduling.lpu.nvidia.com/model: default
@@ -207,26 +66,9 @@ spec:
                     - lpu-node-24
           containers:
           - args:
-            - -c
-            - |-
-              readarray -t partition_node_counts < /configs/nodes_per_partition
-              readarray -t partition_node_offsets < /configs/partition_node_offsets
-              part=""
-              for i in "${!partition_node_counts[@]}"; do
-                if (( GROVE_PCLQ_POD_INDEX >= partition_node_offsets[i] &&
-                      GROVE_PCLQ_POD_INDEX < partition_node_offsets[i] + partition_node_counts[i] )); then
-                  part="${i}"
-                  break
-                fi
-              done
-              : "${part:?no partition row for Grove pod index ${GROVE_PCLQ_POD_INDEX}}"
-              exec agent-hybrid-v2 \
-                --assemble-dir "${GAS_DIR}" \
-                --part "${part}" \
-                --port "${RDMA_PORT}" \
-                --nic "${NIC_NAME}" \
-                --metadata-file "$(mktemp)" \
-                --readiness-port "${READINESS_PORT}"
+            - start
+            command:
+            - /bin/hydra-entrypoint
             env:
             - name: LPX_MODEL_PATH
               value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
@@ -311,8 +153,6 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /configs
-              name: config
             - mountPath: /dev/hugepages
               name: hugepages
             - mountPath: /sys
@@ -359,14 +199,10 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: lpx-v2-local-partitions-a708-lpu-2c2f74b5dc9e0648
-            name: config
         replicas: 14
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v2-local-partitions
-        nvidia.com/extra-resources-hash: df54a9803233327f2a9b061e34cdd5f780498fe4df663ff5fb813fb24336e5fc
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7df77aa0b1fe9e9a0fc937051e0f78cb5f86e80f95797db7fa21b4f2d24bafb8
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
@@ -403,7 +239,6 @@ spec:
             - "16"
             command:
             - /usr/local/bin/cyborg-entrypoint
-            - --expand-hosts
             - --
             - /usr/local/bin/cyborg
             env:
@@ -471,8 +306,6 @@ spec:
                   fieldPath: metadata.uid
             - name: RDMA_PORT
               value: "19877"
-            - name: SERVER_HOSTS_FILE
-              value: /tmp/lpu_servers
             image: example.invalid/gpu-runtime:test
             livenessProbe:
               failureThreshold: 1
@@ -507,8 +340,6 @@ spec:
               periodSeconds: 10
               timeoutSeconds: 5
             volumeMounts:
-            - mountPath: /configs
-              name: config
             - mountPath: /etc/cyborg/model-card.json
               name: cyborg-model-card
               readOnly: true
@@ -543,9 +374,6 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: lpx-v2-local-partitions-a708-decode-df54a9803233327f
-            name: config
         replicas: 1
         roleName: cond
         startsAfter:

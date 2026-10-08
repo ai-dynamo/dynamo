@@ -1,59 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-data:
-  nodes_per_partition: |-
-    2
-    2
-  partition_ids: |-
-    0
-    1
-  partition_node_offsets: |-
-    0
-    2
-  partition_paths: |-
-    part-0
-    part-1
-  topologies: |-
-    test-topology
-    test-topology
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpu-cyborg-specdec-5f16-draft-lpu-bc28ad8b58b97be6
-  namespace: test
----
-data:
-  lpu_servers: target-${GROVE_PCSG_INDEX}-target-agt-0
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpu-cyborg-specdec-5f16-target-decode-32805b2198371ed2
-  namespace: test
----
-data:
-  nodes_per_partition: "4"
-  partition_ids: "0"
-  partition_indices: "0"
-  partition_models: default
-  partition_node_offsets: "0"
-  partition_paths: part-0
-  topologies: test-topology
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpu-cyborg-specdec-5f16-target-lpu-40c1426237894337
-  namespace: test
----
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
@@ -69,7 +16,6 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        nvidia.com/extra-resources-hash: bc28ad8b58b97be60c2d1c08e866c24118f26ae618eb0ac449c8b13614ff54e7
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:886fe4bd8b53d2f8b1e5e251389d1aa03932410d2e622c23a0b5add02bc8a9a2
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:62f97fac431d09ef5dc7903e63394738955cbfed8086027893d62d3c324a298d
         scheduling.lpu.nvidia.com/model: default
@@ -147,14 +93,10 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: lpu-cyborg-specdec-5f16-draft-lpu-bc28ad8b58b97be6
-            name: config
         replicas: 4
         roleName: draft-agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        nvidia.com/extra-resources-hash: bc28ad8b58b97be60c2d1c08e866c24118f26ae618eb0ac449c8b13614ff54e7
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:62f97fac431d09ef5dc7903e63394738955cbfed8086027893d62d3c324a298d
         scheduling.lpu.nvidia.com/role: conductor
       labels:
@@ -228,16 +170,12 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: lpu-cyborg-specdec-5f16-draft-lpu-bc28ad8b58b97be6
-            name: config
         replicas: 1
         roleName: draft-cond
         startsAfter:
         - draft-agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        nvidia.com/extra-resources-hash: 40c1426237894337d864193c2ce98c857c622144d2c66ee912eefd3871f520f4
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:5cad661716edebcf65e421a2ef66164e24970b24ff42d7c0c5aaca9b30744194
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:5d1acbf961a05af53edbbd71c05f2053eee85a5f05eac089ed6ee022db45d317
         scheduling.lpu.nvidia.com/model: default
@@ -315,14 +253,10 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: lpu-cyborg-specdec-5f16-target-lpu-40c1426237894337
-            name: config
         replicas: 4
         roleName: target-agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        nvidia.com/extra-resources-hash: 32805b2198371ed2ff837e4776e3e59448937c6274efe6602681e42f78f14d41
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:5d1acbf961a05af53edbbd71c05f2053eee85a5f05eac089ed6ee022db45d317
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
@@ -429,9 +363,6 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: lpu-cyborg-specdec-5f16-target-decode-32805b2198371ed2
-            name: config
         replicas: 1
         roleName: target-cond
         startsAfter:

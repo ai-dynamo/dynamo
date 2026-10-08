@@ -7,7 +7,6 @@ package lpx
 
 import (
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -274,7 +273,6 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 					require.Empty(t, request.PropSyncConnectors)
 				}
 				require.Equal(t, original, projection.configuredBuild.Partitions)
-				require.Equal(t, slices.Repeat([]string{projection.Model()}, len(original)), strings.Split(resolvedPartitionData([]*ModelProjection{projection})["partition_models"], "\n"))
 			}
 
 			for _, expansion := range []struct {

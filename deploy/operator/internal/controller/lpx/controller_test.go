@@ -362,6 +362,7 @@ func TestLPXWorkloadErrorDoesNotAcknowledgeGeneration(t *testing.T) {
 			if tc.deadline {
 				dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](60)}
 			}
+			dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
 			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
 			createLPXTestObjects(t, ctx, r.Client, objects...)
@@ -372,12 +373,12 @@ func TestLPXWorkloadErrorDoesNotAcknowledgeGeneration(t *testing.T) {
 			require.NoError(t, r.Update(ctx, pending))
 
 			t.Log("Fail runtime synchronization after the scheduling deadline is derived")
-			readErr, statusErr := errors.New("ConfigMap read unavailable"), errors.New("status write unavailable")
+			readErr, statusErr := errors.New("Service read unavailable"), errors.New("status write unavailable")
 			failReads, failStatus := !tc.workloadSucceeds, tc.failStatus
 			reads := 0
 			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
 				Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
-					if _, ok := object.(*corev1.ConfigMap); ok && failReads {
+					if _, ok := object.(*corev1.Service); ok && failReads {
 						reads++
 						return readErr
 					}
@@ -723,40 +724,6 @@ func TestPipelineRequestDeadlineHoleWaitsForSchedulingChange(t *testing.T) {
 	current, err := r.getPipelineRequests(ctx, pcs)
 	require.NoError(t, err)
 	require.Empty(t, current)
-}
-
-func TestLPXDeletesOnlyStaleOwnedRuntimeConfigMaps(t *testing.T) {
-	t.Log("Create current, stale, and foreign runtime ConfigMaps")
-	dgd := loadTestDGD(t, lpx.PipelineSingle, "test-build")
-	child := newLPXTestDeployment(t, dgd)
-	owner := []metav1.OwnerReference{*metav1.NewControllerRef(child, v1alpha1.LPXGraphDeploymentGVK)}
-	current := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-		Name: "runtime-current", Namespace: child.Namespace, UID: "current",
-		Labels: map[string]string{deploymentUIDLabel: string(child.UID)}, OwnerReferences: owner,
-	}}
-	stale := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-		Name: "runtime-stale", Namespace: child.Namespace, UID: "stale",
-		Labels: map[string]string{deploymentUIDLabel: string(child.UID)}, OwnerReferences: owner,
-	}}
-	foreign := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-		Name: "runtime-foreign", Namespace: child.Namespace, UID: "foreign",
-		Labels:          map[string]string{deploymentUIDLabel: string(child.UID)},
-		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)},
-	}}
-	r := newLPXTestReconciler(t, nil, child, dgd, current, stale, foreign)
-
-	t.Log("Keep the previous runtime configuration while the replacement is not Ready")
-	require.NoError(t, r.deleteUnusedConfigMaps(t.Context(), child, []client.Object{current}))
-	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(stale), &corev1.ConfigMap{}))
-
-	t.Log("Delete only the stale ConfigMap owned by the current LPX child")
-	setReadyCondition(child, v1beta1.DGDStateSuccessful, "Replacement is Ready")
-	require.NoError(t, r.deleteUnusedConfigMaps(t.Context(), child, []client.Object{current}))
-
-	t.Log("Preserve the current and foreign ConfigMaps")
-	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(current), &corev1.ConfigMap{}))
-	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(stale), &corev1.ConfigMap{})))
-	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(foreign), &corev1.ConfigMap{}))
 }
 
 func TestLPXDownloadsBeforePublication(t *testing.T) {
@@ -1643,7 +1610,6 @@ func TestLPXMaterializationUsesDGDAndChildIdentity(t *testing.T) {
 	root := dynamo.PCSNameForLPX(child)
 	for _, object := range []client.Object{
 		&grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: root, Namespace: child.Namespace}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("%s-lpu-%.16s", root, pcs.Spec.Template.Cliques[0].Annotations[v1alpha1.AnnotationExtraResourcesHash]), Namespace: child.Namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: root + "-serve", Namespace: child.Namespace}},
 	} {
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(object), object))
@@ -2878,7 +2844,7 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilReenabled(t *testing.T) {
 				require.NoError(t, err)
 			}
 			before := []client.ObjectList{
-				&grovev1alpha1.PodCliqueSetList{}, &corev1.ConfigMapList{},
+				&grovev1alpha1.PodCliqueSetList{},
 				&corev1.ServiceList{}, &lpxv1alpha1.LPUPipelineRequestList{},
 			}
 			for _, list := range before {
@@ -3529,7 +3495,7 @@ func TestIndependentLPXWorkloadsScaleAndReportReadiness(t *testing.T) {
 	require.Len(t, workloads, 2)
 	pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 	require.NoError(t, err)
-	require.Len(t, resources, 4)
+	require.Len(t, resources, 2)
 	names := make(map[string]bool)
 	for _, resource := range resources {
 		require.NotContains(t, names, resource.GetName())

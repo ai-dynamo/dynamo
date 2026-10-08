@@ -7,7 +7,6 @@ package lpx
 
 import (
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -61,36 +60,35 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Cover XT configuration mounts and HX hybrid model-storage paths")
+	t.Log("Preserve authored configuration mounts and hybrid model-storage paths")
 	hybrid := newV3CompilerFixture()
 	hybrid.compilationMode = manifestcapnp.CompilationMode_lpx
 	xtSnapshot := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	hxSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
 	tests := []struct {
 		name       string
-		family     lpxv1alpha1.TargetFamily
 		pipeline   Pipeline
 		snapshot   *BuildSnapshot
 		configPath string
 	}{
 		{
-			name: "XT config mount", family: lpxv1alpha1.TargetFamilyXt8888, pipeline: PipelineSingle,
+			name: "XT config mount", pipeline: PipelineSingle,
 			snapshot: xtSnapshot, configPath: "/custom",
 		},
 		{
-			name: "XT omitted config mount", family: lpxv1alpha1.TargetFamilyXt8888, pipeline: PipelineSingle,
+			name: "XT omitted config mount", pipeline: PipelineSingle,
 			snapshot: xtSnapshot,
 		},
 		{
-			name: "HX omitted config mount", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineSingle,
+			name: "HX omitted config mount", pipeline: PipelineSingle,
 			snapshot: hxSnapshot,
 		},
 		{
-			name: "HX custom config mount", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineSingle,
+			name: "HX custom config mount", pipeline: PipelineSingle,
 			snapshot: hxSnapshot, configPath: "/custom",
 		},
 		{
-			name: "HX hybrid storage", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineLPX,
+			name: "HX hybrid storage", pipeline: PipelineLPX,
 			snapshot: acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)), configPath: "/configs",
 		},
 	}
@@ -117,23 +115,23 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				{Key: "cluster.example/custom", Operator: corev1.TolerationOpExists},
 				{Key: "lpu.nvidia.com/node", Operator: corev1.TolerationOpExists},
 			}
-			if test.family == lpxv1alpha1.TargetFamilyXt8888 && test.configPath != "" {
+			if test.configPath != "" {
 				template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
-					Name: lpuConfigVolumeName,
+					Name: "config",
 					VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{Name: "authored-config"}, DefaultMode: ptr.To[int32](0440),
 					}},
 				})
 			}
 			template.Spec.Containers[0].VolumeMounts = slices.DeleteFunc(template.Spec.Containers[0].VolumeMounts,
-				func(mount corev1.VolumeMount) bool { return mount.Name == lpuConfigVolumeName })
+				func(mount corev1.VolumeMount) bool { return mount.Name == "config" })
 			if test.configPath != "" {
 				template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts,
-					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: test.configPath})
+					corev1.VolumeMount{Name: "config", MountPath: test.configPath})
 			}
 			if test.pipeline == PipelineLPX {
 				template.Spec.Containers[0].VolumeMounts[0].MountPath = "/model-cache"
-				pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = "/model-cache"
+				pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts[0].MountPath = "/model-cache"
 			}
 
 			t.Log("Render into the fresh PCS without retaining stale runtime identity")
@@ -269,7 +267,6 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	conductorTemplate.Annotations = map[string]string{"owner": "conductor"}
 	conductorTemplate.Spec.Containers[0].Image = "conductor-runtime"
 	conductorTemplate.Spec.Containers[0].Env = []corev1.EnvVar{
-		{Name: "NOVA_NODE_NAME_TEMPLATE", Value: "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}"},
 		{Name: "NOVA_PIPELINE_TYPE", Value: "SpecDecode"},
 		{Name: "NOVA_MAX_SWA_DKVC_BLOCKS_DRAFT", Value: "2"},
 		{Name: "NOVA_AGENT_CONNECT_TIMEOUT", Value: "30s"},
@@ -316,30 +313,14 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	require.Equal(t, conductorBefore, &conductor.Spec.PodSpec)
 
 	t.Log("Preserve runtime settings in the conductor template and share only partition data")
-	configMap, ok := templates.Resources[0].(*corev1.ConfigMap)
-	require.True(t, ok)
-	require.NotContains(t, configMap.Data, "model_config.toml")
 	for _, env := range conductorTemplate.Spec.Containers[0].Env {
 		require.Contains(t, conductor.Spec.PodSpec.Containers[0].Env, env)
 	}
-	require.Equal(t, "draft0\ndraft1\ntarget", configMap.Data["partition_models"])
 	require.Equal(t, before, source)
 
-	t.Log("Bind conductor allocation and Nova hostnames to the renamed Agent cliques")
+	t.Log("Bind conductor allocation to the renamed Agent cliques")
 	require.Equal(t, "agt0:agt1:agt2", testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, allocationEnvVar))
 	require.Equal(t, []string{"agt0", "agt1", "agt2"}, conductor.Spec.StartsAfter)
-	require.NotContains(t, configMap.Data, "datacenter.toml")
-	nodeNameTemplate := testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, "NOVA_NODE_NAME_TEMPLATE")
-	for _, agent := range plan.ForReplica(0).Agents {
-		hostname := strings.NewReplacer(
-			"${GROVE_PCSG_NAME}", plan.LPXScalingGroup,
-			"${GROVE_PCSG_INDEX}", "0",
-			"{rack}", agent.TemplateName,
-			"{node}", "0",
-			"${GROVE_HEADLESS_SERVICE}", pcs.Name,
-		).Replace(nodeNameTemplate)
-		require.Equal(t, agent.CliqueName+"-0."+pcs.Name, hostname)
-	}
 }
 
 func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *BuildSnapshot) *ModelProjection {
@@ -371,10 +352,7 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 				Volumes: []corev1.Volume{
 					{Name: "model-storage", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}}},
 				},
-				Containers: []corev1.Container{{Name: "main", Image: "cyborg", Env: []corev1.EnvVar{
-					{Name: "SERVER_HOSTS_FILE", Value: "/tmp/lpu_servers"},
-				}, VolumeMounts: []corev1.VolumeMount{
-					{Name: lpuConfigVolumeName, MountPath: "/configs"},
+				Containers: []corev1.Container{{Name: "main", Image: "cyborg", VolumeMounts: []corev1.VolumeMount{
 					{Name: "model-storage", MountPath: "/models"},
 				}}},
 				ResourceClaims: []corev1.PodResourceClaim{{
@@ -404,7 +382,6 @@ func renderTestPodSpec() corev1.PodSpec {
 			Name: "main", Image: "runtime",
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: "model-storage", MountPath: "/models"},
-				{Name: lpuConfigVolumeName, MountPath: "/configs"},
 				{Name: "single-v2-ssh-key", MountPath: "/tmp/dynamo-lpu-ssh"},
 				{Name: "ssh-secret", MountPath: "/ssh-pk", ReadOnly: true},
 			},
