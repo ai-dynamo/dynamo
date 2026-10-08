@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 188 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 197 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">91 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">100 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">28 types</Card>
 </CardGroup>
 
@@ -3076,6 +3076,12 @@ See [EngineGroupTargetValidationStatus](#enginegrouptargetvalidationstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="operation" type="EngineGroupOperationStatus">
+operation summarizes the current or most recent immutable membership operation. It is a projection; the private controller checkpoint owns restart recovery.
+See [EngineGroupOperationStatus](#enginegroupoperationstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="conditions" type="Condition array">
 conditions contains the latest observations of group availability, progress, degradation, target convergence, target validity, and topology authority.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
@@ -3532,6 +3538,45 @@ See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#u
 </ParamField>
 </Accordion>
 
+<Accordion id="enginegroupfailureclassification" title="EngineGroupFailureClassification">
+EngineGroupFailureClassification states whether reconciliation may retry the same external intent.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Retryable Terminal]
+**Appears in:** [EngineGroupFailureStatus](#enginegroupfailurestatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Retryable</Badge> EngineGroupFailureClassificationRetryable permits retrying the same intent.
+- <Badge intent="note" minimal>Terminal</Badge> EngineGroupFailureClassificationTerminal means the same intent cannot safely make progress.
+</Accordion>
+
+<Accordion id="enginegroupfailurestatus" title="EngineGroupFailureStatus">
+EngineGroupFailureStatus is one structured subsystem or transition failure.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupOperationStatus](#enginegroupoperationstatus), [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+<ParamField path="classification" type="EngineGroupFailureClassification">
+classification states whether the same external intent may be retried.
+See [EngineGroupFailureClassification](#enginegroupfailureclassification).
+**Validation:** Enum: [Retryable Terminal]
+</ParamField>
+
+<ParamField path="reason" type="string">
+reason is a stable machine-readable failure reason.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="message" type="string">
+message explains the failure for a human reader.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
 <Accordion id="enginegroupmemberstatus" title="EngineGroupMemberStatus">
 EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
 
@@ -3614,6 +3659,132 @@ See [EngineGroupReplicaMembership](#enginegroupreplicamembership).
 traffic is admission or terminal drain evidence from the runtime traffic authority.
 See [EngineGroupMemberTraffic](#enginegroupmembertraffic).
 **Validation:** Enum: [Admitted Draining Drained Withdrawn Unknown]
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupoperationphase" title="EngineGroupOperationPhase">
+EngineGroupOperationPhase summarizes progress without replacing engine transaction authority.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Pending Submitting Committing Committed Failed Unknown Aborting Aborted]
+**Appears in:** [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Pending</Badge> EngineGroupOperationPhasePending means preparatory capacity or traffic work remains.
+- <Badge intent="note" minimal>Submitting</Badge> EngineGroupOperationPhaseSubmitting means a durable membership target has no conclusive observation yet.
+- <Badge intent="note" minimal>Committing</Badge> EngineGroupOperationPhaseCommitting means the engine accepted its membership transition.
+- <Badge intent="note" minimal>Committed</Badge> EngineGroupOperationPhaseCommitted means membership committed; verification or admission may still remain.
+- <Badge intent="note" minimal>Failed</Badge> EngineGroupOperationPhaseFailed means a definitive failure blocks or rejects progress.
+- <Badge intent="note" minimal>Unknown</Badge> EngineGroupOperationPhaseUnknown means the membership outcome cannot be established conclusively.
+- <Badge intent="note" minimal>Aborting</Badge> EngineGroupOperationPhaseAborting means a provably uncommitted change is restoring preparatory state.
+- <Badge intent="note" minimal>Aborted</Badge> EngineGroupOperationPhaseAborted means preparatory state has been restored after rejection.
+</Accordion>
+
+<Accordion id="enginegroupoperationstatus" title="EngineGroupOperationStatus">
+EngineGroupOperationStatus is a user-facing projection of one immutable membership operation.
+Recovery authority lives in the controller's private, versioned checkpoint, not this projection.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+<ParamField path="id" type="string">
+id identifies the same operation across retries and controller restarts.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="intent" type="string">
+intent distinguishes planned growth, planned shrink, failure recovery, and deletion-driven retirement.
+**Validation:** Enum: [Grow Shrink Recover Retire]
+</ParamField>
+
+<ParamField path="shape" type="string">
+shape records the resolved backend operation semantics.
+**Validation:** Enum: [Grow Retire ReduceToSurvivors Restore Remap]
+</ParamField>
+
+<ParamField path="specGeneration" type="integer">
+specGeneration is the object generation from which this operation was planned. It does not change when a newer scale target arrives.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="baseTopology" type="EngineGroupTopologyStatus">
+baseTopology is the exact committed membership from which the operation starts.
+See [EngineGroupTopologyStatus](#enginegrouptopologystatus).
+</ParamField>
+
+<ParamField path="targetReplicas" type="integer">
+targetReplicas is this operation's immutable logical allocation target. It may differ from the latest spec.replicas while a multi-step resize progresses.
+**Validation:** Minimum: 0
+</ParamField>
+
+<ParamField path="joiningReplicas" type="string array">
+joiningReplicas names logical allocations introduced or restored by this operation.
+**Validation:** items:MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="nominatedReplicas" type="string array">
+nominatedReplicas names allocations selected for planned retirement or recovery.
+**Validation:** items:MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="targetNativeMembers" type="string array">
+targetNativeMembers names the exact desired native membership for this operation.
+**Validation:** items:MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="queuedTargetReplicas" type="integer">
+queuedTargetReplicas reports a newer absolute target without mutating the active plan.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="trafficRequirement" type="EngineGroupTrafficRequirement">
+trafficRequirement records whether retained members may keep serving during the change.
+See [EngineGroupTrafficRequirement](#enginegrouptrafficrequirement).
+**Validation:** Enum: [KeepServing QuiesceGroup]
+</ParamField>
+
+<ParamField path="servingVerification" type="EngineGroupVerificationRequirement">
+servingVerification records whether commit requires serving-progress proof before admission.
+See [EngineGroupVerificationRequirement](#enginegroupverificationrequirement).
+**Validation:** Enum: [None Required]
+</ParamField>
+
+<ParamField path="phase" type="EngineGroupOperationPhase">
+phase summarizes membership and cross-subsystem progress, not a second transaction protocol.
+See [EngineGroupOperationPhase](#enginegroupoperationphase).
+**Validation:** Enum: [Pending Submitting Committing Committed Failed Unknown Aborting Aborted]
+</ParamField>
+
+<ParamField path="startedAt" type="Time">
+startedAt records when the immutable plan was persisted.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+</ParamField>
+
+<ParamField path="lastTransitionTime" type="Time">
+lastTransitionTime changes only when phase changes.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+</ParamField>
+
+<ParamField path="committedTopology" type="EngineGroupTopologyStatus">
+committedTopology is the result correlated with this exact operation, when observed.
+See [EngineGroupTopologyStatus](#enginegrouptopologystatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="verification" type="EngineGroupVerificationStatus">
+verification contains topology-bound serving evidence, independently from membership commit.
+See [EngineGroupVerificationStatus](#enginegroupverificationstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="error" type="EngineGroupFailureStatus">
+error is the current structured operation failure, if any.
+See [EngineGroupFailureStatus](#enginegroupfailurestatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -3833,6 +4004,29 @@ maxReplicas is the maximum target selected by policy. It cannot exceed the resol
 </ParamField>
 </Accordion>
 
+<Accordion id="enginegroupservingproofstatus" title="EngineGroupServingProofStatus">
+EngineGroupServingProofStatus binds successful verification to an immutable topology.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+<ParamField path="topologyGeneration" type="integer">
+topologyGeneration identifies the verified topology.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="runtimeDigest" type="string">
+runtimeDigest identifies the runtime-observed membership and serving path.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="observedAt" type="Time">
+observedAt records when serving progress was proven.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+</ParamField>
+</Accordion>
+
 <Accordion id="enginegrouptargetvalidationstatus" title="EngineGroupTargetValidationStatus">
 EngineGroupTargetValidationStatus records a reconcile-time target rejection without silently
 changing the requested target.
@@ -3877,7 +4071,7 @@ EngineGroupTopologyStatus is one immutable engine-authoritative committed topolo
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus), [EngineGroupOperationStatus](#enginegroupoperationstatus)
 
 <ParamField path="generation" type="integer">
 generation is the engine's topology generation.
@@ -3889,6 +4083,21 @@ replicas is the complete logical-to-native membership mapping at this generation
 See [EngineGroupMemberStatus](#enginegroupmemberstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptrafficrequirement" title="EngineGroupTrafficRequirement">
+EngineGroupTrafficRequirement describes the traffic boundary around membership mutation.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [KeepServing QuiesceGroup]
+**Appears in:** [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>KeepServing</Badge> EngineGroupTrafficRequirementKeepServing permits retained replicas to continue serving.
+- <Badge intent="note" minimal>QuiesceGroup</Badge> EngineGroupTrafficRequirementQuiesceGroup drains the complete base topology before mutation.
 </Accordion>
 
 <Accordion id="enginegrouptrafficstatus" title="EngineGroupTrafficStatus">
@@ -3923,6 +4132,63 @@ See [EngineGroupMemberStatus](#enginegroupmemberstatus).
 <ParamField path="drained" type="EngineGroupMemberStatus array">
 drained is durable terminal non-serving evidence for exact member incarnations.
 See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupverificationphase" title="EngineGroupVerificationPhase">
+EngineGroupVerificationPhase is the independent serving-verification state.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Pending Passed Failed]
+**Appears in:** [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Pending</Badge> EngineGroupVerificationPhasePending means a proof is required for the committed topology.
+- <Badge intent="note" minimal>Passed</Badge> EngineGroupVerificationPhasePassed means the exact topology produced serving progress.
+- <Badge intent="note" minimal>Failed</Badge> EngineGroupVerificationPhaseFailed means a conclusive serving check failed.
+</Accordion>
+
+<Accordion id="enginegroupverificationrequirement" title="EngineGroupVerificationRequirement">
+EngineGroupVerificationRequirement states whether commit needs a serving-progress proof.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [None Required]
+**Appears in:** [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>None</Badge> EngineGroupVerificationRequirementNone permits admission after authoritative membership commit.
+- <Badge intent="note" minimal>Required</Badge> EngineGroupVerificationRequirementRequired requires a matching serving proof before admission.
+</Accordion>
+
+<Accordion id="enginegroupverificationstatus" title="EngineGroupVerificationStatus">
+EngineGroupVerificationStatus records serving progress independently from membership commit.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+<ParamField path="phase" type="EngineGroupVerificationPhase">
+phase is the durable serving-verification state.
+See [EngineGroupVerificationPhase](#enginegroupverificationphase).
+**Validation:** Enum: [Pending Passed Failed]
+</ParamField>
+
+<ParamField path="proof" type="EngineGroupServingProofStatus">
+proof is a positive result bound to one immutable topology.
+See [EngineGroupServingProofStatus](#enginegroupservingproofstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="failure" type="EngineGroupFailureStatus">
+failure is a conclusive verification failure.
+See [EngineGroupFailureStatus](#enginegroupfailurestatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

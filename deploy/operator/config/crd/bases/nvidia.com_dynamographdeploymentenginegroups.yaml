@@ -234,6 +234,297 @@ spec:
                   format: int64
                   minimum: 0
                   type: integer
+                operation:
+                  description: |-
+                    operation summarizes the current or most recent immutable membership operation.
+                    It is a projection; the private controller checkpoint owns restart recovery.
+                  properties:
+                    baseTopology:
+                      description: baseTopology is the exact committed membership from which the operation starts.
+                      properties:
+                        generation:
+                          description: generation is the engine's topology generation.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        replicas:
+                          description: replicas is the complete logical-to-native membership mapping at this generation.
+                          items:
+                            description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+                            properties:
+                              nativeMembers:
+                                description: |-
+                                  nativeMembers correlates backend-native IDs with exact process lifetimes. Terminal traffic evidence may
+                                  retain several lifetimes of a reused native ID; committed topology must contain only its current lifetime.
+                                items:
+                                  description: EngineGroupNativeMemberIncarnationStatus binds one native ID to an independent process lifetime.
+                                  properties:
+                                    id:
+                                      description: id is the engine-native member identity.
+                                      minLength: 1
+                                      type: string
+                                    runtimeIncarnation:
+                                      description: runtimeIncarnation changes on every restart of this member's process.
+                                      minLength: 1
+                                      type: string
+                                  required:
+                                    - id
+                                    - runtimeIncarnation
+                                  type: object
+                                minItems: 1
+                                type: array
+                                x-kubernetes-list-map-keys:
+                                  - id
+                                  - runtimeIncarnation
+                                x-kubernetes-list-type: map
+                              replicaID:
+                                description: replicaID is the stable logical identity.
+                                minLength: 1
+                                type: string
+                            required:
+                              - nativeMembers
+                              - replicaID
+                            type: object
+                          type: array
+                          x-kubernetes-list-map-keys:
+                            - replicaID
+                          x-kubernetes-list-type: map
+                      required:
+                        - generation
+                      type: object
+                    committedTopology:
+                      description: committedTopology is the result correlated with this exact operation, when observed.
+                      properties:
+                        generation:
+                          description: generation is the engine's topology generation.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        replicas:
+                          description: replicas is the complete logical-to-native membership mapping at this generation.
+                          items:
+                            description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+                            properties:
+                              nativeMembers:
+                                description: |-
+                                  nativeMembers correlates backend-native IDs with exact process lifetimes. Terminal traffic evidence may
+                                  retain several lifetimes of a reused native ID; committed topology must contain only its current lifetime.
+                                items:
+                                  description: EngineGroupNativeMemberIncarnationStatus binds one native ID to an independent process lifetime.
+                                  properties:
+                                    id:
+                                      description: id is the engine-native member identity.
+                                      minLength: 1
+                                      type: string
+                                    runtimeIncarnation:
+                                      description: runtimeIncarnation changes on every restart of this member's process.
+                                      minLength: 1
+                                      type: string
+                                  required:
+                                    - id
+                                    - runtimeIncarnation
+                                  type: object
+                                minItems: 1
+                                type: array
+                                x-kubernetes-list-map-keys:
+                                  - id
+                                  - runtimeIncarnation
+                                x-kubernetes-list-type: map
+                              replicaID:
+                                description: replicaID is the stable logical identity.
+                                minLength: 1
+                                type: string
+                            required:
+                              - nativeMembers
+                              - replicaID
+                            type: object
+                          type: array
+                          x-kubernetes-list-map-keys:
+                            - replicaID
+                          x-kubernetes-list-type: map
+                      required:
+                        - generation
+                      type: object
+                    error:
+                      description: error is the current structured operation failure, if any.
+                      properties:
+                        classification:
+                          description: classification states whether the same external intent may be retried.
+                          enum:
+                            - Retryable
+                            - Terminal
+                          type: string
+                        message:
+                          description: message explains the failure for a human reader.
+                          type: string
+                        reason:
+                          description: reason is a stable machine-readable failure reason.
+                          minLength: 1
+                          type: string
+                      required:
+                        - classification
+                        - reason
+                      type: object
+                    id:
+                      description: id identifies the same operation across retries and controller restarts.
+                      minLength: 1
+                      type: string
+                    intent:
+                      description: intent distinguishes planned growth, planned shrink, failure recovery, and deletion-driven retirement.
+                      enum:
+                        - Grow
+                        - Shrink
+                        - Recover
+                        - Retire
+                      type: string
+                    joiningReplicas:
+                      description: joiningReplicas names logical allocations introduced or restored by this operation.
+                      items:
+                        minLength: 1
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: set
+                    lastTransitionTime:
+                      description: lastTransitionTime changes only when phase changes.
+                      format: date-time
+                      type: string
+                    nominatedReplicas:
+                      description: nominatedReplicas names allocations selected for planned retirement or recovery.
+                      items:
+                        minLength: 1
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: set
+                    phase:
+                      description: phase summarizes membership and cross-subsystem progress, not a second transaction protocol.
+                      enum:
+                        - Pending
+                        - Submitting
+                        - Committing
+                        - Committed
+                        - Failed
+                        - Unknown
+                        - Aborting
+                        - Aborted
+                      type: string
+                    queuedTargetReplicas:
+                      description: queuedTargetReplicas reports a newer absolute target without mutating the active plan.
+                      format: int32
+                      minimum: 1
+                      type: integer
+                    servingVerification:
+                      description: servingVerification records whether commit requires serving-progress proof before admission.
+                      enum:
+                        - None
+                        - Required
+                      type: string
+                    shape:
+                      description: shape records the resolved backend operation semantics.
+                      enum:
+                        - Grow
+                        - Retire
+                        - ReduceToSurvivors
+                        - Restore
+                        - Remap
+                      type: string
+                    specGeneration:
+                      description: |-
+                        specGeneration is the object generation from which this operation was planned.
+                        It does not change when a newer scale target arrives.
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    startedAt:
+                      description: startedAt records when the immutable plan was persisted.
+                      format: date-time
+                      type: string
+                    targetNativeMembers:
+                      description: targetNativeMembers names the exact desired native membership for this operation.
+                      items:
+                        minLength: 1
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: set
+                    targetReplicas:
+                      description: |-
+                        targetReplicas is this operation's immutable logical allocation target.
+                        It may differ from the latest spec.replicas while a multi-step resize progresses.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    trafficRequirement:
+                      description: trafficRequirement records whether retained members may keep serving during the change.
+                      enum:
+                        - KeepServing
+                        - QuiesceGroup
+                      type: string
+                    verification:
+                      description: verification contains topology-bound serving evidence, independently from membership commit.
+                      properties:
+                        failure:
+                          description: failure is a conclusive verification failure.
+                          properties:
+                            classification:
+                              description: classification states whether the same external intent may be retried.
+                              enum:
+                                - Retryable
+                                - Terminal
+                              type: string
+                            message:
+                              description: message explains the failure for a human reader.
+                              type: string
+                            reason:
+                              description: reason is a stable machine-readable failure reason.
+                              minLength: 1
+                              type: string
+                          required:
+                            - classification
+                            - reason
+                          type: object
+                        phase:
+                          description: phase is the durable serving-verification state.
+                          enum:
+                            - Pending
+                            - Passed
+                            - Failed
+                          type: string
+                        proof:
+                          description: proof is a positive result bound to one immutable topology.
+                          properties:
+                            observedAt:
+                              description: observedAt records when serving progress was proven.
+                              format: date-time
+                              type: string
+                            runtimeDigest:
+                              description: runtimeDigest identifies the runtime-observed membership and serving path.
+                              minLength: 1
+                              type: string
+                            topologyGeneration:
+                              description: topologyGeneration identifies the verified topology.
+                              format: int64
+                              minimum: 1
+                              type: integer
+                          required:
+                            - observedAt
+                            - runtimeDigest
+                            - topologyGeneration
+                          type: object
+                      required:
+                        - phase
+                      type: object
+                  required:
+                    - baseTopology
+                    - id
+                    - intent
+                    - lastTransitionTime
+                    - phase
+                    - servingVerification
+                    - shape
+                    - specGeneration
+                    - startedAt
+                    - targetReplicas
+                    - trafficRequirement
+                  type: object
                 profile:
                   description: profile is the immutable resolved mapping between logical replicas and physical capacity.
                   properties:

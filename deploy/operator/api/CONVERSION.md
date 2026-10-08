@@ -1,5 +1,10 @@
 # Conversion Rules
 
+The Engine Group operation status and private checkpoint are v1beta1-only.
+DynamoGraphDeploymentEngineGroup has no v1alpha1 counterpart, so replacing its
+public reconciliation journal with an operation projection requires no conversion
+path or preserved alpha-version payload.
+
 These rules apply to API conversion code and tests under `deploy/operator/api`.
 Every API type change in any version must update conversion code/tests, or
 explicitly document why conversion is unaffected.

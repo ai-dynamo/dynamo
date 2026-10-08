@@ -2091,6 +2091,7 @@ _Appears in:_
 | `traffic` _[EngineGroupTrafficStatus](#enginegrouptrafficstatus)_ | traffic is the runtime's authoritative routing and drain observation. |  | Optional: \{\} <br /> |
 | `releaseAuthorizations` _[EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization) array_ | releaseAuthorizations names the exact Pod UIDs that may be removed from stable replica slots. |  | Optional: \{\} <br /> |
 | `targetValidation` _[EngineGroupTargetValidationStatus](#enginegrouptargetvalidationstatus)_ | targetValidation describes a desired replica target rejected from reconciliation-time<br />profile or capability information. |  | Optional: \{\} <br /> |
+| `operation` _[EngineGroupOperationStatus](#enginegroupoperationstatus)_ | operation summarizes the current or most recent immutable membership operation.<br />It is a projection; the private controller checkpoint owns restart recovery. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | conditions contains the latest observations of group availability, progress, degradation,<br />target convergence, target validity, and topology authority. |  | Optional: \{\} <br /> |
 
 
@@ -2371,6 +2372,43 @@ _Appears in:_
 | `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ | uid is the concrete Pod incarnation and prevents name reuse from inheriting authority. |  |  |
 
 
+#### EngineGroupFailureClassification
+
+_Underlying type:_ _string_
+
+EngineGroupFailureClassification states whether reconciliation may retry the same external intent.
+
+_Validation:_
+- Enum: [Retryable Terminal]
+
+_Appears in:_
+- [EngineGroupFailureStatus](#enginegroupfailurestatus)
+
+| Field | Description |
+| --- | --- |
+| `Retryable` | EngineGroupFailureClassificationRetryable permits retrying the same intent.<br /> |
+| `Terminal` | EngineGroupFailureClassificationTerminal means the same intent cannot safely make progress.<br /> |
+
+
+#### EngineGroupFailureStatus
+
+
+
+EngineGroupFailureStatus is one structured subsystem or transition failure.
+
+
+
+_Appears in:_
+- [EngineGroupOperationStatus](#enginegroupoperationstatus)
+- [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `classification` _[EngineGroupFailureClassification](#enginegroupfailureclassification)_ | classification states whether the same external intent may be retried. |  | Enum: [Retryable Terminal] <br /> |
+| `reason` _string_ | reason is a stable machine-readable failure reason. |  | MinLength: 1 <br /> |
+| `message` _string_ | message explains the failure for a human reader. |  | Optional: \{\} <br /> |
+
+
 #### EngineGroupMemberStatus
 
 
@@ -2444,6 +2482,64 @@ _Appears in:_
 | `runtimeIncarnation` _string_ | runtimeIncarnation identifies the process to which membership and traffic evidence apply. |  | MinLength: 1 <br />Optional: \{\} <br /> |
 | `membership` _[EngineGroupReplicaMembership](#enginegroupreplicamembership)_ | membership distinguishes committed participation from masking or orchestration intent. |  | Enum: [Active Masked Joining Retiring Unknown] <br /> |
 | `traffic` _[EngineGroupMemberTraffic](#enginegroupmembertraffic)_ | traffic is admission or terminal drain evidence from the runtime traffic authority. |  | Enum: [Admitted Draining Drained Withdrawn Unknown] <br /> |
+
+
+#### EngineGroupOperationPhase
+
+_Underlying type:_ _string_
+
+EngineGroupOperationPhase summarizes progress without replacing engine transaction authority.
+
+_Validation:_
+- Enum: [Pending Submitting Committing Committed Failed Unknown Aborting Aborted]
+
+_Appears in:_
+- [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` | EngineGroupOperationPhasePending means preparatory capacity or traffic work remains.<br /> |
+| `Submitting` | EngineGroupOperationPhaseSubmitting means a durable membership target has no conclusive observation yet.<br /> |
+| `Committing` | EngineGroupOperationPhaseCommitting means the engine accepted its membership transition.<br /> |
+| `Committed` | EngineGroupOperationPhaseCommitted means membership committed; verification or admission may still remain.<br /> |
+| `Failed` | EngineGroupOperationPhaseFailed means a definitive failure blocks or rejects progress.<br /> |
+| `Unknown` | EngineGroupOperationPhaseUnknown means the membership outcome cannot be established conclusively.<br /> |
+| `Aborting` | EngineGroupOperationPhaseAborting means a provably uncommitted change is restoring preparatory state.<br /> |
+| `Aborted` | EngineGroupOperationPhaseAborted means preparatory state has been restored after rejection.<br /> |
+
+
+#### EngineGroupOperationStatus
+
+
+
+EngineGroupOperationStatus is a user-facing projection of one immutable membership operation.
+Recovery authority lives in the controller's private, versioned checkpoint, not this projection.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `id` _string_ | id identifies the same operation across retries and controller restarts. |  | MinLength: 1 <br /> |
+| `intent` _string_ | intent distinguishes planned growth, planned shrink, failure recovery, and deletion-driven retirement. |  | Enum: [Grow Shrink Recover Retire] <br /> |
+| `shape` _string_ | shape records the resolved backend operation semantics. |  | Enum: [Grow Retire ReduceToSurvivors Restore Remap] <br /> |
+| `specGeneration` _integer_ | specGeneration is the object generation from which this operation was planned.<br />It does not change when a newer scale target arrives. |  | Minimum: 1 <br /> |
+| `baseTopology` _[EngineGroupTopologyStatus](#enginegrouptopologystatus)_ | baseTopology is the exact committed membership from which the operation starts. |  |  |
+| `targetReplicas` _integer_ | targetReplicas is this operation's immutable logical allocation target.<br />It may differ from the latest spec.replicas while a multi-step resize progresses. |  | Minimum: 0 <br /> |
+| `joiningReplicas` _string array_ | joiningReplicas names logical allocations introduced or restored by this operation. |  | items:MinLength: 1 <br />Optional: \{\} <br /> |
+| `nominatedReplicas` _string array_ | nominatedReplicas names allocations selected for planned retirement or recovery. |  | items:MinLength: 1 <br />Optional: \{\} <br /> |
+| `targetNativeMembers` _string array_ | targetNativeMembers names the exact desired native membership for this operation. |  | items:MinLength: 1 <br />Optional: \{\} <br /> |
+| `queuedTargetReplicas` _integer_ | queuedTargetReplicas reports a newer absolute target without mutating the active plan. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `trafficRequirement` _[EngineGroupTrafficRequirement](#enginegrouptrafficrequirement)_ | trafficRequirement records whether retained members may keep serving during the change. |  | Enum: [KeepServing QuiesceGroup] <br /> |
+| `servingVerification` _[EngineGroupVerificationRequirement](#enginegroupverificationrequirement)_ | servingVerification records whether commit requires serving-progress proof before admission. |  | Enum: [None Required] <br /> |
+| `phase` _[EngineGroupOperationPhase](#enginegroupoperationphase)_ | phase summarizes membership and cross-subsystem progress, not a second transaction protocol. |  | Enum: [Pending Submitting Committing Committed Failed Unknown Aborting Aborted] <br /> |
+| `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | startedAt records when the immutable plan was persisted. |  |  |
+| `lastTransitionTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | lastTransitionTime changes only when phase changes. |  |  |
+| `committedTopology` _[EngineGroupTopologyStatus](#enginegrouptopologystatus)_ | committedTopology is the result correlated with this exact operation, when observed. |  | Optional: \{\} <br /> |
+| `verification` _[EngineGroupVerificationStatus](#enginegroupverificationstatus)_ | verification contains topology-bound serving evidence, independently from membership commit. |  | Optional: \{\} <br /> |
+| `error` _[EngineGroupFailureStatus](#enginegroupfailurestatus)_ | error is the current structured operation failure, if any. |  | Optional: \{\} <br /> |
 
 
 #### EngineGroupProfileStatus
@@ -2602,6 +2698,24 @@ _Appears in:_
 | `maxReplicas` _integer_ | maxReplicas is the maximum target selected by policy. It cannot exceed the resolved hard<br />engine capability bound. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
+#### EngineGroupServingProofStatus
+
+
+
+EngineGroupServingProofStatus binds successful verification to an immutable topology.
+
+
+
+_Appears in:_
+- [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `topologyGeneration` _integer_ | topologyGeneration identifies the verified topology. |  | Minimum: 1 <br /> |
+| `runtimeDigest` _string_ | runtimeDigest identifies the runtime-observed membership and serving path. |  | MinLength: 1 <br /> |
+| `observedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | observedAt records when serving progress was proven. |  |  |
+
+
 #### EngineGroupTargetValidationStatus
 
 
@@ -2634,11 +2748,30 @@ EngineGroupTopologyStatus is one immutable engine-authoritative committed topolo
 
 _Appears in:_
 - [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+- [EngineGroupOperationStatus](#enginegroupoperationstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `generation` _integer_ | generation is the engine's topology generation. |  | Minimum: 1 <br /> |
 | `replicas` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | replicas is the complete logical-to-native membership mapping at this generation. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupTrafficRequirement
+
+_Underlying type:_ _string_
+
+EngineGroupTrafficRequirement describes the traffic boundary around membership mutation.
+
+_Validation:_
+- Enum: [KeepServing QuiesceGroup]
+
+_Appears in:_
+- [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+| Field | Description |
+| --- | --- |
+| `KeepServing` | EngineGroupTrafficRequirementKeepServing permits retained replicas to continue serving.<br /> |
+| `QuiesceGroup` | EngineGroupTrafficRequirementQuiesceGroup drains the complete base topology before mutation.<br /> |
 
 
 #### EngineGroupTrafficStatus
@@ -2659,6 +2792,61 @@ _Appears in:_
 | `admitted` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | admitted is the exact set of member incarnations eligible for new work. |  | Optional: \{\} <br /> |
 | `draining` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | draining is the exact set of member incarnations whose in-flight work has not completed. |  | Optional: \{\} <br /> |
 | `drained` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | drained is durable terminal non-serving evidence for exact member incarnations. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupVerificationPhase
+
+_Underlying type:_ _string_
+
+EngineGroupVerificationPhase is the independent serving-verification state.
+
+_Validation:_
+- Enum: [Pending Passed Failed]
+
+_Appears in:_
+- [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` | EngineGroupVerificationPhasePending means a proof is required for the committed topology.<br /> |
+| `Passed` | EngineGroupVerificationPhasePassed means the exact topology produced serving progress.<br /> |
+| `Failed` | EngineGroupVerificationPhaseFailed means a conclusive serving check failed.<br /> |
+
+
+#### EngineGroupVerificationRequirement
+
+_Underlying type:_ _string_
+
+EngineGroupVerificationRequirement states whether commit needs a serving-progress proof.
+
+_Validation:_
+- Enum: [None Required]
+
+_Appears in:_
+- [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+| Field | Description |
+| --- | --- |
+| `None` | EngineGroupVerificationRequirementNone permits admission after authoritative membership commit.<br /> |
+| `Required` | EngineGroupVerificationRequirementRequired requires a matching serving proof before admission.<br /> |
+
+
+#### EngineGroupVerificationStatus
+
+
+
+EngineGroupVerificationStatus records serving progress independently from membership commit.
+
+
+
+_Appears in:_
+- [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `phase` _[EngineGroupVerificationPhase](#enginegroupverificationphase)_ | phase is the durable serving-verification state. |  | Enum: [Pending Passed Failed] <br /> |
+| `proof` _[EngineGroupServingProofStatus](#enginegroupservingproofstatus)_ | proof is a positive result bound to one immutable topology. |  | Optional: \{\} <br /> |
+| `failure` _[EngineGroupFailureStatus](#enginegroupfailurestatus)_ | failure is a conclusive verification failure. |  | Optional: \{\} <br /> |
 
 
 #### ExperimentalSpec
