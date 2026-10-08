@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"sigs.k8s.io/yaml"
 )
@@ -42,16 +43,53 @@ const maxCandidateIDLength = 48
 // object name.
 var candidateIDPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
+const dgdKind = "DynamoGraphDeployment"
+
+// Manifest is one rendered candidate: exactly one DynamoGraphDeployment plus any
+// companion resources (for example generated ConfigMaps) the renderer emitted with it.
+type Manifest struct {
+	DGD        map[string]any
+	Companions []string // raw YAML documents, in order
+}
+
+var documentSeparator = regexp.MustCompile(`(?m)^---[ \t]*$`)
+
+// ParseManifest splits a multi-document manifest and locates its single
+// DynamoGraphDeployment, which must carry a spec.
+func ParseManifest(manifest string) (*Manifest, error) {
+	var out Manifest
+	for _, doc := range documentSeparator.Split(manifest, -1) {
+		if strings.TrimSpace(doc) == "" {
+			continue
+		}
+		var obj map[string]any
+		if err := yaml.Unmarshal([]byte(doc), &obj); err != nil {
+			return nil, fmt.Errorf("manifest document is not a YAML mapping: %w", err)
+		}
+		if len(obj) == 0 {
+			continue // comment-only document
+		}
+		if obj["kind"] != dgdKind {
+			out.Companions = append(out.Companions, strings.TrimSpace(doc))
+			continue
+		}
+		if out.DGD != nil {
+			return nil, errors.New("manifest has more than one DynamoGraphDeployment")
+		}
+		if _, ok := obj["spec"].(map[string]any); !ok {
+			return nil, errors.New("DynamoGraphDeployment has no spec")
+		}
+		out.DGD = obj
+	}
+	if out.DGD == nil {
+		return nil, errors.New("manifest has no DynamoGraphDeployment")
+	}
+	return &out, nil
+}
+
 func validateManifest(id, manifest string) error {
-	var doc map[string]any
-	if err := yaml.Unmarshal([]byte(manifest), &doc); err != nil {
-		return violation("manifest of candidate %q is not a YAML mapping: %v", id, err)
-	}
-	if doc["kind"] != "DynamoGraphDeployment" {
-		return violation("manifest of candidate %q is not a DynamoGraphDeployment", id)
-	}
-	if _, ok := doc["spec"].(map[string]any); !ok {
-		return violation("manifest of candidate %q has no spec", id)
+	if _, err := ParseManifest(manifest); err != nil {
+		return violation("manifest of candidate %q: %v", id, err)
 	}
 	return nil
 }

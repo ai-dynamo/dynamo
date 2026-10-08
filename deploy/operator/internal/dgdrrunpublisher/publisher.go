@@ -118,7 +118,6 @@ type Cluster interface {
 	SweeperState(ctx context.Context) (SweeperState, error)
 }
 
-// Publisher reconciles snapshots into the cluster.
 type Publisher struct {
 	Cluster      Cluster
 	SnapshotDir  string
