@@ -46,7 +46,7 @@ use dynamo_runtime::metrics::{
     transport_metrics::ensure_transport_metrics_registered_prometheus,
 };
 use std::net::{IpAddr, SocketAddr};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
@@ -146,6 +146,37 @@ pub struct State {
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
+    systemone_admission: Arc<Semaphore>,
+    systemone_preflight_admission: Arc<Semaphore>,
+    systemone_max_inflight_branches: usize,
+    systemone_max_input_tokens: usize,
+    systemone_request_timeout: Duration,
+}
+
+const DEFAULT_SYSTEMONE_MAX_INFLIGHT_BRANCHES: usize = 256;
+const DEFAULT_SYSTEMONE_MAX_INPUT_TOKENS: usize = 65_536;
+const SYSTEMONE_MAX_CONCURRENT_PREFLIGHT: usize = 4;
+
+fn bounded_systemone_limit(env_name: &'static str, default: usize) -> usize {
+    match std::env::var(env_name) {
+        Ok(value) => match value.parse::<usize>() {
+            Ok(parsed) if parsed > 0 => parsed.min(default),
+            _ => {
+                tracing::warn!(
+                    env = env_name,
+                    value,
+                    default,
+                    "ignoring invalid System One limit"
+                );
+                default
+            }
+        },
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => {
+            tracing::warn!(env = env_name, %error, default, "ignoring invalid System One limit");
+            default
+        }
+    }
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -532,6 +563,10 @@ impl State {
         cancel_token: CancellationToken,
         config: StateConfig,
     ) -> Self {
+        let systemone_max_inflight_branches = bounded_systemone_limit(
+            env_llm::DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES,
+            DEFAULT_SYSTEMONE_MAX_INFLIGHT_BRANCHES,
+        );
         Self {
             manager,
             metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
@@ -558,6 +593,19 @@ impl State {
             frontend_api_config: config.frontend_api_config,
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
+            systemone_admission: Arc::new(Semaphore::new(systemone_max_inflight_branches)),
+            systemone_preflight_admission: Arc::new(Semaphore::new(
+                SYSTEMONE_MAX_CONCURRENT_PREFLIGHT,
+            )),
+            systemone_max_inflight_branches,
+            systemone_max_input_tokens: bounded_systemone_limit(
+                env_llm::DYN_SYSTEMONE_MAX_INPUT_TOKENS,
+                DEFAULT_SYSTEMONE_MAX_INPUT_TOKENS,
+            ),
+            systemone_request_timeout: Duration::from_secs(bounded_systemone_limit(
+                env_llm::DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS,
+                300,
+            ) as u64),
         }
     }
 
@@ -572,6 +620,26 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
+    }
+
+    pub(crate) fn systemone_admission(&self) -> Arc<Semaphore> {
+        self.systemone_admission.clone()
+    }
+
+    pub(crate) fn systemone_max_inflight_branches(&self) -> usize {
+        self.systemone_max_inflight_branches
+    }
+
+    pub(crate) fn systemone_preflight_admission(&self) -> Arc<Semaphore> {
+        self.systemone_preflight_admission.clone()
+    }
+
+    pub(crate) fn systemone_max_input_tokens(&self) -> usize {
+        self.systemone_max_input_tokens
+    }
+
+    pub(crate) fn systemone_request_timeout(&self) -> Duration {
+        self.systemone_request_timeout
     }
 
     pub fn discovery(&self) -> Arc<dyn Discovery> {

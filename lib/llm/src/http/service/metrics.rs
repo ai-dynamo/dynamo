@@ -593,6 +593,93 @@ struct MetricsHandlerState {
     drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum SystemOnePhase {
+    Preflight,
+    FirstBranch,
+    Fanout,
+}
+
+impl SystemOnePhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Preflight => "preflight",
+            Self::FirstBranch => "first_branch",
+            Self::Fanout => "fanout",
+        }
+    }
+}
+
+struct SystemOneMetrics {
+    questions: HistogramVec,
+    input_tokens: HistogramVec,
+    candidate_ids: HistogramVec,
+    cached_tokens: HistogramVec,
+    admitted_branches: IntCounterVec,
+    phase_seconds: HistogramVec,
+}
+
+impl SystemOneMetrics {
+    fn new(prefix: &str) -> Self {
+        let work_histogram = |name: &str, help: &str, max: f64| {
+            HistogramVec::new(
+                HistogramOpts::new(format!("{prefix}_systemone_{name}"), help)
+                    .buckets(generate_log_buckets(1.0, max, 12)),
+                &["model"],
+            )
+            .expect("fixed System One work metric is valid")
+        };
+        Self {
+            questions: work_histogram(
+                "questions",
+                "Questions per admitted System One request",
+                128.0,
+            ),
+            input_tokens: work_histogram(
+                "input_tokens",
+                "Expanded prompt tokens per admitted System One request",
+                65_536.0,
+            ),
+            candidate_ids: work_histogram(
+                "candidate_ids",
+                "Requested candidate token IDs per admitted System One request",
+                32_640.0,
+            ),
+            cached_tokens: work_histogram(
+                "cached_tokens",
+                "Cached prompt tokens reported by a completed System One branch",
+                65_536.0,
+            ),
+            admitted_branches: IntCounterVec::new(
+                Opts::new(
+                    format!("{prefix}_systemone_admitted_branches_total"),
+                    "Total question branches admitted for System One dispatch",
+                ),
+                &["model"],
+            )
+            .expect("fixed System One branch metric is valid"),
+            phase_seconds: HistogramVec::new(
+                HistogramOpts::new(
+                    format!("{prefix}_systemone_phase_seconds"),
+                    "Duration of a System One execution phase in seconds",
+                )
+                .buckets(generate_log_buckets(0.001, 120.0, 15)),
+                &["model", "phase"],
+            )
+            .expect("fixed System One phase metric is valid"),
+        }
+    }
+
+    fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(self.questions.clone()))?;
+        registry.register(Box::new(self.input_tokens.clone()))?;
+        registry.register(Box::new(self.candidate_ids.clone()))?;
+        registry.register(Box::new(self.cached_tokens.clone()))?;
+        registry.register(Box::new(self.admitted_branches.clone()))?;
+        registry.register(Box::new(self.phase_seconds.clone()))
+    }
+}
+
 pub struct Metrics {
     request_started_counter: IntCounterVec,
     request_counter: IntCounterVec,
@@ -614,6 +701,7 @@ pub struct Metrics {
     /// inference rather than the 1-512s LLM-generation range. Labeled by
     /// `model`.
     embedding_latency: HistogramVec,
+    systemone: SystemOneMetrics,
 
     // Per-request multimodal content-part count histograms (labeled by `model`).
     images_per_request: HistogramVec,
@@ -707,6 +795,11 @@ pub enum Endpoint {
 
     /// Generate (token-in/token-out)
     Generate,
+
+    /// System One typed decisions
+    SystemOne,
+    /// OpenAI and SGLang-native decisions
+    Decisions,
 }
 
 /// Metrics for the HTTP service
@@ -922,6 +1015,7 @@ impl Metrics {
             );
         }
         let frontend_metric_name = |suffix: &str| format!("{}_{}", &prefix, suffix);
+        let systemone = SystemOneMetrics::new(&prefix);
 
         let request_counter = IntCounterVec::new(
             Opts::new(
@@ -1301,6 +1395,7 @@ impl Metrics {
             time_to_first_token,
             inter_token_latency,
             embedding_latency,
+            systemone,
             images_per_request,
             videos_per_request,
             audio_per_request,
@@ -1398,6 +1493,40 @@ impl Metrics {
             .observe(seconds);
     }
 
+    pub(crate) fn observe_systemone_work(
+        &self,
+        model: &str,
+        questions: usize,
+        input_tokens: usize,
+        candidate_ids: usize,
+    ) {
+        for (histogram, count) in [
+            (&self.systemone.questions, questions),
+            (&self.systemone.input_tokens, input_tokens),
+            (&self.systemone.candidate_ids, candidate_ids),
+        ] {
+            histogram.with_label_values(&[model]).observe(count as f64);
+        }
+        self.systemone
+            .admitted_branches
+            .with_label_values(&[model])
+            .inc_by(questions as u64);
+    }
+
+    pub(crate) fn observe_systemone_branch(&self, model: &str, cached_tokens: usize) {
+        self.systemone
+            .cached_tokens
+            .with_label_values(&[model])
+            .observe(cached_tokens as f64);
+    }
+
+    pub(crate) fn observe_systemone_phase(&self, model: &str, phase: SystemOnePhase, seconds: f64) {
+        self.systemone
+            .phase_seconds
+            .with_label_values(&[model, phase.as_str()])
+            .observe(seconds);
+    }
+
     /// Get the cumulative count of embedding latency observations for the given
     /// model. Test helper.
     #[cfg(test)]
@@ -1445,6 +1574,7 @@ impl Metrics {
     }
 
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+        self.systemone.register(registry)?;
         registry.register(Box::new(self.request_started_counter.clone()))?;
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
@@ -1861,6 +1991,8 @@ impl std::fmt::Display for Endpoint {
             Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
             Endpoint::Generate => write!(f, "generate"),
+            Endpoint::SystemOne => write!(f, "systemone"),
+            Endpoint::Decisions => write!(f, "decisions"),
         }
     }
 }
@@ -1881,6 +2013,8 @@ impl Endpoint {
             Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",
             Endpoint::Generate => "generate",
+            Endpoint::SystemOne => "systemone",
+            Endpoint::Decisions => "decisions",
         }
     }
 }
@@ -5258,5 +5392,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn systemone_metrics_use_configured_prefix_and_bounded_labels() {
+        let metrics = Metrics::new_with_prefix(Some("custom_frontend".to_string()));
+        let registry = Registry::new();
+        metrics.register(&registry).unwrap();
+        metrics.observe_systemone_work("served-model", 3, 120, 7);
+        metrics.observe_systemone_branch("served-model", 80);
+        for phase in [
+            SystemOnePhase::Preflight,
+            SystemOnePhase::FirstBranch,
+            SystemOnePhase::Fanout,
+        ] {
+            metrics.observe_systemone_phase("served-model", phase, 0.125);
+        }
+
+        let families: Vec<_> = registry
+            .gather()
+            .into_iter()
+            .filter(|family| family.name().starts_with("custom_frontend_systemone_"))
+            .collect();
+        assert_eq!(families.len(), 6);
+        for family in &families {
+            for metric in family.get_metric() {
+                for label in metric.get_label() {
+                    match label.name() {
+                        "model" => assert_eq!(label.value(), "served-model"),
+                        "phase" => assert!(matches!(
+                            label.value(),
+                            "preflight" | "first_branch" | "fanout"
+                        )),
+                        other => panic!("unexpected System One label {other}"),
+                    }
+                }
+            }
+        }
+        for (suffix, expected) in [
+            ("questions", 3.0),
+            ("input_tokens", 120.0),
+            ("candidate_ids", 7.0),
+            ("cached_tokens", 80.0),
+        ] {
+            let family = families
+                .iter()
+                .find(|family| family.name() == format!("custom_frontend_systemone_{suffix}"))
+                .unwrap();
+            let histogram = family.get_metric()[0].get_histogram();
+            assert_eq!(histogram.sample_count(), 1);
+            assert_eq!(histogram.sample_sum(), expected);
+        }
+        let branches = families
+            .iter()
+            .find(|family| family.name() == "custom_frontend_systemone_admitted_branches_total")
+            .unwrap();
+        assert_eq!(branches.get_metric()[0].get_counter().value(), 3.0);
+        let phases = families
+            .iter()
+            .find(|family| family.name() == "custom_frontend_systemone_phase_seconds")
+            .unwrap();
+        assert_eq!(phases.get_metric().len(), 3);
+        assert!(phases.get_metric().iter().all(|metric| {
+            let histogram = metric.get_histogram();
+            histogram.sample_count() == 1 && histogram.sample_sum() == 0.125
+        }));
     }
 }
