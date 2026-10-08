@@ -95,8 +95,12 @@ KEK_KEY_ID=issuer-kek-v1 KEK_KEY_VERSION=1 \
 MIN_RUNTIME_VERSION=1.6.0 \
 deploy/model-protection/protect-model.sh \
   /media/thinh_do/Data/Workspace/ocr_service/Resources/models/Qwen3.5-4B-25-09 \
-  "$MODEL_OUT" customer-ocr Qwen3.5-4B-25-09 file-v1
+  "$MODEL_OUT" customer-ocr Qwen3.5-4B-25-09 1
 ```
+
+`MODEL_OUT` is the output directory. The script creates `package/` and
+`issuer-record.json` directly inside it. The final `1` is the model-version
+metadata; it does not create a `file-v1/` directory.
 
 **Bước A2 — máy phát hành:** xuất đúng DEK 32 byte của package vừa tạo,
 không phải issuer KEK và không phải private signing key:

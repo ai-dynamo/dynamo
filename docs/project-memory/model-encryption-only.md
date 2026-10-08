@@ -10,6 +10,8 @@ Hướng dẫn này bao gồm mã hóa trên **máy nhà phát hành** và cấu
 **server khách hàng**. Lệnh mã hóa chỉ chạy trên máy nhà phát hành, nơi có
 model gốc và key. Chế độ này không cần TPM, enrollment, challenge hay license.
 Server khách hàng vẫn cần image protected đã build và cấu hình runtime bên dưới.
+Branch này khóa protected runtime ở vLLM `0.30.0` và Omni `0.30.0rc1`; dùng
+image được build từ branch này.
 Bản tiếng Anh: [model-encryption-only.en.md](model-encryption-only.en.md).
 
 Hướng dẫn chọn `PROTECTION_PROFILE=encrypted-file`: mã hóa cơ bản, không ràng
@@ -38,7 +40,7 @@ flowchart TD
 | Passphrase | `$XDG_RUNTIME_DIR/issuer-secrets/package-v2.pass` |
 | Model Qwen gốc | `/media/thinh_do/Data/Workspace/ocr_service/Resources/models/Qwen3.5-4B-25-09` |
 | Model HunyuanOCR gốc | `/media/thinh_do/Data/Workspace/ocr_service/Resources/models/Model_ocr_02_10_2026` |
-| Package mới | `/media/thinh_do/Data/Workspace/ocr_service/Resources/models/protected/encrypted-file/<tên-model>/file-v1` |
+| Thư mục đầu ra | `/media/thinh_do/Data/Workspace/ocr_service/Resources/models/protected/encrypted-file/<tên-model>` |
 
 Thư mục checkpoint phải chứa trực tiếp `config.json` và các file
 `*.safetensors`. Packager không tìm checkpoint trong các thư mục con. Nếu dùng
@@ -174,7 +176,9 @@ Nếu lệnh dừng, kiểm tra từng file và khôi phục bộ key v2 trướ
 
 Khối này định nghĩa đầy đủ các biến rồi mã hóa Qwen và HunyuanOCR lần lượt.
 `customer-ocr` là mã phạm vi khách hàng trong ví dụ; đổi nếu phát hành cho
-scope khác. `file-v1` là phiên bản package, không phải Docker image tag.
+scope khác. Thư mục đầu ra chính là thư mục model; script tạo `package/` và
+`issuer-record.json` ngay bên trong. Tham số `MODEL_VERSION` chỉ là metadata
+trong manifest, không tạo thư mục phiên bản. Ví dụ dùng giá trị `1`.
 
 Đích mới nằm dưới `protected/encrypted-file/`, tách khỏi package TPM cũ.
 Kiểm tra dung lượng đĩa đủ cho một bản weights mã hóa của mỗi model.
@@ -214,8 +218,8 @@ Kiểm tra dung lượng đĩa đủ cho một bản weights mã hóa của mỗ
   for MODEL in Qwen3.5-4B-25-09 Model_ocr_02_10_2026; do
     test -s "$MODEL_ROOT/$MODEL/config.json"
     compgen -G "$MODEL_ROOT/$MODEL/*.safetensors" > /dev/null
-    for OUT in "$RELEASE_ROOT/$MODEL/file-v1/package" \
-               "$RELEASE_ROOT/$MODEL/file-v1/issuer-record.json"; do
+    for OUT in "$RELEASE_ROOT/$MODEL/package" \
+               "$RELEASE_ROOT/$MODEL/issuer-record.json"; do
       if [ -e "$OUT" ] || [ -L "$OUT" ]; then
         printf 'Đích đã tồn tại, không ghi đè: %s\n' "$OUT" >&2
         exit 1
@@ -226,28 +230,30 @@ Kiểm tra dung lượng đĩa đủ cho một bản weights mã hóa của mỗ
   # 4.1. Qwen.
   bash deploy/model-protection/protect-model.sh \
     "$MODEL_ROOT/Qwen3.5-4B-25-09" \
-    "$RELEASE_ROOT/Qwen3.5-4B-25-09/file-v1" \
-    customer-ocr Qwen3.5-4B-25-09 file-v1
+    "$RELEASE_ROOT/Qwen3.5-4B-25-09" \
+    customer-ocr Qwen3.5-4B-25-09 1
 
   # 4.2. HunyuanOCR.
   bash deploy/model-protection/protect-model.sh \
     "$MODEL_ROOT/Model_ocr_02_10_2026" \
-    "$RELEASE_ROOT/Model_ocr_02_10_2026/file-v1" \
-    customer-ocr Model_ocr_02_10_2026 file-v1
+    "$RELEASE_ROOT/Model_ocr_02_10_2026" \
+    customer-ocr Model_ocr_02_10_2026 1
 )
 ```
 
 Thành công, mỗi lệnh in hai đường dẫn:
 
 ```text
-encrypted package: .../file-v1/package
-issuer record (do not ship): .../file-v1/issuer-record.json
+encrypted package: .../<tên-model>/package
+issuer record (do not ship): .../<tên-model>/issuer-record.json
 ```
 
 Nếu Qwen thành công nhưng OCR thất bại, giữ nguyên kết quả Qwen. Sau khi sửa
 lỗi OCR, chạy lại khối trên nhưng chỉ giữ OCR trong vòng kiểm tra và bỏ lệnh
 4.1. Không xóa kết quả Qwen để chạy lại cả hai. Khi phát hành phiên bản mới,
-đổi `file-v1` thành `file-v2` trong cả đường dẫn và tham số phiên bản.
+dùng thư mục đầu ra mới hoặc xác nhận/di chuyển bản cũ trước khi chạy lại; đặt
+`MODEL_VERSION` thành giá trị phiên bản mới trong metadata. Không thêm thư mục
+`file-v1` hoặc `file-v2` vào đường dẫn.
 
 ## 5. Kiểm tra package (máy nhà phát hành)
 
@@ -256,7 +262,7 @@ lỗi OCR, chạy lại khối trên nhưng chỉ giữ OCR trong vòng kiểm t
   set -euo pipefail
   RELEASE_ROOT=/media/thinh_do/Data/Workspace/ocr_service/Resources/models/protected/encrypted-file
   for MODEL in Qwen3.5-4B-25-09 Model_ocr_02_10_2026; do
-    MODEL_OUT="$RELEASE_ROOT/$MODEL/file-v1"
+    MODEL_OUT="$RELEASE_ROOT/$MODEL"
     test -s "$MODEL_OUT/package/model.protection.json"
     test -s "$MODEL_OUT/package/model.protection.sig"
     test -s "$MODEL_OUT/issuer-record.json"
@@ -284,7 +290,7 @@ kiểm tra toàn bộ digest hoặc smoke test inference. Mã hóa xong không c
 minh model có chất lượng OCR tốt hoặc tương thích với vLLM.
 
 ```text
-file-v1/
+<tên-model>/
 ├── package/                       # Package được phép chuyển cho khách
 │   ├── model.protection.json       # Manifest đã ký
 │   ├── model.protection.sig        # Chữ ký Ed25519
@@ -310,7 +316,7 @@ chữ ký issuer-record và sự khớp giữa chúng trước khi mở khóa.
   KEY_DIR=/home/thinh_do/Desktop/key-so-hoa/cqtt
   RELEASE_ROOT=/media/thinh_do/Data/Workspace/ocr_service/Resources/models/protected/encrypted-file
   for MODEL in Qwen3.5-4B-25-09 Model_ocr_02_10_2026; do
-    MODEL_OUT="$RELEASE_ROOT/$MODEL/file-v1"
+    MODEL_OUT="$RELEASE_ROOT/$MODEL"
     test ! -e "$MODEL_OUT/runtime/model-dek.bin"
     test ! -L "$MODEL_OUT/runtime/model-dek.bin"
     install -d -m 0700 "$MODEL_OUT/runtime" "$MODEL_OUT/runtime/trust"
@@ -341,33 +347,32 @@ chỉ giữ model còn thiếu trong vòng lặp; không ghi đè DEK đang dùn
 
 Khi cần bàn giao, chuyển riêng `package/` và `runtime/` của đúng model qua
 kênh bảo mật. `runtime/model-dek.bin` là **bí mật**, không in nội dung vào log.
-Không chuyển toàn bộ `file-v1/` vì nó chứa `issuer-record.json`. Không gửi
-KEK, `.pk8` hoặc passphrase. Không đưa checkpoint gốc vào gói bàn giao.
+Chỉ chuyển hai thư mục `package/` và `runtime/`; không chuyển
+`issuer-record.json`. Không gửi KEK, `.pk8` hoặc passphrase. Không đưa
+checkpoint gốc vào gói bàn giao.
 
 ## 7. Cấu hình chạy trên server khách hàng
 
-Chỉ chuyển `package/` và `runtime/` của cùng một model/version. Giữ nguyên
-cấu trúc `file-v1`. Compose OCR và LLM hiện nối `OCR_MODEL_PATH` hoặc
-`LLM_MODEL_PATH` với `/file-v1/package` và `/file-v1/runtime`.
+Chỉ chuyển `package/` và `runtime/` của cùng một model/version. Đặt hai thư
+mục này trực tiếp dưới thư mục model. Không tạo thêm thư mục `file-v1`.
+Compose OCR và LLM nối `OCR_MODEL_PATH` hoặc `LLM_MODEL_PATH` trực tiếp với
+`/package` và `/runtime`.
 
-Nếu bạn đặt `file-v1` ngay dưới `/root/developments/sohoa/ocr-prod`, cây thư
+Nếu bạn đặt thư mục model tại `/root/developments/sohoa/ocr-prod`, cây thư
 mục phải như sau:
 
 ```text
 /root/developments/sohoa/ocr-prod/
-└── file-v1/
-    ├── package/
-    └── runtime/
-        ├── runtime.json
-        ├── model-dek.bin
-        └── trust/package-public.key
+├── package/
+└── runtime/
+    ├── runtime.json
+    ├── model-dek.bin
+    └── trust/package-public.key
 ```
 
-Khi đó đặt `OCR_MODEL_PATH=/root/developments/sohoa/ocr-prod`. Nếu bạn giữ
-thêm thư mục model ở giữa, ví dụ
-`/root/developments/sohoa/ocr-prod/Model_ocr_02_10_2026/file-v1/`, đặt
-`OCR_MODEL_PATH=/root/developments/sohoa/ocr-prod/Model_ocr_02_10_2026`.
-Biến này phải trỏ tới thư mục **chứa trực tiếp `file-v1/`**.
+Đặt `OCR_MODEL_PATH=/root/developments/sohoa/ocr-prod`. Nếu bạn giữ thư mục
+model bên trong thư mục gốc triển khai, hãy đặt biến này trỏ thẳng tới thư
+mục model có `package/` và `runtime/` bên trong.
 
 ### 7.1. Cấu hình `runtime.json`
 
@@ -415,8 +420,8 @@ OCR_MODEL_NAME=KNM/OCR1.0-1B
 OCR_MODEL_PROTECTION_CONFIG=/runtime/runtime.json
 ```
 
-Đường dẫn trên giả định `file-v1/` nằm trực tiếp dưới
-`/root/developments/sohoa/ocr-prod/`. `OCR_MODEL_NAME` phải trùng tên model
+Đường dẫn trên phải trỏ trực tiếp tới thư mục có `package/` và `runtime/`.
+`OCR_MODEL_NAME` phải trùng tên model
 được khai báo cho frontend và worker.
 
 Với LLM, dùng biến `LLM_*` tương ứng:
@@ -428,9 +433,9 @@ LLM_MODEL_NAME=Qwen3.5-4B-25-09
 LLM_MODEL_PROTECTION_CONFIG=/runtime/runtime.json
 ```
 
-`OCR_MODEL_PATH` và `LLM_MODEL_PATH` là đường dẫn host. Compose tự mount
-`<đường-dẫn>/file-v1/package` vào `/models/package` và
-`<đường-dẫn>/file-v1/runtime` vào `/runtime`, ở chế độ chỉ đọc. Giá trị
+`OCR_MODEL_PATH` và `LLM_MODEL_PATH` là đường dẫn host tới thư mục model.
+Compose mount `<đường-dẫn>/package` vào `/models/package` và
+`<đường-dẫn>/runtime` vào `/runtime`, ở chế độ chỉ đọc. Giá trị
 `OCR_MODEL_PROTECTION_CONFIG` hoặc `LLM_MODEL_PROTECTION_CONFIG` là đường dẫn
 trong container. Không đặt biến này bằng đường dẫn host.
 
@@ -445,12 +450,12 @@ Compose mặc định chạy worker bằng UID/GID `1000:1000`. Sau khi sao ché
 
 ```bash
 MODEL_DIR=/root/developments/sohoa/ocr-prod
-sudo chown -R 1000:1000 "$MODEL_DIR/file-v1"
-sudo find "$MODEL_DIR/file-v1" -type d -exec chmod 0700 {} +
-sudo find "$MODEL_DIR/file-v1" -type f -exec chmod 0600 {} +
+sudo chown -R 1000:1000 "$MODEL_DIR/package" "$MODEL_DIR/runtime"
+sudo find "$MODEL_DIR/package" "$MODEL_DIR/runtime" -type d -exec chmod 0700 {} +
+sudo find "$MODEL_DIR/package" "$MODEL_DIR/runtime" -type f -exec chmod 0600 {} +
 ```
 
-Nếu `file-v1` nằm trong thư mục tên model, đặt `MODEL_DIR` thành thư mục đó.
+Đặt `MODEL_DIR` thành thư mục có trực tiếp `package/` và `runtime/`.
 Nếu dùng UID/GID khác, đặt `MODEL_PROTECTION_UID` và
 `MODEL_PROTECTION_GID` tương ứng.
 
@@ -531,7 +536,7 @@ Không thấy frontend yêu cầu `/api/models//run/protected-ocr-models/...`. S
 | `SOFTWARE_PROFILE_REQUIRED` khi xuất DEK | Package cũ là TPM hoặc profile khác. Tạo package mới với `PROTECTION_PROFILE=encrypted-file`; không sửa manifest đã ký. |
 | Frontend gọi Hugging Face với `/run/protected-...` | Đặt `DYN_SYSTEM_PORT=9090` và `DYN_SELF_HOST_METADATA=true` trên worker; xác nhận worker và frontend ở cùng mạng Docker. Không đổi model thành repo ID giả. |
 | `OSError: Read-only file system: /home/dynamo/.cupy` | Đặt `HOME=/tmp` và `CUPY_CACHE_DIR=/tmp/cache/cupy`; xác nhận `/tmp` là tmpfs ghi được. |
-| Không tìm thấy `file-v1/package` hoặc `file-v1/runtime` | Đặt `OCR_MODEL_PATH`/`LLM_MODEL_PATH` trỏ tới thư mục host chứa trực tiếp `file-v1/`; kiểm tra cấu trúc thư mục đã copy. |
+| Không tìm thấy `package/` hoặc `runtime/` | Đặt `OCR_MODEL_PATH`/`LLM_MODEL_PATH` trỏ tới thư mục host có trực tiếp hai thư mục này; không thêm `/file-v1`. Kiểm tra cấu trúc đã copy. |
 | `MODEL_PROTECTION_CONFIG_INVALID` | Kiểm tra JSON tại `runtime/runtime.json`, key ID và đường dẫn `/runtime/...`; đảm bảo worker đọc được mọi file. |
 
 `ulimit -l` trên Bash trả đơn vị KiB, khác `MEMLOCK_BYTES` của container worker.

@@ -602,6 +602,8 @@ RUN rm -rf /workspace/vllm
 # omni video-encode path, which uses the royalty-free VP9 (libvpx_vp9) encoder —
 # no H.264 is built. Direct rm makes the removal robust regardless of how the
 # base image's pip is configured; the guards fail the build if any of them survive.
+# Some package mirrors omit cmake, which the isolated OpenCV build needs. Keep
+# the configured index first and allow public PyPI to supply build dependencies.
 RUN set -eux; \
     OPENCV_VERSION="$(python3 -m pip show opencv-python-headless 2>/dev/null | awk '/^Version:/{print $2}')"; \
     if [ -z "${OPENCV_VERSION}" ]; then \
@@ -628,7 +630,9 @@ RUN set -eux; \
     ! python3 -c "import torchcodec" 2>/dev/null; \
     ENABLE_HEADLESS=1 ENABLE_CONTRIB=0 MAKEFLAGS="-j$(nproc)" \
     CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DVIDEOIO_ENABLE_PLUGINS=OFF -DWITH_1394=OFF -DWITH_V4L=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DENABLE_CCACHE=OFF" \
-    python3 -m pip install --no-binary opencv-python-headless "opencv-python-headless==${OPENCV_VERSION}"; \
+    python3 -m pip install --no-cache-dir --timeout 60 --retries 5 \
+        --extra-index-url https://pypi.org/simple \
+        --no-binary opencv-python-headless "opencv-python-headless==${OPENCV_VERSION}"; \
     rm -rf /root/.cache/pip; \
     python3 -c "import cv2; cv2.resize"; \
     ! ls -d "${SITE_PACKAGES}"/opencv_python*.libs 2>/dev/null; \

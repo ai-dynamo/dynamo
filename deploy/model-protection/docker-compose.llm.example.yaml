@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Example cloned from ocr_service/deploy/prod/docker-compose.model-llm.yaml.
-# This file uses the encrypted-file package layout: <LLM_MODEL_PATH>/file-v1/.
+# This file uses the encrypted-file layout: package/ and runtime/ are directly
+# under LLM_MODEL_PATH. The protected runtime uses vLLM 0.30.0.
 # The external network must contain nats-server and etcd-server.
 
 x-protected-runtime: &protected-runtime
@@ -95,13 +96,13 @@ services:
       DYN_MODEL_PROTECTION_CONFIG: "${LLM_MODEL_PROTECTION_CONFIG:-${DYN_MODEL_PROTECTION_CONFIG:-/runtime/runtime.json}}"
     volumes:
       - type: bind
-        source: "${LLM_MODEL_PATH:?Set LLM_MODEL_PATH}/file-v1/package"
+        source: "${LLM_MODEL_PATH:?Set LLM_MODEL_PATH}/package"
         target: /models/package
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: "${LLM_MODEL_PATH:?Set LLM_MODEL_PATH}/file-v1/runtime"
+        source: "${LLM_MODEL_PATH:?Set LLM_MODEL_PATH}/runtime"
         target: /runtime
         read_only: true
         bind:

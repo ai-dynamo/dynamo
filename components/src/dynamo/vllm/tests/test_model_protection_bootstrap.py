@@ -313,7 +313,7 @@ def test_effective_gate_accepts_multimodal_vllm_engine(tmp_path) -> None:
     bootstrap.validate_protected_engine_args(config, prepared, vllm.__version__)
 
 
-@pytest.mark.parametrize("version", ["0.29.0", "0.30.1", "0.30.0rc1"])
+@pytest.mark.parametrize("version", ["0.28.0", "0.29.0", "0.30.1", "0.30.0rc1"])
 def test_effective_gate_rejects_unprofiled_vllm_version(version) -> None:
     session = _Session()
     prepared = bootstrap.ProtectionBootstrap([], session, session.model_path, "test")

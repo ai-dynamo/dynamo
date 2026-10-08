@@ -10,6 +10,8 @@ the **customer server**. Run packaging commands only on the issuer host, which
 holds the source model and issuer keys. This profile does not require TPM,
 enrollment, a challenge, or a license. The customer server still needs a
 protected runtime image and the runtime configuration below.
+This branch pins the protected runtime to vLLM `0.30.0` and Omni `0.30.0rc1`.
+Use an image built from this branch.
 
 Last verified: 2026-10-07.
 
@@ -29,15 +31,17 @@ The Vietnamese version is [model-encryption-only.md](model-encryption-only.md).
 | Passphrase directory | `$XDG_RUNTIME_DIR/issuer-secrets` |
 | Qwen source model | `/media/thinh_do/Data/Workspace/ocr_service/Resources/models/Qwen3.5-4B-25-09` |
 | HunyuanOCR source model | `/media/thinh_do/Data/Workspace/ocr_service/Resources/models/Model_ocr_02_10_2026` |
-| Package output | `/media/thinh_do/Data/Workspace/ocr_service/Resources/models/protected/encrypted-file/<model>/file-v1` |
+| Output directory | `/media/thinh_do/Data/Workspace/ocr_service/Resources/models/protected/encrypted-file/<model>` |
 
 Each source checkpoint must contain `config.json` and its Safetensors files.
 Do not use a parent directory that contains several checkpoints. Do not use an
 unmerged LoRA adapter as a complete model.
 
 The output contains encrypted weights and readable metadata. The source
-checkpoint stays unchanged. The package version `file-v1` is separate from the
-Docker image tag.
+checkpoint stays unchanged. The output directory is the model directory. The
+script creates `package/` and `issuer-record.json` directly inside it. The
+`MODEL_VERSION` argument is manifest metadata; it does not add a directory.
+This guide uses `1` as the metadata version.
 
 ## 2. Build the packaging tools (issuer host)
 
@@ -163,19 +167,19 @@ signing key and KEK.
   for MODEL in Qwen3.5-4B-25-09 Model_ocr_02_10_2026; do
     test -s "$MODEL_ROOT/$MODEL/config.json"
     compgen -G "$MODEL_ROOT/$MODEL/*.safetensors" > /dev/null
-    test ! -e "$RELEASE_ROOT/$MODEL/file-v1/package"
-    test ! -e "$RELEASE_ROOT/$MODEL/file-v1/issuer-record.json"
+    test ! -e "$RELEASE_ROOT/$MODEL/package"
+    test ! -e "$RELEASE_ROOT/$MODEL/issuer-record.json"
   done
 
   bash deploy/model-protection/protect-model.sh \
     "$MODEL_ROOT/Qwen3.5-4B-25-09" \
-    "$RELEASE_ROOT/Qwen3.5-4B-25-09/file-v1" \
-    customer-ocr Qwen3.5-4B-25-09 file-v1
+    "$RELEASE_ROOT/Qwen3.5-4B-25-09" \
+    customer-ocr Qwen3.5-4B-25-09 1
 
   bash deploy/model-protection/protect-model.sh \
     "$MODEL_ROOT/Model_ocr_02_10_2026" \
-    "$RELEASE_ROOT/Model_ocr_02_10_2026/file-v1" \
-    customer-ocr Model_ocr_02_10_2026 file-v1
+    "$RELEASE_ROOT/Model_ocr_02_10_2026" \
+    customer-ocr Model_ocr_02_10_2026 1
 )
 ```
 
@@ -197,7 +201,7 @@ it to the customer.
   KEY_DIR=/home/thinh_do/Desktop/key-so-hoa/cqtt
   RELEASE_ROOT=/media/thinh_do/Data/Workspace/ocr_service/Resources/models/protected/encrypted-file
   for MODEL in Qwen3.5-4B-25-09 Model_ocr_02_10_2026; do
-    MODEL_OUT="$RELEASE_ROOT/$MODEL/file-v1"
+    MODEL_OUT="$RELEASE_ROOT/$MODEL"
     test ! -e "$MODEL_OUT/runtime/model-dek.bin"
     install -d -m 0700 "$MODEL_OUT/runtime" "$MODEL_OUT/runtime/trust"
     target/release/model-protection-issue export-file-key \
@@ -248,26 +252,26 @@ paths. Do not put the DEK in `.env.prod`.
 
 ## 6. Transfer the package and runtime (issuer to customer)
 
-For each model, transfer only the matching `file-v1/package/` and
-`file-v1/runtime/` directories over an approved secure channel. Do not send the
-issuer record, KEK, private keys, passphrase, or original checkpoint.
+For each model, transfer only the matching `package/` and `runtime/`
+directories over an approved secure channel. Do not send the issuer record,
+KEK, private keys, passphrase, or original checkpoint.
 
-On the customer server, place them under the same `file-v1` directory:
+On the customer server, place them directly under the model directory. Do not
+create a `file-v1` directory:
 
 ```text
 /root/developments/sohoa/ocr-prod/
-└── file-v1/
-    ├── package/
-    └── runtime/
-        ├── runtime.json
-        ├── model-dek.bin
-        └── trust/package-public.key
+├── package/
+└── runtime/
+    ├── runtime.json
+    ├── model-dek.bin
+    └── trust/package-public.key
 ```
 
 In this example, set `OCR_MODEL_PATH=/root/developments/sohoa/ocr-prod`. If
-you keep the model directory in the copied tree, include that directory in
-`OCR_MODEL_PATH`. The variable must point to the directory that directly
-contains `file-v1/`.
+you keep a model-named directory in the copied tree, set `OCR_MODEL_PATH` to
+that model directory. The variable must point to the directory that directly
+contains `package/` and `runtime/`.
 
 ## 7. Configure the customer Compose deployment
 
@@ -290,10 +294,11 @@ LLM_MODEL_NAME=Qwen3.5-4B-25-09
 LLM_MODEL_PROTECTION_CONFIG=/runtime/runtime.json
 ```
 
-`OCR_MODEL_PATH` and `LLM_MODEL_PATH` are host paths. The Compose files append
-`/file-v1/package` and `/file-v1/runtime`, then mount these directories
-read-only as `/models/package` and `/runtime`. The protection config variable
-uses the container path `/runtime/runtime.json`, not a host path.
+`OCR_MODEL_PATH` and `LLM_MODEL_PATH` are host paths to the model directory.
+The Compose files append `/package` and `/runtime`, then mount these
+directories read-only as `/models/package` and `/runtime`. The protection
+config variable uses the container path `/runtime/runtime.json`, not a host
+path.
 
 Set the worker UID/GID to match the owner of the runtime files. Set memory,
 tmpfs, and `MEMLOCK_BYTES` limits from measurements on the customer server.
@@ -304,13 +309,13 @@ copy the artifact, set its owner and modes to match:
 
 ```bash
 MODEL_DIR=/root/developments/sohoa/ocr-prod
-sudo chown -R 1000:1000 "$MODEL_DIR/file-v1"
-sudo find "$MODEL_DIR/file-v1" -type d -exec chmod 0700 {} +
-sudo find "$MODEL_DIR/file-v1" -type f -exec chmod 0600 {} +
+sudo chown -R 1000:1000 "$MODEL_DIR/package" "$MODEL_DIR/runtime"
+sudo find "$MODEL_DIR/package" "$MODEL_DIR/runtime" -type d -exec chmod 0700 {} +
+sudo find "$MODEL_DIR/package" "$MODEL_DIR/runtime" -type f -exec chmod 0600 {} +
 ```
 
-If `file-v1` is under a model-named subdirectory, set `MODEL_DIR` to that
-directory. Set `MODEL_PROTECTION_UID` and `MODEL_PROTECTION_GID` if the
+Set `MODEL_DIR` to the directory that directly contains `package/` and
+`runtime/`. Set `MODEL_PROTECTION_UID` and `MODEL_PROTECTION_GID` if the
 container uses another user.
 
 ### Keep metadata local
@@ -384,7 +389,7 @@ an OCR request. For LLM, use `docker-compose.model-llm.yaml` and
 | `SOFTWARE_PROFILE_REQUIRED` | The package uses another profile. Create a new `encrypted-file` package; do not edit its signed manifest. |
 | Hugging Face URL contains `/run/protected-...` | Set `DYN_SYSTEM_PORT=9090` and `DYN_SELF_HOST_METADATA=true` on the worker. Confirm that the frontend can reach the worker over the Docker network. |
 | `Read-only file system: /home/dynamo/.cupy` | Set `HOME=/tmp` and `CUPY_CACHE_DIR=/tmp/cache/cupy`. Confirm that `/tmp` is a writable tmpfs. |
-| `file-v1/package` or `file-v1/runtime` is missing | Set `OCR_MODEL_PATH` or `LLM_MODEL_PATH` to the host directory that directly contains `file-v1/`. |
+| `package/` or `runtime/` is missing | Set `OCR_MODEL_PATH` or `LLM_MODEL_PATH` to the host directory that directly contains both directories. Do not add `/file-v1`. |
 | `MODEL_PROTECTION_CONFIG_INVALID` | Validate `runtime.json`, its key ID, `/runtime/...` paths, file ownership, and file modes. |
 
 This profile does not require TPM enrollment. It does not stop a person who

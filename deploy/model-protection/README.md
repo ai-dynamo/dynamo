@@ -39,6 +39,9 @@ Protected image builds pin the base to vLLM 0.30.0 and Omni 0.30.0rc1.
 loader support exactly 0.30.0. Final diagnostics separate version/loader mismatch
 from a missing TPM-enabled extension. Rebuild the base after this source update;
 an older base may contain the previous Python loader even with vLLM 0.30.0 installed.
+The protected build script overrides the general vLLM image pins in
+`container/context.yaml`. Build through that script so the runtime and protected
+loader use the same source revision and exact vLLM version.
 
 Normal and protected models use separate paths:
 
@@ -193,7 +196,7 @@ to bypass admission; use the
 
 Build the base and protected image from the same reviewed source revision. The
 build script compiles the TPM-enabled wheel and the Dockerfile rejects an image
-without the TPM binding or with a vLLM/loader version other than 0.30.0:
+without the TPM binding or with a vLLM/loader version other than 0.28.0:
 
 ```bash
 IMAGE_TAG=registry.example.com/dynamo-vllm-protected:1.5.0 \
@@ -236,8 +239,8 @@ modify that production file. It starts a frontend and one vLLM worker. The
 example expects this directory layout on the customer host:
 
 ```text
-<LLM_MODEL_PATH>/file-v1/package/
-<LLM_MODEL_PATH>/file-v1/runtime/runtime.json
+<LLM_MODEL_PATH>/package/
+<LLM_MODEL_PATH>/runtime/runtime.json
 ```
 
 Set `LLM_DYN_NAMESPACE` to the namespace signed into the package. The
@@ -247,14 +250,14 @@ namespace. The external Docker network must have services named
 customer host. Do not copy issuer private keys into `runtime/`.
 
 ```bash
-export LLM_PROTECTED_IMAGE=dynamo-vllm-protected-prod:1.5.0
+export LLM_PROTECTED_IMAGE=dynamo-vllm-protected-prod:1.5.0-vllm028
 export LLM_MODEL_PATH=/srv/protected-models/my-llm
 export LLM_MODEL_NAME=my-llm
 export LLM_DYN_NAMESPACE=protected-llm
 export LLM_DYN_NETWORK=ocr_network
 export LLM_GPU_ID=0
-test -d "$LLM_MODEL_PATH/file-v1/package"
-test -f "$LLM_MODEL_PATH/file-v1/runtime/runtime.json"
+test -d "$LLM_MODEL_PATH/package"
+test -f "$LLM_MODEL_PATH/runtime/runtime.json"
 docker network inspect "$LLM_DYN_NETWORK" >/dev/null
 docker compose -f deploy/model-protection/docker-compose.llm.example.yaml config --quiet
 docker compose -f deploy/model-protection/docker-compose.llm.example.yaml up -d
