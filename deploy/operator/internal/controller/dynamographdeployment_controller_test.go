@@ -3731,15 +3731,22 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 }
 
 func TestGroveChildEventPredicates(t *testing.T) {
+	t.Log("ordinary clique creation still waits for a significant readiness observation")
 	podClique := &grovev1alpha1.PodClique{}
 	podCliquePredicates := podCliqueEventPredicates()
 	assert.False(t, podCliquePredicates.Create(event.CreateEvent{Object: podClique}))
 	assert.False(t, podCliquePredicates.Delete(event.DeleteEvent{Object: podClique}))
 	assert.False(t, podCliquePredicates.Generic(event.GenericEvent{Object: podClique}))
 
+	t.Log("Engine Group clique creation and deletion immediately re-evaluate exact world binding")
+	podClique.Labels = map[string]string{commonconsts.KubeLabelDynamoEngineGroup: "group"}
+	assert.True(t, podCliquePredicates.Create(event.CreateEvent{Object: podClique}))
+	assert.True(t, podCliquePredicates.Delete(event.DeleteEvent{Object: podClique}))
+
+	t.Log("PCSG cache arrival or loss independently changes the clique ownership proof")
 	scalingGroup := &grovev1alpha1.PodCliqueScalingGroup{}
 	scalingGroupPredicates := pcsgEventPredicates()
-	assert.False(t, scalingGroupPredicates.Create(event.CreateEvent{Object: scalingGroup}))
-	assert.False(t, scalingGroupPredicates.Delete(event.DeleteEvent{Object: scalingGroup}))
+	assert.True(t, scalingGroupPredicates.Create(event.CreateEvent{Object: scalingGroup}))
+	assert.True(t, scalingGroupPredicates.Delete(event.DeleteEvent{Object: scalingGroup}))
 	assert.False(t, scalingGroupPredicates.Generic(event.GenericEvent{Object: scalingGroup}))
 }

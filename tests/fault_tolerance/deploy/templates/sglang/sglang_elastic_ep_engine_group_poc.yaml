@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Growth-only EP2 -> EP3 proof using one DGD. Render IMAGE, NATS_SERVER,
+# ETCD_ENDPOINTS and SGLANG_MOONCAKE_IB_DEVICE with envsubst, then apply.
+# The operator creates the child Engine Group and Grove PCS automatically.
+# Run run_sglang_elastic_ep_engine_group_poc.sh to scale the generated child.
+# Every capacity Pod uses one template; the bootstrap derives its role from Grove's slot.
+# Allocation readiness does not imply committed membership or serving verification.
+# Recovery, shrink, rollout and automatic world retirement remain unsupported.
+# Requires the operator's Grove feature gate and installed Grove CRDs.
+# DeepSeek-V2-Lite is used because this proof requires an MoE model with elastic experts.
+# NIXL EP requires a working UCX GPU-device transport; validate the host transport first.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-elastic-ep-poc
+spec:
+  backendFramework: sglang
+  env:
+  - name: DYN_NAMESPACE
+    value: sglang-elastic-ep-poc
+  - name: NATS_SERVER
+    value: ${NATS_SERVER}
+  - name: ETCD_ENDPOINTS
+    value: ${ETCD_ENDPOINTS}
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    runtimeVersionOverride: "1.5.0"     # development image tags are not semantic versions
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${IMAGE}
+          args: [-m, dynamo.frontend, --namespace-prefix, sglang-elastic-ep-poc]
+  - name: Worker
+    type: worker
+    replicas: 1                         # one independently resizable world
+    runtimeVersionOverride: "1.5.0"
+    engineGroup:
+      initialSize: 2                    # seeds the child once; live /scale grows to three
+      policy: {minSize: 2, maxSize: 3}
+    podTemplate:
+      spec:
+        restartPolicy: Never            # no uncoordinated engine restart
+        imagePullSecrets:
+        - name: nvcr-imagepullsecret
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        containers:
+        - name: main
+          image: ${IMAGE}
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK]
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          env:
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          - name: HF_HUB_ENABLE_HF_TRANSFER
+            value: "1"
+          - name: HF_HOME
+            value: /model-cache
+          resources:
+            requests:
+              memory: 30Gi
+              nvidia.com/gpu: "1"
+            limits:
+              memory: 60Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+          command: [python3, -m, dynamo.sglang.elastic_ep_bootstrap]
+          args:
+          - --model-path
+          - deepseek-ai/DeepSeek-V2-Lite
+          - --served-model-name
+          - deepseek-ai/DeepSeek-V2-Lite
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --page-size
+          - "16"
+          - --tp
+          - "2"
+          - --dp
+          - "2"
+          - --nnodes
+          - "2"
+          - --moe-dense-tp-size
+          - "1"
+          - --enable-dp-attention
+          - --enable-dp-lm-head
+          - --moe-a2a-backend
+          - nixl
+          - --deepep-mode
+          - low_latency
+          - --elastic-ep-backend
+          - mooncake
+          - --mooncake-ib-device
+          - ${SGLANG_MOONCAKE_IB_DEVICE}
+          - --load-balance-method
+          - round_robin
+          - --enable-eplb
+          - --ep-num-redundant-experts
+          - "24"
+          - --elastic-ep-initial-size
+          - "2"
+          - --max-ep-size
+          - "3"
+          - --disable-cuda-graph
+          - --dist-init-addr
+          - 0.0.0.0:24555                # launcher derives Grove slot-zero DNS

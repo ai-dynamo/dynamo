@@ -72,8 +72,8 @@ func (s *groveWatchSetup) addTo(ctrlBuilder *builder.Builder) *builder.Builder {
 
 func podCliqueEventPredicates() predicate.Funcs {
 	return predicate.Funcs{
-		CreateFunc: func(event.CreateEvent) bool { return false },
-		DeleteFunc: func(event.DeleteEvent) bool { return false },
+		CreateFunc: func(e event.CreateEvent) bool { return e.Object.GetLabels()[consts.KubeLabelDynamoEngineGroup] != "" },
+		DeleteFunc: func(e event.DeleteEvent) bool { return e.Object.GetLabels()[consts.KubeLabelDynamoEngineGroup] != "" },
 		UpdateFunc: func(updateEvent event.UpdateEvent) bool {
 			oldPodClique, oldOK := updateEvent.ObjectOld.(*grovev1alpha1.PodClique)
 			newPodClique, newOK := updateEvent.ObjectNew.(*grovev1alpha1.PodClique)
@@ -87,8 +87,9 @@ func podCliqueEventPredicates() predicate.Funcs {
 
 func pcsgEventPredicates() predicate.Funcs {
 	return predicate.Funcs{
-		CreateFunc: func(event.CreateEvent) bool { return false },
-		DeleteFunc: func(event.DeleteEvent) bool { return false },
+		// PCSG ownership may appear after its clique; creation and deletion change binding validity.
+		CreateFunc: func(event.CreateEvent) bool { return true },
+		DeleteFunc: func(event.DeleteEvent) bool { return true },
 		UpdateFunc: func(updateEvent event.UpdateEvent) bool {
 			oldScalingGroup, oldOK := updateEvent.ObjectOld.(*grovev1alpha1.PodCliqueScalingGroup)
 			newScalingGroup, newOK := updateEvent.ObjectNew.(*grovev1alpha1.PodCliqueScalingGroup)

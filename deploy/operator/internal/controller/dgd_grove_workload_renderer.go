@@ -31,6 +31,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -143,6 +144,21 @@ func (r *groveWorkloadRenderer) renderPodCliqueSet(
 	prepareGroveTopologyConstraintUpgrade(desired, existing)
 	preserveGrovePodCliqueSetOrder(desired, existing)
 	preserveGrovePodCliqueSetReplicas(desired, existing, checkpointInfos)
+	// Until world rollout is implemented, never change a live world's immutable pod template.
+	if existing != nil {
+		for i := range renderDeployment.Spec.Components {
+			component := &renderDeployment.Spec.Components[i]
+			if component.EngineGroup == nil {
+				continue
+			}
+			oldClique := podCliqueSetCliqueForComponent(existing, component.ComponentName)
+			newClique := podCliqueSetCliqueForComponent(desired, component.ComponentName)
+			if oldClique == nil || newClique == nil || !apiequality.Semantic.DeepEqual(oldClique.Spec, newClique.Spec) ||
+				!apiequality.Semantic.DeepEqual(oldClique.Annotations, newClique.Annotations) {
+				return nil, fmt.Errorf("component %q: live Engine Group workload changes require coordinated world rollout", component.ComponentName)
+			}
+		}
+	}
 	return desired, nil
 }
 

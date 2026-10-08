@@ -34,6 +34,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -136,6 +137,19 @@ func (r *Reconciler) Reconcile(
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Fence physical teardown even when the old runtime can no longer resolve its deleted clique.
+	pending, bindingErr := r.reconcileGroveWorld(ctx, group)
+	if pending || bindingErr != nil {
+		before := group.Status.DeepCopy()
+		invalidateEngineGroupHealth(group, "WorldRestartPending", "Physical world teardown or restart has not yet established fresh membership")
+		setEngineGroupCondition(group, engineGroupConditionRuntimeReady, metav1.ConditionFalse, "WorldRestartPending",
+			"Normal membership effects are paused until the physical world binding is fenced")
+		if updateErr := r.updateEngineGroupStatus(ctx, group, before); updateErr != nil {
+			return ctrl.Result{}, errors.Join(bindingErr, updateErr)
+		}
+		return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, bindingErr
+	}
+
 	// A failed binding may progress only through the fenced handoff, never through ordinary effects.
 	if runtimeErr != nil {
 		return r.reconcileUnavailableRuntime(ctx, group, runtimeErr)
@@ -171,7 +185,7 @@ func (r *Reconciler) Reconcile(
 	store := engineGroupCheckpointStore(r, group)
 	checkpoint, snapshot, err := loadEngineGroupCheckpoint(ctx, store, group)
 	if err != nil {
-		return r.reconcileCheckpointFailure(ctx, group, err)
+		return r.reconcileCheckpointLoadFailure(ctx, group, runtime, store, snapshot, err)
 	}
 	if !snapshot.Exists() {
 		return r.initializeEngineGroupStatus(ctx, group, runtime, store, snapshot)
@@ -234,6 +248,22 @@ func (r *Reconciler) initializeEngineGroupStatus(
 	store kubejournal.Store,
 	snapshot kubejournal.Snapshot,
 ) (ctrl.Result, error) {
+	// Even an interrupted first formation needs a verified fresh lifetime after a fenced rebind.
+	uid := group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID]
+	if uid != "" && group.Labels[consts.KubeLabelDynamoEngineGroupRuntime] == consts.KubeLabelDynamoEngineGroupSGLang {
+		var fence groveWorldFence
+		fenceSnapshot, err := groveWorldFenceStore(r.Client, group, types.UID(uid)).Load(ctx, &fence)
+		if err != nil {
+			return r.reconcileCheckpointFailure(ctx, group, err)
+		}
+		if fenceSnapshot.Exists() && fence.PreviousUID != "" {
+			if err := r.authorizeGroveCheckpointRestart(ctx, group, fence.PreviousUID); err != nil {
+				return r.reconcileCheckpointFailure(ctx, group, err)
+			}
+			return r.initializeRestartedEngineGroup(ctx, group, runtime, store, snapshot)
+		}
+	}
+
 	before := group.Status.DeepCopy()
 	observations, err := observeEngineGroupRuntime(ctx, runtime, engineGroupID(group), "")
 	if err != nil {
