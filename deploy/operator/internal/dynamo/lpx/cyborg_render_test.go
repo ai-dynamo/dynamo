@@ -136,7 +136,10 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	manifestEnv := corev1.EnvVar{
 		Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin",
 	}
-	require.Equal(t, append([]corev1.EnvVar{manifestEnv}, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
+	require.Equal(t, append([]corev1.EnvVar{
+		{Name: "LPX_AGENT_HOST_TEMPLATE", Value: "${GROVE_PCS_NAME}-${GROVE_PCS_INDEX}-lpx-${GROVE_PCSG_INDEX}-agt-${LPX_LEADER_OFFSET}.${GROVE_HEADLESS_SERVICE}"},
+		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
+		manifestEnv}, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
 	require.Equal(t, &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cyborg-models", ReadOnly: true}, cyborg.Spec.PodSpec.Volumes[0].PersistentVolumeClaim)
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
 		Name: "model-storage", MountPath: "/models", SubPath: "cyborg", ReadOnly: true,
@@ -150,7 +153,10 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	imageEntrypointCyborg.Spec.Replicas = 4
 	imageEntrypointCyborg.Spec.MinAvailable = ptr.To[int32](4)
 	imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args = []string{"serve"}
-	imageEntrypointEnv := append([]corev1.EnvVar{manifestEnv}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
+	imageEntrypointEnv := append([]corev1.EnvVar{
+		{Name: "LPX_AGENT_HOST_TEMPLATE", Value: "${GROVE_PCS_NAME}-${GROVE_PCS_INDEX}-lpx-${GROVE_PCSG_INDEX}-agt-${LPX_LEADER_OFFSET}.${GROVE_HEADLESS_SERVICE}"},
+		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
+		manifestEnv}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
 
 	t.Log("Leave the image ENTRYPOINT selected when command is omitted")
 	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}

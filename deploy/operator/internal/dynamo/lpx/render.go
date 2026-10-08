@@ -119,6 +119,7 @@ func RenderNodeLocal(
 		if err := applyModelPaths(container, projections, modelStoragePath); err != nil {
 			return nil, err
 		}
+		applyNovaSelections(container, projections)
 		annotations := roleAnnotations(conductorTemplate.Annotations, lpxv1alpha1.PodRoleConductor, workloadDigest)
 		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
 		conductor = &grovev1alpha1.PodCliqueTemplateSpec{
@@ -187,6 +188,10 @@ func RenderNodeLocal(
 			podSpec = *podSpec.DeepCopy()
 		}
 
+		container := common.FindContainerByName(podSpec.Containers, lpuAgentContainerName)
+		if err := applyRuntimeSelection(container, projection, modelStoragePath); err != nil {
+			return nil, err
+		}
 		annotations := roleAnnotations(maps.Clone(template.Annotations), lpxv1alpha1.PodRoleAgent, projection.Digest().String())
 		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
 		annotations[lpxv1alpha1.PodModelAnnotation] = projection.model
@@ -229,6 +234,14 @@ func RenderNodeLocal(
 			return nil, err
 		}
 
+		container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
+		if err := applyRuntimeSelection(container, projections[0], modelStoragePath); err != nil {
+			return nil, err
+		}
+		applyOwnedRuntimeEnv(container, []corev1.EnvVar{{
+			Name:  "LPX_AGENT_HOST_TEMPLATE",
+			Value: "${GROVE_PCS_NAME}-${GROVE_PCS_INDEX}-" + plan.ScalingGroupTemplate + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-${LPX_LEADER_OFFSET}.${GROVE_HEADLESS_SERVICE}",
+		}})
 		cyborg.Spec.MinAvailable = ptr.To(int32(1))
 	}
 

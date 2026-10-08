@@ -75,6 +75,8 @@ spec:
           - command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-draft
             - name: BMC_SSH_ENABLED
               value: "false"
             - name: DYN_COMPONENT
@@ -226,6 +228,8 @@ spec:
           - command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-draft
             - name: BMC_SSH_ENABLED
               value: "false"
             - name: DYN_COMPONENT
@@ -377,6 +381,8 @@ spec:
           - command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-target
             - name: BMC_SSH_ENABLED
               value: "false"
             - name: DYN_COMPONENT

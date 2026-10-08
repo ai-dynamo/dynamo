@@ -429,6 +429,10 @@ spec:
             - --
             - /usr/local/bin/cyborg
             env:
+            - name: LPX_AGENT_HOST_TEMPLATE
+              value: ${GROVE_PCS_NAME}-${GROVE_PCS_INDEX}-lpx-${GROVE_PCSG_INDEX}-agt-${LPX_LEADER_OFFSET}.${GROVE_HEADLESS_SERVICE}
+            - name: LPX_MODEL_PATH
+              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: GBUILD_MANIFEST_PATH
               value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/manifest.v2.capnp.bin
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
