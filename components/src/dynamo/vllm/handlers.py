@@ -3817,12 +3817,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Log with the traceback here — this is the last frame that knows
             # which request and which encoder — then re-raise unchanged.
             #
-            # Deliberately not converted to `InvalidArgument`. The adapters
-            # raise `ValueError`/`TypeError` for genuine input faults, which the
-            # bindings already map to `Backend(InvalidArgument)` → 400 carrying
-            # the message, so the actionable case needs no help. Coercing the
-            # rest would relabel timeouts, CUDA faults, batcher shutdown and
-            # cancellations as client errors, suppressing retries — and since
+            # Deliberately not converted to `InvalidArgument`: adapter
+            # `ValueError`/`TypeError` map to 400, but with a generic
+            # body — only `InvalidArgument` carries its message to the client.
+            # Coercing the rest would relabel timeouts, CUDA faults, batcher shutdown
+            # and cancellations as client errors, suppressing retries — and since
             # `encode()` is co-batched, it could blame a caller for a failure
             # that originated in someone else's request.
             logger.exception("Request %s: CustomEncoder failed", request_id)
