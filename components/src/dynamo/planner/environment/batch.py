@@ -379,7 +379,7 @@ class LlmdAsyncOpenMetricsSource:
 
     def _collect_pool(
         self,
-        payload: str,
+        payload: OpenMetricsSamples,
         pool_id: str,
         observed_at_s: float,
         request_start_mono_s: float,
