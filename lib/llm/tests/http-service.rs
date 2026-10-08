@@ -3564,3 +3564,82 @@ mod zero_top_logprobs {
         run_case(true).await;
     }
 }
+
+/// A model whose last instance just failed (a discovery failover hold) makes
+/// new requests wait for a warm replacement instead of answering 503 at once.
+#[tokio::test]
+async fn test_failover_hold_waits_for_replacement_instead_of_503() {
+    use dynamo_llm::discovery::WorkerSet;
+    use dynamo_llm::worker_type::WorkerType;
+    use std::time::{Duration, Instant};
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager_clone();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    // Registered but not ready: a decode worker set whose prefill peer is gone.
+    let mut card = ModelDeploymentCard::with_name_only("held");
+    card.worker_type = Some(WorkerType::Decode);
+    card.needs = vec![vec![WorkerType::Prefill]];
+    let decode = WorkerSet::new("__held_decode".to_string(), card.mdcsum().to_string(), card);
+    manager.add_worker_set("held", "__held_decode", decode);
+    let url = format!("http://localhost:{}/v1/models/held", port);
+    let client = reqwest::Client::new();
+
+    // No hold: cold start and missing roles still fail fast.
+    let started = Instant::now();
+    let resp = client.get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(started.elapsed() < Duration::from_millis(250));
+
+    // A hold that expires without a replacement: wait, then 503.
+    manager.set_failover_hold(
+        "group-held",
+        "held",
+        Some(tokio::time::Instant::now() + Duration::from_millis(400)),
+    );
+    let started = Instant::now();
+    let resp = client.get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(started.elapsed() >= Duration::from_millis(350));
+
+    // A replacement that arrives during the hold admits the waiting request.
+    manager.set_failover_hold(
+        "group-held",
+        "held",
+        Some(tokio::time::Instant::now() + Duration::from_secs(10)),
+    );
+    let replacement = {
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let mut card = ModelDeploymentCard::with_name_only("held");
+            card.worker_type = Some(WorkerType::Prefill);
+            let prefill = WorkerSet::new(
+                "__held_prefill".to_string(),
+                card.mdcsum().to_string(),
+                card,
+            );
+            manager.add_worker_set("held", "__held_prefill", prefill);
+        })
+    };
+    let started = Instant::now();
+    let resp = client.get(&url).send().await.unwrap();
+    let waited = started.elapsed();
+    replacement.await.unwrap();
+    assert_ne!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(waited >= Duration::from_millis(250) && waited < Duration::from_secs(5));
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}

@@ -295,7 +295,7 @@ async fn handler(
         }
     };
 
-    if let Err(response) = check_model_serving_ready(&state, &model) {
+    if let Err(response) = check_model_serving_ready(&state, &model).await {
         return adapt_openai_error(response);
     }
     let engine = match state

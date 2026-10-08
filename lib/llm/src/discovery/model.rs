@@ -415,6 +415,14 @@ impl Model {
         self.first_ready_workers().is_some()
     }
 
+    /// Whether some worker set of this model has registered instances that
+    /// are all reported down: a failover in progress, not a missing role.
+    pub fn has_failing_over_workers(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().all_instances_reported_down())
+    }
+
     /// Structured per-namespace worker readiness for this model — the data
     /// behind the `GET /v1/models/{model}/ready` observability endpoint.
     ///

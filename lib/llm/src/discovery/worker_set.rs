@@ -235,6 +235,10 @@ pub struct WorkerSet {
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
 
+    /// Routing client behind `instance_count_rx`, used to tell instances that
+    /// are registered but reported down (failing over) from absent ones.
+    routing_client: Option<Client>,
+
     /// Cancels background work created while materializing this WorkerSet.
     lifecycle_cancellation: Option<CancellationToken>,
 
@@ -268,6 +272,7 @@ impl WorkerSet {
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
+            routing_client: None,
             lifecycle_cancellation: None,
             allocator_trim: None,
             allocator_trim_wrapped: false,
@@ -446,6 +451,20 @@ impl WorkerSet {
         self.instance_count_rx = Some(rx);
     }
 
+    /// Keep the routing client so readiness can see reported-down instances.
+    pub(crate) fn set_routing_client(&mut self, client: Client) {
+        self.routing_client = Some(client);
+    }
+
+    /// Whether every registered instance is currently reported down, i.e. the
+    /// set was serving and its workers are failing over, rather than absent.
+    pub fn all_instances_reported_down(&self) -> bool {
+        self.routing_client.as_ref().is_some_and(|client| {
+            let counts = client.routing_instance_counts();
+            counts.discovered > 0 && counts.routable == 0
+        })
+    }
+
     pub(crate) fn set_lifecycle_cancellation(&mut self, cancellation: CancellationToken) {
         self.lifecycle_cancellation = Some(cancellation);
     }
@@ -519,6 +538,7 @@ impl WorkerSet {
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),
+            routing_client: self.routing_client.clone(),
             lifecycle_cancellation: None,
             allocator_trim: None,
             allocator_trim_wrapped: false,
