@@ -122,8 +122,8 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	t.Log("Use independently provisioned Cyborg model storage at the shared runtime path")
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ClaimName = "cyborg-models"
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
-	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].SubPath = "cyborg"
-	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].ReadOnly = true
+	decode.Spec.PodSpec.Containers[0].VolumeMounts[0].SubPath = "cyborg"
+	decode.Spec.PodSpec.Containers[0].VolumeMounts[0].ReadOnly = true
 	input := RenderInput{
 		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 	}
@@ -135,7 +135,11 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	manifestEnv := corev1.EnvVar{
 		Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin",
 	}
-	require.Equal(t, append([]corev1.EnvVar{manifestEnv}, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
+	require.Equal(t, append([]corev1.EnvVar{
+		{Name: allocationEnvVar, Value: "agt"},
+		{Name: localPartitionIDsEnv, Value: ""},
+		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
+		manifestEnv}, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
 	require.Equal(t, &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cyborg-models", ReadOnly: true}, cyborg.Spec.PodSpec.Volumes[0].PersistentVolumeClaim)
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
 		Name: "model-storage", MountPath: "/models", SubPath: "cyborg", ReadOnly: true,
@@ -149,7 +153,11 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	imageEntrypointCyborg.Spec.Replicas = 4
 	imageEntrypointCyborg.Spec.MinAvailable = ptr.To[int32](4)
 	imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args = []string{"serve"}
-	imageEntrypointEnv := append([]corev1.EnvVar{manifestEnv}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
+	imageEntrypointEnv := append([]corev1.EnvVar{
+		{Name: allocationEnvVar, Value: "agt"},
+		{Name: localPartitionIDsEnv, Value: ""},
+		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
+		manifestEnv}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
 
 	t.Log("Leave the image ENTRYPOINT selected when command is omitted")
 	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}
@@ -179,7 +187,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 			cyborg.Spec.Replicas = test.replicas
 			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
 			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
-			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = test.mountPath
+			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[0].MountPath = test.mountPath
 			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 			})

@@ -1,31 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-data:
-  lpu_servers: lpx-${GROVE_PCSG_INDEX}-agt-0
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpx-v3-hx-local-partitions-48b8-decode-734ce683f6b7ea5f
-  namespace: test
----
-data:
-  nodes_per_partition: "1"
-  partition_ids: "1"
-  partition_node_offsets: "0"
-  partition_paths: part-1
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpx-v3-hx-local-partitions-48b8-lpu-a95647c5cf346f22
-  namespace: test
----
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
@@ -41,7 +16,6 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
-        nvidia.com/extra-resources-hash: a95647c5cf346f227c3a37fb60aa01b72b7e2c1e1ab16b69774dee83f6703d29
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:eb47772ed5cd7af1f9726ca192bbd164a8c83c3dc783f0ed979c18d51ed6e842
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3844e7fe1bbfd564fc8d27108910f64b0ed6caf1a46645ce8dcc29a0121a1494
         scheduling.lpu.nvidia.com/model: default
@@ -64,6 +38,8 @@ spec:
             command:
             - /bin/hydra-entrypoint
             env:
+            - name: LPX_LOCAL_PARTITION_IDS
+              value: 0,2,3,4,5,6,7,8,9,10,11,12,13
             - name: LPX_MODEL_PATH
               value: /nfs/gpt-oss-20b-lp30-hx-lpx
             - name: DYN_COMPONENT
@@ -193,14 +169,10 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: lpx-v3-hx-local-partitions-48b8-lpu-a95647c5cf346f22
-            name: config
         replicas: 1
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
-        nvidia.com/extra-resources-hash: 734ce683f6b7ea5f7b0c0172b07d5e1ed45773120ab8c7d834967d180c62cea2
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3844e7fe1bbfd564fc8d27108910f64b0ed6caf1a46645ce8dcc29a0121a1494
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
@@ -221,8 +193,12 @@ spec:
             command:
             - /opt/gpu-runtime
             env:
+            - name: LPX_ALLOCATION
+              value: agt
             - name: LPX_LOCAL_PARTITION_IDS
               value: 0,2,3,4,5,6,7,8,9,10,11,12,13
+            - name: LPX_MODEL_PATH
+              value: /nfs/gpt-oss-20b-lp30-hx-lpx
             - name: GBUILD_MANIFEST_PATH
               value: /nfs/gpt-oss-20b-lp30-hx-lpx/manifest.v2.capnp.bin
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
@@ -332,9 +308,6 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: lpx-v3-hx-local-partitions-48b8-decode-734ce683f6b7ea5f
-            name: config
         replicas: 1
         roleName: cond
         startsAfter:

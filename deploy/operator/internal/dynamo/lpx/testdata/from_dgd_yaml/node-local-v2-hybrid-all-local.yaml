@@ -1,31 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-data:
-  lpu_servers: ""
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: node-local-v2-hybrid-all-local
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-all-local-4f40-decode-fd884c294bcb8400
-  namespace: test
----
-data:
-  nodes_per_partition: ""
-  partition_ids: ""
-  partition_node_offsets: ""
-  partition_paths: ""
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: node-local-v2-hybrid-all-local
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-all-local-4f40-lpu-88cdafee07541757
-  namespace: test
----
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v2-hybrid-all-local
@@ -41,7 +16,6 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid-all-local
-        nvidia.com/extra-resources-hash: fd884c294bcb84009f3f599f5ab8f4dc6a696089567f23f0a5864a094c7614b6
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:9716f907878181fed83aae3f9f03aaddd489713ea7d0d7894bdca70bac3d14b4
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
@@ -61,12 +35,14 @@ spec:
             - serve
             command:
             - /usr/local/bin/cyborg-entrypoint
-            - --expand-hosts
             - --
             - /opt/gpu-runtime
             env:
+            - name: LPX_ALLOCATION
             - name: LPX_LOCAL_PARTITION_IDS
               value: "0"
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v2-connected-lpx
             - name: GBUILD_MANIFEST_PATH
               value: /nfs/node-local-v2-connected-lpx/manifest.v2.capnp.bin
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
@@ -121,8 +97,6 @@ spec:
                   fieldPath: metadata.uid
             - name: RDMA_PORT
               value: "19877"
-            - name: SERVER_HOSTS_FILE
-              value: /tmp/lpu_servers
             image: example.invalid/gpu-runtime:test
             livenessProbe:
               failureThreshold: 1
@@ -157,8 +131,6 @@ spec:
               periodSeconds: 10
               timeoutSeconds: 5
             volumeMounts:
-            - mountPath: /configs
-              name: config
             - mountPath: /dev/infiniband
               name: infiniband
             - mountPath: /nfs
@@ -186,9 +158,6 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: node-local-v2-hybrid-all-local-4f40-decode-fd884c294bcb8400
-            name: config
         replicas: 1
         roleName: cond
     headlessServiceConfig:

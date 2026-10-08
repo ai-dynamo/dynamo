@@ -72,8 +72,6 @@ spec:
                 value: '1024'
               - name: RDMA_PORT
                 value: '19877'
-              - name: SERVER_HOSTS_FILE
-                value: /tmp/lpu_servers
               - name: CYBORG_FPGA_GPI_REPLICA_INDEX
                 valueFrom:
                   fieldRef:
@@ -85,7 +83,6 @@ spec:
                   nvidia.com/gpu: '1'
               command:
               - /usr/local/bin/cyborg-entrypoint
-              - --expand-hosts
               - --
               - /usr/local/bin/cyborg
               startupProbe:
@@ -110,8 +107,6 @@ spec:
                 periodSeconds: 5
                 timeoutSeconds: 4
               volumeMounts:
-              - name: config
-                mountPath: /configs
               - mountPath: /etc/cyborg/model-card.json
                 name: cyborg-model-card
                 readOnly: true
@@ -174,13 +169,7 @@ spec:
                       - lpu-node-24
             containers:
             - args:
-              - -c
-              - "readarray -t partition_node_counts < /configs/nodes_per_partition\nreadarray -t partition_node_offsets < /configs/partition_node_offsets\n\
-                part=\"\"\nfor i in \"${!partition_node_counts[@]}\"; do\n  if (( GROVE_PCLQ_POD_INDEX >= partition_node_offsets[i]\
-                \ &&\n        GROVE_PCLQ_POD_INDEX < partition_node_offsets[i] + partition_node_counts[i] )); then\n    part=\"\
-                ${i}\"\n    break\n  fi\ndone\n: \"${part:?no partition row for Grove pod index ${GROVE_PCLQ_POD_INDEX}}\"\nexec\
-                \ agent-hybrid-v2 \\\n  --assemble-dir \"${GAS_DIR}\" \\\n  --part \"${part}\" \\\n  --port \"${RDMA_PORT}\" \\\
-                \n  --nic \"${NIC_NAME}\" \\\n  --metadata-file \"$(mktemp)\" \\\n  --readiness-port \"${READINESS_PORT}\""
+              - start
               image: example.invalid/lpu-runtime:test
               name: main
               startupProbe:
@@ -221,8 +210,6 @@ spec:
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage
-              - name: config
-                mountPath: /configs
               - name: hugepages
                 mountPath: /dev/hugepages
               - name: host-sys
@@ -240,6 +227,8 @@ spec:
                 requests:
                   cpu: '62'
                   hugepages-2Mi: 4Gi
+              command:
+              - /bin/hydra-entrypoint
             volumes:
             - name: model-storage
               persistentVolumeClaim:

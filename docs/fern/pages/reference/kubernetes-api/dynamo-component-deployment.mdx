@@ -87,6 +87,10 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     </ParamField>
   </Indent>
 
+  LPX uses manifest-backed runtime selection. The operator supplies `LPX_MODEL_PATH` and the GPU-local compiler source IDs through `LPX_LOCAL_PARTITION_IDS` to Agents and Cyborg. The runtimes derive remote partitions by excluding those IDs from canonical manifest placement, preserving its order and chain geometry. An explicit empty local list means all partitions are remote and overrides runtime CLI defaults. Nova resolves each model's placement independently from its manifest. Cyborg derives Agent leader names from `LPX_ALLOCATION` and Grove identity.
+
+  Upgrade runtime images before switching to this operator. Keep runtime configuration mounts while those images use the current operator's compatibility inputs. Remove the mounts when switching to this operator, which emits no runtime ConfigMaps; restore them before rolling back to an operator that requires them. Remove authored legacy directory settings, Quasar's `--partition-metadata`, Cyborg's `--expand-hosts`, host-file renderers, and `LPX_RUNTIME_CONTRACT` when upgrading the corresponding runtime images.
+
   <ParamField path="experimental" type="LPXExperimentalSpec">
     Groups opt-in LPX options whose shape may change incompatibly between v1beta1 releases. These fields are not covered by the v1beta1 deprecation policy.
   </ParamField>
@@ -95,7 +99,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     <ParamField path="localPartitions" type="LPXLocalPartitions">
       Selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. Set `mode: All` to run every partition on the GPU, or `mode: IDs` with `ids` to run the listed partitions. `ids` is required with `IDs` and forbidden with `All`. Omitting `localPartitions` runs every partition on LPUs. Hybrid XT (LP20) and HX (LP30) builds support this field. LPU-only and speculative builds reject it.
 
-      The operator schedules Agent Pods and LPU pipeline requests only for the remaining partitions, and lists only those partitions in the Agents' partition configuration and, for XT builds, the conductor's `lpu_servers`. For HX builds, the request's allocation metadata also lists only the remaining partitions. When every partition is local, it renders no Agent PodClique and creates no LPU pipeline request. It publishes the resolved local partitions to the Cyborg `main` container as `LPX_LOCAL_PARTITION_IDS`, a comma-separated list of compiler partition IDs.
+      The operator schedules Agent Pods and LPU pipeline requests only for the remaining partitions. For HX builds, the request's allocation metadata also lists only the remaining partitions. When every partition is local, it renders no Agent PodClique and creates no LPU pipeline request. It publishes the resolved local partitions to both Cyborg and Agent `main` containers as `LPX_LOCAL_PARTITION_IDS`, a comma-separated list of compiler partition IDs. Each runtime derives the same remaining partitions from the manifest.
 
       `ids` lists compiler partition IDs of the build's runtime partitions. A selected prop-sync chain is one runtime partition: select its first partition, which keeps the whole chain on the GPU. Unknown IDs and non-first chain members are rejected during reconciliation. Because a chain moves as a unit, a local selection never splits a chain. The operator keeps a prop-sync connector only when both of its partitions remain on LPUs, and renumbers it to their positions among the remaining partitions. Changing the selection changes the workload digest and rolls the workload.
     </ParamField>
