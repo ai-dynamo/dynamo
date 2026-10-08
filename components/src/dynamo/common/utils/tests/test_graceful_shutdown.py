@@ -17,7 +17,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -40,8 +40,6 @@ _GRACEFUL_SHUTDOWN_PATH = Path(__file__).parent.parent / "graceful_shutdown.py"
 _dynamo_stub = types.ModuleType("dynamo")
 _dynamo_core_stub = types.ModuleType("dynamo._core")
 _dynamo_core_stub.DistributedRuntime = object
-sys.modules.setdefault("dynamo", _dynamo_stub)
-sys.modules.setdefault("dynamo._core", _dynamo_core_stub)
 
 
 def _load_graceful_shutdown():
@@ -50,7 +48,16 @@ def _load_graceful_shutdown():
         _GRACEFUL_SHUTDOWN_PATH,
     )
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    stubs = {
+        name: module
+        for name, module in (
+            ("dynamo", _dynamo_stub),
+            ("dynamo._core", _dynamo_core_stub),
+        )
+        if name not in sys.modules
+    }
+    with patch.dict(sys.modules, stubs):
+        spec.loader.exec_module(mod)
     return mod
 
 
@@ -328,6 +335,43 @@ def test_install_signal_handlers_returns_a_joinable_teardown():
             "wait_for_shutdown returned before the runtime teardown completed; "
             "the event loop would close on a pending teardown"
         )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("application_failure", ["none", "error", "cancelled"])
+def test_shutdown_failure_propagates_without_masking_application_error(
+    application_failure,
+):
+    async def scenario():
+        runtime_error = RuntimeError("runtime teardown incomplete")
+        application_error = {
+            "none": None,
+            "error": ValueError("application failed"),
+            "cancelled": asyncio.CancelledError(),
+        }[application_failure]
+        runtime = MagicMock()
+        runtime.shutdown_and_wait = AsyncMock(side_effect=runtime_error)
+        loop = asyncio.get_running_loop()
+        shutdown_event = asyncio.Event()
+        join = install_signal_handlers(
+            loop, runtime, [], shutdown_event, grace_period_s=0
+        )
+        _installed_handlers(loop)[0][1]()
+        await shutdown_event.wait()
+
+        async def application():
+            try:
+                if application_error is not None:
+                    raise application_error
+            finally:
+                await join()
+
+        expected = application_error if application_error is not None else runtime_error
+        with pytest.raises(type(expected)) as caught:
+            await application()
+        assert caught.value is expected
+        runtime.shutdown_and_wait.assert_awaited_once()
 
     asyncio.run(scenario())
 

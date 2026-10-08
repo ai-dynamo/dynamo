@@ -92,7 +92,8 @@ def install_graceful_shutdown(
     def _schedule_shutdown(signum: int, frame: Any | None) -> None:
         def _kick() -> None:
             nonlocal shutdown_task
-            shutdown_task = asyncio.create_task(_shutdown_sequence(signum, frame))
+            if shutdown_task is None:
+                shutdown_task = asyncio.create_task(_shutdown_sequence(signum, frame))
 
         loop.call_soon_threadsafe(_kick)
 

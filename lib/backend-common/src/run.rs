@@ -78,10 +78,10 @@ fn run_worker(
         // The bound is passed *into* Phase 2 rather than wrapped around the
         // call: `tokio::time::timeout` cancels by dropping, which would skip
         // Phase 3 and defeat the point of awaiting at all.
-        runtime
+        let shutdown_result = runtime
             .shutdown_and_wait(Some(dynamo_runtime::worker::graceful_shutdown_timeout()))
             .await;
 
-        result
+        result.and(shutdown_result)
     })
 }
