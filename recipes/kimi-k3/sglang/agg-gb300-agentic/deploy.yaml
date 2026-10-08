@@ -58,7 +58,7 @@ spec:
                 - --http-port
                 - "8000"
                 - --router-min-initial-workers
-                - "3"
+                - "2"
                 - --dyn-chat-processor
                 - dynamo
                 - --model-name
@@ -81,7 +81,7 @@ spec:
                   memory: 128Gi
     - name: Worker
       type: worker
-      replicas: 3
+      replicas: 2
       multinode:
         nodeCount: 2
       sharedMemorySize: 64Gi

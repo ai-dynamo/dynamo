@@ -135,7 +135,7 @@ targets:
   recommended: false
   hardware:
     gpu: GB300
-    count: 24
+    count: 16
   runtime:
     framework: sglang
   topology: aggregated
@@ -146,7 +146,7 @@ targets:
   - dspark-speculative-decoding
   workload:
     type: agentic-trace-replay
-    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 54
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 36
     sla: 50 user output tok/s, TTFT P50 <= 5 s
   deploy:
     asset: recipes/kimi-k3/sglang/agg-gb300-agentic/deploy.yaml
@@ -155,7 +155,7 @@ targets:
     asset: recipes/kimi-k3/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 89.7 output tok/s/GPU, 56.6 user tok/s P50, TTFT P50 478 ms at concurrency 54 over 3 workers (15% agentic trace subset, TP8/DCP8/EP1, synthetic acc_len=4.05)
+    summary: 91.3 output tok/s/GPU, 55.6 user tok/s P50, TTFT P50 486 ms at concurrency 36 over 2 workers (15% agentic trace subset, TP8/DCP8/EP1, synthetic acc_len=4.05)
 - id: sglang-disagg-gb300
   recommended: false
   hardware:
