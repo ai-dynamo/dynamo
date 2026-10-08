@@ -15,10 +15,6 @@ pub(crate) enum AdmissionError {
     AdmissionClosed,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Consumed by decision execution integration")
-)]
 /// Reject excess load immediately, matching frontend admission rather than queueing.
 /// The caller must initialize the semaphore and `limit` from the same bounded configuration.
 pub(crate) fn acquire_admission(
@@ -40,10 +36,6 @@ pub(crate) fn acquire_admission(
         })
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Consumed by decision execution integration")
-)]
 pub(crate) async fn run_until_killed<T>(
     context: &dyn AsyncEngineContext,
     operation: impl std::future::Future<Output = T>,
@@ -57,10 +49,6 @@ pub(crate) async fn run_until_killed<T>(
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Consumed by decision execution integration")
-)]
 pub(crate) async fn spawn_blocking_with_permit<T, E, F>(
     permit: OwnedSemaphorePermit,
     task: F,
@@ -75,18 +63,10 @@ where
 
 #[derive(Debug)]
 pub(crate) enum DispatchWaitError {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Inspected by the decision response adapter")
-    )]
     Task(tokio::task::JoinError),
     Deadline,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Consumed by decision execution integration")
-)]
 /// The task must own admission until its work completes and should observe `parent.kill()`.
 /// Cleanup runs separately so the response does not wait for the cancellation grace.
 /// Local completion does not establish physical GPU settlement.
