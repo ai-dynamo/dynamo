@@ -153,9 +153,6 @@ const PUBLICATIONS_CSS = `
   white-space: nowrap;
 }
 
-/* Featured row: pinned partner pieces, one row of three above the list. Same
-   border, radius and hover language as the list cards, scaled up, with a green
-   wash and top rule so the row reads as a deliberate highlight. */
 .dynamo-pubs__group-label {
   margin: 0 0 0.9rem !important;
   color: var(--dynamo-blog-muted);

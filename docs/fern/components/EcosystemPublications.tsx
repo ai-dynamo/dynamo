@@ -83,7 +83,6 @@ function PublicationCard({ publication }: { publication: Publication }) {
   );
 }
 
-/** "https://www.coreweave.com/blog/..." -> "coreweave.com". */
 function siteOf(url: string) {
   try {
     return new URL(url).hostname.replace(/^www\./, "");
@@ -92,11 +91,8 @@ function siteOf(url: string) {
   }
 }
 
-/**
- * Larger card for a pinned entry: bigger mark and title, our one-line summary,
- * and a footer naming the site the link leaves for. Same arrow treatment as
- * PublicationCard, split inline for the same reason.
- */
+// Title split inline, not in a helper, for the Fern transform reason noted on
+// PublicationCard.
 function FeaturedCard({ publication }: { publication: Publication }) {
   const { title, url, partner, date, summary } = publication;
   const words = title.trim().split(/\s+/);

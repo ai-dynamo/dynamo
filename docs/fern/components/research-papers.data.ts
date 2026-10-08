@@ -34,7 +34,7 @@ export const RESEARCH_PAPERS: ResearchPaper[] = [
     org: "University of Georgia",
     venue: "PACT '26",
     date: "Oct 2026",
-    iso: "2026-10-19",
+    iso: "2026-10-01",
   },
   {
     title: "Fast Recovery for LLM Serving via Decoupled Device Memory Lifetime in Dynamo",
