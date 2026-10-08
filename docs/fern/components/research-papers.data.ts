@@ -53,6 +53,14 @@ export const RESEARCH_PAPERS: ResearchPaper[] = [
     iso: "2026-09-19",
   },
   {
+    title: "Calibrate, Then Route: A Measured Study of Learned Request Routing for Disaggregated LLM Serving",
+    url: "https://arxiv.org/abs/2609.16206",
+    org: "",
+    venue: "arXiv",
+    date: "Sep 14, 2026",
+    iso: "2026-09-14",
+  },
+  {
     title: "Phase-Decoupled, Model-Calibrated Power Control for Disaggregated LLM Serving",
     url: "https://arxiv.org/abs/2609.11133",
     org: "Xenoscube",
@@ -181,6 +189,14 @@ export const RESEARCH_PAPERS: ResearchPaper[] = [
     iso: "2026-05-18",
   },
   {
+    title: "ObjectCache: Layerwise Object-Storage Retrieval for KV Cache Reuse",
+    url: "https://arxiv.org/abs/2605.22850",
+    org: "",
+    venue: "arXiv",
+    date: "May 16, 2026",
+    iso: "2026-05-16",
+  },
+  {
     title: "Adaptive Parallelism for LLM Inference with Model Irrelevant Profiler",
     url: "https://ieeexplore.ieee.org/document/11581475",
     org: "Lenovo",
@@ -211,6 +227,14 @@ export const RESEARCH_PAPERS: ResearchPaper[] = [
     venue: "arXiv",
     date: "Apr 16, 2026",
     iso: "2026-04-16",
+  },
+  {
+    title: "TENT: A Declarative Slice Spraying Engine for Performant and Resilient Data Movement in Disaggregated LLM Serving",
+    url: "https://arxiv.org/abs/2604.00368",
+    org: "",
+    venue: "arXiv",
+    date: "Apr 1, 2026",
+    iso: "2026-04-01",
   },
   {
     title: "NCCL EP: Towards a Unified Expert Parallel Communication API for NCCL",
