@@ -456,13 +456,14 @@ impl WorkerSet {
         self.routing_client = Some(client);
     }
 
-    /// Whether every registered instance is currently reported down, i.e. the
-    /// set was serving and its workers are failing over, rather than absent.
-    pub fn all_instances_reported_down(&self) -> bool {
-        self.routing_client.as_ref().is_some_and(|client| {
-            let counts = client.routing_instance_counts();
-            counts.discovered > 0 && counts.routable == 0
-        })
+    /// Whether this committed set currently has no routable instance: its
+    /// instances were all reported down or withdrawn. A set is committed only
+    /// after it had instances, so this means its workers are failing over
+    /// (or gone), never a cold start or a missing worker role.
+    pub fn has_no_routable_instances(&self) -> bool {
+        self.routing_client
+            .as_ref()
+            .is_some_and(|client| client.routing_instance_counts().routable == 0)
     }
 
     pub(crate) fn set_lifecycle_cancellation(&mut self, cancellation: CancellationToken) {

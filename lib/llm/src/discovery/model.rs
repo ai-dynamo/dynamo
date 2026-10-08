@@ -415,12 +415,13 @@ impl Model {
         self.first_ready_workers().is_some()
     }
 
-    /// Whether some worker set of this model has registered instances that
-    /// are all reported down: a failover in progress, not a missing role.
+    /// Whether some committed worker set of this model lost every routable
+    /// instance (reported down or withdrawn): a failover in progress, not a
+    /// cold start or a missing role.
     pub fn has_failing_over_workers(&self) -> bool {
         self.worker_sets
             .iter()
-            .any(|entry| entry.value().all_instances_reported_down())
+            .any(|entry| entry.value().has_no_routable_instances())
     }
 
     /// Structured per-namespace worker readiness for this model — the data

@@ -4665,8 +4665,8 @@ pub(crate) fn model_not_ready_message(model_name: &str) -> String {
 ///
 /// A model failing over is not reported as not ready right away: either its
 /// last serving instance just disappeared (a discovery hold, see
-/// `DYN_HTTP_MODEL_FAILOVER_WAIT_MS`), or all its registered instances were
-/// reported down after failing. The request waits for a warm replacement,
+/// `DYN_HTTP_MODEL_FAILOVER_WAIT_MS`), or a committed worker set has no
+/// routable instance left (reported down or withdrawn). The request waits for a warm replacement,
 /// polling every `DYN_MIGRATION_FAILOVER_POLL_MS`, for at most
 /// `DYN_HTTP_NEW_REQUEST_FAILOVER_WAIT_MS` (default: the hold, or the
 /// discovery grace; `0` rejects at once). Cold start and missing worker roles
@@ -4688,8 +4688,9 @@ pub(crate) async fn check_model_serving_ready(
     loop {
         let deadline = match state.manager().failover_hold_deadline(model_name) {
             Some(hold) => Some(new_request_wait.map_or(hold, |wait| hold.min(started + wait))),
-            // Registered workers all reported down (e.g. the failed primary
-            // before its lease is gone): wait like a hold, from now.
+            // A committed worker set lost every routable instance (the failed
+            // primary was reported down or withdrew before its successor
+            // registered): wait like a hold, from now.
             None if state
                 .manager()
                 .get_committed_model(model_name)
