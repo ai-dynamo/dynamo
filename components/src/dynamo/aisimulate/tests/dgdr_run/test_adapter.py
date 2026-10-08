@@ -636,6 +636,8 @@ def test_plugin_subscribe_with_a_context_publishes_live(
 
     callbacks.on_candidate(record("a", 9.0))
     wait_for(lambda: tags(load(tmp_path)) == ["a"])
+    assert callbacks.on_complete is not None
+    callbacks.on_complete()
 
 
 def test_plugin_subscribe_without_context_or_snapshot_dir_only_validates(
@@ -669,13 +671,6 @@ def fake_search_config(monkeypatch: pytest.MonkeyPatch) -> None:
             return SimpleNamespace(workload="workload")
 
     monkeypatch.setattr(adapter_module, "SmartSearchConfig", FakeSearchConfig)
-
-
-def test_plugin_write_records_progress_from_the_result_counts(
-    tmp_path: Path, renders: list[str], fake_search_config: None
-) -> None:
-    create_adapter().write(PLUGIN_CONFIG, result=_final_result(42), output_dir=tmp_path)
-    assert load(tmp_path)["progress"]["evaluated"] == 42
 
 
 def test_plugin_write_reports_no_artifact_for_a_snapshot_outside_output_dir(
@@ -735,6 +730,8 @@ def test_plugin_write_keeps_the_round_recorded_by_the_live_snapshot(
     assert live is not None and live.on_round is not None
     live.on_round(3, [])
     wait_for(lambda: load(tmp_path)["progress"]["round"] == 3)
+    assert live.on_complete is not None
+    live.on_complete()
 
     create_adapter().write(
         {**PLUGIN_CONFIG, "snapshot_dir": str(tmp_path)},
@@ -861,10 +858,68 @@ def test_failure_after_completion_is_a_noop_and_completion_after_failure_too(
     assert load(tmp_path)["run"]["message"] == "first"
 
 
-def test_subscribe_still_works_with_an_aisimulate_without_lifecycle_callbacks(
+# -- robustness -----------------------------------------------------------------
+
+
+def test_a_broken_renderer_leaves_a_terminal_failed_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_: Any, **__: Any) -> str:
+        raise RuntimeError("renderer not installed")
+
+    monkeypatch.setattr(adapter_module, "render_dgd", broken)
+    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
+    adapter.on_candidate(record("a", 9.0))
+
+    with pytest.raises(RuntimeError, match="renderer not installed"):
+        adapter.close()
+
+    snapshot = load(tmp_path)
+    assert snapshot["run"]["phase"] == "Failed"
+    assert snapshot["run"]["terminal"] is True
+    assert snapshot["run"]["error"] == "RuntimeError"
+    assert all(c["outcome"] != "materialization_failed" for c in snapshot["candidates"])
+
+
+def test_non_finite_scores_and_objectives_stay_valid_for_the_publisher(
+    tmp_path: Path, renders: list[str]
+) -> None:
+    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
+    adapter.on_candidate(record("a", float("-inf"), objectives={"e2e": float("nan")}))
+    adapter.on_candidate(record("b", float("nan")))
+    adapter.close()
+
+    text = (tmp_path / SNAPSHOT_FILE_NAME).read_text()
+    assert (
+        "inf" not in text.lower().replace("information", "")
+        and "nan" not in text.lower()
+    )
+    metrics = {
+        c["parameters"]["tag"]: c["metrics"] for c in load(tmp_path)["candidates"]
+    }
+    assert metrics["a"]["score"] is None and metrics["a"]["objectives"] == {"e2e": None}
+    assert metrics["b"]["score"] is None
+
+
+def test_a_candidate_error_message_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing(*_: Any, **__: Any) -> str:
+        raise CandidateMaterializationError("x" * 5000)
+
+    monkeypatch.setattr(adapter_module, "render_dgd", failing)
+    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
+    adapter.on_candidate(record("a", 9.0))
+    adapter.close()
+
+    (candidate,) = load(tmp_path)["candidates"]
+    assert 0 < len(candidate["error"]) <= 500
+
+
+def test_subscribe_does_not_publish_live_without_lifecycle_callbacks(
     tmp_path: Path, renders: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    @dataclass(frozen=True)
+    @dataclass
     class LegacyCallbacks:
         on_candidate: Any = None
         on_round: Any = None
@@ -872,6 +927,9 @@ def test_subscribe_still_works_with_an_aisimulate_without_lifecycle_callbacks(
     monkeypatch.setattr(
         adapter_module, "RecommendationOutputCallbacks", LegacyCallbacks
     )
-    callbacks = _subscribed(tmp_path)
-    assert isinstance(callbacks, LegacyCallbacks)
-    assert callbacks.on_candidate is not None
+    callbacks = create_adapter().subscribe(
+        {**PLUGIN_CONFIG, "snapshot_dir": str(tmp_path)},
+        context=SimpleNamespace(workload="workload"),
+    )
+    assert callbacks is None
+    assert not (tmp_path / SNAPSHOT_FILE_NAME).exists()

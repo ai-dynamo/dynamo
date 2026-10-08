@@ -44,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -95,6 +96,25 @@ class CandidateRecordLike(Protocol):
 def _plain(value: Any) -> Any:
     """Copy ``value`` into plain, YAML-safe containers (detached from the caller)."""
     return json.loads(json.dumps(value, default=str, sort_keys=True))
+
+
+def _bounded(text: str) -> str:
+    return text[:_MAX_ERROR_MESSAGE]
+
+
+def _finite(value: Any) -> Any:
+    """Replace non-finite floats with ``None`` so the snapshot stays valid JSON/YAML."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _finite(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_finite(item) for item in value]
+    return value
+
+
+class _RendererUnavailable(Exception):
+    """Rendering failed for a reason that is not specific to one candidate."""
 
 
 def candidate_id_for(parameters: Mapping[str, Any]) -> str:
@@ -290,16 +310,18 @@ class DGDRRunOutputAdapter:
             )
             return None
         parameters = _plain(dict(record.config))
+        score = float(record.score)
         metrics: dict[str, Any] = {
-            "score": float(record.score),
+            "score": score if math.isfinite(score) else None,
             "usedGpus": int(record.used_gpus),
         }
         objectives = getattr(record, "objectives", None)
         if objectives:
-            metrics["objectives"] = _plain(dict(objectives))
+            metrics["objectives"] = _finite(_plain(dict(objectives)))
         return _Retained(
             id=candidate_id_for(parameters),
-            score=float(record.score),
+            # A NaN score has no place in an ordering; it ranks as the worst.
+            score=-math.inf if math.isnan(score) else score,
             used_gpus=int(record.used_gpus),
             parameters=parameters,
             metrics=metrics,
@@ -343,7 +365,30 @@ class DGDRRunOutputAdapter:
         self._wake.set()
         if self._thread is not None:
             self._thread.join()
-        self._publish()
+        self._publish_or_record_failure()
+
+    def _publish_or_record_failure(self) -> None:
+        """Publish; if rendering itself is broken, record that as a terminal failure.
+
+        A broken renderer is a run-level problem, not a candidate-specific one, so it
+        must not become ``MATERIALIZATION_FAILED``. The terminal ``Failed`` snapshot
+        carries the candidates that were already rendered, and the original exception
+        is re-raised. Failures to write the file keep propagating unchanged.
+        """
+        try:
+            self._publish()
+        except _RendererUnavailable as unavailable:
+            cause = unavailable.__cause__ or unavailable
+            logger.error("dgdr_run: renderer unavailable", exc_info=cause)
+            with self._lock:
+                self._accepting = False
+                self._terminal = _Terminal(
+                    phase=RunPhase.FAILED,
+                    message=_bounded(str(cause)),
+                    error=type(cause).__name__,
+                )
+            self._publish(render=False)
+            raise cause
 
     def finish_search(self) -> None:
         """The search ended normally: flush the last live state and stop the writer.
@@ -364,14 +409,14 @@ class DGDRRunOutputAdapter:
         self._wake.set()
         if self._thread is not None:
             self._thread.join()
-        self._publish()
+        self._publish_or_record_failure()
 
     def fail(self, error: BaseException) -> None:
         """The search raised: write the terminal ``Failed`` snapshot."""
         self.close(
             phase=RunPhase.FAILED,
             error=type(error).__name__,
-            message=str(error)[:_MAX_ERROR_MESSAGE],
+            message=_bounded(str(error)),
         )
 
     def __enter__(self) -> DGDRRunOutputAdapter:
@@ -404,7 +449,7 @@ class DGDRRunOutputAdapter:
                 self._wake.set()
             self._next_allowed = time.monotonic() + self._interval
 
-    def _publish(self) -> None:
+    def _publish(self, *, render: bool = True) -> None:
         with self._publish_lock:
             with self._lock:
                 # Cleared together with the copy so no update is ever lost: an
@@ -418,7 +463,14 @@ class DGDRRunOutputAdapter:
                 round_no = self._round_no
                 evaluated = self._evaluated
                 terminal = self._terminal
-            candidates = tuple(self._materialize(item) for item in ordered)
+            if render:
+                candidates = tuple(self._materialize(item) for item in ordered)
+            else:
+                candidates = tuple(
+                    self._materialized[item.id]
+                    for item in ordered
+                    if item.id in self._materialized
+                )
             live_ids = {item.id for item in ordered}
             for stale in set(self._materialized) - live_ids:
                 del self._materialized[stale]
@@ -465,8 +517,10 @@ class DGDRRunOutputAdapter:
                 outcome=CandidateOutcome.MATERIALIZATION_FAILED,
                 parameters=item.parameters,
                 metrics=item.metrics,
-                error=str(exc),
+                error=_bounded(str(exc)),
             )
+        except Exception as exc:
+            raise _RendererUnavailable(str(exc)) from exc
         self._materialized[item.id] = entry
         return entry
 
@@ -509,16 +563,23 @@ class DGDRRunOutputPlugin:
         workload = getattr(context, "workload", None)
         if workload is None or resolved.snapshot_dir is None:
             return None
+        # Live publishing needs both lifecycle hooks: without on_complete nothing stops
+        # the live writer before write() publishes the terminal snapshot, which a pending
+        # live write could then overwrite. Older AISimulate releases lack them; the
+        # terminal snapshot then comes from write() alone.
+        supported = {field.name for field in fields(RecommendationOutputCallbacks)}
+        if not {"on_complete", "on_failure"} <= supported:
+            logger.info(
+                "dgdr_run: AISimulate has no lifecycle callbacks; not publishing live"
+            )
+            return None
         adapter = DGDRRunOutputAdapter(resolved, workload)
         adapter.start()
-        lifecycle = {"on_complete": adapter.finish_search, "on_failure": adapter.fail}
-        # Older AISimulate releases have no lifecycle callbacks; the terminal snapshot
-        # then comes from write() alone and a failed run is detected by the publisher.
-        supported = {field.name for field in fields(RecommendationOutputCallbacks)}
         return RecommendationOutputCallbacks(
             on_candidate=adapter.on_candidate,
             on_round=adapter.on_round,
-            **{name: hook for name, hook in lifecycle.items() if name in supported},
+            on_complete=adapter.finish_search,
+            on_failure=adapter.fail,
         )
 
     def live(
