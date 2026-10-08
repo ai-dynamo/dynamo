@@ -761,6 +761,23 @@ navigation:
             path: ../pages-dev/use-cases/tool-calling-and-reasoning/reasoning-parsing.md
           - page: Troubleshooting Tool Calls
             path: ../pages-dev/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
+      - section: Many-Model Serving
+        collapsed: true
+        icon: layer-group
+        slug: many-model-serving
+        contents:
+          - page: Interpreting GPU Sharing Results
+            path: ../pages-dev/use-cases/gpu-sharing/gpu-sharing-results.mdx
+          - page: Deploy the Baseline Experiment
+            path: ../pages-dev/use-cases/gpu-sharing/deploy-baseline.md
+          - page: Deploy the KAI + HAMi Experiment
+            path: ../pages-dev/use-cases/gpu-sharing/deploy-kai-hami.md
+          - page: Build the KAI-Scheduler and GPU Fractioning Forks
+            path: ../pages-dev/use-cases/gpu-sharing/build-gpu-fractioning-forks.md
+          - page: Deploy the KAI + GPU Fractions Experiment
+            path: ../pages-dev/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md
+          - page: Per-GPU Compute and Memory Limits with MPS
+            path: ../pages-dev/use-cases/gpu-sharing/mps-per-gpu-limits.md
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================
