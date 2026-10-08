@@ -55,6 +55,10 @@ pub(crate) struct DeltaGeneratorState {
     model: String,
     system_fingerprint: Option<String>,
     usage: CompletionUsage,
+    /// Trailing generation-stub tokens excluded from reported prompt usage.
+    /// `usage.prompt_tokens` keeps the physical prompt length (also what
+    /// `get_isl` reports for metrics); the subtraction happens in `get_usage`.
+    pending_prompt_tokens: u32,
     options: DeltaGeneratorOptions,
     tracker: Arc<RequestTracker>,
 }
@@ -94,6 +98,7 @@ impl DeltaGeneratorState {
             model,
             system_fingerprint: None,
             usage,
+            pending_prompt_tokens: 0,
             options,
             tracker,
         }
@@ -135,6 +140,13 @@ impl DeltaGeneratorState {
         self.usage.prompt_tokens = isl;
     }
 
+    /// Record how many trailing prompt tokens are the renderer's generation
+    /// stub so reported usage follows the model's reference API, which feeds
+    /// those tokens to the model but does not bill them as prompt tokens.
+    pub(crate) fn set_pending_prompt_tokens(&mut self, pending_prompt_tokens: u32) {
+        self.pending_prompt_tokens = pending_prompt_tokens;
+    }
+
     pub(crate) fn update_usage_from_backend_output(&mut self, output: &BackendOutput) {
         // Aggregate token usage even if usage tracking is disabled for metrics tracking.
         // SAFETY: Casting from `usize` to `u32` could lead to precision loss after `u32::MAX`,
@@ -169,6 +181,23 @@ impl DeltaGeneratorState {
 
     pub(crate) fn get_usage(&self) -> CompletionUsage {
         let mut usage = self.usage.clone();
+        if self.pending_prompt_tokens > 0 {
+            // Applies equally to the frontend's own count and to a
+            // backend-reported prompt_tokens: both measure the physical prompt.
+            usage.prompt_tokens = usage
+                .prompt_tokens
+                .saturating_sub(self.pending_prompt_tokens);
+            // The engine's prefix-cache hit covers the physical prompt, so a
+            // fully cached prompt would otherwise report more cached than
+            // prompt tokens.
+            if let Some(cached) = usage
+                .prompt_tokens_details
+                .as_mut()
+                .and_then(|details| details.cached_tokens.as_mut())
+            {
+                *cached = (*cached).min(usage.prompt_tokens);
+            }
+        }
         usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
         usage
     }
@@ -240,5 +269,84 @@ mod tests {
         let options = options.expect("stream options should remain present");
         assert!(options.include_usage);
         assert!(options.continuous_usage_stats);
+    }
+
+    fn state_with_pending(isl: u32, pending: u32) -> DeltaGeneratorState {
+        let mut state = DeltaGeneratorState::new(
+            "id".to_string(),
+            "chat.completion.chunk".to_string(),
+            "model".to_string(),
+            DeltaGeneratorOptions::default(),
+        );
+        state.update_isl(isl);
+        state.set_pending_prompt_tokens(pending);
+        state
+    }
+
+    #[test]
+    fn pending_prompt_tokens_are_excluded_from_reported_usage_only() {
+        let state = state_with_pending(39, 3);
+        let usage = state.get_usage();
+        assert_eq!(usage.prompt_tokens, 36);
+        assert_eq!(usage.total_tokens, 36);
+        assert_eq!(
+            state.get_isl(),
+            39,
+            "metrics keep the physical prompt length"
+        );
+    }
+
+    #[test]
+    fn zero_pending_prompt_tokens_leave_usage_unchanged() {
+        let usage = state_with_pending(39, 0).get_usage();
+        assert_eq!(usage.prompt_tokens, 39);
+    }
+
+    #[test]
+    fn backend_reported_prompt_tokens_are_adjusted_and_cached_tokens_clamped() {
+        use crate::protocols::common::llm_backend::BackendOutput;
+        use dynamo_protocols::types::PromptTokensDetails;
+
+        let mut state = state_with_pending(39, 3);
+        let output = BackendOutput {
+            token_ids: vec![7, 8],
+            tokens: vec![Some("a".to_string()), Some("b".to_string())],
+            text: Some("ab".to_string()),
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: None,
+            stop_reason: None,
+            index: Some(0),
+            completion_usage: Some(CompletionUsage {
+                prompt_tokens: 39,
+                completion_tokens: 2,
+                total_tokens: 41,
+                prompt_tokens_details: Some(PromptTokensDetails {
+                    // Engine reports a prefix-cache hit over the whole physical prompt.
+                    cached_tokens: Some(38),
+                    ..Default::default()
+                }),
+                completion_tokens_details: None,
+            }),
+            disaggregated_params: None,
+            worker_trace_link: None,
+            engine_data: None,
+            encoder_result: None,
+            routing_data: None,
+            jailed_text: None,
+        };
+        state.update_usage_from_backend_output(&output);
+
+        let usage = state.get_usage();
+        assert_eq!(usage.prompt_tokens, 36);
+        assert_eq!(usage.completion_tokens, 2);
+        assert_eq!(usage.total_tokens, 38);
+        assert_eq!(
+            usage
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            Some(36)
+        );
     }
 }

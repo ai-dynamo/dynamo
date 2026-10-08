@@ -1760,6 +1760,59 @@ fn resolve_qwen_video_processor_contract(
     Ok(vllm_contract.or(sglang_contract))
 }
 
+/// Count the tokens of the rendered prompt's trailing generation stub.
+///
+/// Renderers that follow a reference API which excludes the stub from
+/// `usage.prompt_tokens` (Kimi K3's `<|open|>response<|sep|>`) report it as
+/// pending segments. The stub is re-encoded on its own and accepted only when
+/// it is literally the suffix of `token_ids`, so a tokenizer whose
+/// post-processing changes the boundary degrades to the physical count instead
+/// of under-reporting. Returns zero for every other prompt.
+fn pending_prompt_token_count(
+    tokenizer: &dyn Tokenizer,
+    prompt: Option<&RenderedPrompt>,
+    token_ids: &[TokenIdType],
+) -> u32 {
+    let Some(prompt) = prompt.filter(|prompt| prompt.pending_segments() > 0) else {
+        return 0;
+    };
+    let Some(segments) = prompt.pending_encode_segments() else {
+        return 0;
+    };
+    match tokenizer.encode_segments(&segments) {
+        Ok(encoding) => {
+            let pending = encoding.token_ids();
+            if !pending.is_empty() && token_ids.ends_with(pending) {
+                pending.len() as u32
+            } else {
+                tracing::warn!(
+                    pending_segments = segments.len(),
+                    pending_tokens = pending.len(),
+                    "rendered generation stub is not a suffix of the prompt tokens; reporting the physical prompt length"
+                );
+                0
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "failed to encode the rendered generation stub; reporting the physical prompt length"
+            );
+            0
+        }
+    }
+}
+
+/// Tokens gathered for a request plus the annotations and usage metadata
+/// produced while tokenizing it.
+pub struct GatheredTokens {
+    pub token_ids: Vec<crate::protocols::TokenIdType>,
+    pub annotations: HashMap<String, String>,
+    /// Trailing generation-stub tokens excluded from reported prompt usage.
+    /// See `PreprocessedRequest::pending_prompt_tokens`.
+    pub pending_prompt_tokens: u32,
+}
+
 impl OpenAIPreprocessor {
     fn omitted_max_tokens_default(
         prompt_len: usize,
@@ -2864,7 +2917,11 @@ impl OpenAIPreprocessor {
         );
 
         let tokenize_start = Instant::now();
-        let (token_ids, annotations) = {
+        let GatheredTokens {
+            token_ids,
+            annotations,
+            pending_prompt_tokens,
+        } = {
             let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
             self.gather_tokens(request, formatted_prompt.as_ref(), tracker)
                 .await
@@ -2886,6 +2943,7 @@ impl OpenAIPreprocessor {
         // view so the routing-side borrow stays cheap and builder ownership
         // moves once.
         builder.token_ids(token_ids);
+        builder.pending_prompt_tokens(pending_prompt_tokens);
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_PREPROCESS])
@@ -4502,9 +4560,10 @@ impl OpenAIPreprocessor {
         request: &R,
         formatted_prompt: Option<&RenderedPrompt>,
         tracker: Option<&RequestTracker>,
-    ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
+    ) -> Result<GatheredTokens> {
         let mut annotations = HashMap::new();
         let mut tokens_out: Vec<crate::protocols::TokenIdType> = Vec::new();
+        let mut pending_prompt_tokens = 0u32;
         // match request type before any conversion/processing
         match request.prompt_input_type() {
             PromptInput::Tokens(_) => {
@@ -4599,6 +4658,15 @@ impl OpenAIPreprocessor {
                                 );
                             }
 
+                            // Pre-computed tokens carry no renderer metadata, so
+                            // the stub cannot be identified and nothing is excluded.
+                            if !skip_token_annotation {
+                                pending_prompt_tokens = pending_prompt_token_count(
+                                    self.tokenizer.as_ref(),
+                                    formatted_prompt,
+                                    &tokens_vec,
+                                );
+                            }
                             tokens_out = tokens_vec;
                         }
                         TextInput::Batch(texts) => {
@@ -4620,7 +4688,11 @@ impl OpenAIPreprocessor {
 
         Self::capture_prompt_token_ids(request, tracker, &tokens_out);
 
-        Ok((tokens_out, annotations))
+        Ok(GatheredTokens {
+            token_ids: tokens_out,
+            annotations,
+            pending_prompt_tokens,
+        })
     }
 
     /// Retain the authoritative rendered prompt only for clients that request
@@ -7333,6 +7405,7 @@ impl
         if common_request.prompt_embeds.is_none() {
             let isl = common_request.token_ids.len() as u32;
             response_generator.update_isl(isl);
+            response_generator.set_pending_prompt_tokens(common_request.pending_prompt_tokens);
         }
 
         // repack the common completion request
@@ -7479,7 +7552,11 @@ impl
         } else {
             // Normal path: tokenize the prompt; embeddings don't need MM routing,
             // so install tokens on the builder right away.
-            let (token_ids, ann) = self
+            let GatheredTokens {
+                token_ids,
+                annotations: ann,
+                ..
+            } = self
                 .gather_tokens(&request, None, tracker.as_deref())
                 .await?;
             builder.token_ids(token_ids);
@@ -13379,5 +13456,97 @@ mod tests {
             image,
             video(2)
         ]));
+    }
+}
+
+#[cfg(test)]
+mod pending_prompt_token_tests {
+    use super::*;
+    use crate::tokenizers::TikTokenTokenizer;
+    use dynamo_renderer::RenderedSegment;
+    use std::path::Path;
+
+    /// tiktoken applies no post-processor, matching the Kimi K3 checkpoint
+    /// whose renderer is the only one that reports pending segments.
+    fn mock_tiktoken() -> Arc<dyn Tokenizer> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-tiktoken/tiktoken.model");
+        Arc::new(
+            TikTokenTokenizer::from_file_auto(path.to_str().unwrap())
+                .expect("mock tiktoken tokenizer"),
+        )
+    }
+
+    /// Conversation text followed by a K3-shaped channel stub: control
+    /// marker, channel name, control marker.
+    fn stub_prompt(pending_segments: usize) -> RenderedPrompt {
+        RenderedPrompt::segmented_with_pending(
+            vec![
+                RenderedSegment::new("hello world", false),
+                RenderedSegment::new("[BOS]", true),
+                RenderedSegment::new("response", false),
+                RenderedSegment::new("[EOS]", true),
+            ],
+            pending_segments,
+        )
+    }
+
+    fn encode(tokenizer: &dyn Tokenizer, prompt: &RenderedPrompt) -> Vec<TokenIdType> {
+        tokenizer
+            .encode_segments(&prompt.encode_segments().unwrap())
+            .unwrap()
+            .token_ids()
+            .to_vec()
+    }
+
+    #[test]
+    fn counts_the_rendered_stub_when_it_is_the_prompt_suffix() {
+        let tokenizer = mock_tiktoken();
+        let prompt = stub_prompt(3);
+        let full = encode(tokenizer.as_ref(), &prompt);
+        let stub = tokenizer
+            .encode_segments(&prompt.pending_encode_segments().unwrap())
+            .unwrap()
+            .token_ids()
+            .len();
+        assert!(stub >= 3, "two control markers plus the channel name");
+        assert!(full.len() > stub, "the stub is only the tail of the prompt");
+
+        let pending = pending_prompt_token_count(tokenizer.as_ref(), Some(&prompt), &full);
+        assert_eq!(pending as usize, stub);
+    }
+
+    #[test]
+    fn reports_zero_without_pending_segments_or_a_rendered_prompt() {
+        let tokenizer = mock_tiktoken();
+        let prompt = stub_prompt(0);
+        let full = encode(tokenizer.as_ref(), &prompt);
+        assert_eq!(
+            pending_prompt_token_count(tokenizer.as_ref(), Some(&prompt), &full),
+            0
+        );
+        assert_eq!(
+            pending_prompt_token_count(tokenizer.as_ref(), None, &full),
+            0
+        );
+        let text_only = RenderedPrompt::text("hello world".to_string());
+        assert_eq!(
+            pending_prompt_token_count(tokenizer.as_ref(), Some(&text_only), &full),
+            0
+        );
+    }
+
+    #[test]
+    fn keeps_the_physical_length_when_tokens_do_not_end_with_the_stub() {
+        // Token ids that were truncated or supplied out-of-band no longer end
+        // with the stub; under-reporting would be worse than over-reporting.
+        let tokenizer = mock_tiktoken();
+        let prompt = stub_prompt(3);
+        let full = encode(tokenizer.as_ref(), &prompt);
+        let truncated = &full[..full.len() - 1];
+        assert_eq!(
+            pending_prompt_token_count(tokenizer.as_ref(), Some(&prompt), truncated),
+            0
+        );
     }
 }
