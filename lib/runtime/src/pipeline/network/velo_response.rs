@@ -40,7 +40,7 @@ use crate::{
 };
 
 pub const TRANSPORT_NAME: &str = "velo_response";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 static PROCESS_SERVICE: tokio::sync::Mutex<Weak<SharedService>> =
     tokio::sync::Mutex::const_new(Weak::new());
@@ -122,7 +122,7 @@ struct ResponseAddress {
 
 #[derive(Serialize, Deserialize)]
 enum ResponseFrame {
-    Prologue(ResponseStreamPrologue),
+    Prologue(Bytes),
     Data(Bytes),
 }
 
@@ -314,6 +314,7 @@ impl VeloResponseService {
     pub fn register_response(
         self: &Arc<Self>,
         context: Arc<dyn AsyncEngineContext>,
+        defer_cancellation_until_prologue: bool,
     ) -> Result<RegisteredStream<StreamReceiver>> {
         ensure!(
             !self.closing.load(Ordering::Acquire),
@@ -366,12 +367,12 @@ impl VeloResponseService {
                 tokio::select! {
                     biased;
                     _ = done.cancelled() => return,
-                    _ = context.killed() => {
+                    _ = context.killed(), if !defer_cancellation_until_prologue => {
                         tracing::debug!(context_id = %context.id(), "Cancelling Velo response stream");
                         controller.cancel(); return;
                     }
                     _ = tx.closed() => return,
-                    _ = context.stopped(), if !stopped => {
+                    _ = context.stopped(), if !stopped && !defer_cancellation_until_prologue => {
                         tracing::debug!(context_id = %context.id(), "Stopping Velo response generation");
                         controller.request_stop(); stopped = true;
                     }
@@ -380,6 +381,16 @@ impl VeloResponseService {
             };
             match first {
                 Some(Ok(StreamFrame::Item(ResponseFrame::Prologue(prologue)))) => {
+                    let prologue = match serde_json::from_slice::<ResponseStreamPrologue>(&prologue)
+                    {
+                        Ok(prologue) => prologue,
+                        Err(error) => {
+                            let _ = tx.send(Err(StreamPrologueError::from_message(format!(
+                                "Invalid Velo response prologue: {error}"
+                            ))));
+                            return;
+                        }
+                    };
                     if let Some(error) = prologue.error {
                         tracing::debug!(context_id = %context.id(), %error, "Velo response prologue returned an error");
                         let _ = tx.send(Err(StreamPrologueError {
@@ -400,7 +411,7 @@ impl VeloResponseService {
             }
             let receiver = VeloResponseReceiver {
                 anchor,
-                _lease: lease,
+                lease,
                 context_id: context.id().to_string(),
                 ended: false,
             };
@@ -441,6 +452,13 @@ impl VeloResponseService {
         }
     }
 
+    fn complete(&self, id: Uuid) {
+        let registration = self.registrations.lock().requests.remove(&id);
+        if let Some(registration) = registration {
+            registration.done.cancel();
+        }
+    }
+
     pub async fn associate_instance(&self, id: Uuid, instance: &EndpointInstanceId) -> bool {
         let mut state = self.registrations.lock();
         state
@@ -451,10 +469,8 @@ impl VeloResponseService {
         }
         if let Some(request) = state.requests.get_mut(&id) {
             request.instance = Some(instance.clone());
-            true
-        } else {
-            false
         }
+        true
     }
 
     pub async fn cancel_response(&self, id: Uuid) {
@@ -562,12 +578,23 @@ impl VeloResponseService {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
-                        if let Some(counter) = &cancellation { counter.inc(); }
+                        if !stopped && let Some(counter) = &cancellation { counter.inc(); }
+                        tracing::info!(target: "request_span",
+                            request_id = context.id(),
+                            {"cancellation.signal"} = "kill",
+                            {"cancellation.source"} = "upstream",
+                            "request cancellation received");
                         tracing::debug!(context_id = %context.id(), "Velo response peer cancelled the request");
                         context.kill(); return;
                     }
                     _ = monitor_done.cancelled() => return,
                     _ = stop.cancelled(), if !stopped => {
+                        if let Some(counter) = &cancellation { counter.inc(); }
+                        tracing::info!(target: "request_span",
+                            request_id = context.id(),
+                            {"cancellation.signal"} = "stop",
+                            {"cancellation.source"} = "upstream",
+                            "request cancellation received");
                         tracing::debug!(context_id = %context.id(), "Velo response peer requested a stop");
                         context.stop_generating(); stopped = true;
                     }
@@ -605,7 +632,7 @@ fn first_kind(
 
 pub(super) struct VeloResponseReceiver {
     anchor: StreamAnchor<ResponseFrame>,
-    _lease: ResponseLease,
+    lease: ResponseLease,
     context_id: String,
     ended: bool,
 }
@@ -620,6 +647,7 @@ impl Stream for VeloResponseReceiver {
             Some(Ok(StreamFrame::Item(ResponseFrame::Data(bytes)))) => Poll::Ready(Some(Ok(bytes))),
             Some(Ok(StreamFrame::Finalized)) => {
                 this.ended = true;
+                this.lease.service.complete(this.lease.id);
                 Poll::Ready(None)
             }
             terminal => {
@@ -660,10 +688,9 @@ impl VeloResponseSender {
         self.sender
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Velo response closed"))?
-            .send(ResponseFrame::Prologue(ResponseStreamPrologue {
-                error,
-                typed_error,
-            }))
+            .send(ResponseFrame::Prologue(
+                serde_json::to_vec(&ResponseStreamPrologue { error, typed_error })?.into(),
+            ))
             .await?;
         self.prologue_sent = true;
         Ok(())
@@ -740,7 +767,7 @@ mod tests {
 
                 // Retain both the service and a registration across shutdown.
                 let registration = service
-                    .register_response(EngineContext::new(()).context())
+                    .register_response(EngineContext::new(()).context(), false)
                     .unwrap();
                 let endpoint = second.graceful_shutdown_tracker().register_task();
                 let main = second.primary_token();
@@ -758,7 +785,7 @@ mod tests {
                 assert!(service.registrations.lock().requests.is_empty());
                 assert!(
                     service
-                        .register_response(EngineContext::new(()).context())
+                        .register_response(EngineContext::new(()).context(), false)
                         .is_err()
                 );
                 assert!(second.velo_response_service().service().await.is_err());
@@ -871,14 +898,18 @@ mod tests {
     }
 
     async fn lifecycle_suite(transport: ResponseTransport) {
-        stop_drains_output_and_cancel_reaches_an_idle_engine(transport).await;
         completion_and_failure_keep_distinct_results(transport).await;
+        stop_drains_output_and_cancel_reaches_an_idle_engine(transport).await;
         prologue_preserves_typed_errors_and_rejects_version_mismatch(transport).await;
         blocked_stream_isolation_and_peer_failure(transport).await;
+        deferred_cancellation_ends_at_prologue_or_registration_removal(transport).await;
     }
 
     #[tokio::test]
     async fn tcp_lifecycle() {
+        if crate::test_utils::run_isolated(concat!(module_path!(), "::tcp_lifecycle"), &[]) {
+            return;
+        }
         lifecycle_suite(ResponseTransport::Tcp).await;
     }
 
@@ -892,16 +923,22 @@ mod tests {
         let (consumer, producer) = pair(transport).await;
         let client = EngineContext::new(()).context();
         let engine = EngineContext::new(()).context();
-        let registered = consumer.register_response(client.clone()).unwrap();
+        let registered = consumer.register_response(client.clone(), false).unwrap();
         client.stop_generating();
+        let cancellations = prometheus::IntCounter::new("cancellations", "test").unwrap();
         let mut sender = producer
-            .sender(engine.clone(), registered.connection_info.clone(), None)
+            .sender(
+                engine.clone(),
+                registered.connection_info.clone(),
+                Some(cancellations.clone()),
+            )
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), engine.stopped())
             .await
             .unwrap();
         assert!(!engine.is_killed());
+        assert_eq!(cancellations.get(), 1);
         sender.send_prologue(None).await.unwrap();
         let (_, provider) = registered.into_parts();
         let mut receiver = provider.await.unwrap().unwrap();
@@ -916,14 +953,38 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), engine.killed())
             .await
             .unwrap();
+        assert_eq!(cancellations.get(), 1, "Stop then Kill counts once");
+    }
+
+    fn cancellation_operations() -> f64 {
+        PROCESS_METRICS
+            .0
+            .prometheus_registry
+            .read()
+            .unwrap()
+            .gather()
+            .iter()
+            .filter(|family| family.name() == "velo_streaming_anchor_operations_total")
+            .flat_map(|family| family.get_metric())
+            .filter(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "operation" && label.value() == "cancel")
+            })
+            .map(|metric| metric.get_counter().value())
+            .sum()
     }
 
     async fn completion_and_failure_keep_distinct_results(transport: ResponseTransport) {
         let (consumer, producer) = pair(transport).await;
         for complete in [true, false] {
             let registered = consumer
-                .register_response(EngineContext::new(()).context())
+                .register_response(EngineContext::new(()).context(), false)
                 .unwrap();
+            let id = registered.registration_id().unwrap();
+            let done = consumer.registrations.lock().requests[&id].done.clone();
+            let cancelled_before = cancellation_operations();
             let mut sender = producer
                 .sender(
                     EngineContext::new(()).context(),
@@ -952,6 +1013,14 @@ mod tests {
                 assert!(terminal.unwrap().is_err());
             }
             assert!(receiver.rx.next().await.is_none());
+            if complete {
+                assert!(done.is_cancelled());
+                drop(receiver);
+                // The TCP suite runs in isolation so other tests cannot change this counter.
+                if transport == ResponseTransport::Tcp {
+                    assert_eq!(cancellation_operations(), cancelled_before);
+                }
+            }
         }
     }
 
@@ -960,7 +1029,7 @@ mod tests {
         let mut streams = Vec::new();
         for _ in 0..2 {
             let registered = consumer
-                .register_response(EngineContext::new(()).context())
+                .register_response(EngineContext::new(()).context(), false)
                 .unwrap();
             let engine = EngineContext::new(()).context();
             let mut sender = producer
@@ -1021,18 +1090,108 @@ mod tests {
         sender.abort().await.unwrap();
     }
 
+    async fn deferred_cancellation_ends_at_prologue_or_registration_removal(
+        transport: ResponseTransport,
+    ) {
+        let (consumer, producer) = pair(transport).await;
+        let instance = EndpointInstanceId {
+            namespace: "test".into(),
+            component: "worker".into(),
+            endpoint: "generate".into(),
+            instance_id: 1,
+        };
+        for remove in [false, true] {
+            let client = EngineContext::new(()).context();
+            client.kill();
+            let registered = consumer.register_response(client, true).unwrap();
+            let id = registered.registration_id().unwrap();
+            let engine = EngineContext::new(()).context();
+            let cancellations = prometheus::IntCounter::new("cancellations", "test").unwrap();
+            let mut sender = producer
+                .sender(
+                    engine.clone(),
+                    registered.connection_info.clone(),
+                    Some(cancellations.clone()),
+                )
+                .await
+                .unwrap();
+            assert!(!engine.is_stopped());
+            let (_, mut provider) = registered.into_parts();
+            assert!(matches!(
+                provider.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            if remove {
+                consumer.cancel_response(id).await;
+                assert!(provider.await.is_err());
+                assert!(consumer.associate_instance(id, &instance).await);
+                consumer.cancel_instance_streams(&instance).await;
+                assert!(!consumer.associate_instance(id, &instance).await);
+            } else {
+                sender.send_prologue(None).await.unwrap();
+                let _receiver = provider.await.unwrap().unwrap();
+                tokio::time::timeout(Duration::from_secs(5), engine.killed())
+                    .await
+                    .unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), engine.killed())
+                .await
+                .unwrap();
+            assert_eq!(cancellations.get(), 1, "Kill alone counts once");
+        }
+    }
+
     async fn prologue_preserves_typed_errors_and_rejects_version_mismatch(
         transport: ResponseTransport,
     ) {
         let (consumer, producer) = pair(transport).await;
+        for diagnostic in [None, Some("private backend detail")] {
+            let registered = consumer
+                .register_response(EngineContext::new(()).context(), false)
+                .unwrap();
+            let mut builder = DynamoError::builder()
+                .error_type(ErrorType::InvalidRequest)
+                .public_details(crate::error::PublicDetails::SizeLimit {
+                    limit: 10,
+                    actual: Some(11),
+                });
+            if let Some(diagnostic) = diagnostic {
+                builder = builder.diagnostic(diagnostic);
+            }
+            let error = builder.build();
+            let mut sender = producer
+                .sender(
+                    EngineContext::new(()).context(),
+                    registered.connection_info.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
+            sender
+                .send_prologue(Some(StreamPrologueError::new(
+                    "backend failure",
+                    error.clone(),
+                )))
+                .await
+                .unwrap();
+            match registered.wait().await.unwrap() {
+                Err(actual) => {
+                    let actual = actual.typed_error.expect("typed prologue error");
+                    assert_eq!(actual.class(), ErrorType::InvalidRequest);
+                    assert_eq!(actual.reason(), error.reason());
+                    assert_eq!(actual.public_details(), error.public_details());
+                    assert_eq!(
+                        actual.diagnostic().map(|d| d.as_str()).unwrap_or_default(),
+                        diagnostic.unwrap_or_default()
+                    );
+                }
+                Ok(_) => panic!("error prologue succeeded"),
+            }
+        }
         let registered = consumer
-            .register_response(EngineContext::new(()).context())
+            .register_response(EngineContext::new(()).context(), false)
             .unwrap();
-        let error = DynamoError::builder()
-            .error_type(ErrorType::Disconnected)
-            .message("backend failure")
-            .build();
-        let mut sender = producer
+        let sender = producer
             .sender(
                 EngineContext::new(()).context(),
                 registered.connection_info.clone(),
@@ -1041,24 +1200,18 @@ mod tests {
             .await
             .unwrap();
         sender
-            .send_prologue(Some(StreamPrologueError::new(
-                "backend failure",
-                error.clone(),
-            )))
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(ResponseFrame::Prologue(Bytes::from_static(b"{invalid")))
             .await
             .unwrap();
-        let (_, provider) = registered.into_parts();
-        match provider.await.unwrap() {
-            Err(actual) => {
-                let actual = actual.typed_error.expect("typed prologue error");
-                assert_eq!(actual.class(), error.class());
-                assert_eq!(actual.reason(), error.reason());
-                assert_eq!(actual.to_string(), error.to_string());
-            }
-            Ok(_) => panic!("error prologue succeeded"),
+        match registered.wait().await.unwrap() {
+            Err(error) => assert!(error.message.contains("Invalid Velo response prologue")),
+            Ok(_) => panic!("malformed prologue succeeded"),
         }
         let registered = consumer
-            .register_response(EngineContext::new(()).context())
+            .register_response(EngineContext::new(()).context(), false)
             .unwrap();
         let mut address: ResponseAddress =
             serde_json::from_str(&registered.connection_info.info).unwrap();
