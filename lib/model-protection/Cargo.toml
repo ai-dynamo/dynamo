@@ -14,8 +14,15 @@ description = "Protected model package verification and materialization"
 [features]
 tpm2 = ["dep:tss-esapi"]
 enrollment-client = ["tpm2", "enrollment"]
-enrollment = []
-enrollment-authority = ["enrollment", "packager", "dep:rusqlite", "dep:openssl", "dep:x509-parser"]
+enrollment = ["dep:aes"]
+enrollment-authority = [
+    "enrollment",
+    "packager",
+    "dep:rusqlite",
+    "dep:rustls-pki-types",
+    "dep:webpki",
+    "dep:x509-parser",
+]
 packager = [
     "dep:aes-kw",
     "dep:ed25519-dalek",
@@ -52,8 +59,10 @@ p256 = { version = "0.13", features = ["ecdsa", "pkcs8"], optional = true }
 pkcs8 = { version = "0.10", features = ["encryption", "pem"], optional = true }
 rsa = { version = "0.9", features = ["sha2"], optional = true }
 rusqlite = { version = "0.37", features = ["backup"], optional = true }
-openssl = { version = "0.10", optional = true }
-x509-parser = { version = "0.18", optional = true }
+aes = { version = "0.8", optional = true }
+rustls-pki-types = { version = "1", optional = true }
+webpki = { package = "rustls-webpki", version = "0.103", optional = true, features = ["ring"] }
+x509-parser = { version = "0.18", optional = true, features = ["verify"] }
 ring = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }
@@ -67,3 +76,5 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rcgen = { version = "0.13", features = ["ring"] }
+time = "0.3"

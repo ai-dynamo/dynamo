@@ -81,10 +81,9 @@ build lại image nếu image không có loader hoặc bản sửa code cần th
 đã qua kiểm tra cú pháp Compose tại máy phát hành; xác minh endpoint và inference
 trên server khách vẫn đang mở.
 
-Tài liệu này là kiến trúc V2 sau
-[security review](model-protection-security-review.md). Thiết kế giữ nguyên
-luồng model bình thường, bảo vệ model được phân phối dưới dạng mã hóa và dùng
-TPM để ràng buộc khả năng giải mã với máy đã đăng ký.
+Tài liệu này mô tả kiến trúc V2. Thiết kế giữ nguyên luồng model bình thường,
+bảo vệ model được phân phối dưới dạng mã hóa và dùng TPM để ràng buộc khả năng
+giải mã với máy đã đăng ký.
 
 Baseline V1 giả định hệ thống on-prem có thể air-gapped:
 
@@ -125,8 +124,7 @@ khi có yêu cầu kết nối cụ thể.
 > vẫn là release gate. EK/AK vendor attestation được defer khỏi V1 hiện tại;
 > Kubernetes chỉ là gate riêng
 > nếu release tuyên bố hỗ trợ Kubernetes.
-> Xem [task ledger](TASKS.md) và mục 6–7 của
-> [security review](model-protection-security-review.md).
+> Các release gate này chưa hoàn tất.
 
 > [!NOTE]
 > Ngày 2026-10-07, tài liệu profile `encrypted-file` đã được bổ sung song ngữ.
@@ -1667,7 +1665,6 @@ Còn cần chứng minh trước production release:
 ## 16. Tài liệu tham chiếu
 
 - [DEP #14764: Protected model loading for on-premises deployments](https://github.com/ai-dynamo/dynamo/issues/14764)
-- [Security review and findings](model-protection-security-review.md)
 - [NIST Key Management Guidelines](https://csrc.nist.gov/projects/key-management/key-management-guidelines)
 - [NIST SP 800-38D: GCM and GMAC](https://csrc.nist.gov/pubs/sp/800/38/d/final)
 - [RFC 8032: Ed25519](https://www.rfc-editor.org/info/rfc8032/)

@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use openssl::stack::Stack;
-use openssl::x509::{
-    X509, X509StoreContext,
-    store::X509StoreBuilder,
-    verify::{X509VerifyFlags, X509VerifyParam},
-};
+use rustls_pki_types::{CertificateDer, UnixTime};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use x509_parser::{extensions::GeneralName, parse_x509_certificate};
+use std::time::Duration;
+use webpki::{EndEntityCert, KeyUsage, anchor_from_trusted_cert};
+use x509_parser::{
+    extensions::GeneralName, parse_x509_certificate, prelude::X509Certificate,
+    public_key::PublicKey,
+};
 
 use super::format::{ValidatedRequest, hex, identifier, parse};
 use super::{EnrollmentError as Error, Result};
@@ -113,7 +113,7 @@ pub fn verify_trust_policy(
     })
 }
 
-fn certificate(value: &str) -> Result<X509> {
+fn certificate(value: &str) -> Result<Vec<u8>> {
     if value.len() > 22 * 1024 {
         return Err(Error::Trust);
     }
@@ -121,11 +121,38 @@ fn certificate(value: &str) -> Result<X509> {
     if der.is_empty() || der.len() > 16 * 1024 || BASE64.encode(&der) != value {
         return Err(Error::Trust);
     }
-    let cert = X509::from_der(&der).map_err(|_| Error::Trust)?;
-    if cert.to_der().map_err(|_| Error::Trust)? != der {
+    let (remaining, _) = parse_x509_certificate(&der).map_err(|_| Error::Trust)?;
+    if !remaining.is_empty() {
         return Err(Error::Trust);
     }
-    Ok(cert)
+    Ok(der)
+}
+
+fn parse_certificate(der: &[u8]) -> Result<X509Certificate<'_>> {
+    let (remaining, parsed) = parse_x509_certificate(der).map_err(|_| Error::Trust)?;
+    if !remaining.is_empty() {
+        return Err(Error::Trust);
+    }
+    Ok(parsed)
+}
+
+fn validate_trust_anchor(der: &[u8], now: u64) -> Result<()> {
+    let root = parse_certificate(der)?;
+    let not_before = root.validity().not_before.timestamp();
+    let not_after = root.validity().not_after.timestamp();
+    if root.subject() != root.issuer()
+        || !root.is_ca()
+        || root
+            .key_usage()
+            .map_err(|_| Error::Trust)?
+            .map_or(true, |usage| !usage.value.key_cert_sign())
+        || root.verify_signature(None).is_err()
+        || now < u64::try_from(not_before).map_err(|_| Error::Trust)?
+        || now >= u64::try_from(not_after).map_err(|_| Error::Trust)?
+    {
+        return Err(Error::Trust);
+    }
+    Ok(())
 }
 
 /// No AIA, CRL URL or other customer-controlled network resource is fetched.
@@ -139,10 +166,12 @@ pub fn verify_ek(
         return Err(Error::Trust);
     }
     let chain = &request.request().ek_certificate_chain;
-    let leaf = certificate(chain.first().ok_or(Error::Trust)?)?;
-    let der = leaf.to_der().map_err(|_| Error::Trust)?;
-    let (remaining, parsed) = parse_x509_certificate(&der).map_err(|_| Error::Trust)?;
-    if !remaining.is_empty() || parsed.version().0 != 2 || parsed.is_ca() {
+    if chain.is_empty() || chain.len() > 6 {
+        return Err(Error::Trust);
+    }
+    let leaf_der = certificate(chain.first().ok_or(Error::Trust)?)?;
+    let parsed = parse_certificate(&leaf_der)?;
+    if parsed.version().0 != 2 || parsed.is_ca() {
         return Err(Error::Trust);
     }
     let ku = parsed
@@ -190,65 +219,69 @@ pub fn verify_ek(
     {
         return Err(Error::Trust);
     }
-    let rsa = leaf
-        .public_key()
-        .map_err(|_| Error::Trust)?
-        .rsa()
-        .map_err(|_| Error::Trust)?;
+    let PublicKey::RSA(rsa) = parsed.public_key().parsed().map_err(|_| Error::Trust)? else {
+        return Err(Error::Trust);
+    };
     let ek_public = BASE64
         .decode(&request.request().ek_public)
         .map_err(|_| Error::Trust)?;
-    if rsa.n().num_bits() != 2048
-        || rsa.e().to_vec() != [1, 0, 1]
-        || rsa.n().to_vec() != ek_public[58..]
+    let modulus = rsa.modulus.strip_prefix(&[0]).unwrap_or(rsa.modulus);
+    let exponent = rsa.exponent.strip_prefix(&[0]).unwrap_or(rsa.exponent);
+    if ek_public.len() < 58
+        || rsa.key_size() != 2048
+        || exponent != [1, 0, 1]
+        || modulus != &ek_public[58..]
     {
         return Err(Error::Trust);
     }
-    let mut store = X509StoreBuilder::new().map_err(|_| Error::Trust)?;
-    for root in &policy.policy.root_certificates {
-        store
-            .add_cert(certificate(root)?)
-            .map_err(|_| Error::Trust)?;
-    }
-    let mut parameters = X509VerifyParam::new().map_err(|_| Error::Trust)?;
-    parameters.set_time(i64::try_from(now).map_err(|_| Error::Trust)?);
-    parameters.set_auth_level(2);
-    parameters.set_depth(5);
-    parameters
-        .set_flags(X509VerifyFlags::X509_STRICT | X509VerifyFlags::CHECK_SS_SIGNATURE)
-        .map_err(|_| Error::Trust)?;
-    store.set_param(&parameters).map_err(|_| Error::Trust)?;
-    let mut intermediates = Stack::new().map_err(|_| Error::Trust)?;
+    let mut chain_der = Vec::with_capacity(chain.len());
+    chain_der.push(leaf_der);
     for cert in &chain[1..] {
-        intermediates
-            .push(certificate(cert)?)
-            .map_err(|_| Error::Trust)?;
+        chain_der.push(certificate(cert)?);
     }
-    let mut context = X509StoreContext::new().map_err(|_| Error::Trust)?;
-    let is_valid = context
-        .init(&store.build(), &leaf, &intermediates, |context| {
-            if !context.verify_cert()? {
-                return Ok(false);
-            }
-            let Some(chain) = context.chain() else {
-                return Ok(false);
-            };
-            for certificate in chain {
-                let fingerprint = hex(&Sha256::digest(certificate.to_der()?));
-                if policy
-                    .policy
-                    .revoked_certificate_sha256
-                    .contains(&fingerprint)
-                {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        })
+    let mut root_der = Vec::with_capacity(policy.policy.root_certificates.len());
+    for root in &policy.policy.root_certificates {
+        let der = certificate(root)?;
+        validate_trust_anchor(&der, now)?;
+        root_der.push(der);
+    }
+    for der in chain_der.iter().chain(&root_der) {
+        let fingerprint = hex(&Sha256::digest(der));
+        if policy
+            .policy
+            .revoked_certificate_sha256
+            .contains(&fingerprint)
+        {
+            return Err(Error::Trust);
+        }
+    }
+
+    let trust_certificates: Vec<_> = root_der
+        .iter()
+        .map(|der| CertificateDer::from(der.as_slice()))
+        .collect();
+    let trust_anchors: Vec<_> = trust_certificates
+        .iter()
+        .map(anchor_from_trusted_cert)
+        .collect::<std::result::Result<_, _>>()
         .map_err(|_| Error::Trust)?;
-    if !is_valid {
-        return Err(Error::Trust);
-    }
+    let intermediate_certificates: Vec<_> = chain_der[1..]
+        .iter()
+        .map(|der| CertificateDer::from(der.as_slice()))
+        .collect();
+    let end_entity_der = CertificateDer::from(chain_der[0].as_slice());
+    let end_entity = EndEntityCert::try_from(&end_entity_der).map_err(|_| Error::Trust)?;
+    end_entity
+        .verify_for_usage(
+            webpki::ALL_VERIFICATION_ALGS,
+            &trust_anchors,
+            &intermediate_certificates,
+            UnixTime::since_unix_epoch(Duration::from_secs(now)),
+            KeyUsage::required(&[0x67, 0x81, 0x05, 0x08, 0x01]),
+            None,
+            None,
+        )
+        .map_err(|_| Error::Trust)?;
     Ok(VerifiedEk {
         request_digest: *request.digest(),
         policy_digest: policy.digest,
@@ -259,18 +292,72 @@ pub fn verify_ek(
 mod tests {
     use super::super::format::{test_request, validate_request};
     use super::*;
-    use openssl::{
-        asn1::{Asn1Integer, Asn1Object, Asn1OctetString, Asn1Time},
-        bn::BigNum,
-        hash::MessageDigest,
-        pkey::PKey,
-        rsa::Rsa,
-        x509::{
-            X509Extension, X509NameBuilder,
-            extension::{AuthorityKeyIdentifier, BasicConstraints, KeyUsage, SubjectKeyIdentifier},
-        },
+    use pkcs8::EncodePrivateKey;
+    use rcgen::{
+        BasicConstraints, CertificateParams, CustomExtension, DistinguishedName, DnType, IsCa,
+        KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256,
     };
-    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use ring::signature::{Ed25519KeyPair, KeyPair as RingKeyPair};
+    use rsa::{
+        RsaPrivateKey,
+        pkcs1v15::SigningKey,
+        rand_core::OsRng,
+        signature::{SignatureEncoding, Signer},
+        traits::PublicKeyParts,
+    };
+    use sha2::Sha256;
+
+    fn test_certificates(now: u64) -> (Vec<u8>, Vec<u8>, RsaPrivateKey, RsaPrivateKey) {
+        let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut ca_params = CertificateParams::default();
+        ca_params.distinguished_name = DistinguishedName::new();
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "Test TPM root");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        ca_params.not_before = time::OffsetDateTime::from_unix_timestamp(now as i64 - 100).unwrap();
+        ca_params.not_after = time::OffsetDateTime::from_unix_timestamp(now as i64 + 1000).unwrap();
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+
+        let ek_key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+        let ek_pkcs8 = ek_key.to_pkcs8_der().unwrap();
+        let ek_signing_key = KeyPair::from_pkcs8_der_and_sign_algo(
+            &rustls_pki_types::PrivatePkcs8KeyDer::from(ek_pkcs8.as_bytes()),
+            &PKCS_RSA_SHA256,
+        )
+        .unwrap();
+        let mut leaf_params = CertificateParams::default();
+        leaf_params.distinguished_name = DistinguishedName::new();
+        leaf_params
+            .distinguished_name
+            .push(DnType::CommonName, "Test EK");
+        leaf_params.key_usages = vec![KeyUsagePurpose::KeyEncipherment];
+        leaf_params.not_before =
+            time::OffsetDateTime::from_unix_timestamp(now as i64 - 100).unwrap();
+        leaf_params.not_after =
+            time::OffsetDateTime::from_unix_timestamp(now as i64 + 1000).unwrap();
+        let mut eku = CustomExtension::from_oid_content(
+            &[2, 5, 29, 37],
+            vec![0x30, 7, 6, 5, 0x67, 0x81, 0x05, 0x08, 0x01],
+        );
+        eku.set_criticality(false);
+        leaf_params.custom_extensions.push(eku);
+        let directory_name = vec![
+            0x30, 0x18, 0x31, 0x16, 0x30, 0x14, 0x06, 0x05, 0x67, 0x81, 0x05, 0x02, 0x01, 0x13,
+            0x0b, b'i', b'd', b':', b'4', b'9', b'4', b'E', b'5', b'4', b'4', b'3',
+        ];
+        let mut san = vec![0x30, 0x1c, 0xa4, 0x1a];
+        san.extend_from_slice(&directory_name);
+        leaf_params
+            .custom_extensions
+            .push(CustomExtension::from_oid_content(&[2, 5, 29, 17], san));
+        let leaf = leaf_params
+            .signed_by(&ek_signing_key, &ca, &ca_key)
+            .unwrap();
+        let ak_key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+        (ca.der().to_vec(), leaf.der().to_vec(), ek_key, ak_key)
+    }
 
     fn signed_policy(policy: &TrustPolicy) -> (Vec<u8>, Vec<u8>, [u8; 32]) {
         let key = Ed25519KeyPair::from_seed_unchecked(&[0x55; 32]).unwrap();
@@ -295,116 +382,15 @@ mod tests {
     #[test]
     fn pinned_ek_chain_rejects_revocation_mismatch_expiration_and_unknown_root() {
         let now = 1_790_000_000;
-        let ca_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
-        let ek_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
-        let ak_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
-        let mut ca_name = X509NameBuilder::new().unwrap();
-        ca_name.append_entry_by_text("CN", "Test TPM root").unwrap();
-        let ca_name = ca_name.build();
-        let mut ca = X509::builder().unwrap();
-        ca.set_version(2).unwrap();
-        ca.set_serial_number(&Asn1Integer::from_bn(&BigNum::from_u32(1).unwrap()).unwrap())
-            .unwrap();
-        ca.set_subject_name(&ca_name).unwrap();
-        ca.set_issuer_name(&ca_name).unwrap();
-        ca.set_pubkey(&ca_key).unwrap();
-        ca.set_not_before(&Asn1Time::from_unix(now - 100).unwrap())
-            .unwrap();
-        ca.set_not_after(&Asn1Time::from_unix(now + 1000).unwrap())
-            .unwrap();
-        ca.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
-            .unwrap();
-        ca.append_extension(
-            KeyUsage::new()
-                .critical()
-                .key_cert_sign()
-                .crl_sign()
-                .build()
-                .unwrap(),
-        )
-        .unwrap();
-        ca.append_extension(
-            SubjectKeyIdentifier::new()
-                .build(&ca.x509v3_context(None, None))
-                .unwrap(),
-        )
-        .unwrap();
-        ca.sign(&ca_key, MessageDigest::sha256()).unwrap();
-        let ca = ca.build();
-        let mut subject = X509NameBuilder::new().unwrap();
-        subject.append_entry_by_text("CN", "Test EK").unwrap();
-        let subject = subject.build();
-        let mut leaf = X509::builder().unwrap();
-        leaf.set_version(2).unwrap();
-        leaf.set_serial_number(&Asn1Integer::from_bn(&BigNum::from_u32(2).unwrap()).unwrap())
-            .unwrap();
-        leaf.set_subject_name(&subject).unwrap();
-        leaf.set_issuer_name(ca.subject_name()).unwrap();
-        leaf.set_pubkey(&ek_key).unwrap();
-        leaf.set_not_before(&Asn1Time::from_unix(now - 100).unwrap())
-            .unwrap();
-        leaf.set_not_after(&Asn1Time::from_unix(now + 1000).unwrap())
-            .unwrap();
-        leaf.append_extension(BasicConstraints::new().critical().build().unwrap())
-            .unwrap();
-        leaf.append_extension(
-            KeyUsage::new()
-                .critical()
-                .key_encipherment()
-                .build()
-                .unwrap(),
-        )
-        .unwrap();
-        leaf.append_extension(
-            SubjectKeyIdentifier::new()
-                .build(&leaf.x509v3_context(Some(&ca), None))
-                .unwrap(),
-        )
-        .unwrap();
-        leaf.append_extension(
-            AuthorityKeyIdentifier::new()
-                .keyid(true)
-                .build(&leaf.x509v3_context(Some(&ca), None))
-                .unwrap(),
-        )
-        .unwrap();
-        let eku = Asn1OctetString::new_from_bytes(&[0x30, 7, 6, 5, 0x67, 0x81, 5, 8, 1]).unwrap();
-        leaf.append_extension(
-            X509Extension::new_from_der(&Asn1Object::from_str("2.5.29.37").unwrap(), false, &eku)
-                .unwrap(),
-        )
-        .unwrap();
-        let mut directory = X509NameBuilder::new().unwrap();
-        directory
-            .append_entry_by_text("2.23.133.2.1", "id:494E5443")
-            .unwrap();
-        let directory = directory.build().to_der().unwrap();
-        let mut san = vec![
-            0x30,
-            (directory.len() + 2) as u8,
-            0xa4,
-            directory.len() as u8,
-        ];
-        san.extend_from_slice(&directory);
-        leaf.append_extension(
-            X509Extension::new_from_der(
-                &Asn1Object::from_str("2.5.29.17").unwrap(),
-                false,
-                &Asn1OctetString::new_from_bytes(&san).unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        leaf.sign(&ca_key, MessageDigest::sha256()).unwrap();
-        let leaf = leaf.build();
+        let (ca_der, leaf_der, ek_key, ak_key) = test_certificates(now as u64);
         let mut request = test_request();
         let mut ek = BASE64.decode(&request.ek_public).unwrap();
-        ek[58..].copy_from_slice(&ek_key.rsa().unwrap().n().to_vec());
+        ek[58..].copy_from_slice(&ek_key.n().to_bytes_be());
         request.ek_public = BASE64.encode(&ek);
         let mut ak = BASE64.decode(&request.ak_public).unwrap();
-        ak[24..].copy_from_slice(&ak_key.rsa().unwrap().n().to_vec());
+        ak[24..].copy_from_slice(&ak_key.n().to_bytes_be());
         request.ak_public = BASE64.encode(ak);
-        request.ek_certificate_chain = vec![BASE64.encode(leaf.to_der().unwrap())];
+        request.ek_certificate_chain = vec![BASE64.encode(&leaf_der)];
         let request = validate_request(request).unwrap();
         let mut policy = TrustPolicy {
             format: "model-protection-enrollment-trust-policy".into(),
@@ -413,7 +399,7 @@ mod tests {
             sequence: 1,
             valid_from: now as u64 - 10,
             expires_at: now as u64 + 2000,
-            root_certificates: vec![BASE64.encode(ca.to_der().unwrap())],
+            root_certificates: vec![BASE64.encode(&ca_der)],
             allowed_manufacturers: vec!["id:494E5443".into()],
             revoked_certificate_sha256: vec![],
             revocation_mode: "operator-fingerprint-snapshot-v1".into(),
@@ -447,9 +433,9 @@ mod tests {
             attest.extend_from_slice(&(value.len() as u16).to_be_bytes());
             attest.extend_from_slice(value);
         }
-        let mut signer = openssl::sign::Signer::new(MessageDigest::sha256(), &ak_key).unwrap();
-        signer.update(&attest).unwrap();
-        let ak_signature = signer.sign_to_vec().unwrap();
+        let ak_signature = SigningKey::<Sha256>::new(ak_key.clone())
+            .sign(&attest)
+            .to_vec();
         let mut response = super::super::format::Response {
             format: "model-protection-enrollment-response".into(),
             format_version: 1,
@@ -551,13 +537,13 @@ mod tests {
             verify_trust_policy(&bytes, &envelope, "trust-policy", &key, 2, now as u64).is_err()
         );
         assert!(verify_ek(&request, &verified, now as u64 + 1001).is_err());
-        policy.revoked_certificate_sha256 = vec![hex(&Sha256::digest(leaf.to_der().unwrap()))];
+        policy.revoked_certificate_sha256 = vec![hex(&Sha256::digest(&leaf_der))];
         let (bytes, envelope, key) = signed_policy(&policy);
         let verified =
             verify_trust_policy(&bytes, &envelope, "trust-policy", &key, 1, now as u64).unwrap();
         assert!(verify_ek(&request, &verified, now as u64).is_err());
         policy.revoked_certificate_sha256.clear();
-        policy.root_certificates = vec![BASE64.encode(leaf.to_der().unwrap())];
+        policy.root_certificates = vec![BASE64.encode(&leaf_der)];
         let (bytes, envelope, key) = signed_policy(&policy);
         let verified =
             verify_trust_policy(&bytes, &envelope, "trust-policy", &key, 1, now as u64).unwrap();

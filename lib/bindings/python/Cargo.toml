@@ -74,7 +74,6 @@ dynamo-vllm-sidecar = { path = "../../sidecar/vllm", default-features = false }
 dynamo-model-protection = { path = "../../model-protection" }
 
 anyhow = { version = "1" }
-rustix = { version = "1.1.4", features = ["fs", "process"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 bytes = { version = "1" }

@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use aes::{
+    Aes128,
+    cipher::{BlockEncrypt, KeyInit},
+};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use openssl::symm::{Cipher, Crypter, Mode};
 use ring::{
     hmac,
     rand::{SecureRandom, SystemRandom},
@@ -101,22 +104,7 @@ pub(super) fn protect_credential(
     let mut clear = Zeroizing::new([0; 34]);
     clear[..2].copy_from_slice(&32u16.to_be_bytes());
     clear[2..].copy_from_slice(secret);
-    let mut cipher = Crypter::new(
-        Cipher::aes_128_cfb128(),
-        Mode::Encrypt,
-        &storage_key[..16],
-        Some(&[0; 16]),
-    )
-    .map_err(|_| Error::Proof)?;
-    cipher.pad(false);
-    let mut encrypted = vec![0; clear.len() + 16];
-    let count = cipher
-        .update(&*clear, &mut encrypted)
-        .map_err(|_| Error::Proof)?;
-    let final_count = cipher
-        .finalize(&mut encrypted[count..])
-        .map_err(|_| Error::Proof)?;
-    encrypted.truncate(count + final_count);
+    let encrypted = aes_128_cfb128(&storage_key[..16], &[0; 16], &*clear, false)?;
     let mut message = encrypted.clone();
     message.extend_from_slice(name);
     let integrity = hmac::sign(
@@ -131,10 +119,64 @@ pub(super) fn protect_credential(
     Ok((credential, encrypted_seed))
 }
 
+fn aes_128_cfb128(key: &[u8], iv: &[u8; 16], input: &[u8], decrypt: bool) -> Result<Vec<u8>> {
+    let cipher = Aes128::new_from_slice(key).map_err(|_| Error::Proof)?;
+    let mut feedback = *iv;
+    let mut output = Vec::with_capacity(input.len());
+
+    for chunk in input.chunks(16) {
+        let mut keystream = aes::Block::clone_from_slice(&feedback);
+        cipher.encrypt_block(&mut keystream);
+        let offset = output.len();
+        output.extend(
+            chunk
+                .iter()
+                .zip(keystream.iter())
+                .map(|(byte, key)| byte ^ key),
+        );
+
+        if decrypt {
+            feedback[..chunk.len()].copy_from_slice(chunk);
+        } else {
+            feedback[..chunk.len()].copy_from_slice(&output[offset..]);
+        }
+    }
+
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rsa::{RsaPrivateKey, traits::PublicKeyParts};
+
+    #[test]
+    fn cfb128_matches_the_standard_aes_vector() {
+        let key = [
+            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
+            0x4f, 0x3c,
+        ];
+        let iv = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ];
+        let plaintext = [
+            0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93,
+            0x17, 0x2a,
+        ];
+        let ciphertext = [
+            0x3b, 0x3f, 0xd9, 0x2e, 0xb7, 0x2d, 0xad, 0x20, 0x33, 0x34, 0x49, 0xf8, 0xe8, 0x3c,
+            0xfb, 0x4a,
+        ];
+        assert_eq!(
+            aes_128_cfb128(&key, &iv, &plaintext, false).unwrap(),
+            ciphertext
+        );
+        assert_eq!(
+            aes_128_cfb128(&key, &iv, &ciphertext, true).unwrap(),
+            plaintext
+        );
+    }
 
     #[test]
     fn credential_protection_roundtrip_and_name_integrity() {
@@ -159,13 +201,7 @@ mod tests {
         );
         let storage = kdfa(&seed, b"STORAGE", &name, 128);
         let integrity = kdfa(&seed, b"INTEGRITY", &[], 256);
-        let plaintext = openssl::symm::decrypt(
-            Cipher::aes_128_cfb128(),
-            &storage[..16],
-            Some(&[0; 16]),
-            &credential[34..],
-        )
-        .unwrap();
+        let plaintext = aes_128_cfb128(&storage[..16], &[0; 16], &credential[34..], true).unwrap();
         assert_eq!(&plaintext[..2], &[0, 32]);
         assert_eq!(&plaintext[2..], &secret);
         let mut message = credential[34..].to_vec();

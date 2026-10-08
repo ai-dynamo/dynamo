@@ -252,7 +252,7 @@ TPM hay protected tmpfs. Các quy tắc mật mã, wire format và threat model 
 > Experimental. Collector/authority/registry đã có code; native simulator và
 > Intel PTT tests pass với test keys. OEM trust và product acceptance chưa hoàn tất. Bước 5.1 không phải
 > thao tác tự tạo certified-device JSON rồi ký trên máy khách. Xem
-> [tiến độ TPM](TPM-Implementation-Status.md) trước khi cấp license production.
+> [kiến trúc và trạng thái triển khai](model-protection-architecture.md) trước khi cấp license production.
 
 ### Sơ đồ các bước
 
@@ -323,7 +323,7 @@ hoặc dùng keys tổng hợp của test để cấp license production.
 | E. Cài và chạy protected | Máy phát hành + máy khách | Bước 7–9: nhận bundle, đối chiếu identity, cấu hình TPM/tmpfs, chạy topology đã được triển khai và kiểm tra |
 | F. Nghiệm thu và phê duyệt | Máy khách + máy phát hành | Bước 11–13: inference, reboot/copy rejection, lifecycle, restore/rotation, review và canary đúng source/image |
 
-Theo dõi trạng thái từng phase tại [tiến độ TPM](TPM-Implementation-Status.md).
+Theo dõi trạng thái triển khai trong [tài liệu kiến trúc bảo vệ model](model-protection-architecture.md).
 Không coi việc build image thành công là hoàn tất B, C hoặc F.
 
 ### Đầu vào và kết quả của từng bước
@@ -420,9 +420,8 @@ hợp, không giữ private issuer key hay model plaintext trên server khách.
 **Thực hiện trên:** máy phát hành offline. Không chạy bước này trên máy khách
 hoặc trong container inference.
 
-Dùng quy trình trong phần Key-directory bootstrap and rotation procedure của
-[Runbook.md](Runbook.md). Đây là thao tác chỉ thực hiện trên máy phát hành.
-Bản rút gọn:
+Dùng các bước trong mục này trên máy phát hành. Đây là thao tác chỉ thực hiện
+trên máy phát hành. Bản rút gọn:
 
 ```bash
 set -euo pipefail
@@ -1196,11 +1195,11 @@ registry không rời authority. Nếu output có
 > Source có collector, verifier/registry và authority CLI, nhưng OEM/physical
 > enrollment production chưa nghiệm thu. Không tự viết certified-device JSON,
 > dùng machine-id hay development key để coi bước này hoàn tất. Xem
-> [TPM-Production-Plan.md](TPM-Production-Plan.md), đặc biệt P0–P4.
+> [kiến trúc và trạng thái triển khai](model-protection-architecture.md), đặc biệt các release gate về enrollment.
 
-Hiện đã có CLI `model-protection-enroll inspect/provision/request/respond`;
-xem [tiến độ và lệnh chạy trên máy khách](TPM-Implementation-Status.md).
+Hiện đã có CLI `model-protection-enroll inspect/provision/request/respond`.
 Collector **không tạo certified-device** và không thay enrollment verifier.
+Xem [kiến trúc và trạng thái triển khai](model-protection-architecture.md) để biết giới hạn enrollment hiện tại.
 
 Với hai package OCR ở bước 4, tạo binding/certification/license riêng cho từng
 artifact. Lặp lại 5.1.3–5.1.5 cho Hunyuan; không tái dùng certificate Qwen.
@@ -1755,7 +1754,7 @@ hàng đánh dấu checklist triển khai.
 - [ ] Đã issue license từ certified-device hợp lệ.
 - [ ] Đã lưu issuer-record trong kho offline, không đưa vào customer bundle.
 - [ ] Đã ký image và ghi lại digest.
-- [ ] Đã backup/rotation key theo Runbook.
+- [ ] Đã hoàn tất backup và rotation key theo quy trình custody đã phê duyệt.
 
 ### Máy build/CI
 
@@ -1786,7 +1785,4 @@ hàng đánh dấu checklist triển khai.
 
 - [model-protection-architecture.md](model-protection-architecture.md): kiến trúc,
   format, trust boundary và giới hạn bảo mật.
-- [Runbook.md](Runbook.md): key custody, backup/restore, rotation, build và
-  rollback.
-- [Obstacles.md](Obstacles.md): giới hạn môi trường và các acceptance gate còn mở.
 - [Docker/Kubernetes profile](https://github.com/ai-dynamo/dynamo/blob/main/deploy/model-protection/README.md).

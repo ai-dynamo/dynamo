@@ -13,8 +13,8 @@ Production enrollment is not yet hardware-qualified. The authority verifier,
 registry, resumable collector provisioning/response and intent-bound issuance
 recovery are implemented. Native simulator tests pass; physical acceptance
 remains open. The public policy signer is loaded transiently from a TPMT_PUBLIC
-file, not persisted as an external public object. See
-[implementation status](../../docs/project-memory/TPM-Implementation-Status.md).
+file, not persisted as an external public object. See the
+[model protection architecture and implementation status](https://github.com/ai-dynamo/dynamo/blob/main/docs/project-memory/model-protection-architecture.md).
 Single-/multi-GPU product configurations require separate process and lifecycle
 acceptance; this guide's baseline does not enable multi-worker loading.
 
@@ -189,8 +189,9 @@ Failed issuance publication retains its quota reservation. Retry with identical
 inputs/license ID/generation resumes it or publishes the exact committed bundle;
 changed intent and disabled certificates fail closed. Historical V1 reservations
 without an intent digest cannot be resumed automatically. Do not delete reservations
-to bypass admission; use the
-[operations runbook](../../docs/project-memory/TPM-Operations-Runbook.md).
+to bypass admission. See the
+[protected model usage guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/project-memory/Protected-Model-Usage.md)
+for the full issuer and runtime procedure.
 
 ## 5. Build the protected runtime image
 

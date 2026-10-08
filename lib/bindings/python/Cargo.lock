@@ -2476,7 +2476,6 @@ dependencies = [
  "pythonize",
  "rmp",
  "rmpv",
- "rustix 1.1.4",
  "serde",
  "serde-transcode",
  "serde_json",

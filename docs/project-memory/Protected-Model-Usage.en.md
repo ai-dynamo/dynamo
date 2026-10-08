@@ -515,7 +515,7 @@ license identifier.
 
 - [Protected model architecture](model-protection-architecture.md): formats,
   trust boundaries, and security limits.
-- [Model protection deployment profile](../../deploy/model-protection/README.md):
+- [Model protection deployment profile](https://github.com/ai-dynamo/dynamo/blob/main/deploy/model-protection/README.md):
   Docker/Kubernetes profile and build instructions.
 - [Vietnamese operator guide](Protected-Model-Usage.md): source-language
   companion with detailed command-by-command enrollment instructions.
