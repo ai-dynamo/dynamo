@@ -165,49 +165,64 @@ fn image_sources_are_opaque_but_require_payloads() {
     };
     let text = PreparedRequest::new(request("image"), &config, 4, None).unwrap();
     for (name, source, valid) in cases {
-        for modality in [
-            pb::Modality::Image as i32,
-            pb::Modality::Video as i32,
-            pb::Modality::Audio as i32,
-            pb::Modality::Unspecified as i32,
-            99,
-        ] {
-            let mut req = request("image");
-            req.media.push(pb::MediaItem {
-                modality,
-                source: source.clone(),
-                ..Default::default()
-            });
-            if valid && modality == pb::Modality::Image as i32 {
-                let error =
-                    PreparedRequest::new(req.clone(), &MockerServerConfig::default(), 4, None)
-                        .unwrap_err();
-                assert_eq!(error.code(), tonic::Code::Unimplemented, "{name}");
-            }
-            let result = PreparedRequest::new(req, &config, 4, None);
-            if modality == pb::Modality::Audio as i32 || modality == pb::Modality::Video as i32 {
-                assert_eq!(
-                    result.unwrap_err().code(),
-                    tonic::Code::Unimplemented,
-                    "{name}"
-                );
-            } else if valid && modality == pb::Modality::Image as i32 {
-                let prepared = result.unwrap();
-                assert_eq!(
-                    prepared.direct_request().tokens,
-                    text.direct_request().tokens,
-                    "{name}"
-                );
-                assert_eq!(prepared.output_token(0), text.output_token(0), "{name}");
-            } else {
-                assert_eq!(
-                    result.unwrap_err().code(),
-                    tonic::Code::InvalidArgument,
-                    "{name}"
-                );
-            }
+        let mut req = request("image");
+        req.media.push(pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source,
+            ..Default::default()
+        });
+        let result = PreparedRequest::new(req, &config, 4, None);
+        if valid {
+            let prepared = result.unwrap();
+            assert_eq!(
+                prepared.direct_request().tokens,
+                text.direct_request().tokens,
+                "{name}"
+            );
+            assert_eq!(prepared.output_token(0), text.output_token(0), "{name}");
+        } else {
+            assert_eq!(
+                result.unwrap_err().code(),
+                tonic::Code::InvalidArgument,
+                "{name}"
+            );
         }
     }
+}
+
+#[test]
+fn non_image_modalities_are_rejected() {
+    let config = MockerServerConfig {
+        supports_multimodal: true,
+        ..Default::default()
+    };
+    for modality in [
+        pb::Modality::Audio as i32,
+        pb::Modality::Video as i32,
+        pb::Modality::Unspecified as i32,
+        99,
+    ] {
+        let mut req = request("non-image");
+        req.media.push(pb::MediaItem {
+            modality,
+            source: Some(pb::media_item::Source::RawBytes(vec![1, 2, 3])),
+            ..Default::default()
+        });
+        let error = PreparedRequest::new(req, &config, 4, None).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{modality}");
+    }
+}
+
+#[test]
+fn image_requests_require_multimodal_support() {
+    let mut req = request("image");
+    req.media.push(pb::MediaItem {
+        modality: pb::Modality::Image as i32,
+        source: Some(pb::media_item::Source::RawBytes(vec![1, 2, 3])),
+        ..Default::default()
+    });
+    let error = PreparedRequest::new(req, &MockerServerConfig::default(), 4, None).unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
 }
 
 #[tokio::test]

@@ -28,7 +28,6 @@ if (( $# > 1 )); then
     exit 1
 fi
 
-# Validate required managed ports before starting any processes.
 SYSTEM_PORT1="$(dyn_port DYN_SYSTEM_PORT 1 0)"
 if [[ "$MODE" == disagg ]]; then
     SYSTEM_PORT2="$(dyn_port DYN_SYSTEM_PORT 2 0)"

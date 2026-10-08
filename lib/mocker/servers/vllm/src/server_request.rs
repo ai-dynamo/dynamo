@@ -418,7 +418,7 @@ fn validate_media(media: &[pb::MediaItem]) -> BoxedStatusResult<()> {
             Ok(pb::Modality::Image) => {}
             Ok(pb::Modality::Audio | pb::Modality::Video) => {
                 return Err(
-                    Status::unimplemented("the mock server supports image media only").into(),
+                    Status::invalid_argument("the mock server supports image media only").into(),
                 );
             }
             Ok(pb::Modality::Unspecified) | Err(_) => {
