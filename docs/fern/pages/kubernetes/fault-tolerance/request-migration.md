@@ -70,7 +70,8 @@ worker before the window expires. Direct dispatch bypasses local inhibition. In 
 except `kv`, explicit worker targets such as `x-dynamo-prefill-instance-id` and hard session-affinity
 targets also bypass it. These targets continue to honor the selected worker while that worker remains
 in service discovery. With `--router-mode kv`, a locally inhibited explicit worker target is still
-rejected.
+rejected. Requests that name a LoRA adapter also do not get this bypass, because LoRA routing chooses
+only from workers that are not locally inhibited.
 
 See [Runtime Configuration](../../reference/components/runtime-configuration.mdx#fault-tolerance) for the field
 reference and [Distributed Runtime](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#local-worker-inhibition) for

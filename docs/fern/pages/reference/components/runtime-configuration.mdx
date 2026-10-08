@@ -361,7 +361,9 @@ address.
   process after changing it. Discovery updates remain authoritative. Direct dispatch bypasses the
   local inhibited set while the selected worker remains in discovery. In every router mode except
   `kv`, explicit worker targets and hard session-affinity targets also bypass it. With
-  `--router-mode kv`, a locally inhibited explicit worker target is still rejected.
+  `--router-mode kv`, a locally inhibited explicit worker target is still rejected. Requests that
+  name a LoRA adapter also do not get this bypass, because LoRA routing chooses only from workers
+  that are not locally inhibited.
 </ParamField>
 
 ## Operations
