@@ -14,8 +14,8 @@ When the install is done, a pod that asks for `gpu-fraction: "0.5"` lands on a s
 
 | Fork | What it provides | Images | Helm chart |
 |---|---|---|---|
-| [KAI-Scheduler](https://github.com/nv-kmcgill53/KAI-Scheduler) | Scheduler, binder, admission controller, and operator. Tracks per-GPU compute as well as memory, and writes the `gpu-compute.portion` and `gpu-memory.request` annotations on each fractional pod | 15 service images | `deployments/kai-scheduler` |
-| [kai-gpu-fractioning](https://github.com/nv-kmcgill53/kai-gpu-fractioning) | Node agents. `fractiond` (an NRI plugin) injects the caps into each container, `mpsd` runs the MPS control daemon and creates one namespace per container, `metricsd` exports metrics, and `operator` manages them | 4 images: `operator`, `mpsd`, `fractiond`, `metricsd` | `operator/charts` |
+| [KAI-Scheduler](https://github.com/kai-scheduler/KAI-Scheduler/pull/2368) | Scheduler, binder, admission controller, and operator. Tracks per-GPU compute as well as memory, and writes the `gpu-compute.portion` and `gpu-memory.request` annotations on each fractional pod | 15 service images | `deployments/kai-scheduler` |
+| [kai-gpu-fractioning](https://github.com/kai-scheduler/gpu-fractioning/pull/147) | Node agents. `fractiond` (an NRI plugin) injects the caps into each container, `mpsd` runs the MPS control daemon and creates one namespace per container, `metricsd` exports metrics, and `operator` manages them | 4 images: `operator`, `mpsd`, `fractiond`, `metricsd` | `operator/charts` |
 
 ```text
 pod (gpu-fraction: "0.5")
@@ -34,12 +34,12 @@ kai-gpu-fractioning
 
 ### Pinned Revisions
 
-Both repositories use the branch `kmcgill/sm-sharing-main`. The results published for this experiment were produced by exactly these commits, so check them out by SHA rather than following the branch.
+Both changes are open pull requests against the upstream repositories. The results published for this experiment were produced by exactly these commits, so check them out by SHA rather than following the pull request.
 
-| Repository | Branch | Commit |
+| Repository | Pull request | Commit |
 |---|---|---|
-| `KAI-Scheduler` | `kmcgill/sm-sharing-main` | `44d1d0a966465c69b1fd0d24b40b9a1ebb73699e` |
-| `kai-gpu-fractioning` | `kmcgill/sm-sharing-main` | `af0544e4dbd1d8e03ca14fc1e06d6265fabed99b` |
+| `KAI-Scheduler` | [kai-scheduler/KAI-Scheduler#2368](https://github.com/kai-scheduler/KAI-Scheduler/pull/2368) | `44d1d0a966465c69b1fd0d24b40b9a1ebb73699e` |
+| `kai-gpu-fractioning` | [kai-scheduler/gpu-fractioning#147](https://github.com/kai-scheduler/gpu-fractioning/pull/147) | `af0544e4dbd1d8e03ca14fc1e06d6265fabed99b` |
 
 ## Prerequisites
 
@@ -48,12 +48,12 @@ Both repositories use the branch `kmcgill/sm-sharing-main`. The results publishe
 | Requirement | Version | Notes | References |
 |---|---|---|---|
 | Docker with `buildx` | Recent | The Makefile compiles each service inside a `golang:1.26.3-bookworm` builder container and then builds the image with `docker buildx build` | [Install Docker Engine](https://docs.docker.com/engine/install/), [Docker Build and Buildx](https://docs.docker.com/build/concepts/overview/), [Builders](https://docs.docker.com/build/builders/) |
-| Go | 1.26.3 (`go.mod`) | Only needed if you build outside Docker. The Makefile does not use a host Go toolchain | [Go downloads](https://go.dev/dl/), [Installing Go](https://go.dev/doc/install), [`go.mod`](https://github.com/nv-kmcgill53/KAI-Scheduler/blob/44d1d0a966465c69b1fd0d24b40b9a1ebb73699e/go.mod) |
+| Go | 1.26.3 (`go.mod`) | Only needed if you build outside Docker. The Makefile does not use a host Go toolchain | [Go downloads](https://go.dev/dl/), [Installing Go](https://go.dev/doc/install), [`go.mod`](https://github.com/kai-scheduler/KAI-Scheduler/blob/44d1d0a966465c69b1fd0d24b40b9a1ebb73699e/go.mod) |
 | GNU `make` | Any recent | `make build` builds all 15 services for amd64 and arm64, then assembles the image for the host architecture only | [GNU Make](https://www.gnu.org/software/make/) |
 | `helm` | 3.x or 4.x | Used for `helm dependency build` and the install. The chart rendered cleanly with Helm 4.1 | [Installing Helm](https://helm.sh/docs/intro/install/) |
 | `kubectl` | Within one minor version of your cluster | | [Install kubectl](https://kubernetes.io/docs/tasks/tools/), [kubectl version skew](https://kubernetes.io/releases/version-skew-policy/#kubectl) |
 | `git` | Any recent | | [Git downloads](https://git-scm.com/downloads) |
-| Network access | | Docker Hub (`golang`), `nvcr.io` (`nvcr.io/nvidia/distroless/go:v3.2.1`, the runtime base image), and `ghcr.io` (`helm dependency build` pulls the `gpu-fractioning` subchart that `Chart.yaml` declares) | [`golang` on Docker Hub](https://hub.docker.com/_/golang), [`Dockerfile`](https://github.com/nv-kmcgill53/KAI-Scheduler/blob/44d1d0a966465c69b1fd0d24b40b9a1ebb73699e/Dockerfile), [`Chart.yaml`](https://github.com/nv-kmcgill53/KAI-Scheduler/blob/44d1d0a966465c69b1fd0d24b40b9a1ebb73699e/deployments/kai-scheduler/Chart.yaml) |
+| Network access | | Docker Hub (`golang`), `nvcr.io` (`nvcr.io/nvidia/distroless/go:v3.2.1`, the runtime base image), and `ghcr.io` (`helm dependency build` pulls the `gpu-fractioning` subchart that `Chart.yaml` declares) | [`golang` on Docker Hub](https://hub.docker.com/_/golang), [`Dockerfile`](https://github.com/kai-scheduler/KAI-Scheduler/blob/44d1d0a966465c69b1fd0d24b40b9a1ebb73699e/Dockerfile), [`Chart.yaml`](https://github.com/kai-scheduler/KAI-Scheduler/blob/44d1d0a966465c69b1fd0d24b40b9a1ebb73699e/deployments/kai-scheduler/Chart.yaml) |
 | A container registry you can push to and your cluster can pull from | | Referred to below as `$REGISTRY` | [What is a registry?](https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-registry/), [`docker image push`](https://docs.docker.com/reference/cli/docker/image/push/) |
 
 ### Build Machine: kai-gpu-fractioning
@@ -61,11 +61,11 @@ Both repositories use the branch `kmcgill/sm-sharing-main`. The results publishe
 | Requirement | Version | Notes | References |
 |---|---|---|---|
 | Docker | Recent | Plain `docker build` and `docker push`. `buildx` is needed only for the multi-architecture `docker-buildx` targets | [Install Docker Engine](https://docs.docker.com/engine/install/), [Docker Build and Buildx](https://docs.docker.com/build/concepts/overview/), [Builders](https://docs.docker.com/build/builders/) |
-| Go | 1.26.4 (`go.mod`) | Images build inside `golang:1.27.x` containers, so a host toolchain is not required for them. The `operator/Makefile` calls `go` while evaluating variables, so keep Go on your `PATH` to avoid a `go: No such file or directory` warning | [Go downloads](https://go.dev/dl/), [Installing Go](https://go.dev/doc/install), [`go.mod`](https://github.com/nv-kmcgill53/kai-gpu-fractioning/blob/af0544e4dbd1d8e03ca14fc1e06d6265fabed99b/go.mod) |
+| Go | 1.26.4 (`go.mod`) | Images build inside `golang:1.27.x` containers, so a host toolchain is not required for them. The `operator/Makefile` calls `go` while evaluating variables, so keep Go on your `PATH` to avoid a `go: No such file or directory` warning | [Go downloads](https://go.dev/dl/), [Installing Go](https://go.dev/doc/install), [`go.mod`](https://github.com/kai-scheduler/gpu-fractioning/blob/af0544e4dbd1d8e03ca14fc1e06d6265fabed99b/go.mod) |
 | GNU `make` | Any recent | | [GNU Make](https://www.gnu.org/software/make/) |
 | `helm` | 3.x or 4.x | | [Installing Helm](https://helm.sh/docs/intro/install/) |
 | `git` | Any recent | | [Git downloads](https://git-scm.com/downloads) |
-| Network access | | Docker Hub (`golang`, `nvidia/cuda:13.3.1-base-ubuntu24.04` for `mpsd`) and `nvcr.io` (`nvcr.io/nvidia/distroless/go:v4.1.3`, the runtime base image for the other three) | [`golang` on Docker Hub](https://hub.docker.com/_/golang), [`nvidia/cuda` on Docker Hub](https://hub.docker.com/r/nvidia/cuda), [`mpsd` Dockerfile](https://github.com/nv-kmcgill53/kai-gpu-fractioning/blob/af0544e4dbd1d8e03ca14fc1e06d6265fabed99b/fractioning-manager/mpsd/build/Dockerfile), [operator Dockerfile](https://github.com/nv-kmcgill53/kai-gpu-fractioning/blob/af0544e4dbd1d8e03ca14fc1e06d6265fabed99b/operator/Dockerfile) |
+| Network access | | Docker Hub (`golang`, `nvidia/cuda:13.3.1-base-ubuntu24.04` for `mpsd`) and `nvcr.io` (`nvcr.io/nvidia/distroless/go:v4.1.3`, the runtime base image for the other three) | [`golang` on Docker Hub](https://hub.docker.com/_/golang), [`nvidia/cuda` on Docker Hub](https://hub.docker.com/r/nvidia/cuda), [`mpsd` Dockerfile](https://github.com/kai-scheduler/gpu-fractioning/blob/af0544e4dbd1d8e03ca14fc1e06d6265fabed99b/fractioning-manager/mpsd/build/Dockerfile), [operator Dockerfile](https://github.com/kai-scheduler/gpu-fractioning/blob/af0544e4dbd1d8e03ca14fc1e06d6265fabed99b/operator/Dockerfile) |
 
 The images target `linux/amd64` by default (`PLATFORM ?= linux/amd64`), which matches A100 and H100 nodes. Override `PLATFORM` if you build on another architecture.
 
@@ -82,7 +82,7 @@ Check every row on a GPU node before you install anything. The defaults of a sto
 | `nvidia.com/gpu.memory` node label | KAI's binder reads each GPU's memory size from this label to compute a pod's memory cap. GPU Feature Discovery, part of the GPU Operator, sets it. Without it, fractional pods stay `Pending` and only a binder event explains why | `kubectl get nodes -L nvidia.com/gpu.memory` shows a value in MiB for every GPU node | [GPU Feature Discovery labels](https://github.com/NVIDIA/k8s-device-plugin/blob/main/docs/gpu-feature-discovery/README.md) |
 | `nvidia` RuntimeClass | Needed by GPU pods for driver libraries, and by KAI's reservation pod, which calls NVML | `kubectl get runtimeclass nvidia` | [Kubernetes RuntimeClass](https://kubernetes.io/docs/concepts/containers/runtime-class/), [GPU Operator installation](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) |
 | `nvidia-fabricmanager` | Required on multi-GPU NVLink and NVSwitch nodes such as HGX A100. Match the driver branch | `systemctl is-active nvidia-fabricmanager` | [Fabric Manager User Guide](https://docs.nvidia.com/datacenter/tesla/fabric-manager-user-guide/index.html) |
-| Host memory for `mpsd` | `mpsd` holds one CUDA server context per GPU at about 50 MiB of host memory each. This fork's default pod limit is `1Gi`, enough for 16 GPUs. Raise it on denser nodes | `kubectl -n gpu-fractioning get ds -o yaml` after install, under `resources.limits.memory` | [MPS documentation](https://docs.nvidia.com/deploy/mps/index.html), [`mpsDaemon` chart value](https://github.com/nv-kmcgill53/kai-gpu-fractioning/blob/af0544e4dbd1d8e03ca14fc1e06d6265fabed99b/operator/charts/values.yaml) |
+| Host memory for `mpsd` | `mpsd` holds one CUDA server context per GPU at about 50 MiB of host memory each. This fork's default pod limit is `1Gi`, enough for 16 GPUs. Raise it on denser nodes | `kubectl -n gpu-fractioning get ds -o yaml` after install, under `resources.limits.memory` | [MPS documentation](https://docs.nvidia.com/deploy/mps/index.html), [`mpsDaemon` chart value](https://github.com/kai-scheduler/gpu-fractioning/blob/af0544e4dbd1d8e03ca14fc1e06d6265fabed99b/operator/charts/values.yaml) |
 | Cluster-admin | The charts create CRDs, ClusterRoles, ClusterRoleBindings, PriorityClasses, and a second namespace, `kai-resource-reservation` | The five `kubectl auth can-i create ...` checks below | [Kubernetes RBAC user-facing roles](https://kubernetes.io/docs/reference/access-authn-authz/rbac/#user-facing-roles), [`kubectl auth can-i`](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_auth/kubectl_auth_can-i/) |
 
 ```bash
@@ -124,10 +124,12 @@ All the packages and images below exist publicly; choose the path that matches h
 ```bash
 mkdir kai-forks && cd kai-forks
 
-git clone https://github.com/nv-kmcgill53/KAI-Scheduler.git
+git clone https://github.com/kai-scheduler/KAI-Scheduler.git
+git -C KAI-Scheduler fetch origin pull/2368/head
 git -C KAI-Scheduler checkout 44d1d0a966465c69b1fd0d24b40b9a1ebb73699e
 
-git clone https://github.com/nv-kmcgill53/kai-gpu-fractioning.git
+git clone https://github.com/kai-scheduler/gpu-fractioning.git kai-gpu-fractioning
+git -C kai-gpu-fractioning fetch origin pull/147/head
 git -C kai-gpu-fractioning checkout af0544e4dbd1d8e03ca14fc1e06d6265fabed99b
 ```
 

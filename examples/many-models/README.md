@@ -68,10 +68,10 @@ Install the scheduler stack for the experiment first:
 
 - **Baseline:** no extra components.
 - **KAI + HAMi:** run `kai-hami/install-kai-hami.sh`.
-- **KAI + GPU fractions:** build and install KAI-Scheduler and kai-gpu-fractioning from the
-  `kmcgill/sm-sharing-main` branch of
-  [nv-kmcgill53/KAI-Scheduler](https://github.com/nv-kmcgill53/KAI-Scheduler) and
-  [nv-kmcgill53/kai-gpu-fractioning](https://github.com/nv-kmcgill53/kai-gpu-fractioning),
+- **KAI + GPU fractions:** build and install KAI-Scheduler and kai-gpu-fractioning from
+  pull requests
+  [kai-scheduler/KAI-Scheduler#2368](https://github.com/kai-scheduler/KAI-Scheduler/pull/2368) and
+  [kai-scheduler/gpu-fractioning#147](https://github.com/kai-scheduler/gpu-fractioning/pull/147),
   as described in
   [Build the KAI-Scheduler and GPU Fractioning Forks](../../docs/fern/pages/use-cases/many-model-serving/build-gpu-fractioning-forks.md).
   This requires driver r615 or later for per-namespace MPS limits. Then verify the caps
