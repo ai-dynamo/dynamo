@@ -29,6 +29,7 @@ import (
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -163,6 +164,9 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	var compatibilityErrs []error
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
+		if snapshotFailoverErr := dynamo.ValidateSnapshotFailover(component, field.NewPath("spec", "components").Index(i), dynamoDeployment.Spec.BackendFramework).ToAggregate(); snapshotFailoverErr != nil {
+			compatibilityErrs = append(compatibilityErrs, snapshotFailoverErr)
+		}
 		for _, compatibilityErr := range checkpoint.ValidateCheckpointCompatibility(component.Experimental) {
 			compatibilityErrs = append(
 				compatibilityErrs,

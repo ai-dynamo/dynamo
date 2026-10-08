@@ -18,7 +18,7 @@ use super::{BoxedStatusResult, DP_RANK, MockerServerConfig, ServerMode};
 pub(super) const DEFAULT_MAX_NEW_TOKENS: u32 = 20;
 // Bound the request-owned synthetic token plan independently of LiveEngine's
 // fixed per-request delivery buffer.
-pub(super) const MAX_NEW_TOKENS: u32 = 32_768;
+pub(super) const MAX_NEW_TOKENS: u32 = 1_000_000;
 const MAX_CANDIDATES: usize = 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

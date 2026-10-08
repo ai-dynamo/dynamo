@@ -445,6 +445,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
 		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
+		allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(component, componentPath, spec.BackendFramework)...)
 
 		// Allow existing LPX components to survive disablement without accepting new or changed specs.
 		allErrs = append(allErrs, lpxComponentGateErrors(

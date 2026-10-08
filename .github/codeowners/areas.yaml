@@ -430,6 +430,7 @@ areas:
   - deploy/utils/manifests/
   - deploy/utils/tests/
   - examples/deployments/
+  - examples/gpu-sharing/
   - tests/deploy/
 - label: lpx
   github_team: '@ai-dynamo/dynamo-lpx-codeowners'
