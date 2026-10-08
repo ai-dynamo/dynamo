@@ -10,7 +10,7 @@ use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
-use crate::pipeline::network::StreamPrologueError;
+use crate::pipeline::network::{StreamPrologueError, velo_response};
 use crate::pipeline::{ManyIn, RequestStream};
 use crate::telemetry::{LifecycleStage, LifecycleTrace};
 use futures::StreamExt;
@@ -175,25 +175,28 @@ trait ResponsePublisher {
     }
 }
 
-impl ResponsePublisher for super::super::velo_response::VeloResponseSender {
+impl ResponsePublisher for velo_response::VeloResponseSender {
     async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
-        self.send(payload).await
+        velo_response::VeloResponseSender::send(self, payload).await
     }
     async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
-        self.send_prologue(error.map(StreamPrologueError::from_message))
-            .await
+        velo_response::VeloResponseSender::send_prologue(
+            self,
+            error.map(StreamPrologueError::from_message),
+        )
+        .await
     }
     async fn send_prologue_typed(
         &mut self,
         error: Option<StreamPrologueError>,
     ) -> anyhow::Result<()> {
-        self.send_prologue(error).await
+        velo_response::VeloResponseSender::send_prologue(self, error).await
     }
     async fn finish(&mut self) -> anyhow::Result<()> {
-        self.finish().await
+        velo_response::VeloResponseSender::finish(self).await
     }
     async fn abort(&mut self) -> anyhow::Result<()> {
-        self.abort().await
+        velo_response::VeloResponseSender::abort(self).await
     }
     fn strict_prologue(&self) -> bool {
         true
@@ -959,20 +962,29 @@ where
                 .await?;
             }
             ResponsePlaneMode::Velo => {
-                let service = self.velo_response_service().await?;
                 let context = request.context();
-                let publisher = service
-                    .sender(
-                        context.clone(),
-                        response_connection_info,
-                        cancellation_counter,
-                    )
-                    .await
-                    .map_err(|error| {
-                        PipelineError::Generic(format!(
-                            "Failed to create Velo response stream: {error}"
-                        ))
-                    })?;
+                let publisher = async {
+                    let service = self.velo_response_service().await?;
+                    service
+                        .sender(
+                            context.clone(),
+                            response_connection_info,
+                            cancellation_counter,
+                        )
+                        .await
+                }
+                .await
+                .map_err(|error| {
+                    if let Some(metrics) = self.metrics() {
+                        metrics
+                            .error_counter
+                            .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                            .inc();
+                    }
+                    PipelineError::Generic(format!(
+                        "Failed to create Velo response stream: {error}"
+                    ))
+                })?;
                 drop(worker_admission);
                 tokio::select! {
                     biased;
@@ -1383,6 +1395,74 @@ mod tests {
             .unwrap(),
             IntCounter::with_opts(Opts::new("cancellation_total", "t")).unwrap(),
         )
+    }
+
+    #[tokio::test]
+    async fn velo_setup_failures_count_response_stream_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::velo_setup_failures_count_response_stream_errors"
+            ),
+            &[
+                ("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1"),
+                ("DYN_VELO_RESPONSE_TRANSPORT", "tcp"),
+            ],
+        ) {
+            return;
+        }
+        let runtime = crate::Runtime::from_current().unwrap();
+        for bound in [false, true] {
+            let ingress = TestIngress::new();
+            let metrics = Arc::new(test_metrics());
+            ingress.metrics.set(metrics.clone()).unwrap();
+            ingress.response_plane.set(ResponsePlaneMode::Velo).unwrap();
+            if bound {
+                ingress
+                    .velo_response_owner
+                    .set(Arc::downgrade(&runtime.velo_response_service()))
+                    .unwrap();
+            }
+            let control = RequestControlMessage {
+                id: "test".into(),
+                request_type: RequestType::SingleIn,
+                response_type: ResponseType::ManyOut,
+                payload_codec: RequestPlanePayloadCodec::Json,
+                connection_info: ConnectionInfo {
+                    transport: velo_response::TRANSPORT_NAME.into(),
+                    info: "{}".into(),
+                },
+                metadata: Default::default(),
+                frontend_send_ts_ns: None,
+                request_stream_connection_info: None,
+            };
+            let payload = TwoPartCodec::default()
+                .encode_message(TwoPartMessage::from_parts(
+                    serde_json::to_vec(&control).unwrap().into(),
+                    Bytes::from_static(b"{}"),
+                ))
+                .unwrap();
+            let error = ingress
+                .handle_payload_shared(payload, None)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains(if bound {
+                    "missing field"
+                } else {
+                    "live runtime endpoint"
+                }),
+                "{error}"
+            );
+            assert_eq!(
+                metrics
+                    .error_counter
+                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                    .get(),
+                1
+            );
+        }
+        runtime.velo_response_service().shutdown().await;
     }
 
     #[test]
