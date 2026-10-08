@@ -47,10 +47,8 @@ if [ "$ENABLE_OTEL" = true ]; then
     export OTEL_EXPORT_ENABLED=1
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
     OTEL_JSON="{\"return_perf_metrics\": true, \"otlp_traces_endpoint\": \"${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}\"}"
-    # Merge GPU mem config with OTEL config
     OVERRIDE_JSON=$(build_trtllm_override_args_with_mem --merge-with-json "$OTEL_JSON")
 else
-    # Just GPU mem config (if any)
     OVERRIDE_JSON=$(build_trtllm_override_args_with_mem)
 fi
 
