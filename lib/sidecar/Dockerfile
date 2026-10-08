@@ -74,16 +74,6 @@ COPY examples/router/custom-policy-example/ examples/router/custom-policy-exampl
 COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
-# Exercise Cargo freshness with old checkout mtimes before using shared caches.
-RUN python3 -B -m unittest discover -s lib/sidecar -p test_build_cache.py
-
-# The shared target cache can contain artifacts newer than a fresh checkout.
-# The build helper hashes all copied inputs and restores their mtimes to a
-# shared source timestamp before Cargo checks freshness. This invalidates stale
-# local crates and protobuf outputs and preserves third-party dependency reuse.
-# Use a separate cache generation so older builders cannot replace artifacts
-# without updating the helper's source stamp.
-
 # ---- sidecar builder --------------------------------------------------------
 FROM builder-base AS sidecar-builder
 
@@ -102,21 +92,17 @@ ARG CARGO_CYCLONEDX_VERSION=0.5.9
 # release link expensive. Every id is per-architecture so the amd64 and arm64
 # halves of a multi-platform build do not serialize against each other.
 #
-# build-with-cache.sh resets source mtimes before each cargo call so the
-# shared target cache cannot hand back artifacts from another revision.
-#
 # Each sidecar keeps its own `cargo build -p` call. One
 # `cargo build -p a -p b -p c` would unify features and link the vLLM-only
 # features into the SGLang and TensorRT-LLM binaries.
+# The target directory exists only during this RUN. The final step removes it
+# so the intermediate layer retains only the installed binaries and metadata.
 #
-# The SBOM step runs after the builds. Its output files land in the source
-# tree, and build-with-cache.sh hashes that tree, so running it first would
-# change the source stamp. Development and build-only dependencies cannot be
-# linked into these binaries and are omitted.
+# Development and build-only dependencies cannot be linked into these binaries
+# and are omitted from the SBOMs.
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-tools-${TARGETARCH},target=/tmp/cargo-tools,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-inputs-v3,target=/src/target,sharing=locked \
     set -e; \
     RUSTARCH=$(case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
         amd64) echo "x86_64-unknown-linux-gnu" ;; \
@@ -127,7 +113,7 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
         cargo install cargo-cyclonedx --locked --version "${CARGO_CYCLONEDX_VERSION}"; \
     mkdir -p /out/bin /out/sidecar-sboms /out/rust-licenses; \
     for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar; do \
-        lib/sidecar/build-with-cache.sh build --release --locked -p "${pkg}"; \
+        cargo build --release --locked -p "${pkg}"; \
         strip "target/release/${pkg}"; \
         install -D "target/release/${pkg}" "/out/bin/${pkg}"; \
     done; \
@@ -155,7 +141,8 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
                 mkdir -p "${dest}" && cp "${license}" "${dest}/"; \
             done; \
         done; \
-    done
+    done; \
+    rm -rf target
 
 # ---- runtime base ------------------------------------------------------------
 FROM ${BASE_IMAGE} AS runtime-base
