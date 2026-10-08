@@ -32,7 +32,6 @@ from dynamo.vllm.args import (
 )
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.headless import build_headless_namespace
-from dynamo.vllm.instrumented_scheduler import InstrumentedScheduler
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -595,40 +594,8 @@ def test_should_register_model_fetch_weights_for_default_load_format():
     assert should_register_model_ignore_weights(config) is False
 
 
-@pytest.mark.parametrize(
-    "snapshot_enabled, failover_enabled, scheduler_kind, rejected",
-    [
-        pytest.param(False, False, "instrumented", False, id="ordinary-worker"),
-        pytest.param(True, False, "instrumented", False, id="ordinary-snapshot"),
-        pytest.param(False, True, "instrumented", False, id="cold-start-failover"),
-        pytest.param(True, True, "default", False, id="snapshot-failover-without-fpm"),
-        pytest.param(True, True, "instrumented", True, id="snapshot-failover-with-fpm"),
-        pytest.param(
-            True, True, "subclass", True, id="snapshot-failover-with-subclass"
-        ),
-    ],
-)
-def test_setup_vllm_engine_reuses_engine_config_model_config(
-    monkeypatch, tmp_path, snapshot_enabled, failover_enabled, scheduler_kind, rejected
-):
-    vllm_main = _load_vllm_main()
-
-    monkeypatch.delenv("DYN_SNAPSHOT_CONTROL_DIR", raising=False)
-    monkeypatch.delenv("DYN_SNAPSHOT_FAILOVER_CAPTURE", raising=False)
-    if snapshot_enabled:
-        monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", str(tmp_path / "snapshot"))
-    if failover_enabled:
-        monkeypatch.setenv("DYN_SNAPSHOT_FAILOVER_CAPTURE", "true")
-    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
-
-    class DerivedInstrumentedScheduler(InstrumentedScheduler):
-        pass
-
-    scheduler_cls = {
-        "default": InstrumentedScheduler.__base__,
-        "instrumented": InstrumentedScheduler,
-        "subclass": DerivedInstrumentedScheduler,
-    }[scheduler_kind]
+def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
+    from dynamo.vllm import main as vllm_main
 
     class FakeModelConfig:
         def get_diff_sampling_param(self):
@@ -638,9 +605,6 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(
         additional_config={},
         cache_config=SimpleNamespace(block_size=None),
         model_config=FakeModelConfig(),
-        scheduler_config=SimpleNamespace(
-            get_scheduler_cls=Mock(return_value=scheduler_cls)
-        ),
     )
 
     class FakeEngineArgs:
@@ -657,8 +621,10 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(
 
     engine_client = SimpleNamespace(vllm_config=vllm_config)
 
-    start_engine = Mock(return_value=engine_client)
-    fake_async_llm = SimpleNamespace(from_vllm_config=start_engine)
+    class FakeAsyncLLM:
+        @staticmethod
+        def from_vllm_config(**_kwargs):
+            return engine_client
 
     class FakeMetrics:
         def __init__(self, **_kwargs):
@@ -670,7 +636,7 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(
     monkeypatch.setattr(vllm_main, "setup_multiprocess_prometheus", lambda: None)
     monkeypatch.setattr(vllm_main, "LLMBackendMetrics", FakeMetrics)
     monkeypatch.setattr(vllm_main, "_uses_dynamo_connector", lambda _args: False)
-    monkeypatch.setattr(vllm_main, "AsyncLLM", fake_async_llm)
+    monkeypatch.setattr(vllm_main, "AsyncLLM", FakeAsyncLLM)
     monkeypatch.setattr(
         vllm_main,
         "get_engine_cache_info",
@@ -689,18 +655,9 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(
         served_model_name="Qwen/Qwen3-0.6B",
     )
 
-    if rejected:
-        with pytest.raises(
-            ValueError, match="FPM is not supported with vLLM snapshot failover"
-        ):
-            vllm_main.setup_vllm_engine(config)
-        start_engine.assert_not_called()
-        return
-
     _, _, default_sampling_params, _, _ = vllm_main.setup_vllm_engine(config)
 
     assert default_sampling_params == {"temperature": 0.7}
-    start_engine.assert_called_once()
 
 
 # --disaggregation-mode tests

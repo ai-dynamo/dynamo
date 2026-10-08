@@ -135,10 +135,6 @@ const (
 	// cuInterpose shim when it is "enabled".
 	CUDASharedMemorySupportAnnotation = "nvidia.com/cuda-shared-memory-support"
 
-	// DynamoSnapshotFailoverCaptureEnvVar marks vLLM captures validated without
-	// an FPM publisher. It is capture-time contract data and must remain hashed.
-	DynamoSnapshotFailoverCaptureEnvVar = "DYN_SNAPSHOT_FAILOVER_CAPTURE"
-
 	// Native restore candidate metadata pins the PodSnapshot observation used
 	// by workload reconciliation so admission can detect intervening changes.
 	SnapshotCandidateUIDAnnotation               = "nvidia.com/dynamo-restore-snapshot-uid"

@@ -1146,14 +1146,15 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 		}
 	}
 
-	// vLLM snapshotfailover must not capture an FPM publisher socket that both
-	// restored engines would bind. Remove the default port after job overrides
-	// and mark capture so the runtime rejects any instrumented scheduler.
-	// This marker remains in the compatibility hash, preventing reuse of older
-	// captures that did not enforce the guard. SGLang disables FPM in its hook.
+	// FPM binds a publisher port before capture, which would collide when
+	// restored into both engines. Strip the operator default here so capture
+	// and reuse hash the same template; SGLang disables FPM in its snapshot hook.
 	if backendFramework == dynamo.BackendFrameworkVLLM && dynamo.IsIntraPodFailoverEnabled(component) {
 		targetContainer, err := findPodTemplateContainer(&podTemplate, targetContainerName)
 		if err != nil {
+			return corev1.PodTemplateSpec{}, err
+		}
+		if err := validateVLLMFailoverCaptureFPM(targetContainer); err != nil {
 			return corev1.PodTemplateSpec{}, err
 		}
 		filtered := targetContainer.Env[:0]
@@ -1162,9 +1163,42 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 				filtered = append(filtered, env)
 			}
 		}
-		targetContainer.Env = dynamo.MergeEnvs(filtered, []corev1.EnvVar{
-			{Name: consts.DynamoSnapshotFailoverCaptureEnvVar, Value: "true"},
-		})
+		targetContainer.Env = filtered
 	}
 	return podTemplate, nil
+}
+
+// validateVLLMFailoverCaptureFPM rejects declared FPM activation before capture.
+// container must not be nil. This checks argv and explicit env entries only;
+// it does not resolve envFrom, evaluate launch scripts, or inspect custom schedulers.
+func validateVLLMFailoverCaptureFPM(container *corev1.Container) error {
+	// Inspect direct argv and common inline shell commands for built-in FPM flags.
+	for _, argv := range [][]string{container.Command, container.Args} {
+		for _, arg := range argv {
+			for _, token := range strings.Fields(arg) {
+				token = strings.Trim(token, "\"';")
+				if token == "--fpm-trace" || token == "--benchmark-mode" || strings.HasPrefix(token, "--benchmark-mode=") {
+					return fmt.Errorf("vLLM snapshotfailover capture does not support %s; disable FPM before capture", token)
+				}
+			}
+		}
+	}
+
+	// Explicit trace env must be disabled; unresolved references cannot prove that.
+	for _, env := range container.Env {
+		if env.Name == "DYN_BENCHMARK_MODE" && (env.ValueFrom != nil || strings.TrimSpace(env.Value) != "") {
+			return fmt.Errorf("vLLM snapshotfailover capture does not support DYN_BENCHMARK_MODE; disable FPM before capture")
+		}
+		if env.Name != "DYN_FPM_TRACE" {
+			continue
+		}
+		if env.ValueFrom != nil {
+			return fmt.Errorf("vLLM snapshotfailover capture requires DYN_FPM_TRACE to be unset or explicitly disabled")
+		}
+		switch strings.ToLower(strings.TrimSpace(env.Value)) {
+		case "1", consts.KubeLabelValueTrue, "yes", "on":
+			return fmt.Errorf("vLLM snapshotfailover capture does not support DYN_FPM_TRACE; disable FPM before capture")
+		}
+	}
+	return nil
 }

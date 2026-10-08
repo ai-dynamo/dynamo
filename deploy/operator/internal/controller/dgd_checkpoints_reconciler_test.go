@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"strconv"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -371,17 +370,6 @@ func TestDGDCheckpointsReconciler_MultiGPUSnapshotFailoverCapture(t *testing.T) 
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: "dgd-uid"},
 				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: string(backend)}}
-
-			t.Log("Job overrides cannot remove failover intent or re-enable the default FPM port")
-			component.Experimental.Checkpoint.Job = &v1beta1.ComponentCheckpointJobConfig{
-				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-					Name: commonconsts.MainContainerName,
-					Env: []corev1.EnvVar{
-						{Name: commonconsts.DynamoSnapshotFailoverCaptureEnvVar, Value: ""},
-						{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: strconv.Itoa(commonconsts.DynamoFPMBasePort)},
-					},
-				}}}},
-			}
 			original := component.DeepCopy()
 
 			t.Log("Create one canonical SnapshotJob before serving engines are cloned")
@@ -396,29 +384,10 @@ func TestDGDCheckpointsReconciler_MultiGPUSnapshotFailoverCapture(t *testing.T) 
 			assert.Equal(t, original.PodTemplate.Spec.Containers[0].Args, main.Args)
 			assert.Contains(t, main.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
 			if backend == dynamo.BackendFrameworkVLLM {
-				assert.Contains(t, main.Env, corev1.EnvVar{Name: commonconsts.DynamoSnapshotFailoverCaptureEnvVar, Value: "true"})
-				assert.NotContains(t, main.Env, corev1.EnvVar{Name: commonconsts.DynamoSnapshotFailoverCaptureEnvVar, Value: ""})
 				for _, env := range main.Env {
 					assert.NotEqual(t, "DYN_FORWARDPASS_METRIC_PORT", env.Name)
 					assert.NotEqual(t, "DYN_VLLM_GMS_SHADOW_MODE", env.Name)
 				}
-			}
-
-			if backend == dynamo.BackendFrameworkVLLM {
-				t.Log("A capture without the FPM safety marker cannot match the reuse contract")
-				olderCapture := job.Spec.PodTemplate.DeepCopy()
-				filtered := olderCapture.Spec.Containers[0].Env[:0]
-				for _, env := range olderCapture.Spec.Containers[0].Env {
-					if env.Name != commonconsts.DynamoSnapshotFailoverCaptureEnvVar {
-						filtered = append(filtered, env)
-					}
-				}
-				olderCapture.Spec.Containers[0].Env = filtered
-				gmsMode, deviceClass, err := snapshotGMSCompatibility(gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)))
-				require.NoError(t, err)
-				olderHash, err := checkpoint.ComputeSnapshotCompatibilityHash(olderCapture, commonconsts.MainContainerName, string(backend), gmsMode, deviceClass)
-				require.NoError(t, err)
-				assert.NotEqual(t, expectedHash, olderHash)
 			}
 
 			t.Log("Verify capture allocates two shared GPUs rather than doubling the request")
@@ -427,14 +396,91 @@ func TestDGDCheckpointsReconciler_MultiGPUSnapshotFailoverCapture(t *testing.T) 
 			require.NoError(t, reconciler.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: *job.Spec.PodTemplate.Spec.ResourceClaims[0].ResourceClaimTemplateName}, template))
 			require.Len(t, template.Spec.Spec.Devices.Requests, 1)
 			assert.Equal(t, int64(2), template.Spec.Spec.Devices.Requests[0].Exactly.Count)
+		})
+	}
+}
 
-			t.Log("Ordinary snapshots retain their authored settings and do not acquire failover intent")
-			nonFailover := component.DeepCopy()
-			nonFailover.Experimental.Failover = nil
-			capture, err := newTestDGDCheckpointsReconciler(reconciler).buildCheckpointJobPodTemplate(dgd, nonFailover, "worker", backend)
+func TestDGDCheckpointsReconciler_FailoverCaptureRejectsDeclaredFPM(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		env      []corev1.EnvVar
+		override *corev1.Container
+		backend  dynamo.BackendFramework
+		plain    bool
+		wantErr  string
+	}{
+		{name: "CLI trace", args: []string{"--fpm-trace"}, wantErr: "does not support --fpm-trace"},
+		{name: "env trace", env: []corev1.EnvVar{{Name: "DYN_FPM_TRACE", Value: "1"}}, wantErr: "does not support DYN_FPM_TRACE"},
+		{name: "shell trace", override: &corev1.Container{Command: []string{"bash", "-c", "python3 -m dynamo.vllm --fpm-trace;"}}, wantErr: "does not support --fpm-trace"},
+		{name: "job trace flag", override: &corev1.Container{Args: []string{"--fpm-trace"}}, wantErr: "does not support --fpm-trace"},
+		{name: "job trace env", override: &corev1.Container{Env: []corev1.EnvVar{{Name: "DYN_FPM_TRACE", Value: " TRUE "}}}, wantErr: "does not support DYN_FPM_TRACE"},
+		{name: "env trace yes", env: []corev1.EnvVar{{Name: "DYN_FPM_TRACE", Value: "yes"}}, wantErr: "does not support DYN_FPM_TRACE"},
+		{name: "env trace on", env: []corev1.EnvVar{{Name: "DYN_FPM_TRACE", Value: "on"}}, wantErr: "does not support DYN_FPM_TRACE"},
+		{name: "unresolved trace env", env: []corev1.EnvVar{{Name: "DYN_FPM_TRACE", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Key: "trace"}}}}, wantErr: "requires DYN_FPM_TRACE to be unset or explicitly disabled"},
+		{name: "benchmark", args: []string{"--benchmark-mode", "decode"}, wantErr: "does not support --benchmark-mode"},
+		{name: "benchmark equals", args: []string{"--benchmark-mode=decode"}, wantErr: "does not support --benchmark-mode=decode"},
+		{name: "benchmark env", env: []corev1.EnvVar{{Name: "DYN_BENCHMARK_MODE", Value: "decode"}}, wantErr: "does not support DYN_BENCHMARK_MODE"},
+		{name: "benchmark env unset", env: []corev1.EnvVar{{Name: "DYN_BENCHMARK_MODE", Value: ""}}},
+		{name: "trace disabled", args: []string{"--no-fpm-trace"}, env: []corev1.EnvVar{{Name: "DYN_FPM_TRACE", Value: "false"}}},
+		{name: "job disables trace", env: []corev1.EnvVar{{Name: "DYN_FPM_TRACE", Value: "1"}}, override: &corev1.Container{Env: []corev1.EnvVar{{Name: "DYN_FPM_TRACE", Value: "off"}}}},
+		{name: "job port stripped", override: &corev1.Container{Env: []corev1.EnvVar{{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"}}}},
+		{name: "SGLang keeps snapshot hook behavior", backend: dynamo.BackendFrameworkSGLang, args: []string{"--fpm-trace"}},
+		{name: "ordinary snapshot permits trace", plain: true, args: []string{"--fpm-trace"}},
+		{name: "custom scheduler remains outside guard", args: []string{"--scheduler-cls", "custom.Scheduler"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Build an engine capture with declared command and environment settings")
+			backend := tc.backend
+			if backend == "" {
+				backend = dynamo.BackendFrameworkVLLM
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: commonconsts.MainContainerName, Image: "runtime:1.6.0",
+					Command: []string{"python3", "-m", "dynamo." + string(backend)}, Args: tc.args, Env: tc.env,
+				}}}},
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+					Failover:   &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod},
+				},
+			}
+			if tc.plain {
+				component.Experimental.Failover = nil
+			}
+			if tc.override != nil {
+				override := tc.override.DeepCopy()
+				override.Name = commonconsts.MainContainerName
+				component.Experimental.Checkpoint.Job = &v1beta1.ComponentCheckpointJobConfig{
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{*override}}},
+				}
+			}
+			original := component.DeepCopy()
+			dgd := &v1beta1.DynamoGraphDeployment{Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: string(backend)}}
+			reconciler := newTestDGDCheckpointsReconciler(&DynamoGraphDeploymentReconciler{
+				Client: fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).Build(),
+				Config: &configv1alpha1.OperatorConfiguration{}, RuntimeConfig: &controller_common.RuntimeConfig{},
+			})
+
+			t.Log("Render the final capture template after applying job overrides")
+			pod, err := reconciler.buildCheckpointJobPodTemplate(dgd, component, "worker", backend)
+
+			t.Log("Reject declared activation before capture without mutating the component")
+			require.Equal(t, original, component)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
 			require.NoError(t, err)
-			assert.Contains(t, capture.Spec.Containers[0].Env, corev1.EnvVar{Name: commonconsts.DynamoSnapshotFailoverCaptureEnvVar, Value: ""})
-			assert.Contains(t, capture.Spec.Containers[0].Env, corev1.EnvVar{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: strconv.Itoa(commonconsts.DynamoFPMBasePort)})
+			if backend == dynamo.BackendFrameworkVLLM && !tc.plain {
+				main := findContainer(pod.Spec.Containers, commonconsts.MainContainerName)
+				require.NotNil(t, main)
+				for _, env := range main.Env {
+					assert.NotEqual(t, "DYN_FORWARDPASS_METRIC_PORT", env.Name)
+				}
+			}
 		})
 	}
 }
