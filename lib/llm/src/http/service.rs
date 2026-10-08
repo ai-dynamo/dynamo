@@ -20,6 +20,7 @@
 
 mod anthropic;
 mod batch_proxy;
+mod decision_lifecycle;
 pub mod metadata;
 mod openai;
 mod write_timeout;
