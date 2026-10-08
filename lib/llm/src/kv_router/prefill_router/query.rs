@@ -452,23 +452,23 @@ mod tests {
         let endpoint = chooser.client().endpoint.id();
         chooser.client().override_discovered_instances(vec![7, 8]);
         assert_eq!(
-            router.available_worker_ids_for(&endpoint),
+            router.available_worker_ids_for("legacy", &endpoint),
             Some(HashSet::from([7, 8]))
         );
         chooser.client().report_instance_down(7);
         assert_eq!(
-            router.available_worker_ids_for(&endpoint),
+            router.available_worker_ids_for("legacy", &endpoint),
             Some(HashSet::from([8]))
         );
         let mut other = endpoint.clone();
         other.name = "other".into();
-        assert!(router.available_worker_ids_for(&other).is_none());
+        assert!(router.available_worker_ids_for("legacy", &other).is_none());
         router.lifecycle.store(
             PrefillLifecycleState::Unavailable as u8,
             std::sync::atomic::Ordering::Release,
         );
         assert_eq!(
-            router.available_worker_ids_for(&endpoint),
+            router.available_worker_ids_for("legacy", &endpoint),
             Some(HashSet::new())
         );
         router.lifecycle.store(
@@ -477,7 +477,7 @@ mod tests {
         );
         router.cancel_token.cancel();
         assert_eq!(
-            router.available_worker_ids_for(&endpoint),
+            router.available_worker_ids_for("legacy", &endpoint),
             Some(HashSet::new())
         );
     }
@@ -501,7 +501,7 @@ mod tests {
         let reader = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
             result_tx
-                .send(reader_router.available_worker_ids_for(&original))
+                .send(reader_router.available_worker_ids_for("legacy", &original))
                 .unwrap();
         });
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();

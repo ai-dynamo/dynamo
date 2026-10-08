@@ -32,8 +32,8 @@ pub(crate) struct WorkerGroupObservation {
 }
 
 impl WorkerGroupObservation {
-    pub(crate) fn timing_worker_type(&self) -> &'static str {
-        // Encode workers can serve the public token-generation path, whose timing
+    pub(crate) fn metric_worker_type(&self) -> &'static str {
+        // Encode workers can serve the public token-generation path, whose load and timing
         // attribution is decode even though its topology role remains encode.
         if self.worker_type == WorkerType::Encode.as_str()
             && self

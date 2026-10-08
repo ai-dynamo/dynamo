@@ -257,12 +257,12 @@ impl ModelManager {
                 .worker_set
                 .prefill_router
                 .as_ref()
-                .and_then(|router| router.available_worker_ids_for(endpoint));
+                .and_then(|router| router.available_worker_ids_for(group_id, endpoint));
             let encode = group
                 .worker_set
                 .encoder_router
                 .as_ref()
-                .and_then(|router| router.available_worker_ids_for(endpoint));
+                .and_then(|router| router.available_worker_ids_for(group_id, endpoint));
             for ids in prefill.into_iter().chain(encode) {
                 hops.get_or_insert_with(HashSet::new).extend(ids);
             }
@@ -2312,7 +2312,7 @@ impl ModelManager {
         client: Client,
         kv_cache_block_size: u32,
         policy: SelectionPolicySource,
-        kv_router_config: Option<KvRouterConfig>,
+        mut kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
@@ -2321,6 +2321,9 @@ impl ModelManager {
         scheduler_load: crate::kv_router::SchedulerLoadSender,
         cancellation_token: CancellationToken,
     ) -> anyhow::Result<Arc<KvRouter>> {
+        if let Some(config) = &mut kv_router_config {
+            config.apply_policy_config().map_err(anyhow::Error::msg)?;
+        }
         let endpoint = client.endpoint.clone();
         let lora_domain = self.lora_domain(&endpoint.id());
 
@@ -2893,14 +2896,20 @@ mod tests {
     #[test]
     fn worker_inventory_availability_follows_active_hops_and_group_admission() {
         struct Hop {
+            group_id: String,
             endpoint: EndpointId,
             ids: Arc<parking_lot::Mutex<HashSet<u64>>>,
         }
         impl crate::kv_router::prefill_router::PrefillRouterLifecycle for Hop {
             fn set_target(&self, _: Option<crate::discovery::WorkerSetTarget>) {}
 
-            fn available_worker_ids_for(&self, endpoint: &EndpointId) -> Option<HashSet<u64>> {
-                (endpoint == &self.endpoint).then(|| self.ids.lock().clone())
+            fn available_worker_ids_for(
+                &self,
+                group_id: &str,
+                endpoint: &EndpointId,
+            ) -> Option<HashSet<u64>> {
+                (group_id == self.group_id && endpoint == &self.endpoint)
+                    .then(|| self.ids.lock().clone())
             }
         }
         let manager = ModelManager::new();
@@ -2930,11 +2939,18 @@ mod tests {
         );
         let ids = Arc::new(parking_lot::Mutex::new(HashSet::from([2, 99])));
         let mut consumer = make_worker_set("ns", "consumer");
+        let (_consumer_tx, consumer_rx) = tokio::sync::watch::channel(vec![3]);
+        consumer.set_instance_watcher(consumer_rx);
         consumer.prefill_router = Some(Arc::new(Hop {
+            group_id: "target".into(),
             endpoint: endpoint.clone(),
             ids: ids.clone(),
         }));
         insert("consumer", consumer);
+        assert_eq!(
+            manager.worker_group_available_ids("consumer", &endpoint),
+            HashSet::from([3])
+        );
         assert_eq!(
             manager.worker_group_available_ids("target", &endpoint),
             HashSet::from([2])

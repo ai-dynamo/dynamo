@@ -2546,7 +2546,7 @@ mod tests {
             let observation = host.inventory.snapshot().pop().unwrap().1;
             assert_eq!(observation.worker_type, "encode");
             assert_eq!(observation.model_type, capabilities);
-            assert_eq!(observation.timing_worker_type(), timing_type);
+            assert_eq!(observation.metric_worker_type(), timing_type);
         }
     }
 }

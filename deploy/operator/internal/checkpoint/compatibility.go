@@ -68,6 +68,7 @@ var snapshotRestoreEnvironmentNames = map[string]struct{}{
 	"DYN_SYSTEM_PORT":                       {},
 	"DYN_SYSTEM_STARTING_HEALTH_STATUS":     {},
 	"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": {},
+	"DYN_TCP_LISTEN_BACKLOG":                {},
 	"DYN_TCP_RESPONSE_STREAM_HOST":          {},
 	"DYN_TCP_RESPONSE_STREAM_PORT":          {},
 	"DYN_TCP_RPC_HOST":                      {},
@@ -89,6 +90,7 @@ type snapshotCompatibilityContract struct {
 	BackendFramework      string                     `json:"backendFramework"`
 	GMSMode               string                     `json:"gmsMode"`
 	GMSDeviceClassName    string                     `json:"gmsDeviceClassName,omitempty"`
+	CUDASharedMemory      string                     `json:"cudaSharedMemorySupport,omitempty"`
 	TargetContainer       corev1.Container           `json:"targetContainer"`
 	InitContainers        []corev1.Container         `json:"initContainers,omitempty"`
 	Volumes               []corev1.Volume            `json:"volumes,omitempty"`
@@ -141,6 +143,7 @@ func ComputeSnapshotCompatibilityHash(
 		BackendFramework:      backendFramework,
 		GMSMode:               gmsMode,
 		GMSDeviceClassName:    gmsDeviceClassName,
+		CUDASharedMemory:      podTemplate.Annotations[consts.CUDASharedMemorySupportAnnotation],
 		TargetContainer:       canonicalSnapshotContainer(*target, false),
 		HostNetwork:           podTemplate.Spec.HostNetwork,
 		HostPID:               podTemplate.Spec.HostPID,

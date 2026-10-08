@@ -54,6 +54,15 @@ pub(crate) enum WorkerSetTargetId {
     Legacy(EndpointId),
 }
 
+impl WorkerSetTargetId {
+    pub(crate) fn matches_group(&self, group_id: &str, endpoint: &EndpointId) -> bool {
+        match self {
+            Self::Committed { group, .. } => group == group_id,
+            Self::Legacy(legacy) => legacy == endpoint,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum WorkerSetTarget {
     Committed(CommittedWorkerSetTarget),
@@ -418,6 +427,13 @@ impl WorkerSet {
     /// Build ParsingOptions from this WorkerSet's card configuration.
     pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
         crate::protocols::openai::ParsingOptions {
+            default_thinking_mode: self
+                .card
+                .runtime_config
+                .runtime_data
+                .get(crate::preprocessor::DEFAULT_THINKING_MODE_RUNTIME_KEY)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
             structural_tag_mode: self.card.runtime_config.structural_tag_mode,
             structural_tag_scope: self.card.runtime_config.structural_tag_scope,
             exclude_tools_when_tool_choice_none: self

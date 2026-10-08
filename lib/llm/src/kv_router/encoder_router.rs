@@ -77,23 +77,27 @@ impl Drop for EncoderRouter {
 }
 
 impl EncoderRouter {
-    /// Returns `None` when this router does not target `endpoint`, and an empty
+    /// Returns `None` when this router does not target the group, and an empty
     /// set when it targets the endpoint but its binding is not yet available.
     pub(crate) fn available_worker_ids_for(
         &self,
+        group_id: &str,
         endpoint: &EndpointId,
     ) -> Option<std::collections::HashSet<u64>> {
         // Target changes and activation publish binding/lifecycle under this same lock.
-        let _target = self.target.lock();
+        let target_id = self.target.lock();
         let binding = self.binding.load();
-        let binding_matches = binding
-            .as_ref()
-            .is_some_and(|binding| &binding.router.client.endpoint.id() == endpoint);
+        let binding_matches = binding.as_ref().is_some_and(|binding| {
+            &binding.router.client.endpoint.id() == endpoint
+                && binding.target_id.matches_group(group_id, endpoint)
+        });
         let target_matches = self.target_tx.as_ref().map(|target_tx| {
-            target_tx
-                .borrow()
-                .as_ref()
-                .is_some_and(|target| &target.endpoint().id() == endpoint)
+            target_tx.borrow().as_ref().is_some_and(|target| {
+                &target.endpoint().id() == endpoint
+                    && target_id
+                        .as_ref()
+                        .is_some_and(|id| id.matches_group(group_id, endpoint))
+            })
         });
         if !target_matches.unwrap_or(binding_matches) {
             return None;
@@ -106,7 +110,10 @@ impl EncoderRouter {
             } else {
                 binding
                     .as_ref()
-                    .filter(|binding| &binding.router.client.endpoint.id() == endpoint)
+                    .filter(|binding| {
+                        &binding.router.client.endpoint.id() == endpoint
+                            && binding.target_id.matches_group(group_id, endpoint)
+                    })
                     .map(|binding| {
                         binding
                             .router
@@ -616,6 +623,7 @@ mod tests {
             .collect();
         let (admissions, admitted_ids) = watch::channel(vec![ids[0]]);
         let card = Arc::new(ModelDeploymentCard::with_name_only("model"));
+        let group_id = endpoint.id().to_string();
         let target = |generation, admitted_ids| {
             WorkerSetTarget::Committed(CommittedWorkerSetTarget {
                 endpoint: endpoint.clone(),
@@ -639,8 +647,13 @@ mod tests {
         .await
         .expect("committed encoder must activate");
         assert_eq!(
-            router.available_worker_ids_for(&endpoint.id()),
+            router.available_worker_ids_for(&group_id, &endpoint.id()),
             Some(HashSet::from([ids[0]]))
+        );
+        assert!(
+            router
+                .available_worker_ids_for("other-group", &endpoint.id())
+                .is_none()
         );
         for _ in 0..6 {
             assert_eq!(encoded_worker(&router).await, Some(ids[0]));
@@ -665,12 +678,21 @@ mod tests {
         admissions.send_replace(Vec::new());
         drop(admissions);
         router.set_target(None);
-        assert!(router.available_worker_ids_for(&endpoint.id()).is_none());
+        assert!(
+            router
+                .available_worker_ids_for(&group_id, &endpoint.id())
+                .is_none()
+        );
         let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
         router.set_target(Some(target(2, successor_ids)));
         assert_eq!(
-            router.available_worker_ids_for(&endpoint.id()),
+            router.available_worker_ids_for(&group_id, &endpoint.id()),
             Some(HashSet::new())
+        );
+        assert!(
+            router
+                .available_worker_ids_for("other-group", &endpoint.id())
+                .is_none()
         );
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -684,7 +706,7 @@ mod tests {
         .await
         .expect("same-endpoint successor must activate with its own admission");
         assert_eq!(
-            router.available_worker_ids_for(&endpoint.id()),
+            router.available_worker_ids_for(&group_id, &endpoint.id()),
             Some(HashSet::from([ids[2]]))
         );
         for _ in 0..6 {
@@ -726,7 +748,11 @@ mod tests {
             .unwrap()
             .endpoint("generate");
         let router = EncoderRouter::disabled();
-        assert!(router.available_worker_ids_for(&endpoint.id()).is_none());
+        assert!(
+            router
+                .available_worker_ids_for("legacy", &endpoint.id())
+                .is_none()
+        );
         let binding = Arc::new(
             EncoderRouter::build(
                 WorkerSetTarget::Legacy(endpoint.clone()),
@@ -744,20 +770,20 @@ mod tests {
             .lifecycle
             .store(EncoderLifecycleState::Active as u8, Ordering::Release);
         assert_eq!(
-            router.available_worker_ids_for(&endpoint.id()),
+            router.available_worker_ids_for("legacy", &endpoint.id()),
             Some(HashSet::from([1, 2]))
         );
         binding.router.client.report_instance_down(1);
         assert_eq!(
-            router.available_worker_ids_for(&endpoint.id()),
+            router.available_worker_ids_for("legacy", &endpoint.id()),
             Some(HashSet::from([2]))
         );
         let mut other = endpoint.id();
         other.name = "other".into();
-        assert!(router.available_worker_ids_for(&other).is_none());
+        assert!(router.available_worker_ids_for("legacy", &other).is_none());
         router.cancel_token.cancel();
         assert_eq!(
-            router.available_worker_ids_for(&endpoint.id()),
+            router.available_worker_ids_for("legacy", &endpoint.id()),
             Some(HashSet::new())
         );
         runtime.shutdown();
@@ -809,7 +835,7 @@ mod tests {
         let reader = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
             result_tx
-                .send(reader_router.available_worker_ids_for(&original.id()))
+                .send(reader_router.available_worker_ids_for("legacy", &original.id()))
                 .unwrap();
         });
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();

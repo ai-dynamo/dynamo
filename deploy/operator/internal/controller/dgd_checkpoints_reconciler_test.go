@@ -531,7 +531,7 @@ func TestDGDCheckpointsReconciler_SnapshotJobUsesTargetContainer(t *testing.T) {
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
 					{Name: commonconsts.MainContainerName, Image: "main:latest"},
-					{Name: "snapshot-me", Image: "target:latest"},
+					{Name: "snapshot-me", Image: "target:latest", Command: []string{"python3", "-m", "dynamo.vllm"}},
 					{Name: "serve-sidecar", Image: "serve-sidecar:latest"},
 				},
 			},
@@ -594,7 +594,7 @@ func TestDGDCheckpointsReconciler_AutoUsesTargetContainerWithoutIdentity(t *test
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{Name: commonconsts.MainContainerName, Image: "main:latest"},
-							{Name: "snapshot-me", Image: "target:latest"},
+							{Name: "snapshot-me", Image: "target:latest", Command: []string{"python3", "-m", "dynamo.vllm"}},
 						},
 					},
 				},
@@ -1150,6 +1150,149 @@ func TestDGDCheckpointsReconciler_AutoPreservesPodTemplateMetadata(t *testing.T)
 	assert.Equal(t, "false", jobMeta.Annotations[commonconsts.KubeAnnotationIstioSidecarInject])
 	assert.Equal(t, "yes", jobMeta.Annotations["policy.example.com/keep"])
 	assert.Equal(t, "worker", jobMeta.Labels[commonconsts.KubeLabelDynamoComponent])
+}
+
+func TestDGDCheckpointsReconciler_AutoUsesLeaderRolePodTemplate(t *testing.T) {
+	t.Log("Build an auto-checkpoint multinode component with distinct role templates")
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid")},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+		},
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "worker",
+		ComponentType: v1beta1.ComponentTypeWorker,
+		Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+		Roles: []v1beta1.ComponentRoleSpec{
+			{
+				Name: v1beta1.ComponentRoleLeader,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"example.com/source-role": "leader"}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: commonconsts.MainContainerName, Image: "leader:1.5.0",
+					}}},
+				},
+			},
+			{
+				Name: v1beta1.ComponentRoleWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"example.com/source-role": "worker"}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: commonconsts.MainContainerName, Image: "worker:1.5.0",
+					}}},
+				},
+			},
+		},
+		Experimental: &v1beta1.ExperimentalSpec{
+			Checkpoint: &v1beta1.ComponentCheckpointConfig{
+				Enabled: true,
+				Mode:    v1beta1.CheckpointModeAuto,
+				Identity: &v1beta1.DynamoCheckpointIdentity{
+					Model:            "example/model",
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+				},
+			},
+		},
+	}
+
+	t.Log("Build the checkpoint job template")
+	podTemplate, err := newTestDGDCheckpointsReconciler(reconciler).buildCheckpointJobPodTemplate(
+		dgd,
+		component,
+		"worker",
+		dynamo.BackendFrameworkVLLM,
+	)
+	require.NoError(t, err)
+
+	t.Log("Verify the single-process checkpoint inherits the leader source, not the worker source")
+	main := findContainer(podTemplate.Spec.Containers, commonconsts.MainContainerName)
+	require.NotNil(t, main)
+	assert.Equal(t, "leader:1.5.0", main.Image)
+	assert.Equal(t, "leader", podTemplate.Labels["example.com/source-role"])
+}
+
+func TestDGDCheckpointsReconciler_CUDASharedMemorySupport(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		target      corev1.Container
+		want        string
+		wantErr     string
+	}{
+		{
+			name:   "defaults to enabled",
+			target: corev1.Container{Name: commonconsts.MainContainerName, Image: "worker:latest"},
+			want:   "enabled",
+		},
+		{
+			name:    "rejects a custom target without a command",
+			target:  corev1.Container{Name: "snapshot-me", Image: "target:latest"},
+			wantErr: `checkpoint target container "snapshot-me" must set command`,
+		},
+		{
+			name:        "keeps an explicit opt-out and skips the command requirement",
+			annotations: map[string]string{commonconsts.CUDASharedMemorySupportAnnotation: "disabled"},
+			target:      corev1.Container{Name: "snapshot-me", Image: "target:latest"},
+			want:        "disabled",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Build an auto-checkpoint worker with the table's target and annotations")
+			testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+			reconciler := &DynamoGraphDeploymentReconciler{
+				Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid")},
+				Spec:       v1beta1.DynamoGraphDeploymentSpec{BackendFramework: string(dynamo.BackendFrameworkVLLM)},
+			}
+			containers := []corev1.Container{test.target}
+			if test.target.Name != commonconsts.MainContainerName {
+				containers = append([]corev1.Container{{Name: commonconsts.MainContainerName, Image: "main:latest"}}, containers...)
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: test.annotations},
+					Spec:       corev1.PodSpec{Containers: containers},
+				},
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Enabled:             true,
+						Mode:                v1beta1.CheckpointModeAuto,
+						TargetContainerName: test.target.Name,
+					},
+				},
+			}
+
+			t.Log("Build the checkpoint job template")
+			podTemplate, err := newTestDGDCheckpointsReconciler(reconciler).buildCheckpointJobPodTemplate(
+				dgd,
+				component,
+				"worker",
+				dynamo.BackendFrameworkVLLM,
+			)
+
+			t.Log("Verify the CUDA shared-memory support request")
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, podTemplate.Annotations[commonconsts.CUDASharedMemorySupportAnnotation])
+		})
+	}
 }
 
 func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {

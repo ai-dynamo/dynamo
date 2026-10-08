@@ -155,10 +155,8 @@ trait ResponsePublisher {
     /// Send a failure prologue keeping the worker's [`crate::error::ErrorType`]
     /// where the transport can carry it.
     ///
-    /// The default drops the type and sends the text alone. That is what the
-    /// QUIC response plane does: its error frame is a raw byte payload with no
-    /// field to put a typed error in, so a typed refusal over QUIC classifies
-    /// exactly as it did before this method existed.
+    /// The default drops the type and sends the text alone. TCP and QUIC
+    /// override this so a typed refusal survives the response plane.
     async fn send_prologue_typed(
         &mut self,
         error: Option<StreamPrologueError>,
@@ -184,6 +182,15 @@ impl ResponsePublisher for quic_response::QuicResponseSender {
 
     async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
         quic_response::QuicResponseSender::send_prologue(self, error)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::send_prologue_typed(self, error)
             .await
             .map_err(anyhow::Error::msg)
     }
@@ -877,8 +884,11 @@ where
         let advertised_mode =
             ResponsePlaneMode::from_transport_name(&response_connection_info.transport)
                 .map_err(|error| PipelineError::Generic(error.to_string()))?;
-        let configured_mode = ResponsePlaneMode::configured()
-            .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        let configured_mode = match self.response_plane.get() {
+            Some(mode) => *mode,
+            None => ResponsePlaneMode::configured()
+                .map_err(|error| PipelineError::Generic(error.to_string()))?,
+        };
         let response_modes = ResponsePlaneModes {
             configured: configured_mode,
             advertised: advertised_mode,
@@ -966,7 +976,7 @@ where
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
-        self.bind_lifecycle_endpoint(endpoint);
+        self.bind_endpoint_config(endpoint);
     }
 
     fn add_metrics(
@@ -1002,7 +1012,7 @@ where
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
-        self.bind_lifecycle_endpoint(endpoint);
+        self.bind_endpoint_config(endpoint);
     }
 
     fn add_metrics(

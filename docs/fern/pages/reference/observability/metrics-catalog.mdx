@@ -151,7 +151,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 
 `dynamo_frontend_worker_*` gauges appear once workers register and begin serving. They live on the frontend's local registry (not component-scoped) and do **not** carry `dynamo_namespace` or `dynamo_component` labels. Frontend-only — not available on the standalone router. Labeled by `worker_id`, `dp_rank`, and `worker_type`.
 
-At each HTTP scrape, these five gauges include only workers in the current committed router membership that pass hard availability checks, and only their current data-parallel (DP) ranks. The timing gauges also allow `dp_rank="none"` when the rank is unknown, provided the worker remains available. Their `worker_type` label describes timing attribution: an Encode worker serving Chat/Completions reports these timing samples as `decode`, while the inventory metrics below retain its `encode` topology role. Removed or excluded workers disappear from the output; late request completions or load updates cannot restore their exposed series.
+At each HTTP scrape, these five gauges include only workers in the current committed router membership that pass hard availability checks, and only their current data-parallel (DP) ranks. The timing gauges also allow `dp_rank="none"` when the rank is unknown, provided the worker remains available. The `worker_type` label describes serving attribution: an Encode worker serving Chat/Completions reports its load and timing samples as `decode`, while the inventory metrics below retain its `encode` topology role. Removed or excluded workers disappear from the output; late request completions or load updates cannot restore their exposed series.
 
 <ParamField path="dynamo_frontend_worker_active_decode_blocks" type="gauge">
   Active KV cache decode blocks per worker.
@@ -183,6 +183,8 @@ Admission uses first-wins semantics within each Frontend's model and target grou
   Number of unique physical worker IDs in a model and target group, labeled by `state`. DP ranks do not increase the count. The `available`, `pending`, and `excluded` states are disjoint; `discovered` is their sum. `available` requires successfully committed worker-set membership and current hard availability; `pending` means discovery has observed the worker but initialization has not completed; `excluded` means discovered but currently unavailable for routing.
 </ParamField>
 
+Hard availability uses the committed group's client and, when a prefill or encode hop targets that group, the hop's local availability. A matching hop that is still activating reports no available workers. If no hop targets the group, its own client availability applies. These counts describe individual worker groups; use `dynamo_frontend_model_ready` to check whether the frontend has a complete routable serving topology.
+
 Each previously observed group emits all four counts, including explicit zeros after its last worker disappears, for the lifetime of the frontend's model manager. Groups never observed by that frontend have no series. There are no retained per-worker samples for removed IDs. Do not aggregate these counts across Frontends as worker-global readiness; separate Frontends can choose different incumbents from the same discovered workers.
 
 <ParamField path="dynamo_frontend_router_worker_state" type="gauge">
@@ -203,11 +205,21 @@ The bounded `reason` values describe the current admission or availability condi
 
 When an incumbent is still initializing and an incompatible newcomer is discovered, counts are `discovered=2`, `available=0`, `pending=1`, and `excluded=1`. The incumbent carries `state="pending",reason="initializing"`; only the newcomer carries `state="excluded",reason="checksum_mismatch"`. Once the incumbent is healthy, the same group reports `discovered=2`, `available=1`, `pending=0`, and `excluded=1`. Rejection of the newcomer never makes the incumbent pending or excluded.
 
-Use explicit counts to find observed groups with no available workers:
+For a deployment-level alert across rolling-update namespaces, select the target frontend and the namespaces belonging to that deployment, then sum available workers across those namespaces:
 
 ```promql
-dynamo_frontend_router_workers{state="available"} == 0
+sum without (target_namespace) (
+  dynamo_frontend_router_workers{
+    state="available",
+    job="<frontend-job>",
+    instance="<frontend-instance>",
+    model="<model>",
+    target_namespace=~"<deployment-namespace-pattern>"
+  }
+) == 0
 ```
+
+Replace the selectors with your scrape labels and a namespace pattern that includes only the rolling versions of one deployment. Kubernetes rolling updates can leave an empty retired namespace alongside a healthy replacement. A raw per-namespace `== 0` query continues to match the retired namespace. The aggregate above alerts only when all selected namespaces have no available workers. Preserve `target_namespace` when diagnosing an individual namespace, and do not aggregate independent deployments or different frontend instances.
 
 Inspect workers still discovered but excluded from routing:
 
@@ -332,7 +344,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_input_sequence_tokens" type="histogram">
-  Input sequence length in tokens.
+  Input sequence length per routing attempt, excluding query-only lookups. Labeled by `phase` and `model`.
 </ParamField>
 
 <ParamField path="dynamo_component_router_output_sequence_tokens" type="histogram">
@@ -350,6 +362,32 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
   Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
 </ParamField>
+
+### KV-cache reuse telemetry
+
+The cache reuse funnel shows how much of the incoming prompt could be reused, and how much the worker reports reusing. Each step counts tokens, not requests.
+
+All metric names below start with `dynamo_component_router_`.
+
+| Step | Meaning | Metric suffix |
+| --- | --- | --- |
+| **F0 — Incoming tokens** | Tokens received by the router. | `input_sequence_tokens_sum` |
+| **F2 — Best available match** | Prefix the router estimates is cached on the best-matching eligible worker. | `kv_best_eligible_cached_prefix_tokens_total` |
+| **F3 — Selected worker's match** | Prefix the router estimates is cached on the worker it chooses. | `kv_selected_cached_prefix_tokens_total` |
+| **F4 — Reported reuse** | Tokens the worker reports reusing. Missing reports count as zero. | `kv_worker_reused_tokens_total` |
+
+These counters need no enable flag.
+
+Compare token increases over the same time window and matching KV-routing traffic. Use a long enough window: the steps are recorded at different times, and F4 depends on worker reports arriving after routing. Short windows may therefore compare different requests. Divide each step by F0 to express it as a percentage of incoming tokens.
+
+vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of each aggregated or prefill attempt, as `engine_data.kv_cache_hit` with `prompt_tokens` and `reused_tokens`. `reused_tokens` is the engine's per-request cached-token count, so it includes hits on host and storage tiers and KV connectors, the same tiers F2 and F3 count.
+
+- Disaggregated decode attempts do not report, because each engine counts the KV transferred from the prefill worker as cached; read worker reuse from the `prefill` phase. The exception is a decode attempt that prefills locally under conditional disaggregation, which reports under `phase="decode"`.
+- Attempts take their `phase` from the frontend's request tracker. A standalone router (`python -m dynamo.router`) does not set one, so all of its attempts are labeled `aggregated`.
+- The router counts a report only when its `prompt_tokens` equals the routed prompt length. Engines count multimodal prompts after placeholder expansion, so a multimodal report counts only when the router also routed on expanded tokens; TensorRT-LLM does not report multimodal requests. F2 and F3 count expanded routing tokens while F0 counts the unexpanded prompt, so multimodal ratios to F0 can exceed 100%.
+- With `n > 1`, vLLM and SGLang do not report. Later samples reuse the prompt blocks earlier samples just cached, vLLM keeps the first buffered sample's count when it merges outputs, and SGLang caches the prompt before running the samples.
+- Engines recompute the last prompt token, so a full-prefix hit reports at least one token less than F3, and up to one block less for vLLM.
+- Preemption, partial-block reuse in TensorRT-LLM, and KV loads that fail under a recompute policy can also make F4 differ from F3 when the router's estimate is accurate.
 
 ### Per-request routing overhead
 
@@ -401,6 +439,10 @@ The frontend registers these metrics when queueing is enabled by `--router-queue
   KV cache events applied to the router's radix-tree index. Includes events applied to the device tier and lower tiers such as host-pinned memory and disk. Appears when the worker-selection policy requests `WorkerInputs::CACHE`, the router consumes KV events, and workers publish them. Labeled by `status` and `event_type` — see [Metric-specific labels](metric-labels.mdx#metric-specific-labels).
 </ParamField>
 
+<ParamField path="dynamo_component_ckf_mutation_total" type="counter">
+  CKF block-level mutation outcomes recorded by the router indexer, labeled by `outcome` — see [Metric-specific labels](metric-labels.mdx#metric-specific-labels). **Registered, always zero.** The series is created and exported, but no code path currently increments it, so it reads 0 in every deployment. Do not build alerts or dashboard panels on it. The standalone indexer exports the same counter as `dynamo_kvrouter_ckf_mutation_total`, with the same caveat.
+</ParamField>
+
 The standalone indexer exposes the device-tier-only counter `dynamo_kvrouter_kv_cache_events_applied`; see [Standalone KV Indexer](../../developer-guide/knowledge-base/modular-components/router/standalone-indexer.md).
 
 ### Availability by configuration
@@ -413,6 +455,7 @@ Not all router metrics appear in every deployment. This matrix shows which group
 | `dynamo_router_overhead_*` | Registered and populated | Registered and populated | **Not registered** | **Not created** |
 | `dynamo_frontend_router_queue_*` | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
 | `dynamo_component_kv_cache_events_applied` | Populated when KV events received | Populated when KV events received | **Not registered** | Populated when KV events received |
+| `dynamo_component_ckf_mutation_total` | Registered, **always zero** | Registered, **always zero** | **Not registered** | Registered, **always zero** |
 | `dynamo_frontend_worker_*` | Registered and populated | Registered and populated (`worker_type` = `prefill`/`decode`) | Registered and populated (`worker_type` = `decode`) | **Not created** |
 
 **Key:**
