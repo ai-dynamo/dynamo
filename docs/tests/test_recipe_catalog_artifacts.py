@@ -25,7 +25,7 @@ catalog_validate = load_catalog_validator("recipe_catalog_validate")
         ),
         (
             "glm-5-2",
-            ("nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1",),
+            (),
         ),
         (
             "inkling",
@@ -41,6 +41,7 @@ catalog_validate = load_catalog_validator("recipe_catalog_validate")
         (
             "kimi-k3",
             (
+                "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1-kimi-k3-post.1",
                 "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0-kimi-k3-dev.1",
                 "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-kimi-k3-dev.1",
             ),
@@ -70,7 +71,10 @@ def test_recipe_specific_images_are_catalog_owned(
     expected_images: tuple[str, ...],
 ) -> None:
     document = yaml.safe_load((CATALOG / "recipes" / f"{recipe_id}.yaml").read_text())
-    assert tuple(document["artifacts"]["recipe_specific_images"]) == expected_images
+    assert (
+        tuple(document["artifacts"].get("recipe_specific_images", ()))
+        == expected_images
+    )
 
 
 @pytest.mark.parametrize(
@@ -94,6 +98,7 @@ def test_recipe_specific_images_are_catalog_owned(
                 {
                     "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1",
                     "source_revision": "9ab57d7ecefdd2a2af2e2a2c889724a157457cd6",
+                    "effective_to": "2026-10-04",
                     "source_kind": "github-release",
                     "release_tag": "v1.3.0-glm-5.2-dev.1",
                     "release_state": "prerelease",
@@ -132,6 +137,13 @@ def test_recipe_specific_images_are_catalog_owned(
         (
             "kimi-k3",
             (
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1-kimi-k3-post.1",
+                    "source_revision": "22031aba1fb33524370a26150e9fd7a7751d9fef",
+                    "source_kind": "github-release",
+                    "release_tag": "v1.5.1-kimi-k3-post.1",
+                    "release_state": "prerelease",
+                },
                 {
                     "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0-kimi-k3-dev.1",
                     "source_revision": "f7f0c719e57aebffa3d386ff14b387c94fdaedad",

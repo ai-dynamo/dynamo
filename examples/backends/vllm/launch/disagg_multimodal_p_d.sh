@@ -119,7 +119,7 @@ python -m "$WORKER_MODULE" \
   $PREFILL_GPU_MEM_ARGS \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
   --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PREFILL}\"}" &
 
 # Start decode worker
@@ -135,7 +135,7 @@ python -m "$WORKER_MODULE" \
   $DECODE_GPU_MEM_ARGS \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
   --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_DECODE}\"}" &
 
 echo "=================================================="
