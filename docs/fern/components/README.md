@@ -102,9 +102,10 @@ import { TerminalDemo } from "@/components/TerminalDemo";
 ## Generated Modules
 
 `nightly-selector-data.generated.ts` is gitignored and rebuilt by the docs
-workflow on every publish, so the install selectors never serve a nightly pin
-that a human forgot to refresh. `install-selector-data.ts` imports it, so a
-fresh clone has no module to resolve until it is generated once:
+workflow on every publish, so neither the install selectors nor the Release
+Artifacts nightly ledger serves a pin that a human forgot to refresh.
+`install-selector-data.ts` and `NightlyBuilds.tsx` both import it, so a fresh
+clone has no module to resolve until it is generated once:
 
 ```bash
 python3 docs/fern/scripts/gen_nightly_selector.py            # real data, needs network
@@ -112,10 +113,21 @@ python3 docs/fern/scripts/gen_nightly_selector.py --offline  # empty module, no 
 ```
 
 The offline form writes a valid empty module; the selectors then render their
-"not currently available" state for the nightly channel. Without `--offline`
-the generator fails rather than write a module that resolved nothing — no NGC
-tags, or an unreachable wheel index — so a publish cannot replace live nightly
-rows with nothing or strip every wheel command.
+"not currently available" state for the nightly channel, and the ledger panel
+renders the same state. Without `--offline` the generator fails rather than
+write a module that resolved nothing — an unreachable required wheel index, no
+selector rows, or fewer than `NIGHTLY_LEDGER_BUILDS` complete ledger rows — so a
+publish cannot replace live nightly rows with nothing, blank the ledger, or
+strip every wheel command.
+
+A ledger row is written only for a night whose `ai-dynamo` and
+`ai-dynamo-runtime` wheels both published, because `ai-dynamo` pins the runtime
+wheel to the same version. `kvbm` is reported when that night published it and is
+never required: it is deprecated with removal targeted for v1.6.0. The ledger and
+the selectors' `latest` rows resolve from that same installable wheel set, so the
+ledger is never older than they are; it can be newer, because a `latest` row
+falls back to the wheel of its own container-tag night when a backend pin moved
+since.
 
 `simulate_docs_website.sh` generates its own empty copy into the scratch
 checkout via `--out`, so running the composition check leaves the module here

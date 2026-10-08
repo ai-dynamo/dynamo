@@ -31,9 +31,7 @@ registration, request conversion, transport, cancellation, and abort.
 The integration does **not** support multimodal input, LoRA, encode workers,
 beam search, or `n > 1`.
 
-Data-parallel rank targeting is rejected: the server answers
-`openengine-target-dp-rank` with `UNIMPLEMENTED`, so a request carrying a rank
-hint is refused up front instead of failing in the engine.
+The sidecar advertises a single logical worker, rank `0`. Dynamo may attach that rank even with KV events disabled; it selects the advertised endpoint and is accepted without forwarding an engine rank override. TensorRT-LLM owns internal attention-DP placement through conversation affinity. Nonzero logical ranks are rejected because they are not registered.
 `KvSessionRef.dp_rank` still carries a disaggregated session's KV affinity,
 inside the request body.
 
