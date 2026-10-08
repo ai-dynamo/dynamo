@@ -71,7 +71,8 @@ func (r *graphReconciler) resolveWorkloads(
 
 // renderPodCliqueSet composes resolved workloads into one Grove envelope with
 // runtime ConfigMaps and, for Kubernetes discovery, serving Services.
-// Inputs must be non-nil and workloads must contain every component group.
+// Inputs must be non-nil except existingPCS, which is nil during creation.
+// Workloads must contain every component group.
 // Plans must have finalized names and use the same keys as workloads.
 // Inputs remain read-only.
 func (r *graphReconciler) renderPodCliqueSet(
@@ -80,9 +81,10 @@ func (r *graphReconciler) renderPodCliqueSet(
 	dgd *v1beta1.DynamoGraphDeployment,
 	workloads map[string]*lpx.Workload,
 	plans map[string]*lpx.MaterializationPlan,
+	existingPCS *grovev1alpha1.PodCliqueSet,
 ) (*grovev1alpha1.PodCliqueSet, []client.Object, error) {
 	// Shared defaults and queue resolution belong to the single PCS envelope.
-	pcs, err := dynamo.RenderLPXPodCliqueSet(ctx, dgd, r.config, r.runtimeConfig, dynamo.PCSNameForLPX(deployment))
+	pcs, err := dynamo.RenderLPXPodCliqueSet(ctx, dgd, r.config, r.runtimeConfig, dynamo.PCSNameForLPX(deployment), existingPCS)
 	if err != nil {
 		return nil, nil, err
 	}

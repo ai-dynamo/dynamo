@@ -181,6 +181,48 @@ AISimulate's Weka importer also changes two behaviors from the former Dynamo imp
 The two agentic formats also require `trace_timestamps` and reject the virtual-time cutoff.
 `applied_compute_agentic` requires concurrency load.
 
+### Canonical Python Engine Configuration
+
+Pass an AISimulate engine launch mapping to `extra_engine_args`, `prefill_engine_args`, or
+`decode_engine_args`. Dynamo owns the optional `dynamo` runtime options; AISimulate owns the
+`engine` schema, topology, defaults, and validation.
+
+```python
+engine_config = {
+    "engine": {
+        "backend": "sglang",
+        "block_size": 16,
+        "max_model_len": 4096,
+        "sglang": {"chunked_prefill_size": 8192},
+        "timing_model": {"type": "fixed", "prefill_ms": 2.0, "decode_ms": 1.0},
+    },
+    "dp_size": 1,
+    "tensor_parallel_size": 1,
+    "dynamo": {"enable_local_indexer": True},
+}
+```
+
+The `MockEngineArgs`, `SglangArgs`, and `TrtllmArgs` Python classes have been removed. Replace
+constructor calls and flat engine JSON with mappings in this shape:
+
+| Former input | Canonical field |
+| --- | --- |
+| `engine_type` | `engine.backend` |
+| `num_gpu_blocks`, `block_size`, scheduler limits | Fields under `engine` |
+| `SglangArgs(...)`, `TrtllmArgs(...)` | `engine.sglang`, `engine.trtllm` mappings |
+| `sglang.page_size` | `engine.block_size` |
+| `ais_perf_config` | `engine.timing_model.config`, with `type: external` and `provider: ais` |
+| `ais_nextn`, `ais_nextn_accept_rates`, `ais_mtp_seed` | `engine.aic_nextn`, `engine.aic_nextn_accept_rates`, `engine.aic_mtp_seed` |
+| `kv_bytes_per_token` | `engine.kv_transfer_bytes_per_token` |
+| Ports, reasoning settings, and output replay paths | Fields under `dynamo` |
+| `planner_profile_data` | `engine.timing_model` with `type: external`, `provider: dynamo_profile`, and `config: {path: "profile.npz"}` |
+
+Use `json.dumps` and `json.loads` to save and restore configuration mappings. Keep
+`num_gpu_blocks_is_explicit` when saving a normalized configuration: `false` preserves automatic
+AISimulate capacity estimation. Providing `engine.num_gpu_blocks` without that marker selects an
+explicit capacity. Set `engine.max_num_seqs` or `engine.max_num_batched_tokens` to `null` (`None` in Python)
+for an unlimited scheduler limit; omit the field to use the engine default.
+
 ### Typed agentic replay through the Dynamo API
 
 AISimulate owns public Weka ingestion, validation, and lowering into the canonical
@@ -200,7 +242,6 @@ provenance, but the current runtime projects every node onto the single configur
 `execution_model`. Per-node heterogeneous timing models are not yet supported.
 
 ```python
-from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_trace_replay
 
 report = run_trace_replay(
@@ -210,7 +251,7 @@ report = run_trace_replay(
     agentic_lanes=12,
     router_mode="kv_router",
     num_workers=4,
-    extra_engine_args=MockEngineArgs(engine_type="vllm", block_size=64),
+    extra_engine_args={"engine": {"backend": "vllm", "block_size": 64}},
 )
 ```
 
