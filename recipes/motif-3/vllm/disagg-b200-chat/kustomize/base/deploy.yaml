@@ -25,11 +25,12 @@ metadata:
     app.kubernetes.io/name: motif3-disagg-b200-chat
     app.kubernetes.io/part-of: dynamo
 data:
-  speculative-config: "{\n  \"method\": \"mtp\",\n  \"num_speculative_tokens\": 2\n\
-    }"
-  speculative-config-synthetic: "{\n  \"method\": \"mtp\",\n  \"num_speculative_tokens\"\
-    : 2,\n  \"rejection_sample_method\": \"synthetic\",\n  \"synthetic_acceptance_length\"\
-    : 2.13\n}"
+  speculative-config: |-
+    {"method":"mtp","num_speculative_tokens":2}
+  speculative-config-synthetic: |-
+    {"method":"mtp","num_speculative_tokens":2,"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.13}
+  kv-events-config: |-
+    {"enable_kv_cache_events":false}
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -73,6 +74,8 @@ spec:
             value: '1'
           - name: TRANSFORMERS_OFFLINE
             value: '1'
+          - name: PYTHONHASHSEED
+            value: '0'
           - name: HF_HOME
             value: /shared-model-cache
           - name: DYN_ROUTER_MODE
@@ -124,7 +127,10 @@ spec:
           - --disaggregation-mode=prefill
           - --kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}}
           - --enable-prefix-caching
+          - --kv-events-config=$(KV_EVENTS_CONFIG)
           env:
+          - name: PYTHONHASHSEED
+            value: '0'
           - name: HF_HOME
             value: /shared-model-cache
           - name: DYN_SELF_HOST_METADATA
@@ -142,6 +148,11 @@ spec:
               configMapKeyRef:
                 name: motif3-disagg-b200-chat-config
                 key: speculative-config
+          - name: KV_EVENTS_CONFIG
+            valueFrom:
+              configMapKeyRef:
+                name: motif3-disagg-b200-chat-config
+                key: kv-events-config
           - name: UCX_RCACHE_MAX_UNRELEASED
             value: '1024'
           - name: NCCL_NET_PLUGIN
@@ -214,7 +225,10 @@ spec:
           - --disaggregation-mode=decode
           - --kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}}
           - --enable-prefix-caching
+          - --kv-events-config=$(KV_EVENTS_CONFIG)
           env:
+          - name: PYTHONHASHSEED
+            value: '0'
           - name: HF_HOME
             value: /shared-model-cache
           - name: DYN_SELF_HOST_METADATA
@@ -232,6 +246,11 @@ spec:
               configMapKeyRef:
                 name: motif3-disagg-b200-chat-config
                 key: speculative-config
+          - name: KV_EVENTS_CONFIG
+            valueFrom:
+              configMapKeyRef:
+                name: motif3-disagg-b200-chat-config
+                key: kv-events-config
           - name: UCX_RCACHE_MAX_UNRELEASED
             value: '1024'
           - name: NCCL_NET_PLUGIN

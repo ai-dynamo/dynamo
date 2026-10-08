@@ -29,3 +29,7 @@ matrix:
   - name: 2p1d
     components:
     - kustomize/components/2p1d
+  - name: 2p1d-kv
+    components:
+    - kustomize/components/2p1d
+    - kustomize/components/kv-routing
