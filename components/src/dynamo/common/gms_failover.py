@@ -265,6 +265,21 @@ def _release_frozen_shadow_headroom(backend_name: str) -> None:
     )
 
 
+def frozen_kill_before_gpu_proof(backend_name: str) -> bool:
+    """Whether a broken frozen-mode cohort dies at once, before any MPS proof.
+
+    In frozen-predecessor mode a failed pre-kill proof never blocks takeover:
+    the successor serves from sealed and free KV and reclaims predecessor
+    pages only after its own proof or process death plus grace. Waiting for
+    the bounded ``terminate_client`` attempt (which a crashed MPS context
+    rarely answers in time) therefore only delays the failover lock handoff.
+    ``DYN_GMS_FROZEN_KILL_BEFORE_PROOF=0`` restores the pre-kill attempt.
+    """
+    return frozen_predecessor_enabled(backend_name) and _truthy_env(
+        "DYN_GMS_FROZEN_KILL_BEFORE_PROOF", default=True
+    )
+
+
 def quiesce_local_gpu_cohort_after_rank_loss(
     backend_name: str, *, require_cuda_success: bool = False
 ) -> bool:

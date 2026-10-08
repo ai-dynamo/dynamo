@@ -251,3 +251,25 @@ def test_lock_owners_count_even_without_a_visible_descriptor(tmp_path, monkeypat
         assert not pl._holders_all_exiting(path)
     finally:
         _stop(holder)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc task flags")
+def test_cannot_run_user_code_tracks_kill_not_exit():
+    from gpu_memory_service.integrations.common.process_lifecycle import (
+        cannot_run_user_code,
+    )
+
+    pid = os.fork()
+    if pid == 0:
+        signal.pause()
+        os._exit(1)
+    try:
+        assert not cannot_run_user_code(pid)
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        pid = 0
+    finally:
+        if pid:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+    assert cannot_run_user_code(2**22 + 12345)

@@ -600,8 +600,9 @@ def test_headless_rank_does_not_kill_cuda_worker_without_mps_proof(monkeypatch):
     assert killed == [(os.getpid(), signal.SIGKILL)]
 
 
+@pytest.mark.parametrize("kill_first", [True, False])
 @pytest.mark.parametrize("proof", [True, False])
-def test_frozen_headless_attempts_mps_before_host_exit(monkeypatch, proof):
+def test_frozen_headless_attempts_mps_before_host_exit(monkeypatch, proof, kill_first):
     import signal
 
     from dynamo.common import gms_failover, rank_liveness
@@ -616,6 +617,7 @@ def test_frozen_headless_attempts_mps_before_host_exit(monkeypatch, proof):
             pass
 
     events = []
+    monkeypatch.setenv("DYN_GMS_FROZEN_KILL_BEFORE_PROOF", "1" if kill_first else "0")
     monkeypatch.setattr(rank_liveness, "liveness_enabled", lambda: True)
     monkeypatch.setenv("DYN_GMS_RANK_LIVENESS_ISOLATED", "0")
     monkeypatch.setattr(rank_liveness, "RankLivenessClient", Client)
@@ -634,8 +636,9 @@ def test_frozen_headless_attempts_mps_before_host_exit(monkeypatch, proof):
     )
     headless._maybe_start_vllm_rank_liveness_client(config)
     callbacks[0](0, "peer-rank-lost")
-    assert events == [
-        ("quiesce", "vllm"),
+    # Killing first hands the failover lock over without waiting for an MPS
+    # terminate attempt; the successor still proves or waits for death.
+    assert events == ([] if kill_first else [("quiesce", "vllm")]) + [
         ("kill", os.getpid(), signal.SIGKILL),
     ]
 

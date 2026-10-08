@@ -184,6 +184,16 @@ def _user_space_dead(pid: int) -> bool:
     return True
 
 
+def cannot_run_user_code(pid: int) -> bool:
+    """Whether ``pid`` is gone or none of its threads can run user code again.
+
+    A killed process can spend seconds in NVIDIA driver teardown before it
+    exits, but once every thread is exiting or has SIGKILL pending it can
+    never submit more CPU work.
+    """
+    return _user_space_dead(pid)
+
+
 def _lock_owner_pids(target: os.stat_result) -> list[int]:
     """Owners of granted locks on ``target`` listed in /proc/locks.
 

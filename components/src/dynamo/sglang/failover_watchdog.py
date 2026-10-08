@@ -17,6 +17,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from dynamo.common.gms_failover import (
+    frozen_kill_before_gpu_proof,
     frozen_predecessor_enabled,
     quiesce_local_gpu_cohort_after_rank_loss,
     release_attached_gms_failover_lock,
@@ -171,10 +172,15 @@ def _fence_children(engine: Any, *, wait_s: float = 0.25) -> bool:
     from gpu_memory_service.integrations.common.gpu_quiescence import (
         gms_mps_provider_enabled,
     )
+    from gpu_memory_service.integrations.common.process_lifecycle import (
+        cannot_run_user_code,
+    )
 
     frozen = frozen_predecessor_enabled("sglang")
     mps_enabled = gms_mps_provider_enabled("sglang")
-    quiesced = quiesce_local_gpu_cohort_after_rank_loss(
+    quiesced = not frozen_kill_before_gpu_proof(
+        "sglang"
+    ) and quiesce_local_gpu_cohort_after_rank_loss(
         "sglang", require_cuda_success=frozen
     )
     if mps_enabled and not quiesced and not frozen:
@@ -201,13 +207,21 @@ def _fence_children(engine: Any, *, wait_s: float = 0.25) -> bool:
         )
         return True
 
+    def fenced(pid: int) -> bool:
+        if not _pid_running(pid):
+            return True
+        # In frozen mode the successor serves only sealed and free KV, so a
+        # killed child that can no longer run user code is fenced even while
+        # its driver teardown keeps the process alive for seconds.
+        return frozen and kill_issued and cannot_run_user_code(pid)
+
     deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
-        if all(not _pid_running(pid) for pid in pids):
+        if all(fenced(pid) for pid in pids):
             return True
         time.sleep(0.01)
 
-    alive = [pid for pid in pids if _pid_running(pid)]
+    alive = [pid for pid in pids if not fenced(pid)]
     if alive:
         logger.warning(
             "[GMS failover] SGLang child fence timed out; still-running pids=%s",

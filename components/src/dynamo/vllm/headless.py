@@ -123,6 +123,7 @@ def _maybe_start_vllm_rank_liveness_client(config: Config) -> None:
         import signal
 
         from dynamo.common.gms_failover import (
+            frozen_kill_before_gpu_proof,
             frozen_predecessor_enabled,
             quiesce_local_gpu_cohort_after_rank_loss,
         )
@@ -134,7 +135,7 @@ def _maybe_start_vllm_rank_liveness_client(config: Config) -> None:
             reason,
         )
         frozen = frozen_predecessor_enabled("vllm")
-        if frozen:
+        if frozen and not frozen_kill_before_gpu_proof("vllm"):
             # Preserve the live CUDA client for GMS/MPS termination. Failure
             # still releases CPU ownership, but leaves old pages quarantined.
             quiesce_local_gpu_cohort_after_rank_loss("vllm")

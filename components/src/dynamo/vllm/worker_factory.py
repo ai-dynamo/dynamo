@@ -26,6 +26,7 @@ from dynamo.common.gms_failover import (
     acquire_lock_while_armed,
     arm_frozen_shadow_headroom,
     claim_discovery_for_active_engine,
+    frozen_kill_before_gpu_proof,
     frozen_predecessor_enabled,
     quiesce_local_gpu_cohort_after_rank_loss,
     run_gms_failover_post_lock_fence,
@@ -1472,11 +1473,13 @@ class WorkerFactory:
                 reason,
             )
             if frozen_predecessor_enabled("vllm"):
-                # Give GMS a bounded chance to terminate the still-live local
-                # CUDA worker before the launcher kills its process tree.
-                # A failed proof does not block frozen takeover: predecessor
-                # pages remain quarantined until a later proof succeeds.
-                quiesce_local_gpu_cohort_after_rank_loss("vllm")
+                # Unless killing first, give GMS a bounded chance to terminate
+                # the still-live local CUDA worker before the launcher kills
+                # its process tree. A failed proof does not block frozen
+                # takeover: predecessor pages remain quarantined until a later
+                # proof (or process death plus grace) authorizes reclaim.
+                if not frozen_kill_before_gpu_proof("vllm"):
+                    quiesce_local_gpu_cohort_after_rank_loss("vllm")
                 os.kill(os.getpid(), signal.SIGKILL)
                 return
             from gpu_memory_service.integrations.common.gpu_quiescence import (
