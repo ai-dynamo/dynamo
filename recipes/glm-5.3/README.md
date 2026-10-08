@@ -124,4 +124,4 @@ The rows require `SGLANG_SIMULATE_ACC_LEN=2.69`, `SGLANG_SIMULATE_ACC_METHOD=mat
 - `n>1` requests are not supported with the disaggregated recipe
 - Chat Completions accepts a structured-output JSON schema with an invalid schema type or a malformed regex and returns HTTP 200 with `content` set to null.
 - Chat Completions can return one more alternative than requested. With `top_logprobs=3`, some tokens include four entries in `top_logprobs`.
-- Completions with a long `stop_token_ids` list (for example token IDs 1 through 599) returns HTTP 500. The same request is valid and should stop when a listed token is produced.
+- Completions with more than 32 `stop_token_ids` returns HTTP 500. The same request is valid and should stop when a listed token is produced.
