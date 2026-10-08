@@ -93,6 +93,8 @@ spec:
                 - nvidia/MiniMax-M3-NVFP4
                 - --trust-remote-code
               env:
+                - name: HF_HOME
+                  value: /shared-model-cache
                 - name: HF_HUB_OFFLINE
                   value: "1"
                 - name: TRANSFORMERS_OFFLINE
@@ -106,6 +108,13 @@ spec:
                   cpu: "8"
                   memory: 24Gi
                   ephemeral-storage: 12Gi
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
 
     - name: PrefillWorker
       type: prefill

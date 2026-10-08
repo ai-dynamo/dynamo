@@ -89,6 +89,11 @@ selected `$RECIPE_DIR/deploy.yaml`; write the resolved path, since YAML does
 not expand shell variables. Select `/agg` or `/disagg` Components to match the
 profile, and follow the starter's Component order and placeholder preflight.
 
+If you change the cache claim, update both frontend and worker PVC references
+to the populated claim; the starter's cache-binding Component only patches
+workers. Both frontends mount the cache at `/shared-model-cache` and set
+`HF_HOME` to that path for offline metadata access.
+
 Configure the cache claim, registry credentials, GB200 placement, and provider
 networking in that private composition. Preserve the recipe's ComputeDomain
 claim chain and, for disaggregated serving, its NIXL and UCX multi-node CUDA
@@ -140,14 +145,37 @@ for trace staging and execution.
 ## Synthetic Acceptance for Benchmarks
 
 Both profiles use the ConfigMap's `speculative-config` key for real EAGLE3
-verification. For an explicit benchmark-only variant, use a private patch to
-change the `SPECULATIVE_CONFIG` environment variable's
-`valueFrom.configMapKeyRef.key` to `speculative-config-synthetic` on `Worker`
-for aggregated serving, or on both `PrefillWorker` and `DecodeWorker` for
-disaggregated serving. That configuration sets synthetic acceptance length to
-`2.89`. Render and review the variant separately, and record the image and
-rendered configuration with the results. The benchmark Job does not change
-this setting.
+verification. For a benchmark-only variant, use the checked-in
+[aggregated Component](vllm/agg-gb200-agentic/kustomize/components/synthetic-acceptance/kustomization.yaml)
+or [disaggregated Component](vllm/disagg-gb200-agentic/kustomize/components/synthetic-acceptance/kustomization.yaml).
+These guarded patches select `speculative-config-synthetic` on `Worker`, or
+on both `PrefillWorker` and `DecodeWorker`, with acceptance length `2.89`.
+They fail if the expected environment entries have moved or changed.
+
+First validate the private cluster composition as described in
+[Edit and render](#edit-and-render). The cluster validator accepts only cluster
+binding Components, so apply the synthetic Component in a separate outer
+Kustomization after that validation:
+
+```bash
+export BENCHMARK_KUSTOMIZATION=/absolute/path/to/private/minimax-m3-synthetic
+mkdir -p "$BENCHMARK_KUSTOMIZATION"
+cat > "$BENCHMARK_KUSTOMIZATION/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - $(realpath --relative-to="$BENCHMARK_KUSTOMIZATION" "$CLUSTER_KUSTOMIZATION")
+components:
+  - $(realpath --relative-to="$BENCHMARK_KUSTOMIZATION" "$RECIPE_DIR/kustomize/components/synthetic-acceptance")
+EOF
+kustomize build --load-restrictor LoadRestrictionsNone \
+  "$BENCHMARK_KUSTOMIZATION" > "$BENCHMARK_KUSTOMIZATION/rendered.yaml"
+```
+
+Use a separate directory from `CLUSTER_KUSTOMIZATION`. Review and apply the
+benchmark variant's rendered manifest using the commands in [Deploy](#deploy),
+with its path substituted. Record the image and rendered configuration with
+the results. The benchmark Job does not change the acceptance setting.
 
 > [!WARNING]
 > Synthetic acceptance bypasses real EAGLE3 verification. Use it only for

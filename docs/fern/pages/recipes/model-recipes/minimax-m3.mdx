@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Each target below is a Dynamo + vLLM deployment of Minimax M3 — a multimodal model serving up to 1M-token context with MOE and Sparse Attention — with KV-aware routing, NVFP4-packed routed experts, and FP8 KV cache, running aggregated or with prefill/decode disaggregation on GB200 NVL72 rack. KV transfer and tensor parallelism run over NVLink (MNNVL) using Kubernetes ComputeDomains.
+Each target below is a Dynamo + vLLM deployment of MiniMax M3 — a multimodal model serving up to 1M-token context with MoE and sparse attention — with KV-aware routing, NVFP4-packed routed experts, and FP8 KV cache, running aggregated or with prefill/decode disaggregation on GB200 NVL72 rack. KV transfer and tensor parallelism run over NVLink (MNNVL) using Kubernetes ComputeDomains.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -150,7 +150,7 @@ A successful smoke test returns an HTTP 200 response containing a chat completio
 
 See the MiniMax M3 benchmark [README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/perf/README.md) for the full workflow—staging the trace on the PVC, running a concurrency sweep, and fetching artifacts—and use the checked-in [AIPerf Job](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/perf/perf.yaml) to run the trace replay.
 
-Both serving manifests default to real EAGLE3 verification with three draft tokens. The benchmark Job does not change that setting. For synthetic-acceptance experiments, follow the [benchmark-only configuration instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md#synthetic-acceptance-for-benchmarks). Both profiles provide a synthetic configuration with acceptance length 2.89.
+Both serving manifests default to real EAGLE3 verification with three draft tokens. The benchmark Job does not change that setting. For synthetic-acceptance experiments, follow the [benchmark-only configuration instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md#synthetic-acceptance-for-benchmarks). Use the checked-in [aggregated Component](https://github.com/ai-dynamo/dynamo/tree/main/recipes/minimax-m3/vllm/agg-gb200-agentic/kustomize/components/synthetic-acceptance) or [disaggregated Component](https://github.com/ai-dynamo/dynamo/tree/main/recipes/minimax-m3/vllm/disagg-gb200-agentic/kustomize/components/synthetic-acceptance) described there. Both select acceptance length 2.89.
 
 <Warning>
 Synthetic acceptance bypasses real EAGLE3 verification. Use it only for controlled performance experiments, never production responses or accuracy evaluation.
@@ -166,7 +166,7 @@ The intended agentic workload and interactivity targets are:
 
 The benchmark replays the Mooncake-format agentic trace described in the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/perf/README.md).
 
-### Performance Results
+### Historical Synthetic-Acceptance Results (Not Qualified for the Current Image or Real Verification)
 
 The previously published results below used synthetic acceptance with the SpeedBench coding acceptance length. They describe three aggregated TP4 workers (12 GPUs) and three prefill plus three decode TP4 workers (24 GPUs), respectively.
 
