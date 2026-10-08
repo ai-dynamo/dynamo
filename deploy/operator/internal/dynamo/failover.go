@@ -487,6 +487,22 @@ func IntraPodFailoverEngineContainerNames() []string {
 	return names
 }
 
+// PrepareSnapshotFailoverCapture removes defaults that can create conflicting
+// listeners when a snapshot is restored into both engines in one Pod.
+// FPM is handled because WorkerDefaults automatically injects its port.
+// Other activation paths and runtime socket cleanup remain engine concerns.
+// Mutates container, which must not be nil.
+func PrepareSnapshotFailoverCapture(container *corev1.Container) {
+	// Remove the FPM port from the capture environment.
+	filtered := container.Env[:0]
+	for _, env := range container.Env {
+		if env.Name != "DYN_FORWARDPASS_METRIC_PORT" {
+			filtered = append(filtered, env)
+		}
+	}
+	container.Env = filtered
+}
+
 // buildSnapshotFailoverPod prepares the restored active/standby pair for vLLM
 // and SGLang with GMS V1. TRT-LLM is gated until its restore/election path exists.
 // Collective ports are captured state, so cold shadow overrides do not apply.

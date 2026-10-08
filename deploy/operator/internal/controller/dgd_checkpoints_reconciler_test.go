@@ -383,11 +383,9 @@ func TestDGDCheckpointsReconciler_MultiGPUSnapshotFailoverCapture(t *testing.T) 
 			assert.Equal(t, "main", main.Name)
 			assert.Equal(t, original.PodTemplate.Spec.Containers[0].Args, main.Args)
 			assert.Contains(t, main.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
-			if backend == dynamo.BackendFrameworkVLLM {
-				for _, env := range main.Env {
-					assert.NotEqual(t, "DYN_FORWARDPASS_METRIC_PORT", env.Name)
-					assert.NotEqual(t, "DYN_VLLM_GMS_SHADOW_MODE", env.Name)
-				}
+			for _, env := range main.Env {
+				assert.NotEqual(t, "DYN_FORWARDPASS_METRIC_PORT", env.Name)
+				assert.NotEqual(t, "DYN_VLLM_GMS_SHADOW_MODE", env.Name)
 			}
 
 			t.Log("Verify capture allocates two shared GPUs rather than doubling the request")

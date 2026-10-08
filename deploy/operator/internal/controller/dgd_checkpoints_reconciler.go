@@ -1146,21 +1146,13 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 		}
 	}
 
-	// FPM binds a publisher port before capture, which would collide when
-	// restored into both engines. Strip the operator default here so capture
-	// and reuse hash the same template; SGLang disables FPM in its snapshot hook.
-	if backendFramework == dynamo.BackendFrameworkVLLM && dynamo.IsIntraPodFailoverEnabled(component) {
+	// Prepare capture defaults for snapshot-backed intra-pod failover.
+	if dynamo.IsIntraPodFailoverEnabled(component) {
 		targetContainer, err := findPodTemplateContainer(&podTemplate, targetContainerName)
 		if err != nil {
 			return corev1.PodTemplateSpec{}, err
 		}
-		filtered := targetContainer.Env[:0]
-		for _, env := range targetContainer.Env {
-			if env.Name != "DYN_FORWARDPASS_METRIC_PORT" {
-				filtered = append(filtered, env)
-			}
-		}
-		targetContainer.Env = filtered
+		dynamo.PrepareSnapshotFailoverCapture(targetContainer)
 	}
 	return podTemplate, nil
 }
