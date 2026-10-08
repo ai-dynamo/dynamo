@@ -6,6 +6,7 @@ import functools
 import logging
 import os
 import random
+from contextlib import aclosing
 from types import SimpleNamespace
 from typing import (
     Any,
@@ -25,6 +26,7 @@ from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
+from dynamo.common.backend.health_check import is_probe
 from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
@@ -64,6 +66,7 @@ from dynamo.vllm.omni.output_formatter import (
 from dynamo.vllm.omni.utils import (
     audio_output_is_cumulative,
     build_image_generation_prompt,
+    ensure_awaited,
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
     image_generation_size_from_request,
@@ -319,8 +322,46 @@ class OmniHandler(BaseOmniHandler):
         assert request_id is not None, "Request ID is required"
         logger.debug(f"Omni Request ID: {request_id}")
 
+        if is_probe(request):
+            await self._check_health(request, context, request_id)
+            yield {}
+            return
+
         async for chunk in self._generate_openai_mode(request, context, request_id):
             yield chunk
+
+    async def _check_health(
+        self, request: Dict[str, Any], context: Context, request_id: str
+    ) -> None:
+        await ensure_awaited(self.engine_client.check_health())
+        if len(request) == 1:
+            return
+
+        # The runtime accepts the first response as success. Custom generation
+        # probes must finish before yielding, so a progress chunk cannot hide a
+        # later engine or media-encoding failure.
+        has_output = False
+        async with aclosing(
+            self._generate_openai_mode(request, context, request_id)
+        ) as response:
+            async for chunk in response:
+                if not chunk:
+                    continue
+                if (
+                    chunk.get("error")
+                    or chunk.get("status") in ("failed", "error")
+                    or any(
+                        choice.get("finish_reason") == "error"
+                        for choice in chunk.get("choices", [])
+                    )
+                ):
+                    raise RuntimeError(
+                        "Omni health check failed: "
+                        f"{chunk.get('error') or 'generation returned an error'}"
+                    )
+                has_output = True
+        if not has_output:
+            raise RuntimeError("Omni health check produced no output")
 
     async def _generate_openai_mode(
         self, request: Dict[str, Any], context: Context, request_id: str
@@ -479,8 +520,10 @@ class OmniHandler(BaseOmniHandler):
                 logger.info(f"Request {request_id} aborted due to shutdown")
                 raise
             except Exception as e:
-                logger.error(f"Error during generation for request {request_id}: {e}")
-                yield self._error_chunk(request_id, str(e), inputs.request_type)
+                logger.error(
+                    "Error during generation for request %s: %s", request_id, e
+                )
+                raise
 
     async def _generate_with_lora_admission_lock(
         self,

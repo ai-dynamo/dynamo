@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from dynamo.common.backend.health_check import build_raw_health_check_payload
 from dynamo.common.lora.manager import LoRAInfo
+from dynamo.health_check import HEALTH_CHECK_KEY
 
 try:
     from PIL import Image
@@ -97,6 +100,137 @@ def _make_handler(stage_types=("diffusion",)):
     handler.engine_args = SimpleNamespace(model=config.model)
 
     return handler
+
+
+class TestHealthCanaries:
+    @pytest.mark.parametrize("modality", ["image", "video", "audio", "text"])
+    @pytest.mark.asyncio
+    async def test_default_probe_checks_engine_without_parsing_media(
+        self, monkeypatch, modality
+    ):
+        monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
+        handler = _make_handler()
+        handler.config.output_modalities = [modality]
+        handler.engine_client.check_health = AsyncMock()
+        handler._generate_openai_mode = MagicMock()
+        context = MagicMock()
+        context.id.return_value = "health-test"
+
+        response = [
+            chunk
+            async for chunk in handler.generate(
+                build_raw_health_check_payload({}), context
+            )
+        ]
+
+        assert response == [{}]
+        handler.engine_client.check_health.assert_awaited_once_with()
+        handler._generate_openai_mode.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dead_stage_probe_propagates_failure(self):
+        handler = _make_handler()
+        handler.engine_client.check_health = AsyncMock(
+            side_effect=RuntimeError("Stage-0 has no live replica")
+        )
+        context = MagicMock()
+        context.id.return_value = "health-test"
+
+        with pytest.raises(RuntimeError, match="Stage-0 has no live replica"):
+            async for _ in handler.generate({HEALTH_CHECK_KEY: True}, context):
+                pytest.fail("A failed engine must not yield a successful probe")
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            None,
+            {"status": "failed", "error": "Stage-0 has no live replica"},
+            {
+                "choices": [
+                    {
+                        "delta": {"content": "Error: stage failed"},
+                        "finish_reason": "error",
+                    }
+                ]
+            },
+        ],
+        ids=["completed", "failed-media", "failed-chat"],
+    )
+    @pytest.mark.asyncio
+    async def test_custom_probe_waits_for_completion(self, monkeypatch, failure):
+        monkeypatch.setenv("DYN_HEALTH_CHECK_PAYLOAD", '{"input":"Hello."}')
+        request = build_raw_health_check_payload({})
+        handler = _make_handler()
+        handler.engine_client.check_health = AsyncMock()
+        context = MagicMock()
+        context.id.return_value = "health-test"
+        consumed = []
+        finalized = []
+
+        async def generate(raw, received_context, request_id):
+            assert raw == {"input": "Hello.", HEALTH_CHECK_KEY: True}
+            assert received_context is context
+            assert request_id == "health-test"
+            try:
+                yield {"status": "in_progress"}
+                if failure is not None:
+                    yield failure
+                else:
+                    yield {"status": "completed", "data": [{"b64_json": "audio"}]}
+                consumed.append(True)
+            finally:
+                finalized.append(True)
+
+        handler._generate_openai_mode = generate
+        probe = handler.generate(request, context)
+        if failure is not None:
+            with pytest.raises(RuntimeError, match="health check failed"):
+                await anext(probe)
+        else:
+            assert await anext(probe) == {}
+            assert consumed == [True]
+            with pytest.raises(StopAsyncIteration):
+                await anext(probe)
+        assert finalized == [True]
+
+    @pytest.mark.asyncio
+    async def test_empty_custom_probe_is_unhealthy(self):
+        handler = _make_handler()
+        handler.engine_client.check_health = AsyncMock()
+        context = MagicMock()
+        context.id.return_value = "health-test"
+
+        async def generate(*args):
+            for chunk in ():
+                yield chunk
+
+        handler._generate_openai_mode = generate
+        with pytest.raises(RuntimeError, match="no output"):
+            async for _ in handler.generate(
+                {HEALTH_CHECK_KEY: True, "input": "Hello."}, context
+            ):
+                pytest.fail("An empty generation must not pass a custom probe")
+
+    @pytest.mark.asyncio
+    async def test_normal_generation_propagates_engine_failure(self):
+        handler = _make_handler()
+        handler.config.output_modalities = ["image"]
+        context = MagicMock()
+        context.id.return_value = "image-request"
+
+        async def fail_generation(**kwargs):
+            raise RuntimeError("Stage-0 has no live replica")
+            yield  # pragma: no cover
+
+        @asynccontextmanager
+        async def no_abort_monitor(*args):
+            yield
+
+        handler.engine_client.generate = fail_generation
+        handler._abort_monitor = no_abort_monitor
+        with pytest.raises(RuntimeError, match="Stage-0 has no live replica"):
+            async for _ in handler.generate({"prompt": "A teapot"}, context):
+                pytest.fail("An engine failure must not count as successful activity")
 
 
 class TestEngineInputs:

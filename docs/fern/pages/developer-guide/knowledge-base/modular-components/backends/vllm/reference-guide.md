@@ -108,15 +108,22 @@ For more details, see [Graceful Shutdown](../../../../../kubernetes/fault-tolera
 
 ## Health Checks
 
-Each worker type has a specialized health check payload that validates the full inference pipeline:
+Each worker type registers a health check with the Dynamo runtime:
 
 | Worker Type | Health Check Strategy |
 |------------|----------------------|
 | Decode / Aggregated | Short generation request (`max_tokens=1`) using the model's BOS token |
 | Prefill | Same payload structure as decode, adapted for prefill request format |
-| vLLM-Omni | Short generation request via AsyncOmni with the model's BOS token |
+| vLLM-Omni (aggregated) | Native `AsyncOmni.check_health()` checks the orchestrator and stage replicas; a custom payload opts into inference |
+| vLLM-Omni (stage worker) | Short generation request using the model's BOS token |
 
-Health checks are registered with the Dynamo runtime and called by the frontend or Kubernetes liveness probes. The payload can be overridden via `DYN_HEALTH_CHECK_PAYLOAD` environment variable. See [Observability Architecture](../../../concepts/observability-architecture.md#active-worker-health-checks) for the active health-check design.
+The runtime runs these checks when enabled, and its HTTP health endpoints expose the resulting
+status to Kubernetes probes. Override the payload with `DYN_HEALTH_CHECK_PAYLOAD`. For aggregated
+Omni workers, use a request valid for the model's output modality and allow enough time for inference
+with `DYN_HEALTH_CHECK_REQUEST_TIMEOUT`. See the
+[Health Check Reference](../../../../../reference/observability/health-checks.mdx#active-canary-configuration)
+for configuration and [Observability Architecture](../../../concepts/observability-architecture.md#active-worker-health-checks)
+for the active health-check design.
 
 ## Request Cancellation
 

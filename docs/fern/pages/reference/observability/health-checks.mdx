@@ -113,9 +113,15 @@ selection in the current runtime.
 | `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | `3` | Seconds to wait for the canary response |
 | `DYN_HEALTH_CHECK_PAYLOAD` | Backend default | Optional JSON object or `@/path/to/file.json` payload override for unified backends |
 
-Each backend supplies a minimal inference payload. Dynamo marks the request as a health check and
-uses the backend's normal endpoint path, so the check covers request handling and engine execution
-rather than only process reachability. For the lifecycle and rationale, see
+Backends supply a health-check payload that Dynamo sends through the normal worker endpoint.
+LLM backends use a minimal inference request. Aggregated vLLM-Omni workers instead call
+`AsyncOmni.check_health()` by default to check the orchestrator and stage replicas without generating
+media. This detects failed stages but does not verify that a forward pass completes.
+
+To test inference on an aggregated vLLM-Omni worker, set `DYN_HEALTH_CHECK_PAYLOAD` to a request valid
+for its model and output modality. Set `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` to allow that request to
+complete. Custom Omni probes consume the full response and reject generation errors before
+reporting success. For the lifecycle and rationale, see
 [Observability Architecture](../../developer-guide/knowledge-base/concepts/observability-architecture.md#active-worker-health-checks).
 
 ## Related Reference
