@@ -176,6 +176,7 @@
 /examples/power-aware-budget/                                                                           @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/                                                                         @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/profiler/                                                                        @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/aisimulate/                                                                      @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/core/                                                                    @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/tests/                                                                   @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/global_planner/                                                                  @ai-dynamo/dynamo-planner-codeowners
@@ -339,6 +340,7 @@
 /deploy/operator/docs/                                                                                  @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/hack/                                                                                  @ai-dynamo/dynamo-operator-codeowners
 /examples/deployments/                                                                                  @ai-dynamo/dynamo-operator-codeowners
+/examples/gpu-sharing/                                                                                  @ai-dynamo/dynamo-operator-codeowners
 /deploy/CONTRIBUTING.md                                                                                 @ai-dynamo/dynamo-operator-codeowners
 /deploy/pre-deployment/                                                                                 @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/config/                                                                                @ai-dynamo/dynamo-operator-codeowners
@@ -710,6 +712,7 @@ requirements.txt                                                                
 /lib/sidecar/testkit/tests/support/sglang.rs                                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /tests/fault_tolerance/cancellation/utils.py                                                            @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/serve/multimodal_profiles/vllm_xpu.py                                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/components/src/dynamo/aisimulate/output/dgd/                                                           @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/sglang/health_check.py                                                           @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/trtllm/health_check.py                                                           @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/engine_monitor.py                                                           @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners

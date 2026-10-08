@@ -27,7 +27,7 @@ from tests.fault_tolerance.deploy.scenarios import (
     scenarios,
 )
 from tests.fault_tolerance.deploy.worker_names import get_worker_service_name
-from tests.utils.test_output import resolve_test_output_path
+from tests.utils.output_paths import resolve_test_output_path
 
 
 def get_model_from_deployment(
