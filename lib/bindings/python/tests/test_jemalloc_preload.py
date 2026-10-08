@@ -65,14 +65,13 @@ def test_alias_ignored_unless_passed(startup, monkeypatch):
     execve.assert_not_called()
 
 
-@pytest.mark.parametrize("env,alias,enabled_by", ENABLED)
 @pytest.mark.parametrize("separator", [":", " "])
-def test_already_preloaded(startup, monkeypatch, env, alias, enabled_by, separator):
-    set_env(monkeypatch, env)
+def test_already_preloaded(startup, monkeypatch, separator):
+    monkeypatch.setenv("DYN_JEMALLOC", "1")
     preload = f"libother.so{separator}/usr/lib/libjemalloc.so.2"
     monkeypatch.setenv("LD_PRELOAD", preload)
     find_library, execve = startup
-    maybe_preload_jemalloc(alias=alias)
+    maybe_preload_jemalloc()
     find_library.assert_not_called()
     execve.assert_not_called()
     assert os.environ["LD_PRELOAD"] == preload
@@ -91,12 +90,11 @@ def test_missing_library(startup, monkeypatch, capsys, env, alias, enabled_by):
     assert "LD_PRELOAD" not in os.environ
 
 
-@pytest.mark.parametrize("env,alias,enabled_by", ENABLED)
 @pytest.mark.parametrize(
     "existing", ["", "libother.so:libanother.so", "/opt/jemalloc-tools/libheaptrace.so"]
 )
-def test_restart(startup, monkeypatch, env, alias, enabled_by, existing):
-    set_env(monkeypatch, env)
+def test_restart(startup, monkeypatch, existing):
+    monkeypatch.setenv("DYN_JEMALLOC", "1")
     monkeypatch.setenv("LD_PRELOAD", existing)
     argv = [sys.executable, "-u", "-X", "faulthandler", "-m", "dynamo.router"]
     argv += ["--endpoint", "dynamo.prefill.generate"]
@@ -116,7 +114,7 @@ def test_restart(startup, monkeypatch, env, alias, enabled_by, existing):
         os.environ, LD_PRELOAD="libjemalloc.so.2" + (f":{existing}" if existing else "")
     )
     with pytest.raises(SystemExit):
-        maybe_preload_jemalloc(alias=alias)
+        maybe_preload_jemalloc()
     find_library.assert_called_once_with("jemalloc")
     execve.assert_called_once_with(sys.executable, argv, expected_env)
     assert os.environ["LD_PRELOAD"] == existing
