@@ -72,10 +72,8 @@ jobs:
           "${k[@]}" describe pods -l "$selector" > "$bundle/pods-describe.txt" || true
           "${k[@]}" get events --sort-by=.lastTimestamp > "$bundle/events.txt" || true
           "${k[@]}" get limitrange -o yaml > "$bundle/limitranges.yaml" || true
-          "${k[@]}" get nodes -l kubernetes.io/arch=arm64 \
-            -o json > "$bundle/nodes.json" || true
-          "${k[@]}" describe nodes -l kubernetes.io/arch=arm64 \
-            > "$bundle/nodes-describe.txt" || true
+          "${k[@]}" get nodes -o json > "$bundle/nodes.json" || true
+          "${k[@]}" describe nodes > "$bundle/nodes-describe.txt" || true
           "${k[@]}" logs -l "$selector" -c main --prefix --tail=500 \
             > "$bundle/deployment.log" 2>&1 || true
           for pod in $("${k[@]}" get pods -l "$selector" -o name); do
