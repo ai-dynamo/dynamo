@@ -3688,3 +3688,33 @@ def test_engine_priority_puts_replays_ahead_only_under_priority_policy(
         vllm_config=SimpleNamespace(scheduler_config=SimpleNamespace(policy=policy))
     )
     assert engine_priority(engine_client, routing) == expected
+
+
+@pytest.mark.parametrize(("scope", "expected"), [("pod", "prepare"), ("", "join")])
+def test_headless_shadow_cohort_follows_writer_cohort_scope(
+    monkeypatch, scope, expected
+):
+    import gpu_memory_service.integrations.vllm.writer_lifecycle as lifecycle
+
+    import dynamo.common.gms_failover as gms_failover
+
+    calls = []
+
+    class Stop(Exception):
+        pass
+
+    def stop(_backend):
+        raise Stop
+
+    monkeypatch.setenv("DYN_GMS_WRITER_COHORT_SCOPE", scope)
+    monkeypatch.setattr(lifecycle, "prepare_writer_cohort", lambda: calls.append("prepare"))
+    monkeypatch.setattr(
+        lifecycle, "join_prepared_writer_cohort", lambda: calls.append("join")
+    )
+    monkeypatch.setattr(gms_failover, "arm_frozen_shadow_headroom", stop)
+    config = SimpleNamespace(
+        engine_args=SimpleNamespace(load_format="gms"), gms_shadow_mode=True
+    )
+    with pytest.raises(Stop):
+        asyncio.run(headless.run_dynamo_headless(config))
+    assert calls == [expected]

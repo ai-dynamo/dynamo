@@ -71,6 +71,20 @@ def writer_cohort_required() -> bool:
     )
 
 
+def pod_scoped_writer_cohort() -> bool:
+    """Return whether each pod keeps its own writer cohort (no shared lock dir).
+
+    With ``DYN_GMS_WRITER_COHORT_SCOPE=pod`` every pod (one TP rank's primary
+    and standby containers) creates its own cohort under a pod-local
+    ``FAILOVER_LOCK_PATH``. Each successor rank fences only its own pod's
+    predecessor, and the all-rank ``gms_fence_predecessor_cpu_writers``
+    collective is the cross-node barrier before any rank resumes. Nothing
+    needs a shared filesystem, and every flock is released by the local
+    kernel the moment a writer exits.
+    """
+    return os.environ.get("DYN_GMS_WRITER_COHORT_SCOPE", "").strip().lower() == "pod"
+
+
 def _directory() -> Path:
     lock = Path(os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock"))
     return lock.with_name(lock.name + ".vllm-writers")

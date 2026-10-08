@@ -68,9 +68,16 @@ async def run_dynamo_headless(config: Config) -> None:
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.writer_lifecycle import (
                 join_prepared_writer_cohort,
+                pod_scoped_writer_cohort,
+                prepare_writer_cohort,
             )
 
-            join_prepared_writer_cohort()
+            if pod_scoped_writer_cohort():
+                # This pod's own cohort: its successor fences it locally and
+                # the all-rank CPU-writer collective joins every rank's fence.
+                prepare_writer_cohort()
+            else:
+                join_prepared_writer_cohort()
             from dynamo.common.gms_failover import arm_frozen_shadow_headroom
 
             arm_frozen_shadow_headroom("vllm")
