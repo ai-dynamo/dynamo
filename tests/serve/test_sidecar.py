@@ -23,15 +23,20 @@ from tests.serve.sidecar_checks import assert_native_cancellation_and_recovery
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_metrics import EngineMetrics, VllmMetricsChecker
 from tests.utils.engine_process import EngineConfig
-from tests.utils.gpu_args import map_cuda_visible_devices
+from tests.utils.gpu_args import build_trtllm_override_args, map_cuda_visible_devices
 from tests.utils.payload_builder import (
     chat_payload_default,
     disaggregated_chat_payload,
     disaggregated_token_count_payload,
     http_cancellation_payloads,
     sidecar_compatibility_payloads,
+    streaming_chat_payload_with_logprobs,
 )
-from tests.utils.payloads import ChatPayload, KvTransferPayload
+from tests.utils.payloads import (
+    ChatPayload,
+    GuidedDecodingChatPayload,
+    KvTransferPayload,
+)
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
     deallocate_ports,
@@ -121,6 +126,67 @@ def _disaggregated_payloads(
     ]
 
 
+def _trtllm_compatibility_payloads():
+    logprobs = streaming_chat_payload_with_logprobs(
+        content="Count from one to ten.",
+        expected_response=[],
+        max_tokens=8,
+        top_logprobs=2,
+        extra_body={
+            "ignore_eos": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "nvext": {"extra_fields": ["prompt_token_ids"]},
+        },
+    )
+    logprobs.expected_finish_reason = "length"
+    logprobs.expected_completion_tokens = 8
+    logprobs.min_token_chunks = 2
+    structured = GuidedDecodingChatPayload(
+        body={
+            "messages": [{"role": "user", "content": "Return a successful status."}],
+            "max_tokens": 64,
+            "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "status",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"ok": {"type": "boolean", "const": True}},
+                        "required": ["ok"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "nvext": {"extra_fields": ["completion_token_ids", "prompt_token_ids"]},
+        },
+        expected_response=[],
+        expected_log=[],
+        expected_json={"ok": True},
+        expected_finish_reason="stop",
+        needs_token_ids=True,
+    )
+    return [chat_payload_default(), logprobs, structured]
+
+
+def _trtllm_handoff_payload():
+    payload = disaggregated_chat_payload()
+    payload.body.update(
+        max_tokens=8,
+        ignore_eos=True,
+        logprobs=True,
+        top_logprobs=0,
+        chat_template_kwargs={"enable_thinking": False},
+        nvext={
+            "extra_fields": ["worker_id", "completion_token_ids", "prompt_token_ids"]
+        },
+    )
+    payload.expected_finish_reason = "length"
+    payload.expected_completion_tokens = 8
+    return payload
+
+
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
 # has not been profiled for the sidecar launch path. Add one once measured, to
 # admit these into the parallel stage alongside the equivalent dynamo.{backend}
@@ -168,6 +234,7 @@ sidecar_configs = {
         marks=[
             pytest.mark.trtllm,
             pytest.mark.gpu_1,
+            pytest.mark.requested_trtllm_kv_tokens(4096),
             pytest.mark.timeout(780),
             pytest.mark.post_merge,
             pytest.mark.skipif(
@@ -182,9 +249,7 @@ sidecar_configs = {
             "TLLM_ALLOW_N_GREEDY_DECODING": "1",
             "PYTHONUNBUFFERED": "1",
         },
-        request_payloads=[
-            chat_payload_default(),
-        ],
+        request_payloads=_trtllm_compatibility_payloads(),
     ),
     "trtllm_disaggregated": EngineConfig(
         name="trtllm_disaggregated",
@@ -229,7 +294,7 @@ sidecar_configs = {
             "PRTE_ALLOW_RUN_AS_ROOT": "1",
             "PRTE_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
         },
-        request_payloads=[disaggregated_chat_payload()],
+        request_payloads=[_trtllm_handoff_payload()],
     ),
     "vllm_disaggregated": EngineConfig(
         name="vllm_disaggregated",
@@ -270,7 +335,9 @@ sidecar_configs = {
 
 
 @pytest.fixture(params=params_with_model_mark(sidecar_configs))
-def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_backend):
+def sidecar_config_test(
+    request, dynamo_dynamic_ports, monkeypatch, discovery_backend, tmp_path
+):
     config = sidecar_configs[request.param]
     backend, layout = config.name.split("_", 1)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
@@ -319,6 +386,8 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
                 engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"] = str(
                     engine_ports[4]
                 )
+            elif backend == "trtllm":
+                engine_env["DYN_DISCOVERY_BACKEND"] = discovery_backend
 
             if backend == "vllm":
                 prefill_url = f"http://127.0.0.1:{engine_env[f'{backend.upper()}_PREFILL_HTTP_PORT']}/metrics"
@@ -331,6 +400,30 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
                     decode_metrics=decode_metrics,
                     transfer_metrics=transfer_metrics,
                 )
+        elif backend == "trtllm":
+            # The explicit config takes precedence over the launcher's file.
+            memory_env = dict(os.environ)
+            memory_env.setdefault(
+                "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS",
+                str(
+                    request.node.get_closest_marker("requested_trtllm_kv_tokens").args[
+                        0
+                    ]
+                ),
+            )
+            memory_args = build_trtllm_override_args(memory_env)
+            engine_config = tmp_path / "engine.json"
+            engine_config.write_text(
+                json.dumps(
+                    {
+                        "guided_decoding_backend": "xgrammar",
+                        **json.loads(memory_args[1]),
+                    }
+                )
+            )
+            config = dataclasses.replace(
+                config, script_args=["--extra_llm_api_options", str(engine_config)]
+            )
         elif backend == "vllm":
             namespace = f"sidecar-agg-{generate_random_suffix()}"
             monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
@@ -352,12 +445,15 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
                 max_tokens=CANCELLATION_MAX_TOKENS,
                 discovery_backend=discovery_backend,
             )
-        yield dataclasses.replace(
-            config,
-            frontend_port=dynamo_dynamic_ports.frontend_port,
-            env={**config.env, **engine_env},
-            request_payloads=payloads,
-        ), post_validation
+        yield (
+            dataclasses.replace(
+                config,
+                frontend_port=dynamo_dynamic_ports.frontend_port,
+                env={**config.env, **engine_env},
+                request_payloads=payloads,
+            ),
+            post_validation,
+        )
 
 
 @pytest.mark.core
