@@ -65,6 +65,7 @@ pub struct Runtime {
     secondary: RuntimeType,
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
+    shutdown_started: CancellationToken,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
     /// Bound the in-progress shutdown is draining endpoints with. Set once,
     /// before Phase 1, so the endpoint drain and the Phase 2 wait for it use
@@ -96,6 +97,7 @@ impl Runtime {
 
         // create endpoint shutdown token as a child of the main token
         let endpoint_shutdown_token = cancellation_token.child_token();
+        let shutdown_started = endpoint_shutdown_token.child_token();
 
         // secondary runtime for background ectd/nats tasks
         let secondary = match secondary {
@@ -119,6 +121,7 @@ impl Runtime {
             secondary,
             cancellation_token,
             endpoint_shutdown_token,
+            shutdown_started,
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
             active_drain_timeout: Arc::new(std::sync::OnceLock::new()),
             teardown_tasks: Arc::new(std::sync::Mutex::new(Some(Vec::new()))),
@@ -382,6 +385,24 @@ impl Runtime {
         self.compute_pool.as_ref()
     }
 
+    /// Withdraw readiness before application draining without stopping the
+    /// endpoints or transports still needed to complete that drain.
+    pub fn mark_shutting_down(&self) {
+        if !self.shutdown_started.is_cancelled() {
+            tracing::info!("Runtime readiness withdrawn for shutdown");
+            self.shutdown_started.cancel();
+        }
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown_started.is_cancelled()
+    }
+
+    /// Observe shutdown from its start, rather than waiting for transport teardown.
+    pub fn shutdown_started_token(&self) -> CancellationToken {
+        self.shutdown_started.child_token()
+    }
+
     /// Shuts down the [`Runtime`] instance.
     ///
     /// Fire-and-forget: the three-phase sequence is spawned and this returns
@@ -431,6 +452,7 @@ impl Runtime {
         &self,
         drain_timeout: Option<Duration>,
     ) -> tokio::sync::watch::Receiver<ShutdownCompletion> {
+        self.mark_shutting_down();
         self.shutdown_completion
             .get_or_init(|| {
                 let (complete, receiver) = tokio::sync::watch::channel(None);

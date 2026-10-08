@@ -8,7 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use tokio::sync::futures::OwnedNotified;
-use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
+use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -31,176 +31,232 @@ use tokio::time::Duration;
 // Decentralized router: LocalKvIndexer for workers
 // -------------------------------------------------
 
-#[derive(Clone)]
+/// Full tree dump taken when `base_event_id` was the newest buffered event.
+///
+/// A cache hit returns this dump followed by the buffered events after `base_event_id`.
+/// The dump itself is never modified, so a hit clones only the `Arc` under the state lock.
 struct CachedRecoverySnapshot {
     events: Arc<Vec<RouterEvent>>,
-    base_last_event_id: u64,
-    last_event_id: u64,
+    base_event_id: u64,
 }
 
-impl CachedRecoverySnapshot {
-    fn into_response(self) -> WorkerKvQueryResponse {
-        WorkerKvQueryResponse::TreeDump {
-            events: self.events.as_ref().clone(),
-            last_event_id: self.last_event_id,
-            reset_scope: ResetScope::All,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct InFlightRecoveryBuild {
-    generation: u64,
-    notify: Arc<Notify>,
-}
-
-#[derive(Default)]
-struct RecoveryCacheState {
+/// Recent-event buffer and the recovery snapshot cache built on top of it.
+///
+/// They share one lock so that recording an invalidating event, and checking that the
+/// buffered tail still extends the cached snapshot, are each atomic.
+struct RecoveryState {
+    /// Circular buffer of recent events.
+    ///
+    /// NOTE: One `LocalKvIndexer` belongs to one rank publisher, so its sequence and any latest
+    /// `Cleared` event are rank-local. Do not merge independent rank streams into this buffer.
+    buffer: VecDeque<RouterEvent>,
+    /// Maximum number of events to keep in buffer
+    max_buffer_size: usize, // Router sets this to WORKER_KV_INDEXER_BUFFER_SIZE
+    /// Bumped by `Cleared` events and event-id gaps. A dump started under an older
+    /// generation is still returned to its own requester but is never cached.
     generation: u64,
     cached: Option<CachedRecoverySnapshot>,
-    building: Option<InFlightRecoveryBuild>,
+    /// Single-flight dump build. Requesters that find it wait, then re-check the cache
+    /// instead of taking the builder's response: they may have observed events newer than
+    /// the build's base, and their response must cover those.
+    building: Option<Arc<Notify>>,
 }
 
-struct RecoverySnapshotCache {
-    state: AsyncMutex<RecoveryCacheState>,
+impl RecoveryState {
+    fn new(max_buffer_size: usize) -> Self {
+        Self {
+            buffer: VecDeque::with_capacity(max_buffer_size),
+            max_buffer_size,
+            generation: 0,
+            cached: None,
+            building: None,
+        }
+    }
+
+    fn last_event_id(&self) -> Option<u64> {
+        self.buffer.back().map(|event| event.event.event_id)
+    }
+
+    /// Record an applied event and return any snapshot it made unusable, so the caller
+    /// can free it outside the lock.
+    fn record(&mut self, event: RouterEvent) -> Option<CachedRecoverySnapshot> {
+        let mut invalidates = matches!(event.event.data, KvCacheEventData::Cleared);
+
+        // Check that event id is consecutive to last one
+        if let Some(last_event_id) = self.last_event_id()
+            && event.event.event_id != last_event_id + 1
+        {
+            invalidates = true;
+            tracing::error!(
+                worker_id = event.worker_id,
+                expected = last_event_id + 1,
+                got = event.event.event_id,
+                "Non-consecutive KV event id; buffer may have gaps"
+            );
+        }
+        tracing::debug!(
+            "Recorded event {:?} in buffer, now size is {}",
+            event,
+            self.buffer.len()
+        );
+
+        self.buffer.push_back(event);
+        while self.buffer.len() > self.max_buffer_size {
+            self.buffer.pop_front();
+        }
+
+        if invalidates {
+            self.generation = self.generation.wrapping_add(1);
+            return self.cached.take();
+        }
+        // An expired snapshot can never be served again; free it now rather than on the
+        // next recovery query, which may never come.
+        if self
+            .cached
+            .as_ref()
+            .is_some_and(|cached| self.snapshot_expired(cached.base_event_id))
+        {
+            return self.cached.take();
+        }
+        None
+    }
+
+    /// Whether more events were appended after `base_event_id` than a cached snapshot may
+    /// carry as a tail. The budget is half the buffer, so an unexpired tail is always buffered.
+    fn snapshot_expired(&self, base_event_id: u64) -> bool {
+        let appended = self
+            .last_event_id()
+            .unwrap_or(0)
+            .saturating_sub(base_event_id);
+        appended > (self.max_buffer_size / 2) as u64
+    }
+
+    /// Buffered events after the snapshot's base, or `None` if they cannot extend it.
+    fn snapshot_tail(&self, cached: &CachedRecoverySnapshot) -> Option<Vec<RouterEvent>> {
+        if self.snapshot_expired(cached.base_event_id) {
+            return None;
+        }
+        let tail_len = self
+            .last_event_id()
+            .unwrap_or(0)
+            .checked_sub(cached.base_event_id)?;
+        // Every event after the base was recorded while this snapshot was current, and any
+        // gap would have invalidated it, so the tail is exactly the newest `tail_len` events.
+        let tail_len = usize::try_from(tail_len)
+            .ok()
+            .filter(|&tail_len| tail_len <= self.buffer.len())?;
+        let tail = self.buffer.range(self.buffer.len() - tail_len..);
+        debug_assert!(
+            tail.clone()
+                .next()
+                .is_none_or(|event| event.event.event_id == cached.base_event_id + 1)
+        );
+        tail.clone()
+            .all(|event| {
+                matches!(
+                    event.event.data,
+                    KvCacheEventData::Stored(_) | KvCacheEventData::Removed(_)
+                )
+            })
+            .then(|| tail.cloned().collect())
+    }
 }
 
 enum DumpPlan {
     Immediate(WorkerKvQueryResponse),
-    RequiresDump { last_event_id: u64 },
+    RequiresDump,
 }
 
-enum CacheReuseDecision {
-    ReturnExact(CachedRecoverySnapshot),
-    ReturnExtended(WorkerKvQueryResponse),
-    WaitForBuilder(OwnedNotified),
-    BuildFresh {
-        build: InFlightRecoveryBuild,
-        last_event_id: u64,
-    },
-}
-
-enum TailAppendSafety {
-    ExactHit,
-    Safe {
-        last_event_id: u64,
+enum DumpDecision {
+    Cached {
+        snapshot: Arc<Vec<RouterEvent>>,
         tail: Vec<RouterEvent>,
+        last_event_id: u64,
     },
-    Invalidate,
+    Wait(OwnedNotified),
+    Build(DumpBuild),
 }
 
-enum BuildTaskResult {
-    Response(WorkerKvQueryResponse),
-    StaleGeneration,
+/// Ownership of the single in-flight dump build.
+///
+/// Dropping it releases the build slot and wakes waiters, including when the build task
+/// panics or is cancelled, so waiters never hang on an abandoned build.
+struct DumpBuild {
+    state: Arc<parking_lot::Mutex<RecoveryState>>,
+    notify: Arc<Notify>,
+    generation: u64,
+    base_event_id: u64,
 }
 
-struct FreshDumpOutput {
-    response: WorkerKvQueryResponse,
-    snapshot: Option<CachedRecoverySnapshot>,
-}
+impl DumpBuild {
+    /// Return the dump to the requester that started the build, caching it unless the
+    /// build raced an invalidation or has already expired.
+    fn finish(self, dump: Result<Vec<RouterEvent>, KvRouterError>) -> WorkerKvQueryResponse {
+        let last_event_id = self.base_event_id;
+        let events = match dump {
+            Ok(events) => events,
+            Err(error) => {
+                tracing::warn!("Failed to build recovery dump: {error}");
+                return WorkerKvQueryResponse::TreeDumpFailed {
+                    last_event_id,
+                    message: error.to_string(),
+                };
+            }
+        };
+        let represented_blocks = events
+            .iter()
+            .map(|event| match &event.event.data {
+                KvCacheEventData::Stored(store) => store.blocks.len(),
+                _ => 0,
+            })
+            .sum::<usize>();
+        tracing::info!(
+            event_count = events.len(),
+            represented_block_count = represented_blocks,
+            last_event_id,
+            "Built compressed radix recovery dump"
+        );
 
-impl RecoverySnapshotCache {
-    fn new() -> Self {
-        Self {
-            state: AsyncMutex::new(RecoveryCacheState::default()),
+        let events = Arc::new(events);
+        self.release(Some(&events));
+        let events = Arc::try_unwrap(events).unwrap_or_else(|events| events.as_ref().clone());
+        WorkerKvQueryResponse::TreeDump {
+            events,
+            last_event_id,
+            reset_scope: ResetScope::All,
         }
     }
 
-    async fn decide_reuse_or_build<F>(
-        &self,
-        fallback_last_event_id: u64,
-        current_last_event_id: Option<u64>,
-        assess_tail_append_safety: F,
-    ) -> CacheReuseDecision
-    where
-        F: FnOnce(&CachedRecoverySnapshot) -> TailAppendSafety,
-    {
-        let mut cache_state = self.state.lock().await;
-
-        if let Some(cached) = cache_state.cached.clone() {
-            match assess_tail_append_safety(&cached) {
-                TailAppendSafety::ExactHit => return CacheReuseDecision::ReturnExact(cached),
-                TailAppendSafety::Safe {
-                    last_event_id,
-                    tail,
-                } => {
-                    let mut events = cached.events.as_ref().clone();
-                    events.extend(tail);
-                    let shared_events = Arc::new(events);
-                    cache_state.cached = Some(CachedRecoverySnapshot {
-                        events: shared_events.clone(),
-                        base_last_event_id: cached.base_last_event_id,
-                        last_event_id,
-                    });
-                    return CacheReuseDecision::ReturnExtended(WorkerKvQueryResponse::TreeDump {
-                        events: shared_events.as_ref().clone(),
-                        last_event_id,
-                        reset_scope: ResetScope::All,
-                    });
-                }
-                TailAppendSafety::Invalidate => {
-                    cache_state.cached = None;
-                }
+    /// Clear the build slot if this build still holds it, cache `events` when still valid,
+    /// and wake waiters. Idempotent.
+    fn release(&self, events: Option<&Arc<Vec<RouterEvent>>>) {
+        {
+            let mut state = self.state.lock();
+            if !state
+                .building
+                .as_ref()
+                .is_some_and(|building| Arc::ptr_eq(building, &self.notify))
+            {
+                return;
+            }
+            state.building = None;
+            if let Some(events) = events
+                && state.generation == self.generation
+                && !state.snapshot_expired(self.base_event_id)
+            {
+                state.cached = Some(CachedRecoverySnapshot {
+                    events: events.clone(),
+                    base_event_id: self.base_event_id,
+                });
             }
         }
-
-        if let Some(build) = cache_state.building.clone() {
-            return CacheReuseDecision::WaitForBuilder(build.notify.notified_owned());
-        }
-
-        let build = InFlightRecoveryBuild {
-            generation: cache_state.generation,
-            notify: Arc::new(Notify::new()),
-        };
-        let last_event_id = current_last_event_id.unwrap_or(fallback_last_event_id);
-        cache_state.building = Some(build.clone());
-        CacheReuseDecision::BuildFresh {
-            build,
-            last_event_id,
-        }
+        self.notify.notify_waiters();
     }
+}
 
-    async fn finish_build(
-        &self,
-        build: &InFlightRecoveryBuild,
-        build_output: FreshDumpOutput,
-    ) -> BuildTaskResult {
-        let mut cache_state = self.state.lock().await;
-        let is_current_build = cache_state
-            .building
-            .as_ref()
-            .is_some_and(|inflight| inflight.generation == build.generation);
-        let generation_matches = cache_state.generation == build.generation;
-
-        if is_current_build {
-            cache_state.building = None;
-        }
-
-        if !is_current_build || !generation_matches {
-            return BuildTaskResult::StaleGeneration;
-        }
-
-        if let Some(snapshot) = build_output.snapshot {
-            cache_state.cached = Some(snapshot);
-        }
-        BuildTaskResult::Response(build_output.response)
-    }
-
-    async fn clear_build_if_current(&self, generation: u64) {
-        let mut cache_state = self.state.lock().await;
-        if cache_state
-            .building
-            .as_ref()
-            .is_some_and(|inflight| inflight.generation == generation)
-        {
-            cache_state.building = None;
-        }
-    }
-
-    async fn invalidate(&self) {
-        let mut cache_state = self.state.lock().await;
-        cache_state.generation = cache_state.generation.saturating_add(1);
-        cache_state.cached = None;
+impl Drop for DumpBuild {
+    fn drop(&mut self) {
+        self.release(None);
     }
 }
 
@@ -212,20 +268,12 @@ pub struct LocalKvIndexer {
     indexer: KvIndexer,
     /// Lazily-created exact lower-tier indexes partitioned by storage tier.
     lower_tier_indexers: LowerTierRegistry,
-    /// Circular buffer of recent events.
-    ///
-    /// NOTE: One `LocalKvIndexer` belongs to one rank publisher, so its sequence and any latest
-    /// `Cleared` event are rank-local. Do not merge independent rank streams into this buffer.
-    pub(super) event_buffer: Arc<Mutex<VecDeque<RouterEvent>>>,
-    /// Coordinates single-flight tree dumps and the cached recovery snapshot.
-    /// This stays separate from `event_buffer` so dump wait/build state can be
-    /// managed on the async path without holding the buffer lock across `.await`.
-    recovery_cache: Arc<RecoverySnapshotCache>,
+    /// Recent-event buffer, cached recovery snapshot, and single-flight dump state.
+    /// Never held across `.await`.
+    recovery: Arc<parking_lot::Mutex<RecoveryState>>,
     /// Shared metrics handle, also wired into lazily created lower-tier
     /// indexers so HostPinned/Disk/External traffic is counted too.
     metrics: Arc<KvIndexerMetrics>,
-    /// Maximum number of events to keep in buffer
-    max_buffer_size: usize, // Router sets this to WORKER_KV_INDEXER_BUFFER_SIZE
     #[cfg(test)]
     dump_build_count: AtomicUsize,
     #[cfg(test)]
@@ -270,9 +318,7 @@ impl LocalKvIndexer {
             indexer,
             metrics,
             lower_tier_indexers: Arc::new(Mutex::new(HashMap::new())),
-            event_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(max_buffer_size))),
-            recovery_cache: Arc::new(RecoverySnapshotCache::new()),
-            max_buffer_size,
+            recovery: Arc::new(parking_lot::Mutex::new(RecoveryState::new(max_buffer_size))),
             #[cfg(test)]
             dump_build_count: AtomicUsize::new(0),
             #[cfg(test)]
@@ -282,8 +328,7 @@ impl LocalKvIndexer {
 
     #[cfg(test)]
     pub fn get_all_events_in_buffer(&self) -> Vec<RouterEvent> {
-        let buffer = self.event_buffer.lock().unwrap();
-        buffer.iter().cloned().collect()
+        self.recovery.lock().buffer.iter().cloned().collect()
     }
 
     /// Query events by ID range, returning a recovery-equivalent suffix for `[start_id, end_id]`.
@@ -311,9 +356,7 @@ impl LocalKvIndexer {
     ) -> WorkerKvQueryResponse {
         match self.classify_query(start_id, end_id) {
             DumpPlan::Immediate(response) => response,
-            DumpPlan::RequiresDump { last_event_id } => {
-                self.get_cached_or_fresh_dump(last_event_id).await
-            }
+            DumpPlan::RequiresDump => self.get_cached_or_fresh_dump().await,
         }
     }
 
@@ -326,57 +369,25 @@ impl LocalKvIndexer {
     /// Note: This is a heuristic - the buffer state may change between this check
     /// and the actual query, so a tree dump may still occur even if this returns true.
     pub fn likely_served_from_buffer(&self, start_id: Option<u64>) -> bool {
-        if start_id.is_none() {
+        let Some(start_id) = start_id else {
             return false;
-        }
-
-        let buffer = self.event_buffer.lock().unwrap();
-        if buffer.is_empty() {
-            return false;
-        }
-
-        let first_buffered = buffer.front().unwrap().event.event_id;
-        start_id.unwrap() >= first_buffered
+        };
+        self.recovery
+            .lock()
+            .buffer
+            .front()
+            .is_some_and(|first| start_id >= first.event.event_id)
     }
 
     /// Newest locally applied outbound event cursor.
     pub fn current_event_id(&self) -> u64 {
-        self.current_buffer_last_event_id().unwrap_or(0)
+        self.recovery.lock().last_event_id().unwrap_or(0)
     }
 
     /// Record an event in the buffer
-    fn record_event(&self, event: RouterEvent) -> bool {
-        let mut buffer = self.event_buffer.lock().unwrap();
-        let mut detected_gap = false;
-
-        // Check that event id is consecutive to last one
-        if let Some(last_event) = buffer.back()
-            && event.event.event_id != last_event.event.event_id + 1
-        {
-            detected_gap = true;
-            let expected = last_event.event.event_id + 1;
-            tracing::error!(
-                worker_id = event.worker_id,
-                expected,
-                got = event.event.event_id,
-                "Non-consecutive KV event id; buffer may have gaps"
-            );
-        }
-        tracing::debug!(
-            "Recorded event {:?} in buffer, now size is {}",
-            event,
-            buffer.len()
-        );
-
-        // Add to back
-        buffer.push_back(event);
-
-        // Remove from front if over capacity (circular buffer behavior)
-        while buffer.len() > self.max_buffer_size {
-            buffer.pop_front();
-        }
-
-        detected_gap
+    fn record_event(&self, event: RouterEvent) {
+        let unusable_snapshot = self.recovery.lock().record(event);
+        drop(unusable_snapshot);
     }
 
     /// Apply event with buffering.
@@ -385,30 +396,19 @@ impl LocalKvIndexer {
     /// wait for the physical mutation to complete. Cleared is intentionally a stronger ordering
     /// barrier and waits for every affected physical indexer before it is recorded.
     pub async fn apply_event_with_buffer(&self, event: RouterEvent) -> Result<(), KvRouterError> {
-        let result = self.apply_event_by_tier(&event).await;
-        self.record_applied_event(event, result).await
-    }
-
-    async fn record_applied_event(
-        &self,
-        event: RouterEvent,
-        result: Result<(), KvRouterError>,
-    ) -> Result<(), KvRouterError> {
-        if result.is_ok() {
-            let should_invalidate = matches!(event.event.data, KvCacheEventData::Cleared);
-            let detected_gap = self.record_event(event);
-            if should_invalidate || detected_gap {
-                self.recovery_cache.invalidate().await;
-            }
-        }
-
-        result
+        self.apply_event_by_tier(&event).await?;
+        self.record_event(event);
+        Ok(())
     }
 
     #[cfg(test)]
     pub fn buffer_len(&self) -> usize {
-        let buffer = self.event_buffer.lock().unwrap();
-        buffer.len()
+        self.recovery.lock().buffer.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_cached_recovery_snapshot(&self) -> bool {
+        self.recovery.lock().cached.is_some()
     }
 
     fn classify_query(&self, start_id: Option<u64>, end_id: Option<u64>) -> DumpPlan {
@@ -427,7 +427,8 @@ impl LocalKvIndexer {
         // guarantee buffered replay: expired/unavailable history falls back to a snapshot.
         // See test_local_indexer_get_events_in_id_range_all_cases and
         // test_local_indexer_buffer_response_starts_at_last_all_domain_clear.
-        let buffer = self.event_buffer.lock().unwrap();
+        let state = self.recovery.lock();
+        let buffer = &state.buffer;
         let (first_id, last_id) = if buffer.is_empty() {
             (None, None)
         } else {
@@ -439,9 +440,7 @@ impl LocalKvIndexer {
 
         if start_id.is_none() {
             tracing::debug!("No start_id specified, dumping entire tree");
-            return DumpPlan::RequiresDump {
-                last_event_id: last_id.unwrap_or(0),
-            };
+            return DumpPlan::RequiresDump;
         }
 
         let start_id = start_id.expect("checked above");
@@ -449,7 +448,7 @@ impl LocalKvIndexer {
 
         let Some(first_buffered) = first_id else {
             tracing::debug!("Buffer empty, dumping entire tree");
-            return DumpPlan::RequiresDump { last_event_id: 0 };
+            return DumpPlan::RequiresDump;
         };
         let last_buffered = last_id.expect("buffer non-empty");
 
@@ -472,16 +471,14 @@ impl LocalKvIndexer {
                 first_buffered,
                 "Requested start_id is older than buffer, dumping entire tree"
             );
-            return DumpPlan::RequiresDump {
-                last_event_id: last_buffered,
-            };
+            return DumpPlan::RequiresDump;
         }
 
         let start_idx = match buffer.binary_search_by_key(&start_id, |event| event.event.event_id) {
             Ok(idx) => idx,
             Err(insertion_point) => insertion_point,
         };
-        let response_start_idx = Self::buffer_response_start_idx(&buffer, start_idx);
+        let response_start_idx = Self::buffer_response_start_idx(buffer, start_idx);
         let events = buffer.iter().skip(response_start_idx).cloned().collect();
 
         DumpPlan::Immediate(WorkerKvQueryResponse::Events {
@@ -503,189 +500,85 @@ impl LocalKvIndexer {
             .map_or(start_idx, |idx| start_idx + idx)
     }
 
-    async fn get_cached_or_fresh_dump(&self, fallback_last_event_id: u64) -> WorkerKvQueryResponse {
+    async fn get_cached_or_fresh_dump(&self) -> WorkerKvQueryResponse {
         loop {
-            let decision = self
-                .recovery_cache
-                .decide_reuse_or_build(
-                    fallback_last_event_id,
-                    self.current_buffer_last_event_id(),
-                    |cached| self.assess_tail_append_safety(cached),
-                )
-                .await;
-
-            match decision {
-                CacheReuseDecision::ReturnExact(snapshot) => return snapshot.into_response(),
-                CacheReuseDecision::ReturnExtended(response) => return response,
-                CacheReuseDecision::WaitForBuilder(waiter) => waiter.await,
-                CacheReuseDecision::BuildFresh {
-                    build,
+            match self.decide_dump() {
+                DumpDecision::Cached {
+                    snapshot,
+                    tail,
                     last_event_id,
                 } => {
-                    let notify = build.notify.clone();
-                    let generation = build.generation;
-                    let build_handle = self.spawn_dump_build(build, last_event_id);
-                    match build_handle.await {
-                        Ok(BuildTaskResult::Response(response)) => return response,
-                        Ok(BuildTaskResult::StaleGeneration) => continue,
-                        Err(error) => {
-                            tracing::warn!("Recovery cache build task failed: {error}");
-                            self.recovery_cache.clear_build_if_current(generation).await;
-                            notify.notify_waiters();
-                            return WorkerKvQueryResponse::TreeDumpFailed {
-                                last_event_id,
-                                message: format!("recovery dump task failed: {error}"),
-                            };
-                        }
-                    }
+                    let mut events = Vec::with_capacity(snapshot.len() + tail.len());
+                    events.extend_from_slice(&snapshot);
+                    events.extend(tail);
+                    return WorkerKvQueryResponse::TreeDump {
+                        events,
+                        last_event_id,
+                        reset_scope: ResetScope::All,
+                    };
                 }
+                DumpDecision::Wait(waiter) => waiter.await,
+                DumpDecision::Build(build) => return self.run_dump_build(build).await,
             }
         }
     }
 
-    fn assess_tail_append_safety(&self, cached: &CachedRecoverySnapshot) -> TailAppendSafety {
-        let append_budget = self.recovery_cache_append_budget();
-        let buffer = self.event_buffer.lock().unwrap();
-        let Some(first_buffered) = buffer.front().map(|event| event.event.event_id) else {
-            return if cached.last_event_id == 0 {
-                TailAppendSafety::ExactHit
-            } else {
-                TailAppendSafety::Invalidate
-            };
-        };
-        let last_buffered = buffer.back().unwrap().event.event_id;
+    fn decide_dump(&self) -> DumpDecision {
+        // Declared before the guard so an unusable snapshot is freed after unlocking.
+        let _unusable_snapshot;
+        let mut state = self.recovery.lock();
 
-        if last_buffered <= cached.last_event_id {
-            return TailAppendSafety::ExactHit;
-        }
-
-        let appended_since_base = last_buffered.saturating_sub(cached.base_last_event_id);
-        if appended_since_base > append_budget {
-            return TailAppendSafety::Invalidate;
-        }
-
-        let next_event_id = cached.last_event_id.saturating_add(1);
-        if next_event_id < first_buffered {
-            return TailAppendSafety::Invalidate;
-        }
-
-        let start_idx =
-            match buffer.binary_search_by_key(&next_event_id, |event| event.event.event_id) {
-                Ok(idx) => idx,
-                Err(insertion_point) => insertion_point,
-            };
-
-        let mut tail = Vec::with_capacity(buffer.len().saturating_sub(start_idx));
-        for event in buffer.iter().skip(start_idx) {
-            match event.event.data {
-                KvCacheEventData::Stored(_) | KvCacheEventData::Removed(_) => {
-                    tail.push(event.clone());
-                }
-                _ => {
-                    return TailAppendSafety::Invalidate;
-                }
+        if let Some(cached) = &state.cached {
+            if let Some(tail) = state.snapshot_tail(cached) {
+                return DumpDecision::Cached {
+                    snapshot: cached.events.clone(),
+                    last_event_id: cached.base_event_id + tail.len() as u64,
+                    tail,
+                };
             }
+            _unusable_snapshot = state.cached.take();
         }
 
-        TailAppendSafety::Safe {
-            last_event_id: last_buffered,
-            tail,
+        if let Some(building) = &state.building {
+            return DumpDecision::Wait(building.clone().notified_owned());
         }
+
+        let notify = Arc::new(Notify::new());
+        state.building = Some(notify.clone());
+        DumpDecision::Build(DumpBuild {
+            state: self.recovery.clone(),
+            notify,
+            generation: state.generation,
+            base_event_id: state.last_event_id().unwrap_or(0),
+        })
     }
 
-    fn recovery_cache_append_budget(&self) -> u64 {
-        (self.max_buffer_size / 2) as u64
-    }
-
-    fn current_buffer_last_event_id(&self) -> Option<u64> {
-        self.event_buffer
-            .lock()
-            .unwrap()
-            .back()
-            .map(|event| event.event.event_id)
-    }
-
-    fn spawn_dump_build(
-        &self,
-        build: InFlightRecoveryBuild,
-        last_event_id: u64,
-    ) -> tokio::task::JoinHandle<BuildTaskResult> {
+    async fn run_dump_build(&self, build: DumpBuild) -> WorkerKvQueryResponse {
+        let last_event_id = build.base_event_id;
         let indexer = self.indexer.clone();
         let lower_tier_indexers = self.lower_tier_indexers.clone();
-        let event_buffer = self.event_buffer.clone();
-        let recovery_cache = self.recovery_cache.clone();
         #[cfg(test)]
         let build_delay = *self.dump_build_delay.lock().unwrap();
         #[cfg(test)]
         self.dump_build_count.fetch_add(1, Ordering::Relaxed);
 
-        tokio::spawn(async move {
+        // Spawned so that a cancelled requester does not abort a build others are waiting on.
+        let build_task = tokio::spawn(async move {
             #[cfg(test)]
             if let Some(delay) = build_delay {
                 tokio::time::sleep(delay).await;
             }
 
-            let build_output =
-                Self::build_fresh_dump(indexer, lower_tier_indexers, event_buffer, last_event_id)
-                    .await;
-            let notify = build.notify.clone();
-            let result = recovery_cache.finish_build(&build, build_output).await;
-
-            notify.notify_waiters();
-            result
+            let dump = Self::dump_all_tiers(&indexer, &lower_tier_indexers).await;
+            build.finish(dump)
+        });
+        build_task.await.unwrap_or_else(|error| {
+            tracing::warn!("Recovery dump build task failed: {error}");
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id,
+                message: format!("recovery dump task failed: {error}"),
+            }
         })
-    }
-
-    async fn build_fresh_dump(
-        indexer: KvIndexer,
-        lower_tier_indexers: LowerTierRegistry,
-        event_buffer: Arc<Mutex<VecDeque<RouterEvent>>>,
-        fallback_last_event_id: u64,
-    ) -> FreshDumpOutput {
-        let last_event_id = event_buffer
-            .lock()
-            .unwrap()
-            .back()
-            .map_or(fallback_last_event_id, |event| event.event.event_id);
-        match Self::dump_all_tiers(&indexer, &lower_tier_indexers).await {
-            Ok(events) => {
-                let represented_blocks = events
-                    .iter()
-                    .map(|event| match &event.event.data {
-                        KvCacheEventData::Stored(store) => store.blocks.len(),
-                        _ => 0,
-                    })
-                    .sum::<usize>();
-                tracing::info!(
-                    event_count = events.len(),
-                    represented_block_count = represented_blocks,
-                    last_event_id,
-                    "Built compressed radix recovery dump"
-                );
-                FreshDumpOutput {
-                    response: WorkerKvQueryResponse::TreeDump {
-                        events: events.clone(),
-                        last_event_id,
-                        reset_scope: ResetScope::All,
-                    },
-                    snapshot: Some(CachedRecoverySnapshot {
-                        events: Arc::new(events),
-                        base_last_event_id: last_event_id,
-                        last_event_id,
-                    }),
-                }
-            }
-            Err(error) => {
-                tracing::warn!("Failed to build recovery dump: {error}");
-                FreshDumpOutput {
-                    response: WorkerKvQueryResponse::TreeDumpFailed {
-                        last_event_id,
-                        message: error.to_string(),
-                    },
-                    snapshot: None,
-                }
-            }
-        }
     }
 
     async fn dump_all_tiers(

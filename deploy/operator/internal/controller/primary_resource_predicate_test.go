@@ -20,14 +20,48 @@ package controller
 import (
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
+func TestDGDPrimaryPredicateObservesMetadataWithoutGenerationChanges(t *testing.T) {
+	t.Log("The primary predicate combines metadata and generation/deletion changes, not status")
+	old := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+	filter := dgdPrimaryPredicate()
+	for _, test := range []struct {
+		name   string
+		mutate func(*v1beta1.DynamoGraphDeployment)
+		want   bool
+	}{
+		{"annotation", func(o *v1beta1.DynamoGraphDeployment) {
+			o.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes"}
+		}, true},
+		{"label", func(o *v1beta1.DynamoGraphDeployment) { o.Labels = map[string]string{"priorityClassName": "batch"} }, true},
+		{"generation", func(o *v1beta1.DynamoGraphDeployment) { o.Generation++ }, true},
+		{"deletion", func(o *v1beta1.DynamoGraphDeployment) {
+			now := metav1.Now()
+			o.DeletionTimestamp = &now
+		}, true},
+		{"status noise", func(o *v1beta1.DynamoGraphDeployment) {
+			o.Status.State = v1beta1.DGDStateSuccessful
+			o.ResourceVersion = "2"
+		}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := old.DeepCopy()
+			test.mutate(changed)
+			assert.Equal(t, test.want, filter.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: changed}))
+		})
+	}
+}
+
 func TestGenerationOrDeletionChangedPredicate(t *testing.T) {
-	pred := generationOrDeletionChangedPredicate()
+	pred := commoncontroller.GenerationOrDeletionChangedPredicate()
 	oldObject := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
 
 	t.Run("preserves non-update event handling", func(t *testing.T) {

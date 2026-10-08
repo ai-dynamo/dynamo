@@ -34,6 +34,7 @@ use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
 const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+static TOKENIZER_CACHE: OnceLock<crate::tokenizers::SharedTokenizerCache> = OnceLock::new();
 
 fn append_runtime_contract_checksum(
     bytes: &mut Vec<u8>,
@@ -47,7 +48,7 @@ fn append_runtime_contract_checksum(
     canonicalize_json_object_keys(&mut value);
     let value = serde_json::to_vec(&value).expect("serializing serde_json::Value cannot fail");
 
-    // These contracts control model-visible media prompt expansion. Workers
+    // This contract controls model-visible media prompt expansion. Workers
     // with different contracts must not share a cohort whose preprocessor is
     // built from one representative card.
     bytes.extend_from_slice(b"\0dynamo/model-card/runtime-contract/v1\0");
@@ -118,6 +119,23 @@ fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
     }
 }
 
+fn shared_tokenizer_cache() -> &'static crate::tokenizers::SharedTokenizerCache {
+    TOKENIZER_CACHE.get_or_init(|| {
+        let cache_bytes =
+            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
+        tracing::info!(cache_bytes, "initializing process-wide tokenizer cache");
+        crate::tokenizers::SharedTokenizerCache::new(cache_bytes)
+    })
+}
+
+fn tokenizer_cache_namespace(checksum: &str, backend: &str) -> Vec<u8> {
+    let mut namespace = Vec::with_capacity(8 + checksum.len() + backend.len());
+    namespace.extend_from_slice(&(checksum.len() as u64).to_le_bytes());
+    namespace.extend_from_slice(checksum.as_bytes());
+    namespace.extend_from_slice(backend.as_bytes());
+    namespace
+}
+
 fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenUsageFn {
     let cached_tokens = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
         .with_label_values(&[model]);
@@ -134,12 +152,18 @@ fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenU
 fn instrumented_tokenizer_cache(
     raw: Arc<dyn crate::tokenizers::traits::Tokenizer>,
     special_tokens: Vec<String>,
-    cache_bytes: usize,
+    shared_cache: &crate::tokenizers::SharedTokenizerCache,
     cache_extend: bool,
     model: &str,
+    namespace: &[u8],
 ) -> Result<Arc<dyn crate::tokenizers::traits::Tokenizer>> {
-    let cached = crate::tokenizers::CachedTokenizer::new(raw, special_tokens, cache_bytes)
-        .context("failed to initialize tokenizer prefix cache")?;
+    let cached = crate::tokenizers::CachedTokenizer::new_with_cache(
+        raw,
+        special_tokens,
+        shared_cache.clone(),
+        namespace,
+    )
+    .context("failed to initialize tokenizer prefix cache")?;
 
     Ok(Arc::new(
         cached
@@ -174,6 +198,15 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Exclusive bound for client token ids: the largest id plus one, added tokens
+/// included. Ids can have gaps, so the token count is not a bound.
+fn hf_token_id_bound(hf: &HfTokenizer) -> Option<usize> {
+    hf.get_vocab(true)
+        .into_values()
+        .max()
+        .map(|id| id as usize + 1)
 }
 
 /// serde `deserialize_with` that maps an explicitly-present value -- *including
@@ -775,12 +808,14 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     Ok((repo.to_string(), filename.to_string()))
 }
 
+// Some(uri) selects a file location; None asks the caller to resolve the NGC
+// artifact. The file is still required, and its MDC checksum is unchanged.
 fn checked_file_uri(
     cf: &CheckedFile,
     source: &str,
     local_model_path: Option<&Path>,
     is_custom: bool,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Option<String>> {
     use std::borrow::Cow;
 
     // Coerce path-only into a synthetic file:// URL up front so the
@@ -800,10 +835,10 @@ fn checked_file_uri(
     };
 
     match url.scheme() {
-        "http" | "https" | "hf" => Ok(url.to_string()),
+        "http" | "https" | "hf" => Ok(Some(url.to_string())),
         "file" => {
-            // worker location → --model-path → hf://. Basename + checksum preserved.
-            // is_custom slots aren't published on HF, so rung 4 errors instead.
+            // Prefer the worker location, then the frontend's --model-path.
+            // Only model-provided files can fall back to the original HF/NGC source.
             let path = url
                 .to_file_path()
                 .map_err(|()| anyhow::anyhow!("invalid file uri: {url}"))?;
@@ -812,12 +847,12 @@ fn checked_file_uri(
                 .and_then(|f| f.to_str())
                 .with_context(|| format!("no filename in file uri: {url}"))?;
             if path.exists() {
-                return Ok(url.to_string());
+                return Ok(Some(url.to_string()));
             }
             if let Some(prefix) = local_model_path {
                 let local = prefix.join(filename);
                 if local.exists() {
-                    return file_uri_for(&local);
+                    return file_uri_for(&local).map(Some);
                 }
             }
             if is_custom {
@@ -830,9 +865,12 @@ fn checked_file_uri(
                     path.display()
                 );
             }
-            Ok(format!("hf://{source}/{filename}"))
+            if source.starts_with("ngc://") {
+                return Ok(None);
+            }
+            Ok(Some(format!("hf://{source}/{filename}")))
         }
-        _ => Ok(url.to_string()),
+        _ => Ok(Some(url.to_string())),
     }
 }
 
@@ -875,7 +913,7 @@ pub struct ModelDeploymentCard {
     // Cache the Slugified display_name so we can share references to it
     slug: Slug,
 
-    /// Original HuggingFace repository path for downloading model files.
+    /// Original Hugging Face repository, NGC URI, or local model path.
     /// When `display_name` is customized (e.g., via `--served-model-name`),
     /// this field preserves the original repository path needed for downloads.
     /// Falls back to `display_name` if not set.
@@ -1013,6 +1051,10 @@ pub struct ModelDeploymentCard {
 
     #[serde(skip, default)]
     checksum: OnceLock<String>,
+
+    /// Set when this card loads its tokenizer. See `hf_token_id_bound`.
+    #[serde(skip, default)]
+    tokenizer_id_bound: OnceLock<Option<usize>>,
 }
 
 /// LoRA adapter information for routing decisions
@@ -1259,6 +1301,13 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
                 }
 
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+                ) {
+                    bytes_to_hash
+                        .extend_from_slice(b"\0vllm_inference_v1_generate\0true");
+                }
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -1291,7 +1340,10 @@ impl ModelDeploymentCard {
     /// - `DYN_TOKENIZER_FALLBACK=0` — fallback control for callers without explicit runtime config
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
-    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
+    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — combined token-ID byte budget for all models
+    ///   in this process (default 64 MiB), read once when the first eligible tokenizer
+    ///   creates the shared cache. Models compete for capacity without reserved shares.
+    ///   Cache metadata and tokenizer objects are excluded; eviction is deferred.
     /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
     ///   (when the cache is enabled) a partial hit also caches the new suffix so each
     ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
@@ -1299,6 +1351,12 @@ impl ModelDeploymentCard {
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         self.tokenizer_with_options(Default::default(), false)
+    }
+
+    /// `None` until this card loads its tokenizer, then `Some` of the
+    /// tokenizer's token id bound. That bound is `None` if unknown (tiktoken).
+    pub(crate) fn tokenizer_id_bound(&self) -> Option<Option<usize>> {
+        self.tokenizer_id_bound.get().copied()
     }
 
     pub(crate) fn embedding_tokenizer_with_options(
@@ -1322,8 +1380,6 @@ impl ModelDeploymentCard {
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
-        let cache_bytes =
-            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
         // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
         let cache_extend = !matches!(
             std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
@@ -1360,6 +1416,8 @@ impl ModelDeploymentCard {
                 if let Some(model_dir) = p.parent() {
                     crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
                 }
+                self.tokenizer_id_bound
+                    .get_or_init(|| hf_token_id_bound(&hf));
 
                 // Disable any truncation baked into `tokenizer.json`: the HF
                 // `tokenizers` crate honors it on `encode()`, silently clipping every
@@ -1403,14 +1461,17 @@ impl ModelDeploymentCard {
                 };
 
                 // Pick the inner backend.
-                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = match tokenizer_backend {
-                    TokenizerBackend::Default => Arc::new(wrap_hf(hf)),
+                let (raw, cache_backend): (
+                    Arc<dyn crate::tokenizers::traits::Tokenizer>,
+                    TokenizerBackend,
+                ) = match tokenizer_backend {
+                    TokenizerBackend::Default => (Arc::new(wrap_hf(hf)), TokenizerBackend::Default),
                     TokenizerBackend::Fastokens => {
                         if let Some(path_str) = p.to_str() {
                             match crate::tokenizers::FastTokenizer::from_file(path_str) {
                                 Ok(fast) => {
                                     tracing::info!("Using fastokens tokenizer backend");
-                                    Arc::new(fast)
+                                    (Arc::new(fast), TokenizerBackend::Fastokens)
                                 }
                                 Err(e) => {
                                     if !is_fallback_enabled {
@@ -1422,7 +1483,7 @@ impl ModelDeploymentCard {
                                         %e,
                                         "Failed to load fastokens, falling back to HuggingFace"
                                     );
-                                    Arc::new(wrap_hf(hf))
+                                    (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
                                 }
                             }
                         } else {
@@ -1436,7 +1497,7 @@ impl ModelDeploymentCard {
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
                             );
-                            Arc::new(wrap_hf(hf))
+                            (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
                         }
                     }
                     TokenizerBackend::Basetenkenizer => {
@@ -1444,7 +1505,7 @@ impl ModelDeploymentCard {
                             match crate::tokenizers::BasetenTokenizer::from_file(path_str) {
                                 Ok(baseten) => {
                                     tracing::info!("Using basetenkenizer tokenizer backend");
-                                    Arc::new(baseten)
+                                    (Arc::new(baseten), TokenizerBackend::Basetenkenizer)
                                 }
                                 Err(e) => {
                                     if !is_fallback_enabled {
@@ -1456,7 +1517,7 @@ impl ModelDeploymentCard {
                                         %e,
                                         "Failed to load basetenkenizer, falling back to HuggingFace"
                                     );
-                                    Arc::new(wrap_hf(hf))
+                                    (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
                                 }
                             }
                         } else {
@@ -1470,14 +1531,17 @@ impl ModelDeploymentCard {
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping basetenkenizer; falling back to HuggingFace"
                             );
-                            Arc::new(wrap_hf(hf))
+                            (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
                         }
                     }
                 };
 
                 if cache_enabled && !options.add_special_tokens {
+                    let shared_cache = shared_tokenizer_cache();
+                    let namespace =
+                        tokenizer_cache_namespace(self.mdcsum(), cache_backend.as_str());
                     tracing::info!(
-                        cache_bytes,
+                        cache_bytes = shared_cache.max_memory_bytes(),
                         cache_extend,
                         specials = specials.len(),
                         "wrapping tokenizer in L1 prefix cache",
@@ -1485,9 +1549,10 @@ impl ModelDeploymentCard {
                     instrumented_tokenizer_cache(
                         raw,
                         specials,
-                        cache_bytes,
+                        shared_cache,
                         cache_extend,
                         self.name(),
+                        &namespace,
                     )?
                 } else {
                     // The prefix cache encodes text in boundary-delimited
@@ -1508,12 +1573,16 @@ impl ModelDeploymentCard {
                     .with_context(|| {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
+                // tiktoken does not expose its ids.
+                self.tokenizer_id_bound.get_or_init(|| None);
 
                 let specials = tokenizer.special_tokens().to_vec();
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
+                    let shared_cache = shared_tokenizer_cache();
+                    let namespace = tokenizer_cache_namespace(self.mdcsum(), "tiktoken");
                     tracing::info!(
-                        cache_bytes,
+                        cache_bytes = shared_cache.max_memory_bytes(),
                         cache_extend,
                         boundaries = specials.len(),
                         "wrapping tiktoken tokenizer in L1 prefix cache",
@@ -1521,9 +1590,10 @@ impl ModelDeploymentCard {
                     instrumented_tokenizer_cache(
                         raw,
                         specials,
-                        cache_bytes,
+                        shared_cache,
                         cache_extend,
                         self.name(),
+                        &namespace,
                     )?
                 } else {
                     raw
@@ -1648,16 +1718,27 @@ impl ModelDeploymentCard {
         let blobs = mdc_blobs_dir()?;
         let local_dir = mdc_local_dir(&self.slug, &mdcsum)?;
 
-        let entries: Vec<(String, CheckedFile)> = self
-            .iter_metadata_files()
-            .into_iter()
-            .map(|(cf, is_custom)| {
-                Ok((
-                    checked_file_uri(cf, &source, local_model_path, is_custom)?,
-                    cf.clone(),
-                ))
-            })
-            .collect::<anyhow::Result<_>>()?;
+        let mut entries = Vec::new();
+        let mut ngc_snapshot = None;
+        for (cf, is_custom) in self.iter_metadata_files() {
+            let uri = match checked_file_uri(cf, &source, local_model_path, is_custom)? {
+                Some(uri) => uri,
+                None => {
+                    let snapshot = match &ngc_snapshot {
+                        Some(snapshot) => snapshot,
+                        None => ngc_snapshot.insert(
+                            crate::hub::from_hf(&source, /* ignore_weights = */ true).await?,
+                        ),
+                    };
+                    // The MDC supplies the filename and expected checksum. Retry
+                    // in the resolved directory; a still-missing file is an error.
+                    checked_file_uri(cf, &source, Some(snapshot), is_custom)?.with_context(
+                        || format!("NGC metadata file missing after fetching {source}: {cf}"),
+                    )?
+                }
+            };
+            entries.push((uri, cf.clone()));
+        }
 
         // Pre-resolve hf:// repos once per unique repo; otherwise the
         // resolve loop would call hub::from_hf N times for one model.
@@ -1919,6 +2000,7 @@ impl ModelDeploymentCard {
             indexer_identity: None,
             extra_files: Vec::new(),
             checksum: OnceLock::new(),
+            tokenizer_id_bound: OnceLock::new(),
         })
     }
 }
@@ -2494,6 +2576,7 @@ mod tests {
             super::DEFAULT_TOKENIZER_CACHE_BYTES
         );
         assert_eq!(super::tokenizer_cache_bytes(Some("1024")), 1024);
+        assert_eq!(super::tokenizer_cache_bytes(Some("0")), 0);
         assert_eq!(
             super::tokenizer_cache_bytes(Some("invalid")),
             super::DEFAULT_TOKENIZER_CACHE_BYTES
@@ -2805,6 +2888,70 @@ mod tests {
         .await
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ngc_identity_survives_cache_relocation() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let source = "ngc://example/team/model:1";
+        let worker_a = hf_cache_fixture(&workspace.path().join("worker-a"))?;
+        let worker_b = hf_cache_fixture(&workspace.path().join("worker-b"))?;
+        let cache_root = workspace.path().join("ngc-cache");
+        let snapshot = cache_root.join("ngc/example/team/models/model/1");
+        std::fs::create_dir_all(&snapshot)?;
+        for entry in std::fs::read_dir(&worker_a)? {
+            let entry = entry?;
+            std::fs::copy(entry.path(), snapshot.join(entry.file_name()))?;
+        }
+
+        let overlay = workspace.path().join("overlay");
+        std::fs::create_dir(&overlay)?;
+        std::fs::copy(worker_a.join("config.json"), overlay.join("config.json"))?;
+        // The explicit overlay must win even when another file needs the NGC cache.
+        std::fs::write(snapshot.join("config.json"), b"{}")?;
+
+        temp_env::async_with_vars(
+            [
+                ("HOME", Some(workspace.path())),
+                ("MODEL_EXPRESS_CACHE_DIRECTORY", Some(cache_root.as_path())),
+            ],
+            async {
+                let mut cards = Vec::new();
+                for path in [&worker_a, &worker_b] {
+                    let model = crate::local_model::LocalModelBuilder::default()
+                        .model_path(path.clone())
+                        .source_path(source.into())
+                        .model_name(Some("public-model".to_string()))
+                        .build()
+                        .await?;
+                    cards.push(model.into_card());
+                }
+                assert_eq!(cards[0].source_path(), source);
+                assert_eq!(cards[0].mdcsum(), cards[1].mdcsum());
+                let expected_sum = cards[1].mdcsum().to_string();
+                std::fs::remove_dir_all(workspace.path().join("worker-a"))?;
+
+                cards[0].download_config(Some(&overlay)).await?;
+                // Deserialization clears the cached mdcsum so the next check recomputes it.
+                let resolved: ModelDeploymentCard = serde_json::from_str(&cards[0].to_json()?)?;
+                assert_eq!(resolved.source_path(), source);
+                assert_eq!(resolved.mdcsum(), expected_sum);
+                assert_eq!(
+                    std::fs::read(resolved.local_dir().join("config.json"))?,
+                    std::fs::read(overlay.join("config.json"))?
+                );
+                assert!(resolved.local_dir().join("tokenizer.json").exists());
+                assert!(
+                    resolved
+                        .local_dir()
+                        .join("special_tokens_map.json")
+                        .exists()
+                );
+                Ok::<_, anyhow::Error>(())
+            },
+        )
+        .await
+    }
+
     /// Build a `CheckedFile` whose wire `path` field is `repr` — parses
     /// as a URL when `repr` has a scheme, otherwise as a `PathBuf`.
     fn cf_for(repr: &str) -> super::CheckedFile {
@@ -2856,7 +3003,7 @@ mod tests {
             let got =
                 super::checked_file_uri(&cf_for(url), "Qwen/Qwen3-0.6B", Some(tmp.path()), false)
                     .unwrap();
-            assert_eq!(got, url);
+            assert_eq!(got.as_deref(), Some(url));
         }
     }
 
@@ -2870,7 +3017,7 @@ mod tests {
             super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path()), false).unwrap();
         assert_eq!(
             got,
-            url::Url::from_file_path(&local_cfg).unwrap().to_string()
+            Some(url::Url::from_file_path(&local_cfg).unwrap().to_string())
         );
     }
 
@@ -2895,7 +3042,7 @@ mod tests {
         let cf = cf_for("/nonexistent/worker/path/template.jinja");
 
         let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, false).unwrap();
-        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/template.jinja");
+        assert_eq!(got.as_deref(), Some("hf://Qwen/Qwen3-0.6B/template.jinja"));
 
         let err = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, true)
             .expect_err("custom slot must error instead of falling back to HF");
@@ -2906,6 +3053,14 @@ mod tests {
             msg.contains("--model-path") || msg.contains("shared mount"),
             "wrong error: {msg}"
         );
+
+        let source = "ngc://example/team/model:1";
+        assert!(
+            super::checked_file_uri(&cf, source, None, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(super::checked_file_uri(&cf, source, None, true).is_err());
     }
 
     /// Dropping `stage_and_rename`'s future mid-await (caller cancellation)
@@ -3168,6 +3323,55 @@ mod ownership_tests {
     }
 
     #[test]
+    fn prefill_load_model_wire_aliases_preserve_card_and_mdcsum() {
+        use crate::entrypoint::RouterConfig;
+        use dynamo_kv_router::scheduling::config::RouterPrefillLoadModel;
+        use dynamo_runtime::pipeline::RouterMode;
+
+        for mode in [RouterMode::KV, RouterMode::RoundRobin] {
+            let mut card = ModelDeploymentCard::with_name_only("wire-compat-model");
+            let mut router = RouterConfig {
+                router_mode: mode,
+                ..Default::default()
+            };
+            router.kv_router_config.router_prefill_load_model = RouterPrefillLoadModel::Ais;
+            card.router_config = Some(router);
+            let emitted: serde_json::Value =
+                serde_json::from_str(&card.to_json().unwrap()).unwrap();
+            assert_eq!(
+                emitted["router_config"]["kv_router_config"]["router_prefill_load_model"],
+                "aic"
+            );
+
+            for spelling in ["aic", "ais"] {
+                let mut input = emitted.clone();
+                input["router_config"]["kv_router_config"]["router_prefill_load_model"] =
+                    serde_json::json!(spelling);
+                let parsed = ModelDeploymentCard::load_from_json_str(&input.to_string()).unwrap();
+                assert_eq!(
+                    parsed
+                        .router_config
+                        .as_ref()
+                        .unwrap()
+                        .kv_router_config
+                        .router_prefill_load_model,
+                    RouterPrefillLoadModel::Ais
+                );
+                assert_eq!(parsed.mdcsum(), card.mdcsum());
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&parsed.to_json().unwrap()).unwrap(),
+                    emitted
+                );
+            }
+        }
+
+        let card = ModelDeploymentCard::with_name_only("wire-compat-default");
+        let parsed = ModelDeploymentCard::load_from_json_str(&card.to_json().unwrap()).unwrap();
+        assert!(parsed.router_config.is_none());
+        assert_eq!(parsed.mdcsum(), card.mdcsum());
+    }
+
+    #[test]
     fn context_length_wire_compatibility() {
         let card = ModelDeploymentCard::with_name_only("model");
         let mut legacy_value = serde_json::to_value(&card).unwrap();
@@ -3247,6 +3451,26 @@ mod ownership_tests {
     }
 
     #[test]
+    fn vllm_generate_capability_isolates_worker_sets() {
+        use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+            false.into(),
+        );
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+            true.into(),
+        );
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
     fn qwen_video_processor_contract_stays_out_of_the_checksum() {
         use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
 
@@ -3299,6 +3523,7 @@ mod ownership_tests {
     #[test]
     fn video_processor_runtime_contract_checksum_boundaries() {
         use crate::local_model::runtime_config::{
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
         };
@@ -3333,6 +3558,23 @@ mod ownership_tests {
                 "resize_mode": "round_ties_even"
             }),
         );
+        let sglang_qwen = card_with_contract(
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "legacy_ceil",
+                "sglang_preprocess": {
+                    "image_factor": 28,
+                    "video_min_pixels": 100352,
+                    "video_max_pixels": 602112,
+                    "video_total_pixels": 90316800,
+                    "frame_factor": 2,
+                    "fps": 2.0,
+                    "min_frames": 4,
+                    "max_frames": 768
+                }
+            }),
+        );
         let nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
             serde_json::json!({"video_pruning_rate": 0.5}),
@@ -3345,6 +3587,8 @@ mod ownership_tests {
 
         assert_eq!(missing.mdcsum(), unrelated.mdcsum());
         assert_eq!(missing.mdcsum(), qwen.mdcsum());
+        assert_eq!(missing.mdcsum(), sglang_qwen.mdcsum());
+        assert_eq!(qwen.mdcsum(), sglang_qwen.mdcsum());
         assert_eq!(qwen.mdcsum(), same_qwen.mdcsum());
         assert_eq!(qwen.mdcsum(), different_qwen.mdcsum());
         assert_ne!(missing.mdcsum(), nemotron.mdcsum());

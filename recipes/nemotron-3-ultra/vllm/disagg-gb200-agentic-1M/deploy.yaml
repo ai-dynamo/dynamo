@@ -219,7 +219,7 @@ spec:
                     --mamba-cache-mode align \
                     --mamba-ssm-cache-dtype bfloat16 \
                     --mamba-backend triton \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
                     --dyn-tool-call-parser qwen3_coder \
                     --dyn-reasoning-parser nemotron3 \
                     --reasoning-parser-plugin "${PLUGIN}" \
@@ -381,7 +381,7 @@ spec:
                     --mamba-cache-mode align \
                     --mamba-ssm-cache-dtype bfloat16 \
                     --mamba-backend triton \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
                     --dyn-tool-call-parser qwen3_coder \
                     --dyn-reasoning-parser nemotron3 \
                     --reasoning-parser-plugin "${PLUGIN}" \

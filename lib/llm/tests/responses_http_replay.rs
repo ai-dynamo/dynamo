@@ -9,7 +9,8 @@ use std::time::Duration;
 use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestUserMessageContent, ChatCompletionToolChoiceOption,
+    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
+    ChatCompletionToolChoiceOption, ImageDetail,
 };
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
@@ -197,6 +198,87 @@ async fn disallowed_streamed_function_call_kills_backend_context() {
         svc.shutdown().await;
     })
     .await;
+}
+
+/// Exercise the production handler's shared name map, including historical
+/// identities that are absent from the current tool definitions.
+#[tokio::test]
+#[serial]
+async fn colliding_namespace_tools_round_trip_through_http() {
+    use dynamo_llm::protocols::openai::{
+        chat_completions::NvCreateChatCompletionRequest, responses::NvCreateResponse,
+    };
+
+    temp_env::async_with_vars(ENV, async {
+        for stream in [false, true] {
+            for namespace in ["crm", "billing"] {
+                let body = json!({
+                    "model": MODEL,
+                    "input": [
+                        {"type": "function_call", "namespace": "archived", "name": "lookup",
+                         "call_id": "previous", "arguments": "{}"},
+                        {"type": "function_call_output", "call_id": "previous", "output": "ok"},
+                        {"role": "user", "content": "Look up /tmp"}
+                    ],
+                    "stream": stream,
+                    "tools": [
+                        {"type": "namespace", "name": "crm", "description": "CRM", "tools": [tool("lookup")]},
+                        {"type": "namespace", "name": "billing", "description": "Billing", "tools": [tool("lookup")]}
+                    ],
+                    "tool_choice": {"type": "allowed_tools", "mode": "required", "tools": [
+                        {"type": "function", "namespace": namespace, "name": "lookup"}
+                    ]}
+                });
+                let request: NvCreateResponse = serde_json::from_value(body.clone()).unwrap();
+                let converted = NvCreateChatCompletionRequest::try_from(request).unwrap();
+                let backend_name = &converted.inner.tools.as_ref().unwrap()[0].function.name;
+                assert_ne!(backend_name, "lookup");
+                let mut script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
+                for chunk in &mut script {
+                    if let Some(data) = &mut chunk.data {
+                        for choice in &mut data.inner.choices {
+                            for call in choice.delta.tool_calls.iter_mut().flatten() {
+                                if let Some(function) = &mut call.function
+                                    && function.name.is_some()
+                                {
+                                    function.name = Some(backend_name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                let svc = HarnessService::start([script]).await;
+                let response = post_responses(&svc, &body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let response_body = if stream {
+                    let events = parse_json_sse(&response.text().await.unwrap()).await.unwrap();
+                    for kind in ["response.output_item.added", "response.output_item.done"] {
+                        let call = events.iter().find(|event| event.event == kind
+                            && event.data["item"]["type"] == "function_call").unwrap();
+                        assert_eq!(call.data["item"]["name"], "lookup");
+                        assert_eq!(call.data["item"]["namespace"], namespace);
+                    }
+                    events.iter().find(|event| event.event == "response.completed")
+                        .unwrap().data["response"].clone()
+                } else {
+                    response.json::<Value>().await.unwrap()
+                };
+                let call = response_body["output"].as_array().unwrap().iter()
+                    .find(|item| item["type"] == "function_call").unwrap();
+                assert_eq!(call["name"], "lookup");
+                assert_eq!(call["namespace"], namespace);
+                assert!(!call["call_id"].as_str().unwrap().is_empty());
+                let observed = svc.engine.take_requests().await;
+                assert_eq!(observed.len(), 1);
+                assert_eq!(&observed[0].inner.tools.as_ref().unwrap()[0].function.name, backend_name);
+                let ChatCompletionRequestMessage::Assistant(history) = &observed[0].inner.messages[0] else {
+                    panic!("expected historical function call");
+                };
+                assert_ne!(&history.tool_calls.as_ref().unwrap()[0].function.name, backend_name);
+                svc.shutdown().await;
+            }
+        }
+    }).await;
 }
 
 async fn post_responses(svc: &HarnessService, body: &Value) -> reqwest::Response {
@@ -849,6 +931,97 @@ async fn function_call_output_round_trip_reaches_the_chat_engine() {
             other => panic!("unexpected translated round-trip messages: {other:#?}"),
         }
 
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn function_call_output_image_without_detail_reaches_the_chat_engine() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script]).await;
+        let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_output_tokens": 64,
+                "input": [
+                    {"role": "user", "content": "What is the dominant color?"},
+                    {"type": "function_call", "call_id": "call_1", "name": "screenshot", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": [
+                        {"type": "input_image", "image_url": image_url}
+                    ]}
+                ],
+                "tools": [tool("screenshot")]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let _ = response.bytes().await.unwrap();
+
+        let requests = svc.engine.take_requests().await;
+        let [request] = &requests[..] else {
+            panic!("expected one chat-engine request, got {}", requests.len());
+        };
+        let [
+            ChatCompletionRequestMessage::User(_),
+            ChatCompletionRequestMessage::Assistant(_),
+            ChatCompletionRequestMessage::Tool(tool_result),
+        ] = &request.inner.messages[..]
+        else {
+            panic!("unexpected translated messages: {:#?}", request.inner.messages);
+        };
+        assert_eq!(tool_result.tool_call_id, "call_1");
+        let ChatCompletionRequestToolMessageContent::Array(parts) = &tool_result.content else {
+            panic!("expected multimodal tool content");
+        };
+        assert_eq!(parts.len(), 1);
+        let ChatCompletionRequestToolMessageContentPart::ImageUrl(image) = &parts[0] else {
+            panic!("expected image part");
+        };
+        let image = image.image_url.as_ref().unwrap();
+        assert_eq!(image.url.as_str(), image_url);
+        assert_eq!(image.detail, Some(ImageDetail::Auto));
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn invalid_image_url_returns_bad_request() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": [
+                    {"role": "user", "content": "What is in the screenshot?"},
+                    {"type": "function_call", "call_id": "call_1", "name": "screenshot", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": [
+                        {"type": "input_image", "image_url": "not-a-url"}
+                    ]}
+                ]
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"], 400);
+        assert_eq!(body["type"], "Bad Request");
+        assert_eq!(
+            body["message"],
+            "Failed to convert responses request: Invalid image URL: relative URL without a base"
+        );
+        assert!(svc.engine.take_requests().await.is_empty());
         svc.shutdown().await;
     })
     .await;
