@@ -2332,3 +2332,43 @@ async def test_shadow_takeover_replaces_predecessor_discovery_lease(
         assert not gms_failover.revoke_predecessor_discovery_lease(222)
     finally:
         server.shutdown()
+
+
+def test_file_backend_removes_only_the_fenced_predecessor_records(
+    tmp_path, monkeypatch
+):
+    from urllib.parse import quote
+
+    from dynamo.common import gms_failover
+
+    root = tmp_path / "kv"
+    monkeypatch.setenv("DYN_DISCOVERY_BACKEND", "file")
+    monkeypatch.setenv("DYN_FILE_KV", str(root))
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", str(tmp_path / "failover.lock"))
+
+    def record(bucket, key):
+        directory = root / bucket
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / quote(key, safe="")
+        path.write_text("{}")
+        return path
+
+    dead = [
+        record("v1/instances", "ns/backend/generate/6f"),
+        record("v1/mdc", "ns/backend/generate/6f"),
+        record("v1/mdc", "ns/backend/generate/6f/my-lora"),
+        record("v1/event_channels", "namespace/ns/topic/kv%2Devents/6f"),
+    ]
+    alive = [
+        record("v1/instances", "ns/backend/generate/7a"),
+        record("v1/mdc", "ns/backend/generate/7a/6f"),
+    ]
+    gms_failover.record_active_discovery_lease(0x6F)
+
+    assert gms_failover.revoke_predecessor_discovery_lease(0x7A)
+    assert not any(path.exists() for path in dead)
+    assert all(path.exists() for path in alive)
+    # A shared logical instance id is never removed: the successor owns it.
+    gms_failover.record_active_discovery_lease(0x7A)
+    assert not gms_failover.revoke_predecessor_discovery_lease(0x7A)
+    assert all(path.exists() for path in alive)
