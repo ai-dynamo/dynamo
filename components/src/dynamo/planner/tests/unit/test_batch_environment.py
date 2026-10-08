@@ -2296,6 +2296,36 @@ async def test_redis_actuator_rejects_invalid_decisions_before_writing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bootstrap_result",
+    [True, 1.0, object()],
+    ids=["bool", "float", "opaque"],
+)
+async def test_redis_bootstrap_rejects_invalid_epoch_types(
+    bootstrap_result: object,
+) -> None:
+    class _InvalidBootstrapRedis(_FakeRedis):
+        async def eval(
+            self, script: str, numkeys: int, *keys_and_args: object
+        ) -> object:
+            self.eval_calls.append((script, keys_and_args))
+            return bootstrap_result
+
+    redis = _InvalidBootstrapRedis()
+    actuator = RedisLeasedDrainLimitActuator(
+        client=redis,
+        control_key_resolver=lambda pool_id: f"planner:drain:{pool_id}",
+        clock=lambda: 1_000.0,
+        writer_id="writer-a",
+    )
+
+    with pytest.raises(RuntimeError, match="invalid epoch"):
+        await actuator.initialize_writer(_drain_decision("startup", 0.0))
+
+    assert len(redis.eval_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_redis_bootstrap_ack_loss_retries_with_new_epoch_and_zero(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
