@@ -174,10 +174,12 @@ const (
 )
 
 // GPUSKUType identifies a supported GPU for discovery and profiling.
-// +kubebuilder:validation:Enum=gb200;gb200_sxm;gb10;b300_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
+// +kubebuilder:validation:Enum=vr_nvl72;gb200;gb200_sxm;gb10;b300_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 type GPUSKUType string
 
 const (
+	// --- Vera Rubin ---
+	GPUSKUTypeVRNVL72 GPUSKUType = "vr_nvl72"
 	// --- Blackwell ---
 	GPUSKUTypeGB200 GPUSKUType = "gb200"
 
@@ -410,7 +412,7 @@ type HardwareSpec struct {
 	// restricted to nodes matching this SKU.
 	// The legacy value gb200_sxm is deprecated; use gb200 instead.
 	// +optional
-	// +kubebuilder:validation:Enum=gb200;gb200_sxm;gb10;b300_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
+	// +kubebuilder:validation:Enum=vr_nvl72;gb200;gb200_sxm;gb10;b300_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.

@@ -6,8 +6,9 @@ subtitle: Recommend simulated topology, worker, and router choices before using 
 ---
 
 `aisimulate recommend --stack dynamo` searches simulated deployment configurations and writes each
-selected candidate as a concrete prediction YAML. The search runs offline on CPUs; the GPU count is
-a simulated constraint rather than a host requirement.
+selected candidate as a concrete prediction YAML. With `--output dgd`, it also renders the selected
+candidate as a `DynamoGraphDeployment` (DGD). The search runs offline on CPUs; the GPU count is a
+simulated constraint rather than a host requirement.
 
 Use recommendation after a single [DynoSim prediction](dynosim-replay.mdx) works. For field and
 domain semantics, see the
@@ -15,23 +16,33 @@ domain semantics, see the
 
 ## Prerequisites
 
-Run from the repository root. Build the runtime bindings and install Dynamo, which installs the
-pinned AISimulate release:
+Run from the repository root. Create and activate a virtual environment, build the runtime bindings,
+and install Dynamo. The editable Dynamo installation installs the pinned AISimulate release and
+registers the Dynamo-owned `dgd` output adapter:
 
 ```bash
-.venv/bin/maturin develop --release -m lib/bindings/python/Cargo.toml
+uv venv --python 3.12 .venv
+source .venv/bin/activate
+uv pip install pip 'maturin[patchelf]'
+maturin develop --release -m lib/bindings/python/Cargo.toml
 uv pip install -e .
+uv pip install scikit-learn==1.7.2
 ```
 
 Do not install the standalone `aiconfigurator` package. AISimulate includes the performance-model
 compatibility code used by the Dynamo stack.
 
 <Steps toc={true}>
-<Step title="Create a recommendation configuration" id="create-a-recommendation-configuration">
+<Step title="Create one input file" id="create-a-recommendation-configuration">
 
-Save this configuration as `/tmp/dynosim-recommend.yaml`:
+Save the complete configuration below as `/tmp/dynosim-recommend.yaml`. It is one input file with
+two parts:
+
+- `traffic` through `optimizer` configure AISimulate's simulation and search.
+- `dgd` configures the Dynamo output adapter selected by `--output dgd`.
 
 ```yaml
+# AISimulate recommendation input: workload, search space, and optimizer.
 traffic:
   source: {type: synthetic, input_tokens: 1024, output_tokens: 128}
   load: {type: concurrency, concurrency: 8}
@@ -68,10 +79,23 @@ optimizer:
   parallelism: 2
   candidate_timeout_seconds: 30
   seed: 42
+
+# Dynamo output configuration, consumed only by --output dgd.
+dgd:
+  name: qwen
+  output_file: deployment.yaml
+  generator: aic
+  format: manifest
+  runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+  num_gpus_per_node: 8
 ```
 
 Each parallelism preset is a complete mapping and becomes one categorical choice. Router and
-scheduler domains add independent search dimensions.
+scheduler domains add independent search dimensions. `engine.model` identifies the model that
+AISimulate evaluates and that the generated DGD serves. `dgd.name` is only the Kubernetes resource
+name, while `dgd.output_file` is the output filename relative to `--output-dir`. Neither field
+selects the model. `dgd.namespace` is optional; when omitted or empty, the output manifest does not
+set `metadata.namespace`.
 
 To search Planner settings too, add `planner: {}`. The default search keeps the scaling presets
 compatible with the optimization target: throughput and latency objectives retain disabled and
@@ -93,11 +117,53 @@ its effective defaults, scaling flags, and GPU limits when passed to `predict`.
 aisimulate recommend \
   --stack dynamo \
   --config /tmp/dynosim-recommend.yaml \
+  --output dgd \
   --output-dir /tmp/dynosim-recommendations
 ```
 
-The command prints ranked candidates and writes concrete files under
-`/tmp/dynosim-recommendations/recommendations/`.
+AISimulate first applies any `--set` overrides. Because the command requests `--output dgd`, it then
+removes the top-level `dgd` mapping before validating the recommendation input and passes that mapping
+to the Dynamo adapter. Omitting the `dgd` mapping while requesting `--output dgd` is an error.
+
+The command prints ranked candidates and produces:
+
+```text
+/tmp/dynosim-recommendations/
+├── recommendations/   # AISimulate's concrete ranked candidate configurations
+├── deployment.yaml     # DGD rendered from the selected scalar candidate
+└── index.json          # Index of artifacts written by the DGD adapter
+```
+
+The `--stack` option selects the simulation implementation. The independent `--output dgd` option
+selects DGD generation.
+
+The `dgd.generator` field defaults to `aic`. Set it to `direct` to compare the direct Dynamo generator.
+The output target depends on `dgd.format`:
+
+- `manifest` requires `output_file` and rejects `output_dir`.
+- `kustomize` requires `output_dir` and rejects `output_file`. The directory is relative to the CLI
+  `--output-dir` and contains `deploy.yaml` and `kustomization.yaml`.
+
+`output_file` must be a bare `.yaml` or `.yml` filename, and `output_dir` must be one directory name,
+not a path. Neither accepts `.` or `..`; `{index}` is the only supported placeholder.
+
+For example, this writes the Kustomize bundle to `/tmp/dynosim-recommendations/qwen/`:
+
+```yaml
+dgd:
+  name: qwen
+  format: kustomize
+  output_dir: qwen
+  runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+  num_gpus_per_node: 8
+```
+
+For a Pareto optimization, `{index}` is required in `name` and in the active output field
+(`output_file` or `output_dir`); scalar targets reject the placeholder. For example,
+`name: candidate-{index}` with `output_dir: candidate-{index}` creates one independently deployable
+Kustomize bundle per selected candidate. The adapter substitutes a three-digit, zero-based index:
+`candidate-000`, `candidate-001`, and so on. AISimulate's recommendation files use a separate
+four-digit, one-based sequence, so `candidate-000` is the DGD for `recommendations/0001.yaml`.
 
 </Step>
 <Step title="Predict the best candidate" id="predict-the-best-candidate">
@@ -133,6 +199,7 @@ aisimulate recommend \
   --set 'traffic.source={type: trace, format: mooncake, paths: [/tmp/toolagent_trace.jsonl], block_size: 512}' \
   --set 'traffic.load={type: trace_timestamps, speedup: 1.0}' \
   --set 'traffic.stop={max_virtual_time_seconds: 3600}' \
+  --output dgd \
   --output-dir /tmp/dynosim-trace-recommendations
 ```
 
@@ -144,6 +211,8 @@ Use a shorter virtual-time cutoff or trial budget while iterating on large trace
 Set `optimization.target` to `throughput`, `throughput_per_gpu`, `throughput_per_user`, `goodput`,
 `goodput_per_gpu`, `ttft`, `e2e_latency`, or `pareto`. Goodput targets require `evaluation.sla`.
 Pareto output contains the complete nondominated front rather than a scalar ranking.
+Before changing the example to `optimization.target: pareto`, update `dgd.name` and the active output
+field with the required `{index}` placeholder as described in the recommendation step.
 
 Change one domain at a time. Use `choices` for categorical values, `range` for numeric domains, and
 complete preset mappings for correlated knobs such as parallelism.
