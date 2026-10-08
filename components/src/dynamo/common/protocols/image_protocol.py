@@ -59,7 +59,7 @@ class NvCreateImageRequest(BaseModel):
     """Image background: transparent, opaque, or auto."""
 
     output_format: Optional[str] = None
-    """Output image encoding: png, jpeg (or jpg), or webp."""
+    """Output image encoding: png, jpeg, or webp."""
 
     response_format: Optional[str] = None
     """Response format: url or b64_json."""

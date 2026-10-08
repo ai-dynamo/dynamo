@@ -169,7 +169,7 @@ class TestDiffusionFormatterImage:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("output_format", "pillow_format"),
-        [("png", "PNG"), ("jpeg", "JPEG"), ("jpg", "JPEG"), ("webp", "WEBP")],
+        [("png", "PNG"), ("jpeg", "JPEG"), ("webp", "WEBP")],
     )
     async def test_b64_outputs_report_decoded_encoding_and_size(
         self, output_format, pillow_format
@@ -262,7 +262,6 @@ class TestDiffusionFormatterImage:
         [
             ("png", "png", "PNG"),
             ("jpeg", "jpg", "JPEG"),
-            ("jpg", "jpg", "JPEG"),
             ("webp", "webp", "WEBP"),
         ],
     )
@@ -296,7 +295,8 @@ class TestDiffusionFormatterImage:
             assert decoded.size == (21, 17)
 
     @pytest.mark.asyncio
-    async def test_unsupported_image_output_format_is_rejected(self):
+    @pytest.mark.parametrize("output_format", ["gif", "jpg"])
+    async def test_unsupported_image_output_format_is_rejected(self, output_format):
         from dynamo.common.utils.output_modalities import RequestType
 
         f = _make_diffusion_formatter()
@@ -306,7 +306,7 @@ class TestDiffusionFormatterImage:
                 "req-invalid",
                 request_type=RequestType.IMAGE_GENERATION,
                 response_format="b64_json",
-                output_format="gif",
+                output_format=output_format,
             )
 
     @pytest.mark.asyncio

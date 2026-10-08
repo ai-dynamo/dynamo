@@ -85,7 +85,6 @@ DEFAULT_AUDIO_SAMPLE_RATE = 24000
 _IMAGE_OUTPUT_FORMATS = {
     "png": ("PNG", "png", "image/png"),
     "jpeg": ("JPEG", "jpg", "image/jpeg"),
-    "jpg": ("JPEG", "jpg", "image/jpeg"),
     "webp": ("WEBP", "webp", "image/webp"),
 }
 
@@ -115,13 +114,13 @@ def _normalize_image_output_options(
     if output_format is None:
         return "png"
     if not isinstance(output_format, str):
-        raise ValueError("output_format must be 'png', 'jpeg'/'jpg', or 'webp'")
+        raise ValueError("output_format must be 'png', 'jpeg', or 'webp'")
 
     normalized = output_format.lower()
     if normalized not in _IMAGE_OUTPUT_FORMATS:
         raise ValueError(
             f"Unsupported output_format: {output_format!r}; "
-            "expected 'png', 'jpeg'/'jpg', or 'webp'"
+            "expected 'png', 'jpeg', or 'webp'"
         )
     return normalized
 
@@ -766,7 +765,7 @@ class DiffusionFormatter:
             request_id: Identifier included in the response and storage path.
             request_type: Request kind selecting the response schema.
             response_format: ``"url"`` or ``"b64_json"`` output representation.
-            output_format: ``"png"``, ``"jpeg"``/``"jpg"``, or ``"webp"`` encoding.
+            output_format: ``"png"``, ``"jpeg"``, or ``"webp"`` encoding.
 
         Returns:
             Dict[str, Any] | None: Formatted response or ``None`` for other request kinds.
@@ -840,7 +839,7 @@ class DiffusionFormatter:
             images: Generated image objects supporting image serialization.
             request_id: Identifier used to construct storage paths.
             response_format: ``"url"`` or ``"b64_json"`` output representation.
-            output_format: ``"png"``, ``"jpeg"``/``"jpg"``, or ``"webp"`` encoding.
+            output_format: ``"png"``, ``"jpeg"``, or ``"webp"`` encoding.
 
         Returns:
             list: Encoded data URLs or uploaded media URLs.
