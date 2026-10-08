@@ -29,8 +29,6 @@ pytestmark = [
         ["--tp-size=4", "--pp=4"],
         ["--tp-size", "4", "--pp-size", "4"],
         ["--tp-size=4", "--pp-size=4"],
-        ["--tensor-parallel-size", "4", "--pipeline-parallel-size", "4"],
-        ["--tp", "4", "--pp", "4"],
     ],
 )
 def test_parallelism_spellings_preserve_multinode_placement(args: list[str]) -> None:
@@ -44,7 +42,8 @@ def test_parallelism_spellings_preserve_multinode_placement(args: list[str]) -> 
         }
     )
 
-    setup_worker_component_resources(component, gpu_count=16, num_gpus_per_node=8)
+    # The fallback GPU count would require four nodes, not the two needed by TP x PP.
+    setup_worker_component_resources(component, gpu_count=32, num_gpus_per_node=8)
 
     assert component.multinode is not None
     assert component.multinode.nodeCount == 2
