@@ -60,6 +60,12 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 {% else %}
 # Motif's base has externally managed system Python and does not include NIXL.
 # Keep Dynamo and vLLM in that interpreter; --no-deps preserves the base stack.
+{% if context.vllm[device_key].runtime_image == "ghcr.io/motiftechnologies/vllm" %}
+# Fix mixed MLA/GQA cache validation and preserve Motif's NHD layout at build
+# time. Workers can launch directly without a writable source tree or launcher.
+RUN --mount=type=bind,source=container/deps/vllm/apply_motif_nixl_patch.py,target=/tmp/apply_motif_nixl_patch.py \
+    python3 /tmp/apply_motif_nixl_patch.py
+{% endif %}
 ENV UV_BREAK_SYSTEM_PACKAGES=1
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     uv pip install --system --break-system-packages --no-deps \
