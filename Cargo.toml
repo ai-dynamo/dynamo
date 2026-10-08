@@ -75,6 +75,7 @@ dynamo-memory = { path = "lib/memory", version = "1.6.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.6.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.6.0" }
 dynamo-protocols = { version = "=6.1.0" }
+dynamo-decisions = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "6ce6582b25e78d8dd85b5f4e9dc107838217e1fa", features = ["utoipa"] }
 dynamo-parsers = { version = "=9.2.7" }
 
 # Published on crates.io. To see all available versions:

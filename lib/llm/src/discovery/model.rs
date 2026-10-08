@@ -16,6 +16,8 @@ use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
+use crate::model_card::ModelDeploymentCard;
+use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
@@ -85,6 +87,70 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) kv_cache_block_size: u32,
     pub(crate) lora_name: Option<String>,
     pub(crate) tower_connector_lora_enabled: bool,
+}
+
+/// Aggregate SGLang engine and model assets selected from one WorkerSet snapshot.
+#[derive(Clone)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Consumed by decision execution integration")
+)]
+pub(crate) struct SystemOneExecutionSelection {
+    pub(crate) canonical_model: String,
+    pub(crate) engine: GenerateStreamingEngine,
+    pub(crate) card: ModelDeploymentCard,
+    pub(crate) preprocessor: Arc<OpenAIPreprocessor>,
+    pub(crate) admitted_ids: Option<tokio::sync::watch::Receiver<Vec<u64>>>,
+}
+
+impl SystemOneExecutionSelection {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Consumed by decision execution integration")
+    )]
+    pub(crate) fn validate_dispatch(
+        &self,
+        pinned_worker: Option<u64>,
+    ) -> Result<(), SystemOneSelectionError> {
+        let Some(admitted) = &self.admitted_ids else {
+            return Ok(());
+        };
+        if admitted.has_changed().is_err() {
+            return Err(SystemOneSelectionError::Unavailable);
+        }
+        let workers = admitted.borrow();
+        if workers.is_empty() || pinned_worker.is_some_and(|worker| !workers.contains(&worker)) {
+            return Err(SystemOneSelectionError::Unavailable);
+        }
+        Ok(())
+    }
+
+    #[expect(dead_code, reason = "Consumed by decision execution integration")]
+    pub(crate) fn decision_capabilities(&self) -> dynamo_decisions::Capabilities {
+        // The serialized SGLang capability pins the zero-decode requested-ID
+        // contract, including vocabulary logprobs and meta_info.cached_tokens.
+        // Tokenizer-specific candidate limits are checked during preflight.
+        dynamo_decisions::Capabilities {
+            max_questions: 128,
+            max_candidates: 255,
+            supports_predicate: true,
+            supports_choice: true,
+            supports_score: true,
+            vocabulary_label_mass: true,
+            measured_cache_reads: true,
+            prompt_format_version: 1,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum SystemOneSelectionError {
+    #[error("model is not registered")]
+    NotFound,
+    #[error("model does not support aggregate SGLang scoring")]
+    Unsupported,
+    #[error("SGLang scoring worker is unavailable")]
+    Unavailable,
 }
 
 /// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
@@ -657,6 +723,51 @@ impl Model {
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
     }
 
+    pub(crate) fn get_systemone_execution_selection(
+        &self,
+        capability: &str,
+    ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
+        self.select_worker_set_with(|ws| self.systemone_execution_inputs(ws, capability))
+            .ok_or_else(|| {
+                if self.worker_sets.iter().any(|entry| {
+                    self.systemone_execution_inputs(entry.value(), capability)
+                        .is_some()
+                }) {
+                    SystemOneSelectionError::Unavailable
+                } else {
+                    SystemOneSelectionError::Unsupported
+                }
+            })
+    }
+
+    fn systemone_execution_inputs(
+        &self,
+        worker_set: &WorkerSet,
+        capability: &str,
+    ) -> Option<SystemOneExecutionSelection> {
+        let card = worker_set.card();
+        if !worker_set.supports_runtime_capability(capability)
+            || !worker_set.supports_runtime_capability(
+                crate::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1,
+            )
+            || card.runtime_config.max_num_seqs != Some(1)
+            || card.worker_type != Some(crate::worker_type::WorkerType::Aggregated)
+            || !card.needs.is_empty()
+            || card.lora.is_some()
+            || card.migration_limit != 0
+            || card.runtime_config.runtime_data.contains_key("spec_decode")
+        {
+            return None;
+        }
+        Some(SystemOneExecutionSelection {
+            canonical_model: self.name.clone(),
+            engine: worker_set.generate_engine.clone()?,
+            card: card.clone(),
+            preprocessor: worker_set.systemone_preprocessor.clone()?,
+            admitted_ids: worker_set.decision_admissions(),
+        })
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_engine_with_parsing(
@@ -1066,6 +1177,159 @@ mod tests {
         assert_eq!(selection_b.kv_cache_block_size, 32);
         assert_eq!(selection_b.lora_name.as_deref(), Some("adapter-b"));
         assert!(selection_b.tower_connector_lora_enabled);
+    }
+
+    fn systemone_worker_set(
+        namespace: &str,
+        configure: impl FnOnce(&mut ModelDeploymentCard),
+    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+        let mut card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.runtime_config.runtime_data.insert(
+            crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
+            true.into(),
+        );
+        card.runtime_config
+            .runtime_data
+            .insert("sglang_systemone_serial_v1".to_string(), true.into());
+        card.runtime_config.max_num_seqs = Some(1);
+        configure(&mut card);
+        let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
+        let mut worker_set = WorkerSet::new(namespace.to_string(), namespace.to_string(), card);
+        worker_set.generate_engine = Some(Arc::new(StubGenerateEngine));
+        worker_set.systemone_preprocessor = Some(preprocessor);
+        let (worker_tx, worker_rx) = watch::channel(vec![1]);
+        worker_set.set_instance_watcher(worker_rx);
+        (Arc::new(worker_set), worker_tx)
+    }
+
+    #[test]
+    fn systemone_selection_keeps_engine_card_and_assets_atomic() {
+        let model = Model::new("scoring-model".to_string());
+        let (worker_set_a, workers_a) = systemone_worker_set("ns-a", |card| {
+            card.kv_cache_block_size = 16;
+        });
+        let (worker_set_b, workers_b) = systemone_worker_set("ns-b", |card| {
+            card.kv_cache_block_size = 32;
+        });
+        workers_b.send(vec![]).unwrap();
+        model.add_worker_set("ns-a".to_string(), worker_set_a.clone());
+        model.add_worker_set("ns-b".to_string(), worker_set_b.clone());
+        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+        let selection_a = model.get_systemone_execution_selection(capability).unwrap();
+        assert!(Arc::ptr_eq(
+            &selection_a.engine,
+            worker_set_a.generate_engine.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &selection_a.preprocessor,
+            worker_set_a.systemone_preprocessor.as_ref().unwrap()
+        ));
+        assert_eq!(selection_a.card.kv_cache_block_size, 16);
+        assert_eq!(selection_a.canonical_model, "scoring-model");
+
+        workers_a.send(vec![]).unwrap();
+        workers_b.send(vec![2]).unwrap();
+        let selection_b = model.get_systemone_execution_selection(capability).unwrap();
+        assert!(Arc::ptr_eq(
+            &selection_b.engine,
+            worker_set_b.generate_engine.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &selection_b.preprocessor,
+            worker_set_b.systemone_preprocessor.as_ref().unwrap()
+        ));
+        assert_eq!(selection_b.card.kv_cache_block_size, 32);
+        assert_eq!(selection_a.card.kv_cache_block_size, 16);
+    }
+
+    #[test]
+    fn systemone_selection_distinguishes_unsupported_from_unavailable() {
+        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+        let unsupported: [fn(&mut ModelDeploymentCard); 13] = [
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .remove("sglang_systemone_serial_v1");
+            },
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .insert("sglang_systemone_serial_v1".to_string(), false.into());
+            },
+            |card| {
+                card.runtime_config.runtime_data.insert(
+                    "sglang_systemone_serial_v1".to_string(),
+                    "unsupported".into(),
+                );
+            },
+            |card| {
+                card.runtime_config.max_num_seqs = None;
+            },
+            |card| {
+                card.runtime_config.max_num_seqs = Some(2);
+            },
+            |card| {
+                card.runtime_config.runtime_data.clear();
+            },
+            |card| {
+                card.worker_type = None;
+            },
+            |card| {
+                card.worker_type = Some(crate::worker_type::WorkerType::Prefill);
+            },
+            |card| {
+                card.worker_type = Some(crate::worker_type::WorkerType::Decode);
+            },
+            |card| {
+                card.lora = Some(LoraInfo {
+                    name: "adapter".to_string(),
+                    max_gpu_lora_count: None,
+                });
+            },
+            |card| {
+                card.needs = vec![vec![crate::worker_type::WorkerType::Prefill]];
+            },
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .insert("spec_decode".to_string(), serde_json::json!({}));
+            },
+            |card| {
+                card.migration_limit = 1;
+            },
+        ];
+        for configure in unsupported {
+            let model = Model::new("scoring-model".to_string());
+            let (worker_set, _workers) = systemone_worker_set("ns", configure);
+            model.add_worker_set("ns".to_string(), worker_set);
+            assert!(matches!(
+                model.get_systemone_execution_selection(capability),
+                Err(SystemOneSelectionError::Unsupported)
+            ));
+        }
+        let model = Model::new("scoring-model".to_string());
+        let (mut worker_set, _workers) = systemone_worker_set("ns", |_| {});
+        Arc::get_mut(&mut worker_set)
+            .unwrap()
+            .systemone_preprocessor = None;
+        model.add_worker_set("ns".to_string(), worker_set);
+        assert!(matches!(
+            model.get_systemone_execution_selection(capability),
+            Err(SystemOneSelectionError::Unsupported)
+        ));
+        let model = Model::new("scoring-model".to_string());
+        let (worker_set, workers) = systemone_worker_set("ns", |_| {});
+        workers.send(vec![]).unwrap();
+        model.add_worker_set("ns".to_string(), worker_set);
+        assert!(matches!(
+            model.get_systemone_execution_selection(capability),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
     }
 
     fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {
