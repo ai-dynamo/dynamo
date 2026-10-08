@@ -216,7 +216,9 @@ class PrometheusQueryClient(Protocol):
 
 
 class _AsyncRedisClient(Protocol):
-    async def eval(self, script: str, numkeys: int, *keys_and_args: object) -> object:
+    def eval(
+        self, script: str, numkeys: int, *keys_and_args: str
+    ) -> Awaitable[object]:
         ...
 
     async def aclose(self) -> None:
@@ -1260,13 +1262,17 @@ class RedisLeasedDrainLimitActuator:
             fields["valid_until_unix_ms"],
             fields["decision_id"],
         )
+        if isinstance(result, bool) or not isinstance(result, (str, bytes, int)):
+            raise RuntimeError(
+                f"Redis writer bootstrap returned invalid epoch {result!r}"
+            )
         try:
             epoch = int(result)
-        except (TypeError, ValueError) as exc:
+        except ValueError as exc:
             raise RuntimeError(
                 f"Redis writer bootstrap returned invalid epoch {result!r}"
             ) from exc
-        if isinstance(result, bool) or epoch <= 0:
+        if epoch <= 0:
             raise RuntimeError(
                 f"Redis writer bootstrap returned invalid epoch {result!r}"
             )
@@ -1370,7 +1376,7 @@ class RedisLeasedDrainLimitActuator:
         )
 
     async def _eval_with_retry(
-        self, script: str, control_key: str, fence_key: str, *args: object
+        self, script: str, control_key: str, fence_key: str, *args: str
     ) -> object:
         for attempt in range(2):
             try:
