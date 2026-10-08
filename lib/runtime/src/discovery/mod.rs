@@ -22,6 +22,8 @@ mod mock;
 pub use mock::{MockDiscovery, SharedMockRegistry};
 mod kv_store;
 pub use kv_store::KVStoreDiscovery;
+mod logical_id;
+pub use logical_id::{hash_logical_instance_key, logical_instance_id_from_env};
 
 mod kube;
 pub use kube::{KubeDiscoveryClient, hash_container_name, hash_pod_name};

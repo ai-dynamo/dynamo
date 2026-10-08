@@ -202,7 +202,10 @@ pub struct Directory {
     p: PathBuf,
     ttl: Duration,
     /// These are the files we created and hence must delete on shutdown
-    owned_files: Arc<Mutex<HashSet<PathBuf>>>,
+    /// Files this process published, with the bytes it wrote. A file whose
+    /// contents changed belongs to another writer (a failover successor that
+    /// took over a shared logical-instance key) and is left alone.
+    owned_files: Arc<Mutex<HashMap<PathBuf, bytes::Bytes>>>,
 }
 
 struct DirectoryMutationLock {
@@ -239,14 +242,19 @@ impl Directory {
             root: canonical_root,
             p: canonical_path,
             ttl,
-            owned_files: Arc::new(Mutex::new(HashSet::new())),
+            owned_files: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// touch the files we own so they don't get deleted by a different FileStore
     fn keep_alive(&self) {
         let owned_files = self.owned_files.lock().clone();
-        for path in owned_files {
+        for (path, written) in owned_files {
+            if !still_ours(&path, &written) {
+                // Taken over (or removed): stop refreshing it.
+                self.owned_files.lock().remove(&path);
+                continue;
+            }
             let file = match OpenOptions::new().write(true).open(&path) {
                 Ok(f) => f,
                 Err(err) => {
@@ -316,7 +324,10 @@ impl Directory {
             .lock_mutations_blocking()
             .map_err(anyhow::Error::from)?;
         let mut errs = Vec::new();
-        for p in self.owned_files.lock().drain() {
+        for (p, written) in self.owned_files.lock().drain() {
+            if !still_ours(&p, &written) {
+                continue;
+            }
             if let Err(err) = fs::remove_file(&p) {
                 errs.push(format!("{}: {err}", p.display()));
             }
@@ -401,7 +412,9 @@ impl Bucket for Directory {
                             "Failed to remove FileStore temp file after create-if-absent publish"
                         );
                     }
-                    self.owned_files.lock().insert(full_path.clone());
+                    self.owned_files
+                        .lock()
+                        .insert(full_path.clone(), value.clone());
                     return Ok(StoreOutcome::Created(0));
                 }
                 Err(err) if err.kind() == ErrorKind::AlreadyExists => {
@@ -432,7 +445,7 @@ impl Bucket for Directory {
             .with_context(|| format!("renaming {} to {}", temp_path.display(), str_path))
             .map_err(a_to_fs_err)?;
 
-        self.owned_files.lock().insert(full_path.clone());
+        self.owned_files.lock().insert(full_path.clone(), value);
         Ok(StoreOutcome::Created(revision))
     }
 
@@ -469,7 +482,7 @@ impl Bucket for Directory {
             ))));
         }
 
-        self.owned_files.lock().insert(full_path);
+        self.owned_files.lock().insert(full_path, value);
         Ok(StoreOutcome::Created(1))
     }
 
@@ -498,7 +511,14 @@ impl Bucket for Directory {
             return Err(StoreError::MissingKey(str_path));
         }
 
-        self.owned_files.lock().remove(&full_path);
+        if let Some(written) = self.owned_files.lock().remove(&full_path)
+            && !still_ours(&full_path, &written)
+        {
+            // Our record was taken over by a failover successor; deleting the
+            // key now would unregister the successor.
+            tracing::debug!(path = %str_path, "Not deleting a key another writer took over");
+            return Ok(());
+        }
 
         fs::remove_file(&full_path)
             .context(str_path)
@@ -665,6 +685,11 @@ impl Bucket for Directory {
         }
         Ok(out)
     }
+}
+
+/// Whether `path` still holds exactly the bytes this process wrote.
+fn still_ours(path: &Path, written: &[u8]) -> bool {
+    fs::read(path).is_ok_and(|current| current == written)
 }
 
 fn write_temp_file_at(temp_path: &Path, value: &[u8]) -> Result<bool, StoreError> {
