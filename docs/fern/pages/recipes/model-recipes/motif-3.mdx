@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-This experimental recipe serves [Motif-Technologies/Motif-3-NVFP4](https://huggingface.co/Motif-Technologies/Motif-3-NVFP4) on NVIDIA B200 GPUs with vLLM tensor parallelism, expert parallelism, Dynamo MTP2 speculative decoding, and a 262K-token context. The aggregated target uses two GPUs. Experimental [disaggregated variants](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/disagg-b200-chat/README.md) use one or two TP2 prefill workers and one TP2 decode worker, for four or six GPUs, with NIXL KV transfer and the same Motif runtime and model settings. Disaggregated performance validation is in progress.
+This experimental recipe serves [Motif-Technologies/Motif-3-NVFP4](https://huggingface.co/Motif-Technologies/Motif-3-NVFP4) on NVIDIA B200 GPUs with vLLM tensor parallelism, expert parallelism, Dynamo MTP2 speculative decoding, and a 262K-token context. The aggregated target uses two GPUs. Experimental [disaggregated variants](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/disagg-b200-chat/README.md) use one or two TP2 prefill workers and one TP2 decode worker, for four or six GPUs, with NIXL KV transfer and the same Motif runtime and model settings. A 2P1D variant adds KV-aware routing with worker KV-cache events; round-robin variants remain available for comparison. Disaggregated performance validation is in progress.
 
 <div className="dynamo-target-picker static">
 <p className="dynamo-target-picker-title">Deployment target</p>

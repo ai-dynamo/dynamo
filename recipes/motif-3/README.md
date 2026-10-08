@@ -10,7 +10,9 @@ See the [Motif-3 NVFP4 recipe documentation](https://github.com/ai-dynamo/dynamo
 Experimental [disaggregated chat variants](vllm/disagg-b200-chat/README.md)
 provide **1P1D (4 GPUs)** and **2P1D (6 GPUs)**, with TP2 and expert
 parallelism on every worker. They preserve the aggregated runtime and model
-settings and add NIXL KV transfer. The disaggregated benchmark matrix uses the
+settings and add NIXL KV transfer. The **2P1D KV-aware** variant publishes
+worker KV-cache events and routes by cache overlap and active load.
+Round-robin variants remain available for comparison. The benchmark matrix uses the
 chat 15% trace at concurrency 8, 16, and 32.
 
 ## Nscale B200

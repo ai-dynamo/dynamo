@@ -6,7 +6,7 @@
 #   scripts/kustomize-matrix.py unfold recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
 #   scripts/kustomize-matrix.py render recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
 # Inspect only this Kustomize overlay (from the repository root):
-#   kustomize build recipes/motif-3/vllm/disagg-b200-chat/kustomize/overlays/generic-2p1d
+#   kustomize build recipes/motif-3/vllm/disagg-b200-chat/kustomize/overlays/generic-2p1d-kv
 # You may edit a copy before applying it.
 
 #
@@ -26,6 +26,19 @@
 # NIXL transfers the real KV cache between roles.
 # Avoid mixing HPC-X UCX with the UCX version bundled by NIXL.
 # TP2 stays within a node; cross-node KV transfer uses NIXL independently.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -34,7 +47,7 @@ metadata:
     app.kubernetes.io/part-of: dynamo
   name: motif3-disagg-b200-chat-config
 data:
-  kv-events-config: '{"enable_kv_cache_events":false}'
+  kv-events-config: '{"enable_kv_cache_events":true,"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}'
   speculative-config: '{"method":"mtp","num_speculative_tokens":2}'
   speculative-config-synthetic: '{"method":"mtp","num_speculative_tokens":2,"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.13}'
 ---
@@ -60,6 +73,56 @@ metadata:
 spec:
   backendFramework: vllm
   components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.frontend
+          - --dyn-chat-processor
+          - vllm
+          - --model-name
+          - Motif-Technologies/Motif-3-NVFP4
+          - --trust-remote-code
+          - --http-port
+          - "8000"
+          - --tool-call-parser
+          - motif
+          - --reasoning-parser
+          - motif
+          - --enable-auto-tool-choice
+          command:
+          - python3
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          - name: DYN_ROUTER_USE_KV_EVENTS
+            value: "true"
+          - name: DYN_EVENT_PLANE
+            value: zmq
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: PYTHONHASHSEED
+            value: "0"
+          - name: HF_HOME
+            value: /shared-model-cache
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources: {}
+          volumeMounts:
+          - mountPath: /shared-model-cache
+            name: shared-model-cache
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+    replicas: 1
+    runtimeVersionOverride: 1.5.0
+    type: frontend
   - name: PrefillWorker
     podTemplate:
       spec:
@@ -90,6 +153,8 @@ spec:
           - python3
           - /motif-runtime/launch_motif_disagg.py
           env:
+          - name: DYN_EVENT_PLANE
+            value: zmq
           - name: PYTHONHASHSEED
             value: "0"
           - name: HF_HOME
@@ -188,6 +253,8 @@ spec:
           - python3
           - /motif-runtime/launch_motif_disagg.py
           env:
+          - name: DYN_EVENT_PLANE
+            value: zmq
           - name: PYTHONHASHSEED
             value: "0"
           - name: HF_HOME
@@ -254,52 +321,6 @@ spec:
     runtimeVersionOverride: 1.5.0
     sharedMemorySize: 64Gi
     type: worker
-  - name: Frontend
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - -m
-          - dynamo.frontend
-          - --dyn-chat-processor
-          - vllm
-          - --model-name
-          - Motif-Technologies/Motif-3-NVFP4
-          - --trust-remote-code
-          - --http-port
-          - "8000"
-          - --tool-call-parser
-          - motif
-          - --reasoning-parser
-          - motif
-          - --enable-auto-tool-choice
-          command:
-          - python3
-          env:
-          - name: HF_HUB_OFFLINE
-            value: "1"
-          - name: TRANSFORMERS_OFFLINE
-            value: "1"
-          - name: PYTHONHASHSEED
-            value: "0"
-          - name: HF_HOME
-            value: /shared-model-cache
-          - name: DYN_ROUTER_MODE
-            value: round-robin
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
-          imagePullPolicy: IfNotPresent
-          name: main
-          resources: {}
-          volumeMounts:
-          - mountPath: /shared-model-cache
-            name: shared-model-cache
-        volumes:
-        - name: shared-model-cache
-          persistentVolumeClaim:
-            claimName: shared-model-cache
-    replicas: 1
-    runtimeVersionOverride: 1.5.0
-    type: frontend
 ---
 apiVersion: v1
 kind: ConfigMap

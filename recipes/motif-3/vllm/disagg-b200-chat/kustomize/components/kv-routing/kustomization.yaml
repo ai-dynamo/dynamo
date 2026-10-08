@@ -13,23 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-source: kustomize/base
-nameTemplate: ${target}-${layout}
-matrix:
-  target:
-  - name: generic
-    components: []
-  - name: nscale
-    components:
-    - kustomize/components/nscale
-  layout:
-  - name: 1p1d
-    components:
-    - kustomize/components/1p1d
-  - name: 2p1d
-    components:
-    - kustomize/components/2p1d
-  - name: 2p1d-kv
-    components:
-    - kustomize/components/2p1d
-    - kustomize/components/kv-routing
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+- path: patch.yaml

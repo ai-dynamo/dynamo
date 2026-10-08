@@ -34,18 +34,9 @@ metadata:
     app.kubernetes.io/part-of: dynamo
   name: motif3-disagg-b200-chat-config
 data:
-  speculative-config: |-
-    {
-      "method": "mtp",
-      "num_speculative_tokens": 2
-    }
-  speculative-config-synthetic: |-
-    {
-      "method": "mtp",
-      "num_speculative_tokens": 2,
-      "rejection_sample_method": "synthetic",
-      "synthetic_acceptance_length": 2.13
-    }
+  kv-events-config: '{"enable_kv_cache_events":false}'
+  speculative-config: '{"method":"mtp","num_speculative_tokens":2}'
+  speculative-config-synthetic: '{"method":"mtp","num_speculative_tokens":2,"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.13}'
 ---
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -107,6 +98,7 @@ spec:
           - --disaggregation-mode=prefill
           - --kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}}
           - --enable-prefix-caching
+          - --kv-events-config=$(KV_EVENTS_CONFIG)
           command:
           - python3
           - /motif-runtime/launch_motif_disagg.py
@@ -115,6 +107,8 @@ spec:
             value: rc_x,rc,cuda_copy,cuda_ipc
           - name: NIXL_LOG_LEVEL
             value: INFO
+          - name: PYTHONHASHSEED
+            value: "0"
           - name: HF_HOME
             value: /shared-model-cache
           - name: DYN_SELF_HOST_METADATA
@@ -131,6 +125,11 @@ spec:
             valueFrom:
               configMapKeyRef:
                 key: speculative-config
+                name: motif3-disagg-b200-chat-config
+          - name: KV_EVENTS_CONFIG
+            valueFrom:
+              configMapKeyRef:
+                key: kv-events-config
                 name: motif3-disagg-b200-chat-config
           - name: UCX_RCACHE_MAX_UNRELEASED
             value: "1024"
@@ -207,6 +206,7 @@ spec:
           - --disaggregation-mode=decode
           - --kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}}
           - --enable-prefix-caching
+          - --kv-events-config=$(KV_EVENTS_CONFIG)
           command:
           - python3
           - /motif-runtime/launch_motif_disagg.py
@@ -215,6 +215,8 @@ spec:
             value: rc_x,rc,cuda_copy,cuda_ipc
           - name: NIXL_LOG_LEVEL
             value: INFO
+          - name: PYTHONHASHSEED
+            value: "0"
           - name: HF_HOME
             value: /shared-model-cache
           - name: DYN_SELF_HOST_METADATA
@@ -231,6 +233,11 @@ spec:
             valueFrom:
               configMapKeyRef:
                 key: speculative-config
+                name: motif3-disagg-b200-chat-config
+          - name: KV_EVENTS_CONFIG
+            valueFrom:
+              configMapKeyRef:
+                key: kv-events-config
                 name: motif3-disagg-b200-chat-config
           - name: UCX_RCACHE_MAX_UNRELEASED
             value: "1024"
@@ -306,6 +313,8 @@ spec:
             value: "1"
           - name: TRANSFORMERS_OFFLINE
             value: "1"
+          - name: PYTHONHASHSEED
+            value: "0"
           - name: HF_HOME
             value: /shared-model-cache
           - name: DYN_ROUTER_MODE
