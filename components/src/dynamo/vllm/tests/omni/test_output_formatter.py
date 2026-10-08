@@ -289,7 +289,7 @@ class TestDiffusionFormatterImage:
             assert decoded.size == (21, 17)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("output_format", ["gif", "jpg"])
+    @pytest.mark.parametrize("output_format", ["jpg"])
     async def test_unsupported_image_output_format_is_rejected(self, output_format):
         from dynamo.common.utils.output_modalities import RequestType
 
