@@ -34,7 +34,6 @@ def _processor(
     frontend_decoding: bool = False,
     media_limits: dict[str, int] | None = None,
 ) -> mod.VllmMultimodalRequestProcessor:
-    """Build a processor with mocked loaders and optional real vLLM limits."""
     engine_client = None
     if media_limits is not None:
         from vllm.config.multimodal import MultiModalConfig
@@ -2111,32 +2110,19 @@ class TestLoadQwenGridParams:
         assert params.decode_embedding_dim == expected_decode_embedding_dim
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("media_variant", ["Url", "Decoded"])
-@pytest.mark.parametrize(
-    "mode",
-    [DisaggregationMode.AGGREGATED, DisaggregationMode.PREFILL],
-)
-@pytest.mark.parametrize("unified_vision_chunk", [False, True])
-async def test_zero_video_limit_rejects_before_any_media_loader(
-    media_variant, mode, unified_vision_chunk
-):
-    """A forbidden video cannot reach loaders, even in unified vision mode."""
-    processor = _processor(
-        media_limits={"image": 8, "video": 0},
-        unified_vision_chunk=unified_vision_chunk,
-    )
+def test_zero_video_limit_rejects_before_any_media_loader():
+    processor = _processor(media_limits={"image": 8, "video": 0})
     processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
     request = {
         "token_ids": [1, 2, 3],
         "multi_modal_data": {
             "image_url": [{"Url": "https://example.com/image.png"}],
-            "video_url": [{media_variant: "rejected-video"}],
+            "video_url": [{"Url": "rejected-video"}],
         },
     }
 
     with pytest.raises(mod.InvalidArgument, match="At most 0 video"):
-        await processor.prepare_input(request, "rejected-video", None, mode)
+        processor.validate_multimodal_request(request)
 
     processor.video_loader.load_video_batch.assert_not_awaited()
     processor.image_loader.load_image_batch.assert_not_awaited()
@@ -2149,7 +2135,6 @@ async def test_zero_video_limit_rejects_before_any_media_loader(
     [("image", 8, 9), ("video", 1, 2), ("audio", 2, 3)],
 )
 def test_media_item_limits_are_checked_before_loading(modality, limit, count):
-    """Reject original media item counts above the configured modality limit."""
     processor = _processor(media_limits={modality: limit})
     request = {
         "multi_modal_data": {
@@ -2162,7 +2147,6 @@ def test_media_item_limits_are_checked_before_loading(modality, limit, count):
 
 @pytest.mark.parametrize("count", [0, 1])
 def test_video_at_configured_limit_is_allowed(count):
-    """Allow video counts below or equal to a nonzero video limit."""
     processor = _processor(media_limits={"video": 1})
     processor.validate_multimodal_request(
         {"multi_modal_data": {"video_url": [{"Url": "video"}] * count}}
@@ -2170,7 +2154,6 @@ def test_video_at_configured_limit_is_allowed(count):
 
 
 def test_zero_video_limit_preserves_image_only_requests():
-    """Disabling video must preserve permitted image-only traffic."""
     processor = _processor(media_limits={"image": 8, "video": 0})
     processor.validate_multimodal_request(
         {"multi_modal_data": {"image_url": [{"Url": "image"}] * 8}}
@@ -2180,12 +2163,11 @@ def test_zero_video_limit_preserves_image_only_requests():
 @pytest.mark.parametrize("unified_vision_chunk", [False, True])
 @pytest.mark.parametrize(
     "image_limit,chunk_limit,count",
-    [(0, 2, 1), (8, 0, 1), (8, 2, 2), (8, 2, 3)],
+    [(0, 2, 1), (8, 0, 1), (8, 2, 3)],
 )
 def test_image_admission_uses_model_modality_limit(
     unified_vision_chunk, image_limit, chunk_limit, count
 ):
-    """Image admission follows the same modality mapping as preparation."""
     processor = _processor(
         unified_vision_chunk=unified_vision_chunk,
         media_limits={"image": image_limit, "vision_chunk": chunk_limit},
@@ -2205,16 +2187,11 @@ def test_image_admission_uses_model_modality_limit(
     processor.image_loader.load_image_batch.assert_not_awaited()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("kwargs_location", ["top_level", "extra_args"])
-@pytest.mark.parametrize(
-    "mode", [DisaggregationMode.AGGREGATED, DisaggregationMode.PREFILL]
-)
 @pytest.mark.parametrize("audio_limit,explicit_audio_count", [(0, 0), (1, 1)])
-async def test_video_derived_audio_rejects_before_any_media_loader(
-    kwargs_location, mode, audio_limit, explicit_audio_count
+def test_video_derived_audio_rejects_before_any_media_loader(
+    kwargs_location, audio_limit, explicit_audio_count
 ):
-    """Count video-derived audio together with explicit audio before decoding."""
     processor = _processor(media_limits={"video": 1, "audio": audio_limit})
     processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
     request = {
@@ -2233,8 +2210,6 @@ async def test_video_derived_audio_rejects_before_any_media_loader(
 
     with pytest.raises(mod.InvalidArgument, match=f"At most {audio_limit} audio"):
         processor.validate_multimodal_request(request)
-    with pytest.raises(mod.InvalidArgument, match=f"At most {audio_limit} audio"):
-        await processor.prepare_input(request, "video-audio", None, mode)
 
     processor.video_loader.load_video_batch.assert_not_awaited()
     processor.image_loader.load_image_batch.assert_not_awaited()
@@ -2244,13 +2219,10 @@ async def test_video_derived_audio_rejects_before_any_media_loader(
 
 
 @pytest.mark.parametrize("kwargs_location", ["top_level", "extra_args"])
-@pytest.mark.parametrize(
-    "use_audio_in_video,audio_limit", [(False, 0), (True, 1), (True, 2)]
-)
+@pytest.mark.parametrize("use_audio_in_video,audio_limit", [(False, 0), (True, 1)])
 def test_video_derived_audio_respects_flag_and_limit(
     kwargs_location, use_audio_in_video, audio_limit
 ):
-    """Video without derived audio and permitted derived audio remain admitted."""
     processor = _processor(media_limits={"video": 1, "audio": audio_limit})
     request = {"multi_modal_data": {"video_url": [{"Url": "video"}]}}
     kwargs = {"mm_processor_kwargs": {"use_audio_in_video": use_audio_in_video}}

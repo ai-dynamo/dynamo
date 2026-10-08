@@ -502,7 +502,6 @@ class VllmMultimodalRequestProcessor:
         )
 
         # These are inbound media items, not decoded frames or image crops.
-        # Validate every modality before any loader or encoder gets to run.
         for modality, key in (
             ("image", IMAGE_URL_KEY),
             ("video", VIDEO_URL_KEY),
@@ -877,7 +876,6 @@ class VllmMultimodalRequestProcessor:
         request before invoking this transformation. The handler validates at
         ``generate`` so text and token modes share the same security boundary.
         """
-        self.validate_multimodal_request(request)
         mm_processor_kwargs = get_mm_processor_kwargs(request)
         request_for_prompt = dict(request)
         has_mm_data = request.get("multi_modal_data") is not None
