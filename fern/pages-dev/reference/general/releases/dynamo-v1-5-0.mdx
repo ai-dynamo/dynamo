@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Dynamo v1.5.0
-subtitle: Release notes for Dynamo v1.5.0 (GA Sep 18, 2026)
+subtitle: Release notes for Dynamo v1.5.0 (GA Sep 18, 2026), including patch release v1.5.1
 ---
 
 import { ReferenceStyles } from "@/components/ReferenceStyles";
@@ -35,7 +35,7 @@ Breaking changes and deprecations for this release are tracked on the [Deprecati
 
 Pull, deploy, and install with every artifact pinned to the v1.5.0 release set.
 
-<PinnedEnvironment />
+<PinnedEnvironment version="v1.5.0" />
 
 ## Highlights
 
@@ -605,3 +605,57 @@ If you would like to get involved, please see our [Contribution Guide](https://d
 If you would like to get involved, please see our [Contribution Guide](../../../community/contributing/overview.md).
 
 </Accordion>
+
+## Patch releases
+
+<a id="v151"></a>
+
+### v1.5.1 - Oct 6, 2026
+
+#### Summary
+
+Dynamo v1.5.1 is a patch release on top of v1.5.0. It fixes **Dynamo Router overload recovery**, **`min_tokens` on tokenizer-free SGLang decode workers**, **Qwen3-VL video routing across mixed workers**, and **reinforcement learning worker discovery on Kubernetes**. It bounds **client-supplied multimodal input** (inline `data:` URL size, remote media downloads, image dimensions, and base64 audio) across the SGLang, TensorRT-LLM, vLLM, and vLLM-Omni paths, and moves all media fetching onto a single aiohttp client. It also upgrades the frontend runtime libraries to fix **Anthropic Messages API requests from Claude Code** against strict chat templates, moves ModelExpress to v0.6.0, pins PyNvVideoCodec at v2.2.3, and moves the in-tree FFmpeg build to v9.0.1. Two changes need action on upgrade; see Breaking Changes.
+
+**Base Branch**: `release/1.5.1`
+
+#### Breaking Changes
+
+- **Egress Proxy Opt-In:** Workers that fetch request media through an ambient HTTP proxy must now set `DYN_MM_TRUST_EGRESS_PROXY=1` ([#14474](https://github.com/ai-dynamo/dynamo/pull/14474)). Without it, a policy-checked media fetch that would route through a proxy is refused, because the proxy resolves the destination outside Dynamo's address check. Fetches that go direct, including hosts listed in `NO_PROXY`, are unaffected, and the check does not run under `DYN_MM_ALLOW_INTERNAL=1`.
+- **SGLang Diffusion Local References:** Local image and video files passed as `input_reference` to SGLang image-diffusion and video-generation workers now require `DYN_MM_LOCAL_PATH` to name the allowed directory ([#14435](https://github.com/ai-dynamo/dynamo/pull/14435)). Previously any local path was accepted.
+
+#### Bug Fixes
+
+- **Router Overload Hint Expiry:** Fixed a Dynamo Router condition where a worker that rejected requests for lack of capacity stayed marked overloaded after the pressure ended, so clients kept receiving HTTP 529 from an idle worker ([#14210](https://github.com/ai-dynamo/dynamo/pull/14210)). Overload hints raised on the request path now expire after one second, while overload state reported by the worker monitor stays independent, so a drained worker returns to rotation without a restart.
+- **SGLang Tokenizer-Free Min Tokens:** Fixed requests with a positive `min_tokens` failing on SGLang decode workers started with `skip_tokenizer_init`, where SGLang rejects the `min_new_tokens` field ([#14276](https://github.com/ai-dynamo/dynamo/pull/14276)). Dynamo now enforces the minimum itself on that path, and cancellation or early stream closure aborts every unfinished choice in multi-choice (`n`) requests. Requests without `min_tokens` and workers that keep a tokenizer are unchanged.
+- **Split Stop-Sequence Leak:** Fixed hidden stop sequences that arrive split across several decode steps leaking their leading fragments into client output ([#14378](https://github.com/ai-dynamo/dynamo/pull/14378)). The decoder now holds back text that could still complete a stop sequence and releases it only once it cannot match, or when the engine finishes on its own, for example at `max_tokens`.
+- **Qwen3-VL Video Contract Agreement:** Fixed a Qwen3-VL deployment serving video with a prompt-expansion contract that only some of its workers publish ([#14624](https://github.com/ai-dynamo/dynamo/pull/14624)). Replicas with different installed packages or engine flags can publish different video contracts; when the workers in a group disagree, Dynamo now disables exact video routing for that group while text serving continues, and keeps the existing group serving until a rebuilt one commits.
+- **Sidecar Worker Namespace Suffix:** Fixed vLLM sidecar and mocker workers registering under the base namespace while reinforcement learning discovery on Kubernetes searched the suffixed one, so RL workloads could not find their workers ([#14955](https://github.com/ai-dynamo/dynamo/pull/14955)). Worker registration now applies `DYN_NAMESPACE_WORKER_SUFFIX` at most once, which keeps operator-upgraded workloads whose `DYN_NAMESPACE` already carries the suffix working, and an explicit command-line namespace still takes precedence.
+- **GPU Memory Service Admission Timeout:** Fixed the vLLM GPU Memory Service worker ignoring a configured `gms_ro_connect_timeout_ms` during its initial weights load, which could leave startup waiting indefinitely behind lock contention ([#14877](https://github.com/ai-dynamo/dynamo/pull/14877)). Deployments that do not set the timeout keep the existing unbounded wait.
+- **Inline Data URL Size Cap:** Added a size cap on inline `data:` media URLs, enforced by both the frontend and the workers ([#14437](https://github.com/ai-dynamo/dynamo/pull/14437)). A `data:` URL larger than `DYN_MM_MAX_DATA_URL_MB` (default 16 MiB) now returns HTTP 400 with a message naming the variable, where before any size was accepted. To raise the limit, set the variable on both the frontend and the workers.
+- **SGLang Diffusion Input References:** Fixed SGLang image-diffusion and video-generation workers handing a client-supplied `input_reference` to the generator after only a non-empty check ([#14435](https://github.com/ai-dynamo/dynamo/pull/14435)). Dynamo now validates the reference and downloads a remote one to a temporary local file first, capped by `DYN_MM_MAX_FILE_SIZE_MB` (default 64 MiB), which matches the vLLM-Omni and TensorRT-LLM workers.
+- **vLLM-Omni Input Validation:** Fixed non-numeric or out-of-range image `width` and `height` values and malformed base64 audio crashing the vLLM-Omni worker or ending a realtime session ([#14436](https://github.com/ai-dynamo/dynamo/pull/14436)). Image dimensions outside 1 to 4096 are now rejected with a clear error, an unusable realtime audio chunk emits an `invalid_audio` error event instead of closing the connection, and percent-encoded `data:` reference audio for text-to-speech now decodes correctly instead of producing corrupted audio.
+- **Media Fetch Address Pinning:** Fixed media fetches resolving a hostname once to validate it and again to connect, so a server that answered differently the second time was checked on one address and dialed on another ([#14474](https://github.com/ai-dynamo/dynamo/pull/14474)). The Python workers and the Rust frontend now connect only to the addresses that passed validation, while TLS still verifies the original hostname.
+- **Single aiohttp HTTP Backend:** Removed the opt-in httpx backend from Dynamo's HTTP client, leaving aiohttp as the only backend ([#14563](https://github.com/ai-dynamo/dynamo/pull/14563)). Setting `DYN_HTTP_BACKEND=httpx` now logs a warning and uses aiohttp. The TensorRT-LLM multimodal processor's remote `.safetensors` download now streams asynchronously, so it no longer blocks the event loop for up to the 300-second download timeout.
+
+#### Dependency Changes
+
+- **Frontend Runtime Libraries:** Upgraded `dynamo-renderer` to v5.1.2 and `dynamo-tokenizers` to v1.8.1, fixing Anthropic Messages API failures when Claude Code sends a non-leading system message to a model whose chat template requires system content first ([#14595](https://github.com/ai-dynamo/dynamo/pull/14595)).
+- **DeepSeek V4 Reasoning Effort:** The renderer now defaults an omitted or invalid reasoning effort to `high`, treats `none` as thinking disabled, and lets a top-level `reasoning_effort` override the template argument ([#14595](https://github.com/ai-dynamo/dynamo/pull/14595)).
+- **OpenAI Response Fields:** Upgraded `dynamo-protocols` to v5.4.1, so `/v1/chat/completions` responses omit absent optional fields such as `usage` instead of returning `null` ([#14154](https://github.com/ai-dynamo/dynamo/pull/14154)). Client code that indexes raw response dictionaries should check for those keys.
+- **ModelExpress:** Upgraded ModelExpress from v0.5.0 to v0.6.0 in the SGLang and vLLM runtime images ([#15026](https://github.com/ai-dynamo/dynamo/pull/15026)).
+- **PyNvVideoCodec and FFmpeg:** Pinned PyNvVideoCodec at v2.2.3 in the runtime images and moved the in-tree FFmpeg build to v9.0.1 ([#14925](https://github.com/ai-dynamo/dynamo/pull/14925)).
+- **Frontend aiohttp:** Raised aiohttp in the Frontend image to v3.14.4, matching the other images ([#15676](https://github.com/ai-dynamo/dynamo/pull/15676)).
+
+#### Documentation
+
+- **Migration After Shutdown Grace:** Clarified across the fault-tolerance guides that requests can finish during the shutdown grace period, that unfinished requests are cancelled when it expires, and that they can migrate to another worker when migration is enabled and the request allows it, with configuration guidance for rolling upgrades and scale-downs ([#14872](https://github.com/ai-dynamo/dynamo/pull/14872)).
+- **Stale Documentation Links:** Repaired documentation links that pointed at moved pages on `main` and returned 404 ([#15308](https://github.com/ai-dynamo/dynamo/pull/15308)).
+- **Agent Skills Tab:** Moved Agent Skills from a single Reference page into its own documentation tab, with an overview and one page per skill category, and listed all 27 skills ([#14146](https://github.com/ai-dynamo/dynamo/pull/14146)). The old Reference URL redirects to the new overview.
+
+#### Known Issues
+
+- **SGLang Sidecar Inference 500 Errors:** Every inference request sent to the SGLang sidecar still fails with HTTP 500 and the error `'GenerateReqInput' object has no attribute 'batch_size'`. The cause is a protocol mismatch with the bundled SGLang version that is corrected in upstream SGLang v0.5.19. No workaround is available yet; the fix is targeted for v1.6.0.
+- **Video Decode Worker Crash:** Some H.264 videos sent as multimodal input crash the worker serving the request when PyNvVideoCodec 2.2.3 decodes the final frame, and later requests to that worker fail until it restarts. The issue also affects v1.5.0 on SGLang, TensorRT-LLM, and vLLM. Image and audio inputs are not affected. No workaround is available yet; the fix is targeted for v1.6.0.
+- **Carried Forward from v1.5.0:** The other [v1.5.0 known issues](known-issues.mdx#v150) still apply.
+
+Backend runtime versions (SGLang v0.5.18, TensorRT-LLM v1.3.0rc25, vLLM v0.28.0), NIXL refs and UCX v1.21.0 are unchanged from v1.5.0. CUDA variants are 13.0 for SGLang, 13.1 for TensorRT-LLM, and 13.0 for vLLM.
