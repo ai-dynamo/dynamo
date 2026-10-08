@@ -60,12 +60,6 @@ spec:
       resources:
         requests:
           gpu: "4"
-          # Weights are on the shared PVC; reserve local space for JIT/temp files.
-          custom:
-            ephemeral-storage: 20Gi
-        limits:
-          custom:
-            ephemeral-storage: 64Gi
       sharedMemory:
         size: 179Gi
       extraPodMetadata: *podMetadata
@@ -91,11 +85,6 @@ spec:
       resources:
         requests:
           gpu: "4"
-          custom:
-            ephemeral-storage: 20Gi
-        limits:
-          custom:
-            ephemeral-storage: 64Gi
       sharedMemory:
         size: 179Gi
       extraPodMetadata: *podMetadata
