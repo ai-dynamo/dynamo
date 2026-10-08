@@ -166,6 +166,15 @@ This builds and pushes `operator`, `mpsd`, `fractiond`, and `metricsd` as `$REGI
 
 ### KAI-Scheduler
 
+`make build` uses your current buildx builder. Check which one that is before you build:
+
+```bash
+docker buildx ls    # the current builder is marked with *; note its DRIVER
+```
+
+> [!NOTE]
+> With the default `docker` driver, images built without `--push` stay in your local Docker daemon. With a `docker-container` builder they stay only in the build cache: `make` still exits 0 and prints `No output specified with docker-container driver`, but no image appears in `docker images`. A registry on `localhost` is also unreachable from inside the builder container, so the push fails with `connection refused`. In either case, prefix the command with `BUILDX_BUILDER=<builder>`, naming a builder that `docker buildx ls` lists with the `docker` driver, usually `default`.
+
 ```bash
 cd KAI-Scheduler
 make build \
@@ -175,9 +184,17 @@ make build \
 cd ..
 ```
 
+To build without pushing, drop `DOCKER_BUILDX_ADDITIONAL_ARGS=--push` and select a `docker` driver builder so the images land in your local Docker daemon:
+
+```bash
+cd KAI-Scheduler
+BUILDX_BUILDER=default make build \
+  DOCKER_REPO_BASE="$REGISTRY/kai-scheduler" \
+  DOCKER_TAG="$TAG"
+cd ..
+```
+
 > [!NOTE]
-> `make build` uses your current buildx builder; check it with `docker buildx ls`. With the default `docker` driver, images built without `--push` stay in your local Docker daemon. With a `docker-container` builder they stay only in the build cache, and a registry on `localhost` is unreachable from inside the builder container, so the push fails with `connection refused`. In that case, prefix the command with `BUILDX_BUILDER=<builder>`, naming a builder that `docker buildx ls` lists with the `docker` driver, usually `default`.
->
 > In this Makefile `make push` is only an alias for `make build`: it has no recipe of its own and does not push. Pushing happens because `DOCKER_BUILDX_ADDITIONAL_ARGS=--push` is passed to `docker buildx build`. Without it, `make build push` leaves the images in your local Docker daemon only. The images match your host architecture. Set `DOCKER_BUILD_PLATFORM=linux/amd64` when you build on an Arm machine for x86 nodes.
 
 The build compiles 15 services in sequence, each for both architectures, so the first run takes a while. Go caches are kept in `~/.cache/go-build-docker-gocache` and `~/.cache/go-build-docker-gopath`, and the build leaves a `builder:1.26.3-bookworm` image in your local Docker daemon. Remove them when you no longer need fast rebuilds.
