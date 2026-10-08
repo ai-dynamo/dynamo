@@ -1979,7 +1979,12 @@ class TestRoutedEnginePath:
         )
         if backend_usage:
             assert data[-1]["usage"]["prompt_tokens_details"] == {"cached_tokens": 64}
-        metrics = [json.loads(chunk["comment"][0]) for chunk in chunks]
+        metrics = [
+            chunk["data"]["llm_metrics"]
+            if "data" in chunk
+            else json.loads(chunk["comment"][0])
+            for chunk in chunks
+        ]
         assert metrics[-1]["output_tokens"] == expected_tokens
         assert sum(metric["chunk_tokens"] for metric in metrics) == expected_tokens
         assert set(processor.output_processor.request_states) == (
