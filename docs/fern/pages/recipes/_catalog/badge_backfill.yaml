@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Recipes that predate required badges. validate.py lets a recipe listed here
+# leave targets without a badge; every other recipe needs one on each target.
+# Remove an id once all of its targets carry a badge (validate.py enforces it).
+# Never add an id: new recipes must ship with badges. Delete this file once the
+# list is empty.
+pending:
+- ax-k2
+- deepseek-v4-1-flash
+- deepseek-v4-flash
+- deepseek-v4-pro
+- deepseek-v4-pro-0813
+- gemma4-31b
+- glm-5-2
+- glm-5-3-flash
+- glm-5-nvfp4
+- gpt-oss-120b
+- inkling
+- k-exaone-2
+- kimi-k2-5
+- kimi-k2-6
+- kimi-k3
+- motif-3
+- nemotron-3-5-lightning
+- nemotron-3-super
+- nemotron-3-ultra
+- qwen-3-8-2-4t-a95b-fp8
+- qwen-3-8-flash-next
+- qwen3-235b-a22b-fp8
+- qwen3-32b
+- qwen3-32b-fp8
+- qwen3-5-122b
+- qwen3-6-35b
+- qwen3-6-35b-a3b
+- qwen3-vl-30b

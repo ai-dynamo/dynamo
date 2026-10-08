@@ -106,7 +106,25 @@ parser and falls back to a required-keys check. It prints which mode it ran in.
 For full schema validation, `pip install pyyaml jsonschema`.
 
 The pre-merge recipe catalog tests run this validator, so catalog changes are
-gated on its path, attribution, and referential-integrity checks.
+gated on its path, attribution, referential-integrity, and badge checks.
+
+### Lifecycle badges
+
+Every target needs a `badge`, and the validator rejects a badge whose evidence
+is missing:
+
+| `badge` | Use it when | Evidence required on the target |
+| --- | --- | --- |
+| `nvidia-validated` | NVIDIA deployed the target end to end and the smoke test returned a completion | None |
+| `nvidia-optimized` | NVIDIA perf-tuned and benchmarked the target | `benchmark.asset` that exists, and `expected_performance.available: true` |
+| `nvidia-certified` | NIM Factory certified the target | Everything `nvidia-optimized` needs, plus a `certification` record (`source: nim-factory`, `ref`, `image`, `date`) |
+| `community` | The recipe is contributed and maintained outside NVIDIA | A named recipe `maintainer`; the badge must cover every target of the recipe |
+
+Contributors outside NVIDIA use `community`. The NVIDIA badges are set by NVIDIA.
+
+`badge_backfill.yaml` lists the recipes that predate required badges; they may
+leave targets without one until they are backfilled. The list only shrinks:
+remove an id once all of its targets carry a badge, and never add one.
 
 ## Page blueprint
 
