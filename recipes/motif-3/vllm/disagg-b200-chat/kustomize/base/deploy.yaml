@@ -30,7 +30,7 @@ data:
   speculative-config-synthetic: |-
     {"method":"mtp","num_speculative_tokens":2,"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.13}
   kv-events-config: |-
-    {"enable_kv_cache_events":false}
+    {"enable_kv_cache_events":true,"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -49,7 +49,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+          image: nvcr.io/nvstaging/nim/motif-3:dynamo-db6a3705-disagg-41e2d0b33@sha256:dca0373c70ddd7ec613f6b9cf5dad67411a61e239739608c600c8f6deca54501
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -74,12 +74,16 @@ spec:
             value: '1'
           - name: TRANSFORMERS_OFFLINE
             value: '1'
+          - name: DYN_EVENT_PLANE
+            value: zmq
           - name: PYTHONHASHSEED
             value: '0'
           - name: HF_HOME
             value: /shared-model-cache
           - name: DYN_ROUTER_MODE
-            value: round-robin
+            value: kv
+          - name: DYN_ROUTER_USE_KV_EVENTS
+            value: 'true'
           volumeMounts:
           - name: shared-model-cache
             mountPath: /shared-model-cache
@@ -89,7 +93,7 @@ spec:
             claimName: shared-model-cache
   - name: PrefillWorker
     type: worker
-    replicas: 1
+    replicas: 2
     runtimeVersionOverride: 1.5.0
     sharedMemorySize: 64Gi
     podTemplate:
@@ -101,12 +105,13 @@ spec:
           effect: NoSchedule
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+          image: nvcr.io/nvstaging/nim/motif-3:dynamo-db6a3705-disagg-41e2d0b33@sha256:dca0373c70ddd7ec613f6b9cf5dad67411a61e239739608c600c8f6deca54501
           imagePullPolicy: IfNotPresent
           command:
           - python3
-          - /motif-runtime/launch_motif_disagg.py
           args:
+          - -m
+          - dynamo.vllm
           - --model=Motif-Technologies/Motif-3-NVFP4
           - --served-model-name=Motif-Technologies/Motif-3-NVFP4
           - --trust-remote-code
@@ -129,6 +134,8 @@ spec:
           - --enable-prefix-caching
           - --kv-events-config=$(KV_EVENTS_CONFIG)
           env:
+          - name: DYN_EVENT_PLANE
+            value: zmq
           - name: PYTHONHASHSEED
             value: '0'
           - name: HF_HOME
@@ -175,16 +182,10 @@ spec:
           volumeMounts:
           - name: shared-model-cache
             mountPath: /shared-model-cache
-          - name: motif-runtime-patch
-            mountPath: /motif-runtime
-            readOnly: true
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-        - name: motif-runtime-patch
-          configMap:
-            name: motif3-disagg-runtime-patch
   - name: DecodeWorker
     type: worker
     replicas: 1
@@ -199,12 +200,13 @@ spec:
           effect: NoSchedule
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+          image: nvcr.io/nvstaging/nim/motif-3:dynamo-db6a3705-disagg-41e2d0b33@sha256:dca0373c70ddd7ec613f6b9cf5dad67411a61e239739608c600c8f6deca54501
           imagePullPolicy: IfNotPresent
           command:
           - python3
-          - /motif-runtime/launch_motif_disagg.py
           args:
+          - -m
+          - dynamo.vllm
           - --model=Motif-Technologies/Motif-3-NVFP4
           - --served-model-name=Motif-Technologies/Motif-3-NVFP4
           - --trust-remote-code
@@ -227,6 +229,8 @@ spec:
           - --enable-prefix-caching
           - --kv-events-config=$(KV_EVENTS_CONFIG)
           env:
+          - name: DYN_EVENT_PLANE
+            value: zmq
           - name: PYTHONHASHSEED
             value: '0'
           - name: HF_HOME
@@ -271,13 +275,7 @@ spec:
           volumeMounts:
           - name: shared-model-cache
             mountPath: /shared-model-cache
-          - name: motif-runtime-patch
-            mountPath: /motif-runtime
-            readOnly: true
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-        - name: motif-runtime-patch
-          configMap:
-            name: motif3-disagg-runtime-patch

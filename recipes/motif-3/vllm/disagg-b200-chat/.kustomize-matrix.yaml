@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 source: kustomize/base
-nameTemplate: ${target}-${layout}
+nameTemplate: ${target}-2p1d-kv
 matrix:
   target:
   - name: generic
@@ -22,14 +22,3 @@ matrix:
   - name: nscale
     components:
     - kustomize/components/nscale
-  layout:
-  - name: 1p1d
-    components:
-    - kustomize/components/1p1d
-  - name: 2p1d
-    components:
-    - kustomize/components/2p1d
-  - name: 2p1d-kv
-    components:
-    - kustomize/components/2p1d
-    - kustomize/components/kv-routing

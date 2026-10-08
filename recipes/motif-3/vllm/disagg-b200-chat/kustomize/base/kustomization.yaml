@@ -19,9 +19,3 @@ resources:
 - deploy.yaml
 components:
 - ../../../../../kustomize/components/dynamo-openapi
-configMapGenerator:
-- name: motif3-disagg-runtime-patch
-  files:
-  - launch_motif_disagg.py
-generatorOptions:
-  disableNameSuffixHash: true
