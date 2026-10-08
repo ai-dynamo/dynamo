@@ -61,6 +61,18 @@ pub(crate) fn request(
     body.insert("rid".into(), Value::String(request_id.to_string()));
     body.insert("stream".into(), Value::Bool(true));
 
+    // This is routing-owned metadata, not a stale hint from the opaque envelope.
+    // Native HTTP uses JSON directly, so integer hashes do not need Struct lowering.
+    if let Some(hint) = request.kv_hint.as_ref() {
+        body.insert(
+            "kv_hints".into(),
+            serde_json::to_value(hint)
+                .map_err(|_| client::invalid_request("kv hint payload could not be serialized"))?,
+        );
+    } else {
+        body.remove("kv_hints");
+    }
+
     let routing = request.routing.as_ref();
     if let Some(priority) = routing.and_then(|routing| routing.priority) {
         body.insert("priority".into(), Value::from(priority));
@@ -651,6 +663,72 @@ mod tests {
             error.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
         );
+    }
+
+    #[test]
+    fn native_http_forwards_current_hint_instead_of_stale_envelope_hint() {
+        use dynamo_backend_common::{KvHint, KvHintAction};
+
+        let mut canonical = canonical_request();
+        let opaque = json!({
+            "kv_hints": {"message_id": "stale"},
+            "custom_engine_option": {"enabled": true},
+        });
+        canonical.extra_args = Some(json!({"sglang_tito": opaque}));
+        canonical.kv_hint = Some(KvHint::new(
+            "current-message",
+            vec![KvHintAction::new(
+                "current-fetch",
+                "kv.fetch",
+                "1.0",
+                std::collections::BTreeMap::from([
+                    ("source_control_endpoint".into(), json!("tcp://peer:12000")),
+                    ("block_hashes".into(), json!([u64::MAX, (1u64 << 53) + 1])),
+                    ("extension".into(), json!({"mode": "copy"})),
+                ]),
+            )],
+        ));
+        let native = request(
+            &canonical,
+            "rid",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        // Reqwest serializes the native JSON body directly, without binary64 conversion.
+        let wire: serde_json::Value =
+            serde_json::from_slice(&serde_json::to_vec(&native.body).unwrap()).unwrap();
+        assert_eq!(
+            wire["kv_hints"],
+            serde_json::to_value(canonical.kv_hint.as_ref().unwrap()).unwrap()
+        );
+        assert_eq!(
+            wire["kv_hints"]["actions"][0]["payload"]["block_hashes"][0].as_u64(),
+            Some(u64::MAX)
+        );
+        assert_eq!(wire["custom_engine_option"], opaque["custom_engine_option"]);
+        assert_eq!(
+            canonical.extra_args.as_ref().unwrap()["sglang_tito"],
+            opaque
+        );
+    }
+
+    #[test]
+    fn native_http_removes_stale_hint_when_router_selected_no_hint() {
+        let mut canonical = canonical_request();
+        canonical.extra_args = Some(json!({"sglang_tito": {"kv_hints": {"message_id": "stale"}}}));
+        let native = request(
+            &canonical,
+            "rid",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(native.body.get("kv_hints").is_none());
     }
 
     #[test]
