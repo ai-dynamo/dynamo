@@ -16,10 +16,9 @@ decoding, KV-aware routing, and a one-million-token context limit.
 | `agg-gb200-agentic` | 3 aggregated TP4 replicas | 12x GB200 | GPU plus 400 GB CPU offload per replica |
 | `disagg-gb200-agentic` | 3 prefill and 3 decode TP4 replicas | 24x GB200 | GPU with NIXL transfer between prefill and decode |
 
-Both profiles use the `e46c79195a` runtime image with the required
-fixes built in, real EAGLE3 verification, and multimodal input enabled. No
-runtime patches are applied. Each ConfigMap also contains a benchmark-only
-synthetic-acceptance option; that option is not the production default.
+Both profiles use real EAGLE3 verification with multimodal input enabled.
+Each ConfigMap also contains a benchmark-only synthetic-acceptance option;
+that option is not the production default.
 See [Deploy](#deploy) for cluster setup and validation of either profile.
 
 ## Prepare the Model Cache
@@ -97,8 +96,7 @@ workers. Both frontends mount the cache at `/shared-model-cache` and set
 Configure the cache claim, registry credentials, GB200 placement, and provider
 networking in that private composition. Preserve the recipe's ComputeDomain
 claim chain and, for disaggregated serving, its NIXL and UCX multi-node CUDA
-IPC settings. The pinned image requires access to its private registry;
-qualify any replacement image separately.
+IPC settings.
 
 After editing the recipe or cluster bindings, validate and render from the
 repository root with standalone Kustomize v5.8.1, Python 3.9 or later, and
@@ -174,8 +172,8 @@ kustomize build --load-restrictor LoadRestrictionsNone \
 
 Use a separate directory from `CLUSTER_KUSTOMIZATION`. Review and apply the
 benchmark variant's rendered manifest using the commands in [Deploy](#deploy),
-with its path substituted. Record the image and rendered configuration with
-the results. The benchmark Job does not change the acceptance setting.
+with its path substituted. Record the rendered configuration with the results.
+The benchmark Job does not change the acceptance setting.
 
 > [!WARNING]
 > Synthetic acceptance bypasses real EAGLE3 verification. Use it only for

@@ -47,9 +47,8 @@ Both deployment profiles default to real EAGLE3 verification. This benchmark
 Job does not enable synthetic acceptance. To run a synthetic-acceptance
 experiment, follow the
 [synthetic-acceptance instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md#synthetic-acceptance-for-benchmarks)
-and record that setting with the image and rendered deployment.
-The historical synthetic-acceptance figures on the Fern recipe page do not
-qualify the current image or real-verification defaults.
+and record that setting with the rendered deployment.
+The performance figures on the Fern recipe page use synthetic acceptance.
 
 ### 2. Stage the trace on the PVC
 

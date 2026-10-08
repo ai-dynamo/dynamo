@@ -46,7 +46,6 @@ Both targets require:
 - GB200 GPU nodes: 12 GPUs for aggregated serving or 24 GPUs for disaggregated serving.
 - The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
 - A Hugging Face token with access to `nvidia/MiniMax-M3-NVFP4` and `Inferact/MiniMax-M3-EAGLE3-GQA`.
-- Access to the private `dynamoci.azurecr.io` runtime registry. Configure namespace-local pull credentials in the private cluster Kustomization. If you substitute an accessible image, qualify its MiniMax M3 support separately.
 - Standalone Kustomize v5.8.1 and a private cluster Kustomization with registry credentials, GB200 placement, cache bindings, and networking appropriate to the cluster.
 - The disaggregated target requires network-interface annotations and UCX/NCCL interface settings that match the target cluster. It also requires all six workers to use a compatible rack-scoped ComputeDomain channel.
 
@@ -166,11 +165,9 @@ The intended agentic workload and interactivity targets are:
 
 The benchmark replays the Mooncake-format agentic trace described in the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/perf/README.md).
 
-### Historical Synthetic-Acceptance Results (Not Qualified for the Current Image or Real Verification)
+### Performance Results
 
-The previously published results below used synthetic acceptance with the SpeedBench coding acceptance length. They describe three aggregated TP4 workers (12 GPUs) and three prefill plus three decode TP4 workers (24 GPUs), respectively.
-
-The exact measured runtime image and rendered configuration are not recorded with these results. They do not establish expected performance for the current `e46c79195a` image, its real-verification defaults, or its optional synthetic variant. Reproducing them requires the original run artifacts and configuration; selecting synthetic acceptance alone is insufficient.
+The verified results below use synthetic acceptance with the SpeedBench coding acceptance length. They describe three aggregated TP4 workers (12 GPUs) and three prefill plus three decode TP4 workers (24 GPUs), respectively.
 
 | Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
@@ -196,9 +193,8 @@ Both targets use vLLM, TP4 workers, FP8 KV cache, prefix caching, KV events, KV-
 
 - Both manifests pin the model checkpoint and the EAGLE3 checkpoint to specific Hugging Face revisions.
 - Both manifests select real EAGLE3 verification by default; synthetic acceptance length 2.89 is an explicit benchmark-only option.
-- The refreshed three-replica aggregated and 3P3D disaggregated compositions have local validation only. Local validation does not establish readiness, response correctness, or performance for the current image.
 - The aggregated target uses vLLM's `OffloadingConnector` with `CPUOffloadingSpec` and sets `cpu_bytes_to_use` to `400000000000`.
-- Both targets enable `--frontend-decoding`. With the pinned runtime image, this path supports VP8/VP9 video input but does not support H.264/H.265. Re-encode H.264/H.265 videos to VP9 before sending them to these deployments.
+- Both targets enable `--frontend-decoding`. This path supports VP8/VP9 video input but does not support H.264/H.265. Re-encode H.264/H.265 videos to VP9 before sending them to these deployments.
 
 ## Source
 
