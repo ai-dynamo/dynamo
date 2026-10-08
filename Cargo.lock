@@ -3144,6 +3144,8 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-sglang-mocker",
  "dynamo-sglang-sidecar",
+ "dynamo-trtllm-mocker",
+ "dynamo-trtllm-sidecar",
  "dynamo-vllm-mocker",
  "dynamo-vllm-sidecar",
  "futures",

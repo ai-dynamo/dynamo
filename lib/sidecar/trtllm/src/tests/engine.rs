@@ -419,58 +419,67 @@ async fn cleanup_terminates_an_in_flight_request() {
 /// prefill worker's blocks with no leg left to claim them. Shutdown still wins.
 #[tokio::test]
 async fn a_cancelled_decode_dispatch_is_not_abandoned_mid_flight() {
-    let service = FakeTrtllm::default();
-    service.hang_before_stream.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = Arc::new(engine_in_mode(
-        &server.endpoint,
-        1,
-        DisaggregationMode::Decode,
-    ));
-    engine.start(0).await.expect("start");
+    for cancel_before_dispatch in [true, false] {
+        let service = FakeTrtllm::default();
+        service.hang_before_stream.store(true, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let engine = Arc::new(engine_in_mode(
+            &server.endpoint,
+            1,
+            DisaggregationMode::Decode,
+        ));
+        engine.start(0).await.expect("start");
 
-    let mut decode_request = request();
-    decode_request.prefill_result = Some(dynamo_backend_common::PrefillResult {
-        disaggregated_params: crate::disagg::session_to_json(fake_session()).expect("handoff"),
-        prompt_tokens_details: None,
-    });
-    let context = dynamo_backend_common::testing::mock_context();
-    let mut dispatch = tokio::spawn({
-        let engine = Arc::clone(&engine);
-        let context = context.clone();
-        async move {
-            engine
-                .generate(decode_request, GenerateContext::new(context, None))
-                .await
+        let mut decode_request = request();
+        decode_request.prefill_result = Some(dynamo_backend_common::PrefillResult {
+            disaggregated_params: crate::disagg::session_to_json(fake_session()).expect("handoff"),
+            prompt_tokens_details: None,
+        });
+        let context = dynamo_backend_common::testing::mock_context();
+        if cancel_before_dispatch {
+            context.stop_generating();
         }
-    });
+        let mut dispatch = tokio::spawn({
+            let engine = Arc::clone(&engine);
+            let context = context.clone();
+            async move {
+                engine
+                    .generate(decode_request, GenerateContext::new(context, None))
+                    .await
+            }
+        });
 
-    // The fake records the request before it withholds response headers, which
-    // is exactly the window this test is about: the engine has the request and
-    // the sidecar does not know it yet.
-    while server.service.requests.lock().await.is_empty() {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    context.stop_generating();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut dispatch)
+        // The fake records the request before it withholds response headers, which
+        // is exactly the window this test is about: the engine has the request and
+        // the sidecar does not know it yet.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while server.service.requests.lock().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cancelled decode must still dispatch to claim the prefill KV");
+        context.stop_generating();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut dispatch)
+                .await
+                .is_err(),
+            "the dispatch must outlive the client's cancellation"
+        );
+
+        engine.cleanup().await.expect("cleanup");
+        let mut stream = tokio::time::timeout(Duration::from_secs(5), dispatch)
             .await
-            .is_err(),
-        "the dispatch must outlive the client's cancellation"
-    );
-
-    engine.cleanup().await.expect("cleanup");
-    let mut stream = tokio::time::timeout(Duration::from_secs(5), dispatch)
-        .await
-        .expect("shutdown must release the dispatch")
-        .expect("dispatch task")
-        .expect("generate");
-    let terminal = stream
-        .next()
-        .await
-        .expect("a terminal item")
-        .expect("terminal");
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+            .expect("shutdown must release the dispatch")
+            .expect("dispatch task")
+            .expect("generate");
+        let terminal = stream
+            .next()
+            .await
+            .expect("a terminal item")
+            .expect("terminal");
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+    }
 }
 
 /// Argument parsing decides where each worker registers. A disaggregated leg
@@ -551,6 +560,7 @@ fn parsed_arguments_map_onto_the_worker_registration() {
         "an empty model path has nothing to tokenize with"
     );
 }
+
 // Regression: eager discovery must neither bypass Worker start nor reconnect
 // during that non-cancellable phase after bootstrap has already succeeded.
 #[tokio::test]
