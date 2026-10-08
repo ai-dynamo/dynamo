@@ -34,8 +34,9 @@ worker page size consistent with the EPP cache block size.
 Local end-to-end validation used Qwen3-0.6B and Qwen3-1.7B; the larger models have not been
 validated with this example.
 
-The SGLang GAIE template follows [agg_router.yaml](../../agg_router.yaml), with a native EPP
-and a direct-mode frontend sidecar in each worker pod. The gateway and PreProc configuration
+The SGLang GAIE template follows the native EPP and direct-mode frontend-sidecar topology of
+the [vLLM GAIE example](../../../../vllm/deploy/gaie/agg.yaml), using SGLang worker settings.
+The gateway and PreProc configuration
 is backend-independent and also works with existing vLLM pools that expose the same interface.
 
 The Kustomization assumes the existing namespace is `switchyard`. Change `namespace` in
