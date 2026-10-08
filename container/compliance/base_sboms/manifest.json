@@ -66,23 +66,23 @@
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:965c2a14a594d7d467bbe9a6517d958cee22ed035333097bdc216da68fd55ba5",
+      "baseline_digest": "sha256:63303112b0b7ea234ceecfeba3402c6bbf36fe2abb3baec218c52e2345240aef",
       "baseline_image": "nvcr.io/nvidia/distroless/go",
-      "baseline_sbom": "go@965c2a14-amd64.cdx.json",
-      "baseline_tag": "v4.1.4",
-      "from_digest": "sha256:965c2a14a594d7d467bbe9a6517d958cee22ed035333097bdc216da68fd55ba5",
+      "baseline_sbom": "go@63303112-amd64.cdx.json",
+      "baseline_tag": "v4.1.5",
+      "from_digest": "sha256:63303112b0b7ea234ceecfeba3402c6bbf36fe2abb3baec218c52e2345240aef",
       "from_image": "nvcr.io/nvidia/distroless/go",
-      "from_tag": "v4.1.4",
+      "from_tag": "v4.1.5",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:965c2a14a594d7d467bbe9a6517d958cee22ed035333097bdc216da68fd55ba5",
+      "baseline_digest": "sha256:63303112b0b7ea234ceecfeba3402c6bbf36fe2abb3baec218c52e2345240aef",
       "baseline_image": "nvcr.io/nvidia/distroless/go",
-      "baseline_sbom": "go@965c2a14-arm64.cdx.json",
-      "baseline_tag": "v4.1.4",
-      "from_digest": "sha256:965c2a14a594d7d467bbe9a6517d958cee22ed035333097bdc216da68fd55ba5",
+      "baseline_sbom": "go@63303112-arm64.cdx.json",
+      "baseline_tag": "v4.1.5",
+      "from_digest": "sha256:63303112b0b7ea234ceecfeba3402c6bbf36fe2abb3baec218c52e2345240aef",
       "from_image": "nvcr.io/nvidia/distroless/go",
-      "from_tag": "v4.1.4",
+      "from_tag": "v4.1.5",
       "platform": "linux/arm64"
     },
     {
@@ -130,23 +130,23 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:eb5be985571eab7eac5e2ff722ed17eedbf64d4cf584ae0cef34cc6497592556",
+      "baseline_digest": "sha256:5be5c1f0b90ff32870e118b13706396924f4a9520b0197e53fd0a02c9da2d8ea",
       "baseline_image": "nvcr.io/nvidia/distroless/python",
-      "baseline_sbom": "python@eb5be985-amd64.cdx.json",
-      "baseline_tag": "3.13-v4.1.4",
-      "from_digest": "sha256:eb5be985571eab7eac5e2ff722ed17eedbf64d4cf584ae0cef34cc6497592556",
+      "baseline_sbom": "python@5be5c1f0-amd64.cdx.json",
+      "baseline_tag": "3.13-v4.1.6",
+      "from_digest": "sha256:5be5c1f0b90ff32870e118b13706396924f4a9520b0197e53fd0a02c9da2d8ea",
       "from_image": "nvcr.io/nvidia/distroless/python",
-      "from_tag": "3.13-v4.1.4",
+      "from_tag": "3.13-v4.1.6",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:eb5be985571eab7eac5e2ff722ed17eedbf64d4cf584ae0cef34cc6497592556",
+      "baseline_digest": "sha256:5be5c1f0b90ff32870e118b13706396924f4a9520b0197e53fd0a02c9da2d8ea",
       "baseline_image": "nvcr.io/nvidia/distroless/python",
-      "baseline_sbom": "python@eb5be985-arm64.cdx.json",
-      "baseline_tag": "3.13-v4.1.4",
-      "from_digest": "sha256:eb5be985571eab7eac5e2ff722ed17eedbf64d4cf584ae0cef34cc6497592556",
+      "baseline_sbom": "python@5be5c1f0-arm64.cdx.json",
+      "baseline_tag": "3.13-v4.1.6",
+      "from_digest": "sha256:5be5c1f0b90ff32870e118b13706396924f4a9520b0197e53fd0a02c9da2d8ea",
       "from_image": "nvcr.io/nvidia/distroless/python",
-      "from_tag": "3.13-v4.1.4",
+      "from_tag": "3.13-v4.1.6",
       "platform": "linux/arm64"
     }
   ],
@@ -162,6 +162,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-10-06T01:41:52+00:00",
+  "generated_at": "2026-10-08T22:35:46+00:00",
   "schema_version": 2
 }
