@@ -817,3 +817,11 @@ nats:
           # Affinity for NATS Box pods
           affinity: {}
       patch: []
+
+# Snapshot component - checkpoint and restore infrastructure
+# Installation is controlled by global.snapshot.install above.
+snapshot:
+  pageBroker:
+    # -- Enable PageBroker for checkpoint and restore. Uses the Snapshot chart's
+    # resource and transfer-buffer defaults. Set false to disable PageBroker.
+    enabled: true
