@@ -32,9 +32,6 @@ func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput)
 	case BuildFamilyXT:
 		projections, err = appendV2ModelProjections(dst, intent)
 	case BuildFamilyHX:
-		if intent.LocalPartitions != nil {
-			return nil, fmt.Errorf("%w: localPartitions is not supported for HX builds", ErrUnsupportedRuntime)
-		}
 		projections, err = appendV3ModelProjections(dst, intent)
 	default:
 		return nil, fmt.Errorf("unsupported LPX target family %q", intent.BuildSnapshot.build.Family)

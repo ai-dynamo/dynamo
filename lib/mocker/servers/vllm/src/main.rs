@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 
 use anyhow::Context;
 use clap::Parser;
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_mocker::common::protocols::MockerConfig;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::proto::control_server::ControlServer;
 use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
@@ -44,13 +44,13 @@ struct Args {
     extra_engine_args: Option<String>,
 }
 
-fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockEngineArgs> {
+fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockerConfig> {
     let args = match value {
-        None => MockEngineArgs::default(),
+        None => MockerConfig::default(),
         Some(value) if value.trim_start().starts_with('{') => {
-            MockEngineArgs::from_json_str(value).map_err(anyhow::Error::msg)?
+            MockerConfig::from_json_str(value).map_err(anyhow::Error::msg)?
         }
-        Some(path) => MockEngineArgs::from_json_file(std::path::Path::new(path))
+        Some(path) => MockerConfig::from_json_file(std::path::Path::new(path))
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("failed to load --extra-engine-args from {path}"))?,
     };

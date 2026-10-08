@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{
-    EngineType, KvEventPublishers, MockEngineArgs, OutputSignal, WorkerType,
+    EngineType, KvEventPublishers, MockerConfig, OutputSignal, WorkerType,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, LiveRequest, stable_request_uuid};
 use dynamo_mocker::scheduler::MockerMetrics;
@@ -103,7 +103,7 @@ pub struct SglangMockerService {
 }
 
 impl SglangMockerService {
-    pub fn new(config: MockerServerConfig, engine_args: MockEngineArgs) -> anyhow::Result<Self> {
+    pub fn new(config: MockerServerConfig, engine_args: MockerConfig) -> anyhow::Result<Self> {
         anyhow::ensure!(!config.model.trim().is_empty(), "model must not be empty");
         anyhow::ensure!(
             config.context_length > 0,
@@ -130,7 +130,7 @@ impl SglangMockerService {
 
         let engine_args = engine_args.normalized()?;
         anyhow::ensure!(
-            engine_args.engine_type == EngineType::Sglang,
+            engine_args.backend == EngineType::Sglang,
             "Mocker engine_type must be sglang"
         );
         anyhow::ensure!(engine_args.dp_size == 1, "Mocker dp_size must be 1");
@@ -148,8 +148,8 @@ impl SglangMockerService {
             .ok_or_else(|| anyhow::anyhow!("num_gpu_blocks * block_size overflows usize"))?;
         let sink = if engine_args.needs_kv_publisher() && config.mode != ServerMode::Decode {
             match ZmqKvEventSink::bind(
-                engine_args.zmq_kv_events_port,
-                engine_args.zmq_replay_port,
+                engine_args.runtime.zmq_kv_events_port,
+                engine_args.runtime.zmq_replay_port,
                 DP_RANK,
                 page_size,
             ) {
@@ -182,10 +182,12 @@ impl SglangMockerService {
             page_size,
             kv_events,
             max_total_num_tokens,
-            max_running_requests: engine_args
-                .max_num_seqs
-                .unwrap_or(engine_args.num_gpu_blocks),
-            max_prefill_tokens: engine_args.max_num_batched_tokens.unwrap_or(8_192),
+            max_running_requests: engine_args.effective_handoff_capacity(),
+            max_prefill_tokens: if engine_args.max_num_batched_tokens == usize::MAX {
+                engine_args.sglang.max_prefill_tokens
+            } else {
+                engine_args.max_num_batched_tokens
+            },
         };
         let engine = LiveEngine::start_with_config(
             engine_args,
@@ -229,13 +231,13 @@ impl SglangMockerService {
             .try_acquire_owned()
             .map_err(|_| Status::resource_exhausted("Mocker concurrent request limit reached"))?;
         let prepared = PreparedRequest::new(request, &self.config).map_err(|status| *status)?;
-        let live = self
-            .engine
-            .submit(prepared.direct_request())
-            .await
-            .map_err(|error| {
-                Status::internal(format!("Mocker request submission failed: {error}"))
-            })?;
+        let direct = prepared.direct_request();
+        let live = if prepared.has_decode_handoff {
+            self.engine.submit_decode(direct).await
+        } else {
+            self.engine.submit(direct).await
+        }
+        .map_err(|error| Status::internal(format!("Mocker request submission failed: {error}")))?;
         Ok((prepared, live, permit))
     }
 
@@ -312,9 +314,14 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
                     biased;
                     _ = signal_tx.closed() => break,
                     signal = live.recv() => {
-                        let Some(signal) = signal else { break };
+                        let Some(signal) = signal else {
+                            if live.is_aborted() {
+                                let _ = signal_tx.send(Err(Status::cancelled("Request aborted"))).await;
+                            }
+                            break;
+                        };
                         let completed = signal.completed;
-                        if signal_tx.send(signal).await.is_err() || completed {
+                        if signal_tx.send(Ok(signal)).await.is_err() || completed {
                             break;
                         }
                     }
@@ -327,6 +334,7 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
             // The sidecar contract enables SGLang's incremental streaming output,
             // so each response contains only this chunk's token and metadata.
             while let Some(signal) = signal_rx.recv().await {
+                let signal = signal?;
                 let token_id = checked_token(&signal).map_err(|status| *status)?;
                 let output_id = i32::try_from(token_id)
                     .map_err(|_| Status::internal("synthetic token ID does not fit i32"))?;

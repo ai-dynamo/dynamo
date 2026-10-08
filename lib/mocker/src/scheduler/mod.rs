@@ -74,7 +74,7 @@ pub trait SchedulerHandle: Send + Sync {
     fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>>;
 }
 
-pub(crate) fn handoff_channel_capacity(args: &crate::common::protocols::MockEngineArgs) -> usize {
+pub(crate) fn handoff_channel_capacity(args: &crate::common::protocols::MockerConfig) -> usize {
     args.effective_handoff_capacity()
         .checked_mul(2)
         .expect("mocker handoff channel capacity overflow")

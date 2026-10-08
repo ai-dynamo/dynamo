@@ -9,15 +9,19 @@ as it would to a real TensorRT-LLM engine — no GPU, no model weights.
 
 Token IDs, logprobs, and the disaggregated handoff are synthetic but
 deterministic for a given `--seed`. KV-cache accounting, batching, admission,
-and prefill/decode timing come from the Mocker scheduler, so capacity and
-scheduling behave like a real deployment.
+and prefill/decode timing come from the Mocker scheduler using the configured
+engine's scheduling policy.
+
+Request recording is disabled by default. Tests that inspect
+`received_requests()` enable `MockerServerConfig::is_request_recording_enabled`;
+the recorder retains at most 256 accepted requests.
 
 ## Aggregated
 
 ```bash
 cargo run -p dynamo-trtllm-mocker --bin dynamo-trtllm-mocker-server -- \
   --listen 127.0.0.1:50051 --model Qwen/Qwen3-0.6B --context-length 2048 \
-  --extra-engine-args '{"speedup_ratio":1000,"block_size":32}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000,"block_size":32}}'
 
 cargo run -p dynamo-trtllm-sidecar --bin dynamo-trtllm-sidecar -- \
   --grpc-endpoint http://127.0.0.1:50051 --model-path Qwen/Qwen3-0.6B
@@ -42,11 +46,11 @@ fetch rather than anywhere in this server.
 cargo run -p dynamo-trtllm-mocker --bin dynamo-trtllm-mocker-server -- \
   --listen 127.0.0.1:50051 --model Qwen/Qwen3-0.6B --context-length 2048 \
   --disaggregation-mode prefill \
-  --extra-engine-args '{"speedup_ratio":1000}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000}}'
 cargo run -p dynamo-trtllm-mocker --bin dynamo-trtllm-mocker-server -- \
   --listen 127.0.0.1:50052 --model Qwen/Qwen3-0.6B --context-length 2048 \
   --disaggregation-mode decode \
-  --extra-engine-args '{"speedup_ratio":1000}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000}}'
 
 cargo run -p dynamo-trtllm-sidecar --bin dynamo-trtllm-sidecar -- \
   --grpc-endpoint http://127.0.0.1:50051 --model-path Qwen/Qwen3-0.6B \
@@ -78,27 +82,24 @@ two legs' token accounting matches a real engine's.
 - Text prompts are rejected: the server has no tokenizer and expects
   `token_ids`, which is what the sidecar always sends.
 - Multimodal media and per-request LoRA are rejected.
-- **The decode role recomputes the prompt.** A decode request submits its full
-  prompt to the scheduler as a normal request, so the simulated engine reserves
-  and prefills tokens that a real decode worker would have received over the
-  transceiver. Disaggregated capacity, cache-hit metrics, and prefill timing are
-  therefore not faithful on the decode leg; request/response behaviour and the
-  handoff contract are. The vLLM and SGLang mocker servers model it the same
-  way. Use aggregated mode for capacity work until the mocker core grows
-  handoff-aware admission.
+- A validated decode handoff reserves destination KV space and starts decoding
+  without recomputing the prompt. The handoff represents a completed transfer;
+  no KV bytes move between mocker processes and network transfer time is not
+  simulated. A decode request that bypasses prefill still computes its prompt.
 - Guided decoding is rejected with `UNIMPLEMENTED`; rejected requests are not recorded.
 
 ## `--context-length` interacts with capacity
 
-The sidecar turns an omitted `max_tokens` into `context_length - prompt_len`,
-and the TensorRT-LLM scheduling policy (`guaranteed_no_evict`) reserves that
-whole budget at admission and never preempts. With the 32768 default and a small
-`num_gpu_blocks`, a request that omits `max_tokens` is rejected for capacity
-rather than truncated. Lower `--context-length` for small-KV experiments.
+The sidecar turns an omitted `max_tokens` into `context_length - prompt_len`.
+The scheduler caps that budget to the total KV-pool capacity minus the prompt
+length, then reserves through completion under `guaranteed_no_evict` without
+preemption. A prompt that leaves no room for output is rejected. Set an explicit
+`max_tokens` or lower `--context-length` for small-KV experiments.
 
 ## Engine arguments
 
 `--extra-engine-args` takes inline JSON or a file path and is merged into
-`MockEngineArgs`. `engine_type` is forced to `trtllm`; passing anything else is
-an error. TensorRT-LLM requires `block_size >= 2` (default 32) and rejects
-`max_model_len` — use `--context-length` instead.
+the canonical AISimulate launch configuration. `engine.backend` defaults to `trtllm`;
+passing another backend is an error. Put scheduler settings such as `block_size`
+and `max_model_len` under `engine`. `--context-length` controls the context
+length advertised by the gRPC mock server.

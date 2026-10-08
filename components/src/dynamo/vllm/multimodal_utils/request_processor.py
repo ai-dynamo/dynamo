@@ -12,7 +12,6 @@ multimodal UUIDs, and the model-specific prefill/decode handoff.
 from __future__ import annotations
 
 import logging
-import pickle
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -35,9 +34,11 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsShmReceiver,
     MmKwargsShmTransferMetadata,
     MmKwargsTransferMetadata,
+    decode_mm_kwargs_item,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.llm.exceptions import InvalidArgument
 
 from .hash_utils import compute_mm_uuids_from_images
 from .model import ModelFamily, construct_qwen_decode_mm_data, resolve_model_family
@@ -462,8 +463,8 @@ class VllmMultimodalRequestProcessor:
         return expanded
 
     @staticmethod
-    def _multimodal_disabled_error() -> ValueError:
-        return ValueError(
+    def _multimodal_disabled_error() -> InvalidArgument:
+        return InvalidArgument(
             "Received multimodal data but multimodal processing is not enabled. "
             "Use --enable-multimodal flag to enable multimodal processing."
         )
@@ -717,10 +718,10 @@ class VllmMultimodalRequestProcessor:
 
             kwargs_items = []
             for payload in pickled_items:
-                # The sender is Dynamo's internal frontend transfer service,
-                # which deliberately serializes vLLM's Python-only kwargs
-                # objects. External request payloads never supply these bytes.
-                item = pickle.loads(payload)
+                # Decode with the typed msgpack decoder. It yields only
+                # MultiModalKwargsItem values and refuses the pickle extension
+                # codes, whatever VLLM_ALLOW_INSECURE_SERIALIZATION says.
+                item = decode_mm_kwargs_item(payload)
                 if not isinstance(item, MultiModalKwargsItem):
                     logger.warning(
                         "%s transfer produced %s instead of MultiModalKwargsItem",

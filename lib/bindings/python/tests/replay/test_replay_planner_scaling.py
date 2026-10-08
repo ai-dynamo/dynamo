@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay import run_trace_replay
 
 from .replay_utils import _require_aisimulate_distribution
@@ -138,11 +138,19 @@ def test_delta_replay_accumulates_context_with_planner(tmp_path, disagg, concurr
         )
         + "\n"
     )
-    args = MockEngineArgs(block_size=64, num_gpu_blocks=16, speedup_ratio=1000.0)
+    args = normalize_mocker_config(
+        {"engine": {"block_size": 64, "num_gpu_blocks": 16, "speedup_ratio": 1000.0}}
+    )
     engines = (
         {
-            "prefill_engine_args": args.with_overrides(worker_type="prefill"),
-            "decode_engine_args": args.with_overrides(worker_type="decode"),
+            "prefill_engine_args": {
+                **args,
+                "engine": {**args["engine"], "worker_type": "prefill"},
+            },
+            "decode_engine_args": {
+                **args,
+                "engine": {**args["engine"], "worker_type": "decode"},
+            },
         }
         if disagg
         else {"extra_engine_args": args}
@@ -203,12 +211,14 @@ def test_actual_aggregated_planner_scales_up_then_down(tmp_path, trace_format):
     )
     report = run_trace_replay(
         trace_path,
-        extra_engine_args=MockEngineArgs(
-            block_size=64,
-            num_gpu_blocks=16,
-            max_num_seqs=32,
-            speedup_ratio=50.0,
-        ),
+        extra_engine_args={
+            "engine": {
+                "block_size": 64,
+                "num_gpu_blocks": 16,
+                "max_num_seqs": 32,
+                "speedup_ratio": 50.0,
+            }
+        },
         num_workers=1,
         planner_config=_planner_config("agg", tmp_path),
         trace_format=trace_format,
@@ -256,11 +266,15 @@ def test_summary_only_planner_replay_keeps_metrics_decisions_and_tick_count(tmp_
     )
     report = run_trace_replay(
         trace_path,
-        extra_engine_args=MockEngineArgs(
-            block_size=64,
-            num_gpu_blocks=16,
-            max_num_seqs=32,
-            speedup_ratio=50.0,
+        extra_engine_args=normalize_mocker_config(
+            {
+                "engine": {
+                    "block_size": 64,
+                    "num_gpu_blocks": 16,
+                    "max_num_seqs": 32,
+                    "speedup_ratio": 50.0,
+                }
+            }
         ),
         num_workers=1,
         planner_config=_planner_config("agg", tmp_path),
@@ -303,22 +317,26 @@ def test_actual_disaggregated_planner_scales_each_pool_up_then_down(
         request_count=2 if component == "prefill" else 32,
         trace_format=trace_format,
     )
-    prefill_args = MockEngineArgs(
-        block_size=64,
-        num_gpu_blocks=16 if component == "prefill" else 64,
-        max_num_seqs=1 if component == "prefill" else 32,
-        speedup_ratio=0.01 if component == "prefill" else 1000.0,
-        startup_time=2.0 if component == "prefill" else None,
-        worker_type="prefill",
-    )
-    decode_args = MockEngineArgs(
-        block_size=64,
-        num_gpu_blocks=64 if component == "prefill" else 16,
-        max_num_seqs=32,
-        speedup_ratio=1000.0 if component == "prefill" else 0.1,
-        startup_time=2.0 if component == "decode" else None,
-        worker_type="decode",
-    )
+    prefill_args = {
+        "startup_time": 2.0 if component == "prefill" else None,
+        "engine": {
+            "block_size": 64,
+            "num_gpu_blocks": 16 if component == "prefill" else 64,
+            "max_num_seqs": 1 if component == "prefill" else 32,
+            "speedup_ratio": 0.01 if component == "prefill" else 1000.0,
+            "worker_type": "prefill",
+        },
+    }
+    decode_args = {
+        "startup_time": 2.0 if component == "decode" else None,
+        "engine": {
+            "block_size": 64,
+            "num_gpu_blocks": 64 if component == "prefill" else 16,
+            "max_num_seqs": 32,
+            "speedup_ratio": 1000.0 if component == "prefill" else 0.1,
+            "worker_type": "decode",
+        },
+    }
     report = run_trace_replay(
         trace_path,
         prefill_engine_args=prefill_args,
