@@ -20,7 +20,6 @@ import pytest
 import dynamo.llm as dynamo_llm
 from dynamo.vllm import envs
 from dynamo.vllm.args import (
-    _connector_to_kv_transfer_json,
     _is_routable,
     _uses_dynamo_connector,
     _uses_nixl_connector,
@@ -234,47 +233,23 @@ def test_removed_multimodal_role_flags_are_rejected(flag, mock_vllm_cli):
         parse_args()
 
 
-# --connector removal tests
+def test_connector_flag_is_rejected(mock_vllm_cli, capsys):
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "kvbm")
 
-
-def test_connector_nixl_raises_error_without_mode(mock_vllm_cli):
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "nixl")
-    with pytest.raises(ValueError, match="--connector is no longer supported"):
+    with pytest.raises(SystemExit) as exc_info:
         parse_args()
 
-
-@pytest.mark.parametrize(
-    ("mode", "expected_role"),
-    [("prefill", "kv_producer"), ("decode", "kv_consumer")],
-)
-def test_connector_nixl_migration_hint_uses_disaggregation_role(
-    mock_vllm_cli, mode, expected_role
-):
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--connector",
-        "nixl",
-        "--disaggregation-mode",
-        mode,
-    )
-    with pytest.raises(ValueError, match=f'"kv_role": "{expected_role}"'):
-        parse_args()
+    assert exc_info.value.code == 2
+    assert "unrecognized arguments: --connector kvbm" in capsys.readouterr().err
 
 
-def test_connector_none_raises_error(mock_vllm_cli):
-    """Test that --connector none raises ValueError telling user it's no longer needed."""
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "none")
-    with pytest.raises(ValueError, match="no longer needed"):
-        parse_args()
-
-
-def test_env_var_dyn_connector_raises_error(monkeypatch, mock_vllm_cli):
-    """Test that DYN_CONNECTOR env var raises error for vLLM backend."""
-    monkeypatch.setenv("DYN_CONNECTOR", "nixl")
+def test_dyn_connector_env_is_ignored(monkeypatch, mock_vllm_cli):
+    monkeypatch.setenv("DYN_CONNECTOR", "kvbm")
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
-    with pytest.raises(ValueError, match="no longer supported"):
-        parse_args()
+
+    config = parse_args()
+
+    assert config.engine_args.kv_transfer_config is None
 
 
 def test_model_express_url_is_accepted_for_compatibility(mock_vllm_cli):
@@ -308,24 +283,6 @@ def test_prefill_worker_without_kv_transfer_config_raises(mock_vllm_cli):
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "prefill")
     with pytest.raises(ValueError, match="--kv-transfer-config"):
         parse_args()
-
-
-def test_connector_to_kv_transfer_json_single():
-    """Test _connector_to_kv_transfer_json returns valid JSON for a single connector."""
-    result = json.loads(_connector_to_kv_transfer_json(["nixl"], "kv_producer"))
-    assert result == {"kv_connector": "NixlConnector", "kv_role": "kv_producer"}
-
-
-def test_connector_to_kv_transfer_json_multi():
-    """Test _connector_to_kv_transfer_json wraps multiple connectors in PdConnector."""
-    result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"], "kv_consumer"))
-    assert result["kv_connector"] == "PdConnector"
-    assert result["kv_role"] == "kv_both"
-    nested = result["kv_connector_extra_config"]["connectors"]
-    assert {c["kv_connector"]: c["kv_role"] for c in nested} == {
-        "DynamoConnector": "kv_both",
-        "NixlConnector": "kv_consumer",
-    }
 
 
 # _uses_nixl_connector / _uses_dynamo_connector tests
