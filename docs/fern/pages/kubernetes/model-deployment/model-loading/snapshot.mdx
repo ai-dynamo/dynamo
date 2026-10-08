@@ -1,0 +1,192 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Restore Workers with Dynamo Snapshot
+subtitle: Capture an initialized TensorRT-LLM worker and verify that a restored worker serves requests
+---
+
+NVIDIA Dynamo Snapshot restores initialized workers so new replicas can skip model
+initialization. This walkthrough uses `Qwen/Qwen3-0.6B` with TensorRT-LLM on one full
+GPU, without GPU Memory Service (GMS) or RDMA.
+
+<Warning>
+Experimental. Use this configuration for a smoke test. Consult the
+[backend compatibility matrix](../../../reference/general/compatibility.mdx) before
+using another backend or topology.
+</Warning>
+
+## Prerequisites
+
+- A [Dynamo Platform installation](../../installation/install-dynamo.md) with a
+  matching TensorRT-LLM runtime image and chart version.
+- A GPU node with MIG disabled, the `nvidia` RuntimeClass, and `/dev/net/tun`.
+  Review Snapshot's [driver, runtime, and privilege requirements](https://github.com/ai-dynamo/snapshot/tree/v0.2.0-rc.1#prerequisites).
+- A storage class that supports `ReadWriteMany` for Snapshot artifacts, and a
+  writable `model-cache` PersistentVolumeClaim (PVC) in the workload namespace.
+  These are separate volumes. See [Model Storage](../../installation/model-storage/overview.md).
+- `helm`, `kubectl`, `curl`, and `jq`, plus access to the runtime image registry and
+  Hugging Face. The capture Pod downloads the model if it is not cached.
+
+Set the namespaces and version to match your installation. Replace the storage
+class with your cluster's RWX storage class:
+
+```bash
+export PLATFORM_NAMESPACE=dynamo-system
+export NAMESPACE=dynamo-snapshot
+export RELEASE_VERSION=1.6.0
+export RWX_STORAGE_CLASS=your-rwx-storage-class
+export TRTLLM_IMAGE="nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:${RELEASE_VERSION}"
+export DGD=qwen3-0-6b-trtllm-snapshot-restore
+```
+
+For a release candidate, use its chart and image tag in `RELEASE_VERSION`.
+Provision `model-cache` in `NAMESPACE` before proceeding; it must be accessible to
+both the capture and serving Pods.
+
+<Steps>
+<Step title="Install Snapshot">
+
+If Snapshot is already installed, verify its version and readiness instead of
+installing a second cluster-wide operator. Dynamo v1.6.0 bundles Snapshot chart
+`0.2.0-rc.1`; this walkthrough installs that version separately:
+
+```bash
+helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+  --version 0.2.0-rc.1 \
+  --namespace snapshot --create-namespace \
+  --set-string storage.pvc.storageClass="$RWX_STORAGE_CLASS"
+
+kubectl rollout status deployment/snapshot-operator -n snapshot --timeout=300s
+kubectl rollout status daemonset/snapshot-agent -n snapshot --timeout=300s
+kubectl get crd snapshotjobs.nvidia.com podsnapshots.nvidia.com
+```
+
+The chart creates an RWX artifact PVC with a default request of `1Ti`.
+For an existing claim or a different runtime socket, follow the
+[Snapshot installation](https://github.com/ai-dynamo/snapshot/blob/v0.2.0-rc.1/docs/operations/install.md)
+and [storage configuration](https://github.com/ai-dynamo/snapshot/blob/v0.2.0-rc.1/docs/operations/storage.md).
+
+</Step>
+<Step title="Enable the Dynamo integration">
+
+After the Snapshot APIs are available, enable checkpoint support on the existing
+Dynamo Platform release. Keep its current values and version:
+
+```bash
+helm upgrade dynamo-platform \
+  "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz" \
+  --namespace "$PLATFORM_NAMESPACE" --reuse-values \
+  --set dynamo-operator.checkpoint.enabled=true --wait --timeout 5m
+```
+
+Use your installed Helm release name if it differs from `dynamo-platform`.
+
+</Step>
+<Step title="Deploy the capture and serving configuration">
+
+Download the [single-GPU TensorRT-LLM example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/snapshot-restore.yaml)
+from the matching release and set both containers to the same runtime image:
+
+```bash
+curl --fail --location \
+  "https://raw.githubusercontent.com/ai-dynamo/dynamo/v${RELEASE_VERSION}/examples/backends/trtllm/deploy/snapshot-restore.yaml" \
+  -o snapshot-template.yaml
+sed "s|my-registry/tensorrtllm-runtime:my-tag|${TRTLLM_IMAGE}|g" \
+  snapshot-template.yaml > snapshot-restore.yaml
+kubectl get pvc model-cache -n "$NAMESPACE"
+kubectl apply -n "$NAMESPACE" -f snapshot-restore.yaml
+```
+
+The example sets `experimental.checkpoint.enabled: true` and
+`startupPolicy: WaitForCheckpoint`. Dynamo creates a `SnapshotJob` to initialize
+and capture the worker. Serving replicas stay at zero until capture completes,
+then start from the resulting `PodSnapshot`.
+
+<Note>
+The default policy, `Immediate`, starts serving workers cold while capture runs.
+Only Pods created after capture completes restore; existing workers are not
+restarted when the snapshot becomes ready.
+</Note>
+
+</Step>
+<Step title="Verify capture and restore">
+
+Wait for the DGD to report a usable artifact, then verify the worker itself:
+
+```bash
+kubectl wait "dgd/$DGD" -n "$NAMESPACE" \
+  --for='jsonpath={.status.checkpoints.TRTLLMWorker.ready}=true' --timeout=20m
+export SNAPSHOT_NAME=$(kubectl get "dgd/$DGD" -n "$NAMESPACE" \
+  -o jsonpath='{.status.checkpoints.TRTLLMWorker.checkpointName}')
+kubectl get "podsnapshot/$SNAPSHOT_NAME" -n "$NAMESPACE"
+kubectl wait "dgd/$DGD" -n "$NAMESPACE" \
+  --for=condition=Ready --timeout=5m
+
+export WORKER_SELECTOR="nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component=TRTLLMWorker,"'!nvidia.com/snapshot-job'
+kubectl wait pod -n "$NAMESPACE" -l "$WORKER_SELECTOR" \
+  --for=condition=Ready --timeout=5m
+export WORKER_POD=$(kubectl get pod -n "$NAMESPACE" -l "$WORKER_SELECTOR" \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl wait "pod/$WORKER_POD" -n "$NAMESPACE" \
+  --for=condition=nvidia.com/Restored --timeout=5m
+test "$(kubectl get "pod/$WORKER_POD" -n "$NAMESPACE" \
+  -o jsonpath='{.metadata.annotations.nvidia\.com/restore-from}')" = "$SNAPSHOT_NAME"
+```
+
+The selector excludes the capture Pod. Success requires both
+`nvidia.com/Restored=True` and the expected `nvidia.com/restore-from` annotation;
+artifact readiness alone does not prove a successful restore.
+
+</Step>
+<Step title="Send a request to the restored worker">
+
+Forward the frontend port in one terminal:
+
+```bash
+kubectl port-forward -n "$NAMESPACE" "svc/$DGD-frontend" 8000:8000
+```
+
+In another terminal, send a request. A nonempty response confirms that the
+restored worker can serve:
+
+```bash
+curl --fail --retry 6 --retry-all-errors --retry-delay 5 \
+  http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Say hello."}],"max_tokens":24,"stream":false}' \
+  | jq -e '.choices[0].message.content | select(length > 0)'
+```
+
+</Step>
+</Steps>
+
+## If a step fails
+
+Inspect the capture conditions and workload events:
+
+```bash
+kubectl describe dgd "$DGD" -n "$NAMESPACE"
+kubectl get snapshotjobs,podsnapshots -n "$NAMESPACE" \
+  -l "nvidia.com/dynamo-graph-deployment-name=$DGD" -o yaml
+kubectl get pods -n "$NAMESPACE"
+```
+
+- **Capture is pending:** check GPU scheduling, image pulls, the model-cache PVC,
+  and Snapshot agent readiness.
+- **Capture fails:** inspect the `SnapshotJob` failure reason and capture Pod logs.
+  Keep the example's `UCX_TLS=tcp,self`; this smoke test does not use RDMA.
+- **Restore fails:** inspect the worker's `nvidia.com/Restored` condition and
+  [Snapshot troubleshooting](https://github.com/ai-dynamo/snapshot/blob/v0.2.0-rc.1/docs/operations/troubleshooting.md).
+
+## Clean Up
+
+Stop port forwarding, then delete the example:
+
+```bash
+kubectl delete dgd "$DGD" -n "$NAMESPACE"
+```
+
+The default `deletionPolicy: Delete` removes the DGD-managed capture and artifact.
+The model-cache PVC and the Snapshot installation remain available for other
+workloads. See the [checkpoint configuration reference](../../../reference/kubernetes-api/dynamo-component-deployment.mdx#experimentalspec)
+for reuse and retention rules.
