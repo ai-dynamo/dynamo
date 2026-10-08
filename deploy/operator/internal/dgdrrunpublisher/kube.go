@@ -19,11 +19,8 @@ package dgdrrunpublisher
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
@@ -40,27 +37,16 @@ import (
 )
 
 const (
-	// LabelRunName ties a candidate to its run.
-	LabelRunName = "nvidia.com/dgdr-run-name"
+	// LabelRunUID ties a candidate to one incarnation of its run. The run name can be
+	// reused after a delete and recreate; the UID cannot, so candidates left over from a
+	// previous run of the same name are never mistaken for current ones.
+	LabelRunUID = "nvidia.com/dgdr-run-uid"
 	// LabelCandidateID records the stable candidate id (the identity read back on list).
 	LabelCandidateID = "nvidia.com/dgdr-candidate-id"
+
+	evaluatedCondition = "Evaluated"
+	dgdKind            = "DynamoGraphDeployment"
 )
-
-// maxLabelValue is the Kubernetes limit on a label value; run names may be up to 253.
-const maxLabelValue = 63
-
-// RunLabelValue is the label-safe, stable selector value for a run name. Names that
-// fit are used as-is; longer ones are truncated and suffixed with a hash of the full
-// name so they stay distinct. Every reader and writer of LabelRunName must use it.
-func RunLabelValue(runName string) string {
-	if len(runName) <= maxLabelValue {
-		return runName
-	}
-	sum := sha256.Sum256([]byte(runName))
-	suffix := hex.EncodeToString(sum[:8])
-	prefix := strings.TrimRight(runName[:maxLabelValue-len(suffix)-1], "-_.")
-	return prefix + "-" + suffix
-}
 
 // KubeCluster is the Cluster implementation backed by a controller-runtime client. It
 // should be a direct (uncached) client: the publisher is a short-lived sidecar, so it
@@ -80,33 +66,64 @@ type KubeCluster struct {
 
 var _ Cluster = (*KubeCluster)(nil)
 
+func (k *KubeCluster) getRun(ctx context.Context) (*v1beta2.DynamoGraphDeploymentRun, error) {
+	var run v1beta2.DynamoGraphDeploymentRun
+	if err := k.Client.Get(ctx, types.NamespacedName{Namespace: k.Namespace, Name: k.RunName}, &run); err != nil {
+		return nil, fmt.Errorf("getting run: %w", err)
+	}
+	return &run, nil
+}
+
 func (k *KubeCluster) ListCandidates(ctx context.Context) ([]dgdcreconcile.CurrentDGDC, error) {
+	run, err := k.getRun(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var list v1beta2.DynamoGraphDeploymentCandidateList
-	if err := k.Client.List(ctx, &list, client.InNamespace(k.Namespace), client.MatchingLabels{LabelRunName: RunLabelValue(k.RunName)}); err != nil {
+	if err := k.Client.List(ctx, &list, client.InNamespace(k.Namespace), client.MatchingLabels{LabelRunUID: string(run.UID)}); err != nil {
 		return nil, err
 	}
 	out := make([]dgdcreconcile.CurrentDGDC, 0, len(list.Items))
 	for i := range list.Items {
 		out = append(out, dgdcreconcile.CurrentDGDC{
-			Name: list.Items[i].Name,
-			ID:   list.Items[i].Labels[LabelCandidateID],
+			Name:       list.Items[i].Name,
+			ID:         list.Items[i].Labels[LabelCandidateID],
+			Incomplete: !meta.IsStatusConditionTrue(list.Items[i].Status.Conditions, evaluatedCondition),
 		})
 	}
 	return out, nil
 }
 
-// CreateCandidate creates the candidate and populates its status exactly once. Both
-// steps are idempotent so a retry after a partial failure converges.
-func (k *KubeCluster) CreateCandidate(ctx context.Context, name string, candidate dgdcreconcile.DesiredCandidate) error {
+// decodeSpec extracts the DGD spec from a rendered manifest, rejecting anything that is
+// not a DynamoGraphDeployment with a spec rather than creating an empty candidate.
+func decodeSpec(candidate dgdcreconcile.DesiredCandidate) (*v1beta1.DynamoGraphDeploymentSpec, error) {
 	var doc struct {
-		Spec v1beta1.DynamoGraphDeploymentSpec `json:"spec"`
+		Kind string                             `json:"kind"`
+		Spec *v1beta1.DynamoGraphDeploymentSpec `json:"spec"`
 	}
 	if err := yaml.Unmarshal([]byte(candidate.Spec), &doc); err != nil {
-		return fmt.Errorf("decoding manifest of candidate %s: %w", candidate.ID, err)
+		return nil, fmt.Errorf("decoding manifest of candidate %s: %w", candidate.ID, err)
 	}
-	var run v1beta2.DynamoGraphDeploymentRun
-	if err := k.Client.Get(ctx, types.NamespacedName{Namespace: k.Namespace, Name: k.RunName}, &run); err != nil {
-		return fmt.Errorf("getting run: %w", err)
+	if doc.Kind != dgdKind {
+		return nil, fmt.Errorf("manifest of candidate %s is a %q, want %s", candidate.ID, doc.Kind, dgdKind)
+	}
+	if doc.Spec == nil {
+		return nil, fmt.Errorf("manifest of candidate %s has no spec", candidate.ID)
+	}
+	return doc.Spec, nil
+}
+
+// CreateCandidate creates the candidate and populates its status exactly once. Both
+// steps are idempotent so a retry after a partial failure converges; the publisher
+// calls it again for a candidate whose status was never populated.
+func (k *KubeCluster) CreateCandidate(ctx context.Context, name string, candidate dgdcreconcile.DesiredCandidate) error {
+	spec, err := decodeSpec(candidate)
+	if err != nil {
+		return err
+	}
+	run, err := k.getRun(ctx)
+	if err != nil {
+		return err
 	}
 	parameters, err := rawExtension(candidate.Parameters)
 	if err != nil {
@@ -116,14 +133,14 @@ func (k *KubeCluster) CreateCandidate(ctx context.Context, name string, candidat
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: k.Namespace,
 			Name:      name,
-			Labels:    map[string]string{LabelRunName: RunLabelValue(k.RunName), LabelCandidateID: candidate.ID},
+			Labels:    map[string]string{LabelRunUID: string(run.UID), LabelCandidateID: candidate.ID},
 		},
 		Spec: v1beta2.DynamoGraphDeploymentCandidateSpec{
-			DynamoGraphDeploymentSpec: doc.Spec,
+			DynamoGraphDeploymentSpec: *spec,
 			Parameters:                parameters,
 		},
 	}
-	if err := controllerutil.SetControllerReference(&run, object, k.Client.Scheme()); err != nil {
+	if err := controllerutil.SetControllerReference(run, object, k.Client.Scheme()); err != nil {
 		return err
 	}
 	if err := k.Client.Create(ctx, object); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -134,7 +151,10 @@ func (k *KubeCluster) CreateCandidate(ctx context.Context, name string, candidat
 	if err := k.Client.Get(ctx, types.NamespacedName{Namespace: k.Namespace, Name: name}, &stored); err != nil {
 		return err
 	}
-	if len(stored.Status.Conditions) > 0 {
+	if !metav1.IsControlledBy(&stored, run) {
+		return fmt.Errorf("candidate %s already exists and is not controlled by run %s (uid %s)", name, k.RunName, run.UID)
+	}
+	if meta.IsStatusConditionTrue(stored.Status.Conditions, evaluatedCondition) {
 		return nil // status already populated; candidates are immutable afterwards
 	}
 	metrics, err := rawExtension(candidate.Metrics)
@@ -143,9 +163,9 @@ func (k *KubeCluster) CreateCandidate(ctx context.Context, name string, candidat
 	}
 	stored.Status.Metrics = metrics
 	meta.SetStatusCondition(&stored.Status.Conditions, metav1.Condition{
-		Type:    "Evaluated",
+		Type:    evaluatedCondition,
 		Status:  metav1.ConditionTrue,
-		Reason:  "Evaluated",
+		Reason:  evaluatedCondition,
 		Message: "evaluated by the Sweeper",
 	})
 	return k.Client.Status().Update(ctx, &stored)

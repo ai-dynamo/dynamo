@@ -60,6 +60,7 @@ func TestComputeActions(t *testing.T) {
 		{"all gone", nil, c("n-a", "a", "n-b", "b"), nil, []string{"n-a", "n-b"}},
 		{"steady state needs no action", d("a", "b"), c("n-a", "a", "n-b", "b"), nil, nil},
 		{"reordering desired needs no action", d("b", "a"), c("n-a", "a", "n-b", "b"), nil, nil},
+		{"incomplete DGDC is ensured again", d("a", "b"), []CurrentDGDC{{Name: "n-a", ID: "a"}, {Name: "n-b", ID: "b", Incomplete: true}}, []string{"b"}, nil},
 		{"mixed", d("a", "c"), c("n-a", "a", "n-b", "b"), []string{"c"}, []string{"n-b"}},
 	}
 	for _, tc := range tests {

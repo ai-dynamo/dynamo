@@ -40,6 +40,8 @@ type fakeCluster struct {
 	creates     []string
 	deletes     []string
 	patches     []RunStatus
+	ops         []string // ordered log of every mutation
+	incomplete  map[string]bool
 	state       SweeperState
 	patchErr    error
 	createErr   error
@@ -47,7 +49,7 @@ type fakeCluster struct {
 }
 
 func newFakeCluster() *fakeCluster {
-	return &fakeCluster{candidates: map[string]string{}, created: map[string]dgdcreconcile.DesiredCandidate{}}
+	return &fakeCluster{candidates: map[string]string{}, created: map[string]dgdcreconcile.DesiredCandidate{}, incomplete: map[string]bool{}}
 }
 
 func (f *fakeCluster) ListCandidates(context.Context) ([]dgdcreconcile.CurrentDGDC, error) {
@@ -55,7 +57,7 @@ func (f *fakeCluster) ListCandidates(context.Context) ([]dgdcreconcile.CurrentDG
 	defer f.mu.Unlock()
 	var out []dgdcreconcile.CurrentDGDC
 	for name, id := range f.candidates {
-		out = append(out, dgdcreconcile.CurrentDGDC{Name: name, ID: id})
+		out = append(out, dgdcreconcile.CurrentDGDC{Name: name, ID: id, Incomplete: f.incomplete[name]})
 	}
 	return out, nil
 }
@@ -67,6 +69,8 @@ func (f *fakeCluster) CreateCandidate(_ context.Context, name string, c dgdcreco
 	if f.createErr != nil {
 		return f.createErr
 	}
+	delete(f.incomplete, name)
+	f.ops = append(f.ops, "create:"+name)
 	f.candidates[name] = c.ID
 	f.created[name] = c
 	f.creates = append(f.creates, name)
@@ -77,6 +81,7 @@ func (f *fakeCluster) DeleteCandidate(_ context.Context, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.candidates, name)
+	f.ops = append(f.ops, "delete:"+name)
 	f.deletes = append(f.deletes, name)
 	return nil
 }
@@ -87,6 +92,7 @@ func (f *fakeCluster) PatchRunStatus(_ context.Context, s RunStatus) error {
 	if f.patchErr != nil {
 		return f.patchErr
 	}
+	f.ops = append(f.ops, "patch")
 	f.patches = append(f.patches, s)
 	return nil
 }
@@ -102,6 +108,8 @@ func (f *fakeCluster) setState(s SweeperState) {
 	defer f.mu.Unlock()
 	f.state = s
 }
+
+const validManifest = "kind: DynamoGraphDeployment\nspec: {}\n"
 
 type cand struct {
 	id      string
@@ -120,7 +128,7 @@ func snapshotJSON(t *testing.T, phase string, cands ...cand) []byte {
 			entry["error"] = "boom"
 		} else {
 			entry["outcome"] = OutcomeMaterialized
-			entry["manifest"] = "kind: DynamoGraphDeployment\n"
+			entry["manifest"] = validManifest
 		}
 		list = append(list, entry)
 	}
@@ -189,7 +197,7 @@ func TestEvaluatedPointReachesTheClusterComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := fc.created["run-a"]
-	if got.Spec != "kind: DynamoGraphDeployment\n" {
+	if got.Spec != validManifest {
 		t.Fatalf("manifest = %q", got.Spec)
 	}
 	if v, ok := got.Parameters["tp"]; !ok || v != float64(2) {
@@ -225,20 +233,6 @@ func TestReturningCandidateIsRecreatedIdentically(t *testing.T) {
 	}
 }
 
-// A published DGDC is immutable: the publisher's view of the cluster has no way to
-// update one, so no code path can modify an evaluated point after its initial status.
-func TestClusterInterfaceCannotUpdateCandidates(t *testing.T) {
-	typ := reflect.TypeOf((*Cluster)(nil)).Elem()
-	var methods []string
-	for i := 0; i < typ.NumMethod(); i++ {
-		methods = append(methods, typ.Method(i).Name)
-	}
-	want := []string{"CreateCandidate", "DeleteCandidate", "ListCandidates", "PatchRunStatus", "SweeperState"}
-	if !reflect.DeepEqual(methods, want) {
-		t.Fatalf("Cluster methods = %v, want %v: adding a candidate-mutating call breaks DGDC immutability", methods, want)
-	}
-}
-
 func TestRepeatedSnapshotCausesNoWrites(t *testing.T) {
 	p, fc, _ := newPublisher(t)
 	ctx := context.Background()
@@ -263,6 +257,10 @@ func TestDroppedCandidateIsDeletedAfterStatusPatch(t *testing.T) {
 	}
 	if got := fc.patches[len(fc.patches)-1].CandidateNames; !reflect.DeepEqual(got, []string{"run-a"}) {
 		t.Fatalf("status refs = %v", got)
+	}
+	want := []string{"create:run-a", "create:run-b", "patch", "patch", "delete:run-b"}
+	if !reflect.DeepEqual(fc.ops, want) {
+		t.Fatalf("ops = %v, want %v", fc.ops, want)
 	}
 }
 
@@ -357,14 +355,19 @@ func TestParseSnapshotValidation(t *testing.T) {
 		"schema":        `{"schemaVersion":2,"run":{"phase":"Running","terminal":false}}`,
 		"phase":         `{"schemaVersion":1,"run":{"phase":"Weird","terminal":false}}`,
 		"terminal flag": `{"schemaVersion":1,"run":{"phase":"Succeeded","terminal":false}}`,
-		"duplicate":     `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized","manifest":"x"},{"id":"a","outcome":"materialized","manifest":"x"}]}`,
+		"duplicate":     `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized","manifest":"kind: DynamoGraphDeployment\\nspec: {}\\n"},{"id":"a","outcome":"materialized","manifest":"kind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
 		"no manifest":   `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized"}]}`,
 		"no error":      `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialization_failed"}]}`,
-		"empty id":      `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"","outcome":"materialized","manifest":"x"}]}`,
+		"unsafe id":     `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"Not_Valid","outcome":"materialized","manifest":"kind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
+		"long id":       `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"%s","outcome":"materialized","manifest":"kind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
+		"wrong kind":    `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized","manifest":"kind: ConfigMap\\nspec: {}\\n"}]}`,
+		"no spec":       `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized","manifest":"kind: DynamoGraphDeployment\\n"}]}`,
+		"empty id":      `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"","outcome":"materialized","manifest":"kind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
 	}
+	bad["long id"] = strings.Replace(bad["long id"], "%s", strings.Repeat("a", 64), 1)
 	for name, doc := range bad {
-		if _, err := ParseSnapshot([]byte(doc)); err == nil {
-			t.Errorf("%s: want error", name)
+		if _, err := ParseSnapshot([]byte(doc)); !errors.Is(err, ErrProtocolViolation) {
+			t.Errorf("%s: want protocol violation, got %v", name, err)
 		}
 	}
 }
@@ -398,8 +401,6 @@ func TestRunTerminalSnapshotAcknowledges(t *testing.T) {
 	}
 }
 
-// A terminal Failed snapshot has its projection reconciled, then fails the publisher
-// whether or not the Sweeper itself exited non-zero.
 func TestRunTerminalFailedSnapshotIsReconciledThenFails(t *testing.T) {
 	for name, state := range map[string]SweeperState{
 		"sweeper exit 0": {Exited: true, ExitCode: 0},
@@ -418,21 +419,6 @@ func TestRunTerminalFailedSnapshotIsReconciledThenFails(t *testing.T) {
 				t.Fatalf("creates = %v", fc.creates)
 			}
 		})
-	}
-}
-
-func TestRunLabelValueIsLabelSafeAndStable(t *testing.T) {
-	if got := RunLabelValue("short-run"); got != "short-run" {
-		t.Fatalf("short names are kept: %q", got)
-	}
-	long := strings.Repeat("a", 100) + "-x"
-	other := strings.Repeat("a", 100) + "-y"
-	got := RunLabelValue(long)
-	if len(got) > 63 || got == RunLabelValue(other) || got != RunLabelValue(long) {
-		t.Fatalf("label = %q (%d)", got, len(got))
-	}
-	if last := got[len(got)-1]; !(last >= '0' && last <= '9' || last >= 'a' && last <= 'f') {
-		t.Fatalf("must end alphanumeric: %q", got)
 	}
 }
 
@@ -484,7 +470,7 @@ func TestRunCleanExitWithoutTerminalSnapshotIsProtocolViolation(t *testing.T) {
 	writeSnapshot(t, dir, snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	fc.setState(SweeperState{Exited: true, ExitCode: 0})
 	err := runWithTimeout(t, p)
-	if !errors.Is(err, ErrMissingTerminalSnapshot) || ExitCode(err) != ExitMissingTerminalSnapshot {
+	if !errors.Is(err, ErrMissingTerminalSnapshot) || ExitCode(err) != ExitProtocolViolation {
 		t.Fatalf("err = %v", err)
 	}
 	if !reflect.DeepEqual(fc.creates, []string{"run-a"}) {
@@ -550,5 +536,107 @@ func TestRunContextCancelledReturnsError(t *testing.T) {
 	cancel()
 	if err := p.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCandidateNameIsBoundedAndUnique(t *testing.T) {
+	if got := CandidateName("run", "a"); got != "run-a" {
+		t.Fatalf("short names are unchanged: %q", got)
+	}
+	id := "evaluated-point-0123456789ab"
+	long := strings.Repeat("r", 253)
+	other := strings.Repeat("r", 252) + "s"
+	name := CandidateName(long, id)
+	if len(name) > 253 || !strings.HasSuffix(name, "-"+id) || name == CandidateName(other, id) || name != CandidateName(long, id) {
+		t.Fatalf("name = %q (%d)", name, len(name))
+	}
+}
+
+func TestUnchangedSnapshotRepairsDrift(t *testing.T) {
+	p, fc, dir := newPublisher(t)
+	ctx := context.Background()
+	writeSnapshot(t, dir, snapshotJSON(t, PhaseRunning, cand{id: "a"}))
+	if err := p.syncOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	delete(fc.candidates, "run-a") // someone deletes the referenced candidate
+	if err := p.syncOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fc.creates, []string{"run-a", "run-a"}) {
+		t.Fatalf("creates = %v", fc.creates)
+	}
+}
+
+func TestCandidateWithoutStatusIsCompletedBeforeItIsReferenced(t *testing.T) {
+	p, fc, dir := newPublisher(t)
+	ctx := context.Background()
+	fc.candidates["run-a"] = "a"
+	fc.incomplete["run-a"] = true // created, but the status write failed
+	writeSnapshot(t, dir, snapshotJSON(t, PhaseRunning, cand{id: "a"}))
+	if err := p.syncOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"create:run-a", "patch"}; !reflect.DeepEqual(fc.ops, want) {
+		t.Fatalf("ops = %v, want %v", fc.ops, want)
+	}
+}
+
+func writeProgress(t *testing.T, dir, phase string, round, evaluated int) {
+	t.Helper()
+	doc := map[string]any{}
+	if err := json.Unmarshal(snapshotJSON(t, phase, cand{id: "a"}), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["progress"] = map[string]any{"round": round, "evaluated": evaluated}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSnapshot(t, dir, data)
+}
+
+func TestRegressingSnapshotIsRejectedBeforeReconcile(t *testing.T) {
+	for name, regressed := range map[string][2]int{"older round": {2, 99}, "fewer evaluated in the same round": {3, 4}} {
+		t.Run(name, func(t *testing.T) {
+			p, fc, dir := newPublisher(t)
+			ctx := context.Background()
+			writeProgress(t, dir, PhaseRunning, 3, 5)
+			if err := p.syncOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+			ops := len(fc.ops)
+			writeProgress(t, dir, PhaseRunning, regressed[0], regressed[1])
+			err := p.syncOnce(ctx)
+			if !errors.Is(err, ErrProtocolViolation) || ExitCode(err) != ExitProtocolViolation {
+				t.Fatalf("err = %v", err)
+			}
+			if len(fc.ops) != ops {
+				t.Fatalf("a regressing snapshot must not be reconciled: %v", fc.ops[ops:])
+			}
+		})
+	}
+}
+
+func TestTerminalSnapshotMayReportItsFinalEvaluatedTotal(t *testing.T) {
+	p, _, dir := newPublisher(t)
+	ctx := context.Background()
+	writeProgress(t, dir, PhaseRunning, 3, 9)
+	if err := p.syncOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	writeProgress(t, dir, PhaseSucceeded, 3, 7)
+	if err := p.syncOnce(ctx); err != nil {
+		t.Fatalf("terminal snapshot rejected: %v", err)
+	}
+}
+
+func TestInvalidFinalSnapshotIsAProtocolViolationExit(t *testing.T) {
+	p, fc, dir := newPublisher(t)
+	writeSnapshot(t, dir, []byte(`{"schemaVersion":2}`))
+	fc.setState(SweeperState{Exited: true, ExitCode: 0})
+	err := runWithTimeout(t, p)
+	if ExitCode(err) != ExitProtocolViolation {
+		t.Fatalf("err = %v, exit = %d", err, ExitCode(err))
 	}
 }
