@@ -171,9 +171,9 @@ class DynamoRuntimeConfig(ConfigBase):
         if self.tcp_tls_client_key_path:
             os.environ["DYN_TCP_TLS_CLIENT_KEY_PATH"] = self.tcp_tls_client_key_path
         if self.tcp_tls_client_ca_cert_path:
-            os.environ["DYN_TCP_TLS_CLIENT_CA_CERT_PATH"] = (
-                self.tcp_tls_client_ca_cert_path
-            )
+            os.environ[
+                "DYN_TCP_TLS_CLIENT_CA_CERT_PATH"
+            ] = self.tcp_tls_client_ca_cert_path
 
         # Propagate NATS TLS CLI flags.
         if self.nats_tls_ca_cert_path:
