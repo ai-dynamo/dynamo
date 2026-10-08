@@ -74,6 +74,13 @@ def _requirements_file_aisimulate_requirement(path: Path) -> Requirement:
 
 def _python_version_range(requirement: Requirement) -> SpecifierSet:
     assert requirement.url is None, "AISimulate must resolve from PyPI"
+    if len(requirement.specifier) == 1:
+        (pin,) = requirement.specifier
+        assert (
+            pin.operator == "=="
+        ), "a single AISimulate specifier must be an exact pin"
+        Version(pin.version)
+        return requirement.specifier
     bounds = {
         specifier.operator: Version(specifier.version)
         for specifier in requirement.specifier
