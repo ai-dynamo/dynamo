@@ -134,8 +134,13 @@ TTFT, per-user output rate, total output rate, request counts, and errors.
 
 On October 8, 2026, the Nscale 2P1D KV-aware deployment passed startup, model
 discovery, chat completion, and prefix-cache reuse smoke tests with the pinned
-image and actual MTP2 verification. Performance benchmarking remains pending;
-no performance result is claimed by these manifests.
+image and actual MTP2 verification. A separate routing test warmed distinct
+prefixes on the two prefill workers. All six unforced repeats selected their
+prefix's cache owner and reported 1,280 cached tokens each; the cold control
+reported zero. Saved metrics confirmed worker KV-event publication, frontend
+event consumption, and successful NIXL transfers with no transfer failures
+or expired leases during the test. Performance benchmarking of this KV-aware
+configuration remains pending; these smoke tests establish functional behavior.
 
 ## Edit and render
 
