@@ -45,6 +45,20 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
         && /tmp/buildenv/bin/pip wheel --no-cache-dir --no-deps crick==0.0.8 -w /wheels; \
     fi
 
+# The temporary Rust Git pin needs the matching C wrapper at runtime. Build
+# only that wrapper; the native NIXL core and UCX still come from the wheel.
+FROM wheel_builder_base AS frontend_nixl_capi
+ARG NIXL_REF
+COPY lib/memory/Cargo.toml /capi-repo/lib/memory/Cargo.toml
+COPY lib/llm/Cargo.toml /capi-repo/lib/llm/Cargo.toml
+COPY container/deps/build_nixl_capi.py /capi-repo/build_nixl_capi.py
+RUN source ${VIRTUAL_ENV}/bin/activate && \
+    uv pip install --no-deps "nixl-cu13==${NIXL_REF#v}" && \
+    NIXL_LIB_DIR="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/.nixl_cu13.mesonpy.libs" && \
+    python /capi-repo/build_nixl_capi.py --repo /capi-repo \
+        --library-dir "${NIXL_LIB_DIR}" --native-version "${NIXL_REF#v}" \
+        --output /opt/dynamo/nixl-capi
+
 FROM ${FRONTEND_IMAGE} AS pre_frontend
 
 ARG PYTHON_VERSION
@@ -188,6 +202,8 @@ RUN --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp
 
 # Setup environment for all users
 USER root
+COPY --from=frontend_nixl_capi /opt/dynamo/nixl-capi/libnixl_capi.so /opt/dynamo/nixl-capi/libnixl_capi.so
+COPY --from=frontend_nixl_capi /opt/dynamo/nixl-capi/source.json /opt/dynamo/nixl-capi/source.json
 # nixl-sys resolves the C API with a bare dlopen("libnixl_capi.so"), and
 # dynamo/_core.abi3.so carries no RPATH, so without this the Rust bindings
 # silently fall back to stub mode while the Python ones work. The wheel keeps
@@ -197,7 +213,7 @@ USER root
 RUN NIXL_LIB_DIR="$(/opt/dynamo/venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/.nixl_cu13.mesonpy.libs" && \
     [ -f "${NIXL_LIB_DIR}/libnixl_capi.so" ] || { echo "missing ${NIXL_LIB_DIR}/libnixl_capi.so; NIXL wheel layout changed" >&2; exit 1; } && \
     [ -d "${NIXL_LIB_DIR}/plugins" ] || { echo "missing ${NIXL_LIB_DIR}/plugins; NIXL wheel layout changed" >&2; exit 1; } && \
-    echo "${NIXL_LIB_DIR}" > /etc/ld.so.conf.d/nixl.conf && \
+    printf '%s\n' /opt/dynamo/nixl-capi "${NIXL_LIB_DIR}" > /etc/ld.so.conf.d/nixl.conf && \
     ldconfig && \
     chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
