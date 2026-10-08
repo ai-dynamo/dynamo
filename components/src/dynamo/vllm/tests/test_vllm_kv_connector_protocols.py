@@ -584,8 +584,7 @@ def test_make_kv_connector_protocol_raises_on_unknown_connector():
 
 
 def test_registry_keys_match_vllm_connector_names():
-    """Wire-format guard: KV_CONNECTOR_PROTOCOLS keys must match the strings
-    vLLM uses in ``KVTransferConfig.kv_connector``."""
+    """Pin the local protocol registry inventory and protocol classes."""
     assert set(KV_CONNECTOR_PROTOCOLS) == {
         "NixlConnector",
         "NixlPullConnector",
@@ -593,7 +592,6 @@ def test_registry_keys_match_vllm_connector_names():
         "LMCacheMPConnector",
         "NeuronNixlConnector",
         "NixlPushConnector",
-        "MooncakeConnector",
     }
     for cls in KV_CONNECTOR_PROTOCOLS.values():
         assert issubclass(cls, KvConnectorProtocol)
@@ -607,6 +605,26 @@ def test_registry_keys_match_vllm_connector_names():
 # This catches upstream path / signature drift that the sys.modules-stubbed
 # tests above would silently pass through.
 # ---------------------------------------------------------------------------
+
+
+_FACTORY_MOD = "vllm.distributed.kv_transfer.kv_connector.factory"
+_real_factory_spec = None
+try:  # pragma: no cover - environment-dependent
+    _real_factory_spec = importlib.util.find_spec(_FACTORY_MOD)
+except (ImportError, ValueError):
+    _real_factory_spec = None
+
+
+@pytest.mark.skipif(
+    _real_factory_spec is None,
+    reason="vLLM KV connector factory not installed in this environment",
+)
+def test_real_vllm_factory_registers_protocol_connector_names():
+    """Check protocol names against vLLM without loading connector classes."""
+    real = importlib.import_module(_FACTORY_MOD)
+    # NeuronNixlConnector is not a built-in vLLM registry entry.
+    connector_names = set(KV_CONNECTOR_PROTOCOLS) - {"NeuronNixlConnector"}
+    assert connector_names <= real.KVConnectorFactory._registry.keys()
 
 
 _real_mooncake_spec = None

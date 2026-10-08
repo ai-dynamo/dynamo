@@ -505,7 +505,7 @@ def create_kv_events_config(
     return None
 
 
-# All NIXL connectors need the side-channel handshake: pull and push mode
+# These NIXL connectors need the side-channel handshake: pull and push mode
 # share vLLM's NIXL base scheduler, which publishes side_channel_host/port in
 # the params it hands the decode side.
 _NIXL_CONNECTOR_NAMES = (
