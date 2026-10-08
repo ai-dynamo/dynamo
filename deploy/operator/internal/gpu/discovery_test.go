@@ -496,13 +496,28 @@ func TestInferHardwareSystem(t *testing.T) {
 
 		// --- Vera Rubin ---
 		{
-			name:     "VR200 model token",
-			input:    "NVIDIA VR200",
+			name:     "observed VR NVL72 ES product name",
+			input:    "NVIDIA VR NVL72 ES",
 			expected: nvidiacomv1beta1.GPUSKUTypeVRNVL72,
 		},
 		{
-			name:     "VR2000 should not match VR200",
-			input:    "NVIDIA VR2000",
+			name:     "GPU Feature Discovery sanitised product name",
+			input:    "NVIDIA-VR-NVL72-ES",
+			expected: nvidiacomv1beta1.GPUSKUTypeVRNVL72,
+		},
+		{
+			name:     "VR200-only name is not accepted",
+			input:    "NVIDIA VR200",
+			expected: "",
+		},
+		{
+			name:     "generic driver fallback",
+			input:    "NVIDIA Graphics Device",
+			expected: "",
+		},
+		{
+			name:     "longer NVL model should not match",
+			input:    "NVIDIA VR NVL720 ES",
 			expected: "",
 		},
 
