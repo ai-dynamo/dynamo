@@ -1186,6 +1186,21 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  vllm-efa-copy-to-acr:
+    name: vllm-runtime-efa
+    needs: [changed-files, vllm-efa-build]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.efa == 'true') &&
+      needs.vllm-efa-build.result == 'success'
+    uses: $/.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      copy_timeout_minutes: 20
+    secrets: inherit
+
   frontend-copy-to-acr:
     name: frontend
     needs: [changed-files, frontend-build]
@@ -1964,6 +1979,7 @@ jobs:
       - planner-test
       - planner-copy-to-acr
       - vllm-copy-to-acr
+      - vllm-efa-copy-to-acr
       - vllm-multi-gpu-test
       - vllm-efa-build
       - sglang-copy-to-acr
