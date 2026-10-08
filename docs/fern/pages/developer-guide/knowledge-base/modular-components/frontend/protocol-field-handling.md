@@ -64,40 +64,40 @@ endpoint:
 
 ## Trace the Complete Field Lifecycle
 
-Follow the stages in request-processing order. Each stage establishes the input or decision needed
-by the next stage:
+Trace a field through four phases in request-processing order. Keep the checks within each phase
+separate when diagnosing a gap:
 
-1. **Parse and capture:** Deserialize the value from its public wire location without losing
-   distinctions such as omitted, `null`, `false`, `0`, and an empty collection. Parsing comes first
-   because no later policy or behavior can inspect a value that was discarded or normalized
-   incorrectly at the boundary. Capture alone does not mean that Dynamo supports the field.
-2. **Admit:** Decide whether the selected endpoint, backend profile, version, transport, and
-   deployment mode accept the captured field. Admission follows parsing because the frontend must
-   know which field the client supplied, but it precedes semantic validation so unsupported fields
-   receive the configured reject-or-ignore outcome instead of accidentally reaching an
-   implementation path.
-3. **Validate:** Check the admitted value's type, range, shape, conflicts, and supported
-   combinations. Validation depends on the selected compatibility path and must finish before
-   preprocessing or generation creates side effects or consumes expensive resources.
-4. **Interpret:** Apply every Dynamo-owned semantic effect, such as changing chat-template
-   rendering, routing, aggregation, or response selection. Interpretation follows validation so
-   components operate on a valid value, and it precedes transport because it determines whether the
-   backend needs the original value, a translated value, or no value at all.
-5. **Transport:** Encode the backend-relevant representation across each applicable Rust, Python,
-   serialization, and process boundary. Transport follows interpretation because the semantic owner
-   determines the required representation, and it precedes execution because a backend cannot act
-   on a value that disappears at an intermediate conversion.
-6. **Execute:** Identify the backend operation that consumes the transported value and verify its
-   behavioral effect. Execution follows successful transport. Reaching a backend data structure is
-   not enough; the engine must use the value as the public contract specifies.
-7. **Project the response:** Map backend results and failures into the public response contract.
-   Check streaming and non-streaming behavior separately when they differ. Projection comes last
-   because it depends on the execution result, but request-only fields still require intentional
-   error behavior even when they add no response field.
+1. **Receive and gate:** Capture the exact wire value, preserving distinctions such as omitted,
+   `null`, `false`, `0`, and an empty collection. Then apply two gates:
+   - **Admission:** Decide whether the selected endpoint, backend profile, version, transport, and
+     deployment mode accept the field. Unsupported fields receive the configured reject-or-ignore
+     outcome.
+   - **Validation:** Check an admitted value's type, range, shape, conflicts, and supported
+     combinations before preprocessing or generation creates side effects or consumes expensive
+     resources.
 
-The order narrows uncertainty at each boundary: preserve what the client sent, select the supported
-contract, reject invalid input, apply frontend semantics, deliver backend semantics, execute them,
-and expose the outcome.
+   Capture comes before both gates because policy cannot inspect a value lost at the boundary.
+   Admission comes before validation because "unsupported here" and "supported but invalid" are
+   different compatibility outcomes.
+2. **Apply frontend semantics:** Perform every Dynamo-owned effect, such as changing chat-template
+   rendering, routing, aggregation, or response selection. This follows validation so frontend
+   components operate on a valid value. It also decides whether a backend needs the original value,
+   a translated value, or no value at all.
+3. **Deliver and execute:** Encode the backend-relevant representation across each applicable Rust,
+   Python, serialization, and process boundary. Then identify the backend operation that reads the
+   value and verify its behavioral effect. Keep these as two distinct subchecks:
+   - **Delivery:** The expected value reaches the expected backend structure.
+   - **Execution:** The backend consumes the value and changes its behavior as the public contract
+     requires.
+
+   Delivery must precede execution, but delivery alone is not proof of support. A value can reach a
+   backend structure and still be ignored, overwritten, or bypassed by the active execution path.
+4. **Return the outcome:** Map backend results and failures into the public response contract. Check
+   streaming and non-streaming behavior separately when they differ. Request-only fields may add no
+   response field, but their validation and compatibility failures still need intentional errors.
+
+The order narrows uncertainty at each boundary: preserve and gate what the client sent, apply
+frontend-owned behavior, prove both backend delivery and execution, and expose the outcome.
 
 ### Example: `bad_words_token_ids` on a vLLM Path
 
@@ -109,28 +109,26 @@ Consider this chat completion request fragment:
 }
 ```
 
-The field traces through the lifecycle as follows:
+The field traces through the four phases as follows:
 
-1. **Parse and capture:** The chat request parser captures the top-level field in its extra-field
-   map. An omitted field remains different from an empty list. A `null` value for this named
-   passthrough field is normalized to omission.
-2. **Admit:** The frontend recognizes `bad_words_token_ids` as one of a small set of fields accepted
-   for backend-specific handling. An arbitrary extra field remains unsupported; this allowlist does
-   not create general passthrough.
-3. **Validate:** Dynamo requires an array of token-ID arrays. A scalar, string token ID, negative
-   token ID, or incorrectly nested array fails before generation.
-4. **Interpret:** Dynamo does not implement the token-blocking semantics. Its responsibility is to
-   normalize and validate the input, so the field remains backend-handled.
-5. **Transport:** The preprocessor copies the value to
-   `extra_args.sampling_options.bad_words_token_ids`, preserving the nested token sequences across
-   the Rust-to-Python boundary.
-6. **Execute:** The vLLM handler installs the sequences in vLLM sampling parameters. It checks that
-   the expected vLLM field exists so a backend upgrade fails visibly instead of silently dropping
-   the constraint. vLLM then applies the constraint during token sampling.
-7. **Project the response:** The option adds no dedicated response field. The generated text is the
-   client-visible result, while validation or backend compatibility failures must surface as errors.
-   Transport-level tests can prove that the sampling parameters contain the value; end-to-end tests
-   are still needed to prove that generated tokens obey the constraint.
+1. **Receive and gate:** The chat request parser captures the top-level field in its extra-field
+   map. An omitted field remains different from an empty list, while a `null` value for this named
+   passthrough field is normalized to omission. Admission recognizes `bad_words_token_ids` as one of
+   a small set of fields accepted for backend-specific handling; the allowlist does not create
+   general passthrough. Validation then requires an array of token-ID arrays. A scalar, string token
+   ID, negative token ID, or incorrectly nested array fails before generation.
+2. **Apply frontend semantics:** Dynamo normalizes and validates the input but does not implement the
+   token-blocking behavior. The field therefore remains backend-handled, and its value must be
+   delivered to vLLM without changing the token sequences.
+3. **Deliver and execute:** For delivery, the preprocessor copies the value to
+   `extra_args.sampling_options.bad_words_token_ids` across the Rust-to-Python boundary. For
+   execution, the vLLM handler assigns the sequences to vLLM's expected sampling-parameter field and
+   checks that the field exists, so a backend upgrade fails visibly instead of silently dropping the
+   constraint. A mapping test that inspects the sampling parameters proves delivery. A behavioral
+   test that generates tokens under the constraint is still needed to prove execution.
+4. **Return the outcome:** The option adds no dedicated response field. Generated text is the
+   client-visible result, while validation or backend compatibility failures surface as errors.
+   Streaming and non-streaming responses otherwise retain their normal shapes.
 
 Dynamo's token pipeline does not generally proxy the original client JSON to a native backend
 server. A field that parses successfully can still disappear at a conversion boundary, and a
