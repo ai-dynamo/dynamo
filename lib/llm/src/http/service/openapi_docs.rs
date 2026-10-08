@@ -92,7 +92,7 @@ pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenAp
         let path = parts[1];
 
         // Add operation based on method
-        let operation = create_operation_for_route(method, path);
+        let operation = create_operation_for_route(method, route.documentation_path());
 
         // Create PathItem with the operation
         use utoipa::openapi::HttpMethod;
