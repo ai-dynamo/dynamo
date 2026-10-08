@@ -109,6 +109,18 @@ pub mod logging {
     }
 }
 
+/// Request-lifecycle tracing environment variables.
+pub mod lifecycle_tracing {
+    /// Enable the native request-lifecycle OpenTelemetry span convention.
+    ///
+    /// This is independent from `DYN_LOG`: lifecycle spans are exported through
+    /// the OpenTelemetry tracing layer only.
+    pub const DYN_LIFECYCLE_TRACE_ENABLED: &str = "DYN_LIFECYCLE_TRACE_ENABLED";
+
+    /// Lifecycle detail mode. Defaults to `core`.
+    pub const DYN_LIFECYCLE_TRACE_MODE: &str = "DYN_LIFECYCLE_TRACE_MODE";
+}
+
 /// Runtime configuration environment variables
 ///
 /// These control the Tokio runtime, system health/metrics server, and worker behavior
@@ -184,6 +196,9 @@ pub mod nats {
     /// NATS request/reply timeout in seconds. Unset = async-nats default (10 s).
     pub const DYN_NATS_REQUEST_TIMEOUT_SECS: &str = "DYN_NATS_REQUEST_TIMEOUT_SECS";
 
+    /// Maximum time in seconds to establish the initial NATS connection.
+    pub const NATS_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "NATS_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
     /// NATS authentication environment variables (checked in priority order)
     pub mod auth {
         /// Username for NATS authentication (use with NATS_AUTH_PASSWORD)
@@ -233,11 +248,17 @@ pub mod etcd {
     /// ETCD endpoints (comma-separated list of URLs)
     pub const ETCD_ENDPOINTS: &str = "ETCD_ENDPOINTS";
 
-    /// ETCD lease TTL in seconds (default: 10)
+    /// ETCD lease TTL in seconds (default: 30)
     pub const ETCD_LEASE_TTL: &str = "ETCD_LEASE_TTL";
 
     /// Maximum time in seconds to retry the initial ETCD connection (default: 120)
     pub const ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
+    /// HTTP/2 keepalive ping interval in seconds for the ETCD channel (default: 15, 0 disables)
+    pub const ETCD_KEEPALIVE_INTERVAL_SECONDS: &str = "ETCD_KEEPALIVE_INTERVAL_SECONDS";
+
+    /// Seconds to wait for a keepalive ping ack before the ETCD channel is closed (default: 10)
+    pub const ETCD_KEEPALIVE_TIMEOUT_SECONDS: &str = "ETCD_KEEPALIVE_TIMEOUT_SECONDS";
 
     /// ETCD authentication environment variables
     pub mod auth {
@@ -356,6 +377,9 @@ pub mod llm {
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
+    /// Listen backlog of the frontend HTTP/HTTPS socket (default 4096).
+    pub const DYN_HTTP_LISTEN_BACKLOG: &str = "DYN_HTTP_LISTEN_BACKLOG";
+
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
@@ -423,19 +447,21 @@ pub mod llm {
     /// Accepted values: "reasoning_content" (default) or "reasoning".
     pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
 
-    /// \[EXPERIMENTAL\] Use `dynamo-parsers-v2` instead of the v1 tool-call jail, for
-    /// BOTH the batch and the streaming path. Off by default.
+    /// Select the parser generation. Unset or `auto` keeps the original family defaults.
     ///
-    /// Which v2 shape a request gets is decided by the configured parsers, not by a
-    /// second flag:
-    /// * tool-call parser only (Qwen3-Coder, DeepSeek-V4) -> the v2 TOOL parser owns
-    ///   incremental tool-call emission and drops values truncated at EOF.
-    /// * tool-call AND reasoning parser naming the same family (`qwen3_coder` +
-    ///   `qwen3`) -> the v2 UNIFIED parser owns reasoning, visible text and tool calls
-    ///   in one ordered stream, so reasoning that followed a tool call stays after it
-    ///   instead of being hoisted to the front and fused with the first thought.
+    /// Explicit `1` keeps the V1 parsers; explicit `2` selects a compatible unified
+    /// parser for the configured family. When both parser slots are set, their names
+    /// must resolve to the same family. Unsupported explicit selections fail during
+    /// preprocessor construction.
     ///
-    /// One switch, because both are the same decision: stop using v1.
+    /// Accepted values are `auto`, `1`, and `2`. Explicit
+    /// generations fail during preprocessor construction when the configured family has
+    /// no compatible parser.
+    pub const DYN_PARSER_VERSION: &str = "DYN_PARSER_VERSION";
+
+    /// Compatibility alias for `DYN_PARSER_VERSION=2` when enabled. Uses the shared
+    /// boolean parser: `1`/`true`/`on`/`yes` enable it; `0`/`false`/`off`/`no`/empty
+    /// disable it. This conflicts with `DYN_PARSER_VERSION=1`; `false` conflicts with `2`.
     pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
 
     /// Rollback lever for incremental guided-tool-call streaming.
@@ -460,9 +486,10 @@ pub mod llm {
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
 
-    /// Pre-commit peek window in milliseconds for the streaming chat/responses
-    /// paths. Controls how long the frontend polls the engine stream for a
-    /// synchronous backend error before committing HTTP 200.
+    /// Pre-commit peek window in milliseconds for the streaming chat,
+    /// completions, responses, and Anthropic messages paths. Controls how long
+    /// the frontend polls the engine stream for a synchronous backend error
+    /// before committing HTTP 200.
     /// Trades a small first-token latency budget
     /// for the ability to surface `Backend(InvalidArgument)` and other
     /// request-validation errors as HTTP 4xx instead of an SSE error frame.
@@ -473,6 +500,9 @@ pub mod llm {
     /// Request-validation errors within the window surface as HTTP 4xx;
     /// anything past the window stays as an SSE error frame. Set to `0` to
     /// disable the peek and commit HTTP 200 immediately.
+    ///
+    /// Read once when the HTTP service is built. A policy supplied through
+    /// `HttpServiceConfigBuilder::streaming_backend_error_check` replaces it.
     pub const DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS: &str = "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS";
 
     /// Enable the LoRA allocation controller (set to "true" to enable)
@@ -514,14 +544,47 @@ pub mod llm {
     pub const DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS: &str =
         "DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS";
 
+    /// Progress-thread delay, in microseconds, of the frontend media loader's NIXL
+    /// agent (default 1000, range 0 to 1000000). NIXL rounds it up to whole
+    /// milliseconds; `0` makes the thread busy-poll one core. Over TCP, a read can
+    /// wait up to the full delay, so larger values add longer stalls. Values that do
+    /// not parse or are above 1000000 use the default.
+    pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
         pub const DYN_METRICS_PREFIX: &str = "DYN_METRICS_PREFIX";
 
-        /// Histogram bucket configuration (pattern: `<PREFIX>_MIN`, `<PREFIX>_MAX`, `<PREFIX>_COUNT`)
-        /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
-        pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
+        /// Histogram bucket configuration prefixes. Each is suffixed with `_MIN`,
+        /// `_MAX`, or `_COUNT` to form the variable that tunes one frontend
+        /// histogram's log-spaced buckets, for example `DYN_METRICS_ITL_MAX`.
+        /// Values are read once, when the frontend builds its metrics.
+        pub const DYN_METRICS_REQUEST_DURATION: &str = "DYN_METRICS_REQUEST_DURATION";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_INPUT_SEQUENCE: &str = "DYN_METRICS_INPUT_SEQUENCE";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_OUTPUT_SEQUENCE: &str = "DYN_METRICS_OUTPUT_SEQUENCE";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_TTFT: &str = "DYN_METRICS_TTFT";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_ITL: &str = "DYN_METRICS_ITL";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_EMBEDDING_LATENCY: &str = "DYN_METRICS_EMBEDDING_LATENCY";
+
+        /// Deprecated prefix for the histogram bucket variables above.
+        ///
+        /// This was once prepended to prefixes that already started with
+        /// `DYN_METRICS_`, so the variables were read under doubled names such as
+        /// `DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`. The doubled form is still accepted
+        /// as a fallback, with a warning, and will be removed in a future release.
+        pub const DEPRECATED_HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
+
+        /// Former name of [`DEPRECATED_HISTOGRAM_PREFIX`], kept so that code outside
+        /// this workspace importing it keeps compiling. Remove together with the
+        /// doubled-name fallback.
+        #[deprecated(note = "use DEPRECATED_HISTOGRAM_PREFIX")]
+        pub const HISTOGRAM_PREFIX: &str = DEPRECATED_HISTOGRAM_PREFIX;
     }
 
     /// Forward-pass-metrics trace configuration.
@@ -764,11 +827,25 @@ pub mod request_plane {
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 
+    /// Serialize `PreprocessedRequest.token_ids` as one packed little-endian int32 blob on
+    /// binary codecs instead of a sequence. Opt-in; every msgpack worker must run a release
+    /// whose readers accept the packed form.
+    pub const DYN_TOKEN_IDS_AS_BYTES: &str = "DYN_TOKEN_IDS_AS_BYTES";
+
     /// Maximum TCP request-plane message size, in bytes.
     pub const DYN_TCP_MAX_MESSAGE_SIZE: &str = "DYN_TCP_MAX_MESSAGE_SIZE";
 
     /// Buffer size above which the TCP decoder shrinks an empty buffer, in bytes.
     pub const DYN_TCP_SHRINK_MESSAGE_SIZE: &str = "DYN_TCP_SHRINK_MESSAGE_SIZE";
+
+    /// Host or interface for the TCP request-plane server.
+    /// The server resolves the value once at startup. A loopback fallback
+    /// persists until restart, and an enumeration error fails server startup.
+    pub const DYN_TCP_RPC_HOST: &str = "DYN_TCP_RPC_HOST";
+
+    /// Port for the TCP request-plane server.
+    /// If unset, the OS assigns a free ephemeral port.
+    pub const DYN_TCP_RPC_PORT: &str = "DYN_TCP_RPC_PORT";
 }
 
 /// Response plane transport configuration.
@@ -784,10 +861,22 @@ pub mod tcp_response_stream {
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
 
-    /// IP address or exact interface shared by the TCP request callback and QUIC response
-    /// listeners.
-    /// Unspecified addresses are rejected.
-    /// If unset, the server auto-detects a routable local IP.
+    /// Listen backlog of the TCP response stream (CallHome) listener. Defaults to
+    /// 4096, capped by the kernel at `net.core.somaxconn`. Unset, zero, negative, or
+    /// unparseable values fall back to the default.
+    pub const DYN_TCP_LISTEN_BACKLOG: &str = "DYN_TCP_LISTEN_BACKLOG";
+
+    /// Host or interface for the TCP response stream server and QUIC response listener.
+    ///
+    /// Accepts IPv4 and IPv6 literals, bracketed IPv6 literals, IPv4 or IPv6
+    /// wildcards, and interface names. Interface aliases such as `eth0:1` are
+    /// also accepted. If unset, the server selects the first usable
+    /// non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6
+    /// loopback. A wildcard uses a reachable address in its requested family.
+    /// If only the other family has a usable non-loopback address, the server
+    /// switches the bind wildcard to that family. The server resolves the value
+    /// once at startup. A loopback fallback persists until restart, and an
+    /// enumeration error fails server startup.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
 
     /// TCP request-plane TLS configuration
@@ -991,6 +1080,7 @@ mod tests {
             // NATS
             nats::NATS_SERVER,
             nats::DYN_NATS_REQUEST_TIMEOUT_SECS,
+            nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
             nats::auth::NATS_AUTH_USERNAME,
             nats::auth::NATS_AUTH_PASSWORD,
             nats::auth::NATS_AUTH_TOKEN,
@@ -1005,6 +1095,8 @@ mod tests {
             etcd::ETCD_ENDPOINTS,
             etcd::ETCD_LEASE_TTL,
             etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
+            etcd::ETCD_KEEPALIVE_INTERVAL_SECONDS,
+            etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
             etcd::auth::ETCD_AUTH_USERNAME,
             etcd::auth::ETCD_AUTH_PASSWORD,
             etcd::auth::ETCD_AUTH_CA,
@@ -1025,6 +1117,7 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_HTTP_LISTEN_BACKLOG,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
@@ -1040,9 +1133,11 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::DYN_REASONING_FIELD_NAME,
+            llm::DYN_PARSER_VERSION,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
             llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS,
+            llm::DYN_MM_NIXL_PROGRESS_DELAY_US,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
@@ -1055,6 +1150,12 @@ mod tests {
             llm::DYN_TOKEN_ECHO_DELAY_MS,
             llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
             llm::metrics::DYN_METRICS_PREFIX,
+            llm::metrics::DYN_METRICS_REQUEST_DURATION,
+            llm::metrics::DYN_METRICS_INPUT_SEQUENCE,
+            llm::metrics::DYN_METRICS_OUTPUT_SEQUENCE,
+            llm::metrics::DYN_METRICS_TTFT,
+            llm::metrics::DYN_METRICS_ITL,
+            llm::metrics::DYN_METRICS_EMBEDDING_LATENCY,
             llm::audit::DYN_AUDIT_SINKS,
             llm::audit::DYN_AUDIT_FORCE_LOGGING,
             llm::audit::DYN_AUDIT_CAPACITY,
@@ -1107,8 +1208,11 @@ mod tests {
             response_plane::DYN_RESPONSE_PLANE,
             request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
             request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
+            request_plane::DYN_TCP_RPC_HOST,
+            request_plane::DYN_TCP_RPC_PORT,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+            tcp_response_stream::DYN_TCP_LISTEN_BACKLOG,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
             tcp_response_stream::tls::DYN_TCP_TLS_CERT_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_KEY_PATH,

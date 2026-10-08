@@ -73,8 +73,8 @@ a microservice behind a dedicated gateway or proxy that provides:
 - **Load balancing** across frontend replicas.
 
 On Kubernetes, place a standard ingress or Gateway that you configure for
-authentication and TLS in front of the Dynamo Frontend service. The frontend
-implements no client authentication; that is the gateway's responsibility. If you
+authentication and TLS in front of the Dynamo Frontend service. End-user
+authentication and authorization remain the gateway's responsibility. If you
 adopt Dynamo's optional [Gateway API routing topology](../../kubernetes/installation/gateway-api-routing.mdx),
 note that its Endpoint Picker selects a backend for load and KV-cache reasons and
 does not authenticate clients, so it still sits behind your authenticating
@@ -83,10 +83,12 @@ gateway.
 TLS termination at the gateway secures only the client-to-gateway hop. If traffic
 from the gateway to the frontend crosses an untrusted segment, re-encrypt that hop
 by enabling the frontend's own server-side TLS (`DYN_TLS_CERT_PATH` /
-`DYN_TLS_KEY_PATH`); see the
-[frontend TLS configuration](../../reference/components/frontend-configuration.mdx).
-This is server-side TLS only — it does not authenticate end users, which remains
-the gateway's responsibility.
+`DYN_TLS_KEY_PATH`). To also require a client certificate from the gateway, set
+`DYN_TLS_CLIENT_CA_CERT_PATH` on the frontend and configure the gateway to present
+a certificate signed by a trusted CA. In this topology, mutual TLS (mTLS)
+authenticates the gateway on the gateway-to-frontend connection. End-user
+authentication and authorization remain the gateway's responsibility. See
+[HTTP TLS and mTLS](../../reference/components/tls-configuration.mdx#http-tls-and-mtls).
 
 ## Securing the Internal Communication Planes
 

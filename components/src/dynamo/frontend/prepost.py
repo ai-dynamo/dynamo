@@ -6,11 +6,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -18,11 +19,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
 )
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams, merge_kwargs
@@ -33,10 +29,24 @@ from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
+from dynamo.frontend.vllm_protocol import DeltaFunctionCall, DeltaMessage, DeltaToolCall
 from dynamo.llm.exceptions import InvalidArgument
 
+from .structural_tag_policy import (
+    ToolChoiceKind,
+    effective_tool_strict,
+    should_attempt_structural_tag,
+)
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import legacy_guided_decoding
+
+get_model_structural_tag: Any
+try:
+    from vllm.tool_parsers import structural_tag_registry
+except ImportError:  # Older supported vLLM releases do not expose this registry.
+    get_model_structural_tag = None
+else:
+    get_model_structural_tag = structural_tag_registry.get_model_structural_tag
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -69,8 +79,33 @@ class PreprocessResult:
     uses_dynamo_json_tool_call_fallback: bool = False
 
 
-_ASYNC_TOKENIZER_POOL: dict[int, Callable[..., Awaitable[Any]]] = {}
+# One executor per live tokenizer. The id-keyed registry stores only a weak
+# reference to the tokenizer, and every lookup verifies object identity. This
+# avoids both id reuse and WeakKeyDictionary's referent-based equality.
+_ASYNC_TOKENIZER_EXECUTORS: dict[
+    int, tuple[weakref.ReferenceType[TokenizerLike], ThreadPoolExecutor]
+] = {}
+# Fallback for tokenizers that do not support weak references; retains
+# entries for the process lifetime (the previous behavior for all tokenizers).
+# The tokenizer is stored alongside its executor so its id() cannot be
+# recycled by a different tokenizer while the entry lives.
+_STRONG_ASYNC_TOKENIZER_EXECUTORS: dict[
+    int, tuple[TokenizerLike, ThreadPoolExecutor]
+] = {}
 SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
+
+
+def _evict_async_tokenizer_executor(
+    key: int,
+    executor: ThreadPoolExecutor,
+    tokenizer_ref: weakref.ReferenceType[TokenizerLike],
+) -> None:
+    entry = _ASYNC_TOKENIZER_EXECUTORS.get(key)
+    if entry is not None and entry[0] is tokenizer_ref:
+        del _ASYNC_TOKENIZER_EXECUTORS[key]
+    # The tokenizer's last reference may be released by this executor's own
+    # worker, so shutdown must not try to join the current thread.
+    executor.shutdown(wait=False)
 
 
 def _reject_non_finite_json(value: str) -> Any:
@@ -182,21 +217,32 @@ def _should_build_tool_call_guidance(
     # enforced guarantee. sglang_prepost.py has the same gap.
     if tool_choice == "none":
         return False
-    if _is_forced_tool_choice(tool_choice):
-        return True
-    if structural_tag_mode != "on":
-        return False
-    if tool_choice != "auto":
-        return False
-    if structural_tag_scope == "always":
-        return True
     # An explicit single-call request is enough to attempt structural-tag
     # guidance. Forced-choice JSON guidance also bounds its array schema below.
     explicit_single_call = (
         "parallel_tool_calls" in request.model_fields_set
         and request.parallel_tool_calls is False
     )
-    return explicit_single_call or any(_tool_is_strict(tool) for tool in request.tools)
+    tool_choice_kind: ToolChoiceKind = (
+        "required"
+        if tool_choice == "required"
+        else "named"
+        if _is_named_tool_choice(tool_choice)
+        else "auto"
+        if tool_choice == "auto"
+        else "other"
+    )
+    attempt_structural_tag = should_attempt_structural_tag(
+        mode=structural_tag_mode,
+        scope=structural_tag_scope,
+        tool_choice_kind=tool_choice_kind,
+        has_tools=True,
+        any_explicit_strict=any(_tool_is_strict(tool) for tool in request.tools),
+        parallel_tool_calls_explicitly_false=explicit_single_call,
+    )
+    # Forced choices retain the generic JSON fallback when structural tags are
+    # disabled or unavailable.
+    return attempt_structural_tag or _is_forced_tool_choice(tool_choice)
 
 
 def _request_for_vllm_structural_tag(
@@ -204,13 +250,14 @@ def _request_for_vllm_structural_tag(
     *,
     structural_tag_schema: str,
 ) -> ChatCompletionRequest:
-    strict_schema = structural_tag_schema == "strict"
     tools = [
         tool.model_copy(
             update={
                 "function": tool.function.model_copy(
                     update={
-                        "strict": True if strict_schema else tool.function.strict,
+                        "strict": effective_tool_strict(
+                            tool.function.strict, structural_tag_schema
+                        ),
                     }
                 )
             }
@@ -242,7 +289,39 @@ def build_tool_call_guided_decoding(
             request,
             structural_tag_schema=structural_tag_schema,
         )
-        structural_tag = tool_parser.get_structural_tag(request_for_tag)
+        try:
+            structural_tag_model = getattr(tool_parser, "structural_tag_model", None)
+            structural_tag_kwargs = {}
+            if structural_tag_model == "hy_v4" and get_model_structural_tag is not None:
+                # HYV4's parser detects checkpoint-specific tokens at construction.
+                # Keep its suffix while Dynamo owns activation of the registry path.
+                structural_tag_kwargs["token_suffix"] = getattr(
+                    tool_parser, "_extractor"
+                ).token_suffix
+            structural_tag = (
+                get_model_structural_tag(
+                    model=structural_tag_model,
+                    tools=request_for_tag.tools,
+                    tool_choice=request_for_tag.tool_choice,
+                    reasoning=False,
+                    **structural_tag_kwargs,
+                )
+                if structural_tag_model is not None
+                and get_model_structural_tag is not None
+                else tool_parser.get_structural_tag(request_for_tag)
+            )
+        except (
+            AttributeError,
+            KeyError,
+            NotImplementedError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            # Parser implementations are third-party capability providers. A
+            # failed structural-tag build must preserve the pre-existing JSON
+            # or unconstrained compatibility path for the request.
+            structural_tag = None
         if structural_tag is not None:
             tag_value = (
                 structural_tag.model_dump()
@@ -332,14 +411,30 @@ def _build_assistant_guided_decoding(
 
 
 def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[Any]]:
-    key = id(tokenizer)
-    async_tokenizer = _ASYNC_TOKENIZER_POOL.get(key)
-    if async_tokenizer is None:
-        async_tokenizer = make_async(
-            tokenizer, executor=ThreadPoolExecutor(max_workers=1)
-        )
-        _ASYNC_TOKENIZER_POOL[key] = async_tokenizer
-    return async_tokenizer
+    try:
+        tokenizer_ref = weakref.ref(tokenizer)
+    except TypeError:
+        # Tokenizer does not support weak references.
+        key = id(tokenizer)
+        entry = _STRONG_ASYNC_TOKENIZER_EXECUTORS.get(key)
+        if entry is None:
+            executor = ThreadPoolExecutor(max_workers=1)
+            _STRONG_ASYNC_TOKENIZER_EXECUTORS[key] = (tokenizer, executor)
+        else:
+            executor = entry[1]
+    else:
+        key = id(tokenizer)
+        entry = _ASYNC_TOKENIZER_EXECUTORS.get(key)
+        if entry is None or entry[0]() is not tokenizer:
+            executor = ThreadPoolExecutor(max_workers=1)
+            tokenizer_ref = weakref.ref(
+                tokenizer,
+                partial(_evict_async_tokenizer_executor, key, executor),
+            )
+            _ASYNC_TOKENIZER_EXECUTORS[key] = (tokenizer_ref, executor)
+        else:
+            executor = entry[1]
+    return make_async(tokenizer, executor=executor)
 
 
 def _materialize_assistant_tool_calls(

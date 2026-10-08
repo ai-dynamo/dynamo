@@ -30,7 +30,7 @@ use crate::{
             classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
             images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-            videos::OpenAIVideosStreamingEngine,
+            rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -209,6 +209,7 @@ pub struct WorkerSet {
     pub(crate) embeddings_engine: Option<OpenAIEmbeddingsStreamingEngine>,
     pub(crate) classify_engine: Option<OpenAIClassifyStreamingEngine>,
     pub(crate) pooling_engine: Option<OpenAIPoolingStreamingEngine>,
+    pub(crate) rerank_engine: Option<OpenAIRerankStreamingEngine>,
     pub(crate) images_engine: Option<OpenAIImagesStreamingEngine>,
     pub(crate) videos_engine: Option<OpenAIVideosStreamingEngine>,
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
@@ -255,6 +256,7 @@ impl WorkerSet {
             embeddings_engine: None,
             classify_engine: None,
             pooling_engine: None,
+            rerank_engine: None,
             images_engine: None,
             videos_engine: None,
             audios_engine: None,
@@ -326,6 +328,10 @@ impl WorkerSet {
         self.pooling_engine.is_some()
     }
 
+    pub fn has_rerank_engine(&self) -> bool {
+        self.rerank_engine.is_some()
+    }
+
     pub fn has_images_engine(&self) -> bool {
         self.images_engine.is_some()
     }
@@ -372,6 +378,7 @@ impl WorkerSet {
             || self.has_embeddings_engine()
             || self.has_classify_engine()
             || self.has_pooling_engine()
+            || self.has_rerank_engine()
             || self.has_images_engine()
             || self.has_tensor_engine()
             || self.has_videos_engine()
@@ -411,6 +418,13 @@ impl WorkerSet {
     /// Build ParsingOptions from this WorkerSet's card configuration.
     pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
         crate::protocols::openai::ParsingOptions {
+            default_thinking_mode: self
+                .card
+                .runtime_config
+                .runtime_data
+                .get(crate::preprocessor::DEFAULT_THINKING_MODE_RUNTIME_KEY)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
             structural_tag_mode: self.card.runtime_config.structural_tag_mode,
             structural_tag_scope: self.card.runtime_config.structural_tag_scope,
             exclude_tools_when_tool_choice_none: self
@@ -464,6 +478,7 @@ impl WorkerSet {
         retain_for_requests!(embeddings_engine);
         retain_for_requests!(classify_engine);
         retain_for_requests!(pooling_engine);
+        retain_for_requests!(rerank_engine);
         retain_for_requests!(images_engine);
         retain_for_requests!(videos_engine);
         retain_for_requests!(audios_engine);
@@ -497,6 +512,7 @@ impl WorkerSet {
             embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),
             classify_engine: lora_context_engine(&self.classify_engine, &lora_name),
             pooling_engine: lora_context_engine(&self.pooling_engine, &lora_name),
+            rerank_engine: lora_context_engine(&self.rerank_engine, &lora_name),
             images_engine: lora_context_engine(&self.images_engine, &lora_name),
             videos_engine: lora_context_engine(&self.videos_engine, &lora_name),
             audios_engine: lora_context_engine(&self.audios_engine, &lora_name),
@@ -548,6 +564,7 @@ mod tests {
     use crate::types::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
     use crate::types::openai::images::{NvCreateImageRequest, NvImagesResponse};
     use crate::types::openai::pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse};
+    use crate::types::openai::rerank::{NvCreateRerankRequest, NvCreateRerankResponse};
     use crate::types::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
     use async_trait::async_trait;
     use dynamo_runtime::engine::AsyncEngine;
@@ -707,6 +724,12 @@ mod tests {
             has_pooling_engine,
             StubEngine::<NvCreatePoolingRequest, NvCreatePoolingResponse>::new(),
             "pooling"
+        );
+        check!(
+            rerank_engine,
+            has_rerank_engine,
+            StubEngine::<NvCreateRerankRequest, NvCreateRerankResponse>::new(),
+            "rerank"
         );
         check!(
             images_engine,

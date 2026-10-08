@@ -8,9 +8,9 @@ from typing import Any, Dict, Optional
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.arg_group import ArgGroup
-from dynamo.common.configuration.groups.aic_perf_args import (
-    AicPerfArgGroup,
-    AicPerfConfigBase,
+from dynamo.common.configuration.groups.ais_perf_args import (
+    AisPerfArgGroup,
+    AisPerfConfigBase,
 )
 from dynamo.common.configuration.groups.kv_router_args import (
     CONDITIONAL_DISAGG_POLICY_CHOICES,
@@ -52,7 +52,7 @@ def validate_model_path(value: str) -> str:
     return value
 
 
-class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
+class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     """Configuration for the Dynamo frontend."""
 
     interactive: bool
@@ -61,6 +61,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     http_port: int
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
+    tls_client_ca_cert_path: Optional[pathlib.Path]
     tcp_tls_cert_path: Optional[str] = None
     tcp_tls_key_path: Optional[str] = None
     tcp_tls_ca_cert_path: Optional[str] = None
@@ -108,12 +109,17 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     def validate(self) -> None:
         if self.load_aware:
             self.router_mode = "kv"
-        self.apply_load_aware_preset()
-        self.apply_conditional_disagg_config()
+        self.apply_router_config()
 
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
+            )
+        if self.tls_client_ca_cert_path and not (
+            self.tls_cert_path and self.tls_key_path
+        ):
+            raise ValueError(
+                "--tls-client-ca-cert-path requires --tls-cert-path and --tls-key-path"
             )
         if self.frontend_route_extensions and (
             self.interactive or self.kserve_grpc_server
@@ -147,32 +153,24 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
-        if self.router_prefill_load_model == "aic":
+        if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
+            raise ValueError(
+                "--ais-perf-config requires --router-prefill-load-model=ais"
+            )
+        if self.router_prefill_load_model == "ais":
             if self.router_mode != "kv":
                 raise ValueError(
-                    "--router-prefill-load-model=aic requires --router-mode=kv"
+                    "--router-prefill-load-model=ais requires --router-mode=kv"
                 )
             if self.chat_processor != "dynamo":
                 raise ValueError(
-                    "--router-prefill-load-model=aic currently requires "
+                    "--router-prefill-load-model=ais currently requires "
                     "--dyn-chat-processor=dynamo"
                 )
-            missing = [
-                flag
-                for flag, value in (
-                    ("--aic-backend", self.aic_backend),
-                    ("--aic-system", self.aic_system),
-                    ("--aic-model-path", self.aic_model_path),
-                )
-                if not value
-            ]
-            if missing:
-                raise ValueError(
-                    "--router-prefill-load-model=aic requires " + ", ".join(missing)
-                )
+            self.ais_perf_kwargs()
             if not self.router_track_prefill_tokens:
                 raise ValueError(
-                    "--router-prefill-load-model=aic requires "
+                    "--router-prefill-load-model=ais requires "
                     "--router-track-prefill-tokens"
                 )
         if self.serve_indexer:
@@ -304,6 +302,14 @@ class FrontendArgGroup(ArgGroup):
             help="TLS certificate key path, PEM format.",
             arg_type=pathlib.Path,
         )
+        add_argument(
+            g,
+            flag_name="--tls-client-ca-cert-path",
+            env_var="DYN_TLS_CLIENT_CA_CERT_PATH",
+            default=None,
+            help="Client CA certificate path for mutual TLS, PEM format.",
+            arg_type=pathlib.Path,
+        )
 
         add_argument(
             g,
@@ -393,7 +399,7 @@ class FrontendArgGroup(ArgGroup):
 
         # KV router options (shared with dynamo.router)
         KvRouterArgGroup().add_arguments(parser)
-        AicPerfArgGroup().add_arguments(parser)
+        AisPerfArgGroup().add_arguments(parser)
 
         add_argument(
             g,
@@ -557,7 +563,7 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--strip-anthropic-preamble",
             env_var="DYN_STRIP_ANTHROPIC_PREAMBLE",
-            default=False,
+            default=True,
             help=(
                 "Strip the Claude Code billing preamble (x-anthropic-billing-header) "
                 "from the system prompt. Saves tokens and improves prompt caching."

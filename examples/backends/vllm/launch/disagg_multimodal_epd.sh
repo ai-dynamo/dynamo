@@ -24,6 +24,8 @@ if ! [[ "$DYN_VLLM_KV_LEASE_DURATION" =~ ^([6-9]|[1-9][0-9]+)$ ]]; then
     exit 2
 fi
 KV_TRANSFER_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"kv_lease_duration\":${DYN_VLLM_KV_LEASE_DURATION}}}"
+KV_TRANSFER_CONFIG_PREFILL="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\",\"kv_connector_extra_config\":{\"kv_lease_duration\":${DYN_VLLM_KV_LEASE_DURATION}}}"
+KV_TRANSFER_CONFIG_DECODE="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\",\"kv_connector_extra_config\":{\"kv_lease_duration\":${DYN_VLLM_KV_LEASE_DURATION}}}"
 
 # --single-gpu: Packs all 3 workers (encode, prefill, decode) onto a single GPU.
 # This is intended for functional testing with small models (e.g. 2B) where CI
@@ -114,10 +116,8 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D ($GPU
 # Start frontend (no router mode)
 echo "Starting frontend..."
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python -m dynamo.frontend &
-
-# Each worker needs its own system port when tests inject DYN_SYSTEM_PORT{1,2,3}.
-unset DYN_SYSTEM_PORT
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 -u DYN_SYSTEM_PORT3 \
+    python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 PD_EXTRA_ARGS=""
@@ -198,12 +198,15 @@ else
     DECODE_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_DECODE_GPU_MEM"
 fi
 
-VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE=${VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE:-20097}
-VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL=${VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL:-20098}
-VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE=${VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE:-20099}
-VLLM_ZMQ_PORT_ENCODE=${VLLM_ZMQ_PORT_ENCODE:-20080}
-VLLM_ZMQ_PORT_PREFILL=${VLLM_ZMQ_PORT_PREFILL:-20081}
-VLLM_ZMQ_PORT_DECODE=${VLLM_ZMQ_PORT_DECODE:-20082}
+VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 "${VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE:-20097}")"
+VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 "${VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL:-20098}")"
+VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 3 "${VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE:-20099}")"
+VLLM_ZMQ_PORT_ENCODE="$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_ZMQ_PORT_ENCODE:-20080}")"
+VLLM_ZMQ_PORT_PREFILL="$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_ZMQ_PORT_PREFILL:-20081}")"
+VLLM_ZMQ_PORT_DECODE="$(dyn_port DYN_VLLM_KV_EVENT_PORT 3 "${VLLM_ZMQ_PORT_DECODE:-20082}")"
+SYSTEM_PORT_ENCODE=$(dyn_port DYN_SYSTEM_PORT 1 8081)
+SYSTEM_PORT_PREFILL=$(dyn_port DYN_SYSTEM_PORT 2 8082)
+SYSTEM_PORT_DECODE=$(dyn_port DYN_SYSTEM_PORT 3 8083)
 
 # Start encode worker.
 #
@@ -229,8 +232,15 @@ VLLM_ZMQ_PORT_DECODE=${VLLM_ZMQ_PORT_DECODE:-20082}
 # --enforce-eager. The V1 runner keeps vLLM's encoder-only vision tower (no full
 # model load). Short-term workaround; drop it (set VLLM_USE_V2_MODEL_RUNNER=1)
 # once the V2 encoder-only path is fixed upstream. MoE VLMs are unaffected.
+#
+# The encode worker serves `generate` without a health-check payload. With
+# canaries off (the default), its /health then falls back to a process status
+# that starts NotReady and is never set, so it answers 503 forever. The operator
+# sets DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS on every worker; mirror it here so
+# readiness follows the endpoint's registration.
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_ENCODE \
+DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS='["generate"]' \
 VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-0} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
@@ -238,15 +248,15 @@ python -m dynamo.vllm --enable-multimodal --disaggregation-mode encode --model $
 
 # Start prefill worker (also handles encode routing via --route-to-encoder)
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (${PREFILL_GPU_MEM_ARGS})..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_PREFILL \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL \
-CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $PREFILL_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_PREFILL}\"}" &
+CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $PREFILL_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG_PREFILL" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_PREFILL}\"}" &
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (${DECODE_GPU_MEM_ARGS})..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_DECODE \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE \
-CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python -m dynamo.vllm  --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $DECODE_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_DECODE}\"}" &
+CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python -m dynamo.vllm  --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $DECODE_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG_DECODE" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_DECODE}\"}" &
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."

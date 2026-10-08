@@ -982,12 +982,22 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 		targetContainerName = checkpointConfig.TargetContainerName
 	}
 
-	// Create a copy of the component spec stripped of features that buildCheckpointJob
+	// Checkpoint jobs preserve the legacy leader/common template semantics. They
+	// materialize one engine process, not a separate multinode worker role.
+	componentForJob := component.DeepCopy()
+	if dynamo.HasRolePodTemplates(component) {
+		var err error
+		componentForJob, err = dynamo.EffectiveComponentForRole(component, dynamo.RoleLeader)
+		if err != nil {
+			return corev1.PodTemplateSpec{}, fmt.Errorf("resolve checkpoint leader template: %w", err)
+		}
+	}
+
+	// Strip features that buildCheckpointJob
 	// or the checkpoint controller handle independently. GenerateBasePodSpec would
 	// otherwise apply DGD-specific transforms (DRA claims, GMS server sidecar,
 	// frontend sidecar, failover transforms) that conflict with the checkpoint path's
 	// own setup.
-	componentForJob := component.DeepCopy()
 	componentForJob.Experimental = nil
 	componentForJob.FrontendSidecar = nil
 
@@ -1035,11 +1045,11 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 	// explicit checkpoint.job.podTemplate overrides (applied below).
 	podLabels := map[string]string{}
 	podAnnotations := map[string]string{}
-	if component.PodTemplate != nil {
-		for k, v := range component.PodTemplate.Labels {
+	if componentForJob.PodTemplate != nil {
+		for k, v := range componentForJob.PodTemplate.Labels {
 			podLabels[k] = v
 		}
-		for k, v := range component.PodTemplate.Annotations {
+		for k, v := range componentForJob.PodTemplate.Annotations {
 			podAnnotations[k] = v
 		}
 	}
@@ -1117,6 +1127,22 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 					existing.StartupProbe = user.StartupProbe.DeepCopy()
 				}
 			}
+		}
+	}
+
+	// Snapshot preloads cuInterpose by prefixing the target command with its
+	// launcher, so capture covers CUDA memory shared between processes, such as
+	// NCCL cuMem and NVLS buffers. An explicit DGD annotation takes precedence.
+	if _, set := podTemplate.Annotations[consts.CUDASharedMemorySupportAnnotation]; !set {
+		podTemplate.Annotations[consts.CUDASharedMemorySupportAnnotation] = "enabled"
+	}
+	if strings.TrimSpace(podTemplate.Annotations[consts.CUDASharedMemorySupportAnnotation]) == "enabled" {
+		target, err := findPodTemplateContainer(&podTemplate, targetContainerName)
+		if err != nil {
+			return corev1.PodTemplateSpec{}, err
+		}
+		if len(target.Command) == 0 {
+			return corev1.PodTemplateSpec{}, fmt.Errorf("checkpoint target container %q must set command for Snapshot's cuInterpose launcher, or the DGD must set %s: disabled", targetContainerName, consts.CUDASharedMemorySupportAnnotation)
 		}
 	}
 	return podTemplate, nil

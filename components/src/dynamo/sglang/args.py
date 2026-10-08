@@ -26,7 +26,7 @@ from dynamo.common.configuration.groups.router_args import (
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.model_fetch import fetch_model
+from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.snapshot.lifecycle import (
     configure_snapshot_capture_env,
     is_snapshot_enabled,
@@ -35,14 +35,25 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
     ConfigArgumentMerger,
-    ensure_sglang_tensor_image_size,
-    get_sglang_model_config,
+    add_sglang_cli_compat,
     resolved_server_args,
+    sglang_uses_mla_backend,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
+from dynamo.sglang.elastic_ep_preflight import check_elastic_ep_backend
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
+
+# Non-MLA attention backends that read the DCP parallel state in their forward
+# path. `aiter` is here because SGLang itself allows dcp_size > 1 on ROCm.
+DCP_CAPABLE_ATTENTION_BACKENDS = frozenset({"triton", "aiter"})
+
+ATTENTION_BACKEND_CLI_FIELDS = (
+    "attention_backend",
+    "prefill_attention_backend",
+    "decode_attention_backend",
+)
 
 
 class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
@@ -50,6 +61,8 @@ class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
 
     component: str
     diffusion_worker: bool = False
+    # Preserve NGC identity for registration while SGLang loads the local path.
+    model_source_uri: Optional[str] = None
     # Whether this worker publishes KV events. Distinct from the router-side
     # `use_kv_events` on `router_advertisement`, which means the router
     # subscribes to them -- the reason the two live on separate objects.
@@ -66,9 +79,19 @@ class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
 class Config:
     """Combined configuration container for SGLang server and Dynamo args."""
 
-    def __init__(self, server_args: ServerArgs, dynamo_args: DynamoConfig) -> None:
+    def __init__(
+        self,
+        server_args: ServerArgs,
+        dynamo_args: DynamoConfig,
+        *,
+        attention_backend_from_cli: bool = False,
+    ) -> None:
         self.server_args = server_args
         self.dynamo_args = dynamo_args
+        # Whether the launch named an attention backend itself. Only the CLI
+        # knows this; the resolved configuration reports the same field whether
+        # SGLang chose the value or the user did.
+        self.attention_backend_from_cli = attention_backend_from_cli
         self.serving_mode = self._set_serving_strategy()
 
     def _set_serving_strategy(self):
@@ -81,8 +104,19 @@ class Config:
         else:
             return DisaggregationMode.AGGREGATED
 
+    def validate_engine_server_args(self, server_args: Any) -> None:
+        """Re-run the launch checks a built engine's configuration can answer.
+
+        Call this on ``engine.server_args`` before the engine takes a request
+        of any kind, including a warmup one.
+        """
+        _validate_dcp_attention_backend(
+            server_args, backend_from_cli=self.attention_backend_from_cli
+        )
+
     def use_resolved_server_args(self, server_args: Any) -> Any:
         """Switch post-runtime Dynamo code to SGLang's resolved configuration."""
+        self.validate_engine_server_args(server_args)
         self.server_args = resolved_server_args(server_args)
         return self.server_args
 
@@ -112,6 +146,8 @@ def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
     """Return the worker role when the selected path does not create an FPM relay."""
     if is_snapshot_enabled():
         return "snapshot"
+    if dynamo_config.rerank_worker:
+        return "rerank"
     if dynamo_config.embedding_worker:
         return "embedding"
     if (
@@ -159,10 +195,16 @@ def is_object_storage_path(model_path: str) -> bool:
 
 
 def should_fetch_model(args: Any, model_path: str) -> bool:
+    """Prefetch NGC and native-loader models, leaving HF P2P to ModelExpress."""
     if os.path.exists(model_path):
         return False
     if is_object_storage_path(model_path):
         return False
+    # SGLang resolves config/tokenizer files before invoking its weight loader.
+    # NGC therefore needs a local directory even with the ModelExpress plugin;
+    # fetch weights too so the plugin's native fallback can read that directory.
+    if needs_local_model_path(model_path):
+        return True
     return not use_modelexpress_remote_instance(args)
 
 
@@ -188,6 +230,84 @@ def _validate_parser_flags(
     if sglang_val and dynamo_val:
         logging.error(f"Cannot use both --{name} and --dyn-{name}.")
         sys.exit(1)
+
+
+def _attention_backend_from_cli(parsed_args: Namespace) -> bool:
+    """Return whether the launch named an attention backend on the command line.
+
+    The phase-specific flags take priority over --attention-backend, so any one
+    of the three means the backend in force was chosen by the user.
+    """
+    return any(
+        getattr(parsed_args, field, None) for field in ATTENTION_BACKEND_CLI_FIELDS
+    )
+
+
+def _validate_dcp_attention_backend(
+    server_args: Any, *, backend_from_cli: bool
+) -> None:
+    """Reject --dcp-size > 1 on an attention backend that never reads it.
+
+    SGLang sizes the KV cache pool the DCP way: DCP ranks replicate the KV
+    heads instead of splitting them, and partition the context dimension. Only
+    some attention backends honor that in their forward path; the rest still do
+    a plain tensor-parallel head split, so the two disagree on the KV row width
+    and the scheduler dies on the first real request. Fail here instead, before
+    the worker registers and starts taking traffic.
+
+    Call this twice: once on the arguments the CLI produced, which catches a
+    backend the user named, and once on the engine's own configuration, which
+    is the only place a backend SGLang chose for itself can be read. SGLang
+    SGLang keeps ``ServerArgs`` at what the caller asked for and resolves in a
+    separate pass, so at CLI time an automatic backend is still ``None``.
+    """
+    # Diffusion/video argument stubs and older SGLang releases omit dcp_size.
+    dcp_size = int(getattr(server_args, "dcp_size", 1) or 1)
+    if dcp_size <= 1:
+        return
+
+    # MLA KV pools have no per-rank KV head split to disagree about, and every
+    # MLA attention backend consumes the DCP parallel state.
+    if sglang_uses_mla_backend(server_args):
+        return
+
+    # Read the effective backend, not the flag the user typed: fa3 is the
+    # automatic choice for an MHA model on Hopper with no --attention-backend.
+    resolved = resolved_server_args(server_args)
+    base_backend = getattr(resolved, "attention_backend", None)
+    phase_backends = {
+        "prefill": getattr(resolved, "prefill_attention_backend", None) or base_backend,
+        "decode": getattr(resolved, "decode_attention_backend", None) or base_backend,
+    }
+
+    unsupported = sorted(
+        (phase, backend)
+        for phase, backend in phase_backends.items()
+        # A backend SGLang has not decided yet is unknown, not unsupported. At
+        # CLI time that is every automatic backend; the engine's configuration
+        # carries the decision, and this runs again there.
+        if backend is not None and backend not in DCP_CAPABLE_ATTENTION_BACKENDS
+    )
+    if not unsupported:
+        return
+
+    named = ", ".join(
+        f"{phase} attention backend '{backend}'" for phase, backend in unsupported
+    )
+    automatic = (
+        ""
+        if backend_from_cli
+        else " SGLang selected it automatically because no attention backend was passed."
+    )
+    raise ValueError(
+        f"--dcp-size {dcp_size} is not supported with the {named}.{automatic} "
+        "Decode context parallel replicates the KV heads across DCP ranks when "
+        "it sizes the KV cache pool, but this backend still splits them across "
+        "tensor-parallel ranks, so the worker crashes on its first request. "
+        "Use --dcp-size 1, or an attention backend that implements decode "
+        "context parallel (--attention-backend triton), or an MLA model with "
+        "one of SGLang's MLA attention backends."
+    )
 
 
 def _has_cli_flag(args: list[str], flag: str) -> bool:
@@ -369,6 +489,7 @@ async def parse_args(args: list[str]) -> Config:
 
     sglang_only_parser = argparse.ArgumentParser(add_help=False)
     ServerArgs.add_cli_args(sglang_only_parser)
+    add_sglang_cli_compat(sglang_only_parser)
 
     # Add "gms" to --load-format choices so it passes argparse validation.
     # The actual loader class is set in main.py when load_format == "gms".
@@ -441,6 +562,16 @@ async def parse_args(args: list[str]) -> Config:
         args_dict["disaggregation_bootstrap_port"] = bootstrap_port
         parsed_args = Namespace(**args_dict)
 
+    # Read off the parsed flags rather than ServerArgs: ServerArgs.from_cli_args
+    # downloads the model, and the diffusion and video paths build a stub that
+    # carries neither flag, so both would leave this unchecked. parsed_args
+    # comes from ServerArgs.add_cli_args, which declares both options across
+    # the supported SGLang releases.
+    check_elastic_ep_backend(
+        parsed_args.elastic_ep_backend,
+        parsed_args.enable_dp_attention,
+    )
+
     # Dynamo argument processing
     # If an endpoint is provided, validate and use it
     # otherwise fall back to default endpoints
@@ -450,9 +581,14 @@ async def parse_args(args: list[str]) -> Config:
     if dynamo_config.enable_multimodal:
         parsed_args.enable_multimodal = True
 
-    # If --embedding-worker is set, also set SGLang's --is-embedding flag
-    if dynamo_config.embedding_worker:
+    # Both dedicated pooling modes use SGLang's embedding engine.
+    if dynamo_config.embedding_worker or dynamo_config.rerank_worker:
         parsed_args.is_embedding = True
+    if dynamo_config.rerank_worker and (
+        parsed_args.disaggregation_mode != "null"
+        or getattr(parsed_args, "dllm_algorithm", None)
+    ):
+        raise ValueError("--rerank-worker requires aggregated cross-encoder serving")
 
     # Enable encoder_only mode for multimodal encode workers to load only vision encoder
     # This significantly reduces memory usage by avoiding loading the full LLM weights
@@ -461,7 +597,9 @@ async def parse_args(args: list[str]) -> Config:
 
     endpoint = dynamo_config.endpoint
     if endpoint is None:
-        if dynamo_config.embedding_worker:
+        if dynamo_config.rerank_worker:
+            endpoint = f"dyn://{namespace}.rerank.generate"
+        elif dynamo_config.embedding_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
         elif dynamo_config.image_diffusion_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
@@ -535,19 +673,30 @@ async def parse_args(args: list[str]) -> Config:
                 served_names[1:],
             )
 
+    if needs_local_model_path(model_path) and (
+        not served_names or ":" in served_names[0]
+    ):
+        raise ValueError(
+            "NGC models require a served model name without ':' in SGLang. "
+            "Pass --served-model-name my-model."
+        )
+
     # Name the model — falls back to model_path only if neither
     # --served-model-name nor an env var supplied one.
     if not parsed_args.served_model_name:
         parsed_args.served_model_name = model_path
     # Download the model if necessary using modelexpress.
-    # We don't set `parsed_args.model_path` to the local path fetch_model returns
-    # because sglang will send this to its pipeline-parallel workers, which may
-    # not have the local path.
+    # For HF names we don't set `parsed_args.model_path` to the local path
+    # fetch_model returns, because sglang will send this to its pipeline-parallel
+    # workers, which may not have the local path.
     # sglang will attempt to download the model again, but find it in the HF cache.
-    # For non-HF models use a path instead of an HF name, and ensure all workers have
-    # that path (ideally via a shared folder).
+    # sglang cannot resolve `ngc://` names, so those use the local path instead;
+    # every worker needs that path (ideally via a shared folder).
     if should_fetch_model(parsed_args, model_path):
-        await fetch_model(model_path)
+        local_path = await fetch_model(model_path)
+        if needs_local_model_path(model_path):
+            dynamo_config.model_source_uri = model_path
+            parsed_args.model_path = model_path = local_path
 
     snapshot_enabled = is_snapshot_enabled()
     if snapshot_enabled:
@@ -634,8 +783,6 @@ async def parse_args(args: list[str]) -> Config:
         # Dynamo expects disjoint output_ids; ServerArgs is read-only after resolution.
         parsed_args.incremental_streaming_output = True
         server_args = ServerArgs.from_cli_args(parsed_args)
-        if get_sglang_model_config(server_args).is_multimodal:
-            ensure_sglang_tensor_image_size()
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(
@@ -643,6 +790,9 @@ async def parse_args(args: list[str]) -> Config:
             "SGLang integration. Dynamo normalizes request priority so higher "
             "values are always higher priority at the API layer."
         )
+
+    backend_from_cli = _attention_backend_from_cli(parsed_args)
+    _validate_dcp_attention_backend(server_args, backend_from_cli=backend_from_cli)
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(
@@ -684,7 +834,9 @@ async def parse_args(args: list[str]) -> Config:
 
     logging.debug(f"Dynamo configs: {dynamo_config}")
 
-    return Config(server_args, dynamo_config)
+    return Config(
+        server_args, dynamo_config, attention_backend_from_cli=backend_from_cli
+    )
 
 
 @contextlib.contextmanager

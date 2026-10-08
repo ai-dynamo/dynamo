@@ -15,9 +15,14 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
 import pytest_asyncio
 
 from dynamo.common.http import close_http_client
+
+# The decode carriers ``codec_errors`` probes. Only these names are answered by
+# the ``carrier_imports`` fixture; every other import runs for real.
+_MEDIA_CARRIERS = ("cv2", "av", "decord")
 
 # Cached results of probing optional deps used by multimodal unit tests.
 # `None` = not attempted, `True` = importable, `False` = raised.
@@ -68,6 +73,32 @@ def pytest_ignore_collect(collection_path, config) -> bool | None:
     if filename.startswith("test_") and not can_import_deps():
         return True
     return None
+
+
+@pytest.fixture
+def carrier_imports(monkeypatch):
+    """Mock media-carrier imports while leaving unrelated imports intact."""
+    # Import after collection's optional-dependency guard: the multimodal
+    # package imports torch, which CPU-only runtime images may not ship.
+    from dynamo.common.multimodal import codec_errors
+
+    def _set(
+        present: tuple[str, ...] = (), error: str | BaseException | None = None
+    ) -> None:
+        real = importlib.import_module
+
+        def _fake(name: str, *args, **kwargs):
+            if name in _MEDIA_CARRIERS:
+                if name in present:
+                    return object()
+                if isinstance(error, BaseException):
+                    raise error
+                raise ImportError(error or f"No module named '{name}'")
+            return real(name, *args, **kwargs)
+
+        monkeypatch.setattr(codec_errors.importlib, "import_module", _fake)
+
+    return _set
 
 
 @pytest_asyncio.fixture(autouse=True)

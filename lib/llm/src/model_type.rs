@@ -62,6 +62,8 @@ bitflags! {
         /// mounts its `/pooling` alongside those surfaces for every
         /// pooling-runner model.
         const Pooling = 1 << 10;
+        /// Cross-encoder relevance scoring served on `/v1/rerank`.
+        const Rerank = 1 << 11;
     }
 }
 
@@ -107,6 +109,9 @@ impl ModelType {
     pub fn supports_pooling(&self) -> bool {
         self.contains(ModelType::Pooling)
     }
+    pub fn supports_rerank(&self) -> bool {
+        self.contains(ModelType::Rerank)
+    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
@@ -142,6 +147,9 @@ impl ModelType {
         }
         if self.supports_pooling() {
             result.push("pooling");
+        }
+        if self.supports_rerank() {
+            result.push("rerank");
         }
         result
     }
@@ -182,6 +190,9 @@ impl ModelType {
         }
         if self.supports_pooling() {
             result.push(ModelType::Pooling);
+        }
+        if self.supports_rerank() {
+            result.push(ModelType::Rerank);
         }
         result
     }
@@ -233,6 +244,9 @@ impl ModelType {
         if self.contains(Self::Pooling) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Pooling);
         }
+        if self.contains(Self::Rerank) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Rerank);
+        }
         // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
         // current use of endpoint type is LLM specific and so does the HTTP
         // server that uses it.
@@ -271,6 +285,35 @@ impl ModelInput {
 mod tests {
     use super::*;
     use crate::endpoint_type::EndpointType;
+
+    #[test]
+    fn dedicated_rerank_does_not_change_legacy_embedding_cards() {
+        bitflags! {
+            #[derive(Debug, Deserialize, PartialEq)]
+            struct LegacyModelType: u16 {
+                const Embedding = 1 << 2;
+            }
+        }
+        #[derive(Debug, Deserialize)]
+        struct LegacyCard {
+            model_type: LegacyModelType,
+        }
+
+        let mut card = crate::model_card::ModelDeploymentCard::with_name_only("embedding");
+        card.model_type = ModelType::Embedding;
+        let wire = serde_json::to_value(&card).unwrap();
+        let legacy: LegacyCard = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(legacy.model_type, LegacyModelType::Embedding);
+
+        // Publishing a separate rerank card must leave the embedding card intact.
+        card.model_type = ModelType::Rerank;
+        let rerank_wire = serde_json::to_value(&card).unwrap();
+        assert!(serde_json::from_value::<LegacyCard>(rerank_wire).is_err());
+        assert!(serde_json::from_value::<LegacyCard>(wire).is_ok());
+
+        card.model_type = ModelType::Embedding | ModelType::Rerank;
+        assert!(serde_json::from_value::<LegacyCard>(serde_json::to_value(card).unwrap()).is_err());
+    }
 
     #[test]
     fn realtime_bit_position() {
@@ -411,6 +454,18 @@ mod tests {
         assert_eq!(
             combined.as_endpoint_types(),
             vec![EndpointType::Classify, EndpointType::Pooling]
+        );
+    }
+
+    #[test]
+    fn rerank_capability_maps_to_endpoint() {
+        assert_eq!(ModelType::Rerank.bits(), 1 << 11);
+        assert!(ModelType::Rerank.supports_rerank());
+        assert_eq!(ModelType::Rerank.as_vec(), vec!["rerank"]);
+        assert_eq!(ModelType::Rerank.units(), vec![ModelType::Rerank]);
+        assert_eq!(
+            ModelType::Rerank.as_endpoint_types(),
+            vec![EndpointType::Rerank]
         );
     }
 

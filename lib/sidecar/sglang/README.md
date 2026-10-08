@@ -28,19 +28,17 @@ follow-up.
 
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is provided through the environment.
 
-Native Dynamo `/generate` requests are forwarded opaquely to SGLang's HTTP
-endpoint using the gRPC host and the HTTP port returned by `GetServerInfo`.
-The sidecar advertises this capability only after the HTTP health probe passes
-and discovery confirms `--incremental-streaming-output`; otherwise it continues
-serving the native gRPC path without advertising `/generate`.
+Start SGLang with `--incremental-streaming-output`. The sidecar's gRPC streaming path expects each response to contain only new tokens; cumulative output would duplicate tokens and inflate completion-token counts. The sidecar checks `GetServerInfo` during discovery and rejects startup unless `incremental_streaming_output` is explicitly `true`. Unlike the in-process Python worker, the sidecar cannot set launch options on an already-running engine.
+
+Native Dynamo `/generate` requests are forwarded opaquely to SGLang's HTTP endpoint using the gRPC host and the HTTP port returned by `GetServerInfo`. The sidecar advertises this capability only after HTTP discovery and its health probe succeed; otherwise it continues serving the native gRPC path without advertising `/generate`.
 
 The sidecar discovers the model and tokenizer paths, served model name, parser defaults, worker role, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through SGLang's native discovery RPCs. Explicit Dynamo parser options override parser names discovered from SGLang.
 
 SGLang remains the source of truth for the worker's aggregated, prefill, or decode role. The inherited `--disaggregation-mode` option and `DYN_DISAGGREGATION_MODE` environment variable have no effect in this sidecar. The SGLang sidecar rejects `--route-to-encoder` because its native protocol does not support encoder workers. Disaggregated workers continue to register under their fixed role components; aggregated workers honor `--component` or `DYN_COMPONENT`.
 
-The sidecar opens eight gRPC connections by default. Override the pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
+The full sidecar opens eight gRPC connections by default. Override the pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`. Telemetry-only mode uses one metadata connection.
 
-Connection startup uses a 30-second timeout per attempt, a one-second retry and readiness interval, and a five-minute deadline for establishing the full connection pool. Override them with `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the corresponding `DYN_SIDECAR_GRPC_*` environment variables.
+Connection startup uses a 30-second timeout per attempt, a one-second retry and readiness interval, and a 30-minute deadline for establishing the full connection pool. Override them with `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the corresponding `DYN_SIDECAR_GRPC_*` environment variables.
 
 ## SGLang-managed module contract
 
@@ -57,7 +55,47 @@ python3 -m sglang.launch_server \
 The entry point configures Dynamo logging when `main()` runs, then calls the
 private `dynamo._core.backend._run_sglang_sidecar(argv)` binding. The binding
 prepends the executable name expected by clap, releases the GIL, and runs the
-same unified worker lifecycle as the standalone executable.
+same mode dispatcher as the standalone executable.
+
+## Multinode DP and KV routing
+
+For multinode deployments with multiple data-parallel (DP) replicas and KV-aware
+routing, launch the sidecar on the leader (`node_rank=0`) and on each follower
+node that owns a DP scheduler/KV publisher. The sidecar automatically selects
+inference or telemetry-only mode from the local engine's `GetServerInfo` metadata.
+Each DP rank has its own KV cache; follower sidecars publish those local KV events
+to Dynamo without accepting inference requests.
+A TP-only follower that holds part of a replica but has no local KV publisher
+does not need a sidecar.
+
+Launch each sidecar separately with `--grpc-endpoint` pointing to its local
+SGLang server. This requires an SGLang build exposing node-local
+`kv_event_sources` through `GetServerInfo` on leaders and followers started
+with `--grpc-port`.
+
+For `launch/multinode_kv_router_sidecar.sh`, use an SGLang build including commit
+[`c50b251`](https://github.com/sgl-project/sglang/commit/c50b251da8e455dfbb594f8c3b7ccae6eca72129),
+which provides node-local KV source discovery and explicit publisher binding.
+The stock v0.5.19 image guidance below applies to the single-node examples.
+
+The multinode example also requires SGLang's explicit
+`"bind": true` KV-event option. It binds each rank's publisher to `127.0.0.1`, so
+the engine and its sidecar must share a network namespace. KV events can include
+token IDs and request metadata; loopback prevents remote access but does not
+isolate other processes in that namespace. If overriding this to a non-loopback
+bind, restrict every publisher port (`SGLANG_KV_EVENT_PORT + dp_rank`) to authorized
+consumers using a firewall or network policy.
+
+For disaggregated multinode attention DP, use
+`launch/multinode_disagg_kv_router_sidecar.sh prefill` on each prefill node and
+`launch/multinode_disagg_kv_router_sidecar.sh decode` on each decode node.
+Each role is a separate distributed engine group: give it its own
+`DIST_INIT_ADDR` and number its nodes from zero. The defaults require four
+nodes in total, with `NNODES=2`, `TP_SIZE=2`, and `DP_SIZE=2` per role.
+Set `SGLANG_BOOTSTRAP_HOST` to the reachable prefill leader address on prefill
+node zero. All nodes must share the Dynamo namespace, discovery and event
+services; start `python3 -m dynamo.frontend --router-mode kv` separately.
+Run the script with `--help` for the four per-node commands.
 
 ## Deploy on Kubernetes (quick start)
 
@@ -74,10 +112,11 @@ executables; these manifests run `dynamo-sglang-sidecar` as the container
 command.
 
 > [!NOTE]
-> The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
-> server (`--grpc-port`) landed there. The KV-routing examples require
+> The engine image must be a stock SGLang **v0.5.17+** build: this is the first
+> release whose native gRPC protocol reads the typed `guided_decoding` field.
+> The KV-routing examples require
 > **v0.5.18+** because the sidecar discovers their structured KV-event
-> descriptor through `GetServerInfo`. They use `lmsysorg/sglang:v0.5.19`.
+> descriptor through `GetServerInfo`. They use `lmsysorg/sglang:v0.5.21`.
 
 ### Prerequisites
 

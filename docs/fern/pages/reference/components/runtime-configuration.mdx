@@ -103,6 +103,20 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_DISCOVERY_BACKEND`
 </ParamField>
 
+<ParamField path="NATS_STARTUP_CONNECT_TIMEOUT_SECONDS" type="integer" default="120">
+  Maximum number of seconds that a process spends establishing its initial NATS connection. Applies
+  only to processes that connect to NATS. Dynamo retries DNS, I/O, and timeout failures with
+  exponential backoff from 1 second up to 5 seconds until this deadline; each attempt times out
+  after at most 5 seconds. Authentication, authorization, TLS, and invalid server address errors
+  fail immediately. Set a larger value when NATS can take longer to become available during
+  deployment startup or recovery; set a smaller value when the process should fail fast. On
+  Kubernetes, ensure the pod's startup probe allows at least this long. Values must be greater than
+  `0`. Zero or invalid values log a warning and fall back to `120`.
+
+  This setting does not affect reconnects after startup, which use a fixed 5-second
+  per-attempt timeout.
+</ParamField>
+
 <ParamField path="ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS" type="integer" default="120">
   Maximum number of seconds that an etcd discovery client spends establishing its initial
   connection and primary lease. Dynamo retries with exponential backoff until this deadline. Set a
@@ -131,11 +145,63 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>json</Badge> <Badge intent="note" minimal>msgpack</Badge></span>
 </ParamField>
 
+<ParamField path="DYN_TCP_MAX_MESSAGE_SIZE" type="integer" default="33554432">
+  Maximum TCP request-plane frame size in bytes (default 32 MiB). The frontend
+  rejects an oversized frame with HTTP 400 before writing it. This limit is
+  independent of `DYN_HTTP_BODY_LIMIT_MB` (default 192 MB) on the HTTP ingress:
+  a chat-completions body can be accepted by the HTTP server and still fail at
+  this cap after serialization. Inline `data:` media is sent once in
+  `multi_modal_data`; raise this value when operators must accept larger
+  inline-media worker frames.
+
+  See [Frontend Configuration](frontend-configuration.mdx) for `DYN_HTTP_BODY_LIMIT_MB`.
+</ParamField>
+
+<ParamField path="DYN_TCP_RPC_HOST" type="string" default="auto-detected local address">
+  Host for the TCP request-plane server. Accepts IPv4 and IPv6 literals, bracketed IPv6 literals,
+  wildcards, and interface names, including aliases such as `eth0:1`. If unset or empty, Dynamo
+  selects a usable non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6 loopback.
+  Within each family, it prefers the address the operating system uses for outbound traffic (on
+  Linux, the preferred source address of the route to an external address) when an up interface
+  carries it, and otherwise the first usable address in operating-system enumeration order. On Unix,
+  automatic selection excludes interfaces that are down. Dynamo trims surrounding whitespace from
+  configured hosts; a value containing only whitespace still fails server startup.
+
+  For a named interface, Dynamo uses the same address selection order, restricted to that interface.
+  It selects the first usable address in each category in operating-system enumeration order. An
+  interface with only loopback addresses uses IPv4 loopback, then IPv6 loopback. Explicit interface
+  lookup does not filter by interface state.
+
+  A wildcard uses the same automatic interface inventory to select a usable non-loopback address in
+  its requested family for advertisement. If only the other family has one, Dynamo switches the bind
+  wildcard to that family. If neither family has one, Dynamo prefers loopback in the requested family
+  before trying the other family. If no
+  loopback address is found, it uses the requested family's standard loopback address. The bind
+  wildcard uses the selected address family. Wildcards are never advertised. IPv4 link-local
+  addresses are accepted. Multicast, broadcast, and IPv6 link-local addresses are rejected.
+
+  IPv4-mapped IPv6 addresses use IPv4 rules. For example, `::ffff:0.0.0.0` uses the `0.0.0.0`
+  wildcard rules and advertises a concrete address.
+
+  The server resolves the address once at startup. A loopback fallback persists until restart, and
+  an interface-enumeration error fails server startup.
+</ParamField>
+
+<ParamField path="DYN_TCP_RPC_PORT" type="integer" default="0">
+  Port used by the TCP request-plane server. Accepted values are integers from `0` to `65535`.
+  When the value is unset, empty, or `0`, the operating system assigns a free port. Dynamo does not
+  trim whitespace. An invalid value, including a value with surrounding whitespace, silently falls
+  back to an operating-system-assigned port.
+</ParamField>
+
 <ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected local address">
-  IPv4 or IPv6 address, or exact network interface name, used to bind and advertise the TCP response
-  stream server. If an interface name occurs more than once in the operating system's interface
-  list, Dynamo uses the last address. Dynamo trims whitespace and treats an empty value as unset.
-  Unspecified addresses such as `0.0.0.0` and `::` are invalid.
+  Host for the TCP response-stream server. It accepts the same address syntax and uses the same
+  address selection and wildcard-family rules as `DYN_TCP_RPC_HOST`. Dynamo trims whitespace and
+  treats an empty value as unset. With a wildcard host, the TCP listener binds the selected wildcard,
+  while the QUIC response listener binds only the selected concrete address.
+
+  The server resolves the address once at startup. A loopback fallback persists until restart, and
+  an interface-enumeration error fails server startup.
 </ParamField>
 
 <ParamField path="DYN_TCP_RESPONSE_STREAM_PORT" type="integer" default="0">
@@ -155,14 +221,35 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 
 <ParamField path="DYN_EVENT_PLANE_HOST" type="string" default="auto-detected local address">
   IPv4 or IPv6 address, or exact network interface name, advertised by direct ZMQ event publishers.
-  If an interface name occurs more than once in the operating system's interface list, Dynamo uses
-  the last address. Dynamo trims whitespace and treats an empty value as unset. Unspecified addresses
-  such as `0.0.0.0` and `::` are invalid.
+  For an interface name, Dynamo selects the first usable IPv4 address, then IPv6. Dynamo trims
+  whitespace and treats an empty value as unset. Unspecified addresses such as `0.0.0.0` and `::` are
+  invalid, including IPv4-mapped wildcards such as `::ffff:0.0.0.0`. When unset, Dynamo selects a
+  usable non-loopback IPv4 address first, then IPv6, preferring the operating system's routed
+  source address as described for `DYN_TCP_RPC_HOST`. On Unix, automatic selection excludes down
+  interfaces. If neither family has a usable non-loopback address, Dynamo selects IPv4 loopback,
+  then IPv6 loopback, and falls back to `127.0.0.1` if neither is found. Remote subscribers cannot
+  reach a loopback address. Automatic selection can choose an IPv4 link-local address or a bridge
+  address. On hosts with several interfaces, set this variable to a reachable IP address or interface
+  if automatic selection chooses the wrong address.
 
-  This variable changes the discovery address, not the listener address. Direct ZMQ continues to bind
-  an IPv4 wildcard, so an IPv6 value does not enable IPv6 listening. This variable does not affect
-  NATS or ZMQ broker mode.
+  Direct ZMQ publishers bind `0.0.0.0` for an advertised IPv4 address or `[::]` for an advertised
+  IPv6 address. Discovery publishes the concrete address with the port assigned to that listener.
+  An explicit override must identify an address reachable by subscribers. The IPv6 wildcard can
+  also accept IPv4 connections; keep ZMQ listeners on trusted networks.
+
+  Event-plane PUB/SUB sockets support IPv4 addresses and bracketed IPv6 addresses, including
+  connections to configured ZMQ brokers. Hostnames retain IPv4 resolution. For an IPv6 broker,
+  use a bracketed address such as `tcp://[2001:db8::10]:5555`; Dynamo rejects an unbracketed IPv6
+  address. This variable does not affect NATS
+  or ZMQ broker mode.
 </ParamField>
+
+<Note>
+On IPv6-only hosts, set `DYN_HTTP_HOST=::` on the Frontend and `DYN_SYSTEM_HOST=::` on workers. Both
+listeners default to `0.0.0.0`, which accepts IPv4 connections only. The request plane and the direct
+ZMQ event plane select an IPv6 address automatically when the host has no usable non-loopback IPv4
+address.
+</Note>
 
 <ParamField path="DYN_ZMQ_IO_THREADS" type="integer" default="4">
   Number of libzmq background I/O threads in the process-wide event-plane context. All event-plane
@@ -209,14 +296,14 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE`
 </ParamField>
 
-<ParamField path="--dyn-enable-structural-tag" type="boolean" default="false">
-  Enable structural tag guided decoding for tool calls. When enabled, configure activation scope and parameter schema strictness with `--dyn-structural-tag-scope` and `--dyn-structural-tag-schema`.
+<ParamField path="--dyn-enable-structural-tag" type="boolean" default="true">
+  Enable structural tag guided decoding for tool calls when the configured parser and backend support it. The Rust, Python vLLM, and Python SGLang frontend preprocessing paths use this setting for `auto`, required, and named tool choices. Setting it to `false` disables optional guidance. Rust preserves native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out for all tool choices. Native Rust sidecars retain their conservative `off`/`auto` behavior, including this Kimi exception, and are not included in the default change.
 
   Environment variable: `DYN_ENABLE_STRUCTURAL_TAG`
 </ParamField>
 
-<ParamField path="--dyn-structural-tag-scope" type="string" default="auto">
-  Controls when structural tags are activated. `auto` activates them for required or named `tool_choice`, or when any tool has `strict=true` or `parallel_tool_calls` is false. `always` additionally activates them for `tool_choice=auto` without those conditions. `tool_choice=none` is unaffected by either setting. Only meaningful when `--dyn-enable-structural-tag` is set.
+<ParamField path="--dyn-structural-tag-scope" type="string" default="always">
+  Controls when structural tags are activated. `always` activates them for supported `auto`, required, and named tool requests. `auto` preserves the legacy conditional behavior: required or named `tool_choice`, or automatic tool choice when any tool has `strict=true` or `parallel_tool_calls` is false. `tool_choice=none` is unaffected by either setting. Applies when structural tags are active.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>always</Badge></span>
 
@@ -224,7 +311,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="--dyn-structural-tag-schema" type="string" default="auto">
-  Controls parameter schema strictness inside structural tags. `auto` applies the real parameter schema only to tools with `strict=true`, leaving all other tools syntactically constrained but schema-unconstrained. `strict` applies the real parameter schema to every tool. Only meaningful when `--dyn-enable-structural-tag` is set.
+  Controls parameter schema strictness inside structural tags. `auto` applies the declared parameter schema unless a tool explicitly sets `strict=false`; an omitted `strict` field is schema-enforced. `strict` applies the declared schema to every tool and overrides `strict=false`. Applies when structural tags are active.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>strict</Badge></span>
 
@@ -301,6 +388,15 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Advanced overflow-queue size for requests waiting in Dynamo before entering the engine. Applies only
   when `--engine-request-limit` or `DYN_ENGINE_REQUEST_LIMIT` is set. Must be at least `2`; the
   effective per-worker cap is the engine limit plus this queue limit.
+</ParamField>
+
+<ParamField path="DYN_SYSTEM_HOST" type="string" default="0.0.0.0">
+  Listen address for the system status server on `DYN_SYSTEM_PORT`, which serves health, metrics,
+  and self-hosted model metadata. `0.0.0.0` accepts IPv4 connections only; on IPv6-only hosts, set
+  `::`. For a wildcard address, Dynamo advertises a non-loopback address from the same family; `::`
+  also accepts IPv4 connections, so it falls back to a non-loopback IPv4 address. If none exists,
+  Dynamo advertises loopback and logs a warning; remote callers such as the Frontend cannot reach
+  that address.
 </ParamField>
 
 ## Related pages

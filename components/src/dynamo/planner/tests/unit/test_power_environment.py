@@ -17,6 +17,7 @@ from kubernetes.client import ApiException
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.base import is_power_aware_connector
+from dynamo.planner.core.types import WorkerCounts
 from dynamo.planner.environment.base import PlannerEnvironmentImpl
 from dynamo.planner.errors import DeploymentValidationError, PowerAnnotationInvalidError
 from dynamo.planner.monitoring.dgd_services import (
@@ -449,3 +450,36 @@ async def test_initialize_power_disabled_skips_settled_backing_wait():
     controller.wait_for_deployment_ready.assert_awaited_once_with(include_planner=False)
     assert backing_lookups == []
     assert env.deployment_state().prefill.power_watts_per_replica is None
+
+
+@pytest.mark.asyncio
+async def test_startup_inventory_cannot_bypass_power_capability_validation():
+    controller = Mock()
+    controller.get_worker_inventory = AsyncMock(return_value=WorkerCounts())
+    env = _env(controller)
+
+    with pytest.raises(DeploymentValidationError, match="PowerAwareConnector"):
+        await env._refresh_replica_counts()
+    controller.get_worker_inventory.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_power_capable_startup_inventory_preserves_pending_workers():
+    controller = _controller()
+    controller.get_worker_inventory = AsyncMock(
+        return_value=WorkerCounts(
+            ready_num_prefill=1,
+            ready_num_decode=2,
+            prefill_scaling_in_progress=True,
+            decode_scaling_in_progress=True,
+            pending_num_decode=1,
+        )
+    )
+    env = _env(controller)
+
+    await env._refresh_replica_counts()
+
+    controller.get_worker_inventory.assert_awaited_once()
+    assert env.deployment_state().decode.replicas.active == 2
+    assert env.deployment_state().decode.replicas.pending_startup == 1
+    assert env.deployment_state().decode.replicas.scaling

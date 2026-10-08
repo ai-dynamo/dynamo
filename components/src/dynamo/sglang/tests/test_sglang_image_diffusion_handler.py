@@ -59,6 +59,8 @@ def mock_context():
     context.trace_id = "test-trace-id"
     context.span_id = "test-span-id"
     context.is_cancelled = MagicMock(return_value=False)
+    context.is_stopped = MagicMock(return_value=False)
+    context.is_killed = MagicMock(return_value=False)
     return context
 
 
@@ -325,11 +327,14 @@ class TestImageDiffusionWorkerHandler:
         user_id = "user123"
         request_id = "req456"
 
-        url = await handler._upload_to_fs(image_bytes, user_id, request_id)
+        url, storage_path = await handler._upload_to_fs(
+            image_bytes, user_id, request_id
+        )
 
         # Verify storage path format
         assert f"users/{user_id}/generations/{request_id}/" in url
         assert url.endswith(".png")
+        assert storage_path.startswith(f"users/{user_id}/generations/{request_id}/")
 
     @pytest.mark.asyncio
     async def test_generate_images_with_numpy_array(self, handler):
@@ -440,32 +445,135 @@ class TestImageDiffusionWorkerHandler:
 
     @pytest.mark.asyncio
     async def test_generate_i2i_passes_image_path(
-        self, handler, mock_context, tmp_path
+        self, handler, mock_context, tmp_path, monkeypatch
     ):
-        """Test that input_reference is passed as image_path to the generator."""
+        """The generator gets the *resolved* path, never the raw reference.
+
+        Resolution is what makes the confinement check meaningful: the string
+        handed to the generator has to be the one that was checked against
+        DYN_MM_LOCAL_PATH, not the one the client sent.
+        """
         test_image = Image.new("RGB", (256, 256), color="green")
 
         handler.generator.generate = Mock(
             return_value=SimpleNamespace(frames=[test_image])
         )
 
-        input_ref = str(tmp_path / "test_input.png")
+        monkeypatch.setenv("DYN_MM_LOCAL_PATH", str(tmp_path))
+        (tmp_path / "sub").mkdir()
+        input_ref = tmp_path / "test_input.png"
+        input_ref.write_bytes(b"x")
+        # A "sub/.." segment so the resolved form differs from what was sent;
+        # on Linux an already-normalized tmp_path resolves to itself, and the
+        # assertion below would hold even with no resolution at all.
+        sent = str(tmp_path / "sub" / ".." / "test_input.png")
         request = {
             "prompt": "Transform this image",
             "model": "test-model",
             "size": "256x256",
             "response_format": "b64_json",
-            "input_reference": input_ref,
+            "input_reference": sent,
         }
 
         results = []
         async for result in handler.generate(request, mock_context):
             results.append(result)
 
-        # Verify image_path was passed to the generator
-        call_args = handler.generator.generate.call_args
-        sampling_params = call_args[1]["sampling_params_kwargs"]
-        assert sampling_params["image_path"] == input_ref
+        sampling_params = handler.generator.generate.call_args[1][
+            "sampling_params_kwargs"
+        ]
+        assert sampling_params["image_path"] != sent
+        assert sampling_params["image_path"] == str(input_ref.resolve())
+
+    @pytest.mark.asyncio
+    async def test_generate_i2i_rejects_path_outside_allowed_dir(
+        self, handler, mock_context, tmp_path, monkeypatch
+    ):
+        """A rejected reference must be a 400, not a sanitized 500.
+
+        UrlValidationError is a policy verdict on client input. It is also a
+        plain ValueError, so without the explicit mapping it reaches the runtime
+        as an unexpected failure and the client is told nothing.
+        """
+        handler.generator.generate = Mock()
+        monkeypatch.setenv("DYN_MM_LOCAL_PATH", str(tmp_path))
+        request = {
+            "prompt": "x",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "input_reference": "/etc/passwd",
+        }
+
+        with pytest.raises(InvalidArgument, match="outside the allowed directory"):
+            async for _ in handler.generate(request, mock_context):
+                pass
+
+        handler.generator.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generate_i2i_rejection_message_is_bounded(
+        self, handler, mock_context, tmp_path, monkeypatch
+    ):
+        """A rejected reference is echoed back bounded, not at full length.
+
+        input_reference has no length limit, and the 400 body plus the error log
+        are two sinks per request: echoing it verbatim turns one request into an
+        arbitrarily large amplification.
+        """
+        handler.generator.generate = Mock()
+        monkeypatch.setenv("DYN_MM_LOCAL_PATH", str(tmp_path))
+        reference = "/nope/" + "A" * 200_000 + ".png"
+        request = {
+            "prompt": "x",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "input_reference": reference,
+        }
+
+        with pytest.raises(InvalidArgument) as excinfo:
+            async for _ in handler.generate(request, mock_context):
+                pass
+
+        assert len(str(excinfo.value)) < 500, "client-visible message is unbounded"
+        handler.generator.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generate_i2i_maps_a_4xx_fetch_to_invalid_argument(
+        self, handler, mock_context, tmp_path, monkeypatch
+    ):
+        """A 4xx from the origin the client chose is the client's problem.
+
+        Everything that is not an InvalidArgument becomes a sanitized 500, so
+        without this the caller is told nothing about their own dead URL. The
+        URL is not echoed back -- it has no length limit and the video handler
+        puts str(exc) straight in its response body.
+        """
+        from dynamo.common.http.base import HttpStatusError
+
+        handler.generator.generate = Mock()
+        monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+        url = "http://example.com/" + "u" * 5000
+
+        async def fake_fetch(u, timeout, *, policy=None, max_bytes=None):
+            raise HttpStatusError(404, "Not Found", u)
+
+        monkeypatch.setattr("dynamo.common.http.fetch_bytes", fake_fetch)
+        request = {
+            "prompt": "x",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "input_reference": url,
+        }
+
+        with pytest.raises(InvalidArgument, match="HTTP 404") as excinfo:
+            async for _ in handler.generate(request, mock_context):
+                pass
+
+        assert "uuuu" not in str(excinfo.value)
+        handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_generate_t2i_no_image_path(self, handler, mock_context):
@@ -491,3 +599,129 @@ class TestImageDiffusionWorkerHandler:
         call_args = handler.generator.generate.call_args
         sampling_params = call_args[1]["sampling_params_kwargs"]
         assert "image_path" not in sampling_params
+
+
+class TestNParameter:
+    """The OpenAI `n` field: n independent images per request."""
+
+    @staticmethod
+    def _request(n=None, seed=42):
+        req = {
+            "prompt": "A red square",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "user": "test-user",
+            "nvext": {"num_inference_steps": 10, "seed": seed},
+        }
+        if n is not None:
+            req["n"] = n
+        return req
+
+    @staticmethod
+    def _mock_one_image(handler):
+        test_image = Image.new("RGB", (256, 256), color="red")
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
+
+    @pytest.mark.asyncio
+    async def test_n_returns_n_images(self, handler, mock_context):
+        """n=3 produces three generations and three data entries."""
+        self._mock_one_image(handler)
+
+        results = []
+        async for result in handler.generate(self._request(n=3), mock_context):
+            results.append(result)
+
+        assert len(results) == 1
+        assert len(results[0]["data"]) == 3
+        assert handler.generator.generate.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_n_seeds_are_deterministic_and_distinct(self, handler, mock_context):
+        """With an explicit seed, generation i uses seed+i."""
+        self._mock_one_image(handler)
+
+        async for _ in handler.generate(self._request(n=3, seed=42), mock_context):
+            pass
+
+        seeds = [
+            call.kwargs["sampling_params_kwargs"]["seed"]
+            for call in handler.generator.generate.call_args_list
+        ]
+        assert seeds == [42, 43, 44]
+
+    @pytest.mark.asyncio
+    async def test_n_defaults_to_single_image(self, handler, mock_context):
+        """Omitted n behaves exactly as before: one generation, one image."""
+        self._mock_one_image(handler)
+
+        results = []
+        async for result in handler.generate(self._request(), mock_context):
+            results.append(result)
+
+        assert len(results[0]["data"]) == 1
+        assert handler.generator.generate.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_n_above_max_is_rejected(self, handler, mock_context):
+        """n above MAX_IMAGES_PER_REQUEST is rejected, matching the TRT-LLM
+        image handler's [1, 10] validation (no silent clamping)."""
+        self._mock_one_image(handler)
+
+        with pytest.raises(InvalidArgument, match=r"n must be in \[1, 10\]"):
+            async for _ in handler.generate(self._request(n=99), mock_context):
+                pass
+        assert handler.generator.generate.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_n_below_one_is_an_error(self, handler, mock_context):
+        """n=0 must not silently produce one image."""
+        self._mock_one_image(handler)
+
+        with pytest.raises(InvalidArgument, match=r"n must be in \[1, 10\]"):
+            async for _ in handler.generate(self._request(n=0), mock_context):
+                pass
+        assert handler.generator.generate.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_cancelled_request_stops_between_generations(
+        self, handler, mock_context
+    ):
+        """A context stopped after the first generation must not start more."""
+        self._mock_one_image(handler)
+        # False for the first iteration check, True afterwards
+        mock_context.is_stopped = MagicMock(side_effect=[False, True, True])
+
+        results = []
+        async for result in handler.generate(self._request(n=3), mock_context):
+            results.append(result)
+
+        assert results == []
+        assert handler.generator.generate.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_partial_upload_failure_cleans_up(self, handler, mock_context):
+        """If a later upload fails, earlier uploaded files are removed."""
+        self._mock_one_image(handler)
+
+        uploads = []
+
+        async def fake_upload(img, user_id, request_id):
+            if len(uploads) == 1:
+                raise RuntimeError("upload failed")
+            uploads.append(
+                f"users/{user_id}/generations/{request_id}/img{len(uploads)}.png"
+            )
+            return "http://x/img.png", uploads[-1]
+
+        handler._upload_to_fs = fake_upload
+        handler._cleanup_uploads = AsyncMock()
+
+        req = self._request(n=2)
+        req["response_format"] = "url"
+        with pytest.raises(RuntimeError, match="upload failed"):
+            async for _ in handler.generate(req, mock_context):
+                pass
+        handler._cleanup_uploads.assert_awaited_once_with(uploads)

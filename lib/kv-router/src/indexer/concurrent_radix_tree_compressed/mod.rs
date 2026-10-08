@@ -45,6 +45,7 @@ pub struct ConcurrentRadixTreeCompressed {
 
     anchor_nodes: DashMap<ExternalSequenceBlockHash, SharedNode, FxBuildHasher>,
     cleanup: CleanupState,
+    lifecycle: super::HashLifecycle,
     #[cfg(feature = "bench")]
     bench_metrics: CrtcBenchMetrics,
 }
@@ -93,11 +94,29 @@ impl Drop for ConcurrentRadixTreeCompressed {
 }
 
 impl ConcurrentRadixTreeCompressed {
+    pub fn new_with_delegate(delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
+        Self::with_lifecycle(super::HashLifecycle::new(delegate))
+    }
+
+    pub(super) fn with_lifecycle(lifecycle: super::HashLifecycle) -> Self {
+        let mut backend = Self::new();
+        backend.lifecycle = lifecycle;
+        backend
+    }
+
+    fn release_hash(&self, worker: WorkerWithDpRank, hash: ExternalSequenceBlockHash) {
+        // Synthetic branch anchors borrow router-owned prefixes, not backend ownership.
+        if self.lifecycle.is_enabled() && !self.anchor_nodes.contains_key(&hash) {
+            self.lifecycle.remove(worker, hash);
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             root: Arc::new(Node::new()),
             anchor_nodes: DashMap::with_hasher(FxBuildHasher),
             cleanup: CleanupState::new(),
+            lifecycle: super::HashLifecycle::default(),
             #[cfg(feature = "bench")]
             bench_metrics: CrtcBenchMetrics::new(),
         }
@@ -206,15 +225,23 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     fn update_lookup_for_blocks(
+        &self,
+        worker: WorkerWithDpRank,
         worker_lookup: &mut WorkerLookup,
         blocks: &[KvCacheStoredBlockData],
         node: &SharedNode,
     ) -> bool {
-        update_arc_lookup_for_keys(
+        let changed = update_arc_lookup_for_keys(
             worker_lookup,
             blocks.iter().map(|block| block.block_hash),
             node,
-        ) > 0
+        ) > 0;
+        if self.lifecycle.is_enabled() {
+            for block in blocks {
+                self.lifecycle.insert(worker, block.block_hash);
+            }
+        }
+        changed
     }
 
     // ------------------------------------------------------------------

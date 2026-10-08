@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 import uuid
@@ -487,6 +490,28 @@ def test_empty_queues():
     assert q.var_decode_kv_tokens == 0.0
 
 
+def test_kv_holding_waiting_counts_each_request_once():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.waiting = [
+        _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=128),
+    ]
+    stub.kv_holding_waiting = [
+        _make_request(RequestStatus.PREEMPTED, num_tokens=512, num_computed_tokens=480),
+        _make_request(
+            RequestStatus.WAITING_FOR_REMOTE_KVS,
+            num_tokens=1024,
+            num_computed_tokens=1024,
+        ),
+    ]
+
+    q = InstrumentedScheduler._compute_queued(stub)
+
+    assert q.num_prefill_requests == 1
+    assert q.sum_prefill_tokens == 128
+    assert q.num_decode_requests == 2
+    assert q.sum_decode_kv_tokens == 1504
+
+
 # ---------------------------------------------------------------------------
 # Variance correctness across both queues
 # ---------------------------------------------------------------------------
@@ -791,6 +816,24 @@ def test_capacity_digest_ignores_request_limit_filtered_capture_sizes():
     assert common.max_num_running_reqs == 128
 
 
+@pytest.mark.parametrize(
+    "cap_attribute",
+    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
+)
+def test_capacity_digest_tracks_admission_cap(cap_attribute):
+    stub = _digest_stub(max_num_running_reqs=128)
+    manager = SimpleNamespace(block_size=16)
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=[manager])
+    )
+    setattr(manager, cap_attribute, 32)
+    initial_digest = stub._bench_grid_invariants_digest()
+
+    setattr(manager, cap_attribute, 64)
+
+    assert stub._bench_grid_invariants_digest() != initial_digest
+
+
 def test_benchmark_synchronizer_rejects_grid_mismatch_before_warmup():
     endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
     rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
@@ -953,96 +996,198 @@ def _stage_pair(timeout=1):
     return rank0, rank1
 
 
-def _stage_verdict(synchronizer, budget=2.0):
-    """Drive ``stage_poll`` the way the scheduler does: one non-blocking poll
-    per idle step until the verdict arrives."""
-    end = time.monotonic() + budget
-    while time.monotonic() < end:
-        verdict = synchronizer.stage_poll()
-        if verdict is not None:
-            return verdict
-        time.sleep(0.005)
-    raise AssertionError("no stage verdict within budget")
+def _round(synchronizer, seq, batch, phase, ok):
+    """Run one blocking round on a thread so both ranks can be driven from the test."""
+    result = {}
+
+    def run():
+        try:
+            result["view"] = synchronizer.stage_round(seq, batch, phase, ok)
+        except Exception as error:  # noqa: BLE001
+            result["error"] = error
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread, result
 
 
-def test_benchmark_synchronizer_stage_exchange_agrees_when_every_rank_is_ok():
+def _join(thread, result, timeout=2.0):
+    thread.join(timeout=timeout)
+    assert not thread.is_alive(), "stage round did not complete"
+    if "error" in result:
+        raise result["error"]
+    return result["view"]
+
+
+def test_benchmark_synchronizer_stage_round_reports_building_until_every_rank_is_done():
     rank0, rank1 = _stage_pair()
-    follower_result = {}
-
-    def follow():
-        rank1.stage_report(8, True)
-        follower_result["verdict"] = _stage_verdict(rank1)
-
-    follower = threading.Thread(target=follow)
-    follower.start()
+    view_cls = instrumented_scheduler_module._BenchmarkStageRound
     try:
-        rank0.stage_report(8, True)
-        # Non-blocking: rank 0 keeps polling between idle steps.
-        assert _stage_verdict(rank0) is True
-        follower.join(timeout=2)
-        assert not follower.is_alive()
-        assert follower_result["verdict"] is True
-        # The exchange is closed on both sides once the verdict is out.
-        for synchronizer in (rank0, rank1):
-            with pytest.raises(RuntimeError, match="without a report"):
-                synchronizer.stage_poll()
+        t0, r0 = _round(rank0, 1, 8, "done", True)
+        t1, r1 = _round(rank1, 1, 8, "building", None)
+        assert _join(t0, r0) == view_cls(all_done=False, ok=None)
+        assert _join(t1, r1) == view_cls(all_done=False, ok=None)
+        t0, r0 = _round(rank0, 2, 8, "done", True)
+        t1, r1 = _round(rank1, 2, 8, "done", True)
+        assert _join(t0, r0) == view_cls(all_done=True, ok=True)
+        assert _join(t1, r1) == view_cls(all_done=True, ok=True)
     finally:
         rank1.close()
         rank0.close()
 
 
 @pytest.mark.parametrize("failing_rank", [0, 1])
-def test_benchmark_synchronizer_stage_exchange_fails_the_group_with_one_rank(
-    failing_rank,
-):
+def test_benchmark_synchronizer_stage_round_fails_the_group_with_one_rank(failing_rank):
     rank0, rank1 = _stage_pair()
-    follower_result = {}
-
-    def follow():
-        rank1.stage_report(16, failing_rank != 1)
-        follower_result["verdict"] = _stage_verdict(rank1)
-
-    follower = threading.Thread(target=follow)
-    follower.start()
     try:
-        rank0.stage_report(16, failing_rank != 0)
-        assert _stage_verdict(rank0) is False
-        follower.join(timeout=2)
-        assert not follower.is_alive()
-        assert follower_result["verdict"] is False
+        t0, r0 = _round(rank0, 1, 16, "done", failing_rank != 0)
+        t1, r1 = _round(rank1, 1, 16, "done", failing_rank != 1)
+        expected = instrumented_scheduler_module._BenchmarkStageRound(
+            all_done=True, ok=False
+        )
+        assert _join(t0, r0) == expected
+        assert _join(t1, r1) == expected
     finally:
         rank1.close()
         rank0.close()
 
 
-def test_benchmark_synchronizer_stage_exchange_times_out_without_follower_report():
+def test_benchmark_synchronizer_stage_round_blocks_the_follower_until_rank0_answers():
+    """The follower's round returns only when the group view has arrived: a
+    late broadcast delays the follower's step instead of letting it idle
+    into the next collective while rank 0 has already moved on."""
+    rank0, rank1 = _stage_pair()
+    try:
+        t1, r1 = _round(rank1, 1, 8, "done", True)
+        time.sleep(0.2)
+        assert t1.is_alive()  # rank 0 has not run its round yet: still blocked
+        t0, r0 = _round(rank0, 1, 8, "done", True)
+        view = _join(t1, r1)
+        assert view.all_done is True and view.ok is True
+        assert _join(t0, r0) == view
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_stage_round_times_out_without_a_peer():
     rank0, rank1 = _stage_pair(timeout=0.05)
     try:
-        rank0.stage_report(8, True, timeout=0.05)
-        with pytest.raises(TimeoutError, match="stage reports.*batch=8"):
-            _stage_verdict(rank0)
-        # A second report is possible again (the failed exchange is closed),
-        # and the late follower learns about the failure instead of waiting.
-        rank1.stage_report(8, True)
-        with pytest.raises(RuntimeError, match="synchronization failed"):
-            _stage_verdict(rank1)
-        with pytest.raises(RuntimeError, match="already pending"):
-            rank0.stage_report(8, True)
-            rank0.stage_report(8, True)
+        # The follower alone: rank 0 never runs its round.
+        with pytest.raises(TimeoutError):
+            rank1.stage_round(1, 8, "done", True)
+    finally:
+        rank1.close()
+        rank0.close()
+    rank0, rank1 = _stage_pair(timeout=0.05)
+    try:
+        # Rank 0 alone: the follower never reports.
+        with pytest.raises(TimeoutError):
+            rank0.stage_round(1, 8, "done", True)
     finally:
         rank1.close()
         rank0.close()
 
 
-def test_benchmark_synchronizer_stage_exchange_rejects_a_rung_mismatch():
+@pytest.mark.parametrize("field, value", [("seq", 2), ("batch", 4)])
+def test_benchmark_synchronizer_stage_round_rejects_a_rank_out_of_lockstep(
+    field, value
+):
+    """A follower at another round or another rung is not waited for: the
+    ranks have lost lockstep and the group aborts instead of hanging."""
     rank0, rank1 = _stage_pair()
     try:
-        rank1.stage_report(4, True)
-        rank0.stage_report(8, True)
-        with pytest.raises(RuntimeError, match="invalid attention-DP warm-up stage"):
-            _stage_verdict(rank0)
-        with pytest.raises(RuntimeError, match="synchronization failed"):
-            _stage_verdict(rank1)
+        follower = {"seq": 1, "batch": 8}
+        follower[field] = value
+        t1, r1 = _round(rank1, follower["seq"], follower["batch"], "done", True)
+        with pytest.raises(RuntimeError, match="not in lockstep"):
+            rank0.stage_round(1, 8, "done", True)
+        with pytest.raises(RuntimeError):
+            _join(t1, r1)
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"all_done": True, "ok": None},
+        {"all_done": False, "ok": True},
+        {"all_done": "yes", "ok": None},
+        {"seq": 2, "all_done": True, "ok": True},
+    ],
+)
+def test_benchmark_synchronizer_stage_round_follower_rejects_an_invalid_result(bad):
+    """A malformed ``stage_round_result`` from rank 0 is a protocol error for
+    the follower, never a hang: drive the follower directly so a raw reply
+    can be substituted for rank 0's real one."""
+    rank0, rank1 = _stage_pair()
+    try:
+        t1, r1 = _round(rank1, 1, 8, "done", True)
+        ident, _ = rank0._read_router(0)
+        rank0._send_to_all(
+            {1: ident},
+            {"type": "stage_round_result", "benchmark_id": 0, "seq": 1, **bad},
+        )
+        with pytest.raises(
+            RuntimeError, match="invalid attention-DP warm-up stage round result"
+        ):
+            _join(t1, r1)
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"phase": "done", "ok": None},
+        {"phase": "building", "ok": True},
+        {"dp_rank": 5},
+    ],
+)
+def test_benchmark_synchronizer_stage_round_rank0_rejects_a_malformed_status(bad):
+    """A malformed raw ``stage_round`` status is rejected by rank 0 like any
+    other protocol violation, and the follower is notified instead of being
+    left to time out."""
+    rank0, rank1 = _stage_pair()
+    try:
+        rank1._socket.send_json(
+            {
+                "type": "stage_round",
+                "benchmark_id": 0,
+                "dp_rank": 1,
+                "seq": 1,
+                "batch": 8,
+                "phase": "done",
+                "ok": True,
+                **bad,
+            }
+        )
+        with pytest.raises(
+            RuntimeError, match="invalid attention-DP warm-up stage status"
+        ):
+            rank0.stage_round(1, 8, "done", True)
+        assert rank1._socket.poll(500)
+        reply = rank1._socket.recv_json()
+        assert reply["type"] == "error"
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_stage_round_rejects_an_invalid_phase():
+    rank0, rank1 = _stage_pair()
+    try:
+        with pytest.raises(
+            ValueError, match="invalid attention-DP warm-up stage phase"
+        ):
+            rank0.stage_round(1, 8, "parked", None)
+        with pytest.raises(ValueError, match="with outcome"):
+            rank0.stage_round(1, 8, "done", None)
+        with pytest.raises(ValueError, match="with outcome"):
+            rank0.stage_round(1, 8, "building", True)
     finally:
         rank1.close()
         rank0.close()
@@ -1987,6 +2132,60 @@ def test_explicit_infeasible_point_reports_source_index():
         InstrumentedScheduler._bench_build_grid(stub)
 
 
+@pytest.mark.core
+@pytest.mark.parametrize("kv_read_tokens", [0, 12288])
+def test_prefill_feasibility_uses_native_split_with_local_prefix(kv_read_tokens):
+    stub = _explicit_grid_stub("prefill")
+    stub.need_mamba_block_aligned_split = True
+    stub._mamba_block_aligned_split = MagicMock(return_value=128)
+
+    scheduled = stub._bench_prefill_scheduled_tokens_per_req(
+        kv_read_tokens + 192, kv_read_tokens
+    )
+
+    assert scheduled == 128
+    (request, new_tokens), kwargs = stub._mamba_block_aligned_split.call_args
+    assert new_tokens == 192
+    assert request.num_computed_tokens == 0
+    assert request.num_prompt_tokens == request.num_tokens == kv_read_tokens + 192
+    assert request.shared_prefix_boundary == 0
+    assert kwargs == {"num_new_local_computed_tokens": kv_read_tokens}
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("generated", [False, True])
+def test_prefill_grid_rejects_native_split_before_measurement(generated):
+    # Plenty of capacity isolates the native KDA split from shared-pool
+    # feasibility: four 192-token prompts first schedule four 128-token chunks.
+    stub = _explicit_grid_stub("prefill")
+    stub.cache_config.num_gpu_blocks = 1024
+    stub.cache_config.block_size = 1536
+    stub.need_mamba_block_aligned_split = True
+    stub._mamba_block_aligned_split = MagicMock(return_value=128)
+    candidate = PrefillPointCandidate(
+        total_prefill_tokens=768, total_kv_read_tokens=0, batch_size=4
+    )
+
+    if generated:
+        assert (
+            stub._bench_materialize_prefill_candidate(
+                candidate, "prefill[273]", generated=True
+            )
+            is None
+        )
+    else:
+        with pytest.raises(ValueError, match=r"prefill\[273\].*infeasible"):
+            stub._bench_materialize_prefill_candidate(candidate, "prefill[273]")
+
+    supported = candidate.model_copy(update={"total_prefill_tokens": 512})
+    point = stub._bench_materialize_prefill_candidate(
+        supported, "prefill[272]", generated=generated
+    )
+    assert point is not None
+    assert point.total_prefill_tokens == 512
+    assert point.batch_size == 4
+
+
 def test_explicit_decode_respects_scheduled_token_limit():
     stub = _explicit_grid_stub(
         "decode",
@@ -2358,6 +2557,33 @@ def test_prefill_grid_uses_total_tokens_and_piecewise_boundaries():
         if point.total_prefill_tokens == 40 and point.batch_size == 1
     )
     assert engine_limit.sample_reasons == ["eager_tail", "engine_limit"]
+
+
+def test_prefill_grid_applies_the_sample_limit_after_block_alignment():
+    """Hybrid align mode adds whole-block totals to the new-token axis; the
+    configured sample limit bounds the combined axis, so the aligned candidates
+    cannot grow the grid past ``prefill_max_new_token_samples``."""
+    stub = _prefill_grid_stub(num_gpu_blocks=512)
+    stub.max_num_scheduled_tokens = 40
+    stub._bench_prefill_capture_sizes = list(range(1, 41))
+    stub._bench_config.prefill_max_new_token_samples = 4
+    stub._bench_config.prefill_max_kv_read_token_samples = 3
+    stub._bench_config.prefix_max_batch_size_samples = 1
+    stub.need_mamba_block_aligned_split = True
+    stub.cache_config.block_size = stub.block_size
+    # whole-block chunks pass the align-mode split unchanged
+    stub._mamba_block_aligned_split = lambda request, new_tokens, **_: new_tokens
+    block_size = int(stub.block_size)
+    aligned = list(range(2 * block_size, 41, block_size))
+    assert aligned, "fixture must leave room for whole-block totals"
+    assert InstrumentedScheduler._bench_block_aligned_prefill_axis(
+        stub, [1, 40], 40
+    ) == sorted({1, 40, *aligned})
+
+    InstrumentedScheduler._bench_generate_prefill_grid(stub)
+
+    totals = sorted({point.total_prefill_tokens for point in stub._bench_grid})
+    assert len(totals) <= 4
 
 
 def test_prefill_grid_uniformly_limits_new_tokens_batch_and_kv_axes():
@@ -3944,8 +4170,7 @@ def test_prefill_point_with_exact_batch_shape_is_saved():
     ]
 
 
-@pytest.mark.parametrize("fpm_count", [0, 2])
-def test_benchmark_point_rejects_non_single_fpm_count(fpm_count):
+def _decode_point_and_fpm():
     point = BenchmarkPoint(
         point_type="decode",
         benchmark_id=4,
@@ -3958,10 +4183,30 @@ def test_benchmark_point_rejects_non_single_fpm_count(fpm_count):
             "sum_decode_kv_tokens": 48,
         }
     }
-    stub = _benchmark_save_stub(point, [fpm.copy() for _ in range(fpm_count)])
+    return point, fpm
+
+
+def test_benchmark_point_rejects_multiple_fpms():
+    # Two FPMs under one benchmark_id means the point isolation broke: abort.
+    point, fpm = _decode_point_and_fpm()
+    stub = _benchmark_save_stub(point, [fpm.copy() for _ in range(2)])
 
     with pytest.raises(RuntimeError, match="exactly one FPM"):
         InstrumentedScheduler._bench_save_current_point(stub)
+
+
+def test_benchmark_point_with_no_fpm_is_skipped_not_aborted():
+    # The deadline passed before a single FPM was recorded (first pass at a
+    # fresh giant shape, kernel JIT): a group-synchronized skip, not a sweep abort.
+    point, _ = _decode_point_and_fpm()
+    stub = _benchmark_save_stub(point, [])
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == []
+    assert stub._bench_skipped_points == [
+        SkippedBenchmarkPoint(point=point, reason="no_fpm_before_deadline")
+    ]
 
 
 def test_decode_point_with_no_fpm_stops_waiting_at_deadline(monkeypatch):
@@ -4312,7 +4557,8 @@ def test_save_records_only_the_steady_fpm():
     InstrumentedScheduler._bench_save_current_point(stub)
 
     assert len(stub._bench_results) == 1
-    assert stub._bench_results[0].fpms == [steady]
+    # the kept sample is marked as a recorded steady step
+    assert stub._bench_results[0].fpms == [{**steady, "kvwarm_steady_sample": True}]
     assert stub._bench_skipped_points == []
 
 
@@ -4963,9 +5209,12 @@ def test_kvwarm_gate_reads_an_empty_dump_as_dataset_empty(monkeypatch, tmp_path)
     assert stub._kvwarm_meta["skip_reason"] == "dataset_empty"
 
 
-def test_kvwarm_seed_regime_vocabulary(monkeypatch):
+@pytest.mark.core
+@pytest.mark.parametrize("random_kda", [False, True])
+def test_kvwarm_seed_regime_vocabulary(monkeypatch, random_kda):
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_random_kda = random_kda
     stub._kvwarm_meta = {"warm_eligible": True, "skip_reason": None}
     decode = BenchmarkPoint(point_type="decode", total_kv_read_tokens=64, batch_size=2)
     prefill = BenchmarkPoint(
@@ -4974,10 +5223,11 @@ def test_kvwarm_seed_regime_vocabulary(monkeypatch):
     regime = InstrumentedScheduler._kvwarm_seed_regime
     assert regime(stub, prefill) == "not_applicable"
     assert regime(stub, decode) == "unstamped"
-    assert regime(stub, replace(decode, sample_reasons=["kvwarm_real_kv"])) == "real_kv"
-    assert (
-        regime(stub, replace(decode, sample_reasons=["kvwarm_fake_fallback"]))
-        == "fake_fallback"
+    assert regime(stub, replace(decode, sample_reasons=["kvwarm_real_kv"])) == (
+        "real_attention_kv_random_kda" if random_kda else "real_kv"
+    )
+    assert regime(stub, replace(decode, sample_reasons=["kvwarm_fake_fallback"])) == (
+        "fake_attention_kv_random_kda" if random_kda else "fake_fallback"
     )
     stub._kvwarm_meta = {
         "warm_eligible": False,
@@ -5063,11 +5313,16 @@ def _kvwarm_planner_stub(usable_blocks, groups=1, block_size=16):
     meta = {"warm_eligible": True, "skip_reason": None}
     stub._kvwarm_meta_init = lambda: meta
     stub._kvwarm_warm_eligible = lambda: True
+    stub._bench_synchronizer = None
     stub._bench_negotiated_capacity = None
     stub.max_model_len = 8192
     stub.cache_config = SimpleNamespace(block_size=block_size)
     stub.kv_cache_manager = SimpleNamespace(
-        coordinator=SimpleNamespace(single_type_managers=[object()] * groups)
+        coordinator=SimpleNamespace(
+            single_type_managers=[
+                SimpleNamespace(block_size=block_size) for _ in range(groups)
+            ]
+        )
     )
     stub._bench_blocks_per_req = lambda depth, **_: groups * -(-depth // block_size)
     stub._bench_usable_blocks = lambda batch, reserve_watermark=False: usable_blocks
@@ -5115,6 +5370,49 @@ def test_kvwarm_prepare_reserves_shadow_tail_blocks(monkeypatch):
     # injection instead of crashing the run.
     point = stub._bench_grid[-1]
     assert not InstrumentedScheduler._kvwarm_plan_covers(stub, point)
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("ctx", [2, 1000])
+def test_kvwarm_does_not_build_a_stage_over_budget_at_the_depth_floor(ctx, monkeypatch):
+    # Four one-block chains fit, but the private tail block each shadow takes
+    # at these contexts (exact per-rung reserve, one block per group here)
+    # raises the warmup bound to eight. Reaching depth 8 (or starting below
+    # it) must not mark the short point as covered by real KV.
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_planner_stub(usable_blocks=7)
+    short = BenchmarkPoint(point_type="decode", batch_size=4, total_kv_read_tokens=8)
+    deepest = replace(short, total_kv_read_tokens=4 * ctx)
+    stub._bench_grid = deque([deepest, short] if ctx > 2 else [short])
+    original_points = list(stub._bench_grid)
+
+    stub._kvwarm_prepare("decode")
+
+    assert stub._kvwarm_plan[4] == 0
+    assert not stub._kvwarm_plan_covers(short)
+    assert list(stub._bench_grid) == original_points
+    assert stub._kvwarm_meta_init()["capacity_fallbacks"] == [
+        {
+            "batch": 4,
+            "depth": min(ctx + 4, 8),
+            "required_blocks": 8,
+            "usable_blocks": 7,
+        }
+    ]
+    stub._bench_active_req_ids = set()
+    stub._bench_current_point = None
+    stub._bench_synchronizer = None
+    stub._bench_soft_timeout_elapsed = lambda: False
+    stub._bench_frees_pending = lambda: False
+    stub._kvwarm_start_stage = MagicMock()
+    assert stub._kvwarm_step_busy() is False
+    stub._kvwarm_start_stage.assert_not_called()
+
+    fitted = _kvwarm_planner_stub(usable_blocks=12)
+    fitted._bench_grid = deque([short])
+    fitted._kvwarm_prepare("decode")
+    assert fitted._kvwarm_plan_covers(short)
+    assert "capacity_fallbacks" not in fitted._kvwarm_meta_init()
 
 
 def test_kvwarm_plan_trims_depth_by_the_negotiated_pool(monkeypatch):
@@ -5455,6 +5753,334 @@ def test_kvwarm_shadow_pool_shortfall_matches_tail_arithmetic():
     assert InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [40, 47], 3) == 0
 
 
+def test_kvwarm_shadow_registration_keeps_positional_table_for_sliding_window():
+    """An admission cap bounds resident blocks, not the positional table: a
+    sliding-window group keeps absolute positions (null placeholders included),
+    so the shadow at ctx=152 forks table index 9, never the last ``cap`` entries."""
+    stub, mgr, pool, chain = _shadow_stub(cow=True)
+    mgr._max_admission_blocks_per_request = 4
+    mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=True)
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 152, 3
+    )
+    assert table == ([0, 1, 2, 3, 4, 5, 6, 7, 8, 1000],)
+    assert mgr.cows == [(9, 1000)]
+    assert zero_ids == []
+    assert mgr.num_cached_block["shadow"] == 9
+
+
+@pytest.mark.parametrize(
+    "cap_attribute",
+    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
+)
+def test_kvwarm_shadow_registration_forks_circular_tail_table(cap_attribute):
+    """GLM5-Next's k-pool tail: one circularly reused block per request
+    (admission cap 1, excluded from prefix caching). The chain holds a single
+    block whatever its depth; the shadow shares nothing and forks that block."""
+    stub, mgr, pool, chain = _shadow_stub(cow=True)
+    mgr.req_to_blocks["chain"] = chain[:1]
+    mgr.block_size = 4
+    setattr(mgr, cap_attribute, 1)
+    mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=False)
+    assert stub._bench_blocks_per_req(152, apply_admission_cap=True) == 1
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 152, 3
+    )
+    assert table == ([1000],)
+    assert mgr.cows == [(0, 1000)]
+    assert zero_ids == []
+    assert mgr.num_cached_block["shadow"] == 0
+
+
+class _FakeMambaSpec:
+    """Spec whose class name carries "Mamba", the key of the recurrent-group checks."""
+
+
+class MambaManager(_FakeManager):
+    def __init__(self, chain_blocks, cow=True):
+        super().__init__(chain_blocks, cow=cow)
+        self.kv_cache_spec = _FakeMambaSpec()
+
+
+def test_kvwarm_live_state_shadow_forks_the_recurrent_read_slot_at_a_boundary():
+    """At an exact block boundary vLLM reads the previous state at
+    ceil(ctx/bs)-1, one position below ctx//bs. The live-state fork must cover
+    that read slot too (``recurrent_shadow_range``), or the shadow starts from a
+    pruned checkpoint: ctx=32, bs=16 -> positions 1..2 forked from the live block 9."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    chain = [_FakeBlock(i) for i in range(10)]
+    mgr = MambaManager(chain, cow=True)
+    pool = _FakePool()
+    stub.kv_cache_manager = SimpleNamespace(
+        block_pool=pool, coordinator=SimpleNamespace(single_type_managers=[mgr])
+    )
+    stub.cache_config = SimpleNamespace(block_size=16)
+    stub._bench_hybrid_live_state = True
+    stub._bench_random_kda = False
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 32, 3
+    )
+    assert table == ([0, 1000, 1001],)
+    assert mgr.cows == [(9, 1000), (9, 1001)]
+    assert zero_ids == []
+    assert mgr.num_cached_block["shadow"] == 1
+    # the per-context reserve and the pool-shortfall mirror agree on the span
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks_for(stub, 32, 3) == 2
+    assert InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [32], 3) == 0
+
+
+class KpoolTailManager(_FakeManager):
+    """Matches the circular-table predicate (admission cap, spec excluded from
+    prefix caching); its ``SimpleNamespace`` spec is not a Mamba spec, so the
+    live-state predicate does not match."""
+
+
+def test_kvwarm_live_state_keeps_circular_kpool_geometry():
+    """With live-state on, the k-pool tail (one circular block, admission cap 1,
+    excluded from prefix caching) must keep its ring geometry: fork the single
+    block, never walk ``recurrent_shadow_range`` positions (65 entries at ctx 255)."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    chain = [_FakeBlock(0)]
+    mgr = KpoolTailManager(chain, cow=True)
+    mgr.block_size = 4
+    mgr._max_admission_blocks_per_request = 1
+    mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=False)
+    pool = _FakePool()
+    stub.kv_cache_manager = SimpleNamespace(
+        block_pool=pool, coordinator=SimpleNamespace(single_type_managers=[mgr])
+    )
+    stub.cache_config = SimpleNamespace(block_size=16)
+    stub._bench_hybrid_live_state = True
+    stub._bench_random_kda = False
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 255, 3
+    )
+    assert table == ([1000],)
+    assert mgr.cows == [(0, 1000)]
+    assert zero_ids == []
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks_for(stub, 255, 3) == 1
+    assert InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [255], 3) == 0
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks(stub, 3) == 2
+
+
+def test_kvwarm_plan_keeps_kimi_long_context_real_kv_coverage(monkeypatch):
+    """Kimi K3 TP8/DCP8 layout (three align-mode recurrent groups, block 1536;
+    one attention group, effective block 12288): a 1M-token batch-8 point must
+    stay on real-KV warm-up. The resident recurrent estimate is the allocator's
+    (align pair + prefill checkpoint), not a token-proportional retention term."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_REPEATS", "3")
+    stub = _kvwarm_planner_stub(usable_blocks=2144)
+    del stub._bench_blocks_per_req  # exercise the real footprint arithmetic
+    stub.max_model_len = 1048576
+    stub.block_size = 12288
+    stub.cache_config = SimpleNamespace(block_size=12288)
+    managers = [
+        SimpleNamespace(
+            block_size=1536,
+            mamba_cache_mode="align",
+            num_speculative_blocks=0,
+            kv_cache_spec=SimpleNamespace(num_prefill_checkpoint_blocks=1),
+        )
+        for _ in range(3)
+    ]
+    managers.append(SimpleNamespace(block_size=12288))
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=managers)
+    )
+    context = 1_000_000
+    point = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=1,
+        batch_size=8,
+        total_kv_read_tokens=8 * context,
+    )
+    stub._bench_grid = deque([point])
+    stub._kvwarm_prepare("decode")
+    assert stub._bench_blocks_per_req(context + 4, resident_chain=True) == 91
+    assert stub._kvwarm_plan[8] == context + 4
+    assert stub._kvwarm_plan_covers(point)
+
+
+def test_kvwarm_reserve_uses_the_admission_context_at_a_block_boundary(monkeypatch):
+    """The shadow is admitted at ctx-1 with ``repeats`` steady steps. At a block
+    boundary the recurrent read slot moves one position down, so the reserve
+    must be taken at that geometry: ctx 33 -> admission 32 needs 3 private
+    blocks (1 attention + recurrent positions 1..2), not the 2 that
+    ``(33, 1 + repeats)`` suggests. A pool that fits only the smaller reserve
+    must NOT admit the warm stage at the measured depth."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_REPEATS", "3")
+    stub = _kvwarm_planner_stub(usable_blocks=37, groups=2)
+    stub._bench_hybrid_live_state = True
+    stub._bench_random_kda = False
+    stub.kv_cache_manager.coordinator.single_type_managers[
+        1
+    ].kv_cache_spec = _FakeMambaSpec()
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks_for(stub, 32, 3) == 3
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks_for(stub, 33, 4) == 2
+    point = BenchmarkPoint(
+        point_type="decode", benchmark_id=1, batch_size=4, total_kv_read_tokens=4 * 33
+    )
+    stub._bench_grid = deque([point])
+    stub._kvwarm_prepare("decode")
+    # depth 37 with the 3-block reserve needs (6 + 3) * 4 = 36 > 35 (0.95 pool):
+    # the rung is trimmed below the point instead of admitting an underfunded stage
+    assert stub._kvwarm_plan[4] < 37
+    assert not stub._kvwarm_plan_covers(point)
+
+
+def _dp_planner_stub(monkeypatch, points, usable_blocks=100):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_planner_stub(usable_blocks=usable_blocks)
+    stub._bench_dp_size = 2
+    stub._bench_expected_points = sum(
+        EAGER_WARMUP_REASON not in p.sample_reasons for p in points
+    )
+    stub._bench_grid = deque(points)
+    return stub
+
+
+def test_kvwarm_dp_filter_rejects_uncovered_explicit_points(monkeypatch):
+    covered = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=1,
+        batch_size=1,
+        total_kv_read_tokens=16,
+        sample_reasons=["explicit"],
+    )
+    deep = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=2,
+        batch_size=3,
+        total_kv_read_tokens=1500,
+        sample_reasons=["explicit"],
+    )
+    stub = _dp_planner_stub(monkeypatch, [covered, deep])
+    with pytest.raises(
+        RuntimeError, match=r"explicit decode point.*batch=3, total_kv_read_tokens=1500"
+    ):
+        stub._kvwarm_prepare("decode")
+
+
+def test_kvwarm_dp_filter_counts_only_real_points(monkeypatch):
+    covered = BenchmarkPoint(
+        point_type="decode", benchmark_id=1, batch_size=1, total_kv_read_tokens=16
+    )
+    replica = replace(covered, benchmark_id=3, sample_reasons=[EAGER_WARMUP_REASON])
+    deep = BenchmarkPoint(
+        point_type="decode", benchmark_id=2, batch_size=3, total_kv_read_tokens=1500
+    )
+    stub = _dp_planner_stub(monkeypatch, [covered, deep, replica])
+    stub._kvwarm_prepare("decode")
+    kept = list(stub._bench_grid)
+    assert [(p.batch_size, p.total_kv_read_tokens) for p in kept] == [(1, 16), (1, 16)]
+    assert stub._bench_expected_points == 1
+    # IDs are left to ``_bench_build_grid``, which numbers the final order.
+    assert {p.benchmark_id for p in kept} == {1, 3}
+
+
+def test_kvwarm_dp_filter_marks_decode_missing_when_nothing_is_covered(monkeypatch):
+    """Attention-DP keeps real-KV decode points only. When the plan covers none of
+    them the decode phase is gone, and the artifact must not report a complete,
+    usable run with zero decode measurements."""
+    deep = BenchmarkPoint(
+        point_type="decode", benchmark_id=1, batch_size=3, total_kv_read_tokens=1500
+    )
+    stub = _dp_planner_stub(monkeypatch, [deep])
+    stub._bench_missing_phases = []
+    stub._kvwarm_prepare("decode")
+    assert list(stub._bench_grid) == []
+    assert stub._bench_expected_points == 0
+    assert stub._bench_missing_phases == ["decode"]
+
+
+def test_giant_fake_off_by_batch_correction_requires_a_steady_sample():
+    """The admission step also measures ``declared - batch``; only a recorded steady
+    sample (``kvwarm_steady_sample``, set by both save paths) may be accepted at the
+    measured coordinate. A giant fake point that reached its deadline with the
+    admission FPM alone is a validation skip, not a decode measurement."""
+    stub = SimpleNamespace(_kvwarm_giant_threshold=lambda: 1000)
+    point = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=1,
+        batch_size=2,
+        total_kv_read_tokens=2000,
+        sample_reasons=["kvwarm_fake_fallback"],
+    )
+    scheduled = {"num_decode_requests": 2, "sum_decode_kv_tokens": 1998}
+    admission_only = {"scheduled_requests": scheduled}
+    assert (
+        InstrumentedScheduler._bench_fpm_validation_failure(stub, point, admission_only)
+        == "measured_decode_context_mismatch"
+    )
+    steady = {"scheduled_requests": scheduled, "kvwarm_steady_sample": True}
+    assert (
+        InstrumentedScheduler._bench_fpm_validation_failure(stub, point, steady) is None
+    )
+    # the median marker alone is not the steady evidence
+    median_only = {"scheduled_requests": scheduled, "kvwarm_giant_median_of": 3}
+    assert (
+        InstrumentedScheduler._bench_fpm_validation_failure(stub, point, median_only)
+        == "measured_decode_context_mismatch"
+    )
+
+
+def _giant_fake_point():
+    return BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=1,
+        batch_size=2,
+        total_kv_read_tokens=2000,
+        sample_reasons=["kvwarm_fake_fallback"],
+    )
+
+
+def test_two_fpm_save_path_records_the_steady_sample_at_the_measured_coordinate(
+    monkeypatch,
+):
+    """`DYN_BENCH_GIANT_KV_REPEATS=1` (or a pool/model-length limit) reduces a giant
+    fake point to admission plus one steady step. That path keeps the steady FPM
+    and must mark it as recorded, so the off-by-batch correction accepts it and the
+    point is saved at the measured coordinate."""
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_THRESHOLD", "1000")
+    scheduled = {"num_decode_requests": 2, "sum_decode_kv_tokens": 1998}
+    stub = _benchmark_save_stub(
+        _giant_fake_point(),
+        [
+            {"scheduled_requests": dict(scheduled), "wall_time": 0.5},
+            {"scheduled_requests": dict(scheduled), "wall_time": 0.02},
+        ],
+    )
+    stub._bench_expected_fpms = 2
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_skipped_points == []
+    (result,) = stub._bench_results
+    assert result.point.total_kv_read_tokens == 1998
+    assert "giant_fake_off_by_batch" in result.point.sample_reasons
+    (fpm,) = result.fpms
+    assert fpm["wall_time"] == 0.02, "the admission step is scaffolding"
+    assert fpm["kvwarm_steady_sample"] is True
+
+
+def test_two_fpm_save_path_skips_an_admission_only_giant_sample(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_THRESHOLD", "1000")
+    scheduled = {"num_decode_requests": 2, "sum_decode_kv_tokens": 1998}
+    stub = _benchmark_save_stub(
+        _giant_fake_point(), [{"scheduled_requests": dict(scheduled)}]
+    )
+    stub._bench_expected_fpms = 2
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == []
+    assert [s.reason for s in stub._bench_skipped_points] == [
+        "measured_decode_context_mismatch"
+    ]
+
+
 def test_kvwarm_shadow_registration_rejects_too_shallow_chain():
     stub, mgr, pool, chain = _shadow_stub()
     with pytest.raises(RuntimeError, match="too shallow"):
@@ -5493,10 +6119,10 @@ def test_kvwarm_chain_parks_only_after_in_flight_tokens_drain():
 # negotiated envelope) but a chain can vanish, or the pool can fall short of
 # the shadows' tails, on one rank only. Zeroing the plan there alone would
 # send that rank to fake injection while its peers inject real KV: READY
-# summaries differ and the sweep aborts. The outcome is therefore reported
-# through the synchronizer's non-blocking stage exchange and applied only
-# once the group verdict is in; meanwhile every step is handed to the real
-# scheduler (the DP forward is collective, so no rank may block).
+# summaries differ and the sweep aborts. The outcome is therefore settled
+# through a round every rank runs at the same point of every idle
+# decode-sweep step, before its forward: ranks block only together, and the
+# group settles the rung in the same step everywhere.
 
 
 def _kvwarm_group_stage_stub(*, chains=("chain-a", "chain-b"), synchronizer=None):
@@ -5504,7 +6130,8 @@ def _kvwarm_group_stage_stub(*, chains=("chain-a", "chain-b"), synchronizer=None
     stub = _kvwarm_busy_stub(point, chains=chains)
     stub._kvwarm_plan = {4: 128}  # covers the point: max(63) + 1 + 3 <= 128
     stub._bench_synchronizer = MagicMock() if synchronizer is None else synchronizer
-    stub._bench_synchronizer.timeout_seconds = 10.0
+    if synchronizer is None:
+        stub._bench_synchronizer.timeout_seconds = 10.0
     stub._kvwarm_building = True
     stub._kvwarm_stage_batch = 4
     stub._kvwarm_stage_t0 = time.monotonic()
@@ -5522,70 +6149,97 @@ def _kvwarm_group_stage_stub(*, chains=("chain-a", "chain-b"), synchronizer=None
     return stub, meta
 
 
-def test_kvwarm_stage_verdict_is_taken_from_the_group():
+def _round_views(*views):
+    """side_effect for a mocked ``stage_round``: one group view per step."""
+    return [instrumented_scheduler_module._BenchmarkStageRound(*view) for view in views]
+
+
+def test_kvwarm_stage_is_settled_by_the_group_round_in_the_same_step():
     stub, meta = _kvwarm_group_stage_stub()
     sync = stub._bench_synchronizer
-    sync.stage_poll.side_effect = [None, None, True]
+    # Step 1: this rank's build completes while a peer is still building.
+    # Step 2: every rank is done and the verdict is ok.
+    sync.stage_round.side_effect = _round_views((False, None), (True, True))
 
-    # Build complete: the local outcome is reported, not applied.
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
-    sync.stage_report.assert_called_once()
-    (batch, ok), kwargs = sync.stage_report.call_args
-    # No soft deadline armed in the stub: the budget is the protocol timeout.
-    assert (batch, ok) == (4, True) and kwargs["timeout"] == 10.0
     assert stub._kvwarm_building is False
-    assert stub._kvwarm_stage_reported[:2] == (4, True)
+    assert stub._kvwarm_stage_local[:2] == (4, True)
     assert meta["stages"] == []
-    # Pending verdict: every step is an idle step for the real scheduler.
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
-    assert meta["stages"] == []
-    # Verdict in: the stage is ready and the point flow resumes.
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
-    assert stub._kvwarm_stage_reported is None
+    assert stub._kvwarm_stage_local is None
     assert [entry["batch"] for entry in meta["stages"]] == [4]
     assert meta["stages"][0]["depth"] == 8 and "failed" not in meta["stages"][0]
+    assert sync.stage_round.call_args_list == [
+        call(1, 4, "done", True),
+        call(2, 4, "done", True),
+    ]
+    # Step 3: nothing pending; the point flow resumes from shared state, and
+    # the round still runs (phase "none") so every rank stays in step.
+    sync.stage_round.side_effect = _round_views((False, None))
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is False
+    assert sync.stage_round.call_args_list[-1] == call(3, 4, "none", None)
     assert stub._kvwarm_plan[4] == 128
     stub._kvwarm_shed_chains.assert_not_called()
-    assert sync.stage_poll.call_count == 3
+
+
+def test_kvwarm_round_keeps_a_building_rank_in_step():
+    """A rank still building reports "building" and hands the step to the
+    real scheduler; the round runs on every step regardless."""
+    stub, meta = _kvwarm_group_stage_stub()
+    stub.requests["chain-a"].num_computed_tokens = 2  # still building
+    sync = stub._bench_synchronizer
+    sync.stage_round.side_effect = _round_views((False, None), (False, None))
+
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    assert stub._kvwarm_building is True and stub._kvwarm_stage_local is None
+    assert sync.stage_round.call_args_list == [
+        call(1, 4, "building", None),
+        call(2, 4, "building", None),
+    ]
+    assert meta["stages"] == []
 
 
 def test_kvwarm_group_fallback_zeroes_the_plan_and_sheds_a_healthy_fleet():
     stub, meta = _kvwarm_group_stage_stub()
     sync = stub._bench_synchronizer
-    sync.stage_poll.side_effect = [None, False]
+    sync.stage_round.side_effect = _round_views((False, None), (True, False))
 
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # reported ok
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # pending
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # verdict: no
+    assert (
+        InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    )  # 1: done ok, peers pending
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # 2: the group says no
     assert stub._kvwarm_plan[4] == 0
     stub._kvwarm_shed_chains.assert_called_once_with()
     (entry,) = meta["stages"]
     assert entry["batch"] == 4 and entry["failed"] is True
     assert entry["group_fallback"] is True
     # The rung's points now take fake injection: the shed blocks drain behind
-    # the fence first, then the fake path proceeds.
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    # the fence first, then the fake path proceeds; each step still rounds.
+    sync.stage_round.side_effect = _round_views((False, None), (False, None))
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # 3: fence
     stub.deferred_frees.clear()
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is False
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is False  # 4: fake path
+    assert sync.stage_round.call_args_list[-2:] == [
+        call(3, None, "none", None),
+        call(4, None, "none", None),
+    ]
     stub._kvwarm_start_stage.assert_not_called()
 
 
-def test_kvwarm_local_stage_failure_is_reported_before_it_is_applied():
+def test_kvwarm_local_stage_failure_is_reported_done_and_not_ok():
     stub, meta = _kvwarm_group_stage_stub()
     del stub.requests["chain-a"]  # vanished during the build
     sync = stub._bench_synchronizer
-    sync.stage_poll.side_effect = [None, False]
+    sync.stage_round.side_effect = _round_views((False, None), (True, False))
 
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
-    # Survivors are released at once, but the plan waits for the group.
+    # Survivors are released at once, but the plan waits for the group; the
+    # status still names the rung the fleet was built for.
     stub._kvwarm_shed_chains.assert_called_once_with()
-    (batch, ok), _ = sync.stage_report.call_args
-    assert (batch, ok) == (4, False)
-    assert stub._kvwarm_plan[4] == 128
-    assert meta["stages"] == []
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    assert stub._kvwarm_stage_local[:2] == (4, False)
+    assert sync.stage_round.call_args_list == [call(1, 4, "done", False)]
+    assert stub._kvwarm_plan[4] == 128 and meta["stages"] == []
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
     assert stub._kvwarm_plan[4] == 0
     assert meta["stages"] == [
@@ -5596,37 +6250,33 @@ def test_kvwarm_local_stage_failure_is_reported_before_it_is_applied():
 def test_kvwarm_stage_pool_shortfall_fails_the_rung_for_the_group():
     """The per-point pool check of injection would skip a point on one rank
     alone; under attention-DP the rung's worst case is checked once the
-    fleet is parked and goes into the shared verdict."""
+    fleet is parked and goes into the group verdict through the round."""
     stub, meta = _kvwarm_group_stage_stub()
     stub._kvwarm_stage_shadow_shortfall = lambda batch: 3
     sync = stub._bench_synchronizer
-    sync.stage_poll.side_effect = [False]
+    sync.stage_round.side_effect = _round_views((True, False))
 
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
-    (batch, ok), _ = sync.stage_report.call_args
-    assert (batch, ok) == (4, False)
-    stub._kvwarm_shed_chains.assert_called_once_with()
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    assert sync.stage_round.call_args_list == [call(1, 4, "done", False)]
+    # Once for the local failure, once more when the group falls back.
+    assert stub._kvwarm_shed_chains.call_count == 2
     assert meta["stages"] == [
         {"batch": 4, "failed": True, "pool_shortfall": 3, "group_fallback": True}
     ]
 
 
-def test_kvwarm_soft_timeout_mid_build_abandons_the_stage_through_the_group():
-    """A rank that reaches the soft timeout while its fleet is still
-    building must not walk off to the boundary handshake while a peer is
-    waiting for its stage report."""
+def test_kvwarm_soft_timeout_mid_build_abandons_the_stage_through_the_round():
+    """A rank that reaches the soft timeout while its fleet is still building
+    closes the stage as failed and keeps rounding, so peers are never left
+    waiting for a report that will not come."""
     stub, meta = _kvwarm_group_stage_stub()
     stub.requests["chain-a"].num_computed_tokens = 2  # still building
     stub._bench_deadline_monotonic = 0.0  # soft timeout elapsed
     sync = stub._bench_synchronizer
-    sync.stage_poll.side_effect = [False]
+    sync.stage_round.side_effect = _round_views((True, False))
 
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
-    (batch, ok), _ = sync.stage_report.call_args
-    assert (batch, ok) == (4, False)
-    stub._kvwarm_shed_chains.assert_called_once_with()
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    assert sync.stage_round.call_args_list == [call(1, 4, "done", False)]
     assert meta["stages"] == [
         {"batch": 4, "failed": True, "soft_timeout": True, "group_fallback": True}
     ]
@@ -5639,10 +6289,58 @@ def test_kvwarm_stage_settles_locally_without_a_synchronizer():
     stub._kvwarm_stage_shadow_shortfall = MagicMock()
 
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
-    assert stub._kvwarm_stage_reported is None
+    assert stub._kvwarm_stage_local is None
     assert [entry["batch"] for entry in meta["stages"]] == [4]
     stub._kvwarm_stage_shadow_shortfall.assert_not_called()
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is False
+
+
+def test_kvwarm_round_delays_the_follower_step_until_the_group_view_arrives():
+    """The delayed-decision regression: rank 0's group view is broadcast
+    later than any follower poll would have been. With a round the
+    follower's step cannot complete until the view arrives, so both ranks
+    settle the rung in the same step and resume the point flow on the same
+    step; neither can idle into a collective the other has already left."""
+    rank0, rank1 = _stage_pair(timeout=5)
+    send_to_all = rank0._send_to_all
+
+    def delayed_send(identities, message):
+        time.sleep(0.3)
+        send_to_all(identities, message)
+
+    rank0._send_to_all = delayed_send
+    stubs = [_kvwarm_group_stage_stub(synchronizer=sync)[0] for sync in (rank0, rank1)]
+    sequences = {0: [], 1: []}
+    finished = {0: [], 1: []}
+
+    def drive(rank, stub):
+        for _step in range(3):
+            sequences[rank].append(InstrumentedScheduler._kvwarm_step_busy(stub))
+            finished[rank].append(time.monotonic())
+
+    threads = [
+        threading.Thread(target=drive, args=(rank, stub))
+        for rank, stub in enumerate(stubs)
+    ]
+    started = time.monotonic()
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            assert not thread.is_alive()
+        # Step 1: both builds complete and the round settles the rung at once;
+        # steps 2 and 3: nothing pending, the point flow resumes. Identical.
+        assert sequences[0] == sequences[1] == [True, False, False]
+        for stub in stubs:
+            assert stub._kvwarm_stage_local is None and stub._kvwarm_plan[4] == 128
+        # The follower's first step ended only after the delayed broadcast,
+        # within the same instant as rank 0's.
+        assert finished[1][0] - started >= 0.25
+        assert abs(finished[1][0] - finished[0][0]) < 0.2
+    finally:
+        rank1.close()
+        rank0.close()
 
 
 def test_kvwarm_stage_shadow_shortfall_takes_the_rung_worst_case(monkeypatch):
@@ -5666,18 +6364,6 @@ def test_kvwarm_stage_shadow_shortfall_takes_the_rung_worst_case(monkeypatch):
     assert InstrumentedScheduler._kvwarm_stage_shadow_shortfall(stub, 4) == 5
     # Only this rung's covered points, with the full repeat count as headroom.
     assert seen == [([63] * 4, 3), ([46] * 4, 3)]
-
-
-def test_kvwarm_stage_sync_timeout_reaches_the_soft_deadline():
-    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    synchronizer = SimpleNamespace(timeout_seconds=10.0)
-    stub._bench_deadline_monotonic = time.monotonic() + 100.0
-    budget = InstrumentedScheduler._kvwarm_stage_sync_timeout(stub, synchronizer)
-    assert 109.0 < budget <= 110.0
-    stub._bench_deadline_monotonic = 0.0  # already elapsed
-    assert InstrumentedScheduler._kvwarm_stage_sync_timeout(stub, synchronizer) == 10.0
-    stub._bench_deadline_monotonic = None
-    assert InstrumentedScheduler._kvwarm_stage_sync_timeout(stub, synchronizer) == 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -6159,3 +6845,233 @@ def test_bench_inject_fake_decode_caches_blocks_before_the_request_runs():
     assert output.total_num_scheduled_tokens == 1
     assert stub._bench_active_req_ids == {"__bench_0"}
     assert stub.requests["__bench_0"].status == RequestStatus.RUNNING
+
+
+def test_hybrid_decode_capacity_reserves_state_turnover_and_prefill_checkpoints():
+    """A long-context batch can fit MLA while exhausting the shared state pool."""
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=2145, block_size=12288)
+    stub.max_model_len = 1048576
+    stub.max_num_running_reqs = 32
+    managers = [
+        SimpleNamespace(
+            block_size=1536,
+            mamba_cache_mode="align",
+            num_speculative_blocks=0,
+            kv_cache_spec=SimpleNamespace(num_prefill_checkpoint_blocks=1),
+        )
+        for _ in range(3)
+    ]
+    managers.append(SimpleNamespace(block_size=12288))  # already DCP-resolved
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=managers)
+    )
+    context = 1048573
+    assert stub._bench_blocks_per_req(context + 1) == 95  # 86 attention + 9 state
+    assert stub._bench_decode_point_feasible(22, 22 * context)
+    assert not stub._bench_decode_point_feasible(23, 23 * context)
+
+
+@pytest.mark.parametrize("context", [1, 15, 16, 17, 40])
+def test_random_kda_shadow_keeps_attention_prefix_but_owns_sparse_state(context):
+    stub, attention, pool, chain = _shadow_stub(cow=True)
+    stub._bench_random_kda = True
+    state_chain = [_FakeBlock(900)]  # a deep chain retains one current state
+    kda = _FakeManager(state_chain)
+    kda.kv_cache_spec = instrumented_scheduler_module.MambaSpec(
+        block_size=16, shapes=(), dtypes=(), mamba_cache_mode="align"
+    )
+    pool.null_block = _FakeBlock(0)
+    pool.null_block.is_null = True
+    stub.kv_cache_manager.coordinator.single_type_managers.append(kda)
+    table, zero_ids = stub._kvwarm_register_shadow("shadow", "chain", context, 3)
+    first, end = instrumented_scheduler_module.recurrent_shadow_range(context, 3, 16)
+    assert table[1][:first] == [0] * first
+    assert len(table[1]) == end
+    assert table[1][first:] == zero_ids
+    assert all(block_id >= 1000 for block_id in zero_ids)
+    assert 900 not in table[1]
+    assert state_chain[0].ref_cnt == 1
+    assert kda.cows == []
+    assert pool.null_block.ref_cnt == 1
+    assert table[0][: context // 16] == [b.block_id for b in chain[: context // 16]]
+    assert set(table[0]).isdisjoint(zero_ids)
+
+
+def test_random_kda_allows_hybrid_warm_chains_without_expert_parallelism(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_gate_stub(state_groups=("FullAttentionSpec", "MambaSpec"), ep=False)
+    stub._bench_random_kda = True
+    assert stub._kvwarm_warm_eligible()
+    assert stub._kvwarm_meta["skip_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# FPM worker_id propagation into the EngineCore child (snapshot restore)
+# ---------------------------------------------------------------------------
+
+FPM_UTILITY_NAME = "set_fpm_worker_id"
+
+
+def _fpm_utility():
+    from vllm.v1.engine.core import EngineCore
+
+    return getattr(EngineCore, FPM_UTILITY_NAME)
+
+
+def _fpm_scheduler_stub(worker_id: str = ""):
+    """``InstrumentedScheduler`` carrying only the two FPM identity fields."""
+    scheduler = object.__new__(InstrumentedScheduler)
+    scheduler._fpm_worker_id = worker_id
+    scheduler._publisher = SimpleNamespace(_worker_id=worker_id)
+    return scheduler
+
+
+def test_fpm_utility_installed_on_engine_core_base_class():
+    """Patched on the base class, so every EngineCore variant inherits it."""
+    from vllm.v1.engine.core import EngineCore, EngineCoreProc
+
+    assert FPM_UTILITY_NAME in vars(EngineCore)
+    assert hasattr(EngineCoreProc, FPM_UTILITY_NAME)
+
+
+def test_fpm_utility_install_is_idempotent():
+    """A second install must not rebind an already-patched class."""
+    before = _fpm_utility()
+
+    instrumented_scheduler_module._install_fpm_worker_id_utility()
+
+    assert _fpm_utility() is before
+
+
+def test_fpm_utility_updates_scheduler_and_publisher():
+    """Active samples use the scheduler's id; idle heartbeats use the publisher's."""
+    scheduler = _fpm_scheduler_stub()
+    engine_core = SimpleNamespace(scheduler=scheduler)
+
+    _fpm_utility()(engine_core, "8465209922961459")
+
+    assert scheduler._fpm_worker_id == "8465209922961459"
+    assert scheduler._publisher._worker_id == "8465209922961459"
+
+
+def test_fpm_utility_overwrites_a_previously_set_id():
+    """A pod may be restored more than once; the id must follow the new runtime."""
+    scheduler = _fpm_scheduler_stub(worker_id="1111111111111111")
+    engine_core = SimpleNamespace(scheduler=scheduler)
+
+    _fpm_utility()(engine_core, "2222222222222222")
+
+    assert scheduler._fpm_worker_id == "2222222222222222"
+    assert scheduler._publisher._worker_id == "2222222222222222"
+
+
+@pytest.mark.parametrize(
+    "scheduler", [None, SimpleNamespace()], ids=["missing", "foreign"]
+)
+def test_fpm_utility_rejects_non_instrumented_scheduler(scheduler):
+    """Raise rather than no-op, so the parent sees the failure."""
+    engine_core = SimpleNamespace(scheduler=scheduler)
+
+    with pytest.raises(RuntimeError, match="not InstrumentedScheduler"):
+        _fpm_utility()(engine_core, "8465209922961459")
+
+
+def test_fpm_utility_argument_is_not_msgspec_converted():
+    """vLLM converts msgspec.Struct-annotated args; the id must stay a plain str."""
+    from inspect import isclass, signature
+
+    import msgspec
+
+    annotation = signature(_fpm_utility()).parameters["new_worker_id"].annotation
+
+    assert not (isclass(annotation) and issubclass(annotation, msgspec.Struct))
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(300)
+def test_scheduler_cls_resolution_installs_the_patch():
+    """Resolving ``--scheduler-cls`` is what installs the patch in the child.
+
+    Runs in a fresh interpreter: this module already imported the scheduler.
+    """
+    script = textwrap.dedent(
+        """
+        from vllm.utils.import_utils import resolve_obj_by_qualname
+        from vllm.v1.engine.core import EngineCore
+
+        assert not hasattr(EngineCore, "set_fpm_worker_id"), (
+            "patch present before scheduler_cls resolution"
+        )
+
+        resolved = resolve_obj_by_qualname(
+            "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+        )
+
+        assert resolved.__name__ == "InstrumentedScheduler"
+        assert hasattr(EngineCore, "set_fpm_worker_id"), (
+            "resolving scheduler_cls did not install the FPM worker_id utility"
+        )
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=280,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
+    """Through vLLM's own utility dispatch, both FPM payload kinds carry the new id."""
+    import queue
+
+    import zmq
+    from vllm.v1.engine import EngineCoreRequestType
+    from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
+
+    from dynamo.common.forward_pass_metrics import decode
+
+    ctx = zmq.Context.instance()
+    sub = ctx.socket(zmq.SUB)
+    sub.setsockopt(zmq.SUBSCRIBE, b"")
+    port = sub.bind_to_random_port("tcp://127.0.0.1")
+    sub.unbind(sub.getsockopt(zmq.LAST_ENDPOINT))
+    publisher = instrumented_scheduler_module._FpmPublisherThread(
+        f"tcp://127.0.0.1:{port}", worker_id="", dp_rank=0
+    )
+    sub.connect(f"tcp://127.0.0.1:{port}")
+    try:
+        scheduler = object.__new__(InstrumentedScheduler)
+        scheduler._fpm_worker_id = ""
+        scheduler._fpm_dp_rank = 0
+        scheduler._publisher = publisher
+        engine = object.__new__(EngineCoreProc)
+        engine.scheduler = scheduler
+        engine.shutdown_state = EngineShutdownState.RUNNING
+        engine.output_queue = queue.Queue()
+
+        engine._handle_client_request(
+            EngineCoreRequestType.UTILITY,
+            (0, 7, FPM_UTILITY_NAME, ("8465209922961459",)),
+        )
+
+        _client, outputs = engine.output_queue.get_nowait()
+        assert outputs.utility_output.failure_message is None
+        active = InstrumentedScheduler._extract_metrics(
+            scheduler,
+            None,
+            None,
+            0.0,
+            scheduled=instrumented_scheduler_module.ScheduledRequestMetrics(),
+        )
+        assert active.worker_id == "8465209922961459"
+        assert sub.poll(timeout=5000), "no idle heartbeat within 5s"
+        heartbeat = decode(sub.recv_multipart()[2])
+        assert heartbeat is not None
+        assert heartbeat.worker_id == "8465209922961459"
+    finally:
+        publisher.shutdown()
+        sub.close(linger=0)
