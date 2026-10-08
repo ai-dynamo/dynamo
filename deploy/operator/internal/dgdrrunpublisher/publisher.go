@@ -34,18 +34,22 @@
 //	Sweeper exited non-zero, no terminal snapshot      -> reconcile last snapshot, exit 0
 //	                                                      (the Sweeper's exit fails the Job)
 //	Sweeper exited zero, no terminal snapshot          -> reconcile last snapshot,
-//	                                                      exit ExitMissingTerminalSnapshot
+//	                                                      exit ExitProtocolViolation
+//	invalid or regressing snapshot, Sweeper exited    -> exit ExitProtocolViolation
 //	final/last snapshot cannot be reconciled           -> exit ExitReconcileFailed
 package dgdrrunpublisher
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
@@ -53,15 +57,15 @@ import (
 
 // Process exit codes of the publisher binary.
 const (
-	ExitAcknowledged            = 0
-	ExitReconcileFailed         = 1
-	ExitMissingTerminalSnapshot = 3
-	ExitRunFailed               = 4
+	ExitAcknowledged      = 0
+	ExitReconcileFailed   = 1
+	ExitProtocolViolation = 3
+	ExitRunFailed         = 4
 )
 
 // ErrMissingTerminalSnapshot means the Sweeper exited successfully without publishing a
 // terminal snapshot, which violates the producer protocol.
-var ErrMissingTerminalSnapshot = errors.New("sweeper exited without publishing a terminal snapshot")
+var ErrMissingTerminalSnapshot = fmt.Errorf("%w: sweeper exited without publishing a terminal snapshot", ErrProtocolViolation)
 
 // ErrRunFailed means the Sweeper published a terminal Failed snapshot. The snapshot is
 // reconciled first; the error keeps a producer that reports failure but exits 0 from
@@ -73,8 +77,8 @@ func ExitCode(err error) int {
 	switch {
 	case err == nil:
 		return ExitAcknowledged
-	case errors.Is(err, ErrMissingTerminalSnapshot):
-		return ExitMissingTerminalSnapshot
+	case errors.Is(err, ErrProtocolViolation):
+		return ExitProtocolViolation
 	case errors.Is(err, ErrRunFailed):
 		return ExitRunFailed
 	default:
@@ -121,17 +125,29 @@ type Publisher struct {
 	RunName      string
 	PollInterval time.Duration
 
-	lastRaw      []byte
 	lastStatus   *RunStatus
 	haveSnapshot bool // a snapshot has been reconciled
+	round        int32
+	evaluated    int32
 	terminal     bool // the reconciled snapshot was terminal
 	phase        string
 }
 
+// maxObjectName is the Kubernetes limit on an object name (DNS subdomain).
+const maxObjectName = 253
+
 // CandidateName is the DGDC name for a candidate id. It depends only on the run and the
-// stable id, never on rank.
+// stable id, never on rank. A run name too long to leave room for the id is truncated
+// and a hash of the full run name is added, so names stay unique and within the limit.
 func CandidateName(runName, id string) string {
-	return fmt.Sprintf("%s-%s", runName, id)
+	name := runName + "-" + id
+	if len(name) <= maxObjectName {
+		return name
+	}
+	sum := sha256.Sum256([]byte(runName))
+	hash := hex.EncodeToString(sum[:6])
+	room := maxObjectName - len(id) - len(hash) - 2
+	return strings.TrimRight(runName[:room], "-.") + "-" + hash + "-" + id
 }
 
 // Reconcile applies one snapshot: create missing candidates, patch the run status
@@ -227,8 +243,9 @@ func (p *Publisher) patchStatus(ctx context.Context, status RunStatus) error {
 	return nil
 }
 
-// syncOnce reads the snapshot file and reconciles it if it changed. A missing file or
-// an unchanged snapshot is not an error.
+// syncOnce reads the snapshot file and reconciles it. A missing file is not an error.
+// An unchanged snapshot is reconciled again on purpose: the diff makes that free when
+// the cluster matches, and repairs it (for example a deleted candidate) when it does not.
 func (p *Publisher) syncOnce(ctx context.Context) error {
 	data, err := os.ReadFile(filepath.Join(p.SnapshotDir, SnapshotFileName))
 	if errors.Is(err, os.ErrNotExist) {
@@ -237,22 +254,37 @@ func (p *Publisher) syncOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if p.lastRaw != nil && string(p.lastRaw) == string(data) {
-		return nil
-	}
 	snap, err := ParseSnapshot(data)
 	if err != nil {
+		return err
+	}
+	if err := p.checkProgress(snap); err != nil {
 		return err
 	}
 	if err := p.Reconcile(ctx, snap); err != nil {
 		return err
 	}
-	// Record exactly the bytes that were reconciled, even if the file was replaced
-	// since: the next sync will see the newer content as a change.
-	p.lastRaw = data
 	p.haveSnapshot = true
+	p.round = snap.Progress.Round
+	p.evaluated = snap.Progress.Evaluated
 	p.terminal = snap.Run.Terminal
 	p.phase = snap.Run.Phase
+	return nil
+}
+
+// checkProgress rejects a snapshot that moves progress backwards: an older round, or
+// fewer evaluated points within the same round. A terminal snapshot is exempt from the
+// evaluated check because its count is the search's final total, not the live counter.
+func (p *Publisher) checkProgress(snap *Snapshot) error {
+	if !p.haveSnapshot {
+		return nil
+	}
+	if snap.Progress.Round < p.round {
+		return violation("snapshot round regressed from %d to %d", p.round, snap.Progress.Round)
+	}
+	if !snap.Run.Terminal && snap.Progress.Round == p.round && snap.Progress.Evaluated < p.evaluated {
+		return violation("snapshot evaluated count regressed from %d to %d in round %d", p.evaluated, snap.Progress.Evaluated, p.round)
+	}
 	return nil
 }
 
@@ -293,7 +325,6 @@ func (p *Publisher) Run(ctx context.Context) error {
 	}
 }
 
-// terminalResult is the outcome once a terminal snapshot has been reconciled.
 func (p *Publisher) terminalResult() error {
 	if p.phase == PhaseFailed {
 		return ErrRunFailed
