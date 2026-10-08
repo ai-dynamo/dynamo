@@ -822,7 +822,8 @@ impl<
             .with_available_workers(available.as_deref())
             .best_cached_tokens();
         let mut classification =
-            ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at);
+            ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
+                .with_pinned_worker(request.pinned_worker);
         if let Some(request_id) = request.mode.request_id() {
             classification = classification.with_request_id(request_id);
         }
@@ -1699,6 +1700,8 @@ impl<
                     best_worker: selected.selection.worker,
                     effective_overlap_blocks: selected.selection.effective_overlap_blocks,
                     cached_tokens: selected.selection.cached_tokens,
+                    max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
+                    selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
                     selected_worker_tiers: selected.selected_worker_tiers,
                     target_cached_prefix_blocks,
                     kv_transfer_candidates: request.kv_transfer_candidates.take(),
@@ -1743,6 +1746,8 @@ impl<
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
             cached_tokens: selected.selection.cached_tokens,
+            max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
+            selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
             selected_worker_tiers: selected.selected_worker_tiers,
             target_cached_prefix_blocks,
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
@@ -2106,7 +2111,13 @@ mod tests {
             self.response_rx.lock().unwrap().take();
         }
 
-        fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+        fn observe_load(
+            &self,
+            _: &WorkerWithDpRank,
+            _: &str,
+            _: crate::sequences::LocalWorkerLoad,
+        ) {
+        }
     }
 
     #[derive(Default)]
@@ -2184,6 +2195,8 @@ mod tests {
                 required_blocks: request.request_blocks(block_size),
                 effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
                 cached_tokens: request.effective_cached_tokens_for(worker),
+                max_raw_cached_tokens: None,
+                selected_raw_cached_tokens: None,
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
             })
@@ -2739,6 +2752,7 @@ policy_classes:
 
         request.pinned_worker = Some(pin);
         let mut classified = queue.build_classify_request(&request, now);
+        assert_eq!(classified.pinned_worker(), Some(pin));
         classified.set_worker_selection_target(worker);
         queue
             .validate_classification(&mut request, classified, now)

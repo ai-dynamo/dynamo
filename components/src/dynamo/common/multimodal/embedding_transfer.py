@@ -328,9 +328,9 @@ class RingBuffer:
 
         # If the allocation will go over end boundary, simply try allocate from the start
         if self.free_start_idx + size > self.end_idx:
-            # Not enough space even after wrap around, reject the allocation early
-            # so we don't mark the remaining space "used"
-            if self.allocated_start_idx < size:
+            # A wrapped allocation already occupies the start of the buffer.
+            # Reject before changing cursors or marking the tail as freed.
+            if self.wrapped_around or self.allocated_start_idx < size:
                 return None, None
             # add artificial entry to freed_list to treat the remaining space to be
             # allocated and released.

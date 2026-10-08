@@ -22,7 +22,6 @@ use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::time::Instant;
-use uuid::Uuid;
 
 #[cfg(test)]
 use rustc_hash::FxHashSet;
@@ -51,6 +50,18 @@ pub(super) struct RequestState {
     blocks: RequestBlockChain,
     started_at: Instant,
     expected_output_tokens: Option<u32>,
+    prefill_completed: bool,
+}
+
+/// What marking a request's prefill complete changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrefillCompletion {
+    /// The request is unknown or its prefill was already complete.
+    Unchanged,
+    /// The request left the prefill phase without holding prompt load.
+    PhaseChanged,
+    /// The request left the prefill phase and released its prompt load.
+    LoadReleased,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -113,6 +124,8 @@ pub(super) struct SequenceMutationOutcome {
 pub struct ActiveSequences {
     requests: HashMap<RequestId, RequestState>,
     prefill: PrefillLoadTracker,
+    /// Requests not yet marked prefill-complete, whether or not they hold prompt load.
+    prefill_requests: usize,
     blocks: BlockTracker,
     last_expiry_check_time: Instant,
     expiry_duration: Option<Duration>,
@@ -136,6 +149,7 @@ impl ActiveSequences {
         Self {
             requests: HashMap::new(),
             prefill: PrefillLoadTracker::default(),
+            prefill_requests: 0,
             blocks: BlockTracker::default(),
             last_expiry_check_time: Instant::now(),
             expiry_duration,
@@ -146,10 +160,20 @@ impl ActiveSequences {
     fn assert_consistent(&self) {
         self.prefill.assert_consistent();
         let active_prefills: HashSet<RequestId> = self.prefill.prefills.keys().cloned().collect();
-        let active_requests: HashSet<RequestId> = self.requests.keys().cloned().collect();
+        let prefill_phase: HashSet<RequestId> = self
+            .requests
+            .iter()
+            .filter(|(_, state)| !state.prefill_completed)
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
         assert!(
-            active_prefills.is_subset(&active_requests),
-            "prefill tracker cannot reference missing request state",
+            active_prefills.is_subset(&prefill_phase),
+            "prefill tracker can only reference requests still in prefill",
+        );
+        assert_eq!(
+            self.prefill_requests,
+            prefill_phase.len(),
+            "prefill request count must match per-request prefill state",
         );
         self.blocks
             .assert_consistent(self.requests.values().map(|state| &state.blocks));
@@ -215,18 +239,20 @@ impl ActiveSequences {
             None
         };
 
+        if let Some(prefill) = prefill {
+            self.prefill.insert(&request_id, prefill, decay_now);
+        }
+
         self.requests.insert(
-            request_id.clone(),
+            request_id,
             RequestState {
                 blocks,
                 started_at,
                 expected_output_tokens,
+                prefill_completed: false,
             },
         );
-
-        if let Some(prefill) = prefill {
-            self.prefill.insert(&request_id, prefill, decay_now);
-        }
+        self.prefill_requests += 1;
 
         self.validate_state();
         outcome
@@ -237,10 +263,21 @@ impl ActiveSequences {
         &mut self,
         request_id: &RequestId,
         decay_now: Instant,
-    ) -> bool {
-        let changed = self.prefill.remove(request_id, decay_now).is_some();
+    ) -> PrefillCompletion {
+        let Some(request_state) = self.requests.get_mut(request_id) else {
+            return PrefillCompletion::Unchanged;
+        };
+        if std::mem::replace(&mut request_state.prefill_completed, true) {
+            return PrefillCompletion::Unchanged;
+        }
+        self.prefill_requests -= 1;
+        let completion = if self.prefill.remove(request_id, decay_now).is_some() {
+            PrefillCompletion::LoadReleased
+        } else {
+            PrefillCompletion::PhaseChanged
+        };
         self.validate_state();
-        changed
+        completion
     }
 
     /// Free all blocks associated with a request.
@@ -255,6 +292,9 @@ impl ActiveSequences {
         let _ = self.prefill.remove(request_id, decay_now);
 
         let request_state = self.requests.remove(request_id)?;
+        if !request_state.prefill_completed {
+            self.prefill_requests -= 1;
+        }
 
         let blocks = request_state.blocks;
         let _ = request_state.expected_output_tokens;
@@ -265,24 +305,30 @@ impl ActiveSequences {
         Some(membership_delta)
     }
 
-    /// Add an output block with a random hash and optional fractional decay weight.
+    /// Append output blocks and apply the optional decay weight once.
     ///
-    /// This is used during generation to track output blocks as they are created.
-    pub(super) fn add_output_block(
+    /// Return whether blocks were appended. A zero count or missing request returns
+    /// `false` without changing block state or applying decay.
+    pub(super) fn add_output_blocks(
         &mut self,
         request_id: &RequestId,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
-    ) -> Option<SequenceHash> {
+    ) -> bool {
+        if num_blocks == 0 {
+            return false;
+        }
         let Some(request_state) = self.requests.get_mut(request_id) else {
-            tracing::warn!("Request {request_id} not found for add_output_block");
-            return None;
+            tracing::warn!("Request {request_id} not found for add_output_blocks");
+            return false;
         };
 
         // TODO: Output blocks still use random hashes, so indexing them mainly simplifies
         // generic block bookkeeping and usually adds little real reuse signal.
-        let random_hash: SequenceHash = Uuid::new_v4().as_u64_pair().0;
-        self.blocks
-            .append_output(&mut request_state.blocks, random_hash);
+        for _ in 0..num_blocks {
+            let hash = fastrand::u64(..);
+            self.blocks.append_output(&mut request_state.blocks, hash);
+        }
 
         if let Some(frac) = decay_fraction {
             self.blocks
@@ -290,7 +336,7 @@ impl ActiveSequences {
         }
 
         self.validate_state();
-        Some(random_hash)
+        true
     }
 
     /// Force expiry of stale requests if the timer has elapsed.
@@ -336,6 +382,7 @@ impl ActiveSequences {
         WorkerLoadSnapshot {
             active_blocks: self.active_blocks(),
             active_requests: self.requests.len(),
+            prefill_requests: self.prefill_requests,
             prefill: self.prefill.snapshot(),
         }
     }
@@ -478,25 +525,17 @@ mod tests {
                 new_suffix_start: 0,
             }]
         );
-        assert_eq!(
-            seq_manager.active_block_hashes(),
-            [1, 2, 3].into_iter().collect()
-        );
+        let prompt_hashes = seq_manager.active_block_hashes();
+        assert_eq!(prompt_hashes, [1, 2, 3].into_iter().collect());
 
-        let output_hash = seq_manager
-            .add_output_block(&"r1".to_string(), Some(0.5))
-            .expect("request exists");
-        assert_eq!(
-            seq_manager.active_block_hashes(),
-            [1, 2, 3, output_hash].into_iter().collect()
-        );
+        assert!(seq_manager.add_output_blocks(&"r1".to_string(), 1, Some(0.5)));
+        let active_hashes = seq_manager.active_block_hashes();
+        assert!(active_hashes.is_superset(&prompt_hashes));
+        assert_eq!(active_hashes.len(), prompt_hashes.len() + 1);
 
         seq_manager.mark_prefill_completed(&"r1".to_string(), decay_now);
         assert_eq!(seq_manager.active_tokens(decay_now), 0);
-        assert_eq!(
-            seq_manager.active_block_hashes(),
-            [1, 2, 3, output_hash].into_iter().collect()
-        );
+        assert_eq!(seq_manager.active_block_hashes(), active_hashes);
 
         let free_delta = seq_manager
             .free(&"r1".to_string(), decay_now)
@@ -578,12 +617,10 @@ mod tests {
         );
         assert_eq!(seq_manager.active_blocks(), 3);
 
-        assert!(
-            seq_manager
-                .add_output_block(&"r1".to_string(), Some(0.5))
-                .is_some()
-        );
-        assert_eq!(seq_manager.active_blocks(), 2);
+        assert!(!seq_manager.add_output_blocks(&"r1".to_string(), 0, Some(0.0)));
+        assert_eq!(seq_manager.active_blocks(), 3);
+        assert!(seq_manager.add_output_blocks(&"r1".to_string(), 3, Some(0.5)));
+        assert_eq!(seq_manager.active_blocks(), 3);
 
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
@@ -593,17 +630,14 @@ mod tests {
             tracking_hint(8),
             decay_now,
         );
-        assert_eq!(seq_manager.active_blocks(), 2);
+        assert_eq!(seq_manager.active_blocks(), 3);
 
-        assert!(
-            seq_manager
-                .add_output_block(&"r1".to_string(), Some(0.0))
-                .is_some()
-        );
+        assert!(seq_manager.add_output_blocks(&"r1".to_string(), 2, Some(0.0)));
         assert_eq!(seq_manager.active_blocks(), 1);
 
         seq_manager.free(&"r2".to_string(), decay_now);
         seq_manager.free(&"r1".to_string(), decay_now);
+        assert!(!seq_manager.add_output_blocks(&"r1".to_string(), 1, None));
         assert_eq!(seq_manager.active_blocks(), 0);
         assert_eq!(seq_manager.active_tokens(decay_now), 0);
     }
@@ -642,6 +676,80 @@ mod tests {
 
         seq_manager.free(&"r2".to_string(), decay_now);
         assert_eq!(seq_manager.active_tokens(decay_now), 0);
+    }
+
+    #[test]
+    fn prefill_phase_counts_requests_until_marked_even_without_prompt_load() {
+        let mut seq_manager = ActiveSequences::new(4);
+        let decay_now = Instant::now();
+
+        seq_manager.add_request_with_prefill_tracking(
+            "loaded".to_string(),
+            Some(vec![1, 2]),
+            None,
+            true,
+            tracking_hint(8),
+            decay_now,
+        );
+        seq_manager.add_request_with_prefill_tracking(
+            "cached".to_string(),
+            Some(vec![1]),
+            None,
+            true,
+            tracking_hint(0),
+            decay_now,
+        );
+        let load = seq_manager.worker_load_snapshot();
+        assert_eq!((load.active_requests, load.prefill_requests), (2, 2));
+
+        assert_eq!(
+            seq_manager.mark_prefill_completed(&"cached".to_string(), decay_now),
+            PrefillCompletion::PhaseChanged
+        );
+        assert_eq!(
+            seq_manager.mark_prefill_completed(&"cached".to_string(), decay_now),
+            PrefillCompletion::Unchanged
+        );
+        assert_eq!(seq_manager.worker_load_snapshot().prefill_requests, 1);
+
+        assert_eq!(
+            seq_manager.mark_prefill_completed(&"loaded".to_string(), decay_now),
+            PrefillCompletion::LoadReleased
+        );
+        assert_eq!(seq_manager.worker_load_snapshot().prefill_requests, 0);
+        assert_eq!(
+            seq_manager.mark_prefill_completed(&"missing".to_string(), decay_now),
+            PrefillCompletion::Unchanged
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn free_and_expiry_remove_prefill_phase_requests_from_the_count() {
+        let mut seq_manager = ActiveSequences::new_with_expiry(4, Some(Duration::from_secs(60)));
+
+        for request_id in ["freed", "expired", "decoding"] {
+            seq_manager.add_request_with_prefill_tracking(
+                request_id.to_string(),
+                Some(vec![1]),
+                None,
+                false,
+                None,
+                Instant::now(),
+            );
+        }
+        seq_manager.mark_prefill_completed(&"decoding".to_string(), Instant::now());
+        seq_manager.free(&"freed".to_string(), Instant::now());
+        let load = seq_manager.worker_load_snapshot();
+        assert_eq!((load.active_requests, load.prefill_requests), (2, 1));
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        let expired = seq_manager.force_expiry();
+        assert_eq!(
+            expired.expired_request_ids,
+            HashSet::from(["expired".to_string(), "decoding".to_string()])
+        );
+        let load = seq_manager.worker_load_snapshot();
+        assert_eq!((load.active_requests, load.prefill_requests), (0, 0));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use tonic_v14 as tonic;
 use std::collections::BTreeMap;
 
 use dynamo_mocker::common::protocols::DirectRequest;
-use dynamo_mocker::live::stable_request_uuid;
+use dynamo_mocker::live::{DeterministicTokenGenerator, stable_request_uuid};
 use dynamo_vllm_sidecar::proto as pb;
 use prost_types::{ListValue, Struct, Value, value::Kind};
 use tonic::Status;
@@ -18,7 +18,7 @@ use super::{BoxedStatusResult, DP_RANK, MockerServerConfig, ServerMode};
 pub(super) const DEFAULT_MAX_NEW_TOKENS: u32 = 20;
 // Bound the request-owned synthetic token plan independently of LiveEngine's
 // fixed per-request delivery buffer.
-pub(super) const MAX_NEW_TOKENS: u32 = 32_768;
+pub(super) const MAX_NEW_TOKENS: u32 = 1_000_000;
 const MAX_CANDIDATES: usize = 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,8 +28,9 @@ enum KvTransferRole {
     Decode,
 }
 
-pub(super) const DECODE_RENDEZVOUS_FIELDS: [&str; 4] = [
+pub(super) const DECODE_RENDEZVOUS_FIELDS: [&str; 5] = [
     "remote_engine_id",
+    "remote_request_id",
     "remote_host",
     "remote_port",
     "remote_block_ids",
@@ -58,9 +59,12 @@ impl SequenceOutputExt for pb::SequenceOutput {
 pub(super) struct PreparedRequest {
     pub(super) uuid: Uuid,
     request_id: String,
-    output_token_seed: u64,
+    output_tokens: DeterministicTokenGenerator,
     prompt_tokens: Vec<u32>,
+    block_size: usize,
     pub(super) max_output_tokens: usize,
+    pub(super) has_decode_handoff: bool,
+    stop_token: Option<u32>,
     priority: i32,
     response: pb::ResponseOptions,
     mode: ServerMode,
@@ -70,6 +74,8 @@ impl PreparedRequest {
     pub(super) fn new(
         mut request: pb::GenerateRequest,
         config: &MockerServerConfig,
+        block_size: usize,
+        max_model_len: Option<u32>,
     ) -> BoxedStatusResult<Self> {
         if !request.lora_name.is_empty() {
             return Err(Status::unimplemented("LoRA is not supported by the mock server").into());
@@ -165,6 +171,19 @@ impl PreparedRequest {
             ))
             .into());
         }
+        let max_new_tokens = if let Some(max_model_len) = max_model_len {
+            let remaining = (max_model_len as usize)
+                .checked_sub(prompt_tokens.len())
+                .filter(|remaining| *remaining > 0)
+                .ok_or_else(|| {
+                    Status::invalid_argument(
+                        "prompt must leave room for generation in max_model_len",
+                    )
+                })?;
+            max_new_tokens.min(remaining as u32)
+        } else {
+            max_new_tokens
+        };
         let min_new_tokens = stopping
             .map(|stopping| stopping.min_new_tokens)
             .unwrap_or_default();
@@ -181,14 +200,28 @@ impl PreparedRequest {
             request.request_id
         };
         let uuid = stable_request_uuid(config.seed, &request_id);
-        let output_token_seed = synthetic_token_seed(config.seed, &request_id);
-        let max_output_tokens = max_new_tokens as usize;
+        let output_tokens = DeterministicTokenGenerator::new(config.seed, &request_id);
+        let stop_match = stopping
+            .filter(|stopping| !stopping.stop_token_ids.is_empty())
+            .and_then(|stopping| {
+                (min_new_tokens as usize..max_new_tokens as usize).find_map(|position| {
+                    let token = output_tokens.token_id(position);
+                    stopping
+                        .stop_token_ids
+                        .contains(&token)
+                        .then_some((position + 1, token))
+                })
+            });
+        let max_output_tokens = stop_match.map_or(max_new_tokens as usize, |(length, _)| length);
         Ok(Self {
             uuid,
             request_id,
-            output_token_seed,
+            output_tokens,
             prompt_tokens,
+            block_size,
             max_output_tokens,
+            has_decode_handoff: transfer_role == KvTransferRole::Decode,
+            stop_token: stop_match.map(|(_, token)| token),
             priority: request.priority,
             response: request.response.unwrap_or_default(),
             mode: config.mode,
@@ -212,7 +245,7 @@ impl PreparedRequest {
     }
 
     pub(super) fn output_token(&self, position: usize) -> u32 {
-        deterministic_token_id(self.output_token_seed, position)
+        self.output_tokens.token_id(position)
     }
 
     pub(super) fn prompt_info(&self) -> pb::PromptInfo {
@@ -253,7 +286,15 @@ impl PreparedRequest {
         }
     }
 
-    pub(super) fn sequence_output(&self, token_ids: &[u32], terminal: bool) -> pb::SequenceOutput {
+    pub(super) fn sequence_output(
+        &self,
+        token_ids: &[u32],
+        total_output_tokens: usize,
+        terminal: bool,
+    ) -> pb::SequenceOutput {
+        let stop_token = self
+            .stop_token
+            .filter(|_| total_output_tokens == self.max_output_tokens);
         let wants_logprobs = self.response.output_logprobs;
         let output_ids = if self.response.output_token_ids {
             token_ids.to_vec()
@@ -293,19 +334,33 @@ impl PreparedRequest {
             ranks,
             candidate_tokens,
             finish_info: terminal.then(|| pb::FinishInfo {
-                num_output_tokens: token_ids.len() as u32,
-                finish_reason: pb::finish_info::FinishReason::Length as i32,
-                stop_reason: None,
+                num_output_tokens: total_output_tokens as u32,
+                finish_reason: if stop_token.is_some() {
+                    pb::finish_info::FinishReason::Stop
+                } else {
+                    pb::finish_info::FinishReason::Length
+                } as i32,
+                stop_reason: stop_token.map(pb::finish_info::StopReason::StopTokenId),
                 kv_transfer_params: (self.mode == ServerMode::Prefill).then(|| self.handoff()),
                 ec_transfer_params: None,
             }),
         }
     }
 
+    pub(super) fn aborted_output(&self, token_ids: &[u32]) -> pb::SequenceOutput {
+        let mut output = self.sequence_output(token_ids, token_ids.len(), false);
+        output.finish_info = Some(pb::FinishInfo {
+            num_output_tokens: token_ids.len() as u32,
+            finish_reason: pb::finish_info::FinishReason::Aborted as i32,
+            ..Default::default()
+        });
+        output
+    }
+
     pub(super) fn handoff(&self) -> Struct {
         let remote_block_ids = self
             .prompt_tokens
-            .chunks(64)
+            .chunks(self.block_size)
             .enumerate()
             .map(|(index, _)| Value {
                 kind: Some(Kind::NumberValue(index as f64)),
@@ -319,13 +374,21 @@ impl PreparedRequest {
                     "remote_engine_id".to_string(),
                     string_value(format!("mocker-prefill-{}", self.uuid)),
                 ),
+                (
+                    "remote_request_id".to_string(),
+                    string_value(self.request_id.clone()),
+                ),
                 ("remote_host".to_string(), string_value("127.0.0.1")),
                 ("remote_port".to_string(), number_value(0.0)),
                 (
                     "remote_block_ids".to_string(),
                     Value {
                         kind: Some(Kind::ListValue(ListValue {
-                            values: remote_block_ids,
+                            values: vec![Value {
+                                kind: Some(Kind::ListValue(ListValue {
+                                    values: remote_block_ids,
+                                })),
+                            }],
                         })),
                     },
                 ),
@@ -365,6 +428,7 @@ impl KvTransferRole {
             }
             (_, Some(true)) => {
                 require_string(params, "remote_engine_id")?;
+                require_string(params, "remote_request_id")?;
                 require_string(params, "remote_host")?;
                 require_port(params, "remote_port")?;
                 require_block_ids(params, "remote_block_ids")?;
@@ -388,22 +452,6 @@ impl KvTransferRole {
             }
         }
     }
-}
-
-fn synthetic_token_seed(seed: u64, request_id: &str) -> u64 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&seed.to_le_bytes());
-    hasher.update(request_id.as_bytes());
-    let mut seed_bytes = [0u8; 8];
-    seed_bytes.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
-    u64::from_le_bytes(seed_bytes)
-}
-
-fn deterministic_token_id(seed: u64, position: usize) -> u32 {
-    let mut value = seed.wrapping_add((position as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    1_000 + ((value ^ (value >> 31)) as u32 % 31_000)
 }
 
 fn selected_logprob(token_id: u32) -> f32 {
@@ -510,18 +558,23 @@ fn require_block_ids(value: &Struct, key: &str) -> BoxedStatusResult<()> {
     match value.fields.get(key) {
         Some(Value {
             kind: Some(Kind::ListValue(values)),
-        }) if values.values.iter().all(|value| {
+        }) if values.values.iter().all(|group| {
             matches!(
-                &value.kind,
-                Some(Kind::NumberValue(id))
-                    if id.is_finite() && id.fract() == 0.0 && *id >= 0.0
+                &group.kind,
+                Some(Kind::ListValue(ids)) if ids.values.iter().all(|value| {
+                    matches!(
+                        &value.kind,
+                        Some(Kind::NumberValue(id))
+                            if id.is_finite() && id.fract() == 0.0 && *id >= 0.0
+                    )
+                })
             )
         }) =>
         {
             Ok(())
         }
         _ => Err(Status::invalid_argument(format!(
-            "decode KV transfer field '{key}' must be a list of non-negative integer IDs",
+            "decode KV transfer field '{key}' must be a list of cache-group lists of non-negative integer IDs",
         ))
         .into()),
     }
