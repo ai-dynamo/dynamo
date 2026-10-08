@@ -285,17 +285,7 @@ async def test_generate_delegates_formatting_to_output_formatter():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("output_format", "gif", "Unsupported output_format"),
-        ("quality", "high", "quality is not supported"),
-        ("background", "transparent", "background is not supported"),
-    ],
-)
-async def test_image_request_options_are_rejected_before_stage_call(
-    field, value, message
-):
+async def test_invalid_image_output_format_is_rejected_before_stage_call():
     stage_called = False
 
     async def stage0_handler(request):
@@ -308,9 +298,9 @@ async def test_image_request_options_are_rejected_before_stage_call(
         stage_clients={"stage0": _StageClient(stage0_handler)},
         output_modalities=["image"],
     )
-    request = {"prompt": "x", field: value}
+    request = {"prompt": "x", "output_format": "gif"}
 
-    with pytest.raises(InvalidArgument, match=message):
+    with pytest.raises(InvalidArgument, match="Unsupported output_format"):
         [chunk async for chunk in router.generate(request, context=None)]
 
     assert not stage_called

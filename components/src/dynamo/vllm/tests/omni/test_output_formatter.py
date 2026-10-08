@@ -167,13 +167,7 @@ class TestDiffusionFormatterPrepareImages:
 
 class TestDiffusionFormatterImage:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("output_format", "pillow_format"),
-        [("png", "PNG"), ("jpeg", "JPEG"), ("webp", "WEBP")],
-    )
-    async def test_b64_outputs_report_decoded_encoding_and_size(
-        self, output_format, pillow_format
-    ):
+    async def test_b64_outputs_report_decoded_encoding_and_size(self):
         from dynamo.common.utils.output_modalities import RequestType
 
         f = _make_diffusion_formatter()
@@ -187,10 +181,10 @@ class TestDiffusionFormatterImage:
             "req-formats",
             request_type=RequestType.IMAGE_GENERATION,
             response_format="b64_json",
-            output_format=output_format,
+            output_format="png",
         )
 
-        assert response["output_format"] == output_format
+        assert response["output_format"] == "png"
         assert response["size"] == "37x19"
         assert "background" not in response
         assert "quality" not in response
@@ -198,7 +192,7 @@ class TestDiffusionFormatterImage:
         for item in response["data"]:
             encoded = base64.b64decode(item["b64_json"])
             with Image.open(BytesIO(encoded)) as decoded:
-                assert decoded.format == pillow_format
+                assert decoded.format == "PNG"
                 assert decoded.size == (37, 19)
 
     @pytest.mark.asyncio

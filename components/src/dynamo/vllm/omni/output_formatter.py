@@ -96,7 +96,6 @@ def _normalize_image_output_options(
     quality: str | None = None,
     background: str | None = None,
 ) -> str:
-    """Validate image controls and return the normalized encoding format."""
     if response_format not in (None, "url", "b64_json"):
         raise ValueError(
             f"Unsupported response_format: {response_format!r}; "
@@ -126,7 +125,6 @@ def _normalize_image_output_options(
 
 
 def _resolved_image_size(images: list) -> str | None:
-    """Return dimensions only when every output image has the same valid size."""
     dimensions = []
     for image in images:
         size = getattr(image, "size", None)

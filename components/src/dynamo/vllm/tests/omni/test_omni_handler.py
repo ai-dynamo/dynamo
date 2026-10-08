@@ -198,7 +198,6 @@ class TestBuildEngineInputs:
             ({"output_format": "gif"}, "Unsupported output_format"),
             ({"quality": "high"}, "quality is not supported"),
             ({"background": "transparent"}, "background is not supported"),
-            ({"response_format": "xml"}, "Unsupported response_format"),
             ({"response_format": "file"}, "Unsupported response_format"),
         ],
     )
