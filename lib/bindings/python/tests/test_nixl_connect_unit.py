@@ -10,12 +10,12 @@ NIXL and CUDA are mocked so these tests run on CPU-only machines.
 """
 
 import base64
-import sys
 import zlib
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch", reason="nixl_connect requires PyTorch")
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge]
 
@@ -40,28 +40,20 @@ def _make_nixl_mocks():
 
 @pytest.fixture
 def nixl_mocks():
+    from dynamo import nixl_connect
+
     nixl_api_mock, nixl_bindings_mock, agent_instance = _make_nixl_mocks()
 
-    # Patch cupy import too since nixl_connect tries to import it
+    # Patch dependencies in place so module and class identities stay stable.
     cupy_mock = MagicMock()
     cupy_mock.cuda = MagicMock()
     cupy_mock.cuda.is_available = MagicMock(return_value=False)
     cupy_mock.ndarray = type("ndarray", (), {})
 
     with (
-        patch.dict(
-            sys.modules,
-            {
-                "nixl": MagicMock(),
-                "nixl._api": nixl_api_mock,
-                "nixl._bindings": nixl_bindings_mock,
-                "cupy": cupy_mock,
-                "cupy_backends": MagicMock(),
-                "cupy_backends.cuda": MagicMock(),
-                "cupy_backends.cuda.api": MagicMock(),
-                "cupy_backends.cuda.api.runtime": MagicMock(),
-            },
-        ),
+        patch.object(nixl_connect, "nixl_api", nixl_api_mock),
+        patch.object(nixl_connect, "nixl_bindings", nixl_bindings_mock),
+        patch.object(nixl_connect, "array_module", cupy_mock),
     ):
         yield nixl_api_mock, nixl_bindings_mock, agent_instance
 
@@ -70,9 +62,7 @@ def nixl_mocks():
 def connection(nixl_mocks):
     from dynamo import nixl_connect
 
-    api, _, _ = nixl_mocks
-    with patch.object(nixl_connect, "nixl_api", api):
-        yield nixl_connect.Connection(nixl_connect.Connector(), 1)
+    return nixl_connect.Connection(nixl_connect.Connector(), 1)
 
 
 @pytest.mark.gpu_0
