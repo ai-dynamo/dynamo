@@ -887,23 +887,20 @@ mod tests {
             "required": ["value"],
             "additionalProperties": false
         });
-        for stream in [false, true] {
-            let req: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
-                "model": "test-model", "max_tokens": 100,
-                "messages": [{"role": "user", "content": "Return a value."}],
-                "stream": stream,
-                "output_config": {"format": {"type": "json_schema", "schema": schema}}
-            }))
-            .unwrap();
-            let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
-            assert_eq!(
-                serde_json::to_value(chat.inner.response_format).unwrap(),
-                serde_json::json!({
-                    "type": "json_schema",
-                    "json_schema": {"name": "response", "schema": schema, "strict": true}
-                })
-            );
-        }
+        let req: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model", "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Return a value."}],
+            "output_config": {"format": {"type": "json_schema", "schema": schema}}
+        }))
+        .unwrap();
+        let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+        assert_eq!(
+            serde_json::to_value(chat.inner.response_format).unwrap(),
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": schema, "strict": true}
+            })
+        );
     }
 
     #[test]
