@@ -26,6 +26,7 @@ source .venv/bin/activate
 uv pip install pip 'maturin[patchelf]'
 maturin develop --release -m lib/bindings/python/Cargo.toml
 uv pip install -e .
+uv pip install scikit-learn==1.7.2
 ```
 
 Do not install the standalone `aiconfigurator` package. AISimulate includes the performance-model
