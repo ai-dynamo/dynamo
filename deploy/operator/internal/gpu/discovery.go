@@ -122,15 +122,16 @@ var gcpMachineSeries = []string{
 }
 
 type gpuRule struct {
-	token     string
-	sxmSKU    nvidiacomv1beta1.GPUSKUType
-	pcieSKU   nvidiacomv1beta1.GPUSKUType
-	singleSKU nvidiacomv1beta1.GPUSKUType // for GPUs without form factor variants
+	token        string
+	boundedToken bool // require a complete model token instead of a substring match
+	sxmSKU       nvidiacomv1beta1.GPUSKUType
+	pcieSKU      nvidiacomv1beta1.GPUSKUType
+	singleSKU    nvidiacomv1beta1.GPUSKUType // for GPUs without form factor variants
 }
 
 var gpuRules = []gpuRule{
 	// Vera Rubin
-	{token: tokenVR200, singleSKU: nvidiacomv1beta1.GPUSKUTypeVRNVL72},
+	{token: tokenVR200, boundedToken: true, singleSKU: nvidiacomv1beta1.GPUSKUTypeVRNVL72},
 
 	// Blackwell
 	{token: tokenGB200, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB200},
@@ -144,7 +145,7 @@ var gpuRules = []gpuRule{
 
 	// Ampere
 	{token: tokenA100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeA100PCIe},
-	{token: tokenA30, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
+	{token: tokenA30, boundedToken: true, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
 
 	// Ada
 	{token: tokenL40S, singleSKU: nvidiacomv1beta1.GPUSKUTypeL40S},
@@ -960,8 +961,7 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	formFactor := detectFormFactor(normalized)
 
 	for _, rule := range gpuRules {
-		// A30 and VR200 require bounded tokens to avoid matching longer model names.
-		if (rule.token == tokenA30 || rule.token == tokenVR200) && !containsModelToken(gpuProduct, rule.token) {
+		if rule.boundedToken && !containsModelToken(gpuProduct, rule.token) {
 			continue
 		}
 

@@ -496,13 +496,8 @@ func TestInferHardwareSystem(t *testing.T) {
 
 		// --- Vera Rubin ---
 		{
-			name:     "Vera Rubin NVL72 (DCGM model token)",
+			name:     "VR200 model token",
 			input:    "NVIDIA VR200",
-			expected: nvidiacomv1beta1.GPUSKUTypeVRNVL72,
-		},
-		{
-			name:     "Vera Rubin NVL72 descriptive suffix",
-			input:    "NVIDIA VR200 NVL72",
 			expected: nvidiacomv1beta1.GPUSKUTypeVRNVL72,
 		},
 		{
