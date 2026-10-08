@@ -959,11 +959,7 @@ where
                 .await?;
             }
             ResponsePlaneMode::Velo => {
-                let service = self
-                    .velo_response_service
-                    .get_or_try_init(super::super::velo_response::VeloResponseService::shared)
-                    .await
-                    .map_err(|error| PipelineError::Generic(error.to_string()))?;
+                let service = self.velo_response_service().await?;
                 let context = request.context();
                 let publisher = service
                     .sender(
