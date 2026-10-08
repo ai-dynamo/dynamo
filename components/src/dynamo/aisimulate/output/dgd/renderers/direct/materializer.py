@@ -14,6 +14,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from aisimulate.capacity import (
+    DEFAULT_FREE_GPU_MEMORY_FRACTION,
+    DEFAULT_GPU_MEMORY_UTILIZATION,
+    DEFAULT_MEM_FRACTION_STATIC,
+)
+
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import update_image
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
@@ -22,6 +28,12 @@ _STRATEGY_SETTERS = {
     "tp": "set_config_tp_size",
     "tep": "set_config_tep_size",
     "dep": "set_config_dep_size",
+}
+
+_DEFAULT_MEMORY_FRACTIONS = {
+    "sglang": DEFAULT_MEM_FRACTION_STATIC,
+    "trtllm": DEFAULT_FREE_GPU_MEMORY_FRACTION,
+    "vllm": DEFAULT_GPU_MEMORY_UTILIZATION,
 }
 
 # Candidate.config's key names for one worker's shape/kv-cache/scheduler/
@@ -136,9 +148,11 @@ def _materialize_worker(
 
     memory_fraction = candidate_config[keys["gpu_memory_utilization"]]
     num_gpu_blocks = candidate_config.get(keys["num_gpu_blocks"])
-    if (memory_fraction is None) == (num_gpu_blocks is None):
+    if memory_fraction is None and num_gpu_blocks is None:
+        memory_fraction = _DEFAULT_MEMORY_FRACTIONS[candidate_config["backend"]]
+    elif memory_fraction is not None and num_gpu_blocks is not None:
         raise ValueError(
-            "candidate must set exactly one of GPU memory utilization and GPU blocks"
+            "candidate cannot set both GPU memory utilization and GPU blocks"
         )
     config = modifier.set_config_kv_cache(
         config,

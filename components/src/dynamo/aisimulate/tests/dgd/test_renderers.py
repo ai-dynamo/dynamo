@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
 import json
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from dynamo.aisimulate.output.dgd.renderers import base as base_module
 from dynamo.aisimulate.output.dgd.renderers import render_dgd
 from dynamo.aisimulate.output.dgd.renderers.aic import renderer as aic_renderer
 from dynamo.aisimulate.output.dgd.renderers.direct import renderer as direct_renderer
+from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 
 pytestmark = [
     pytest.mark.unit,
@@ -402,7 +404,9 @@ spec:
     assert calls[0][1:] == ("trtllm", "Qwen/Qwen3-32B")
 
 
-def test_patch_manifest_preserves_selected_router_configuration(monkeypatch) -> None:
+def test_patch_manifest_router_configuration_round_trips_through_frontend(
+    monkeypatch,
+) -> None:
     _stub_legacy_materialization(monkeypatch)
     candidate = _candidate(
         adapters={
@@ -449,6 +453,20 @@ spec:
         "DYN_ROUTER_TEMPERATURE": "0.2",
         "DYN_ROUTER_PREFILL_LOAD_MODEL": "none",
     }
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    parser = argparse.ArgumentParser()
+    with pytest.warns(FutureWarning, match="router-policy-config"):
+        FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+
+    assert config.router_mode == "kv"
+    assert config.overlap_score_credit == 0.5
+    assert config.prefill_load_scale == 0.25
+    assert config.router_temperature == 0.2
+    assert config.router_prefill_load_model == "none"
 
 
 @pytest.mark.parametrize(

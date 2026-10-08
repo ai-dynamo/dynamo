@@ -208,6 +208,48 @@ def test_vllm_fixed_kv_capacity_uses_num_gpu_blocks_override() -> None:
     assert args[index + 1] == "512"
 
 
+@pytest.mark.parametrize(
+    ("backend", "memory_flag", "expected_fraction"),
+    [
+        ("vllm", "--gpu-memory-utilization", "0.9"),
+        ("sglang", "--mem-fraction-static", "0.88"),
+        ("trtllm", "free_gpu_memory_fraction", "0.9"),
+    ],
+)
+def test_default_kv_capacity_uses_aisimulate_backend_default(
+    backend, memory_flag, expected_fraction
+) -> None:
+    candidate = dict(
+        REAL_CANDIDATE_TEP_TRTLLM,
+        backend=backend,
+        strategy="tp",
+        agg_gpu_memory_utilization=None,
+    )
+
+    result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
+
+    worker = next(
+        component
+        for component in result.dgd["spec"]["components"]
+        if component.get("type") == "worker"
+    )
+    args = " ".join(worker["podTemplate"]["spec"]["containers"][0]["args"])
+    assert memory_flag in args
+    assert expected_fraction in args
+
+
+def test_kv_capacity_rejects_memory_fraction_and_fixed_blocks_together() -> None:
+    candidate = dict(
+        REAL_CANDIDATE_TEP_TRTLLM,
+        backend="vllm",
+        strategy="tp",
+        agg_num_gpu_blocks=512,
+    )
+
+    with pytest.raises(MaterializationError, match="cannot set both"):
+        materialize_dgd_from_candidate(candidate, image=_IMAGE)
+
+
 @pytest.mark.parametrize("backend", ["sglang", "trtllm"])
 def test_fixed_kv_capacity_fails_when_backend_cannot_materialize_it(backend) -> None:
     candidate = dict(
