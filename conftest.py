@@ -90,6 +90,53 @@ def pytest_runtest_setup(item):
     _strip_bad_path()
 
 
+@pytest.hookimpl(wrapper=True, trylast=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Tear down the parent's setup stack after a forked item.
+
+    pytest-forked runs setup and teardown only in the child process
+    (https://github.com/pytest-dev/pytest-forked, ``forked_run_report``), so
+    the parent never calls ``teardown_exact(nextitem)`` for a forked item.
+    Collectors the parent set up for earlier non-forked items, such as the
+    ``Package`` of a test directory whose last tests are forked, then stay on
+    the stack, and the first item of the next package fails setup with
+    "previous item was not torn down properly". Doing the teardown pytest
+    would have done keeps the parent's stack in step with ``nextitem``.
+
+    A parent-side finalizer failure is reported as a teardown error for the
+    item, as pytest's own teardown phase would, rather than escaping the hook
+    as an INTERNALERROR. The child already reported a passing teardown, so
+    nothing more is reported when the parent teardown succeeds.
+    """
+    result = yield
+    if item.config.pluginmanager.has_plugin("pytest_forked") and (
+        item.config.getoption("forked", default=False)
+        or item.get_closest_marker("forked")
+    ):
+        # Match pytest's teardown when the session will not run the next item.
+        if item.session.shouldfail or item.session.shouldstop:
+            nextitem = None
+        reraise: tuple[type[BaseException], ...] = (pytest.exit.Exception,)
+        if not item.config.getoption("usepdb", False):
+            reraise += (KeyboardInterrupt,)
+        call = pytest.CallInfo.from_call(
+            lambda: item.session._setupstate.teardown_exact(nextitem),
+            when="teardown",
+            reraise=reraise,
+        )
+        if call.excinfo is not None:
+            # Built directly: makereport hook wrappers such as
+            # pytest-rerunfailures expect per-item state that their protocol
+            # hook sets, and pytest-forked's protocol hook skips it.
+            report = pytest.TestReport.from_item_and_call(item, call)
+            item.ihook.pytest_runtest_logreport(report=report)
+            if not call.excinfo.errisinstance(pytest.skip.Exception):
+                item.ihook.pytest_exception_interact(
+                    node=item, call=call, report=report
+                )
+    return result
+
+
 def _is_unmanaged(item) -> bool:
     """True when the item lives in a demo or script tree, not a CI suite."""
     try:

@@ -90,6 +90,21 @@ const testCases = [
     desc: 'trtllm script triggers only trtllm'
   },
   {
+    file: 'examples/backends/tokenspeed/tests/test_validate_disagg.py',
+    expect: { core: true },
+    desc: 'TokenSpeed validator tests trigger the runtime test lane'
+  },
+  {
+    file: 'examples/backends/tokenspeed/launch_disagg.sh',
+    expect: { core: true },
+    desc: 'TokenSpeed example code triggers runtime validation'
+  },
+  {
+    file: 'examples/backends/tokenspeed/README.md',
+    expect: { core: false },
+    desc: 'TokenSpeed documentation alone avoids runtime builds'
+  },
+  {
     file: 'recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml',
     expect: { core: false, examples: true },
     desc: 'recipe matrix dotfile triggers recipe check without core'
@@ -119,6 +134,11 @@ const testCases = [
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
   },
+  {
+    file: 'components/src/dynamo/aisimulate/output/dgd/adapter.py',
+    expect: { core: false, planner: true },
+    desc: 'AISimulate Dynamo adapter triggers planner validation'
+  },
 
   // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
   {
@@ -127,7 +147,7 @@ const testCases = [
     desc: 'common sidecar source avoids unrelated build and E2E filters'
   },
   {
-    file: 'lib/sidecar/trtllm/proto/trtllm_service.proto',
+    file: 'lib/sidecar/trtllm/proto/openengine/v1/generation.proto',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'sidecar proto contracts trigger Rust checks without backend E2E'
   },

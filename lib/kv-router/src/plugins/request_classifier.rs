@@ -40,6 +40,7 @@ pub struct ClassifyRequest {
     initial_cached_tokens: usize,
     pub(crate) progress: RequestProgress,
     session_context: Option<SessionContext>,
+    pinned_worker: Option<WorkerWithDpRank>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -71,6 +72,7 @@ impl ClassifyRequest {
             initial_cached_tokens,
             progress: RequestProgress::new(input_tokens).0,
             session_context: None,
+            pinned_worker: None,
         }
     }
 
@@ -86,6 +88,11 @@ impl ClassifyRequest {
 
     pub(crate) fn with_session_context(mut self, session_context: SessionContext) -> Self {
         self.session_context = Some(session_context);
+        self
+    }
+
+    pub(crate) fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
+        self.pinned_worker = pinned_worker;
         self
     }
 
@@ -152,6 +159,12 @@ impl ClassifyRequest {
 
     pub fn session_context(&self) -> Option<&SessionContext> {
         self.session_context.as_ref()
+    }
+
+    /// Exact worker/rank required by the caller. A classifier's soft selection
+    /// target cannot override this pin.
+    pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
+        self.pinned_worker
     }
 
     /// Only the explicit overrides feed the queue: cache eligibility is

@@ -1410,6 +1410,13 @@ mod tests {
 
     #[tokio::test]
     async fn new_no_tls_env_is_plaintext() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::new_no_tls_env_is_plaintext"),
+            &[],
+        ) {
+            return;
+        }
+
         let token = CancellationToken::new();
         temp_env::with_vars_unset(["DYN_TCP_TLS_CERT_PATH", "DYN_TCP_TLS_KEY_PATH"], || {
             let server =
@@ -1421,6 +1428,13 @@ mod tests {
 
     #[tokio::test]
     async fn new_partial_tls_config_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::new_partial_tls_config_errors"),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
@@ -1454,6 +1468,13 @@ mod tests {
 
     #[tokio::test]
     async fn new_both_paths_enables_tls() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::new_both_paths_enables_tls"),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         let token = CancellationToken::new();
         temp_env::with_vars(

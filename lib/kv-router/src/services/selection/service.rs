@@ -145,7 +145,10 @@ impl SelectionServiceBuilder {
         self
     }
 
-    pub async fn build(self) -> anyhow::Result<SelectionService> {
+    pub async fn build(mut self) -> anyhow::Result<SelectionService> {
+        self.kv_router_config
+            .apply_policy_config()
+            .map_err(anyhow::Error::msg)?;
         if let Some(ttl) = self.session_affinity_ttl {
             super::affinity::SessionAffinity::validate_ttl(ttl)?;
         }
@@ -158,10 +161,11 @@ impl SelectionServiceBuilder {
             anyhow::bail!("standalone selection does not support request_classifier plugins");
         }
         let worker_selection_policy_factory = match self.worker_selection_policy_factory {
-            Some(factory) => Some(factory),
+            Some(factory) => factory,
             None => self
                 .plugin_registry
-                .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?,
+                .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?
+                .ok_or(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)?,
         };
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
         let indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
@@ -214,7 +218,7 @@ impl SelectionServiceBuilder {
         let peer_manager = if replica_runtime.is_some() {
             let weak_core = Arc::downgrade(&core);
             let affinity_core = Arc::downgrade(&core);
-            Some(PeerManager::start_with_affinity(
+            Some(Arc::new(PeerManager::start_with_affinity(
                 self.replica_sync_peers,
                 cancel_token.child_token(),
                 move |event| {
@@ -229,7 +233,7 @@ impl SelectionServiceBuilder {
                         }
                     }
                 }),
-            )?)
+            )?))
         } else {
             None
         };
@@ -297,7 +301,7 @@ impl Drop for StartupGuard {
 
 pub struct SelectionService {
     core: Arc<SelectionCore>,
-    peer_manager: Option<PeerManager>,
+    peer_manager: Option<Arc<PeerManager>>,
     replica_runtime: Option<ReplicaSyncRuntime>,
     replica_sync_port: Option<u16>,
     cancel_token: CancellationToken,
@@ -317,6 +321,12 @@ impl SelectionService {
                     indexer_threads,
                     cancel_token.clone(),
                     SelectionCacheConfig::default(),
+                    std::sync::Arc::new(|config, role, _| {
+                        crate::WorkerSelectionPolicy::reference(
+                            config.clone(),
+                            role.default_selector_label(),
+                        )
+                    }),
                 )
                 .expect("valid test config"),
             ),
@@ -467,8 +477,12 @@ impl SelectionService {
     pub fn list_replica_peers(&self) -> Vec<String> {
         self.peer_manager
             .as_ref()
-            .map(PeerManager::list_peers)
+            .map(|peer_manager| peer_manager.list_peers())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn peer_manager(&self) -> Option<Arc<PeerManager>> {
+        self.peer_manager.clone()
     }
 
     pub async fn indexer_snapshot(&self) -> serde_json::Value {
@@ -520,6 +534,30 @@ mod tests {
             router_queue_threshold: None,
             ..Default::default()
         }
+    }
+
+    fn test_registry() -> RouterPluginRegistry {
+        RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
+        }))
+    }
+
+    #[tokio::test]
+    async fn missing_default_is_rejected_at_construction() {
+        let result = SelectionServiceBuilder::new(
+            test_config(),
+            WorkerType::Aggregated,
+            RouterPluginRegistry::default(),
+        )
+        .build()
+        .await;
+        let Err(error) = result else {
+            panic!("missing default accepted")
+        };
+        assert!(matches!(
+            error.downcast_ref::<crate::plugins::WorkerSelectionPolicyRegistryError>(),
+            Some(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)
+        ));
     }
 
     fn reserve_tcp_port() -> u16 {
@@ -600,7 +638,7 @@ worker_selection:
                 match SelectionServiceBuilder::new(
                     test_config(),
                     WorkerType::Aggregated,
-                    RouterPluginRegistry::default(),
+                    test_registry(),
                 )
                 .indexer_threads(1)
                 .replica_sync(port, Vec::new())
@@ -619,15 +657,12 @@ worker_selection:
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn startup_and_shutdown_release_replica_resources() {
         let port = reserve_tcp_port();
-        let failed = SelectionServiceBuilder::new(
-            test_config(),
-            WorkerType::Aggregated,
-            RouterPluginRegistry::default(),
-        )
-        .indexer_threads(1)
-        .replica_sync(port, vec!["invalid".to_string()])
-        .build()
-        .await;
+        let failed =
+            SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+                .indexer_threads(1)
+                .replica_sync(port, vec!["invalid".to_string()])
+                .build()
+                .await;
         assert!(failed.is_err());
 
         let service = build_on_port(port).await;
@@ -674,14 +709,10 @@ worker_selection:
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
         let build = tokio::spawn(
-            SelectionServiceBuilder::new(
-                test_config(),
-                WorkerType::Aggregated,
-                RouterPluginRegistry::default(),
-            )
-            .indexer_threads(1)
-            .indexer_peers(vec![peer_url])
-            .build(),
+            SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+                .indexer_threads(1)
+                .indexer_peers(vec![peer_url])
+                .build(),
         );
         tokio::time::timeout(Duration::from_secs(3), gate.requested.notified())
             .await
