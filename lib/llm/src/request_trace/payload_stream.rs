@@ -63,14 +63,16 @@ pub struct PassThroughWithAgg<S> {
     inner: S,
     chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
     done_tx: Option<oneshot::Sender<PayloadOutcome>>,
+    parsing_options: ParsingOptions,
 }
 
 impl<S> PassThroughWithAgg<S> {
-    fn new(inner: S, tx: oneshot::Sender<PayloadOutcome>) -> Self {
+    fn new(inner: S, tx: oneshot::Sender<PayloadOutcome>, parsing_options: ParsingOptions) -> Self {
         Self {
             inner,
             chunks: Vec::new(),
             done_tx: Some(tx),
+            parsing_options,
         }
     }
 }
@@ -90,7 +92,7 @@ where
                     && let Some(tx) = self.done_tx.take()
                 {
                     let chunks = std::mem::take(&mut self.chunks);
-                    let parsing_options = ParsingOptions::default();
+                    let parsing_options = self.parsing_options.clone();
                     tokio::spawn(async move {
                         let _ =
                             tx.send(aggregate_with_partial_recovery(chunks, parsing_options).await);
@@ -108,7 +110,7 @@ where
                         let _ = tx.send(PayloadOutcome::dropped(None, DROP_EMPTY_RESPONSE_STREAM));
                         return Poll::Ready(None);
                     }
-                    let parsing_options = ParsingOptions::default();
+                    let parsing_options = self.parsing_options.clone();
 
                     tokio::spawn(async move {
                         let _ =
@@ -134,7 +136,12 @@ async fn aggregate_with_partial_recovery(
     parsing_options: ParsingOptions,
 ) -> PayloadOutcome {
     let Some(error_at) = chunks.iter().position(|chunk| chunk.is_error()) else {
-        return match DeltaAggregator::apply(futures::stream::iter(chunks), parsing_options).await {
+        return match DeltaAggregator::apply_for_selected_unified_parser(
+            futures::stream::iter(chunks),
+            parsing_options,
+        )
+        .await
+        {
             Ok(final_resp) => PayloadOutcome::complete(final_resp),
             Err(e) => {
                 tracing::warn!("request payload: aggregation failed: {e}");
@@ -156,18 +163,24 @@ async fn aggregate_with_partial_recovery(
     if chunks.is_empty() {
         return PayloadOutcome::dropped(None, reason);
     }
-    let partial = DeltaAggregator::apply(futures::stream::iter(chunks), parsing_options)
-        .await
-        .ok();
+    let partial = DeltaAggregator::apply_for_selected_unified_parser(
+        futures::stream::iter(chunks),
+        parsing_options,
+    )
+    .await
+    .ok();
     PayloadOutcome::dropped(partial, reason)
 }
 
-pub fn scan_aggregate_with_future<S>(stream: S) -> (PayloadStream, PayloadFuture)
+pub fn scan_aggregate_with_future<S>(
+    stream: S,
+    parsing_options: ParsingOptions,
+) -> (PayloadStream, PayloadFuture)
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Unpin + Send + 'static,
 {
     let (tx, rx) = oneshot::channel::<PayloadOutcome>();
-    let passthrough = PassThroughWithAgg::new(stream, tx);
+    let passthrough = PassThroughWithAgg::new(stream, tx, parsing_options);
     (
         Box::pin(passthrough),
         Box::pin(async move {
@@ -231,6 +244,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
 
         Annotated {
@@ -273,6 +287,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
 
         Annotated {
@@ -317,6 +332,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
 
         Annotated {
@@ -361,6 +377,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
 
         Annotated {
@@ -405,7 +422,8 @@ mod tests {
         ];
 
         let input_stream = stream::iter(chunks.clone());
-        let (passthrough, future) = scan_aggregate_with_future(input_stream);
+        let (passthrough, future) =
+            scan_aggregate_with_future(input_stream, ParsingOptions::default());
         let results: Vec<_> = passthrough.collect().await;
         let outcome = future.await;
         assert!(
@@ -464,7 +482,8 @@ mod tests {
         ];
 
         let input_stream = stream::iter(chunks.clone());
-        let (passthrough, future) = scan_aggregate_with_future(input_stream);
+        let (passthrough, future) =
+            scan_aggregate_with_future(input_stream, ParsingOptions::default());
         let results: Vec<_> = passthrough.collect().await;
         let outcome = future.await;
         let final_resp = outcome
@@ -497,6 +516,131 @@ mod tests {
         assert_eq!(tool_call.function.arguments, "{\"city\":\"Tokyo\"}");
     }
 
+    fn call_without_explicit_tool_terminal(
+        finish_reason: FinishReason,
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        let name = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call_weather".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: None,
+            }),
+        };
+        let arguments = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: None,
+            r#type: None,
+            function: Some(FunctionCallStream {
+                name: None,
+                arguments: Some("{\"city\":\"Tokyo\"}".to_string()),
+            }),
+        };
+        vec![
+            create_tool_call_chunk(name, None),
+            create_tool_call_chunk(arguments, Some(finish_reason)),
+        ]
+    }
+
+    fn unified_parser_options() -> ParsingOptions {
+        ParsingOptions::new(Some("qwen3_coder".to_string()), Some("qwen3".to_string()))
+    }
+
+    #[tokio::test]
+    async fn payload_capture_keeps_complete_backend_calls_at_eof() {
+        let chunks = call_without_explicit_tool_terminal(FinishReason::Stop);
+        let (passthrough, future) =
+            scan_aggregate_with_future(stream::iter(chunks.clone()), unified_parser_options());
+        let delivered = passthrough.collect::<Vec<_>>().await;
+        let outcome = future.await;
+        assert_eq!(delivered.len(), chunks.len());
+        assert!(outcome.drop_reason.is_none());
+        assert!(
+            outcome
+                .response
+                .expect("complete output should be captured")
+                .inner
+                .choices[0]
+                .message
+                .tool_calls
+                .is_some()
+        );
+
+        // Without a unified parser selected, the same structurally valid call is kept.
+        let (passthrough, future) =
+            scan_aggregate_with_future(stream::iter(chunks), ParsingOptions::default());
+        let _ = passthrough.collect::<Vec<_>>().await;
+        let outcome = future.await;
+        assert!(
+            outcome
+                .response
+                .expect("default aggregation should capture the response")
+                .inner
+                .choices[0]
+                .message
+                .tool_calls
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn payload_capture_keeps_complete_backend_calls_in_error_prefix() {
+        let mut chunks = call_without_explicit_tool_terminal(FinishReason::Stop);
+        chunks
+            .push(Annotated::<NvCreateChatCompletionStreamResponse>::from_error("backend failed"));
+        let (passthrough, future) =
+            scan_aggregate_with_future(stream::iter(chunks), unified_parser_options());
+        let delivered = passthrough.take(3).collect::<Vec<_>>().await;
+        let outcome = future.await;
+
+        assert_eq!(delivered.len(), 3);
+        assert!(delivered[2].is_error());
+        assert!(
+            outcome
+                .drop_reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("aggregation_failed:"))
+        );
+        assert!(
+            outcome
+                .response
+                .expect("the prefix should still be captured")
+                .inner
+                .choices[0]
+                .message
+                .tool_calls
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn payload_capture_respects_request_tool_suppression() {
+        let mut chunk = create_mock_chunk(
+            "<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>"
+                .to_string(),
+            0,
+        );
+        chunk.data.as_mut().unwrap().inner.choices[0].finish_reason = Some(FinishReason::Stop);
+        let options = ParsingOptions::new(Some("hermes".to_string()), None)
+            .with_tool_call_parsing_enabled(false);
+        let (passthrough, future) = scan_aggregate_with_future(stream::iter(vec![chunk]), options);
+
+        let _ = passthrough.collect::<Vec<_>>().await;
+        let outcome = future.await;
+        assert!(outcome.drop_reason.is_none());
+        assert!(
+            outcome
+                .response
+                .expect("suppressed output should still be captured")
+                .inner
+                .choices[0]
+                .message
+                .tool_calls
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn test_empty_stream_handling() {
         // Empty stream: the aggregator has nothing to apply, so the outcome carries no
@@ -504,7 +648,8 @@ mod tests {
         let chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = vec![];
 
         let input_stream = stream::iter(chunks);
-        let (passthrough, future) = scan_aggregate_with_future(input_stream);
+        let (passthrough, future) =
+            scan_aggregate_with_future(input_stream, ParsingOptions::default());
         let results: Vec<_> = passthrough.collect().await;
         let outcome = future.await;
 
@@ -526,7 +671,8 @@ mod tests {
         let chunks = vec![create_mock_chunk("Single chunk".to_string(), 0)];
 
         let input_stream = stream::iter(chunks);
-        let (passthrough, future) = scan_aggregate_with_future(input_stream);
+        let (passthrough, future) =
+            scan_aggregate_with_future(input_stream, ParsingOptions::default());
         let results: Vec<_> = passthrough.collect().await;
         let outcome = future.await;
         let final_resp = outcome
@@ -576,6 +722,7 @@ mod tests {
                 nvext: None,
                 prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
             id: Some("correlation-123".to_string()),
             event: Some("test-event".to_string()),
@@ -584,7 +731,8 @@ mod tests {
         };
 
         let input_stream = stream::iter(vec![chunk_with_metadata.clone()]);
-        let (passthrough, _future) = scan_aggregate_with_future(input_stream);
+        let (passthrough, _future) =
+            scan_aggregate_with_future(input_stream, ParsingOptions::default());
         let results: Vec<_> = passthrough.collect().await;
 
         // Verify metadata is preserved
@@ -603,8 +751,10 @@ mod tests {
         let chunks1 = vec![create_mock_chunk("Stream 1".to_string(), 0)];
         let chunks2 = vec![create_mock_chunk("Stream 2".to_string(), 0)];
 
-        let (_, future1) = scan_aggregate_with_future(stream::iter(chunks1));
-        let (_, future2) = scan_aggregate_with_future(stream::iter(chunks2));
+        let (_, future1) =
+            scan_aggregate_with_future(stream::iter(chunks1), ParsingOptions::default());
+        let (_, future2) =
+            scan_aggregate_with_future(stream::iter(chunks2), ParsingOptions::default());
 
         let (outcome1, outcome2) = tokio::join!(future1, future2);
 
@@ -633,7 +783,8 @@ mod tests {
             create_mock_chunk("never polled".to_string(), 0),
         ];
 
-        let (passthrough, future) = scan_aggregate_with_future(stream::iter(chunks));
+        let (passthrough, future) =
+            scan_aggregate_with_future(stream::iter(chunks), ParsingOptions::default());
         let delivered: Vec<_> = passthrough.take(2).collect().await;
         assert_eq!(delivered.len(), 2);
         // The error reaches the client unchanged; the handler surfaces it exactly
@@ -671,7 +822,8 @@ mod tests {
         ];
 
         let input_stream = stream::iter(chunks);
-        let (passthrough, future) = scan_aggregate_with_future(input_stream);
+        let (passthrough, future) =
+            scan_aggregate_with_future(input_stream, ParsingOptions::default());
         let _results: Vec<_> = passthrough.collect().await;
         let outcome = future.await;
 
@@ -691,5 +843,35 @@ mod tests {
             reason.contains("backend unavailable"),
             "reason should name the underlying error, got {reason}"
         );
+    }
+
+    // Model-text fixtures cannot carry the internal parser completion evidence.
+    #[tokio::test]
+    async fn payload_capture_rejects_provisional_evidence_at_eof_and_error_prefix() {
+        for error in [false, true] {
+            let mut chunks = call_without_explicit_tool_terminal(FinishReason::Stop);
+            chunks[0].data.as_mut().unwrap().tool_call_completion.push(
+                crate::protocols::openai::chat_completions::ToolCallCompletion {
+                    choice_index: 0,
+                    tool_index: 0,
+                    complete: false,
+                },
+            );
+            if error {
+                chunks.push(Annotated::from_error("backend failed"));
+            }
+            let (passthrough, future) =
+                scan_aggregate_with_future(stream::iter(chunks), unified_parser_options());
+            let delivered = passthrough.collect::<Vec<_>>().await;
+            let outcome = future.await;
+            assert_eq!(delivered.len(), if error { 3 } else { 2 });
+            assert_eq!(outcome.drop_reason.is_some(), error);
+            assert!(
+                outcome.response.unwrap().inner.choices[0]
+                    .message
+                    .tool_calls
+                    .is_none()
+            );
+        }
     }
 }

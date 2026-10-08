@@ -61,6 +61,11 @@ When reviewing frontend or runtime changes, also read the corresponding
 [frontend review prompt](.github/review-prompts/frontend.md) or
 [runtime review prompt](.github/review-prompts/runtime.md) for additional CODEOWNERS guidance.
 
+Before changing request or response fields, validation, preprocessing, backend translation, or
+response projection, read the
+[protocol field handling contract](docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md).
+Identify every semantic owner and preserve the field's documented end-to-end behavior.
+
 **For deploying and operating Dynamo:**
 
 - `synthesize-user-workload` — interview the user, capture their confirmed baseline DGD, and create the canonical workload contract

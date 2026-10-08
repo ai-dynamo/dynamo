@@ -14,7 +14,12 @@ async fn aggregated_generation_streams_delta_then_terminal() {
     // GetModelInfo reports max_context_length 4096.
     assert_eq!(config.llm.unwrap().context_length, Some(4096));
 
-    let outputs = collect(&engine, request()).await;
+    let mut req = request();
+    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        dp_rank: Some(0),
+        ..Default::default()
+    });
+    let outputs = collect(&engine, req).await;
     assert_eq!(outputs.len(), 2);
     assert_eq!(outputs[0].token_ids, [42]);
     assert!(outputs[0].finish_reason.is_none());
@@ -103,11 +108,7 @@ async fn an_aggregated_request_cancelled_before_dispatch_never_reaches_the_engin
     );
 }
 
-/// The server answers `openengine-target-dp-rank` with UNIMPLEMENTED, so a
-/// rank hint has to be refused before dispatch: sending it anyway fails the
-/// whole request with a non-migratable 5xx. `nvext.dp_rank` and the
-/// `x-dynamo-dp-rank` header both land in these fields, so this is reachable
-/// without a KV router.
+/// Nonzero logical ranks are not advertised and must be rejected before dispatch.
 #[tokio::test]
 async fn a_data_parallel_rank_hint_is_rejected_before_dispatch() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
@@ -490,10 +491,20 @@ fn parsed_arguments_map_onto_the_worker_registration() {
         TrtllmSidecarEngine::from_args(argv)
     };
 
-    let (_, aggregated) = parse(&["--component", "operator-chosen"]).expect("aggregated parses");
+    let (_, aggregated) = parse(&[
+        "--component",
+        "operator-chosen",
+        "--dyn-default-thinking-mode",
+        "disabled",
+    ])
+    .expect("aggregated parses");
     assert_eq!(aggregated.component, "operator-chosen");
     assert_eq!(aggregated.disaggregation_mode, AGG);
     assert_eq!(aggregated.model_name, "model-source");
+    assert_eq!(
+        aggregated.default_thinking_mode.as_deref(),
+        Some("disabled")
+    );
     assert!(
         !aggregated.enable_kv_routing,
         "the sidecar has no KV events"
