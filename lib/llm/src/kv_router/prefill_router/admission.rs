@@ -67,10 +67,9 @@ impl PrefillRouter {
                 }
                 if let Some(output) = next.data.as_ref() {
                     if output.disaggregated_params.is_some() {
-                        return Err(PrefillError::PrefillError(
-                            "Prefill router returned multiple handoff payloads".to_string(),
-                            None,
-                        ));
+                        tracing::warn!(
+                            "Ignoring an additional prefill handoff from a legacy parallel-sampling worker"
+                        );
                     }
                     if prompt_tokens_details.is_none() {
                         prompt_tokens_details = output
@@ -327,7 +326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn later_handoff_payload_is_rejected_instead_of_silently_dropped() {
+    async fn legacy_parallel_handoffs_keep_the_first_payload() {
         let result = PrefillRouter::consume_prefill_stream(
             prefill_stream(vec![
                 Annotated::from_data(LLMEngineOutput {
@@ -342,13 +341,16 @@ mod tests {
             None,
             None,
         )
-        .await;
+        .await
+        .unwrap();
 
-        assert!(matches!(
-            result,
-            Err(PrefillError::PrefillError(message, None))
-                if message.contains("multiple handoff payloads")
-        ));
+        let PrefillCompletion::Handoff { result, .. } = result else {
+            panic!("expected the first prefill handoff");
+        };
+        assert_eq!(
+            result.disaggregated_params,
+            json!({"remote_request_id": "0_req"})
+        );
     }
 
     #[tokio::test]
