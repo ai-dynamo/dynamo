@@ -122,3 +122,6 @@ The rows require `SGLANG_SIMULATE_ACC_LEN=2.69`, `SGLANG_SIMULATE_ACC_METHOD=mat
 - H200 recipes support up to 250K context lengths.
 - Structured decoding works with reasoning enabled: the generated JSON is populated in the `content` field and the chain-of-thought in `reasoning_content`. This requires both `--dyn-reasoning-parser glm45` (frontend) and `--reasoning-parser glm45` (engine), which the recipes set.
 - `n>1` requests are not supported with the disaggregated recipe
+- Chat Completions accepts a structured-output JSON schema with an invalid schema type or a malformed regex and returns HTTP 200 with `content` set to null.
+- Chat Completions can return one more alternative than requested. With `top_logprobs=3`, some tokens include four entries in `top_logprobs`.
+- Completions with a long `stop_token_ids` list (for example token IDs 1 through 599) returns HTTP 500. The same request is valid and should stop when a listed token is produced.
