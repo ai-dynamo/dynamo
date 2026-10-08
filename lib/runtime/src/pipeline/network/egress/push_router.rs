@@ -69,39 +69,14 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
         .map(std::time::Duration::from_secs)
 }
 
-/// Without this bound, a worker that accepts a request but never opens its
-/// response stream (for example, it cannot reach the frontend's advertised
-/// response address) blocks dispatch until the client disconnects or the
-/// worker leaves discovery. Dropping the dispatch on timeout removes the
-/// pending response-stream registration. A dispatch holding a first-response
-/// guard runs detached and keeps its guard until the worker responds, since a
-/// remote read of guarded memory may be active.
-async fn dispatch_with_establish_timeout<F, R>(
-    dispatch: F,
-    timeout: Option<std::time::Duration>,
-    instance_id: u64,
-) -> anyhow::Result<R>
-where
-    F: std::future::Future<Output = anyhow::Result<R>>,
-{
-    let Some(timeout) = timeout else {
-        return dispatch.await;
-    };
-    match tokio::time::timeout(timeout, dispatch).await {
-        Ok(result) => result,
-        Err(_) => {
-            tracing::warn!(
-                instance_id,
-                timeout_secs = timeout.as_secs(),
-                "backend response stream not established before timeout — quarantining worker"
-            );
-            Err(DynamoError::builder()
-                .error_type(ErrorType::ResponseTimeout)
-                .message("backend response stream not established before timeout")
-                .build()
-                .into())
-        }
-    }
+/// Read the response-stream establish timeout from the environment.
+fn response_stream_establish_timeout() -> Option<std::time::Duration> {
+    use crate::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS;
+    std::env::var(DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(std::time::Duration::from_secs)
 }
 
 /// RAII handle for one in-flight unit of work charged against
@@ -208,6 +183,12 @@ where
     /// Cached response inactivity timeout. Read once at construction from
     /// [`environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS`](crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS) to avoid a syscall per request.
     response_timeout: Option<std::time::Duration>,
+
+    /// Cached bound on the wait for a worker's response stream after the worker
+    /// ACKs a unary request. Read once at construction from
+    /// [`environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS`](crate::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS).
+    /// Applied only when fault detection is enabled.
+    establish_timeout: Option<std::time::Duration>,
 
     /// Shared request occupancy state for tracked routing modes.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
@@ -653,6 +634,7 @@ where
             random_picker,
             fault_detection_enabled: false,
             response_timeout: response_inactivity_timeout(),
+            establish_timeout: response_stream_establish_timeout(),
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
@@ -722,6 +704,7 @@ where
             random_picker,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
+            establish_timeout: response_stream_establish_timeout(),
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
@@ -765,6 +748,7 @@ where
             random_picker,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
+            establish_timeout: response_stream_establish_timeout(),
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
@@ -1811,22 +1795,24 @@ where
                 return Err(error);
             }
         };
-        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
+        let establish_timeout = self
+            .establish_timeout
+            .filter(|_| self.fault_detection_enabled);
+        let request = request.map(|req| {
+            AddressedRequest::with_instance(req, address, instance)
+                .with_establish_timeout(establish_timeout)
+        });
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
             .observe(route_start.elapsed().as_secs_f64());
 
         let _nvtx_transport = dynamo_nvtx_range!(transport_kind);
-        let dispatch = self
+        let stream = self
             .addressed
             .generate(request)
-            .instrument(route_span.clone());
-        let establish_timeout = self
-            .response_timeout
-            .filter(|_| self.fault_detection_enabled);
-        let stream =
-            dispatch_with_establish_timeout(dispatch, establish_timeout, instance_id).await;
+            .instrument(route_span.clone())
+            .await;
         let stream = self.wrap_with_fault_detection(stream, instance_id, route_span)?;
         Ok((metadata, stream))
     }
@@ -3734,31 +3720,23 @@ mod tests {
         rt.shutdown();
     }
 
-    /// Dropping the pending dispatch signals `dropped`, standing in for the
-    /// response-stream registration cleanup.
-    struct StalledDispatch {
-        dropped: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    }
-
-    struct SignalOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
-
-    impl Drop for SignalOnDrop {
-        fn drop(&mut self) {
-            if let Some(tx) = self.0.take() {
-                let _ = tx.send(());
-            }
-        }
+    /// Records the establish timeout each unary dispatch carries.
+    #[derive(Default)]
+    struct DeadlineRecordingDispatch {
+        seen: std::sync::Mutex<Vec<Option<std::time::Duration>>>,
     }
 
     #[async_trait::async_trait]
-    impl StreamingDispatch<u64, TestResponse> for StalledDispatch {
+    impl StreamingDispatch<u64, TestResponse> for DeadlineRecordingDispatch {
         async fn generate(
             &self,
-            _request: SingleIn<AddressedRequest<u64>>,
+            request: SingleIn<AddressedRequest<u64>>,
         ) -> Result<ManyOut<TestResponse>, Error> {
-            let _registration = SignalOnDrop(self.dropped.lock().unwrap().take());
-            futures::future::pending::<()>().await;
-            unreachable!("stalled dispatch never resolves")
+            self.seen
+                .lock()
+                .unwrap()
+                .push(request.content().establish_timeout());
+            Ok(RecordingDispatch::canned_stream())
         }
 
         async fn generate_bidirectional(
@@ -3767,18 +3745,20 @@ mod tests {
             _address: String,
             _input: ManyIn<u64>,
         ) -> Result<ManyOut<TestResponse>, Error> {
-            futures::future::pending().await
+            Ok(RecordingDispatch::canned_stream())
         }
     }
 
-    #[tokio::test]
-    async fn response_stream_establish_timeout_fails_and_quarantines_worker() {
+    async fn establish_timeout_seen_by_dispatch(
+        namespace: &str,
+        fault_detection_enabled: bool,
+    ) -> Option<std::time::Duration> {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
             .unwrap();
         let endpoint = drt
-            .namespace("test_establish_timeout".to_string())
+            .namespace(namespace.to_string())
             .unwrap()
             .component("test_component".to_string())
             .unwrap()
@@ -3791,89 +3771,43 @@ mod tests {
             "precondition: worker should be available"
         );
 
-        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
-        let dispatch = Arc::new(StalledDispatch {
-            dropped: std::sync::Mutex::new(Some(dropped_tx)),
-        });
+        let dispatch = Arc::new(DeadlineRecordingDispatch::default());
         let mut router = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
             client.clone(),
             RouterMode::RoundRobin,
-            dispatch,
+            dispatch.clone(),
         )
         .await
         .unwrap();
-        router.response_timeout = Some(std::time::Duration::from_millis(200));
+        router.establish_timeout = Some(std::time::Duration::from_millis(200));
+        router.fault_detection_enabled = fault_detection_enabled;
 
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            router.generate(SingleIn::new(42u64)),
-        )
-        .await
-        .expect("dispatch must not hang past the response timeout")
-        .expect_err("stalled dispatch must fail");
-        assert!(
-            match_error_chain(error.as_ref(), &[ErrorType::ResponseTimeout], &[]),
-            "expected ResponseTimeout, got: {error}"
-        );
-        dropped_rx
-            .await
-            .expect("timed-out dispatch must be dropped so its registration is cleaned up");
-        assert!(
-            !client.instance_ids_avail().contains(&instance_id),
-            "worker that never established a response stream should be quarantined"
-        );
+        let mut stream = router.generate(SingleIn::new(42u64)).await.unwrap();
+        while stream.next().await.is_some() {}
 
+        let seen = dispatch.seen.lock().unwrap().clone();
         rt.shutdown();
+        assert_eq!(seen.len(), 1, "expected exactly one unary dispatch");
+        seen[0]
+    }
+
+    /// The deadline rides on the addressed request so the transport can start
+    /// it at the worker's ACK rather than around local admission and send.
+    #[tokio::test]
+    async fn establish_timeout_is_passed_to_dispatch() {
+        assert_eq!(
+            establish_timeout_seen_by_dispatch("test_establish_timeout", true).await,
+            Some(std::time::Duration::from_millis(200))
+        );
     }
 
     #[tokio::test]
     async fn establish_timeout_skipped_without_fault_detection() {
-        let rt = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
-        let endpoint = drt
-            .namespace("test_establish_timeout_no_fd".to_string())
-            .unwrap()
-            .component("test_component".to_string())
-            .unwrap()
-            .endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
-        endpoint.register_endpoint_instance().await.unwrap();
-        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
-        assert!(
-            poll_until(|| client.instance_ids_avail().contains(&instance_id)).await,
-            "precondition: worker should be available"
-        );
-
-        let dispatch = Arc::new(StalledDispatch {
-            dropped: std::sync::Mutex::new(None),
-        });
-        let mut router = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
-            client.clone(),
-            RouterMode::RoundRobin,
-            dispatch,
-        )
-        .await
-        .unwrap();
-        router.response_timeout = Some(std::time::Duration::from_millis(100));
-        router.fault_detection_enabled = false;
-
-        let pending = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            router.generate(SingleIn::new(42u64)),
-        )
-        .await;
-        assert!(
-            pending.is_err(),
+        assert_eq!(
+            establish_timeout_seen_by_dispatch("test_establish_timeout_no_fd", false).await,
+            None,
             "routers without fault detection must not bound dispatch"
         );
-        assert!(
-            client.instance_ids_avail().contains(&instance_id),
-            "routers without fault detection must not quarantine the worker"
-        );
-
-        rt.shutdown();
     }
 
     /// Poll a predicate until it holds or a short deadline elapses; discovery

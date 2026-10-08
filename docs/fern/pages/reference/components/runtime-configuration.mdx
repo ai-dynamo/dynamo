@@ -362,6 +362,17 @@ address.
   local inhibited set while the selected worker remains in discovery.
 </ParamField>
 
+<ParamField path="DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS" type="integer" default="0">
+  Seconds a frontend waits for a worker to establish its response stream after the worker
+  acknowledges a unary request. The timer starts at the acknowledgement, so waiting for local
+  admission, connecting, and sending does not count. It covers worker queueing and setup before the
+  response stream opens, and a worker that accepts requests but cannot connect back. Set it above the
+  worst-case time a healthy worker takes to start a response. On expiry the request fails with a
+  response timeout, or migrates when migration is enabled, and the worker is locally inhibited for
+  `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Set to `0` or leave unset to disable. Routers without fault
+  detection and bidirectional requests do not apply this timeout.
+</ParamField>
+
 ## Operations
 
 <ParamField path="--dump-config-to" type="string" default="null">
