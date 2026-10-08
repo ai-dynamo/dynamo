@@ -19,7 +19,8 @@ metadata:
   name: qwen-small
 spec:
   parentRefs:
-  - name: switchyard-gateway
+  - name: inference-gateway
+    namespace: agentgateway-system
     sectionName: http
   rules:
   - matches:
@@ -44,7 +45,8 @@ metadata:
   name: qwen-large
 spec:
   parentRefs:
-  - name: switchyard-gateway
+  - name: inference-gateway
+    namespace: agentgateway-system
     sectionName: http
   rules:
   - matches:

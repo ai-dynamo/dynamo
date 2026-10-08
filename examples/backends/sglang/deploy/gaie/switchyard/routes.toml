@@ -18,7 +18,7 @@ schema_version = 1
 # This StageRouter policy makes no routing-time model calls.
 [llm_clients.dynamo]
 format = "openai_chat"
-base_url = "http://switchyard-gateway/v1"
+base_url = "http://inference-gateway.agentgateway-system.svc.cluster.local/v1"
 
 [targets.qwen-small]
 id = "Qwen/Qwen3.5-27B"

@@ -14,38 +14,6 @@
 # limitations under the License.
 
 apiVersion: agentgateway.dev/v1alpha1
-kind: AgentgatewayParameters
-metadata:
-  name: switchyard-gateway
-spec:
-  image:
-    registry: cr.agentgateway.dev
-    repository: agentgateway
-    tag: v1.0.0@sha256:855a2800042aff4a26e687fd3f6d898fd4aeadf67437fe53f7b41017ad633bcd
-  deployment:
-    spec:
-      template:
-        metadata:
-          annotations:
-            sidecar.istio.io/inject: "false"
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: switchyard-gateway
-spec:
-  gatewayClassName: agentgateway
-  infrastructure:
-    parametersRef:
-      group: agentgateway.dev
-      kind: AgentgatewayParameters
-      name: switchyard-gateway
-  listeners:
-  - name: http
-    port: 80
-    protocol: HTTP
----
-apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayPolicy
 metadata:
   name: switchyard-preproc
@@ -53,7 +21,7 @@ spec:
   targetRefs:
   - group: gateway.networking.k8s.io
     kind: Gateway
-    name: switchyard-gateway
+    name: inference-gateway
   frontend:
     http:
       maxBufferSize: 2097152

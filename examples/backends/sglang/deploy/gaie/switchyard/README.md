@@ -15,8 +15,13 @@ the Kubernetes deployment and model-pool bindings.
 ## Prerequisites
 
 Use an existing Kubernetes deployment with the Dynamo operator, Gateway API, GAIE, and the
-**agentgateway 1.0.0 controller and CRDs** installed. Cluster, operator, GPU, and worker setup are
-outside this example.
+**agentgateway 1.0.0 controller and CRDs** installed. Follow Dynamo's
+[Gateway API installation guide](../../../../../../docs/fern/pages/kubernetes/installation/gateway-api-routing.mdx)
+and its [agentgateway setup script](../../../../../../deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh).
+The script creates `inference-gateway` in `agentgateway-system`, with an `http` listener that
+allows routes from workload namespaces. This add-on reuses that Gateway; cluster, operator,
+GPU, and worker setup remain outside the example. Use the agentgateway option in the guide:
+the PreProc policy below is specific to agentgateway.
 
 The namespace must already contain ready model workers, native Dynamo EPPs, and two
 `InferencePool` resources named `qwen-small-pool` and `qwen-large-pool`, serving `Qwen/Qwen3.5-27B`
@@ -39,11 +44,20 @@ the [vLLM GAIE example](../../../../vllm/deploy/gaie/agg.yaml), using SGLang wor
 The gateway and PreProc configuration
 is backend-independent and also works with existing vLLM pools that expose the same interface.
 
-The Kustomization assumes the existing namespace is `switchyard`. Change `namespace` in
-[kustomization.yaml](kustomization.yaml) to your workload namespace. If your model IDs or pool names differ,
-change the target model IDs in [routes.toml](routes.toml), and both the `X-Gateway-Model-Name` header
-values and the pool references in [http-routes.yaml](http-routes.yaml). PreProc and the example's dedicated Gateway run
-in that same namespace. Do not downgrade newer controller CRDs to run this example.
+The Kustomization deploys PreProc and its policy into the existing Gateway namespace,
+`agentgateway-system`. Set that namespace in [kustomization.yaml](kustomization.yaml).
+If your Gateway name or namespace differs, update its parent references in
+[http-routes.yaml](http-routes.yaml), the policy target in
+[preproc-policy.yaml](preproc-policy.yaml), and the gateway URL in [routes.toml](routes.toml).
+Apply the HTTPRoutes separately in the namespace containing the model pools.
+
+If model IDs or pool names differ, update the TOML targets, HTTPRoute `X-Gateway-Model-Name`
+values, and pool references together. See Dynamo's
+[GAIE routing guide](../../../../../../docs/fern/pages/kubernetes/kv-aware-routing/gateway-api.mdx)
+for native EPP and pool configuration. Do not downgrade newer controller CRDs for this example.
+
+The PreRouting policy applies to all HTTP requests on the selected Gateway. Use a Gateway
+whose traffic is intended for Switchyard; other clients would also pass through PreProc.
 
 You also need Docker, `kubectl` with Kustomize support, and a registry the cluster can pull from.
 
@@ -58,20 +72,25 @@ export EXAMPLE=examples/backends/sglang/deploy/gaie/switchyard
 ```
 
 Set the PreProc registry image in [kustomization.yaml](kustomization.yaml). Then apply the add-on
-to the prepared namespace:
+to the existing Gateway and model namespaces:
 
 ```bash
 export NAMESPACE=switchyard
+export AGW_NAMESPACE=agentgateway-system
 kubectl get -n "$NAMESPACE" inferencepool qwen-small-pool qwen-large-pool
-kubectl apply -k "$EXAMPLE"
-kubectl rollout status -n "$NAMESPACE" deployment/switchyard-preproc --timeout=180s
-kubectl wait -n "$NAMESPACE" gateway/switchyard-gateway \
+kubectl wait -n "$AGW_NAMESPACE" gateway/inference-gateway \
   --for=condition=Programmed --timeout=180s
-kubectl get -n "$NAMESPACE" httproute
-kubectl port-forward -n "$NAMESPACE" service/switchyard-gateway 8000:80
+kubectl apply -k "$EXAMPLE"
+kubectl rollout status -n "$AGW_NAMESPACE" deployment/switchyard-preproc --timeout=180s
+kubectl apply -n "$NAMESPACE" -f "$EXAMPLE/http-routes.yaml"
+kubectl get -n "$AGW_NAMESPACE" agentgatewaypolicy switchyard-preproc -o yaml
+kubectl get -n "$NAMESPACE" httproute -o yaml
+kubectl port-forward -n "$AGW_NAMESPACE" service/inference-gateway 8000:80
 ```
 
-The HTTPRoutes must report `Accepted=True` and `ResolvedRefs=True`.
+The policy must report `Accepted=True`. The HTTPRoutes must report `Accepted=True` and
+`ResolvedRefs=True`. PreProc and its policy share the Gateway namespace; the HTTPRoutes
+share the model pools' namespace.
 
 ## Verify both model choices
 
@@ -100,12 +119,12 @@ Edit [routes.toml](routes.toml) to choose the routing policy, then reapply the
 Kustomization. Set the request's `model` to a configured route ID, such as `auto`.
 
 To route to another existing model pool, add its target and policy in the TOML and a matching
-rule in [http-routes.yaml](http-routes.yaml). See
+rule in [http-routes.yaml](http-routes.yaml), then reapply both the Kustomization and HTTPRoutes. See
 [Switchyard routing configuration](https://github.com/NVIDIA-NeMo/Switchyard/tree/main/examples/dynamo-preproc#configure-routing)
 for policy restrictions and session headers.
 
-Set `MAX_ACTIVE_STREAMS` in [preproc.yaml](preproc.yaml) and the gateway request timeout in
-[http-routes.yaml](http-routes.yaml), then reapply the Kustomization. See
+Set `MAX_ACTIVE_STREAMS` in [preproc.yaml](preproc.yaml) and reapply the Kustomization. For the
+gateway request timeout, edit and reapply [http-routes.yaml](http-routes.yaml). See
 [concurrency and timeouts](https://github.com/NVIDIA-NeMo/Switchyard/tree/main/examples/dynamo-preproc#concurrency-and-timeouts)
 for the defaults, overload behavior and the distinction between gateway and PreProc timeouts.
 
@@ -115,8 +134,10 @@ routing.
 
 ## Remove
 
-Remove the add-on's resources; the existing model deployments and pools remain:
+Remove the model routes and PreProc add-on. The existing Gateway, model deployments and
+pools remain:
 
 ```bash
+kubectl delete -n "$NAMESPACE" -f "$EXAMPLE/http-routes.yaml"
 kubectl delete -k "$EXAMPLE"
 ```
