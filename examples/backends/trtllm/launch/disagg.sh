@@ -5,7 +5,8 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_trtllm_override_args_with_mem
+source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
@@ -40,13 +41,23 @@ done
 
 trap 'echo Cleaning up...; kill 0' EXIT
 
-# Enable tracing if requested
-TRACE_ARGS=()
+TRTLLM_OVERRIDE_ARGS=()
 if [ "$ENABLE_OTEL" = true ]; then
     export DYN_LOGGING_JSONL=true
     export OTEL_EXPORT_ENABLED=1
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
-    TRACE_ARGS+=(--override-engine-args "{\"return_perf_metrics\": true, \"otlp_traces_endpoint\": \"${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}\" }")
+    OTEL_JSON="{\"return_perf_metrics\": true, \"otlp_traces_endpoint\": \"${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}\"}"
+    # Merge GPU mem config with OTEL config
+    OVERRIDE_JSON=$(build_trtllm_override_args_with_mem --merge-with-json "$OTEL_JSON")
+else
+    # Just GPU mem config (if any)
+    OVERRIDE_JSON=$(build_trtllm_override_args_with_mem)
+fi
+
+# The KV cap (if set) applies to each worker. It also bounds the KV region
+# that NIXL registers (and UCX gdr_copy pins) on each GPU.
+if [[ -n "$OVERRIDE_JSON" ]]; then
+    TRTLLM_OVERRIDE_ARGS=(--override-engine-args "$OVERRIDE_JSON")
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -74,7 +85,7 @@ python3 -m "$WORKER_MODULE" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --disaggregation-mode prefill \
-  "${TRACE_ARGS[@]}" &
+  "${TRTLLM_OVERRIDE_ARGS[@]}" &
 
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode \
@@ -86,7 +97,7 @@ python3 -m "$WORKER_MODULE" \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --disaggregation-mode decode \
-  "${TRACE_ARGS[@]}" &
+  "${TRTLLM_OVERRIDE_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
