@@ -18,6 +18,8 @@ try:
 except (ImportError, OSError, NotImplementedError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
+
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
@@ -148,7 +150,12 @@ vllm_omni_configs = {
             pytest.mark.gpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
+            pytest.mark.installs_extra_dependencies,
         ],
+        # vLLM-Omni's Wan2.x pipeline imports PyAV at module load (diffusion/utils/media_utils.py);
+        # the shipped image omits it as a codec carrier, so install it for this test only.
+        # See common._install_test_only_packages.
+        env={"DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["av"]},
         model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
         request_payloads=[
             I2VPayload(
@@ -273,7 +280,12 @@ vllm_omni_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 6_473_647_000
             ),  # KV cache cap (2x safety over min=3_236_823_040)
+            pytest.mark.installs_extra_dependencies,
         ],
+        # vLLM-Omni's Wan2.x pipeline imports PyAV at module load (diffusion/utils/media_utils.py);
+        # the shipped image omits it as a codec carrier, so install it for this test only.
+        # See common._install_test_only_packages.
+        env={"DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["av"]},
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         request_payloads=[
             VideoGenerationPayload(
