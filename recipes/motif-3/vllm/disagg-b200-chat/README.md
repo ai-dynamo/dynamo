@@ -130,8 +130,11 @@ acceptance on a chat trace does not measure real MTP acceptance or output
 quality. Report context-limit rejections separately from other errors.
 
 Per-GPU system throughput divides by **all six** participating GPUs. Include
-TTFT, per-user output rate, total output rate,
-request counts, and errors. Deployment and benchmark validation is in progress;
+TTFT, per-user output rate, total output rate, request counts, and errors.
+
+On October 8, 2026, the Nscale 2P1D KV-aware deployment passed startup, model
+discovery, chat completion, and prefix-cache reuse smoke tests with the pinned
+image and actual MTP2 verification. Performance benchmarking remains pending;
 no performance result is claimed by these manifests.
 
 ## Edit and render
