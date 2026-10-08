@@ -11,6 +11,3 @@ sortOptions:
   order: fifo
 resources:
   - "../../base"
-components:
-  - "../../components/2p1d"
-  - "../../components/kv-routing"

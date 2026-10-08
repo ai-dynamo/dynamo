@@ -13,5 +13,3 @@ resources:
   - "../../base"
 components:
   - "../../components/nscale"
-  - "../../components/2p1d"
-  - "../../components/kv-routing"
