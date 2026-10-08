@@ -830,8 +830,14 @@ options such as `--router-mode kv` or `--router-track-output-blocks`.
 
 ### Frontend feature switches
 
-Environment variables controlling frontend extensions. Extensions are enabled by default. Set a
-truthy value (`1`, `true`, `yes`, or `on`, case-insensitive) to disable the corresponding surface.
+Environment variables controlling frontend extensions and protocol admission. The variables below
+are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-insensitive.
+
+<ParamField path="DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS" type="boolean" default="false">
+  When truthy, `/v1/chat/completions` and `/v1/completions` ignore and drop unknown top-level
+  request fields instead of rejecting the request. This does not forward arbitrary fields to a
+  backend. Named passthrough fields remain subject to their normal validation and handling.
+</ParamField>
 
 <ParamField path="DYN_DISABLE_FRONTEND_NVEXT" type="boolean" default="false">
   When truthy, the frontend drops all request NvExt fields except `cache_salt` on
