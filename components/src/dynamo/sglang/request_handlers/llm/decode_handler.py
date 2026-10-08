@@ -459,7 +459,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def _routed_experts_kwargs_for(
         self, request: Dict[str, Any], input_param: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Prefer the request's nvext start offset over the probed default."""
         if "routed_experts_start_len" not in self._routed_experts_kwargs:
             return self._routed_experts_kwargs
         extra_args = request.get("extra_args") or {}
@@ -472,6 +471,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 continue
             start_len = int(start_len)
             # Out of range aborts in-engine and surfaces as a normal short reply; reject instead.
+            if start_len < 0:
+                raise HttpError(
+                    400, f"routed_experts_start_len={start_len} must be >= 0"
+                )
             input_ids = input_param.get("input_ids")
             if isinstance(input_ids, list) and start_len > len(input_ids):
                 raise HttpError(
