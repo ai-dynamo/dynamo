@@ -146,6 +146,11 @@ type DynamoGraphDeploymentEngineGroupStatus struct {
 	// +optional
 	TargetValidation *EngineGroupTargetValidationStatus `json:"targetValidation,omitempty"`
 
+	// operation summarizes the current or most recent immutable membership operation.
+	// It is a projection; the private controller checkpoint owns restart recovery.
+	// +optional
+	Operation *EngineGroupOperationStatus `json:"operation,omitempty"`
+
 	// conditions contains the latest observations of group availability, progress, degradation,
 	// target convergence, target validity, and topology authority.
 	// +optional
