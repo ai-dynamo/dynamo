@@ -387,6 +387,64 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     runtime.shutdown();
 }
 
+// An explicit prefill pin is a hard pin chosen upstream. Local inhibition only
+// filters this router's own selection, so the pinned worker is still dispatched
+// while it remains in discovery (DYN-3737). LeastLoaded covers the occupancy path.
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_explicit_prefill_pin_ignores_local_inhibition() {
+    for (namespace, mode) in [
+        ("builtin-prefill-pin-inhibited-rr", RouterMode::RoundRobin),
+        ("builtin-prefill-pin-inhibited-ll", RouterMode::LeastLoaded),
+    ] {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace(namespace.to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        let load_context = test_load_context(&client).await;
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let inner = PushRouter::from_client_with_dispatch(
+            client.clone(),
+            mode,
+            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        )
+        .await
+        .unwrap();
+        let host = RoutingHost::new_builtin(inner, load_context).unwrap();
+
+        client.report_instance_down(worker_id);
+        assert!(client.instance_ids().contains(&worker_id));
+        assert!(!client.instance_ids_avail().contains(&worker_id));
+
+        let mut content = request();
+        content.routing_mut().prefill_worker_id = Some(worker_id);
+        let (target, mut stream) = host
+            .select_and_dispatch_prefill(Context::new(content), |_, target| Ok(target))
+            .await
+            .unwrap_or_else(|error| panic!("{mode:?}: inhibited pin rejected: {error:#}"));
+        while stream.next().await.is_some() {}
+        assert_eq!(target.worker_id, worker_id, "{mode:?}");
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[worker_id],
+            "{mode:?}"
+        );
+
+        drop(host);
+        runtime.shutdown();
+    }
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn builtin_lora_keeps_separate_selection_and_cleanup() {

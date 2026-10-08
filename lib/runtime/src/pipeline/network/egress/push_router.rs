@@ -824,7 +824,7 @@ where
 
         let state = self.occupancy_state()?;
         if let Some(worker_id) = pinned_worker {
-            self.ensure_routable(worker_id)?;
+            self.ensure_discovered(worker_id)?;
             let selection = self.device_aware_candidates(request, &[worker_id]);
             let is_cpu = selection
                 .candidates
@@ -874,34 +874,35 @@ where
         })
     }
 
-    /// Reject an exact target that local fault detection has removed from routing.
-    pub fn ensure_routable(&self, instance_id: u64) -> anyhow::Result<()> {
-        if self
-            .client
-            .routing_instances()
-            .routable_ids()
-            .contains(&instance_id)
-        {
+    /// Reject an exact target that is not in the discovery snapshot.
+    ///
+    /// Local inhibition only filters workers this router selects itself. An
+    /// explicit pin or hard-affinity target was selected upstream, so it stays
+    /// selectable while the worker remains discovered; transport resolution at
+    /// dispatch still fails if the worker has left discovery.
+    pub fn ensure_discovered(&self, instance_id: u64) -> anyhow::Result<()> {
+        if self.client.is_instance_discovered(instance_id) {
             return Ok(());
         }
-        anyhow::bail!(
-            "instance_id={instance_id} not found for endpoint {}",
-            self.client.endpoint.id()
-        )
+        Err(self.instance_not_found(instance_id))
     }
 
     fn ensure_discovered_for_dispatch(&self, instance_id: u64) -> anyhow::Result<()> {
         if self.client.is_instance_live(instance_id) {
             return Ok(());
         }
-        Err(DynamoError::builder()
+        Err(self.instance_not_found(instance_id))
+    }
+
+    fn instance_not_found(&self, instance_id: u64) -> anyhow::Error {
+        DynamoError::builder()
             .error_type(ErrorType::CannotConnect)
             .message(format!(
                 "instance_id={instance_id} not found for endpoint {}",
                 self.client.endpoint.id()
             ))
             .build()
-            .into())
+            .into()
     }
 
     /// Issue a request to the next available instance in a round-robin fashion
@@ -1570,13 +1571,7 @@ where
         pinned_worker: Option<u64>,
     ) -> anyhow::Result<(u64, Option<OccupancyPermit>)> {
         if let Some(instance_id) = pinned_worker {
-            let routing_instances = self.client.routing_instances();
-            if !routing_instances.routable_ids().contains(&instance_id) {
-                return Err(anyhow::anyhow!(
-                    "instance_id={instance_id} not found for endpoint {}",
-                    self.client.endpoint.id()
-                ));
-            }
+            self.ensure_discovered(instance_id)?;
             let permit = match self.router_mode {
                 RouterMode::LeastLoaded
                 | RouterMode::PowerOfTwoChoices
