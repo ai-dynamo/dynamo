@@ -27,7 +27,7 @@ dynamo-truthy = { workspace = true }
 
 anyhow = { workspace = true }
 cudarc = { workspace = true }
-nixl-sys = { git = "https://github.com/jthomson04/nixl.git", rev = "94d16cce509b9b17fea2120b5e14f17f06e9b128" }
+nixl-sys = { version = "=1.3.2" }
 serde = { workspace = true}
 thiserror = { workspace = true }
 tracing = { workspace = true }

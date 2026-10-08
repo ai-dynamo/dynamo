@@ -3,17 +3,19 @@
 
 """Unit tests for dynamo.nixl_connect
 
-Tests the ERRORED state handling in ActiveOperation._wait_for_completion_() added
-to prevent decode workers from silently consuming bad data when a prefill worker
-disappears mid-transfer (issue #7319).
+Tests metadata import ordering, remote reference cleanup, and ERRORED transfer
+handling when a prefill worker disappears mid-transfer (issue #7319).
 
 NIXL and CUDA are mocked so these tests run on CPU-only machines.
 """
 
+import base64
 import sys
-from unittest.mock import MagicMock, patch
+import zlib
+from unittest.mock import MagicMock, call, patch
 
 import pytest
+import torch
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge]
 
@@ -62,6 +64,93 @@ def nixl_mocks():
         ),
     ):
         yield nixl_api_mock, nixl_bindings_mock, agent_instance
+
+
+@pytest.fixture
+def connection(nixl_mocks):
+    from dynamo import nixl_connect
+
+    api, _, _ = nixl_mocks
+    with patch.object(nixl_connect, "nixl_api", api):
+        yield nixl_connect.Connection(nixl_connect.Connector(), 1)
+
+
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("encoding", ["bytes", "b64", "hex"])
+def test_remote_imports_legacy_metadata(connection, encoding):
+    from dynamo.nixl_connect import Remote
+
+    metadata = b"legacy metadata"
+    if encoding == "b64":
+        encoded = "b64:" + base64.b64encode(zlib.compress(metadata)).decode()
+    elif encoding == "hex":
+        encoded = zlib.compress(metadata).hex()
+    else:
+        encoded = metadata
+    with Remote(connection, encoded):
+        connection._nixl.add_remote_agent.assert_called_once_with(metadata)
+        assert connection._remote_refs == {"mock-remote-agent": 1}
+    assert connection._remote_refs == {}
+    connection._nixl.remove_remote_agent.assert_called_once_with("mock-remote-agent")
+
+
+@pytest.mark.gpu_0
+def test_remote_imports_connection_before_buffer(connection):
+    from dynamo.nixl_connect import Remote
+
+    def encode(value):
+        return "b64:" + base64.b64encode(zlib.compress(value)).decode()
+
+    with Remote(
+        connection,
+        encode(b"buffer"),
+        nixl_connection_metadata=encode(b"connection"),
+    ):
+        assert connection._nixl.add_remote_agent.call_args_list == [
+            call(b"connection"),
+            call(b"buffer"),
+        ]
+        assert connection._remote_refs == {"mock-remote-agent": 1}
+    assert connection._remote_refs == {}
+    connection._nixl.remove_remote_agent.assert_called_once_with("mock-remote-agent")
+
+
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("failed_import", [1, 2])
+def test_read_import_failure_preserves_other_remote_reference(
+    connection, failed_import
+):
+    from dynamo.nixl_connect import (
+        Descriptor,
+        OperationKind,
+        RdmaMetadata,
+        ReadOperation,
+        Remote,
+    )
+
+    with Remote(connection, b"existing read"):
+        connection._nixl.add_remote_agent.reset_mock()
+        connection._nixl.add_remote_agent.side_effect = (
+            [RuntimeError("import failed")]
+            if failed_import == 1
+            else [b"mock-remote-agent", RuntimeError("import failed")]
+        )
+        metadata = "b64:" + base64.b64encode(zlib.compress(b"buffer")).decode()
+        with pytest.raises(RuntimeError, match="import failed"):
+            ReadOperation(
+                connection,
+                RdmaMetadata(
+                    nixl_metadata=metadata,
+                    operation_kind=int(OperationKind.READ),
+                ),
+                Descriptor(torch.empty(16, dtype=torch.uint8)),
+                nixl_connection_metadata=b"connection",
+            )
+        assert connection._remote_refs == {"mock-remote-agent": 1}
+        connection._nixl.remove_remote_agent.assert_not_called()
+        connection._nixl.initialize_xfer.assert_not_called()
+    assert connection._remote_refs == {}
+    connection._nixl.remove_remote_agent.assert_called_once_with("mock-remote-agent")
 
 
 @pytest.fixture

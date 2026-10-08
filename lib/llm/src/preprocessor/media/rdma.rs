@@ -44,8 +44,12 @@ pub struct DecodedMediaData {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RdmaMediaDataDescriptor {
-    // b64 agent metadata
+    // Compressed, base64-encoded metadata for this registration only.
     pub(crate) nixl_metadata: String,
+    // Connection-only metadata. Frontend decoding requires upgrading workers first.
+    // Absent in payloads from older frontends, which include connections in nixl_metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) nixl_connection_metadata: Option<String>,
     // tensor descriptor
     pub(crate) nixl_descriptor: NixlDescriptor,
 
@@ -267,10 +271,12 @@ impl DecodedMediaData {
             .map_err(|_| anyhow::anyhow!("Failed to register storage with NIXL"))?;
 
         let nixl_descriptor = registered.descriptor();
-        let nixl_metadata = get_descriptor_metadata(nixl_agent, &nixl_descriptor)?;
+        let (nixl_metadata, nixl_connection_metadata) =
+            get_descriptor_metadata(nixl_agent, &nixl_descriptor)?;
 
         Ok(RdmaMediaDataDescriptor {
             nixl_metadata,
+            nixl_connection_metadata: Some(nixl_connection_metadata),
             nixl_descriptor,
             tensor_info: self.tensor_info,
             content_hash,
@@ -307,11 +313,10 @@ impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
     }
 }
 
-// Get NIXL metadata for a descriptor
-// Returns zlib-compressed, base64-encoded metadata in format: "b64:<compressed_base64>"
-// This format matches what Python nixl_connect expects for RdmaMetadata.nixl_metadata
+// Return (registration metadata, connection metadata), each zlib-compressed and
+// base64-encoded in the format "b64:<compressed_base64>" used by Python nixl_connect.
 // TODO: pre-allocate a fixed NIXL-registered RAM pool so metadata can be cached on the target?
-pub fn get_nixl_metadata(agent: &NixlAgent, storage: &SystemStorage) -> Result<String> {
+pub fn get_nixl_metadata(agent: &NixlAgent, storage: &SystemStorage) -> Result<(String, String)> {
     let (ptr, size, mem_type, device_id) = storage.nixl_params();
     get_descriptor_metadata(
         agent,
@@ -324,20 +329,28 @@ pub fn get_nixl_metadata(agent: &NixlAgent, storage: &SystemStorage) -> Result<S
     )
 }
 
-fn get_descriptor_metadata(agent: &NixlAgent, descriptor: &NixlDescriptor) -> Result<String> {
+fn get_descriptor_metadata(
+    agent: &NixlAgent,
+    descriptor: &NixlDescriptor,
+) -> Result<(String, String)> {
     // The descriptor's source_storage guard owns this registration only.
     // A fresh receiver also needs the agent's connection information.
     let mut descriptors = nixl::RegDescList::new(descriptor.mem_type)?;
+    // An empty descriptor list exports connection information without registrations.
+    let connection_metadata = agent.raw_agent().get_local_partial_md(&descriptors, None)?;
     descriptors.add_storage_desc(descriptor)?;
-    let mut options = nixl::OptArgs::new()?;
-    options.set_include_connection_info(true)?;
-    let nixl_md = agent
-        .raw_agent()
-        .get_local_partial_md(&descriptors, Some(&options))?;
+    let registration_metadata = agent.raw_agent().get_local_partial_md(&descriptors, None)?;
 
+    Ok((
+        encode_metadata(&registration_metadata)?,
+        encode_metadata(&connection_metadata)?,
+    ))
+}
+
+fn encode_metadata(metadata: &[u8]) -> Result<String> {
     // Compress with zlib (level 6, matching Python's default)
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
-    encoder.write_all(&nixl_md)?;
+    encoder.write_all(metadata)?;
     let compressed = encoder.finish()?;
 
     let b64_encoded = general_purpose::STANDARD.encode(&compressed);
@@ -409,16 +422,31 @@ pub(super) mod native_tests {
         selected: &RdmaMediaDataDescriptor,
         unrelated: &NixlDescriptor,
     ) -> Result<()> {
-        let compressed = general_purpose::STANDARD
-            .decode(selected.nixl_metadata.strip_prefix("b64:").unwrap())?;
-        let mut metadata = Vec::new();
-        flate2::read::ZlibDecoder::new(&compressed[..]).read_to_end(&mut metadata)?;
+        fn decode_metadata(encoded: &str) -> Result<Vec<u8>> {
+            let compressed =
+                general_purpose::STANDARD.decode(encoded.strip_prefix("b64:").unwrap())?;
+            let mut metadata = Vec::new();
+            flate2::read::ZlibDecoder::new(&compressed[..]).read_to_end(&mut metadata)?;
+            Ok(metadata)
+        }
         let receiver = get_nixl_agent()?;
-        let remote = receiver.raw_agent().load_remote_md(&metadata)?;
+        let connection_metadata =
+            decode_metadata(selected.nixl_connection_metadata.as_deref().unwrap())?;
+        let remote = receiver.raw_agent().load_remote_md(&connection_metadata)?;
         let mut remote_selected = nixl::XferDescList::new(selected.nixl_descriptor.mem_type)?;
         remote_selected.add_storage_desc(&selected.nixl_descriptor)?;
         let mut remote_unrelated = nixl::XferDescList::new(unrelated.mem_type)?;
         remote_unrelated.add_storage_desc(unrelated)?;
+        // The first import must not expose any registered buffer.
+        for descriptors in [&remote_selected, &remote_unrelated] {
+            assert!(
+                !receiver
+                    .raw_agent()
+                    .check_remote_metadata(&remote, Some(descriptors))
+            );
+        }
+        let metadata = decode_metadata(&selected.nixl_metadata)?;
+        assert_eq!(receiver.raw_agent().load_remote_md(&metadata)?, remote);
         assert!(
             receiver
                 .raw_agent()
@@ -477,7 +505,10 @@ pub(super) mod native_tests {
             .into_rdma_descriptor(&source)?;
         assert_scoped_metadata(&selected, &unrelated.nixl_descriptor)?;
         assert_eq!(
-            selected.nixl_metadata,
+            (
+                selected.nixl_metadata.clone(),
+                selected.nixl_connection_metadata.clone().unwrap()
+            ),
             get_nixl_metadata(&source, selected.source_storage.as_ref().unwrap().storage())?
         );
         let unrelated_descriptor = unrelated.nixl_descriptor.clone();
