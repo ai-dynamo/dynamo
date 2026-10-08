@@ -2157,6 +2157,8 @@ class InstrumentedScheduler(AsyncScheduler):
         for request in self.waiting:
             if request.status == RequestStatus.PREEMPTED:
                 decode_kv.add(request.num_computed_tokens)
+            elif request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                decode_kv.add(request.num_computed_tokens)
             else:
                 prefill.add(request.num_tokens)
 

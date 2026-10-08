@@ -568,6 +568,23 @@ def test_conditional_disagg_config_rejects_invalid_json(
         kv_router_args._conditional_disagg_config_arg(config_json)
 
 
+def test_removed_remote_kv_threshold_is_not_a_frontend_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_rejection_threshold_env(monkeypatch)
+    monkeypatch.setenv("DYN_REMOTE_KV_WAITING_TOKENS_THRESHOLD", "8192")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+    assert not hasattr(config, "remote_kv_waiting_tokens_threshold")
+    assert "remote_kv_waiting_tokens_threshold" not in config.router_kwargs()
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args(["--remote-kv-waiting-tokens-threshold", "8192"])
+    assert error.value.code == 2
+
+
 def test_frontend_rejection_thresholds_default_to_none(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

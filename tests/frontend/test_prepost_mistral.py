@@ -19,7 +19,6 @@ if HAS_VLLM:
         ChatCompletionRequest,
         ChatCompletionToolsParam,
     )
-    from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
     from vllm.outputs import CompletionOutput
     from vllm.reasoning import ReasoningParserManager
     from vllm.sampling_params import SamplingParams
@@ -29,6 +28,7 @@ if HAS_VLLM:
     from dynamo.frontend.prepost import StreamingPostProcessor
 
     MistralReasoningParser = ReasoningParserManager.get_reasoning_parser("mistral")
+    from dynamo.frontend.vllm_protocol import FunctionDefinition
 else:
     # Fake some types so that `pre-commit` passes
     class MistralTokenizer:

@@ -578,6 +578,7 @@ jobs:
           # EPP_IMAGE so the epp stage cache-hits instead of resolving the
           # rendered default upstream staging tag, which gets garbage-collected.
           epp_image: ${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
+          extra_build_args: ${{ inputs.extra_build_args }}
           # Match the build's sccache build-args so the extract reuses the warm
           # wheel_builder/pre_runtime cache instead of a cold rebuild.
           sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}

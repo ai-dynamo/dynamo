@@ -1,0 +1,29 @@
+diff --git a/vllm/models/minimax_m3/common/vision_tower.py b/vllm/models/minimax_m3/common/vision_tower.py
+--- a/vllm/models/minimax_m3/common/vision_tower.py
++++ b/vllm/models/minimax_m3/common/vision_tower.py
+@@ -6,6 +6,7 @@
+ import numpy as np
+ import torch
+ import torch.nn as nn
++import torch.nn.functional as F
+ from einops import rearrange
+ from transformers import PretrainedConfig
+ 
+@@ -69,9 +70,10 @@ class MiniMaxVLPatchEmbed(nn.Module):
+             self.patch_embedding = self.patch_embedding.to(pixel_values.dtype)
+-        x = pixel_values.reshape(
+-            pixel_values.shape[0],
+-            self.num_channels,
+-            self.temporal_patch_size,
+-            self.patch_size,
+-            self.patch_size,
++        # Each row is already exactly one non-overlapping Conv3d receptive
++        # field. The Conv3d output therefore has spatial shape (1, 1, 1) and
++        # is algebraically identical to this bias-free linear projection.
++        # Using GEMM also avoids lazy cuDNN initialization in the serving
++        # workers, which can fail while loading a cuDNN JIT module on GB200.
++        return F.linear(
++            pixel_values,
++            self.patch_embedding.weight.flatten(1),
+         )
+-        return self.patch_embedding(x).reshape(x.shape[0], -1)

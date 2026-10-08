@@ -94,20 +94,25 @@ def test_new_request_data_has_fields_instrumented_scheduler_sets():
     )
 
 
-def test_scheduler_output_new_connector_fields_remain_optional():
-    """Dynamo constructs SchedulerOutput directly without v0.27's new fields."""
-    from vllm.v1.core.sched.output import SchedulerOutput
+def test_scheduler_output_construction_without_optional_connector_fields():
+    """The benchmark scheduler can construct an empty output on both vLLM pins."""
+    from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 
-    fields = {field.name: field for field in dataclasses.fields(SchedulerOutput)}
-    for field_name in ("ec_manager_metadata", "partial_tail_offloads"):
-        assert field_name in fields, (
-            f"vLLM SchedulerOutput.{field_name} is gone — re-audit Dynamo's "
-            "direct SchedulerOutput construction."
-        )
-        assert fields[field_name].default is None, (
-            f"vLLM SchedulerOutput.{field_name} became required — update every "
-            "InstrumentedScheduler constructor."
-        )
+    output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[0],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    assert output.total_num_scheduled_tokens == 0
+    assert output.kv_connector_metadata is None
+    assert output.ec_connector_metadata is None
+    assert output.ec_manager_metadata is None
 
 
 def test_async_scheduler_has_methods_instrumented_scheduler_overrides():
