@@ -15,18 +15,18 @@ pub(crate) fn discovery_runtime_data(
     server_info: &Value,
     mode: DisaggregationMode,
 ) -> Result<HashMap<String, Value>, DynamoError> {
-    let extra_key = if server_info["enable_unified_cache_external_linker"] == true {
-        if server_info["unified_cache_external_linker_backend"] != "kvcr" {
-            return Ok(HashMap::new());
-        }
-        "unified_cache_external_linker_extra_config"
-    } else if server_info["enable_hierarchical_cache"] == true
-        && server_info["hicache_storage_backend"] == "kvcr"
-    {
-        "hicache_storage_backend_extra_config"
+    let kvcr_enabled = if server_info["enable_unified_cache_external_linker"] == true {
+        server_info["unified_cache_external_linker_backend"] == "kvcr"
     } else {
-        return Ok(HashMap::new());
+        server_info["enable_hierarchical_cache"] == true
+            && server_info["hicache_storage_backend"] == "kvcr"
     };
+    if !kvcr_enabled {
+        return Ok(HashMap::new());
+    }
+    // Both KVCRDirectLinker and HiCacheStorage read this shared engine field.
+    // SGLang has no unified_cache_external_linker_extra_config setting.
+    let extra_key = "hicache_storage_backend_extra_config";
 
     // GetServerInfo can contain either a decoded mapping or the JSON CLI argument.
     // Never read an @file in the sidecar: its filesystem need not be the engine's.
@@ -191,7 +191,7 @@ mod tests {
         json!({
             "enable_unified_cache_external_linker": true,
             "unified_cache_external_linker_backend": "kvcr",
-            "unified_cache_external_linker_extra_config": {
+            "hicache_storage_backend_extra_config": {
                 "enable_remote_hint": true, "control_advertise_host": "peer.example", "control_port": 12000,
             },
             "tp_size": 8, "dp_size": 2, "enable_dp_attention": true, "nnodes": 1, "pp_size": 1,
@@ -235,8 +235,6 @@ mod tests {
         storage["enable_unified_cache_external_linker"] = json!(false);
         storage["enable_hierarchical_cache"] = json!(true);
         storage["hicache_storage_backend"] = json!("kvcr");
-        storage["hicache_storage_backend_extra_config"] =
-            storage["unified_cache_external_linker_extra_config"].clone();
         let expected = discovery_runtime_data(&storage, DisaggregationMode::Aggregated).unwrap();
         storage["hicache_storage_backend_extra_config"] =
             json!(storage["hicache_storage_backend_extra_config"].to_string());
@@ -245,8 +243,8 @@ mod tests {
             expected
         );
         let mut linker = info();
-        linker["unified_cache_external_linker_extra_config"] =
-            json!(linker["unified_cache_external_linker_extra_config"].to_string());
+        linker["hicache_storage_backend_extra_config"] =
+            json!(linker["hicache_storage_backend_extra_config"].to_string());
         assert_eq!(
             discovery_runtime_data(&linker, DisaggregationMode::Aggregated).unwrap(),
             expected
@@ -266,7 +264,7 @@ mod tests {
         }
         for extra in [Value::Null, json!({}), json!({"enable_remote_hint": false})] {
             let mut info = info();
-            info["unified_cache_external_linker_extra_config"] = extra;
+            info["hicache_storage_backend_extra_config"] = extra;
             cases.push(info);
         }
         for info in cases {
@@ -279,6 +277,22 @@ mod tests {
     }
 
     #[test]
+    fn linker_does_not_advertise_from_an_unreported_config_field() {
+        let mut info = info();
+        let extra = info
+            .as_object_mut()
+            .unwrap()
+            .remove("hicache_storage_backend_extra_config")
+            .unwrap();
+        info["unified_cache_external_linker_extra_config"] = extra;
+        assert!(
+            discovery_runtime_data(&info, DisaggregationMode::Aggregated)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn invalid_config_is_rejected() {
         for extra in [
             json!([]),
@@ -287,24 +301,21 @@ mod tests {
             json!({"enable_remote_hint": "true"}),
         ] {
             let mut info = info();
-            info["unified_cache_external_linker_extra_config"] = extra;
+            info["hicache_storage_backend_extra_config"] = extra;
             assert!(discovery_runtime_data(&info, DisaggregationMode::Aggregated).is_err());
         }
     }
 
     #[test]
     fn unresolved_engine_file_disables_only_hint_discovery() {
-        for extra_key in [
-            "unified_cache_external_linker_extra_config",
-            "hicache_storage_backend_extra_config",
-        ] {
+        for use_linker in [true, false] {
             let mut info = info();
-            if extra_key == "hicache_storage_backend_extra_config" {
+            if !use_linker {
                 info["enable_unified_cache_external_linker"] = json!(false);
                 info["enable_hierarchical_cache"] = json!(true);
                 info["hicache_storage_backend"] = json!("kvcr");
             }
-            info[extra_key] = json!("@/engine/config.json");
+            info["hicache_storage_backend_extra_config"] = json!("@/engine/config.json");
             // Do not read the engine's file or reject ordinary multinode serving.
             info["nnodes"] = json!(2);
             assert!(
@@ -327,11 +338,11 @@ mod tests {
             Value::Null,
         ] {
             let mut info = info();
-            info["unified_cache_external_linker_extra_config"]["control_port"] = port;
+            info["hicache_storage_backend_extra_config"]["control_port"] = port;
             assert!(discovery_runtime_data(&info, DisaggregationMode::Aggregated).is_err());
         }
         let mut info = info();
-        info["unified_cache_external_linker_extra_config"]["control_port"] = json!(65528);
+        info["hicache_storage_backend_extra_config"]["control_port"] = json!(65528);
         assert!(discovery_runtime_data(&info, DisaggregationMode::Aggregated).is_ok());
     }
 
@@ -354,7 +365,7 @@ mod tests {
         // The topology restrictions do not change ordinary, non-remote engines.
         let mut info = info();
         info["nnodes"] = json!(2);
-        info["unified_cache_external_linker_extra_config"]["enable_remote_hint"] = json!(false);
+        info["hicache_storage_backend_extra_config"]["enable_remote_hint"] = json!(false);
         assert!(
             discovery_runtime_data(&info, DisaggregationMode::Aggregated)
                 .unwrap()
@@ -366,8 +377,7 @@ mod tests {
     fn ipv6_hosts_are_bracketed_without_changing_the_port() {
         for host in ["2001:db8::1", "[2001:db8::1]"] {
             let mut info = info();
-            info["unified_cache_external_linker_extra_config"]["control_advertise_host"] =
-                json!(host);
+            info["hicache_storage_backend_extra_config"]["control_advertise_host"] = json!(host);
             let data = discovery_runtime_data(&info, DisaggregationMode::Aggregated).unwrap();
             assert_eq!(
                 data["router_hint_source_control_endpoints"]["1"],
@@ -397,7 +407,7 @@ mod tests {
             Value::Null,
         ] {
             let mut info = info();
-            info["unified_cache_external_linker_extra_config"]["control_advertise_host"] = host;
+            info["hicache_storage_backend_extra_config"]["control_advertise_host"] = host;
             assert!(discovery_runtime_data(&info, DisaggregationMode::Aggregated).is_err());
         }
     }

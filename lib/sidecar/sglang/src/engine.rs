@@ -1723,7 +1723,7 @@ mod tests {
             &discovery(json!({
                 "enable_unified_cache_external_linker": true,
                 "unified_cache_external_linker_backend": "kvcr",
-                "unified_cache_external_linker_extra_config": {
+                "hicache_storage_backend_extra_config": {
                     "enable_remote_hint": true,
                     "control_advertise_host": "peer.example",
                     "control_port": 12000,
@@ -1748,6 +1748,48 @@ mod tests {
             "sglang.runtime.v1.SglangService"
         );
         assert_eq!(config.llm.unwrap().data_parallel_size, Some(2));
+    }
+
+    #[test]
+    fn kvcr_linker_launcher_extra_config_is_discovered() {
+        // The launcher passes --enable-unified-cache-external-linker and
+        // --hicache-storage-backend-extra-config. KVCRDirectLinker reads that
+        // shared HiCache config field; there is no linker-specific extra field.
+        let extra_config = json!({
+            "local_dram_bytes_per_worker": 32u64 << 30,
+            "enable_remote_hint": true,
+            "control_port": 26800,
+            "control_advertise_host": "127.0.0.1",
+            "direct_remote_restore": true,
+            "progressive_restore": true,
+        });
+        for extra_config in [extra_config.clone(), json!(extra_config.to_string())] {
+            let server_info = json!({
+                "enable_unified_cache_external_linker": true,
+                "unified_cache_external_linker_backend": "kvcr",
+                "enable_hierarchical_cache": false,
+                "hicache_storage_backend": null,
+                "hicache_storage_backend_extra_config": extra_config,
+                "tp_size": 1, "dp_size": 1, "enable_dp_attention": false,
+                "nnodes": 1, "pp_size": 1, "page_size": 64,
+            });
+            let config = build_engine_config(
+                &discovery(server_info),
+                DisaggregationMode::Aggregated,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(config.runtime_data.get("router_hint"), Some(&json!(true)));
+            assert_eq!(config.runtime_data["router_hint_worker_type"], "aggregated");
+            assert_eq!(
+                config.runtime_data["router_hint_source_control_endpoints"],
+                json!({
+                    "0": "tcp://127.0.0.1:26800",
+                })
+            );
+            assert_eq!(config.llm.unwrap().kv_cache_block_size, Some(64));
+        }
     }
 
     #[test]
