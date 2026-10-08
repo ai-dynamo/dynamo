@@ -33,7 +33,6 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
-from dynamo.vllm.kv_cache_metadata_compat import enable_kv_cache_metadata_compat
 
 from . import envs
 
@@ -164,7 +163,6 @@ def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]
 
 
 def _build_config(dynamo_config: Config, vllm_args: argparse.Namespace) -> Config:
-    enable_kv_cache_metadata_compat()
     engine_config = AsyncEngineArgs.from_cli_args(vllm_args)
 
     # Attach engine_args before validate(): the --enable-lora exclusivity rules

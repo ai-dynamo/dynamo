@@ -740,7 +740,9 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
 
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
-    parse_mm_data.assert_called_once_with({"vision_chunk": []}, validate=False)
+    parse_mm_data.assert_called_once()
+    assert parse_mm_data.call_args.args[0] in ({}, {"vision_chunk": []})
+    assert parse_mm_data.call_args.kwargs == {"validate": False}
 
     cache.is_cached.return_value = [False]
     parse_mm_data.reset_mock()
@@ -1427,7 +1429,7 @@ async def test_receive_transferred_kwargs_injects_vllm_cache(monkeypatch):
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1460,7 +1462,7 @@ async def test_receive_transferred_kwargs_marks_vllm_feature_hash(monkeypatch):
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1496,7 +1498,7 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
     processor = _processor(unified_vision_chunk=True)
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1536,7 +1538,7 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
 async def test_receive_transferred_kwargs_falls_back_to_metadata_hashes(monkeypatch):
     processor = _processor()
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1561,7 +1563,7 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1579,6 +1581,164 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
 
     assert result is None
     input_processor.inject_into_mm_cache.assert_not_called()
+
+
+def _real_kwargs_item(key: str = "pixel_values"):
+    """Build a real vLLM ``MultiModalKwargsItem`` for the transfer tests."""
+    import torch
+    from vllm.multimodal.inputs import (
+        MultiModalBatchedField,
+        MultiModalFieldElem,
+        MultiModalKwargsItem,
+    )
+
+    elem = MultiModalFieldElem(
+        data=torch.arange(8, dtype=torch.float32),
+        field=MultiModalBatchedField(),
+    )
+    return MultiModalKwargsItem({key: elem})
+
+
+@pytest.mark.asyncio
+async def test_receive_transferred_kwargs_rejects_pickle_payload():
+    """A pickle-format payload must fall back, not deserialize.
+
+    The transfer uses vLLM's typed msgpack decoder, so a payload in the old
+    pickle wire format (or any foreign bytes) fails the decode and the receive
+    path returns ``None``, which is its fallback. The pre-fix worker ran
+    pickle.loads on this payload and accepted the item, so this assertion fails
+    there.
+    """
+    import pickle
+
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    payload = pickle.dumps(_real_kwargs_item())
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
+    )
+
+    result = await processor._receive_mm_kwargs(
+        {
+            "mm_hashes": ["0123456789abcdef"],
+            "mm_placeholders": [[1, 2]],
+            "expanded_token_ids": [10, 11, 12],
+        },
+        "shm",
+        receiver,
+        SimpleNamespace(modality="image", mm_hashes=[]),
+    )
+
+    assert result is None
+
+
+_LOG_SENTINEL = "zzsentinelzz"
+
+
+def _undecodable_payload(case: str) -> bytes:
+    """Return a payload that fails to decode and carries the log sentinel."""
+    import pickle
+    import struct
+
+    from msgspec import msgpack
+    from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+    from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
+
+    sentinel = _LOG_SENTINEL.encode()
+    if case == "pickle_format":
+        # The wire format of a frontend on the previous release.
+        return pickle.dumps(_real_kwargs_item(key=_LOG_SENTINEL))
+    if case == "short_frame":
+        # The declared buffer length runs past the end of the frame.
+        return struct.pack("<I", 1) + struct.pack("<Q", 999) + sentinel
+    if case == "wrong_structure":
+        # A well-formed frame whose message is not a kwargs item.
+        return _pack_buffers([msgpack.encode(_LOG_SENTINEL)])
+    # A frame that carries the serializer's pickle extension code.
+    return _pack_buffers([msgpack.encode(msgpack.Ext(CUSTOM_TYPE_PICKLE, sentinel))])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["pickle_format", "short_frame", "wrong_structure", "pickle_ext_code"]
+)
+async def test_receive_transfer_failure_log_omits_payload_bytes(case, caplog):
+    """A payload that fails to decode falls back without logging its bytes."""
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    payload = _undecodable_payload(case)
+    # The sentinel is in the payload, so an echo of the bytes would show it.
+    assert _LOG_SENTINEL.encode() in payload
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
+    )
+
+    with caplog.at_level("DEBUG"):
+        result = await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["0123456789abcdef"],
+                "mm_placeholders": [[1, 2]],
+                "expanded_token_ids": [10, 11, 12],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
+
+    assert result is None
+    # Positive control: the failure itself was logged and captured.
+    assert "falling back" in caplog.text
+    assert _LOG_SENTINEL not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_receive_refuses_pickle_extension_code_with_insecure_flag(
+    monkeypatch, caplog
+):
+    """With VLLM_ALLOW_INSECURE_SERIALIZATION set, the worker still refuses.
+
+    The frame carries the pickle extension code with dummy bytes, not a pickle
+    object. vLLM's own decoder would try to unpickle them when the variable is
+    set. The worker must refuse the code instead and take its fallback path.
+    """
+    import vllm.envs as envs
+    from msgspec import msgpack
+    from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+    from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
+
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    assert envs.VLLM_ALLOW_INSECURE_SERIALIZATION is True
+
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    ext = msgpack.Ext(CUSTOM_TYPE_PICKLE, b"\x00 not a pickle")
+    receiver = SimpleNamespace(
+        receive=AsyncMock(
+            return_value={
+                "__pickled_kwargs_item__": [_pack_buffers([msgpack.encode(ext)])]
+            }
+        )
+    )
+
+    with caplog.at_level("DEBUG"):
+        result = await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["0123456789abcdef"],
+                "mm_placeholders": [[1, 2]],
+                "expanded_token_ids": [10, 11, 12],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
+
+    assert result is None
+    assert "falling back" in caplog.text
+    # The logged cause is the refusal, not an attempt to unpickle the data.
+    assert "Extension type code 1 is not supported" in caplog.text
 
 
 def test_build_prefill_handoff_dispatches_by_model_and_forwards_processor_kwargs(

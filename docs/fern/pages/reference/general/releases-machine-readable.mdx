@@ -15,7 +15,7 @@ Current stable release: v1.5.0 (Sep 18, 2026; container tag `1.5.0`, wheel versi
 
 | Version | Kind | Date | SGLang | TensorRT-LLM | vLLM | NIXL (SGL / TRT / vLLM) | UCX | Notes | Delta |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| main (ToT) | development head | - | 0.5.21 | 1.3.0rc29 | 0.30.0 | 1.4.0 / 1.3.1 / 1.3.2 | - | - | - |
+| main (ToT) | development head | - | 0.5.21 | 1.3.0rc29 | 0.31.0 | 1.4.0 / 1.3.1 / 1.3.2 | - | - | - |
 | v1.5.0 | stable | Sep 18, 2026 | 0.5.18 | 1.3.0rc25 | 0.28.0 | 1.4.0 / 1.3.1 / 1.3.2 | 1.21.x | [release notes](https://docs.nvidia.com/dynamo/dev/reference/releases/v1-5-0) | KVBM deprecated with removal targeted for v1.6.0; CRD storage version promoted to v1beta1 and the v1alpha1 admission webhook endpoints removed; Go EPP removed in favor of the Rust EPP shipped inside the Frontend image; Dynamo Snapshot moved to a standalone operator and chart, dropping the bundled snapshot chart, snapshot-agent image and DynamoCheckpoint CRD; AIConfigurator renamed to AISimulate; unified-backend entry point removed from the vLLM and SGLang workers; UCX 1.21.x. |
 | v1.4.2 | patch | Aug 28, 2026 | 0.5.16 | 1.3.0rc22 | 0.26.0 | 1.3.0 / 1.3.1 / 1.3.2 | 1.21.x | [release notes](https://docs.nvidia.com/dynamo/dev/reference/releases/v1-4-0#v142) | Patch release and the first Dynamo Enterprise Support release: a curated set of release artifacts publishes under the -enterprise suffix on NGC, eligible for enterprise support, with no functional or binary differences from the open-source artifacts. Fixes NIXL loader-path resolution in the Frontend and SGLang Runtime images, removes the unused Nsight EFA metrics plugin, and tightens dependency pins (pillow v12.3.0 floor, plotext below v6, EFA Installer v1.50). Backend pins are unchanged from v1.4.0. |
 | v1.4.1 | patch | Aug 21, 2026 | 0.5.16 | 1.3.0rc22 | 0.26.0 | 1.3.0 / 1.3.1 / 1.3.2 | 1.21.x | [release notes](https://docs.nvidia.com/dynamo/dev/reference/releases/v1-4-0#v141) | Patch release. Adds the classify and pooling endpoints, forwards logprob_token_ids through the OpenAI frontend, reconciles request-path overload marks in the Router, and fixes NIXL writable buffers for vLLM. All three Go modules move to Go 1.26.6 with aligned x/net and grpc. Backend pins are unchanged from v1.4.0. |
@@ -160,7 +160,7 @@ Release highlights (stable releases):
 | Speculative Decoding | Supported | Supported | Supported (Eagle3) |
 | GPU Memory Service | Supported (Weights and KV; upstream integration remains in progress) | Experimental (Weights only; multinode and upstream integration remain in progress) | Supported (Weights and KV; upstream integration remains in progress) |
 | Shadow Engine Failover | Experimental (No KV-cache reuse or hardware fault tolerance) | Experimental (No KV-cache reuse or hardware fault tolerance) | Supported with caveat (Software-process failover only; no KV-cache reuse or hardware fault tolerance) |
-| Dynamo Snapshot | Supported with caveat (Single-GPU supported; multi-GPU and multinode remain in progress) | Experimental (Single-GPU aggregated text-worker path only) | Supported with caveat (Single-GPU supported; multi-GPU is highly experimental and multinode remains in progress) |
+| Dynamo Snapshot | Supported with caveat (Single-node single- and multi-GPU supported; multinode remains in progress) | Experimental (Aggregated text-worker path only) | Supported with caveat (Single-node single- and multi-GPU supported; multinode remains in progress) |
 
 ## Artifact inventory (v1.5.0)
 
@@ -278,12 +278,6 @@ Release highlights (stable releases):
 
 ## Nightlies
 
-ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026); kvbm joined the nightly train on Aug 2, 2026. Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus a rolling `latest` tag.
-
-| Version | Date | Packages | Notes |
-| --- | --- | --- | --- |
-| 1.5.0.dev20260831 | Aug 31, 2026 | ai-dynamo, ai-dynamo-runtime, kvbm | - |
-| 1.5.0.dev20260830 | Aug 30, 2026 | ai-dynamo, ai-dynamo-runtime, kvbm | - |
-| 1.5.0.dev20260829 | Aug 29, 2026 | ai-dynamo, ai-dynamo-runtime, kvbm | - |
+ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026); kvbm joined the nightly train on Aug 2, 2026. Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus a rolling `latest` tag. A night is listed once both its `ai-dynamo` and `ai-dynamo-runtime` wheels published; a night with an incomplete wheel train is omitted.
 
 {/* llms-tables:end */}
