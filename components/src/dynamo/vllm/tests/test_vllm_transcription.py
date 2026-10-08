@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 
 from dynamo.llm import HttpError
 from dynamo.vllm import transcription_handler
@@ -125,6 +124,10 @@ def test_generate_preserves_native_vllm_error_status():
 
 
 async def _assert_generate_preserves_native_vllm_error_status():
+    # Imported here, as in test_realtime_handler, so collection does not need
+    # vLLM's serving modules.
+    from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
+
     handler = make_handler()
     handler._run_with_cancellation = AsyncMock(
         return_value=ErrorResponse(

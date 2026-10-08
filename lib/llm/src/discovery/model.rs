@@ -300,10 +300,12 @@ impl Model {
             .any(|worker_set| worker_set.has_audios_engine())
     }
 
+    /// Check if any WorkerSet has a transcriptions engine.
     pub fn has_transcriptions_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_transcriptions_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_transcriptions_engine())
     }
 
     /// Check if any WorkerSet has a realtime engine.

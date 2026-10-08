@@ -27,6 +27,7 @@ use dynamo_runtime::pipeline::{
 use reqwest::StatusCode;
 
 const MODEL: &str = "test-whisper";
+const ALIAS: &str = "test-whisper-alias";
 
 struct TestTranscriptionEngine {
     fail: bool,
@@ -171,6 +172,10 @@ impl TestService {
             .model_manager()
             .add_transcriptions_model(MODEL, "0", engine)
             .expect("failed to register transcription model");
+        assert!(
+            service.model_manager().register_alias(ALIAS, MODEL),
+            "failed to register transcription model alias"
+        );
         let metrics = service.state_clone().metrics_clone();
 
         let cancel = CancellationToken::new();
@@ -251,6 +256,31 @@ async fn multipart_request_uses_default_model_and_returns_json() {
     let response: NvAudioTranscriptionResponse = response.json().await.unwrap();
     assert_eq!(response.text, "sample.wav:5");
     assert_eq!(response.language.as_deref(), Some("en"));
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn alias_request_routes_and_meters_under_primary_model() {
+    let service = TestService::start(false).await;
+
+    let response = service
+        .transcribe_with_form(reqwest::multipart::Form::new().text("model", ALIAS))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: NvAudioTranscriptionResponse = response.json().await.unwrap();
+    assert_eq!(response.text, "sample.wav:5");
+    let counter = |model: &str| {
+        service.metrics.get_request_counter(
+            model,
+            &Endpoint::Transcriptions,
+            &RequestType::Unary,
+            &Status::Success,
+            &MetricErrorType::None,
+        )
+    };
+    assert_eq!(counter(MODEL), 1);
+    assert_eq!(counter(ALIAS), 0);
     service.shutdown().await;
 }
 

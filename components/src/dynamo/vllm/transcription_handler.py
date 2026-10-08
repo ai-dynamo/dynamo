@@ -21,9 +21,9 @@ from .engine_monitor import VllmEngineMonitor
 _TRANSCRIPTION_IMPORT_ERROR: ImportError | None = None
 try:
     from fastapi import UploadFile
-    from vllm.entrypoints.openai.engine.protocol import ErrorResponse
     from vllm.entrypoints.openai.models.protocol import BaseModelPath
     from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+    from vllm.entrypoints.serve.engine.protocol import ErrorResponse
     from vllm.entrypoints.speech_to_text.transcription.protocol import (
         TranscriptionRequest,
     )

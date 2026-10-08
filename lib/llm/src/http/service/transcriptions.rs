@@ -178,8 +178,12 @@ async fn audio_transcription(
             .find(|model| state.manager().is_model_ready_to_serve(model))
             .unwrap_or_default(),
     };
-    request.model = Some(model.clone());
+    // Gate readiness on the requested name so a 503 quotes back what the caller
+    // asked for, then resolve a --served-model-name alias to its primary before
+    // it reaches routing, metrics, or the engine request (as /v1/audio/speech does).
     check_model_serving_ready(&state, &model)?;
+    let model = state.manager().resolve_canonical_name(&model);
+    request.model = Some(model.clone());
 
     let metric_model = state.manager().metric_model_for(&model).to_string();
     let request_id = get_or_create_request_id(&headers);

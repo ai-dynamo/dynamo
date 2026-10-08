@@ -2035,7 +2035,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -2044,14 +2044,22 @@ class WorkerFactory:
 
         fpm_worker_id = str(generate_endpoint.connection_id())
         if snapshot_engine is not None:
+            # A restored snapshot carries the engine together with the stat
+            # logger factory it was built with; bind that factory and retarget
+            # the FPM worker id the same way the realtime worker does.
+            engine_setup, stat_logger_factory = snapshot_engine
             (
                 engine_client,
                 vllm_config,
                 _default_sampling_params,
                 _prometheus_temp_dir,
                 _component_gauges,
-            ) = snapshot_engine
+            ) = engine_setup
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+            stat_logger_factory.bind_endpoint(generate_endpoint)
+            await _sync_fpm_worker_id_or_shutdown(
+                engine_client, vllm_config, fpm_worker_id
+            )
         else:
             engine_client, vllm_config, _, _, _ = self.setup_vllm_engine(
                 config,

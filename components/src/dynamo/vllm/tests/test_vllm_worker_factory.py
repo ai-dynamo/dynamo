@@ -4878,12 +4878,19 @@ async def test_transcription_worker_reuses_snapshot_engine(
 
     engine_client = Mock()
     vllm_config = Mock()
-    snapshot_engine: EngineSetupResult = (
+    engine_setup: EngineSetupResult = (
         engine_client,
         vllm_config,
         Mock(),
         None,
         Mock(),
+    )
+    stat_logger_factory = Mock()
+    snapshot_engine: SnapshotEngineSetupResult = (engine_setup, stat_logger_factory)
+    sync_fpm_worker_id = AsyncMock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._sync_fpm_worker_id_or_shutdown",
+        sync_fpm_worker_id,
     )
     setup_vllm_engine = Mock()
     register_vllm_model = AsyncMock()
@@ -4915,6 +4922,8 @@ async def test_transcription_worker_reuses_snapshot_engine(
     )
 
     setup_vllm_engine.assert_not_called()
+    stat_logger_factory.bind_endpoint.assert_called_once_with(endpoint)
+    sync_fpm_worker_id.assert_awaited_once_with(engine_client, vllm_config, "worker-1")
     assert register_vllm_model.await_args.args[4] is engine_client
     assert register_vllm_model.await_args.args[5] is vllm_config
     endpoint.serve_endpoint.assert_awaited_once()
