@@ -9,7 +9,7 @@ outside the shared CI GPU budget. Set DYNAMO_DECISION_REQUIRE_SDKS=1 to make
 missing official clients a failure instead of an optional-dependency skip.
 
 Use the server origin without /v1 and the exact registered model alias. The
-recorded client profile is openai==3.26.0 and typesafe==0.7.2 in an isolated
+recorded client profile is openai==3.26.0 and typesafe-sdk==0.7.2 in an isolated
 client environment; do not replace shared repository dependency pins. This
 module exercises synchronous Python clients, not the complete SDK matrix.
 For independent native numerical parity, also set DYNAMO_DECISION_NATIVE_URL
