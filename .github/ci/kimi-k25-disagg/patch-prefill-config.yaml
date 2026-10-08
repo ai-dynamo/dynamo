@@ -19,9 +19,9 @@ data:
     max_seq_len: 200000
     tensor_parallel_size: 4
     moe_expert_parallel_size: 4
-    # TensorRT-LLM 1.3.0rc28 and rc29 allocate the same EAGLE3 request slot
-    # twice with attention DP. Limit this workaround to the nightly CI overlay.
-    enable_attention_dp: false
+    # Regression check for NVIDIA/TensorRT-LLM#19891: EAGLE3 with attention DP.
+    # This test branch uses the fixed 1.4.0rc0.dev202610070001 daily build.
+    enable_attention_dp: true
     pipeline_parallel_size: 1
     print_iter_log: true
     stream_interval: 100

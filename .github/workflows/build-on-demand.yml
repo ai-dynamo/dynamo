@@ -26,6 +26,14 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      run_kimi_disagg:
+        description: 'Validate the EAGLE3 attention-DP fix after building TensorRT-LLM'
+        type: boolean
+        default: false
+      kimi_preflight_only:
+        description: 'Validate the Kimi recipe without deploying'
+        type: boolean
+        default: true
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -93,6 +101,9 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
+      build_only: true
+      extra_build_args: |
+        RUNTIME_IMAGE_TAG=1.4.0rc0.dev202610070001@sha256:4b814c463dfb9574bc9299ed4228c99b1e614f004745fd0303439bd9e01d5206
     secrets: inherit
 
   triton-build:
@@ -136,8 +147,8 @@ jobs:
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      # The Kimi GB200 recipe needs the ARM64 member of the image index.
+      copy_timeout_minutes: 20
     secrets: inherit
 
   # Triton images are published to AWS ECR only (no Azure ACR mirror), so there
@@ -146,6 +157,17 @@ jobs:
   # ============================================================================
   # OPERATOR (build-only)
   # ============================================================================
+
+  kimi-disagg-perf:
+    name: Kimi K2.5 EAGLE3 attention-DP regression
+    needs: [trtllm-copy-to-acr]
+    if: ${{ inputs.run_kimi_disagg }}
+    uses: ./.github/workflows/kimi-k25-disagg-nightly.yml
+    with:
+      source_ref: ${{ github.sha }}
+      image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
+      preflight_only: ${{ inputs.kimi_preflight_only }}
+    secrets: inherit
 
   operator:
     needs: [init]
