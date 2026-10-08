@@ -34,11 +34,13 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
+	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -77,6 +79,119 @@ func TestGroveReconcileRequestUsesDelegationPredicate(t *testing.T) {
 	defaultReq := groveReconcileRequest{DGD: dgd}
 	require.Equal(t, dgd.Spec.Components, defaultReq.ManagedComponents())
 	require.Empty(t, defaultReq.DelegatedComponents())
+}
+
+func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
+	for _, test := range []struct {
+		name                            string
+		scalingGroup, completedProgress bool
+		replicas                        int32
+	}{
+		{name: "standalone scale-up with missing progress", replicas: 3},
+		{name: "standalone scale-down with completed old progress", replicas: 1, completedProgress: true},
+		{name: "scaling group scale-up with completed old progress", replicas: 3, scalingGroup: true, completedProgress: true},
+		{name: "scaling group scale-down with missing progress", replicas: 1, scalingGroup: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
+			t.Log("Observe a Coherent PCS and two serving replicas at generation 8")
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid", Generation: 1, Annotations: map[string]string{consts.KubeAnnotationGroveUpdateStrategy: string(grovev1alpha1.CoherentStrategy)}},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+					ComponentName: "frontend", ComponentType: nvidiacomv1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(2)),
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "runtime:old"}}}},
+				}}},
+			}
+			if test.scalingGroup {
+				dgd.Spec.Components[0].Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)}}
+			}
+			config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}
+			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}
+			secrets := &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}
+			pcs, err := dynamo.GenerateGrovePodCliqueSet(ctx, dgd, nil, config, runtimeConfig, nil, secrets, nil, nil, false, nil)
+			require.NoError(t, err)
+			pcs.Generation = 8
+			pcs.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment"))}
+			pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+			if test.completedProgress {
+				pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now(), UpdateEndedAt: ptr.To(metav1.Now())}
+			}
+			hash, err := commoncontroller.GetSpecHash(pcs)
+			require.NoError(t, err)
+			pcs.Annotations = map[string]string{commoncontroller.NvidiaAnnotationHashKey: hash, commoncontroller.NvidiaAnnotationGenerationKey: "8"}
+			metadata := metav1.ObjectMeta{Name: "graph-0-frontend", Namespace: "default", Generation: 1}
+			var child client.Object = &grovev1alpha1.PodClique{ObjectMeta: metadata, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 2}, Status: grovev1alpha1.PodCliqueStatus{Replicas: 2, ReadyReplicas: 2, UpdatedReplicas: 2, ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1))}}
+			if test.scalingGroup {
+				child = &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metadata, Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2}, Status: grovev1alpha1.PodCliqueScalingGroupStatus{Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2, ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1))}}
+			}
+			writes := 0
+			funcs := groveScaleInterceptor(interceptor.Funcs{
+				Update: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
+					if desired, ok := object.(*unstructured.Unstructured); ok && desired.GetKind() == groveconstants.KindPodCliqueSet {
+						current := &unstructured.Unstructured{}
+						current.SetGroupVersionKind(desired.GroupVersionKind())
+						require.NoError(t, delegated.Get(ctx, client.ObjectKeyFromObject(desired), current))
+						if !apiequality.Semantic.DeepEqual(current.Object["spec"], desired.Object["spec"]) {
+							desired.SetGeneration(current.GetGeneration() + 1)
+						}
+					}
+					return delegated.Update(ctx, object, opts...)
+				},
+			}, func() { writes++ })
+			providerClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithRESTMapper(groveScaleRESTMapper()).WithObjects(dgd, pcs, child).WithStatusSubresource(dgd, pcs).Build()
+			kubeClient := interceptor.NewClient(providerClient, funcs)
+			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Config: config, RuntimeConfig: runtimeConfig, Recorder: events.NewFakeRecorder(10), DockerSecretRetriever: secrets}
+
+			t.Log("Request an image rollout and capacity change in the same DGD edit")
+			dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Image = "runtime:new"
+			dgd.Spec.Components[0].Replicas = ptr.To(test.replicas)
+			result, err := reconciler.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+			require.NoError(t, err)
+			require.Zero(t, writes)
+			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+			require.EqualValues(t, 9, pcs.Generation)
+			require.EqualValues(t, 8, *pcs.Status.ObservedGeneration)
+			require.Equal(t, "runtime:new", pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].Image)
+			dgd.Status = result.Status
+
+			t.Log("Fresh program instances keep the new spec pending despite old or missing progress")
+			for range 2 {
+				result, err = reconciler.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+				require.NoError(t, err)
+				require.Zero(t, writes)
+				require.Zero(t, result.Result, "the PCS watch resumes pending work")
+				require.True(t, meta.IsStatusConditionTrue(result.Status.Conditions, "ScalingDeferred"))
+				require.Contains(t, result.Status.Components, "frontend")
+				dgd.Status = result.Status
+			}
+
+			t.Log("Acknowledged active progress still blocks both scaling directions")
+			pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+			pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
+			require.NoError(t, providerClient.Status().Update(ctx, pcs))
+			result, err = reconciler.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+			require.NoError(t, err)
+			require.Zero(t, writes)
+			require.True(t, meta.IsStatusConditionTrue(result.Status.Conditions, "ScalingDeferred"))
+			dgd.Status = result.Status
+
+			t.Log("Only completion of the acknowledged generation releases scaling")
+			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+			pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+			require.NoError(t, providerClient.Status().Update(ctx, pcs))
+			result, err = reconciler.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+			require.NoError(t, err)
+			require.Equal(t, 1, writes)
+			require.True(t, meta.IsStatusConditionFalse(result.Status.Conditions, "ScalingDeferred"))
+			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(child), child))
+			switch live := child.(type) {
+			case *grovev1alpha1.PodClique:
+				require.Equal(t, test.replicas, live.Spec.Replicas)
+			case *grovev1alpha1.PodCliqueScalingGroup:
+				require.Equal(t, test.replicas, live.Spec.Replicas)
+			}
+		})
+	}
 }
 
 func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
@@ -882,8 +997,8 @@ func TestGroveProgram_ScalingDuringUpdatesPreservesStatus(t *testing.T) {
 		guard, mixedLPX, allowScaling, scaleDown                    bool
 	}{
 		{name: "active coherent update waits for completion", strategy: "Coherent", active: true, unobserved: true},
-		{name: "coherent configuration with lagging observed generation can scale", strategy: "Coherent", unobserved: true, allowScaling: true},
-		{name: "initial coherent configuration without observed generation can scale", strategy: "Coherent", missingObservation: true, allowScaling: true},
+		{name: "coherent configuration with lagging observed generation defers scaling", strategy: "Coherent", unobserved: true},
+		{name: "initial coherent configuration waits for Grove acknowledgement", strategy: "Coherent", missingObservation: true},
 		{name: "default rolling recreate can scale during a rollout", active: true, unobserved: true, allowScaling: true},
 		{name: "explicit rolling recreate can scale during a rollout", strategy: "RollingRecreate", active: true, unobserved: true, allowScaling: true},
 		{name: "default rolling recreate can scale down during a rollout", active: true, unobserved: true, allowScaling: true, scaleDown: true},
@@ -996,11 +1111,14 @@ func TestGroveProgram_ScalingDuringUpdatesPreservesStatus(t *testing.T) {
 			t.Log("Persist program status before the next reconciliation")
 			dgd.Status = result.Status
 
-			t.Log("Retry failures or complete the Coherent rollout without advancing observed generation")
+			t.Log("Retry failures or observe acknowledgement and completion of the current Coherent generation")
 			guardActive = false
 			if !test.guard && !test.allowScaling {
 				require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
-				pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+				pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+				if pcs.Status.UpdateProgress != nil {
+					pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+				}
 				require.NoError(t, kubeClient.Update(t.Context(), pcs))
 			}
 			result, err = reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})

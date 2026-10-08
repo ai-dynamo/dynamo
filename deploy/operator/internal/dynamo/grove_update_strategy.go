@@ -58,10 +58,19 @@ func GroveCoherentUpdateSelected(pcs *grovev1alpha1.PodCliqueSet) bool {
 	return pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovev1alpha1.CoherentStrategy
 }
 
-// GroveCoherentUpdateInProgress reports the provider's PCS-wide scaling lock.
-// pcs may be nil before initial creation; a missing PCS has no active update.
-// Grove advances observedGeneration after resource synchronization succeeds, so it
-// can lag throughout a RollingRecreate rollout and must not gate scaling.
-func GroveCoherentUpdateInProgress(pcs *grovev1alpha1.PodCliqueSet) bool {
-	return pcs != nil && GroveCoherentUpdateSelected(pcs) && pcs.Status.UpdateProgress != nil && pcs.Status.UpdateProgress.UpdateEndedAt == nil
+// GroveScalingBlocked reports whether a Coherent PCS must defer replica changes.
+// pcs may be nil before creation. Other strategies do not block scaling.
+func GroveScalingBlocked(pcs *grovev1alpha1.PodCliqueSet) bool {
+	if pcs == nil || !GroveCoherentUpdateSelected(pcs) {
+		return false
+	}
+
+	// Old or missing progress cannot acknowledge a newly observed Coherent spec.
+	// Grove advances observedGeneration after resource synchronization, which can
+	// lag until a rollout finishes; this wait applies only to Coherent.
+	if pcs.Status.ObservedGeneration == nil || *pcs.Status.ObservedGeneration != pcs.Generation {
+		return true
+	}
+
+	return pcs.Status.UpdateProgress != nil && pcs.Status.UpdateProgress.UpdateEndedAt == nil
 }

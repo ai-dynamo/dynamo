@@ -140,8 +140,8 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	// Wait for cached PCS intent after a write and for an active Coherent rollout.
-	scalingBlocked := pcsWasWritten || dynamo.GroveCoherentUpdateInProgress(syncedPodCliqueSet)
+	// Wait for cached PCS intent, Coherent generation acknowledgement, and completion.
+	scalingBlocked := pcsWasWritten || dynamo.GroveScalingBlocked(syncedPodCliqueSet)
 	scalingDeferred, scaleErr := r.scaler.Reconcile(ctx, req, checkpointInfos, scalingBlocked)
 	if scaleErr != nil {
 		scaleErr = fmt.Errorf("failed to reconcile Grove scaling: %w", scaleErr)

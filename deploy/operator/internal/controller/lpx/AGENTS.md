@@ -76,10 +76,13 @@ SPDX-License-Identifier: Apache-2.0
   LPXGD updates are filtered. Ordinary errors use controller-runtime backoff.
 - Synchronize the desired PCS before any replica write, including scale-down and
   deadline cleanup. After a PCS write, wait for its watched cache observation. Use
-  the shared Coherent-update predicate to defer replica writes during that rollout.
-  Do not gate scaling on Grove's observed generation: it can lag throughout a
-  RollingRecreate rollout. Continue observing readiness and component status while
-  scaling is deferred.
+  the shared scaling predicate to defer Coherent replica writes until Grove's
+  observed generation matches the current PCS generation and no rollout is active.
+  Completed progress from an older generation does not acknowledge a new spec.
+  Apply this generation wait only to Coherent: observed generation can lag
+  throughout RollingRecreate without blocking its scaling. Initial Coherent
+  configuration acknowledgement does not require scheduler requests or Ready pods.
+  Continue observing readiness and component status while scaling is deferred.
 - After writing a PCS, wait for its watched observation before publishing LPRs.
   An LPR `AlreadyExists` response means wait for observation, not adopt an
   unverified object. Never adopt a foreign resource with the expected name.

@@ -233,7 +233,7 @@ func mustJSON(t *testing.T, value any) string {
 	return string(raw)
 }
 
-func TestGroveCoherentUpdateInProgress(t *testing.T) {
+func TestGroveScalingBlocked(t *testing.T) {
 	for _, test := range []struct {
 		name                           string
 		strategy                       grovev1alpha1.UpdateStrategyType
@@ -243,16 +243,20 @@ func TestGroveCoherentUpdateInProgress(t *testing.T) {
 	}{
 		{name: "before creation", missingPCS: true},
 		{name: "initial configuration without observed generation", noProgress: true},
-		{name: "coherent configuration before an update starts", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(1)), noProgress: true},
+		{name: "initial coherent configuration without observed generation", strategy: grovev1alpha1.CoherentStrategy, noProgress: true, blocked: true},
+		{name: "coherent configuration before an update starts", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(1)), noProgress: true, blocked: true},
+		{name: "acknowledged coherent configuration without a rollout", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(2)), noProgress: true},
 		{name: "active coherent update with lagging observed generation", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(1)), active: true, blocked: true},
 		{name: "active coherent update without observed generation", strategy: grovev1alpha1.CoherentStrategy, active: true, blocked: true},
-		{name: "completed coherent update with lagging observed generation", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(1))},
+		{name: "active coherent update after generation acknowledgement", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(2)), active: true, blocked: true},
+		{name: "completed coherent update with lagging observed generation", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(1)), blocked: true},
+		{name: "completed acknowledged coherent update", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(2))},
 		{name: "active rolling recreate with lagging observed generation", strategy: grovev1alpha1.RollingRecreateStrategy, observed: ptr.To(int64(1)), active: true},
 		{name: "on delete with lagging observed generation", strategy: grovev1alpha1.OnDeleteStrategy, observed: ptr.To(int64(1))},
 		{name: "implicit rolling recreate with lagging observed generation", observed: ptr.To(int64(1)), active: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Observe provider update progress independently of observed generation")
+			t.Log("Observe the PCS strategy, generation acknowledgement, and update progress")
 			pcs := &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{Generation: 2},
 				Status: grovev1alpha1.PodCliqueSetStatus{
@@ -274,8 +278,8 @@ func TestGroveCoherentUpdateInProgress(t *testing.T) {
 			}
 			before := pcs.DeepCopy()
 
-			t.Log("Only an active Coherent update holds the provider scaling lock")
-			require.Equal(t, test.blocked, GroveCoherentUpdateInProgress(pcs))
+			t.Log("Coherent scaling waits for the current generation and rollout completion")
+			require.Equal(t, test.blocked, GroveScalingBlocked(pcs))
 			require.Equal(t, before, pcs)
 		})
 	}
