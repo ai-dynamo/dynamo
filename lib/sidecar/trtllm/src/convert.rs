@@ -56,23 +56,20 @@ pub(crate) fn build_generate_request(
     };
     // The decode worker replays the prefill worker's session; the prefill worker
     // marks its request `context_only` through `extra`.
-    let (kv, extra) = match mode {
-        DisaggregationMode::Prefill => (None, Some(disagg::context_only_extra())),
+    let kv = match mode {
+        DisaggregationMode::Prefill => None,
         // A handoff is the normal case, but conditional disaggregation
         // dispatches straight to a decode worker with none, expecting it to run
         // the context phase itself. Requiring one would fail every bypassed
         // request.
         DisaggregationMode::Decode => match request.prefill_result.as_ref() {
-            Some(handoff) => (
-                Some(pb::KvOptions {
-                    session: Some(disagg::session_from_json(&handoff.disaggregated_params)?),
-                    ..Default::default()
-                }),
-                None,
-            ),
-            None => (None, None),
+            Some(handoff) => Some(pb::KvOptions {
+                session: Some(disagg::session_from_json(&handoff.disaggregated_params)?),
+                ..Default::default()
+            }),
+            None => None,
         },
-        DisaggregationMode::Aggregated | DisaggregationMode::Encode => (None, None),
+        DisaggregationMode::Aggregated | DisaggregationMode::Encode => None,
     };
 
     Ok(pb::GenerateRequest {
@@ -130,7 +127,14 @@ pub(crate) fn build_generate_request(
         media: Vec::new(),
         lora_name: String::new(),
         kv,
-        extra,
+        extra: Some(disagg::request_extra(
+            mode.is_prefill(),
+            request
+                .agent_context
+                .as_ref()
+                .map(|context| context.session_id.trim())
+                .filter(|session_id| !session_id.is_empty()),
+        )),
     })
 }
 
@@ -413,21 +417,17 @@ fn validate_request(
             "request priority is not supported by the TensorRT-LLM sidecar",
         ));
     }
-    if request
-        .routing
-        .as_ref()
-        .is_some_and(|routing| routing.dp_rank.is_some() || routing.prefill_dp_rank.is_some())
-    {
-        // The same server branch that rejects `openengine-priority` also rejects
-        // `openengine-target-dp-rank` (`grpc/openengine/request_mapping.py`,
-        // `_trace_headers`), and the servicer turns that into UNIMPLEMENTED --
-        // measured against TensorRT-LLM main at 8bbaf66bd5, rank 0 included.
-        // Sending it anyway failed the whole request with a non-migratable
-        // 5xx; rejecting here names the unsupported feature in a 4xx instead.
-        // `nvext.dp_rank` and the `x-dynamo-dp-rank` header both reach this
-        // field, so it is reachable without a KV router.
+    if request.routing.as_ref().is_some_and(|routing| {
+        routing.dp_rank.is_some_and(|rank| rank != 0)
+            || routing.prefill_dp_rank.is_some_and(|rank| rank != 0)
+    }) {
+        // This sidecar advertises one logical worker (rank 0). The KV router
+        // attaches that rank even when KV events are disabled. It selects the
+        // endpoint, not an internal TRT-LLM attention-DP rank: the engine owns
+        // internal placement through conversation affinity. Nonzero logical
+        // ranks are not registered and must never be silently ignored.
         return Err(client::invalid_argument(
-            "data-parallel rank targeting is not supported by the TensorRT-LLM sidecar",
+            "nonzero data-parallel rank targeting is not supported by the TensorRT-LLM sidecar",
         ));
     }
     if request.stop_conditions.max_thinking_tokens.is_some() {
