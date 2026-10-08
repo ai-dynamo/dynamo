@@ -383,7 +383,7 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 </ParamField>
 
 <Warning>
-Dynamo v1.6.0 is a hard compatibility boundary for checkpoint resources. Dynamo creates automatic captures through the standalone Snapshot operator's `SnapshotJob` API, and `checkpointRef` names a standalone `PodSnapshot`. Legacy `DynamoCheckpoint` objects and their artifacts cannot be restored.
+Dynamo v1.5.0 is a hard compatibility boundary for checkpoint resources. Dynamo creates automatic captures through the standalone Snapshot operator's `SnapshotJob` API, and `checkpointRef` names a standalone `PodSnapshot`. Legacy `DynamoCheckpoint` objects and their artifacts cannot be restored.
 
 The upgrade does not delete the legacy `DynamoCheckpoint` CRD, instances, `PodSnapshot` objects, `PodSnapshotContent` objects, PVC data, or stored artifacts. Before upgrading, list retained `DynamoCheckpoint` objects and legacy `PodSnapshot` objects labeled `nvidia.com/snapshot-owner`, recreate any required snapshots through the standalone Snapshot APIs, and delete unneeded legacy checkpoints while the old controller can still run their finalizers. After upgrading, review and remove unsupported resources manually. Do not delete the shared `PodSnapshot` or `PodSnapshotContent` CRDs because the standalone Snapshot operator uses them.
 </Warning>
