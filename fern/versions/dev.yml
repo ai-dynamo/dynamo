@@ -397,6 +397,8 @@ navigation:
                 contents:
                   - page: Overview
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/frontend/overview.md
+                  - page: Protocol Field Handling
+                    path: ../pages-dev/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md
                   - page: KServe gRPC Frontend
                     slug: kserve-grpc-frontend
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/frontend/frontend-guide.md
