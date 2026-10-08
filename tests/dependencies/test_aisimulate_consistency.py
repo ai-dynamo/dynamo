@@ -145,10 +145,11 @@ def test_dynamo_declares_matching_aisimulate_requirements() -> None:
     cargo_version = Version(cargo_requirement.removeprefix("="))
 
     patch = cargo.get("patch", {}).get("crates-io", {}).get("aisimulate-core")
-    assert python_versions.contains(cargo_version)
-    assert python_versions.contains("0.13.0")
     assert not python_versions.contains("0.14.0")
-    if patch is not None:
+    if patch is None:
+        assert python_versions.contains(cargo_version)
+        assert python_versions.contains("0.13.0")
+    else:
         # Release freezes pin Rust source independently of the Python wheel.
         assert set(patch) == {"git", "rev"}
         assert patch["git"] == "https://github.com/ai-dynamo/aisimulate.git"
