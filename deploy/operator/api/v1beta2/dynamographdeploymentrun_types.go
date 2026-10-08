@@ -113,7 +113,8 @@ type DynamoGraphDeploymentRunStatus struct {
 	// +optional
 	Progress *DGDRRunProgress `json:"progress,omitempty"`
 
-	// CandidateRefs identifies the current bounded DGDC projection.
+	// CandidateRefs identifies the current bounded DGDC projection. List order
+	// represents rank, best first, for scalar searches.
 	// +optional
 	CandidateRefs []corev1.LocalObjectReference `json:"candidateRefs,omitempty"`
 

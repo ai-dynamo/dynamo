@@ -18,47 +18,12 @@
 package v1beta2
 
 import (
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// RemoteCodePolicy controls whether generated backend commands may execute
-// Python code from the model repository.
-// +kubebuilder:validation:Enum=Never;TrustCacheAndRevision;AlwaysTrust
-type RemoteCodePolicy string
-
-const (
-	RemoteCodeNever                 RemoteCodePolicy = "Never"
-	RemoteCodeTrustCacheAndRevision RemoteCodePolicy = "TrustCacheAndRevision"
-	RemoteCodeAlwaysTrust           RemoteCodePolicy = "AlwaysTrust"
-)
-
-// ModelPVCSpec identifies model weights on a PersistentVolumeClaim in the DGDR namespace.
-type ModelPVCSpec struct {
-	// Name is the PersistentVolumeClaim containing the model weights.
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
-
-	// ModelPath is the model directory relative to the root of the claim.
-	// +kubebuilder:validation:MinLength=1
-	ModelPath string `json:"modelPath"`
-
-	// MountPath is the absolute mount path in generated containers.
-	// +kubebuilder:validation:Pattern=`^/`
-	MountPath string `json:"mountPath"`
-}
-
-// ModelCacheSpec identifies model weights already available to the search Job
-// and generated DGD.
-type ModelCacheSpec struct {
-	// PVC mounts model weights from a PersistentVolumeClaim in the DGDR namespace.
-	PVC *ModelPVCSpec `json:"pvc,omitempty"`
-}
-
 // ModelReference identifies the model whose deployment configurations are evaluated.
-// +kubebuilder:validation:XValidation:rule="self.remoteCode != 'TrustCacheAndRevision' || (has(self.revision) && has(self.cache) && has(self.cache.pvc))",message="remoteCode TrustCacheAndRevision requires revision and cache.pvc"
 type ModelReference struct {
 	// Name identifies the model in the syntax accepted by the selected backend.
 	// +kubebuilder:validation:MinLength=1
@@ -67,15 +32,6 @@ type ModelReference struct {
 	// Revision pins repository contents. Backends that do not support revisions reject this field.
 	// +optional
 	Revision string `json:"revision,omitempty"`
-
-	// RemoteCode controls whether generated backend commands may execute model-repository Python code.
-	// +optional
-	// +kubebuilder:default=Never
-	RemoteCode RemoteCodePolicy `json:"remoteCode,omitempty"`
-
-	// Cache identifies model weights already available to the search Job and generated DGD.
-	// +optional
-	Cache *ModelCacheSpec `json:"cache,omitempty"`
 }
 
 // Backend identifies an inference backend searched by Sweeper and used by generated candidates.
@@ -224,7 +180,7 @@ const (
 type ObjectiveMetric string
 
 // ObjectiveSLASpec defines per-request latency bounds used to calculate goodput.
-// +kubebuilder:validation:XValidation:rule="has(self.e2eMs) != (has(self.ttftMs) && has(self.itlMs))",message="specify either e2eMs or both ttftMs and itlMs"
+// +kubebuilder:validation:XValidation:rule="has(self.e2eMs) ? (!has(self.ttftMs) && !has(self.itlMs)) : (has(self.ttftMs) && has(self.itlMs))",message="specify either e2eMs or both ttftMs and itlMs"
 type ObjectiveSLASpec struct {
 	// TTFTMs is the Time To First Token bound in milliseconds.
 	// +optional
@@ -309,26 +265,6 @@ type RecommendationSpec struct {
 	MaxCandidates int32 `json:"maxCandidates,omitempty"`
 }
 
-// RerunSpec intentionally changes the DGDR spec when search inputs otherwise remain unchanged.
-type RerunSpec struct {
-	// Reason records why the user requested another run. Any new value creates a new generation.
-	// +kubebuilder:validation:MinLength=1
-	Reason string `json:"reason"`
-}
-
-// OverridesSpec customizes the generated Job and DGD without changing modeled search semantics.
-type OverridesSpec struct {
-	// ProfilingJob is a partial batch/v1 JobSpec merged into the controller-generated Job.
-	// +optional
-	ProfilingJob *batchv1.JobSpec `json:"profilingJob,omitempty"`
-
-	// DGD is a partial versioned DGD merged after candidate materialization and before hashing.
-	// +optional
-	// +kubebuilder:pruning:PreserveUnknownFields
-	// +kubebuilder:validation:EmbeddedResource
-	DGD *runtime.RawExtension `json:"dgd,omitempty"`
-}
-
 // DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
 type DynamoGraphDeploymentRequestSpec struct {
 	// ModelRef identifies the model whose deployment configurations are evaluated.
@@ -337,10 +273,6 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// Backends lists one or more inference backends searched by Sweeper and used by generated candidates.
 	// +kubebuilder:validation:MinItems=1
 	Backends []Backend `json:"backends"`
-
-	// Image is the versioned container image used by the controller-generated search Job.
-	// +kubebuilder:validation:MinLength=1
-	Image string `json:"image"`
 
 	// Hardware bounds the accelerator configurations evaluated by the search.
 	Hardware HardwareSpec `json:"hardware"`
@@ -356,15 +288,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 
 	// Recommendation controls bounded projection into DGDC resources.
 	// +optional
-	Recommendation RecommendationSpec `json:"recommendation,omitempty"`
-
-	// Rerun intentionally changes the DGDR spec when search inputs otherwise remain unchanged.
-	// +optional
-	Rerun *RerunSpec `json:"rerun,omitempty"`
-
-	// Overrides customizes the generated Job and DGD without changing modeled search semantics.
-	// +optional
-	Overrides *OverridesSpec `json:"overrides,omitempty"`
+	Recommendation *RecommendationSpec `json:"recommendation,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestStatus represents reconciliation of persistent search intent.

@@ -21,9 +21,6 @@ spec:
   scope: Namespaced
   versions:
     - additionalPrinterColumns:
-        - jsonPath: .status.rank
-          name: Rank
-          type: integer
         - jsonPath: .status.conditions[?(@.type=="Evaluated")].status
           name: Evaluated
           type: string
@@ -36,9 +33,7 @@ spec:
       name: v1beta2
       schema:
         openAPIV3Schema:
-          description: |-
-            DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
-            Its spec is exactly the v1beta1 DynamoGraphDeploymentSpec schema.
+          description: DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
           properties:
             apiVersion:
               description: |-
@@ -58,7 +53,9 @@ spec:
             metadata:
               type: object
             spec:
-              description: DynamoGraphDeploymentSpec defines the desired state of a DynamoGraphDeployment.
+              description: |-
+                DynamoGraphDeploymentCandidateSpec is an immutable evaluated point: the
+                inline DGD spec plus its resolved evaluation parameters.
               properties:
                 annotations:
                   additionalProperties:
@@ -9172,6 +9169,10 @@ spec:
                     type: string
                   description: labels to propagate to all child resources. Same precedence rules as `annotations`.
                   type: object
+                parameters:
+                  description: Parameters are the resolved evaluation parameters for this point.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
                 priorityClassName:
                   description: |-
                     priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
@@ -9332,17 +9333,10 @@ spec:
                   x-kubernetes-list-map-keys:
                     - type
                   x-kubernetes-list-type: map
-                experimental:
-                  description: |-
-                    Experimental contains Sweeper-version-specific diagnostics and round-trips
-                    without a nested CRD schema.
+                metrics:
+                  description: Metrics are the resolved evaluation metrics for this point.
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
-                rank:
-                  description: Rank is the one-based scalar ordering and is absent for Pareto searches.
-                  format: int32
-                  minimum: 1
-                  type: integer
               type: object
           required:
             - spec

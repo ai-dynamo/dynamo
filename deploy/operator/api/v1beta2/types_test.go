@@ -68,11 +68,65 @@ func TestRunSpecIsExactRequestSpec(t *testing.T) {
 func TestCandidateSpecUsesV1Beta1DGDContract(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Compare the candidate spec type with the v1beta1 DGD contract.")
-	candidateType := reflect.TypeOf(DynamoGraphDeploymentCandidate{}).Field(2).Type
+	t.Log("Verify that the candidate spec inlines the v1beta1 DGD contract.")
+	candidateSpecType := reflect.TypeOf(DynamoGraphDeploymentCandidateSpec{})
+	dgdField := candidateSpecType.Field(0)
 	dgdType := reflect.TypeOf(v1beta1.DynamoGraphDeploymentSpec{})
-	if candidateType != dgdType {
-		t.Fatalf("candidate spec type %v differs from v1beta1 DGD spec type %v", candidateType, dgdType)
+	if !dgdField.Anonymous || dgdField.Type != dgdType || dgdField.Tag.Get("json") != ",inline" {
+		t.Fatalf("candidate DGD field = %#v, want anonymous inline %v", dgdField, dgdType)
 	}
 
+	t.Log("Verify that resolved parameters are part of the immutable candidate spec.")
+	parametersField, ok := candidateSpecType.FieldByName("Parameters")
+	if !ok {
+		t.Fatal("candidate spec has no Parameters field")
+	}
+	rawExtensionType := reflect.TypeOf((*runtime.RawExtension)(nil))
+	if parametersField.Type != rawExtensionType {
+		t.Fatalf("candidate parameters type = %v, want %v", parametersField.Type, rawExtensionType)
+	}
+}
+
+func TestRequestSpecUsesMVPFieldSet(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Verify the request spec contains only MVP search intent.")
+	specType := reflect.TypeOf(DynamoGraphDeploymentRequestSpec{})
+	got := make([]string, specType.NumField())
+	for i := range specType.NumField() {
+		got[i] = specType.Field(i).Name
+	}
+	want := []string{
+		"ModelRef",
+		"Backends",
+		"Hardware",
+		"Workload",
+		"Objective",
+		"Search",
+		"Recommendation",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("request spec fields = %v, want %v", got, want)
+	}
+
+	t.Log("Verify the model reference retains only model identity and revision.")
+	modelType := reflect.TypeOf(ModelReference{})
+	got = make([]string, modelType.NumField())
+	for i := range modelType.NumField() {
+		got[i] = modelType.Field(i).Name
+	}
+	want = []string{"Name", "Revision"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("model reference fields = %v, want %v", got, want)
+	}
+
+	t.Log("Verify the optional recommendation is omitted when absent.")
+	recommendationField, ok := specType.FieldByName("Recommendation")
+	if !ok {
+		t.Fatal("request spec has no Recommendation field")
+	}
+	wantRecommendationType := reflect.TypeOf((*RecommendationSpec)(nil))
+	if recommendationField.Type != wantRecommendationType {
+		t.Fatalf("recommendation type = %v, want %v", recommendationField.Type, wantRecommendationType)
+	}
 }

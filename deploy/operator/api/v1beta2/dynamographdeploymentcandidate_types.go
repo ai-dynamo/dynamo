@@ -26,41 +26,45 @@ import (
 // DynamoGraphDeploymentCandidateStatus describes simulation and materialization,
 // never deployment health.
 type DynamoGraphDeploymentCandidateStatus struct {
-	// Rank is the one-based scalar ordering and is absent for Pareto searches.
+	// Metrics are the resolved evaluation metrics for this point.
 	// +optional
-	// +kubebuilder:validation:Minimum=1
-	Rank *int32 `json:"rank,omitempty"`
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	Metrics *runtime.RawExtension `json:"metrics,omitempty"`
 
 	// Conditions describes evaluation and materialization.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
 
-	// Experimental contains Sweeper-version-specific diagnostics and round-trips
-	// without a nested CRD schema.
+// DynamoGraphDeploymentCandidateSpec is an immutable evaluated point: the
+// inline DGD spec plus its resolved evaluation parameters.
+type DynamoGraphDeploymentCandidateSpec struct {
+	v1beta1.DynamoGraphDeploymentSpec `json:",inline"`
+
+	// Parameters are the resolved evaluation parameters for this point.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
-	Experimental *runtime.RawExtension `json:"experimental,omitempty"`
+	Parameters *runtime.RawExtension `json:"parameters,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgdc
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || self.spec == oldSelf.spec",message="spec is immutable"
-// +kubebuilder:printcolumn:name="Rank",type=integer,JSONPath=`.status.rank`
 // +kubebuilder:printcolumn:name="Evaluated",type=string,JSONPath=`.status.conditions[?(@.type=="Evaluated")].status`
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backendFramework`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
-// Its spec is exactly the v1beta1 DynamoGraphDeploymentSpec schema.
 type DynamoGraphDeploymentCandidate struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   v1beta1.DynamoGraphDeploymentSpec    `json:"spec"`
+	Spec   DynamoGraphDeploymentCandidateSpec   `json:"spec"`
 	Status DynamoGraphDeploymentCandidateStatus `json:"status,omitempty"`
 }
 

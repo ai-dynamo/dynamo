@@ -41,6 +41,7 @@ _DEV_URL_RE = re.compile(r"[^\s<>()\[\]&\"']*/dynamo/dev/[^\s<>()\[\]&,;\"']*")
 EXPECTED_PACKAGES = (
     "nvidia.com/v1alpha1",
     "nvidia.com/v1beta1",
+    "nvidia.com/v1beta2",
     "operator.config.dynamo.nvidia.com/v1alpha1",
 )
 EXPECTED_TYPE_COUNTS = {
@@ -50,7 +51,7 @@ EXPECTED_TYPE_COUNTS = {
     # owned by github.com/ai-dynamo/snapshot.
     "nvidia.com/v1alpha1": 69,
     "nvidia.com/v1beta1": 74,
-    "nvidia.com/v1beta2": 38,
+    "nvidia.com/v1beta2": 34,
     "operator.config.dynamo.nvidia.com/v1alpha1": 29,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
