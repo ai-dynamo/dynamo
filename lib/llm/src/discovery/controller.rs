@@ -2475,11 +2475,7 @@ mod tests {
         assert_eq!(host.inventory.snapshot()[0].1.committed, HashSet::from([2]));
 
         controller.apply_removed(&newcomer.key);
-        let observation = host.inventory.snapshot().pop().unwrap().1;
-        assert_eq!(observation.state, WorkerGroupState::Removed);
-        assert!(observation.workers.is_empty());
-        assert!(observation.committed.is_empty());
-        assert!(observation.checksum_mismatches.is_empty());
+        assert!(host.inventory.snapshot().is_empty());
     }
 
     #[tokio::test]

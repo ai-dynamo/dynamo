@@ -190,9 +190,10 @@ If decode-block load does not produce HTTP 529 responses:
    rejected worker ID; first-wins admission leaves the incumbent `pending` during initialization or
    `available` after it succeeds. With one healthy incumbent and one incompatible newcomer, expect
    `discovered=2`, `available=1`, `pending=0`, and `excluded=1`; rejection does not remove the
-   incumbent. Workers removed from discovery have no per-worker state sample, while previously observed
-   empty groups retain `dynamo_frontend_router_workers{state="available"}` with value `0`. Missing
-   inventory series do not imply zero workers; verify scrape health and discovery. Inspect each
+   incumbent. Workers removed from discovery have no per-worker state sample. When the last worker
+   disappears and discovery withdraws the group, its `dynamo_frontend_router_workers` series also
+   disappears. Available counts of `0` still identify observed groups whose workers are pending or
+   excluded. Handle absent series when alerting on worker loss, and verify scrape health and discovery. Inspect each
    Frontend independently rather than aggregating readiness across Frontends. See
    [Router Worker Inventory](../../reference/observability/metrics-catalog.mdx#router-worker-inventory)
    for the full metric semantics.

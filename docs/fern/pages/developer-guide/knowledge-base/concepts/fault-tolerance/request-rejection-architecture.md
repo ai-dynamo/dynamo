@@ -112,8 +112,9 @@ and exclusion reason before diagnosing its load feed. For example, `state="exclu
 differs from the incumbent. During incumbent initialization, the incumbent remains
 `state="pending",reason="initializing"`; rejecting a newcomer never makes the incumbent pending or
 excluded. A worker removed from discovery has no per-worker state sample;
-`dynamo_frontend_router_workers` retains explicit zero counts after the last worker disappears for a
-previously observed group. If the worker is available but its load sample is missing, investigate load
+`dynamo_frontend_router_workers` disappears when discovery withdraws the group after its last worker
+is removed. An observed group with pending or excluded workers still reports `available=0`; alerts
+for worker loss must also handle absent series. If the worker is available but its load sample is missing, investigate load
 publication and subscriptions. Transient overload is separate from this availability check, so busy
 workers can still expose load samples for comparison with the configured threshold. Do not aggregate
 inventory across Frontends as worker-global readiness.

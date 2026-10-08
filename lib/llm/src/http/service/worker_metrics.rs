@@ -570,10 +570,57 @@ mod tests {
             assert_eq!(f.count("available"), Some(1.0));
             f.inventory.publish("group".into(), None);
             for state in COUNT_STATES {
-                assert_eq!(f.count(state), Some(0.0));
+                assert_eq!(f.count(state), None);
             }
             assert_eq!(f.sample("dynamo_frontend_router_worker_state", &[]), None);
         }
+    }
+
+    #[test]
+    fn withdrawn_namespace_disappears_without_removing_other_groups() {
+        let f = Fixture::new();
+        f.observe(&[1], &[1], WorkerGroupState::Ready);
+        let original = f.inventory.snapshot().pop().unwrap().1;
+        let mut replacement = original.clone();
+        replacement.endpoint.namespace = "ns-next".into();
+        replacement.workers = HashMap::from([(2, original.workers[&1].clone())]);
+        replacement.committed = HashSet::from([2]);
+        f.inventory.publish("replacement".into(), Some(replacement));
+        *f.available.lock() = HashSet::from([1, 2]);
+        let count = |namespace: &str, state: &str| {
+            f.sample(
+                "dynamo_frontend_router_workers",
+                &[("target_namespace", namespace), ("state", state)],
+            )
+        };
+        assert_eq!(count("ns", "available"), Some(1.0));
+        assert_eq!(count("ns-next", "available"), Some(1.0));
+
+        f.inventory.publish("group".into(), None);
+        for state in COUNT_STATES {
+            assert_eq!(count("ns", state), None);
+        }
+        assert_eq!(count("ns-next", "available"), Some(1.0));
+        assert_eq!(
+            f.sample(
+                "dynamo_frontend_router_worker_state",
+                &[("router_worker_id", "1")]
+            ),
+            None
+        );
+        for gauge in &f.values {
+            gauge.with_label_values(&["1", "0", "decode"]).set(99);
+            assert_eq!(
+                f.sample(&gauge.desc()[0].fq_name, &[("worker_id", "1")]),
+                None
+            );
+        }
+        assert_eq!(f.inventory.snapshot().len(), 1);
+
+        // Only a fresh discovery observation can restore the withdrawn group.
+        f.inventory.publish("group".into(), Some(original));
+        assert_eq!(count("ns", "available"), Some(1.0));
+        assert_eq!(count("ns-next", "available"), Some(1.0));
     }
 
     #[test]
