@@ -17,6 +17,39 @@ fn assert_invalid(error: DynamoError) {
 }
 
 #[test]
+fn media_strings_move_into_generate_request() {
+    let media = vec![
+        MultimodalData::RawUrl("data:image/jpeg;base64,AA==".to_string()),
+        MultimodalData::Url("https://example.com/image.jpg".parse().unwrap()),
+    ];
+    let pointers: Vec<_> = media
+        .iter()
+        .map(|item| match item {
+            MultimodalData::RawUrl(value) => value.as_ptr(),
+            MultimodalData::Url(value) => value.as_str().as_ptr(),
+            _ => unreachable!(),
+        })
+        .collect();
+    let mut request = epd_request(vec![("image_url", media)]);
+    request.multi_modal_uuids = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![Some("raw".to_string()), Some("parsed".to_string())],
+    )]));
+    let wire = build_generate_request(request, "move-media".into(), DisaggregationMode::Aggregated)
+        .unwrap();
+    assert_eq!(wire.media.len(), 2);
+    for (item, pointer) in wire.media.iter().zip(pointers) {
+        let source = match item.source.as_ref().unwrap() {
+            pb::media_item::Source::DataUri(value) | pb::media_item::Source::Url(value) => value,
+            other => panic!("unexpected media source: {other:?}"),
+        };
+        assert_eq!(source.as_ptr(), pointer);
+    }
+    assert_eq!(wire.media[0].uuid, "raw");
+    assert_eq!(wire.media[1].uuid, "parsed");
+}
+
+#[test]
 fn compatibility_envelope_preserves_typed_controls() {
     for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
         let request = PreprocessedRequest::builder()

@@ -272,9 +272,14 @@ pub struct MmRoutingInfo {
     pub expanded_prompt_len: usize,
 }
 
+/// Media carried between the frontend and backend.
+///
+/// A `Url` wire value can deserialize as either `Url` or `RawUrl` when parsing
+/// is unnecessary. Consumers must handle both representations of URL input.
 #[derive(Serialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
+    /// URL text without a parsed URL object; not all values have been validated.
     #[serde(rename(serialize = "Url"))]
     RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
@@ -285,19 +290,24 @@ pub enum MultimodalData {
 impl<'de> Deserialize<'de> for MultimodalData {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::IntoDeserializer;
+        use std::borrow::Cow;
 
         // Keep the existing names and variant order for old and new senders.
         #[derive(Deserialize)]
-        enum WireData {
-            Url(String),
+        enum WireData<'a> {
+            Url(#[serde(borrow)] Cow<'a, str>),
             RawUrl(String),
             Decoded(RdmaMediaDataDescriptor),
             UuidOnly(String),
         }
 
         match WireData::deserialize(deserializer)? {
-            WireData::Url(value) if is_plain_base64_data_uri(&value) => Ok(Self::RawUrl(value)),
-            WireData::Url(value) => url::Url::deserialize(value.into_deserializer()).map(Self::Url),
+            WireData::Url(value) if is_plain_base64_data_uri(&value) => {
+                Ok(Self::RawUrl(value.into_owned()))
+            }
+            WireData::Url(value) => {
+                url::Url::deserialize(value.as_ref().into_deserializer()).map(Self::Url)
+            }
             WireData::RawUrl(value) => Ok(Self::RawUrl(value)),
             WireData::Decoded(value) => Ok(Self::Decoded(value)),
             WireData::UuidOnly(value) => Ok(Self::UuidOnly(value)),
@@ -846,45 +856,134 @@ mod tests {
         ];
         for (value, fast) in values {
             let wire = serde_json::json!({"Url": value});
-            let decoded: MultimodalData = serde_json::from_value(wire).unwrap();
-            assert_eq!(
-                matches!(decoded, MultimodalData::RawUrl(_)),
-                fast,
-                "{value}"
-            );
+            let json = serde_json::to_vec(&wire).unwrap();
+            let packed = rmp_serde::to_vec_named(&wire).unwrap();
             let expected = url::Url::parse(value).unwrap();
-            assert_eq!(
-                serde_json::to_value(&decoded).unwrap(),
-                serde_json::json!({"Url": expected})
-            );
+            for decoded in [
+                serde_json::from_value::<MultimodalData>(wire).unwrap(),
+                serde_json::from_slice(&json).unwrap(),
+                rmp_serde::from_slice(&packed).unwrap(),
+            ] {
+                assert_eq!(
+                    matches!(decoded, MultimodalData::RawUrl(_)),
+                    fast,
+                    "{value}"
+                );
+                assert_eq!(
+                    serde_json::to_value(decoded).unwrap(),
+                    serde_json::json!({"Url": expected})
+                );
+            }
         }
+        let descriptor = serde_json::from_value(serde_json::json!({
+            "nixl_metadata": "test-metadata",
+            "nixl_descriptor": {"addr": 0, "size": 3, "mem_type": "Dram", "device_id": 0},
+            "shape": [1, 1, 3], "dtype": "UINT8", "metadata": null,
+            "content_hash": "0123456789abcdef"
+        }))
+        .unwrap();
         let old = vec![
             OldData::Url(url::Url::parse(values[0].0).unwrap()),
             OldData::RawUrl(values[0].0.into()),
+            OldData::Url(url::Url::parse("https://example.com/image.jpg").unwrap()),
+            OldData::Decoded(descriptor),
             OldData::UuidOnly("cache-id".into()),
         ];
         let json = serde_json::to_vec(&old).unwrap();
-        let new: Vec<MultimodalData> = serde_json::from_slice(&json).unwrap();
-        assert_eq!(serde_json::to_vec(&new).unwrap(), json);
-        let _: Vec<OldData> = serde_json::from_slice(&serde_json::to_vec(&new).unwrap()).unwrap();
+        let check = |new: Vec<MultimodalData>| {
+            assert_eq!(serde_json::to_vec(&new).unwrap(), json);
+            let legacy: Vec<OldData> =
+                serde_json::from_slice(&serde_json::to_vec(&new).unwrap()).unwrap();
+            assert_eq!(serde_json::to_vec(&legacy).unwrap(), json);
+            // A new public variant must update this compatibility test too.
+            let legacy: Vec<_> = new
+                .into_iter()
+                .map(|value| match value {
+                    MultimodalData::Url(value) => OldData::Url(value),
+                    MultimodalData::RawUrl(value) => OldData::RawUrl(value),
+                    MultimodalData::Decoded(value) => OldData::Decoded(value),
+                    MultimodalData::UuidOnly(value) => OldData::UuidOnly(value),
+                })
+                .collect();
+            assert_eq!(serde_json::to_vec(&legacy).unwrap(), json);
+        };
+        check(serde_json::from_slice(&json).unwrap());
+        check(serde_json::from_value(serde_json::to_value(&old).unwrap()).unwrap());
         for packed in [
             rmp_serde::to_vec(&old).unwrap(),
             rmp_serde::to_vec_named(&old).unwrap(),
         ] {
             let decoded: Vec<MultimodalData> = rmp_serde::from_slice(&packed).unwrap();
-            let back = rmp_serde::to_vec_named(&decoded).unwrap();
-            let legacy: Vec<OldData> = rmp_serde::from_slice(&back).unwrap();
-            assert_eq!(serde_json::to_vec(&legacy).unwrap(), json);
+            for back in [
+                rmp_serde::to_vec(&decoded).unwrap(),
+                rmp_serde::to_vec_named(&decoded).unwrap(),
+            ] {
+                let legacy: Vec<OldData> = rmp_serde::from_slice(&back).unwrap();
+                assert_eq!(serde_json::to_vec(&legacy).unwrap(), json);
+            }
+            check(decoded);
         }
         for value in ["relative", "http://[invalid"] {
-            assert!(
-                serde_json::from_value::<MultimodalData>(serde_json::json!({"Url":value})).is_err()
+            let wire = serde_json::json!({"Url": value});
+            assert_eq!(
+                serde_json::from_value::<MultimodalData>(wire.clone())
+                    .unwrap_err()
+                    .to_string(),
+                serde_json::from_value::<OldData>(wire.clone())
+                    .unwrap_err()
+                    .to_string()
+            );
+            let json = serde_json::to_vec(&wire).unwrap();
+            // The wire wrapper reports parser errors after reading the input,
+            // without JSON source positions, just as before the borrowed field.
+            assert_eq!(
+                serde_json::from_slice::<MultimodalData>(&json)
+                    .unwrap_err()
+                    .to_string(),
+                serde_json::from_value::<OldData>(wire.clone())
+                    .unwrap_err()
+                    .to_string()
+            );
+            let packed = rmp_serde::to_vec_named(&wire).unwrap();
+            assert_eq!(
+                rmp_serde::from_slice::<MultimodalData>(&packed)
+                    .unwrap_err()
+                    .to_string(),
+                rmp_serde::from_slice::<OldData>(&packed)
+                    .unwrap_err()
+                    .to_string()
             );
         }
         assert!(matches!(
             serde_json::from_value::<MultimodalData>(serde_json::json!({"RawUrl":"raw"})).unwrap(),
             MultimodalData::RawUrl(_)
         ));
+    }
+
+    #[test]
+    fn multimodal_uri_header_matches_url_parser() {
+        let cases = (0u8..=127)
+            .map(char::from)
+            .chain(['é', '💡'])
+            .map(|c| format!("data:image/{c};base64,AA=="))
+            .chain([
+                " \tdata:image/jpeg;base64,AA==\n".to_string(),
+                "DATA:image/jpeg;base64,AA==".to_string(),
+                "data://[invalid;base64,AA==".to_string(),
+            ]);
+        for value in cases {
+            let expected = url::Url::parse(&value);
+            let actual =
+                serde_json::from_value::<MultimodalData>(serde_json::json!({"Url": value}));
+            assert_eq!(actual.is_ok(), expected.is_ok(), "{value:?}");
+            if let Ok(expected) = expected {
+                assert_eq!(
+                    serde_json::to_value(actual.unwrap()).unwrap(),
+                    serde_json::json!({"Url": expected}),
+                    "{value:?}"
+                );
+            }
+        }
     }
 
     #[derive(serde::Deserialize)]
