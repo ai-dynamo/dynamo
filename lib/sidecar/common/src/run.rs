@@ -58,7 +58,7 @@ where
                 _ = sigint.recv() => {}
             }
             tracing::warn!("Second shutdown signal received; exiting immediately");
-            std::process::exit(dynamo_backend_common::shutdown::EXIT_CODE_SHUTDOWN_TIMEOUT);
+            std::process::exit(dynamo_runtime::worker::EXIT_CODE_SHUTDOWN_TIMEOUT);
         });
 
         let result = task(runtime.clone(), shutdown.clone()).await;
