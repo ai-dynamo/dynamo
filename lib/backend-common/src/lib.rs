@@ -27,6 +27,7 @@ pub mod snapshot_publisher;
 pub mod telemetry;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+mod topology;
 #[cfg(debug_assertions)]
 mod validate;
 pub mod worker;
@@ -40,8 +41,9 @@ pub use engine::{
     KV_HINT_TRANSFER_CAPABILITY_KEY, KvEventPublisher, KvEventSource, KvHint, KvHintAction,
     KvSourceLocationsPayload, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration,
     LogProbs, Metrics, MetricsBindings, MetricsCtx, MultimodalData, OnPublisherReady,
-    OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest, RawEngine,
-    SamplingOptions, StopConditions, StopReason, TopLogprob, TopLogprobs, chunk, usage,
+    OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest,
+    PromptTokensDetails, RawEngine, SamplingOptions, StopConditions, StopReason, TopLogprob,
+    TopLogprobs, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use lifecycle::RequestTracker;

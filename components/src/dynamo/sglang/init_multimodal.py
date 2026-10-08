@@ -70,6 +70,8 @@ async def init_multimodal_encode_worker(
         cache_publisher,
         shutdown_event,
     )
+    serving_task = None
+    registration_task = None
     try:
         server_args = config.use_resolved_server_args(handler.encoder.server_args)
 
@@ -83,21 +85,8 @@ async def init_multimodal_encode_worker(
 
         await pd_worker_client.wait_for_instances()
 
-        ready_event = asyncio.Event()
-
-        register_model_taint_route(runtime, generate_endpoint)
-        _ = await asyncio.gather(
-            serve_endpoint(
-                generate_endpoint,
-                handler.generate,
-                shutdown=shutdown,
-                graceful_shutdown=True,
-                metrics_labels=[
-                    (prometheus_names.labels.MODEL, server_args.served_model_name),
-                    (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
-                ],
-            ),
-            register_model_with_readiness_gate(
+        async def register_encoder() -> None:
+            await register_model_with_readiness_gate(
                 None,  # engine
                 generate_endpoint,
                 server_args,
@@ -111,18 +100,42 @@ async def init_multimodal_encode_worker(
                 # pair OR a single Aggregated peer — so the model is not
                 # advertised until the whole pipeline is live.
                 output_type=ModelType.Chat | ModelType.Completions,
-                readiness_gate=ready_event,
                 worker_type=WorkerType.Encode,
                 needs=[
                     [WorkerType.Prefill, WorkerType.Decode],
                     [WorkerType.Aggregated],
                 ],
-            ),
+            )
+            # Encode has no engine canary payload; publish process health only
+            # after initialization and model registration have succeeded.
+            runtime.set_health_status(True)
+
+        register_model_taint_route(runtime, generate_endpoint)
+        registration_task = asyncio.create_task(register_encoder())
+        # Runtime endpoints return a Future today, while test and alternate runtime
+        # implementations may return a coroutine. ensure_future supports both.
+        serving_task = asyncio.ensure_future(
+            serve_endpoint(
+                generate_endpoint,
+                handler.generate,
+                shutdown=shutdown,
+                graceful_shutdown=True,
+                metrics_labels=[
+                    (prometheus_names.labels.MODEL, server_args.served_model_name),
+                    (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
+                ],
+            )
         )
+        _ = await asyncio.gather(serving_task, registration_task)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        tasks = [task for task in (serving_task, registration_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        runtime.set_health_status(False)
         handler.cleanup()
         if run_deferred_handlers is not None:
             logging.info("Running deferred handlers")

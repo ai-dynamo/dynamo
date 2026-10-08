@@ -12,7 +12,10 @@
 
 FROM ${PLANNER_BUILD_IMAGE}:${PLANNER_BUILD_IMAGE_TAG} AS planner_builder
 
-ARG PYTHON_VERSION
+# Planner-scoped interpreter; see container/context.yaml `planner_python_version`.
+# The planner build/runtime bases decouple this stage's CPython from the
+# global PYTHON_VERSION used by the frontend and framework stages.
+ARG PLANNER_PYTHON_VERSION
 ARG TARGETARCH
 
 # Install only the packages needed to resolve and install the planner runtime
@@ -21,9 +24,9 @@ ARG TARGETARCH
 # from sdist (crick==0.0.8 publishes no manylinux aarch64 wheel); on amd64
 # the prebuilt wheel from PyPI is used and the toolchain is skipped
 # entirely. Python headers come from the base image's
-# /usr/local/include/python${PYTHON_VERSION} (python:3.X-slim bundles them
-# directly — no apt python*-dev needed, and python${PYTHON_VERSION}-dev is
-# not available in this base's apt index anyway). libc6-dev is required
+# /usr/local/include/python${PLANNER_PYTHON_VERSION} (python:3.X-slim bundles
+# them directly — no apt python*-dev needed, and python${PLANNER_PYTHON_VERSION}-dev
+# is not available in this base's apt index anyway). libc6-dev is required
 # explicitly because on Debian it's a Recommends of gcc, not a Depends, so
 # --no-install-recommends would otherwise skip it and the build fails with
 # "fatal error: stdlib.h: No such file or directory". The toolchain stays
@@ -62,18 +65,16 @@ USER dynamo
 
 RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv venv ${VIRTUAL_ENV} --python ${PYTHON_VERSION}
+    uv venv ${VIRTUAL_ENV} --python ${PLANNER_PYTHON_VERSION}
 
 # Install the local wheels and planner/profiler runtime dependencies before the
 # repo copies so changes in tests/configs don't invalidate the dependency layer.
 # aiperf is required by the thorough profiler path (profiler/utils/aiperf.py).
 RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
-    --mount=type=bind,source=./container/deps/overrides.planner.txt,target=/tmp/overrides.planner.txt \
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
-        --overrides /tmp/overrides.planner.txt \
         --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \

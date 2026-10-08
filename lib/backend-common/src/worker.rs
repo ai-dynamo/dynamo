@@ -60,15 +60,25 @@ const MODEL_TAINT_UPDATE_ROUTE: &str = "update/model_taints";
 
 /// Per-worker transport configuration. Explicit values take precedence over
 /// environment defaults when the worker constructs its distributed runtime.
-#[derive(Clone, Debug, Default)]
+#[derive(clap::Args, Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeConfig {
     /// Discovery backend selector — e.g. `"etcd"`, `"kubernetes"`, `"file"`,
     /// `"mem"`. Maps to `DYN_DISCOVERY_BACKEND`.
+    #[arg(long, env = "DYN_DISCOVERY_BACKEND", value_parser = ["kubernetes", "etcd", "file", "mem"])]
     pub discovery_backend: Option<String>,
     /// Request-plane transport — e.g. `"tcp"`, `"nats"`. Maps to `DYN_REQUEST_PLANE`.
+    #[arg(long, env = "DYN_REQUEST_PLANE", value_parser = ["tcp", "nats"], ignore_case = true)]
     pub request_plane: Option<String>,
+    /// Response transport. Frontend and workers must use the same value.
+    /// Maps to `DYN_RESPONSE_PLANE`.
+    #[arg(long, env = "DYN_RESPONSE_PLANE", value_parser = ["tcp", "quic"])]
+    pub response_plane: Option<String>,
     /// Event-plane transport — `"nats"` or `"zmq"`. When `None` the runtime
-    /// derives a default from the discovery backend. Maps to `DYN_EVENT_PLANE`.
+    /// uses its default transport. Maps to `DYN_EVENT_PLANE`.
+    #[arg(long, env = "DYN_EVENT_PLANE", value_parser = [
+        clap::builder::PossibleValue::new("nats"),
+        clap::builder::PossibleValue::new("zmq").alias(""),
+    ])]
     pub event_plane: Option<String>,
 }
 
@@ -76,7 +86,31 @@ impl RuntimeConfig {
     pub fn has_overrides(&self) -> bool {
         self.discovery_backend.is_some()
             || self.request_plane.is_some()
+            || self.response_plane.is_some()
             || self.event_plane.is_some()
+    }
+
+    /// Resolve transport settings without changing the process environment.
+    pub fn to_distributed_config(
+        &self,
+    ) -> anyhow::Result<dynamo_runtime::distributed::DistributedConfig> {
+        use dynamo_runtime::pipeline::network::ResponsePlaneMode;
+
+        let mut config =
+            dynamo_runtime::distributed::DistributedConfig::from_settings_with_overrides(
+                self.discovery_backend.as_deref(),
+                self.request_plane.as_deref(),
+                self.event_plane.as_deref(),
+            )?;
+        config.response_plane = match self.response_plane.as_deref() {
+            Some("tcp") => Some(ResponsePlaneMode::Tcp),
+            Some("quic") => Some(ResponsePlaneMode::Quic),
+            Some(value) => {
+                anyhow::bail!("invalid response plane '{value}'; expected 'tcp' or 'quic'")
+            }
+            None => None,
+        };
+        Ok(config)
     }
 
     /// Apply each set field to the corresponding environment variable.
@@ -97,6 +131,9 @@ impl RuntimeConfig {
         }
         if let Some(ref value) = self.request_plane {
             set("DYN_REQUEST_PLANE", value);
+        }
+        if let Some(ref value) = self.response_plane {
+            set("DYN_RESPONSE_PLANE", value);
         }
         if let Some(ref value) = self.event_plane {
             set("DYN_EVENT_PLANE", value);
@@ -168,8 +205,8 @@ pub struct WorkerConfig {
     pub structural_tag_scope: StructuralTagScope,
     /// Structural tag schema strictness.
     pub structural_tag_schema: StructuralTagSchemaMode,
-    /// Runtime / transport overrides applied via env vars before the
-    /// `DistributedRuntime` is constructed.
+    /// Runtime / transport overrides used when constructing the
+    /// `DistributedRuntime`.
     pub runtime: RuntimeConfig,
     /// Shutdown timing overrides. Unset fields fall back to the environment.
     pub shutdown: ShutdownConfig,
@@ -219,6 +256,9 @@ impl Default for WorkerConfig {
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
             health_check_payload: None,
+            // Keep the shared/wire default conservative for mixed-version and
+            // Rust-sidecar compatibility. Deployment-facing runtime arguments
+            // explicitly publish the current On/Always defaults.
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
@@ -506,11 +546,36 @@ impl Worker {
     ///
     /// `engine.cleanup()` is guaranteed to run exactly once if
     /// `engine.start()` succeeded, regardless of which path led to shutdown.
-    pub async fn run(mut self, runtime: Runtime) -> Result<(), DynamoError> {
+    pub async fn run(self, runtime: Runtime) -> Result<(), DynamoError> {
+        self.run_owned(runtime, None, None).await
+    }
+
+    /// Run on the sidecar's already-connected runtime and process shutdown token.
+    pub async fn run_with_drt(
+        self,
+        drt: DistributedRuntime,
+        shutdown: CancellationToken,
+    ) -> Result<(), DynamoError> {
+        self.run_owned(drt.runtime().clone(), Some(drt), Some(shutdown))
+            .await
+    }
+
+    async fn run_owned(
+        mut self,
+        runtime: Runtime,
+        drt: Option<DistributedRuntime>,
+        shutdown: Option<CancellationToken>,
+    ) -> Result<(), DynamoError> {
         let watchdog = Arc::new(std::sync::Mutex::new(None));
         let mut signal_handle = None;
         let result = self
-            .run_lifecycle(runtime.clone(), watchdog.clone(), &mut signal_handle)
+            .run_lifecycle(
+                runtime.clone(),
+                drt,
+                shutdown,
+                watchdog.clone(),
+                &mut signal_handle,
+            )
             .await;
         let teardown_bound = self
             .shutdown_budget
@@ -573,6 +638,8 @@ impl Worker {
     async fn run_lifecycle(
         &mut self,
         runtime: Runtime,
+        drt: Option<DistributedRuntime>,
+        shutdown: Option<CancellationToken>,
         watchdog: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>>,
         signal_handle: &mut Option<tokio_util::task::AbortOnDropHandle<()>>,
     ) -> Result<(), DynamoError> {
@@ -588,6 +655,21 @@ impl Worker {
             .shutdown
             .validate()
             .map_err(|message| err(ErrorType::Backend(BackendError::InvalidArgument), message))?;
+
+        if let Some(shutdown) = shutdown {
+            let token = shutdown.clone();
+            let started_at = Arc::clone(&self.shutdown_started_at);
+            let config = self.config.shutdown;
+            *signal_handle = Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+                async move {
+                    token.cancelled().await;
+                    let _ = started_at.set(std::time::Instant::now());
+                    *watchdog.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(Self::arm_hard_watchdog(force_exit_deadline(&config)));
+                },
+            )));
+            return self.run_with_shutdown(runtime, drt, shutdown).await;
+        }
 
         // Install the OS signal handlers synchronously, before spawning
         // anything, so a SIGTERM delivered between this point and the
@@ -647,20 +729,30 @@ impl Worker {
             },
         )));
 
+        self.run_with_shutdown(runtime, drt, shutdown_token).await
+    }
+
+    async fn run_with_shutdown(
+        &mut self,
+        runtime: Runtime,
+        drt: Option<DistributedRuntime>,
+        shutdown_token: CancellationToken,
+    ) -> Result<(), DynamoError> {
         // Mirror `dynamo_runtime::Worker::execute`'s shutdown deadline:
         // once a signal arrives, the orchestrator + cleanup must finish
         // within the total shutdown budget, including grace and cleanup,
         // otherwise we force-exit. Healthy long-running workers
         // never hit this — the timer only starts after `shutdown_token`
         // is cancelled.
+        let shutdown_config = self.config.shutdown;
         let outcome = {
-            let inner_fut = self.run_inner(runtime, &shutdown_token);
+            let inner_fut = self.run_inner(runtime.clone(), drt, &shutdown_token);
             tokio::pin!(inner_fut);
 
             tokio::select! {
                 result = &mut inner_fut => result,
                 _ = shutdown_token.cancelled() => {
-                    // The signal listener already started the absolute watchdog.
+                    runtime.mark_shutting_down();
                     let deadline = force_exit_deadline(&shutdown_config);
                     tracing::debug!(
                         "graceful shutdown started; deadline {}s",
@@ -684,6 +776,7 @@ impl Worker {
 
         // Final safety net: guarantee engine.cleanup() runs if start()
         // succeeded. No-op if cleanup already ran via the orchestrator.
+        runtime.mark_shutting_down();
         self.cleanup_once().await;
 
         // An abandoned cleanup is not a clean shutdown. Reporting Ok here let
@@ -709,29 +802,35 @@ impl Worker {
     async fn run_inner(
         &mut self,
         runtime: Runtime,
+        drt: Option<DistributedRuntime>,
         shutdown: &CancellationToken,
     ) -> Result<(), DynamoError> {
         // model_input was already validated at the top of `run`; re-checking
         // here would double-error on misconfig.
-        let config = dynamo_runtime::distributed::DistributedConfig::from_settings_with_overrides(
-            self.config.runtime.discovery_backend.as_deref(),
-            self.config.runtime.request_plane.as_deref(),
-            self.config.runtime.event_plane.as_deref(),
-        )
-        .map_err(|e| {
-            err(
-                ErrorType::Backend(BackendError::InvalidArgument),
-                format!("distributed runtime config: {e}"),
-            )
-        })?;
-        let drt = DistributedRuntime::new(runtime, config)
-            .await
-            .map_err(|e| {
-                err(
-                    ErrorType::Backend(BackendError::CannotConnect),
-                    format!("distributed runtime: {e}"),
-                )
-            })?;
+        let drt = match drt {
+            Some(drt) => drt,
+            None => {
+                let config = self.config.runtime.to_distributed_config().map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::InvalidArgument),
+                        format!("distributed runtime config: {e}"),
+                    )
+                })?;
+                let result = DistributedRuntime::new(runtime, config).await;
+                // A signal cancels DRT initialization through the runtime token.
+                // Preserve the clean pre-start shutdown contract before mapping
+                // independent connection failures to CannotConnect.
+                if shutdown.is_cancelled() {
+                    return Ok(());
+                }
+                result.map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::CannotConnect),
+                        format!("distributed runtime: {e}"),
+                    )
+                })?
+            }
+        };
         tracing::debug!("distributed runtime connected");
 
         let component = drt
@@ -1015,6 +1114,7 @@ impl Worker {
         endpoint: &dynamo_runtime::component::Endpoint,
         tracker: Option<&RequestTracker>,
     ) {
+        endpoint.drt().runtime().mark_shutting_down();
         // Armed before the first stage, so every stage below shares one
         // deadline measured from here.
         let budget = self.arm_shutdown_budget();
@@ -2291,7 +2391,7 @@ async fn build_local_model(
         );
     }
 
-    let rt_cfg = ModelRuntimeConfig {
+    let mut rt_cfg = ModelRuntimeConfig {
         context_length: llm.context_length,
         total_kv_blocks: llm.total_kv_blocks,
         max_num_seqs: llm.max_num_seqs,
@@ -2312,6 +2412,8 @@ async fn build_local_model(
         runtime_data,
         ..ModelRuntimeConfig::default()
     };
+
+    crate::topology::apply_topology_config(&mut rt_cfg).await?;
 
     let mut builder = LocalModelBuilder::default();
     builder
@@ -3087,6 +3189,7 @@ mod tests {
     /// `start` success/failure via a flag.
     struct StateMockEngine {
         start_should_fail: bool,
+        start_calls: AtomicUsize,
         cleanup_calls: Arc<AtomicUsize>,
     }
 
@@ -3095,6 +3198,7 @@ mod tests {
             let cleanup_calls = Arc::new(AtomicUsize::new(0));
             let eng = Arc::new(Self {
                 start_should_fail,
+                start_calls: AtomicUsize::new(0),
                 cleanup_calls: cleanup_calls.clone(),
             });
             (eng, cleanup_calls)
@@ -3104,6 +3208,7 @@ mod tests {
     #[async_trait]
     impl LLMEngine for StateMockEngine {
         async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            self.start_calls.fetch_add(1, Ordering::SeqCst);
             if self.start_should_fail {
                 Err(err(
                     ErrorType::Backend(BackendError::EngineShutdown),
@@ -3151,12 +3256,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_during_runtime_connection_distinguishes_signals_from_failure() {
+        // Hold a real etcd connection before its first RPC can complete.
+        let peer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let etcd_url = format!("http://{}", peer.local_addr().unwrap());
+        temp_env::async_with_vars(
+            [
+                ("DYN_DISCOVERY_BACKEND", Some("etcd")),
+                ("DYN_REQUEST_PLANE", Some("tcp")),
+                ("DYN_EVENT_PLANE", Some("zmq")),
+                ("DYN_SYSTEM_PORT", None),
+                ("NATS_SERVER", None),
+                ("ETCD_ENDPOINTS", Some(etcd_url.as_str())),
+                ("ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS", Some("30")),
+                ("ETCD_AUTH_USERNAME", None),
+                ("ETCD_AUTH_PASSWORD", None),
+                ("ETCD_AUTH_CA", None),
+                ("ETCD_AUTH_CLIENT_CERT", None),
+                ("ETCD_AUTH_CLIENT_KEY", None),
+            ],
+            async {
+                for signal in [false, true] {
+                    let runtime = Runtime::from_current().unwrap();
+                    let shutdown = CancellationToken::new();
+                    let (engine, cleanup_calls) = StateMockEngine::new(false);
+                    let mut worker = worker_with(engine.clone());
+                    let mut run = Box::pin(worker.run_with_shutdown(
+                        runtime.clone(), None, shutdown.clone(),
+                    ));
+                    let (_connection, _) = tokio::select! {
+                        result = &mut run => panic!("worker completed before etcd replied: {result:?}"),
+                        peer = tokio::time::timeout(Duration::from_secs(5), peer.accept()) => {
+                            peer.unwrap().unwrap()
+                        }
+                    };
+                    if signal {
+                        // Exercise the same token as Worker's SIGTERM handler.
+                        shutdown.cancel();
+                    } else {
+                        runtime.mark_shutting_down();
+                    }
+                    let result = tokio::time::timeout(Duration::from_secs(5), run)
+                        .await
+                        .expect("pending runtime connection is cancelled");
+                    if signal {
+                        result.expect("SIGTERM before engine start exits cleanly");
+                    } else {
+                        assert_eq!(
+                            result.unwrap_err().error_type(),
+                            ErrorType::Backend(BackendError::CannotConnect),
+                        );
+                    }
+                    assert_eq!(engine.start_calls.load(Ordering::SeqCst), 0);
+                    assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
+                    runtime.shutdown();
+                }
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn start_engine_init_to_running_on_success() {
         let (engine, _) = StateMockEngine::new(false);
         let mut worker = worker_with(engine);
         let cfg = worker.start_engine(0).await.expect("start");
         assert_eq!(cfg.model, "mock");
         assert_eq!(worker.state, LifecycleState::Running);
+    }
+
+    // A sidecar-supplied runtime must retain cleanup and teardown on startup failure.
+    #[tokio::test]
+    async fn supplied_runtime_is_torn_down_after_engine_start_failure() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_DISCOVERY_BACKEND", Some("mem")),
+                ("DYN_REQUEST_PLANE", Some("tcp")),
+                ("DYN_EVENT_PLANE", Some("zmq")),
+                ("DYN_SYSTEM_PORT", None),
+                ("NATS_SERVER", None),
+            ],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                let drt = DistributedRuntime::from_settings(runtime.clone())
+                    .await
+                    .unwrap();
+                let (engine, cleanup_calls) = StateMockEngine::new(true);
+                let result = worker_with(engine)
+                    .run_with_drt(drt, CancellationToken::new())
+                    .await;
+                assert!(result.is_err());
+                assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+                assert!(runtime.is_shutting_down());
+                assert!(runtime.primary_token().is_cancelled());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -3513,6 +3708,7 @@ mod tests {
         let cfg = RuntimeConfig {
             discovery_backend: Some("file".to_string()),
             request_plane: Some("tcp".to_string()),
+            response_plane: Some("quic".to_string()),
             event_plane: Some("zmq".to_string()),
         };
 
@@ -3523,6 +3719,7 @@ mod tests {
             vec![
                 ("DYN_DISCOVERY_BACKEND".to_string(), "file".to_string()),
                 ("DYN_REQUEST_PLANE".to_string(), "tcp".to_string()),
+                ("DYN_RESPONSE_PLANE".to_string(), "quic".to_string()),
                 ("DYN_EVENT_PLANE".to_string(), "zmq".to_string()),
             ]
         );
@@ -3533,6 +3730,7 @@ mod tests {
         let cfg = RuntimeConfig {
             discovery_backend: Some("etcd".to_string()),
             request_plane: None,
+            response_plane: None,
             event_plane: None,
         };
 
