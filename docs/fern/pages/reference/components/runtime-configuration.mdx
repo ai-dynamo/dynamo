@@ -358,9 +358,10 @@ address.
   Maximum number of seconds that a runtime client locally removes a worker from normal routing after
   a request-path failure while service discovery propagates the worker state. Set to `0` to disable
   local inhibition. The process reads this value once when the first client initializes; restart the
-  process after changing it. Discovery updates remain authoritative. Direct dispatch, explicit worker
-  targets, and hard session-affinity targets bypass the local inhibited set while the selected worker
-  remains in discovery.
+  process after changing it. Discovery updates remain authoritative. Direct dispatch bypasses the
+  local inhibited set while the selected worker remains in discovery. In every router mode except
+  `kv`, explicit worker targets and hard session-affinity targets also bypass it. With
+  `--router-mode kv`, a locally inhibited explicit worker target is still rejected.
 </ParamField>
 
 ## Operations

@@ -66,9 +66,11 @@ the client process, such as the Frontend or another component that dispatches re
 
 Set the value to `0` to disable local inhibition. The runtime reads it once when the first client is
 initialized, so restart the process after changing it. Discovery updates can restore or remove a
-worker before the window expires. Direct dispatch, explicit worker targets such as
-`x-dynamo-prefill-instance-id`, and hard session-affinity targets bypass local inhibition. They
-continue to honor the selected worker while that worker remains in service discovery.
+worker before the window expires. Direct dispatch bypasses local inhibition. In every router mode
+except `kv`, explicit worker targets such as `x-dynamo-prefill-instance-id` and hard session-affinity
+targets also bypass it. These targets continue to honor the selected worker while that worker remains
+in service discovery. With `--router-mode kv`, a locally inhibited explicit worker target is still
+rejected.
 
 See [Runtime Configuration](../../reference/components/runtime-configuration.mdx#fault-tolerance) for the field
 reference and [Distributed Runtime](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#local-worker-inhibition) for
