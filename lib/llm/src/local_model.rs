@@ -391,7 +391,8 @@ impl LocalModelBuilder {
                 model_path.display(),
             );
         }
-        let model_path = fs::canonicalize(model_path)?;
+        let original_model_path = model_path;
+        let model_path = fs::canonicalize(&original_model_path)?;
 
         let mut card =
             ModelDeploymentCard::load_from_disk(&model_path, self.custom_template_path.as_deref())?;
@@ -399,11 +400,9 @@ impl LocalModelBuilder {
         // path of the downloaded model.
         if let Some(source_path) = self.source_path.take() {
             card.set_source_path(source_path);
-        } else if self
-            .model_name
-            .as_deref()
-            .is_some_and(|name| name != card.display_name)
-        {
+        } else if self.model_name.as_deref().is_some_and(|name| {
+            name != original_model_path.to_string_lossy() && name != card.display_name
+        }) {
             // A served name must not replace the local metadata source during registration.
             card.set_source_path(model_path.clone());
         }
@@ -1007,17 +1006,26 @@ mod local_source_tests {
     async fn default_names_and_explicit_sources_keep_their_representation() {
         let canonical = fs::canonicalize(model_dir()).unwrap();
         let path_name = canonical.to_str().unwrap().to_string();
-        for (name, source) in [
-            (None, None),
-            (Some(path_name.clone()), None),
-            (Some("local-qwen".to_string()), Some(canonical.clone())),
+        let relative = model_dir()
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_path_buf();
+        let dir = tempfile::tempdir().unwrap();
+        let symlink = dir.path().join("model");
+        std::os::unix::fs::symlink(&canonical, &symlink).unwrap();
+        for (path, name, source) in [
+            (model_dir(), None, None),
+            (model_dir(), Some(path_name.clone()), None),
+            (relative.clone(), Some(relative.display().to_string()), None),
+            (symlink.clone(), Some(symlink.display().to_string()), None),
             (
+                model_dir(),
                 Some("local-qwen".to_string()),
                 Some(PathBuf::from("Qwen/Qwen3-0.6B")),
             ),
         ] {
             let mut builder = LocalModelBuilder::default();
-            builder.model_path(model_dir()).model_name(name.clone());
+            builder.model_path(path).model_name(name.clone());
             if let Some(source) = &source {
                 builder.source_path(source.clone());
             }
@@ -1025,6 +1033,18 @@ mod local_source_tests {
             assert_eq!(model.display_name(), name.as_deref().unwrap_or(&path_name));
             let expected = source.as_ref().map(|path| path.display().to_string());
             assert_eq!(model.card().source_path, expected);
+            let mut original = LocalModelBuilder::default()
+                .model_path(model_dir())
+                .build()
+                .await
+                .unwrap()
+                .card()
+                .clone();
+            if let Some(source) = source {
+                original.set_source_path(source);
+            }
+            original.set_name(name.as_deref().unwrap_or(&path_name));
+            assert_eq!(model.card().mdcsum(), original.mdcsum());
         }
     }
 }
