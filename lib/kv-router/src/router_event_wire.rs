@@ -98,7 +98,6 @@ impl<'a> Walker<'a> {
         self.buf.get(start..start.checked_add(N)?)?.try_into().ok()
     }
 
-    /// Consume a `header`-byte prefix followed by `len` payload bytes.
     fn take(&mut self, header: usize, len: usize) -> Option<&'a [u8]> {
         let start = self.pos.checked_add(header)?;
         let end = start.checked_add(len)?;
