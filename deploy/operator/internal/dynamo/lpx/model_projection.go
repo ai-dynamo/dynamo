@@ -71,6 +71,8 @@ type ModelProjection struct {
 	agentReplicas int
 	// localPartitionIDs lists the runtime partitions that run on the Cyborg GPU, in build order.
 	localPartitionIDs []int
+	// An authored placement override must reach every role, even when it selects no remote partitions.
+	remoteSelectionRequired bool
 }
 
 // AgentReplicas returns the number of LPU Agent Pods that the projection requires.

@@ -110,18 +110,19 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
 
 		dst = append(dst, &ModelProjection{
-			digest:                 transcript.sum(),
-			compilerSnapshotDigest: intent.BuildSnapshot.contentID,
-			runtimeBuildRef:        intent.RuntimeBuildRef,
-			model:                  intent.Models[index],
-			pipeline:               intent.Pipeline,
-			configuredBuild:        runtimeBuild,
-			allocationMetadata:     allocationMetadata,
-			partitions:             partitions,
-			connectors:             connectors,
-			propSyncEdges:          edgePositions,
-			agentReplicas:          agentReplicas,
-			localPartitionIDs:      localPartitionIDs,
+			digest:                  transcript.sum(),
+			compilerSnapshotDigest:  intent.BuildSnapshot.contentID,
+			runtimeBuildRef:         intent.RuntimeBuildRef,
+			model:                   intent.Models[index],
+			pipeline:                intent.Pipeline,
+			configuredBuild:         runtimeBuild,
+			allocationMetadata:      allocationMetadata,
+			partitions:              partitions,
+			connectors:              connectors,
+			propSyncEdges:           edgePositions,
+			agentReplicas:           agentReplicas,
+			localPartitionIDs:       localPartitionIDs,
+			remoteSelectionRequired: intent.LocalPartitions != nil,
 		})
 	}
 	return dst, nil
