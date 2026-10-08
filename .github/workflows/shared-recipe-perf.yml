@@ -196,7 +196,7 @@ jobs:
         if: ${{ !inputs.preflight_only }}
         # DeepSeek V4 Pro disagg needs extra margin for four-node scheduling
         # and loading its 805 GiB checkpoint from the shared Lustre volume.
-        timeout-minutes: ${{ inputs.recipe == 'deepseek-v4-pro-disagg' && 180 || 105 }}
+        timeout-minutes: ${{ inputs.recipe == 'deepseek-v4-pro-disagg' && 180 || inputs.recipe == 'kimi-k25-disagg' && 30 || 105 }}
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           selector=nvidia.com/dynamo-graph-deployment-name=$DGD
