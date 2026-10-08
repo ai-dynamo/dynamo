@@ -38,11 +38,52 @@ on:
         description: 'Capture the matching daily-image SBOM before building'
         type: boolean
         default: false
+      diagnose_kimi:
+        description: 'Collect read-only diagnostics for the running Kimi test'
+        type: boolean
+        default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
+
+  kimi-diagnostics:
+    if: inputs.diagnose_kimi
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      KUBECONFIG: /teleport/kubeconfig.yaml
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-gcp-dev-02
+      NAMESPACE: dynamo-nightly-dsv4
+    steps:
+      - name: Collect Kimi state and logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/kimi-diagnostics-${{ github.run_id }}"
+          mkdir -p "$bundle"
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=30s)
+          selector=nvidia.com/dynamo-graph-deployment-name=kimi-k25-disagg-kv-eagle
+          "${k[@]}" get dgd kimi-k25-disagg-kv-eagle -o yaml > "$bundle/dgd.yaml" || true
+          "${k[@]}" get pods -l "$selector" -o yaml > "$bundle/pods.yaml" || true
+          "${k[@]}" describe pods -l "$selector" > "$bundle/pods-describe.txt" || true
+          "${k[@]}" get events --sort-by=.lastTimestamp > "$bundle/events.txt" || true
+          "${k[@]}" logs -l "$selector" -c main --prefix --tail=500 \
+            > "$bundle/deployment.log" 2>&1 || true
+          for pod in $("${k[@]}" get pods -l "$selector" -o name); do
+            "${k[@]}" logs "$pod" -c main --prefix --previous --tail=500 \
+              >> "$bundle/deployment-previous.log" 2>&1 || true
+          done
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        if: always()
+        with:
+          name: kimi-readiness-diagnostics
+          path: ${{ runner.temp }}/kimi-diagnostics-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 7
 
   trtllm-baseline:
     if: inputs.capture_trtllm_baseline
