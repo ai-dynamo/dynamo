@@ -776,6 +776,7 @@ pub struct RouteDoc {
     method: axum::http::Method,
     path: String,
     openapi_kind: Option<OpenApiRouteKind>,
+    documentation_path: Option<&'static str>,
 }
 
 impl std::fmt::Display for RouteDoc {
@@ -791,6 +792,7 @@ impl RouteDoc {
             method,
             path: path.into(),
             openapi_kind: None,
+            documentation_path: None,
         }
     }
 
@@ -814,5 +816,14 @@ impl RouteDoc {
     /// Return the registered URL path, including any operator override.
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    pub(crate) fn with_documentation_path(mut self, path: &'static str) -> Self {
+        self.documentation_path = Some(path);
+        self
+    }
+
+    pub(crate) fn documentation_path(&self) -> &str {
+        self.documentation_path.unwrap_or(&self.path)
     }
 }

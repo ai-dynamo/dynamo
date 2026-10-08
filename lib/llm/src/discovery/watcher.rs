@@ -348,7 +348,6 @@ impl ModelWatcher {
         self.generate_engine_capabilities = capabilities;
     }
 
-    #[expect(dead_code, reason = "Configured by the decision HTTP service")]
     pub(crate) fn set_systemone_enabled(&mut self, enabled: bool) {
         self.systemone_enabled = enabled;
     }
