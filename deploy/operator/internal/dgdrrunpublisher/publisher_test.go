@@ -97,6 +97,8 @@ func (f *fakeCluster) PatchRunStatus(_ context.Context, s RunStatus) error {
 	return nil
 }
 
+func (f *fakeCluster) RunUID(context.Context) (string, error) { return testRunUID, nil }
+
 func (f *fakeCluster) SweeperState(context.Context) (SweeperState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -110,6 +112,10 @@ func (f *fakeCluster) setState(s SweeperState) {
 }
 
 const validManifest = "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\nspec: {}\n"
+
+const testRunUID = "uid-1"
+
+func cn(id string) string { return CandidateName("run", testRunUID, id) }
 
 type cand struct {
 	id      string
@@ -180,13 +186,13 @@ func TestSwapLeavesBothCandidatesUntouched(t *testing.T) {
 	if err := p.Reconcile(ctx, mustParse(t, snapshotJSON(t, PhaseRunning, cand{id: "b", metrics: map[string]any{"score": 3.0}}, cand{id: "a", metrics: map[string]any{"score": 2.0}}))); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(fc.creates, []string{"run-a", "run-b"}) || len(fc.deletes) != 0 {
+	if !reflect.DeepEqual(fc.creates, []string{cn("a"), cn("b")}) || len(fc.deletes) != 0 {
 		t.Fatalf("swap touched DGDCs: creates=%v deletes=%v", fc.creates, fc.deletes)
 	}
 	if !reflect.DeepEqual(before, fc.created) {
 		t.Fatalf("a published DGDC's content changed: before=%v after=%v", before, fc.created)
 	}
-	if got, want := fc.patches[len(fc.patches)-1].CandidateNames, []string{"run-b", "run-a"}; !reflect.DeepEqual(got, want) {
+	if got, want := fc.patches[len(fc.patches)-1].CandidateNames, []string{cn("b"), cn("a")}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("ordered references = %v, want %v", got, want)
 	}
 }
@@ -196,7 +202,7 @@ func TestEvaluatedPointReachesTheClusterComplete(t *testing.T) {
 	if err := p.Reconcile(context.Background(), mustParse(t, snapshotJSON(t, PhaseRunning, cand{id: "a", metrics: map[string]any{"goodputPerGpu": 87.7}}))); err != nil {
 		t.Fatal(err)
 	}
-	got := fc.created["run-a"]
+	got := fc.created[cn("a")]
 	if got.Spec != validManifest {
 		t.Fatalf("manifest = %q", got.Spec)
 	}
@@ -222,14 +228,14 @@ func TestReturningCandidateIsRecreatedIdentically(t *testing.T) {
 			t.Fatal(err)
 		}
 		if i == 0 {
-			firstB = fc.created["run-b"]
+			firstB = fc.created[cn("b")]
 		}
 	}
-	if !reflect.DeepEqual(fc.creates, []string{"run-a", "run-b", "run-b"}) || !reflect.DeepEqual(fc.deletes, []string{"run-b"}) {
+	if !reflect.DeepEqual(fc.creates, []string{cn("a"), cn("b"), cn("b")}) || !reflect.DeepEqual(fc.deletes, []string{cn("b")}) {
 		t.Fatalf("creates=%v deletes=%v", fc.creates, fc.deletes)
 	}
-	if !reflect.DeepEqual(firstB, fc.created["run-b"]) {
-		t.Fatalf("recreated candidate differs: %v vs %v", firstB, fc.created["run-b"])
+	if !reflect.DeepEqual(firstB, fc.created[cn("b")]) {
+		t.Fatalf("recreated candidate differs: %v vs %v", firstB, fc.created[cn("b")])
 	}
 }
 
@@ -252,13 +258,13 @@ func TestDroppedCandidateIsDeletedAfterStatusPatch(t *testing.T) {
 	ctx := context.Background()
 	_ = p.Reconcile(ctx, mustParse(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}, cand{id: "b"})))
 	_ = p.Reconcile(ctx, mustParse(t, snapshotJSON(t, PhaseRunning, cand{id: "a"})))
-	if !reflect.DeepEqual(fc.deletes, []string{"run-b"}) {
+	if !reflect.DeepEqual(fc.deletes, []string{cn("b")}) {
 		t.Fatalf("deletes = %v", fc.deletes)
 	}
-	if got := fc.patches[len(fc.patches)-1].CandidateNames; !reflect.DeepEqual(got, []string{"run-a"}) {
+	if got := fc.patches[len(fc.patches)-1].CandidateNames; !reflect.DeepEqual(got, []string{cn("a")}) {
 		t.Fatalf("status refs = %v", got)
 	}
-	want := []string{"create:run-a", "create:run-b", "patch", "patch", "delete:run-b"}
+	want := []string{"create:" + cn("a"), "create:" + cn("b"), "patch", "patch", "delete:" + cn("b")}
 	if !reflect.DeepEqual(fc.ops, want) {
 		t.Fatalf("ops = %v, want %v", fc.ops, want)
 	}
@@ -269,10 +275,10 @@ func TestFailedMaterializationIsNotCreatedButCounted(t *testing.T) {
 	if err := p.Reconcile(context.Background(), mustParse(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}, cand{id: "x", failed: true}))); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(fc.creates, []string{"run-a"}) {
+	if !reflect.DeepEqual(fc.creates, []string{cn("a")}) {
 		t.Fatalf("creates = %v", fc.creates)
 	}
-	if got := fc.patches[0].CandidateNames; !reflect.DeepEqual(got, []string{"run-a"}) {
+	if got := fc.patches[0].CandidateNames; !reflect.DeepEqual(got, []string{cn("a")}) {
 		t.Fatalf("refs must not include the failed candidate: %v", got)
 	}
 	if msg := fc.patches[0].Message; !strings.Contains(msg, "1 candidate(s) failed materialization") {
@@ -395,7 +401,7 @@ func TestRunTerminalSnapshotAcknowledges(t *testing.T) {
 	if err != nil || ExitCode(err) != ExitAcknowledged {
 		t.Fatalf("err = %v", err)
 	}
-	if got := lastPatch(t, fc).CandidateNames; !reflect.DeepEqual(got, []string{"run-a"}) {
+	if got := lastPatch(t, fc).CandidateNames; !reflect.DeepEqual(got, []string{cn("a")}) {
 		t.Fatalf("refs = %v", got)
 	}
 }
@@ -407,7 +413,7 @@ func TestRunTerminalFailedSnapshotIsReconciledThenFails(t *testing.T) {
 	if !errors.Is(err, ErrRunFailed) || ExitCode(err) != ExitRunFailed {
 		t.Fatalf("err = %v", err)
 	}
-	if !reflect.DeepEqual(fc.creates, []string{"run-a"}) {
+	if !reflect.DeepEqual(fc.creates, []string{cn("a")}) {
 		t.Fatalf("creates = %v", fc.creates)
 	}
 }
@@ -436,7 +442,7 @@ func TestRunCrashWithoutTerminalSnapshotReconcilesLastSnapshot(t *testing.T) {
 	if err := runWithTimeout(t, p); err != nil {
 		t.Fatal(err)
 	}
-	if got := lastPatch(t, fc).CandidateNames; !reflect.DeepEqual(got, []string{"run-a"}) {
+	if got := lastPatch(t, fc).CandidateNames; !reflect.DeepEqual(got, []string{cn("a")}) {
 		t.Fatalf("refs = %v", got)
 	}
 }
@@ -463,7 +469,7 @@ func TestRunCleanExitWithoutTerminalSnapshotIsProtocolViolation(t *testing.T) {
 	if !errors.Is(err, ErrMissingTerminalSnapshot) || ExitCode(err) != ExitProtocolViolation {
 		t.Fatalf("err = %v", err)
 	}
-	if !reflect.DeepEqual(fc.creates, []string{"run-a"}) {
+	if !reflect.DeepEqual(fc.creates, []string{cn("a")}) {
 		t.Fatalf("last snapshot must still be reconciled: %v", fc.creates)
 	}
 }
@@ -503,7 +509,7 @@ func TestRunTerminalSnapshotReconcileFailureIsRetriedUntilSuccess(t *testing.T) 
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(fc.creates, []string{"run-a"}) {
+	if !reflect.DeepEqual(fc.creates, []string{cn("a")}) {
 		t.Fatalf("creates = %v", fc.creates)
 	}
 }
@@ -529,15 +535,15 @@ func TestRunContextCancelledReturnsError(t *testing.T) {
 	}
 }
 
-func TestCandidateNameIsBoundedAndUnique(t *testing.T) {
-	if got := CandidateName("run", "a"); got != "run-a" {
-		t.Fatalf("short names are unchanged: %q", got)
-	}
+func TestCandidateNameIsBoundedAndUniquePerRunIncarnation(t *testing.T) {
 	id := "evaluated-point-0123456789ab"
+	if cn("a") != CandidateName("run", testRunUID, "a") || cn("a") == CandidateName("run", "uid-2", "a") {
+		t.Fatalf("a recreated run must get different names: %q", cn("a"))
+	}
 	long := strings.Repeat("r", 253)
 	other := strings.Repeat("r", 252) + "s"
-	name := CandidateName(long, id)
-	if len(name) > 253 || !strings.HasSuffix(name, "-"+id) || name == CandidateName(other, id) || name != CandidateName(long, id) {
+	name := CandidateName(long, testRunUID, id)
+	if len(name) > 253 || !strings.HasSuffix(name, "-"+id) || name == CandidateName(other, testRunUID, id) || name != CandidateName(long, testRunUID, id) {
 		t.Fatalf("name = %q (%d)", name, len(name))
 	}
 }
@@ -549,11 +555,11 @@ func TestUnchangedSnapshotRepairsDrift(t *testing.T) {
 	if err := p.syncOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	delete(fc.candidates, "run-a") // someone deletes the referenced candidate
+	delete(fc.candidates, cn("a")) // someone deletes the referenced candidate
 	if err := p.syncOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(fc.creates, []string{"run-a", "run-a"}) {
+	if !reflect.DeepEqual(fc.creates, []string{cn("a"), cn("a")}) {
 		t.Fatalf("creates = %v", fc.creates)
 	}
 }
@@ -561,13 +567,13 @@ func TestUnchangedSnapshotRepairsDrift(t *testing.T) {
 func TestCandidateWithoutStatusIsCompletedBeforeItIsReferenced(t *testing.T) {
 	p, fc, dir := newPublisher(t)
 	ctx := context.Background()
-	fc.candidates["run-a"] = "a"
-	fc.incomplete["run-a"] = true // created, but the status write failed
+	fc.candidates[cn("a")] = "a"
+	fc.incomplete[cn("a")] = true // created, but the status write failed
 	writeSnapshot(t, dir, snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	if err := p.syncOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"create:run-a", "patch"}; !reflect.DeepEqual(fc.ops, want) {
+	if want := []string{"create:" + cn("a"), "patch"}; !reflect.DeepEqual(fc.ops, want) {
 		t.Fatalf("ops = %v, want %v", fc.ops, want)
 	}
 }

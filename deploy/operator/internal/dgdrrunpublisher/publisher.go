@@ -114,6 +114,8 @@ type Cluster interface {
 	CreateCandidate(ctx context.Context, name string, candidate dgdcreconcile.DesiredCandidate) error
 	DeleteCandidate(ctx context.Context, name string) error
 	PatchRunStatus(ctx context.Context, status RunStatus) error
+	// RunUID identifies the current incarnation of the run, which candidate names include.
+	RunUID(ctx context.Context) (string, error)
 	// SweeperState reads the Sweeper container's status from this pod.
 	SweeperState(ctx context.Context) (SweeperState, error)
 }
@@ -135,24 +137,32 @@ type Publisher struct {
 // maxObjectName is the Kubernetes limit on an object name (DNS subdomain).
 const maxObjectName = 253
 
-// CandidateName is the DGDC name for a candidate id. It depends only on the run and the
-// stable id, never on rank. A run name too long to leave room for the id is truncated
-// and a hash of the full run name is added, so names stay unique and within the limit.
-func CandidateName(runName, id string) string {
-	name := runName + "-" + id
-	if len(name) <= maxObjectName {
-		return name
+// CandidateName is the DGDC name for a candidate id. It depends only on the run
+// incarnation (name and UID) and the stable id, never on rank. The UID component keeps a
+// recreated run of the same name from colliding with candidates of the previous one that
+// are still waiting for garbage collection. A run name too long to leave room for the
+// rest is truncated and a hash of the full run name is added, so names stay unique and
+// within the limit.
+func CandidateName(runName, runUID, id string) string {
+	uidSum := sha256.Sum256([]byte(runUID))
+	suffix := "-" + hex.EncodeToString(uidSum[:4]) + "-" + id
+	if len(runName)+len(suffix) <= maxObjectName {
+		return runName + suffix
 	}
-	sum := sha256.Sum256([]byte(runName))
-	hash := hex.EncodeToString(sum[:6])
-	room := maxObjectName - len(id) - len(hash) - 2
-	return strings.TrimRight(runName[:room], "-.") + "-" + hash + "-" + id
+	nameSum := sha256.Sum256([]byte(runName))
+	hash := hex.EncodeToString(nameSum[:6])
+	room := maxObjectName - len(suffix) - len(hash) - 1
+	return strings.TrimRight(runName[:room], "-.") + "-" + hash + suffix
 }
 
 // Reconcile applies one snapshot: create missing candidates, patch the run status
 // (ordered references and progress), then delete obsolete candidates. Existing
 // candidates are never updated. It is idempotent and safe to retry.
 func (p *Publisher) Reconcile(ctx context.Context, snap *Snapshot) error {
+	runUID, err := p.Cluster.RunUID(ctx)
+	if err != nil {
+		return fmt.Errorf("reading run: %w", err)
+	}
 	var desired []dgdcreconcile.DesiredCandidate
 	var names []string
 	failed := 0
@@ -167,7 +177,7 @@ func (p *Publisher) Reconcile(ctx context.Context, snap *Snapshot) error {
 			Parameters: candidate.Parameters,
 			Metrics:    candidate.Metrics,
 		})
-		names = append(names, CandidateName(p.RunName, candidate.ID))
+		names = append(names, CandidateName(p.RunName, runUID, candidate.ID))
 	}
 
 	current, err := p.Cluster.ListCandidates(ctx)
@@ -179,7 +189,7 @@ func (p *Publisher) Reconcile(ctx context.Context, snap *Snapshot) error {
 		return err
 	}
 	for _, candidate := range actions.Creates {
-		if err := p.Cluster.CreateCandidate(ctx, CandidateName(p.RunName, candidate.ID), candidate); err != nil {
+		if err := p.Cluster.CreateCandidate(ctx, CandidateName(p.RunName, runUID, candidate.ID), candidate); err != nil {
 			return fmt.Errorf("creating candidate %s: %w", candidate.ID, err)
 		}
 	}

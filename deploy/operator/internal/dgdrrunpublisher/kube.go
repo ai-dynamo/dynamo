@@ -80,6 +80,15 @@ func (k *KubeCluster) getRun(ctx context.Context) (*v1beta2.DynamoGraphDeploymen
 	return &run, nil
 }
 
+// RunUID is the UID of the current incarnation of the run; candidate names include it.
+func (k *KubeCluster) RunUID(ctx context.Context) (string, error) {
+	run, err := k.getRun(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(run.UID), nil
+}
+
 func (k *KubeCluster) ListCandidates(ctx context.Context) ([]dgdcreconcile.CurrentDGDC, error) {
 	run, err := k.getRun(ctx)
 	if err != nil {
