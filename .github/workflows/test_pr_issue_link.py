@@ -105,16 +105,25 @@ class FakeApi:
 
 
 def run(
-    monkeypatch: pytest.MonkeyPatch, api: FakeApi | None = None, **env: str
+    monkeypatch: pytest.MonkeyPatch,
+    api: FakeApi | None = None,
+    today: str = "2026-10-08",
+    **env: str,
 ) -> tuple[int, FakeApi]:
-    """Run `main()` against a fake API and return its exit code."""
+    """Run `main()` against a fake API and return its exit code.
+
+    `today` defaults to a date before the blocking date, so the suite does not
+    change behaviour when the real calendar passes it.
+    """
     api = api or FakeApi()
     monkeypatch.setattr(pr_issue_link, "verify_github_issue", api.verify_github_issue)
     monkeypatch.setattr(pr_issue_link, "repo_visible", api.repo_visible)
     monkeypatch.setattr(pr_issue_link, "verify_linear_issue", api.verify_linear_issue)
-    # The runner sets GITHUB_STEP_SUMMARY; leaving it set would make these
-    # tests append to the real job summary.
+    monkeypatch.setattr(pr_issue_link, "today", lambda: today)
+    # The runner sets GITHUB_STEP_SUMMARY and GITHUB_OUTPUT; leaving them set
+    # would make these tests append to the real job summary and outputs.
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
     monkeypatch.delenv("BLOCKING_DATE", raising=False)
     for key, value in {**ENV_DEFAULTS, **env}.items():
         monkeypatch.setenv(key, value)
@@ -494,6 +503,89 @@ def test_missing_message_names_the_blocking_date(
     assert "becomes required on 2026-10-21" in capsys.readouterr().out
 
 
+# ------------------------------------------------------------------
+# Moving a failing pull request back to draft
+# ------------------------------------------------------------------
+
+
+def draft_requested(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    today: str,
+    api: FakeApi | None = None,
+    **env: str,
+) -> tuple[int, bool]:
+    """Run the check with a step-output file and report whether it asked for draft."""
+    output = tmp_path / "output"
+    output.touch()
+    code, _ = run(
+        monkeypatch,
+        api,
+        today=today,
+        BLOCKING_DATE="2026-10-21",
+        GITHUB_OUTPUT=str(output),
+        **env,
+    )
+    return code, "draft=true" in output.read_text()
+
+
+@pytest.mark.parametrize("today", ["2026-10-21", "2026-11-03"])
+def test_a_missing_link_asks_for_draft_once_required(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    today: str,
+) -> None:
+    code, drafted = draft_requested(monkeypatch, tmp_path, today)
+    assert code == 1
+    assert drafted
+    assert "moved to draft" in capsys.readouterr().out
+
+
+def test_a_missing_link_stays_open_while_advisory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    code, drafted = draft_requested(monkeypatch, tmp_path, "2026-10-20")
+    assert code == 1
+    assert not drafted
+
+
+def test_a_proposal_alone_asks_for_draft_once_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    api = FakeApi(github={DEP: (True, True)}, deps={DEP})
+    code, drafted = draft_requested(
+        monkeypatch, tmp_path, "2026-10-21", api, PR_BODY="Part of #14897"
+    )
+    assert code == 1
+    assert drafted
+
+
+@pytest.mark.parametrize(
+    "result", [(True, True), (False, False)], ids=["linked", "api-outage"]
+)
+def test_a_passing_check_never_asks_for_draft(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, result: tuple[bool, bool]
+) -> None:
+    """An outage fails open, so it must not move anyone's pull request either."""
+    api = FakeApi(github={f"{REPO}#123": result})
+    code, drafted = draft_requested(
+        monkeypatch, tmp_path, "2026-11-03", api, PR_BODY="Fixes #123"
+    )
+    assert code == 0
+    assert not drafted
+
+
+def test_request_draft_appends_the_step_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "output"
+    output.write_text("other=1\n")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    pr_issue_link.request_draft()
+    assert output.read_text() == "other=1\ndraft=true\n"
+
+
 def test_summary_is_appended_to_the_step_summary_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -596,6 +688,29 @@ def test_the_check_runs_only_against_main() -> None:
     block = re.search(r"\n  pull_request_target:\n((?:    [^\n]*\n|\n)*)", workflow)
     assert block, "the workflow does not trigger on pull_request_target"
     assert "branches: [main]" in block.group(1)
+
+
+def job_block(workflow: str, name: str) -> str:
+    match = re.search(rf"\n  {name}:\n((?:    [^\n]*\n|\n)*)", workflow)
+    assert match, f"the workflow has no {name} job"
+    return match.group(1)
+
+
+def test_only_the_draft_job_holds_a_write_token() -> None:
+    """The job that reads PR text stays read-only; the one that writes reads nothing.
+
+    Both run on `pull_request_target`, where a fork's pull request gets a token
+    for the base repository. Granting write to the check job would hand it to
+    the step that handles untrusted title and body text, and a checkout in the
+    draft job would put repository code next to the write token.
+    """
+    workflow = (Path(__file__).parent / "pr-issue-link.yml").read_text()
+    check = job_block(workflow, "check-issue-link")
+    draft = job_block(workflow, "move-to-draft")
+    assert "write" not in check
+    assert "pull-requests: write" in draft
+    assert "actions/checkout" not in draft
+    assert "needs.check-issue-link.outputs.draft == 'true'" in draft
 
 
 # ------------------------------------------------------------------
