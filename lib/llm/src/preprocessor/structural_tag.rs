@@ -204,6 +204,7 @@ impl OpenAIPreprocessor {
             parallel_tool_calls,
             schema_mode: self.runtime_config.structural_tag_schema,
             starts_in_reasoning: prompt_injected_reasoning
+                && !self.uses_full_output_grammar()
                 && !self.tool_call_structural_tag_excludes_reasoning(
                     preprocessed_request.require_reasoning,
                 ),

@@ -11,6 +11,7 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
+mod full_output;
 pub mod media;
 #[cfg(feature = "mm-routing")]
 pub mod mm_routing;
@@ -198,6 +199,7 @@ pub struct PromptReasoningPrefill {
     legacy: bool,
     unified: bool,
     prefix: Option<&'static str>,
+    closed: bool,
 }
 
 impl From<bool> for PromptReasoningPrefill {
@@ -207,6 +209,7 @@ impl From<bool> for PromptReasoningPrefill {
             legacy: value,
             unified: value,
             prefix: None,
+            closed: false,
         }
     }
 }
@@ -6697,6 +6700,9 @@ impl OpenAIPreprocessor {
             legacy,
             unified: unified || prefix.is_some(),
             prefix,
+            closed: full_output::reasoning_markers(reasoning_parser).is_some_and(|(_, end)| {
+                formatted_prompt.is_some_and(|prompt| prompt.trim_end().ends_with(end))
+            }),
         }
     }
 
@@ -7657,6 +7663,11 @@ impl
             &mut common_request,
             prompt_injected_reasoning.unified,
         )?;
+        self.apply_reasoning_to_guided_decoding(
+            &request,
+            &mut common_request,
+            prompt_injected_reasoning,
+        )?;
         let tool_processing_route =
             self.tool_processing_route(&request, &guided_tool_constraint)?;
         let payload_parsing_options = payload_handle.as_ref().map(|_| {
@@ -8431,6 +8442,229 @@ mod extra_args_media_copy_tests {
     fn inline_data_url() -> String {
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
             .to_string()
+    }
+
+    struct FullOutputPocBackend {
+        output: String,
+        captured: Arc<Mutex<Option<PreprocessedRequest>>>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for FullOutputPocBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            let (request, context) = request.into_parts();
+            *self.captured.lock().unwrap() = Some(request);
+            // Split reasoning markers across chunks and stream JSON one character
+            // at a time. The v1 Qwen parser buffers marker prefixes of two or more
+            // characters; a lone '<' is ordinary text in that parser.
+            let mut fragments = Vec::new();
+            let mut remaining = self.output.as_str();
+            while !remaining.is_empty() {
+                if let Some(marker) = ["<think>", "</think>"]
+                    .into_iter()
+                    .find(|marker| remaining.starts_with(marker))
+                {
+                    fragments.extend([marker[..3].to_string(), marker[3..].to_string()]);
+                    remaining = &remaining[marker.len()..];
+                } else {
+                    let ch = remaining.chars().next().unwrap();
+                    fragments.push(ch.to_string());
+                    remaining = &remaining[ch.len_utf8()..];
+                }
+            }
+            let mut chunks = fragments
+                .into_iter()
+                .map(|text| {
+                    Annotated::from_data(
+                        serde_json::from_value::<BackendOutput>(serde_json::json!({
+                            "token_ids": [], "tokens": [], "text": text, "index": 0
+                        }))
+                        .unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            chunks.push(Annotated::from_data(
+                serde_json::from_value(serde_json::json!({
+                    "token_ids": [], "tokens": [], "text": "", "index": 0, "finish_reason": "stop"
+                }))
+                .unwrap(),
+            ));
+            Ok(ResponseStream::new(
+                Box::pin(stream::iter(chunks)),
+                context.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn full_output_poc_real_frontend_requests_and_parsing() {
+        use crate::local_model::runtime_config::{
+            StructuralTagMode, StructuralTagScope, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        };
+        let schema = serde_json::json!({"type":"object", "properties":{"answer":{"type":"integer"}},
+            "required":["answer"], "additionalProperties":false});
+        for kind in [
+            "schema",
+            "json_object",
+            "named",
+            "required",
+            "auto",
+            "none",
+            "plain",
+            "named_json",
+            "required_json",
+        ] {
+            for (thinking, prefilled) in [(false, false), (true, false), (true, true)] {
+                let mut preprocessor = test_preprocessor();
+                preprocessor.tool_call_parser =
+                    if matches!(kind, "schema" | "json_object" | "plain") {
+                        None
+                    } else {
+                        Some("hermes".into())
+                    };
+                preprocessor.runtime_config.reasoning_parser = Some("qwen3".into());
+                preprocessor.runtime_config.structural_tag_mode = if kind.ends_with("_json") {
+                    StructuralTagMode::Off
+                } else {
+                    StructuralTagMode::On
+                };
+                preprocessor.runtime_config.structural_tag_scope = StructuralTagScope::Always;
+                preprocessor
+                    .runtime_config
+                    .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
+                    .unwrap();
+                // Exercise the rendered-prompt check rather than passing prefill state by hand.
+                preprocessor.formatter = super::tests::test_prompt_formatter(if prefilled {
+                    "assistant\n<think>"
+                } else {
+                    "assistant\n{% if enable_thinking is defined and not enable_thinking %}<think>\n\n</think>\n\n{% endif %}"
+                });
+                let mut wire = serde_json::json!({"model":"test-model", "stream":true,
+                    "messages":[{"role":"user","content":"What is 8 + 9?"}],
+                    "chat_template_kwargs":{"enable_thinking":thinking}});
+                if kind == "schema" {
+                    wire["response_format"] = serde_json::json!({"type":"json_schema", "json_schema":{"name":"answer", "strict":true, "schema":schema}});
+                } else if kind == "json_object" {
+                    wire["response_format"] = serde_json::json!({"type":"json_object"});
+                } else if kind != "plain" {
+                    wire["tools"] = serde_json::json!([{"type":"function", "function":{"name":"answer", "strict":true, "parameters":schema}}]);
+                    wire["parallel_tool_calls"] = serde_json::json!(false);
+                    wire["tool_choice"] = if kind.starts_with("named") {
+                        serde_json::json!({"type":"function", "function":{"name":"answer"}})
+                    } else {
+                        serde_json::json!(kind.strip_suffix("_json").unwrap_or(kind))
+                    };
+                }
+                let request: NvCreateChatCompletionRequest = serde_json::from_value(wire).unwrap();
+                let tool_output = matches!(
+                    kind,
+                    "named" | "required" | "auto" | "named_json" | "required_json"
+                );
+                let final_output = match kind {
+                    "named" | "required" | "auto" => {
+                        "<tool_call>\n{\"name\": \"answer\", \"arguments\": {\"answer\":17}}\n</tool_call>"
+                    }
+                    "required_json" => "[{\"name\":\"answer\",\"parameters\":{\"answer\":17}}]",
+                    "plain" | "none" => "17",
+                    _ => "{\"answer\":17}",
+                };
+                let output = if thinking {
+                    format!(
+                        "{}private</think>\n\n{final_output}",
+                        if prefilled { "" } else { "<think>" }
+                    )
+                } else {
+                    final_output.to_string()
+                };
+                let captured = Arc::new(Mutex::new(None));
+                let backend = Arc::new(FullOutputPocBackend {
+                    output: output.clone(),
+                    captured: captured.clone(),
+                });
+                let chunks =
+                    Operator::generate(&preprocessor, PipelineContext::new(request), backend)
+                        .await
+                        .unwrap()
+                        .collect::<Vec<_>>()
+                        .await;
+                let choices = chunks
+                    .iter()
+                    .filter_map(|chunk| chunk.data.as_ref())
+                    .flat_map(|chunk| &chunk.inner.choices)
+                    .collect::<Vec<_>>();
+                let reasoning = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                    .collect::<String>();
+                assert_eq!(
+                    reasoning.trim(),
+                    if thinking { "private" } else { "" },
+                    "{kind} thinking={thinking} prefilled={prefilled}"
+                );
+                if tool_output {
+                    let calls = choices
+                        .iter()
+                        .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    let name = calls
+                        .iter()
+                        .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                        .collect::<String>();
+                    let args = calls
+                        .iter()
+                        .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                        .collect::<String>();
+                    assert_eq!(name, "answer", "{kind}");
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&args).unwrap(),
+                        serde_json::json!({"answer":17}),
+                        "{kind}"
+                    );
+                } else {
+                    let content = choices
+                        .iter()
+                        .filter_map(|choice| match choice.delta.content.as_ref() {
+                            Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    assert_eq!(content.trim(), final_output, "{kind}");
+                }
+                let captured = captured.lock().unwrap();
+                let common = captured.as_ref().unwrap();
+                if let Some(guided) = &common.sampling_options.guided_decoding {
+                    assert!(guided.json.is_none() && guided.regex.is_none());
+                    assert!(!common.require_reasoning);
+                    let extra = common.extra_args.as_ref().unwrap();
+                    assert!(extra.get("reasoning_parser_kwargs").is_none());
+                    assert!(extra.get("reasoning_ended").is_none());
+                    let tag = guided.structural_tag.as_ref().unwrap();
+                    if thinking {
+                        assert_eq!(
+                            tag["format"]["elements"][0]["begin"],
+                            if prefilled { "" } else { "<think>" }
+                        );
+                        assert_eq!(tag["format"]["elements"][0]["end"], "</think>");
+                    }
+                    // Consumed by full_output_grammar_cpu.py using the real XGrammar compiler.
+                    println!(
+                        "FULL_OUTPUT_POC_CASE={}",
+                        serde_json::json!({
+                            "kind":kind, "thinking":thinking, "prefilled":prefilled,
+                            "structural_tag":tag, "valid_output":output
+                        })
+                    );
+                } else {
+                    assert!(matches!(kind, "plain" | "none"));
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -13709,7 +13943,7 @@ mod tests {
         assert!(dynamo_err.to_string().contains("legacy tool-call parsing"));
     }
 
-    fn test_prompt_formatter(template: &str) -> Arc<dyn OAIPromptFormatter> {
+    pub(super) fn test_prompt_formatter(template: &str) -> Arc<dyn OAIPromptFormatter> {
         let template: dynamo_renderer::ChatTemplate = serde_json::from_value(serde_json::json!({
             "chat_template": template
         }))
