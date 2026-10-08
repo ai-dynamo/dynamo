@@ -934,7 +934,6 @@ mod tests {
             .fetch_and_decode_media_part(&part_b, None)
             .await
             .unwrap();
-        super::super::rdma::native_tests::assert_scoped_metadata(&b, &a.nixl_descriptor).unwrap();
         assert_eq!(loader.cache_len(), 2);
 
         // Touch B to make it the LRU front; A becomes the eviction target

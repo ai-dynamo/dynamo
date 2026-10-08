@@ -107,9 +107,12 @@ def test_remote_imports_connection_before_buffer(connection):
 
 @pytest.mark.gpu_0
 @pytest.mark.parametrize("failed_import", [1, 2])
-def test_read_import_failure_preserves_other_remote_reference(
-    connection, failed_import
-):
+def test_read_import_failure_balances_python_remote_refs(connection, failed_import):
+    """Check Python reference accounting, not native state after a failed import.
+
+    NIXL is mocked here. A real failed import can invalidate shared native state
+    even when the Python reference counts remain correct.
+    """
     from dynamo.nixl_connect import (
         Descriptor,
         OperationKind,

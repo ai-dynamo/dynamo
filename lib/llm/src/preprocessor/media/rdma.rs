@@ -313,8 +313,11 @@ impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
     }
 }
 
-// Return (registration metadata, connection metadata), each zlib-compressed and
-// base64-encoded in the format "b64:<compressed_base64>" used by Python nixl_connect.
+/// Export metadata for storage already registered with `agent`.
+///
+/// Returns `(registration_metadata, connection_metadata)`, each zlib-compressed
+/// and base64-encoded as `b64:<compressed_base64>` for Python nixl_connect.
+/// The caller must keep the storage registration alive until the remote read completes.
 // TODO: pre-allocate a fixed NIXL-registered RAM pool so metadata can be cached on the target?
 pub fn get_nixl_metadata(agent: &NixlAgent, storage: &SystemStorage) -> Result<(String, String)> {
     let (ptr, size, mem_type, device_id) = storage.nixl_params();
@@ -418,17 +421,17 @@ pub(super) mod native_tests {
     use std::io::Read;
     use std::time::{Duration, Instant};
 
+    fn decode_metadata(encoded: &str) -> Result<Vec<u8>> {
+        let compressed = general_purpose::STANDARD.decode(encoded.strip_prefix("b64:").unwrap())?;
+        let mut metadata = Vec::new();
+        flate2::read::ZlibDecoder::new(&compressed[..]).read_to_end(&mut metadata)?;
+        Ok(metadata)
+    }
+
     pub fn assert_scoped_metadata(
         selected: &RdmaMediaDataDescriptor,
         unrelated: &NixlDescriptor,
-    ) -> Result<()> {
-        fn decode_metadata(encoded: &str) -> Result<Vec<u8>> {
-            let compressed =
-                general_purpose::STANDARD.decode(encoded.strip_prefix("b64:").unwrap())?;
-            let mut metadata = Vec::new();
-            flate2::read::ZlibDecoder::new(&compressed[..]).read_to_end(&mut metadata)?;
-            Ok(metadata)
-        }
+    ) -> Result<NixlAgent> {
         let receiver = get_nixl_agent()?;
         let connection_metadata =
             decode_metadata(selected.nixl_connection_metadata.as_deref().unwrap())?;
@@ -445,22 +448,36 @@ pub(super) mod native_tests {
                     .check_remote_metadata(&remote, Some(descriptors))
             );
         }
+        assert_buffer_read(&receiver, &remote, selected, unrelated)?;
+        Ok(receiver)
+    }
+
+    fn assert_buffer_read(
+        receiver: &NixlAgent,
+        remote: &str,
+        selected: &RdmaMediaDataDescriptor,
+        unrelated: &NixlDescriptor,
+    ) -> Result<()> {
+        let mut remote_selected = nixl::XferDescList::new(selected.nixl_descriptor.mem_type)?;
+        remote_selected.add_storage_desc(&selected.nixl_descriptor)?;
+        let mut remote_unrelated = nixl::XferDescList::new(unrelated.mem_type)?;
+        remote_unrelated.add_storage_desc(unrelated)?;
         let metadata = decode_metadata(&selected.nixl_metadata)?;
         assert_eq!(receiver.raw_agent().load_remote_md(&metadata)?, remote);
         assert!(
             receiver
                 .raw_agent()
-                .check_remote_metadata(&remote, Some(&remote_selected))
+                .check_remote_metadata(remote, Some(&remote_selected))
         );
         assert!(
             !receiver
                 .raw_agent()
-                .check_remote_metadata(&remote, Some(&remote_unrelated))
+                .check_remote_metadata(remote, Some(&remote_unrelated))
         );
 
         let destination = nixl::register_with_nixl(
             SystemStorage::new(selected.nixl_descriptor.size)?,
-            &receiver,
+            receiver,
             None,
         )
         .map_err(|_| anyhow::anyhow!("failed to register receiver buffer"))?;
@@ -471,7 +488,7 @@ pub(super) mod native_tests {
             nixl::XferOp::Read,
             &local,
             &remote_selected,
-            &remote,
+            remote,
             None,
         )?;
         if receiver.raw_agent().post_xfer_req(&request, None)? {
@@ -503,7 +520,7 @@ pub(super) mod native_tests {
             .into_rdma_descriptor(&source)?;
         let selected = DecodedMediaData::try_from(ndarray::Array1::from_elem(65536, 0x5a))?
             .into_rdma_descriptor(&source)?;
-        assert_scoped_metadata(&selected, &unrelated.nixl_descriptor)?;
+        let receiver = assert_scoped_metadata(&selected, &unrelated.nixl_descriptor)?;
         assert_eq!(
             (
                 selected.nixl_metadata.clone(),
@@ -513,7 +530,15 @@ pub(super) mod native_tests {
         );
         let unrelated_descriptor = unrelated.nixl_descriptor.clone();
         drop(unrelated);
-        assert_scoped_metadata(&selected, &unrelated_descriptor)
+
+        // Reuse the receiver without invalidating its remote metadata. The selected
+        // registration stays live; this does not test address reuse with a new key.
+        let connection_metadata =
+            decode_metadata(selected.nixl_connection_metadata.as_deref().unwrap())?;
+        let remote = receiver.raw_agent().load_remote_md(&connection_metadata)?;
+        assert_buffer_read(&receiver, &remote, &selected, &unrelated_descriptor)?;
+        assert_scoped_metadata(&selected, &unrelated_descriptor)?;
+        Ok(())
     }
 }
 
