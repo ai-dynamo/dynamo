@@ -1313,7 +1313,19 @@ class HandlerBase(BaseGenerativeHandler):
                 "cache_salt": cache_salt,
             }
             generate_async = self.engine.llm.generate_async
+            preprocess = getattr(self.engine.llm, "preprocess", None)
             try:
+                if preprocess is not None and self._request_has_images(
+                    processed_input
+                ):
+                    # generate_async preprocesses synchronously and blocks the
+                    # event loop on media; do it on a thread and pass the result.
+                    generate_kwargs["inputs"] = await asyncio.to_thread(
+                        preprocess,
+                        processed_input,
+                        sampling_params,
+                        disaggregated_params,
+                    )
                 generation_result = generate_async(**generate_kwargs)
             except (ValueError, TypeError, NotImplementedError) as e:
                 # TRT-LLM performs request validation and preprocessing synchronously in
