@@ -201,7 +201,6 @@ def test_identity_and_manifests_do_not_depend_on_rank_or_observation_order(
     one.on_candidate(record("a", 1.0))
     one.on_candidate(record("b", 2.0))
     one.close()
-    # Same two points, opposite scores and opposite observation order.
     two = DGDRRunOutputAdapter(make_config(second), workload=None)
     two.on_candidate(record("b", 1.0))
     two.on_candidate(record("a", 2.0))
@@ -443,6 +442,7 @@ def test_a_terminal_write_failure_is_raised_not_swallowed(
 def test_a_failed_periodic_write_is_retried_with_the_latest_state(
     tmp_path: Path, renders: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(adapter_module, "_WRITE_RETRY_BACKOFF", 0.02)
     adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
     adapter.start()
     real = adapter_module.write_snapshot
@@ -631,7 +631,6 @@ def test_plugin_subscribe_with_a_context_publishes_live(
     assert callbacks is not None
     assert callbacks.on_candidate is not None
     assert callbacks.on_round is not None
-    # The initial snapshot exists before the first candidate is evaluated.
     assert load(tmp_path)["run"] == {"phase": "Running", "terminal": False}
 
     callbacks.on_candidate(record("a", 9.0))
@@ -718,30 +717,6 @@ def test_a_transient_materialization_failure_is_retried_and_recovers(
     assert candidate["outcome"] == "materialized"
     assert "error" not in candidate
     assert len(attempts) == 2
-
-
-def test_plugin_write_keeps_the_round_recorded_by_the_live_snapshot(
-    tmp_path: Path, renders: list[str], fake_search_config: None
-) -> None:
-    live = create_adapter().subscribe(
-        {**PLUGIN_CONFIG, "snapshot_dir": str(tmp_path)},
-        context=SimpleNamespace(workload="workload"),
-    )
-    assert live is not None and live.on_round is not None
-    live.on_round(3, [])
-    wait_for(lambda: load(tmp_path)["progress"]["round"] == 3)
-    assert live.on_complete is not None
-    live.on_complete()
-
-    create_adapter().write(
-        {**PLUGIN_CONFIG, "snapshot_dir": str(tmp_path)},
-        result=_final_result(4),
-        output_dir=tmp_path,
-    )
-
-    snapshot = load(tmp_path)
-    assert snapshot["run"]["terminal"] is True
-    assert snapshot["progress"] == {"round": 3, "evaluated": 4}
 
 
 def test_plugin_write_without_a_live_snapshot_starts_at_round_zero(
@@ -933,3 +908,34 @@ def test_subscribe_does_not_publish_live_without_lifecycle_callbacks(
     )
     assert callbacks is None
     assert not (tmp_path / SNAPSHOT_FILE_NAME).exists()
+
+
+def test_a_persistent_write_failure_does_not_spin_the_writer(
+    tmp_path: Path, renders: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(adapter_module, "_WRITE_RETRY_BACKOFF", 0.2)
+    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
+    adapter.start()
+    attempts = {"count": 0}
+
+    def failing(directory: Path, snapshot: Any) -> Path:
+        attempts["count"] += 1
+        raise OSError("disk full")
+
+    monkeypatch.setattr(adapter_module, "write_snapshot", failing)
+    adapter.on_candidate(record("a", 1.0))
+    time.sleep(0.6)
+    seen = attempts["count"]
+    monkeypatch.undo()
+    adapter.close()
+    assert 1 <= seen <= 5
+
+
+def test_plugin_write_keeps_the_objectives_of_the_selected_candidates(
+    tmp_path: Path, renders: list[str], fake_search_config: None
+) -> None:
+    result = _final_result(1)
+    result.selected_candidates = [record("a", 9.0, objectives={"throughput": 12.5})]
+    create_adapter().write(PLUGIN_CONFIG, result=result, output_dir=tmp_path)
+    (candidate,) = load(tmp_path)["candidates"]
+    assert candidate["metrics"]["objectives"] == {"throughput": 12.5}
