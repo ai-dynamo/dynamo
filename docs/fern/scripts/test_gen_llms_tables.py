@@ -189,6 +189,34 @@ class TestAgainstRealData:
         assert "TensorRT-LLM" in table
 
 
+class TestEnterpriseArtifacts:
+    ARTIFACTS = [
+        {"component": "vLLM runtime", "ref": "nvcr.io/x/vllm-runtime-enterprise:{tag}"},
+        {"component": "Chart", "ref": "https://h/charts/platform-enterprise-{tag}.tgz"},
+    ]
+
+    def test_newest_enterprise_release_sets_line_and_tag(self):
+        body = gen.render_enterprise_artifacts(
+            {
+                "RELEASES": [
+                    {"version": "v1.6.0"},
+                    {"version": "v1.5.1", "enterprise": "Oct 6, 2026"},
+                    {"version": "v1.5.0", "enterprise": "Sep 28, 2026"},
+                ],
+                "ENTERPRISE_ARTIFACTS": self.ARTIFACTS,
+            }
+        )
+        assert "The Dynamo 1.5 release line" in body
+        assert "| vLLM runtime | `nvcr.io/x/vllm-runtime-enterprise:1.5.1` |" in body
+        assert "platform-enterprise-1.5.1.tgz" in body
+
+    def test_renders_from_the_checked_in_module(self):
+        real = gen.parse_data_module(gen.DATA_TS)
+        body = gen.render_enterprise_artifacts(real)
+        assert body.count("-enterprise") == len(real["ENTERPRISE_ARTIFACTS"])
+        assert "{tag}" not in body
+
+
 class TestGeneratedNightlyLedger:
     def test_loads_generated_rows(self, tmp_path: Path):
         path = tmp_path / "nightly.generated.ts"

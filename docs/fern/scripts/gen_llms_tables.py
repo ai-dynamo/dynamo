@@ -116,6 +116,7 @@ REQUIRED_EXPORTS = [
     "KNOWN_ARTIFACT_ISSUES",
     "CRATES_FIRST_PUBLISHED",
     "RELEASE_STATS",
+    "ENTERPRISE_ARTIFACTS",
 ]
 
 
@@ -863,6 +864,25 @@ def render_model_ea_builds(data: dict) -> str:
     return "\n\n".join(parts)
 
 
+def render_enterprise_artifacts(data: dict) -> str:
+    """Mirror of <EnterpriseArtifacts />: the newest release with an enterprise date."""
+    release = next(r for r in data["RELEASES"] if r.get("enterprise"))
+    tag = release["version"].removeprefix("v")
+    line = ".".join(tag.split(".")[:2])
+    rows = [
+        [a["component"], f"`{a['ref'].replace('{tag}', tag)}`"]
+        for a in data["ENTERPRISE_ARTIFACTS"]
+    ]
+    return "\n\n".join(
+        [
+            f"The Dynamo {line} release line is the current supported release. "
+            "The following artifacts are published for it. "
+            "Commercial support is limited to this exact set.",
+            md_table(["Component", "Artifact"], rows),
+        ]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dates (fixed mapping — content never depends on the wall clock)
 # ---------------------------------------------------------------------------
@@ -1245,7 +1265,7 @@ class Block(NamedTuple):
     append_if_missing: bool
 
 
-# The three component-backed pages get <llms-only> twins (humans see the React
+# The component-backed pages get <llms-only> twins (humans see the React
 # components); releases-machine-readable.mdx IS the page body, human-viewable
 # and machine-consumable alike.
 PAGES: dict[str, tuple[Block, ...]] = {
@@ -1268,6 +1288,10 @@ PAGES: dict[str, tuple[Block, ...]] = {
     ),
     "releases/release-history.mdx": (
         Block("release-stats", render_release_stats, False, False),
+    ),
+    # Outside the reference tree; keys resolve against REFERENCE_DIR.
+    "../../enterprise/supported-artifacts.mdx": (
+        Block("llms-tables", render_enterprise_artifacts, True, False),
     ),
 }
 
