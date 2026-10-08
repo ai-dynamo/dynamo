@@ -32,6 +32,7 @@ from dynamo.sglang.capacity import (
     kv_metrics_block_values,
     local_dp_rank_bounds,
     publishes_kv_events,
+    sglang_dp_layout,
 )
 from dynamo.sglang.gateway import (
     effective_gateway_workers,
@@ -470,8 +471,7 @@ class DynamoSglangPublisher:
         # FPM uses per-scheduler IPC endpoints suffixed by dp_rank.
         # Unlike KV events (per-request, routed), every scheduler emits FPM
         # independently — subscribe to all local DP ranks.
-        dp_size = getattr(self.server_args, "dp_size", 1) or 1
-        enable_dp_attention = getattr(self.server_args, "enable_dp_attention", False)
+        dp_size, enable_dp_attention = sglang_dp_layout(self.server_args)
         nnodes = getattr(self.server_args, "nnodes", 1) or 1
         node_rank = getattr(self.server_args, "node_rank", 0) or 0
 
