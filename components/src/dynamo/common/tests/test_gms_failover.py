@@ -2246,3 +2246,89 @@ async def test_successor_never_waits_for_a_standby(monkeypatch, tmp_path):
     _standby_gate_env(monkeypatch, tmp_path, engine_id="1")
     assert await gms_failover.wait_for_armed_standby_before_serving("vllm") is False
     assert not (tmp_path / "failover.lock.primary-boot").exists()
+
+
+def _fake_etcd_gateway():
+    import http.server
+    import threading
+
+    received = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            received.append((self.path, json.loads(body)))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, received
+
+
+def test_successor_revokes_only_a_recorded_predecessor_lease(tmp_path, monkeypatch):
+    from dynamo.common import gms_failover
+
+    server, received = _fake_etcd_gateway()
+    try:
+        lock = str(tmp_path / "failover.lock")
+        monkeypatch.setenv("FAILOVER_LOCK_PATH", lock)
+        monkeypatch.setenv("ETCD_ENDPOINTS", f"127.0.0.1:{server.server_port}")
+        monkeypatch.delenv("DYN_DISCOVERY_BACKEND", raising=False)
+
+        # Nothing recorded yet: nothing to revoke.
+        assert not gms_failover.revoke_predecessor_discovery_lease(222)
+        gms_failover.record_active_discovery_lease(111)
+        # Our own lease is never revoked.
+        assert not gms_failover.revoke_predecessor_discovery_lease(111)
+        assert gms_failover.revoke_predecessor_discovery_lease(222)
+        assert received == [("/v3/lease/revoke", {"ID": "111"})]
+
+        # Other discovery backends are left alone.
+        monkeypatch.setenv("DYN_DISCOVERY_BACKEND", "kubernetes")
+        assert not gms_failover.revoke_predecessor_discovery_lease(222)
+        assert len(received) == 1
+    finally:
+        server.shutdown()
+
+
+def test_unreachable_etcd_gateway_is_only_a_lost_hint(tmp_path, monkeypatch):
+    from dynamo.common import gms_failover
+
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", str(tmp_path / "failover.lock"))
+    monkeypatch.setenv("ETCD_ENDPOINTS", "http://127.0.0.1:9")
+    monkeypatch.delenv("DYN_DISCOVERY_BACKEND", raising=False)
+    gms_failover.record_active_discovery_lease(111)
+    assert not gms_failover.revoke_predecessor_discovery_lease(222)
+
+
+@pytest.mark.asyncio
+async def test_shadow_takeover_replaces_predecessor_discovery_lease(
+    tmp_path, monkeypatch
+):
+    from dynamo.common import gms_failover
+
+    server, received = _fake_etcd_gateway()
+    try:
+        monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+        monkeypatch.setenv("ENGINE_ID", "1")
+        monkeypatch.setenv("FAILOVER_LOCK_PATH", str(tmp_path / "failover.lock"))
+        monkeypatch.setenv("ETCD_ENDPOINTS", f"127.0.0.1:{server.server_port}")
+        monkeypatch.delenv("DYN_DISCOVERY_BACKEND", raising=False)
+        gms_failover.record_active_discovery_lease(111)
+        owner = _Owner()
+        owner.generate_endpoint = SimpleNamespace(connection_id=lambda: 222)
+
+        await prepare_gms_failover(
+            owner, _Runtime(), backend_name="test", lock_factory=_BusyOnTryLock
+        )
+
+        assert received == [("/v3/lease/revoke", {"ID": "111"})]
+        # The next successor revokes this engine's lease, not ours again.
+        assert not gms_failover.revoke_predecessor_discovery_lease(222)
+    finally:
+        server.shutdown()

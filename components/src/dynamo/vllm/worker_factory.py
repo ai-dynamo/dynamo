@@ -25,6 +25,7 @@ from dynamo import prometheus_names
 from dynamo.common.gms_failover import (
     acquire_lock_while_armed,
     arm_frozen_shadow_headroom,
+    claim_discovery_for_active_engine,
     frozen_predecessor_enabled,
     quiesce_local_gpu_cohort_after_rank_loss,
     run_gms_failover_post_lock_fence,
@@ -1673,6 +1674,7 @@ class WorkerFactory:
                 )
             self._maybe_start_rank_liveness_monitor(handler, config)
             await wait_for_armed_standby_before_serving("vllm")
+            claim_discovery_for_active_engine(handler)
             logger.info(
                 "[Shadow] Failover lock already acquired before engine init; "
                 "registering with discovery"
@@ -1703,6 +1705,7 @@ class WorkerFactory:
                 raise
             self._maybe_start_rank_liveness_monitor(handler, config)
             await wait_for_armed_standby_before_serving("vllm")
+            claim_discovery_for_active_engine(handler)
             return False
 
         # The pre-initialized standby relinquishes its writer role without clearing
@@ -1819,6 +1822,7 @@ class WorkerFactory:
                 # live until that cleanup (or kernel process death) completes.
                 os.kill(os.getpid(), signal.SIGTERM)
             raise
+        claim_discovery_for_active_engine(handler)
         logger.info("[Shadow] Engine awake, registering with discovery")
         return was_contended
 

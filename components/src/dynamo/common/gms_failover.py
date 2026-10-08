@@ -333,6 +333,106 @@ def _write_atomic(path: Path, text: str) -> None:
     os.replace(pending, path)
 
 
+def _discovery_lease_path(lock_path: str | None = None) -> Path:
+    lock_path = lock_path or os.environ.get(
+        "FAILOVER_LOCK_PATH", DEFAULT_FAILOVER_LOCK_PATH
+    )
+    return Path(lock_path + ".discovery-lease")
+
+
+def record_active_discovery_lease(lease_id: int, lock_path: str | None = None) -> None:
+    """Record the active engine's discovery lease next to the failover lock.
+
+    Called while holding the active failover lock, so there is one writer. A
+    successor revokes this lease after fencing the engine that owns it.
+    """
+    try:
+        _write_atomic(_discovery_lease_path(lock_path), f"{int(lease_id)}\n")
+    except OSError:
+        logger.warning(
+            "[GMS failover] could not record the active discovery lease",
+            exc_info=True,
+        )
+
+
+def _etcd_gateway_endpoint() -> str | None:
+    backend = os.environ.get("DYN_DISCOVERY_BACKEND", "etcd").strip().lower()
+    if backend not in {"", "etcd"}:
+        return None
+    endpoints = os.environ.get("ETCD_ENDPOINTS", "").strip()
+    if not endpoints:
+        return None
+    endpoint = endpoints.split(",")[0].strip().rstrip("/")
+    if not endpoint.startswith(("http://", "https://")):
+        endpoint = "http://" + endpoint
+    return endpoint
+
+
+def revoke_predecessor_discovery_lease(
+    own_lease_id: int | None, lock_path: str | None = None
+) -> bool:
+    """Drop the fenced predecessor's discovery registration at once.
+
+    A SIGKILLed primary cannot unregister, so the frontend kept routing to
+    its dead endpoint until the etcd lease expired (about 10 s), and migrated
+    requests exhausted their retries there. Its registrations (instances,
+    model card, event channels) all live under one lease, so revoking that
+    lease removes exactly this engine. Call only after the predecessor's
+    writers are fenced; it is a routing hint, never a safety step, and the
+    lease would expire on its own if this fails.
+    """
+    path = _discovery_lease_path(lock_path)
+    try:
+        recorded = int(path.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return False
+    if own_lease_id is not None and recorded == int(own_lease_id):
+        return False
+    endpoint = _etcd_gateway_endpoint()
+    if endpoint is None:
+        return False
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"{endpoint}/v3/lease/revoke",
+        data=json.dumps({"ID": str(recorded)}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=1.0) as response:
+            response.read()
+    except Exception as exc:  # noqa: BLE001 - expiry remains the fallback
+        logger.warning(
+            "[GMS failover] could not revoke predecessor discovery lease %x: %s",
+            recorded,
+            exc,
+        )
+        return False
+    logger.info(
+        "[GMS failover] revoked predecessor discovery lease %x in %.1f ms",
+        recorded,
+        (time.monotonic() - started) * 1000.0,
+    )
+    return True
+
+
+def claim_discovery_for_active_engine(owner: Any) -> None:
+    """Replace the fenced predecessor's discovery registration with ours.
+
+    Call after the post-lock fence, while holding the active lock.
+    """
+    endpoint = getattr(owner, "generate_endpoint", None)
+    try:
+        own = int(endpoint.connection_id()) if endpoint is not None else None
+    except Exception:  # noqa: BLE001 - routing hint only
+        own = None
+    revoke_predecessor_discovery_lease(own)
+    if own is not None:
+        record_active_discovery_lease(own)
+
+
 async def wait_for_armed_standby_before_serving(
     backend_name: str, lock_path: str | None = None
 ) -> bool:
@@ -1809,6 +1909,7 @@ async def prepare_gms_failover(
         except BaseException:
             await _release_lock_after_activation_error(lock, backend_name=backend_name)
             raise
+        claim_discovery_for_active_engine(owner)
         return GmsFailoverActivation(
             enabled=True,
             lock=lock,
@@ -1938,6 +2039,7 @@ async def prepare_gms_failover(
             raise cleanup_cancelled
         raise
 
+    claim_discovery_for_active_engine(owner)
     logger.info(
         "[GMS failover] %s %s resumed; registering with discovery",
         backend_name,
