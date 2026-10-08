@@ -636,9 +636,15 @@ def _test_frontend_kv_routing(
                                 "x-dynamo-dp-rank": str(target[1]),
                             }
                         )
+                    # Warm both prefill engines before requiring their transfer metrics.
+                    check_transfer = (
+                        transfer_total is not None
+                        and target is None
+                        and not is_query_only
+                    )
                     before = (
                         await asyncio.to_thread(transfer_total)
-                        if transfer_total is not None
+                        if check_transfer
                         else None
                     )
                     nvext, has_generated_text = await send_router_chat_request(
@@ -657,7 +663,7 @@ def _test_frontend_kv_routing(
                             selected["decode_worker_id"],
                             selected["decode_dp_rank"],
                         ) == selected_target, selected
-                    if transfer_total is not None:
+                    if check_transfer:
                         deadline = time.monotonic() + 10
                         while await asyncio.to_thread(transfer_total) <= before:
                             assert time.monotonic() < deadline, (
