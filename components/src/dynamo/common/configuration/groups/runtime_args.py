@@ -29,7 +29,7 @@ _fpm_trace_invalid_warning_emitted = False
 
 
 class StructuralTagConfig(msgspec.Struct, forbid_unknown_fields=True):
-    scope: Literal["auto", "always"] = "auto"
+    scope: Literal["auto", "always"] = "always"
     schema: Literal["auto", "strict"] = "auto"
     allow_tool_calls_with_structured_output: bool = False
     exclude_special_tokens: Optional[bool] = None
@@ -171,9 +171,9 @@ class DynamoRuntimeConfig(ConfigBase):
         if self.tcp_tls_client_key_path:
             os.environ["DYN_TCP_TLS_CLIENT_KEY_PATH"] = self.tcp_tls_client_key_path
         if self.tcp_tls_client_ca_cert_path:
-            os.environ[
-                "DYN_TCP_TLS_CLIENT_CA_CERT_PATH"
-            ] = self.tcp_tls_client_ca_cert_path
+            os.environ["DYN_TCP_TLS_CLIENT_CA_CERT_PATH"] = (
+                self.tcp_tls_client_ca_cert_path
+            )
 
         # Propagate NATS TLS CLI flags.
         if self.nats_tls_ca_cert_path:
@@ -350,9 +350,12 @@ class DynamoRuntimeArgGroup(ArgGroup):
             arg_type=_parse_structural_tag,
             nargs="?",
             const="true",
-            help="Enable structural tag guided decoding, optionally configured with a JSON object. "
-            "Named Kimi K3 tool_choice requests always activate their required "
-            "XTML structural tag even when this flag is off.",
+            help="Configure default-on structural tag guided decoding with a JSON object, "
+            "or pass false to disable optional guidance. Rust retains native tags for "
+            "Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang "
+            "respect the opt-out. Schema auto enforces strict omitted or true; schema "
+            "strict enforces every tool, overriding strict=false. Unsupported schema "
+            "constructs can cause backend grammar compilation errors.",
         )
         add_argument(
             g,
@@ -626,12 +629,12 @@ def resolve_structural_tag_config(
             _validate_xgrammar_any_order_support()
         return msgspec.to_builtins(structural_tag_setting)
 
-    if legacy_enable is not True:
+    if legacy_enable is False:
         return None
 
     return msgspec.to_builtins(
         StructuralTagConfig(
-            scope=legacy_scope if legacy_scope is not None else "auto",
+            scope=legacy_scope if legacy_scope is not None else "always",
             schema=legacy_schema if legacy_schema is not None else "auto",
         )
     )

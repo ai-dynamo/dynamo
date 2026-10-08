@@ -72,7 +72,8 @@ fn to_v2_tool(tool: &ToolDefinition) -> Tool {
         name: tool.name.clone(),
         description: None,
         parameters: tool.parameters.clone().unwrap_or(serde_json::Value::Null),
-        strict: tool.strict,
+        // Match the deployment policy shared with v1: only explicit false opts out.
+        strict: Some(tool.strict.unwrap_or(true)),
     }
 }
 
@@ -87,6 +88,18 @@ pub(super) fn supports_family(parser_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_tool_strict_matches_v1_schema_enforcement() {
+        for (strict, expected) in [(None, true), (Some(true), true), (Some(false), false)] {
+            let tool = ToolDefinition {
+                name: "get_weather".to_string(),
+                parameters: None,
+                strict,
+            };
+            assert_eq!(to_v2_tool(&tool).strict, Some(expected));
+        }
+    }
 
     #[test]
     fn deepseek_v4_engine_aliases_select_the_structural_tag_builder() {

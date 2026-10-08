@@ -31,6 +31,36 @@ def _parse_runtime_args(argv: list[str]) -> tuple[DynamoRuntimeConfig, str]:
     return config, parser.format_help()
 
 
+def test_structural_tags_default_on_for_supported_parsers(monkeypatch):
+    _clear_structural_tag_env(monkeypatch)
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.structural_tag is not None
+    assert config.structural_tag["scope"] == "always"
+    assert config.structural_tag["schema"] == "auto"
+
+
+def test_structural_tag_schema_help_describes_omitted_strict(monkeypatch):
+    _clear_structural_tag_env(monkeypatch)
+
+    _, help_text = _parse_runtime_args([])
+
+    help_text = " ".join(help_text.split())
+    assert "strict omitted or true" in help_text
+    assert "overriding strict=false" in help_text
+
+
+def test_structural_tag_global_opt_out(monkeypatch):
+    _clear_structural_tag_env(monkeypatch)
+    monkeypatch.setenv("DYN_ENABLE_STRUCTURAL_TAG", "false")
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.dyn_enable_structural_tag is False
+    assert config.structural_tag is None
+
+
 def test_fpm_trace_defaults_disabled(monkeypatch):
     monkeypatch.delenv("DYN_FPM_TRACE", raising=False)
 
@@ -154,12 +184,17 @@ def _clear_structural_tag_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-def test_structural_tags_are_disabled_by_default(monkeypatch):
+def test_default_structural_tag_policy_does_not_warn_about_legacy_options(
+    monkeypatch, caplog
+):
     _clear_structural_tag_env(monkeypatch)
 
     config, _ = _parse_runtime_args([])
 
-    assert config.structural_tag is None
+    assert config.structural_tag is not None
+    assert config.structural_tag["scope"] == "always"
+    assert "deprecated" not in caplog.text
+    assert config.dyn_enable_structural_tag is None
 
 
 def test_structural_tag_flag_uses_default_config(monkeypatch):
@@ -168,7 +203,7 @@ def test_structural_tag_flag_uses_default_config(monkeypatch):
     config, help_text = _parse_runtime_args(["--dyn-structural-tag"])
 
     assert config.structural_tag == {
-        "scope": "auto",
+        "scope": "always",
         "schema": "auto",
         "allow_tool_calls_with_structured_output": False,
         "exclude_special_tokens": None,
@@ -177,6 +212,32 @@ def test_structural_tag_flag_uses_default_config(monkeypatch):
     }
     assert "DYN_STRUCTURAL_TAG" in help_text
     assert "--dyn-enable-structural-tag" not in help_text
+
+
+@pytest.mark.parametrize(
+    "argv", [["--dyn-structural-tag", "false"], ["--no-dyn-enable-structural-tag"]]
+)
+def test_structural_tag_cli_opt_out(monkeypatch, argv):
+    _clear_structural_tag_env(monkeypatch)
+    config, _ = _parse_runtime_args(argv)
+    assert config.structural_tag is None
+
+
+@pytest.mark.parametrize(
+    "argv, scope, schema",
+    [
+        (["--dyn-structural-tag-scope", "auto"], "auto", "auto"),
+        (["--dyn-structural-tag-schema", "strict"], "always", "strict"),
+    ],
+)
+def test_legacy_tuning_alone_keeps_default_guidance_enabled(
+    monkeypatch, argv, scope, schema
+):
+    _clear_structural_tag_env(monkeypatch)
+    config, _ = _parse_runtime_args(argv)
+    assert config.structural_tag is not None
+    assert config.structural_tag["scope"] == scope
+    assert config.structural_tag["schema"] == schema
 
 
 def test_structural_tag_json_config_enables_and_fills_defaults(monkeypatch):

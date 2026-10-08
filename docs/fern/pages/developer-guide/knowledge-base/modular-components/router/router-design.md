@@ -222,8 +222,9 @@ graph TD
 1. Each worker assigns monotonically increasing event IDs starting from 0
 2. The router tracks the last received event ID per worker
 3. If an event arrives with `event_id > last_id + 1`, the router detects a gap
-4. The router resets that worker rank and requests a full snapshot (`start_event_id=None`, `end_event_id=None`)
-5. On worker discovery (Added event), the router dumps the worker's entire local indexer state
+4. The router keeps the existing index entries for that worker rank and requests events from the next expected ID (`start_event_id=last_id + 1`, `end_event_id=None`)
+5. The worker replies with its buffered events if its event buffer still holds that ID, or with a full tree dump that replaces the rank if the buffer no longer holds it
+6. On worker discovery (Added event), the router dumps the worker's entire local indexer state
 
 **Startup behavior:**
 - When a worker is discovered, the router queries and ingests its full local indexer state

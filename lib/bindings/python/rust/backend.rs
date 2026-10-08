@@ -105,10 +105,7 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
-    let bootstrap = dynamo_sglang_sidecar::SglangSidecarEngine::try_from_args_async(cli_argv)
-        .map_err(sidecar_startup_to_pyerr)?;
-
-    py.allow_threads(move || dynamo_sidecar_common::run(bootstrap))
+    py.allow_threads(move || dynamo_sglang_sidecar::run(cli_argv))
         .map_err(sidecar_run_to_pyerr)
 }
 
@@ -385,17 +382,19 @@ pub struct RuntimeConfig {
 #[pymethods]
 impl RuntimeConfig {
     #[new]
-    #[pyo3(signature = (discovery_backend = None, request_plane = None, event_plane = None))]
+    #[pyo3(signature = (discovery_backend = None, request_plane = None, event_plane = None, *, response_plane = None))]
     fn new(
         discovery_backend: Option<String>,
         request_plane: Option<String>,
         event_plane: Option<String>,
+        response_plane: Option<String>,
     ) -> Self {
         Self {
             inner: RsRuntimeConfig {
                 discovery_backend,
                 request_plane,
                 event_plane,
+                response_plane,
             },
         }
     }

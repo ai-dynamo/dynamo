@@ -8,6 +8,7 @@ import os
 from typing import Any, List, Optional
 
 import sglang as sgl
+from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
@@ -31,9 +32,9 @@ from dynamo.llm import (
     register_model,
 )
 from dynamo.sglang._compat import (
+    filter_supported_async_generate_kwargs,
     sglang_uses_mla_backend,
     supports_disagg_prefill_cancel_anytime,
-    supports_require_reasoning,
 )
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
@@ -58,17 +59,44 @@ from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_cont
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
-TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
-    "tool_call_structural_tag_excludes_reasoning"
+TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY = (
+    "tool_call_structural_tag_reasoning_gate"
 )
 
 
-def _backend_excludes_reasoning_from_structural_tag(
-    engine: Optional[sgl.Engine], server_args: ServerArgs
-) -> bool:
-    return bool(getattr(server_args, "reasoning_parser", None)) and (
-        supports_require_reasoning(engine)
+def publish_sglang_structural_tag_reasoning_policy(
+    runtime_config: ModelRuntimeConfig,
+    engine: Optional[sgl.Engine],
+    server_args: ServerArgs,
+) -> None:
+    """Advertise the native gate that consumes reasoning before guided output."""
+    # vLLM also publishes grammar timing through runtime metadata.
+    # SGLang's exclusion additionally depends on require_reasoning per request.
+    parser = getattr(server_args, "reasoning_parser", None)
+    if (
+        engine is None
+        or not parser
+        or getattr(server_args, "skip_tokenizer_init", False)
+    ):
+        return
+    tokenizer = getattr(engine.tokenizer_manager, "tokenizer", None)
+    if (
+        tokenizer is None
+        or "require_reasoning"
+        not in filter_supported_async_generate_kwargs(
+            engine, {"require_reasoning": True}
+        )
+    ):
+        return
+    # Match the scheduler's gate initialization, including disabled gates when
+    # the reasoning terminator cannot be encoded by the initialized tokenizer.
+    reasoner = ReasoningParser(
+        model_type=parser, stream_reasoning=False, tokenizer=tokenizer
     )
+    if tokenizer.encode(reasoner.detector.think_end_token, add_special_tokens=False):
+        runtime_config.set_engine_specific(
+            TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, json.dumps(True)
+        )
 
 
 def _supports_engine_generate(
@@ -234,7 +262,8 @@ async def _register_model_with_runtime_config(
             input_type,
             output_type,
             endpoint,
-            _register_model_source_path(engine, server_args),
+            dynamo_args.model_source_uri
+            or _register_model_source_path(engine, server_args),
             server_args.served_model_name,
             kv_cache_block_size=kv_cache_block_size,
             runtime_config=runtime_config,
@@ -458,6 +487,11 @@ async def get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    # Multimodal and diffusion handlers do not forward the per-request gate.
+    if llm_handler and not getattr(server_args, "dllm_algorithm", None):
+        publish_sglang_structural_tag_reasoning_policy(
+            runtime_config, engine, server_args
+        )
     if dynamo_args.dyn_default_thinking_mode is not None:
         runtime_config.set_engine_specific(
             "default_thinking_mode",
@@ -467,12 +501,6 @@ async def get_runtime_config(
         dynamo_args.exclude_tools_when_tool_choice_none
     )
     runtime_config.set_structural_tag(dynamo_args.structural_tag)
-    runtime_config.set_engine_specific(
-        TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
-        json.dumps(
-            _backend_excludes_reasoning_from_structural_tag(engine, server_args)
-        ),
-    )
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (
