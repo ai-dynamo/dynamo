@@ -18,10 +18,43 @@
 package dgdrrunpublisher
 
 import (
+	"errors"
 	"fmt"
+	"regexp"
 
 	"sigs.k8s.io/yaml"
 )
+
+// ErrProtocolViolation means the Sweeper broke the snapshot contract: a snapshot that
+// cannot be decoded or validated, one that moves progress backwards, or a missing
+// terminal snapshot. It maps to ExitProtocolViolation.
+var ErrProtocolViolation = errors.New("snapshot protocol violation")
+
+func violation(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrProtocolViolation, fmt.Sprintf(format, args...))
+}
+
+// maxCandidateIDLength keeps ids well inside the 63-character Kubernetes label-value
+// limit, since the id is recorded verbatim as a label on the candidate.
+const maxCandidateIDLength = 48
+
+// candidateIDPattern is a DNS-1123 label, valid both as a label value and inside an
+// object name.
+var candidateIDPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+func validateManifest(id, manifest string) error {
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(manifest), &doc); err != nil {
+		return violation("manifest of candidate %q is not a YAML mapping: %v", id, err)
+	}
+	if doc["kind"] != "DynamoGraphDeployment" {
+		return violation("manifest of candidate %q is not a DynamoGraphDeployment", id)
+	}
+	if _, ok := doc["spec"].(map[string]any); !ok {
+		return violation("manifest of candidate %q has no spec", id)
+	}
+	return nil
+}
 
 // SnapshotSchemaVersion is the only wire version this publisher understands.
 const SnapshotSchemaVersion = 1
@@ -76,39 +109,45 @@ type SnapshotCandidate struct {
 func ParseSnapshot(data []byte) (*Snapshot, error) {
 	var snap Snapshot
 	if err := yaml.Unmarshal(data, &snap); err != nil {
-		return nil, fmt.Errorf("decoding snapshot: %w", err)
+		return nil, violation("decoding snapshot: %v", err)
 	}
 	if snap.SchemaVersion != SnapshotSchemaVersion {
-		return nil, fmt.Errorf("unsupported snapshot schemaVersion %d (want %d)", snap.SchemaVersion, SnapshotSchemaVersion)
+		return nil, violation("unsupported snapshot schemaVersion %d (want %d)", snap.SchemaVersion, SnapshotSchemaVersion)
 	}
 	switch snap.Run.Phase {
 	case PhaseRunning, PhaseSucceeded, PhaseFailed:
 	default:
-		return nil, fmt.Errorf("unknown run phase %q", snap.Run.Phase)
+		return nil, violation("unknown run phase %q", snap.Run.Phase)
 	}
 	if snap.Run.Terminal != (snap.Run.Phase != PhaseRunning) {
-		return nil, fmt.Errorf("run phase %q inconsistent with terminal=%t", snap.Run.Phase, snap.Run.Terminal)
+		return nil, violation("run phase %q inconsistent with terminal=%t", snap.Run.Phase, snap.Run.Terminal)
 	}
 	seen := make(map[string]struct{}, len(snap.Candidates))
 	for i, candidate := range snap.Candidates {
 		if candidate.ID == "" {
-			return nil, fmt.Errorf("candidate %d has an empty id", i)
+			return nil, violation("candidate %d has an empty id", i)
+		}
+		if len(candidate.ID) > maxCandidateIDLength || !candidateIDPattern.MatchString(candidate.ID) {
+			return nil, violation("candidate id %q is not a lowercase DNS label of at most %d characters", candidate.ID, maxCandidateIDLength)
 		}
 		if _, dup := seen[candidate.ID]; dup {
-			return nil, fmt.Errorf("duplicate candidate id %q", candidate.ID)
+			return nil, violation("duplicate candidate id %q", candidate.ID)
 		}
 		seen[candidate.ID] = struct{}{}
 		switch candidate.Outcome {
 		case OutcomeMaterialized:
 			if candidate.Manifest == "" {
-				return nil, fmt.Errorf("materialized candidate %q has no manifest", candidate.ID)
+				return nil, violation("materialized candidate %q has no manifest", candidate.ID)
+			}
+			if err := validateManifest(candidate.ID, candidate.Manifest); err != nil {
+				return nil, err
 			}
 		case OutcomeMaterializationFailed:
 			if candidate.Error == "" {
-				return nil, fmt.Errorf("failed candidate %q has no error", candidate.ID)
+				return nil, violation("failed candidate %q has no error", candidate.ID)
 			}
 		default:
-			return nil, fmt.Errorf("candidate %q has unknown outcome %q", candidate.ID, candidate.Outcome)
+			return nil, violation("candidate %q has unknown outcome %q", candidate.ID, candidate.Outcome)
 		}
 	}
 	return &snap, nil
