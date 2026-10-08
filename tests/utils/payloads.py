@@ -368,12 +368,13 @@ class KvTransferPayload(DisaggregatedChatPayload):
 
     prefill_metrics: EngineMetrics = field(kw_only=True)
     decode_metrics: EngineMetrics = field(kw_only=True)
+    transfer_metrics: EngineMetrics = field(kw_only=True)
     _transfer_before: float | None = field(default=None, init=False, repr=False)
 
     def before_request(self) -> None:
         self.prefill_metrics.wait_for_scheduler()
         self.decode_metrics.wait_for_scheduler()
-        self._transfer_before = self.prefill_metrics.transfer_progress()
+        self._transfer_before = self.transfer_metrics.transfer_progress()
         message = self.body["messages"][0]
         message["content"] = f"Request {uuid.uuid4()}. " + message["content"]
 
@@ -382,7 +383,7 @@ class KvTransferPayload(DisaggregatedChatPayload):
         assert (
             self._transfer_before is not None
         ), "Missing pre-request transfer baseline"
-        self.prefill_metrics.wait_for_transfer(before=self._transfer_before)
+        self.transfer_metrics.wait_for_transfer(before=self._transfer_before)
         self.decode_metrics.wait_for_scheduler()
         self.prefill_metrics.wait_for_scheduler()
 
