@@ -272,7 +272,7 @@ pub struct MmRoutingInfo {
     pub expanded_prompt_len: usize,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
     #[serde(rename(serialize = "Url"))]
@@ -280,6 +280,48 @@ pub enum MultimodalData {
     Decoded(RdmaMediaDataDescriptor),
     /// Payload-free media slot resolved by a backend processor cache.
     UuidOnly(String),
+}
+
+impl<'de> Deserialize<'de> for MultimodalData {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::IntoDeserializer;
+
+        // Keep the existing names and variant order for old and new senders.
+        #[derive(Deserialize)]
+        enum WireData {
+            Url(String),
+            RawUrl(String),
+            Decoded(RdmaMediaDataDescriptor),
+            UuidOnly(String),
+        }
+
+        match WireData::deserialize(deserializer)? {
+            WireData::Url(value) if is_plain_base64_data_uri(&value) => Ok(Self::RawUrl(value)),
+            WireData::Url(value) => url::Url::deserialize(value.into_deserializer()).map(Self::Url),
+            WireData::RawUrl(value) => Ok(Self::RawUrl(value)),
+            WireData::Decoded(value) => Ok(Self::Decoded(value)),
+            WireData::UuidOnly(value) => Ok(Self::UuidOnly(value)),
+        }
+    }
+}
+
+/// Recognize data URIs whose bytes, and therefore cache keys, need no normalization.
+fn is_plain_base64_data_uri(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("data:") else {
+        return false;
+    };
+    let Some((header, payload)) = rest.split_once(',') else {
+        return false;
+    };
+    value.len() <= u32::MAX as usize
+        && !header.starts_with('/')
+        && header.ends_with(";base64")
+        && header
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && b != b'?' && b != b'#')
+        && payload
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
 }
 
 // multimodal map containing {mm_part_type: [data...]}
@@ -739,6 +781,68 @@ impl PreprocessedEmbeddingRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multimodal_uri_wire_compatibility_and_order() {
+        #[derive(Serialize, Deserialize, Debug)]
+        enum OldData {
+            Url(url::Url),
+            #[serde(rename(serialize = "Url"))]
+            RawUrl(String),
+            Decoded(RdmaMediaDataDescriptor),
+            UuidOnly(String),
+        }
+        let values = [
+            ("data:image/jpeg;base64,/9j/AA==", true),
+            (" data:image/jpeg;base64,AA==\n", false),
+            ("DATA:image/jpeg;base64,AA==", false),
+            ("data:/image/../jpeg;base64,AA==", false),
+            ("data:image/jpeg;base64,A%41==", false),
+            ("data:image/jpeg;base64,AA==#fragment", false),
+            ("https://EXAMPLE.com/a/../image.jpg", false),
+        ];
+        for (value, fast) in values {
+            let wire = serde_json::json!({"Url": value});
+            let decoded: MultimodalData = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                matches!(decoded, MultimodalData::RawUrl(_)),
+                fast,
+                "{value}"
+            );
+            let expected = url::Url::parse(value).unwrap();
+            assert_eq!(
+                serde_json::to_value(&decoded).unwrap(),
+                serde_json::json!({"Url": expected})
+            );
+        }
+        let old = vec![
+            OldData::Url(url::Url::parse(values[0].0).unwrap()),
+            OldData::RawUrl(values[0].0.into()),
+            OldData::UuidOnly("cache-id".into()),
+        ];
+        let json = serde_json::to_vec(&old).unwrap();
+        let new: Vec<MultimodalData> = serde_json::from_slice(&json).unwrap();
+        assert_eq!(serde_json::to_vec(&new).unwrap(), json);
+        let _: Vec<OldData> = serde_json::from_slice(&serde_json::to_vec(&new).unwrap()).unwrap();
+        for packed in [
+            rmp_serde::to_vec(&old).unwrap(),
+            rmp_serde::to_vec_named(&old).unwrap(),
+        ] {
+            let decoded: Vec<MultimodalData> = rmp_serde::from_slice(&packed).unwrap();
+            let back = rmp_serde::to_vec_named(&decoded).unwrap();
+            let legacy: Vec<OldData> = rmp_serde::from_slice(&back).unwrap();
+            assert_eq!(serde_json::to_vec(&legacy).unwrap(), json);
+        }
+        for value in ["relative", "http://[invalid"] {
+            assert!(
+                serde_json::from_value::<MultimodalData>(serde_json::json!({"Url":value})).is_err()
+            );
+        }
+        assert!(matches!(
+            serde_json::from_value::<MultimodalData>(serde_json::json!({"RawUrl":"raw"})).unwrap(),
+            MultimodalData::RawUrl(_)
+        ));
+    }
 
     #[derive(serde::Deserialize)]
     struct TokenIdsOnly {
