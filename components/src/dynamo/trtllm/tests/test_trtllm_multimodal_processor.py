@@ -291,13 +291,14 @@ async def test_video_data_uri_exactly_at_the_size_limit_is_accepted(
     monkeypatch.setattr(mmp, "async_load_video", AsyncMock(return_value=object()))
 
     raw = b"x" * processor.max_file_size_bytes
-    uri = "data:video/mp4;base64," + base64.b64encode(raw).decode()
+    encoded = base64.b64encode(raw).decode()
+    uri = "data:video/mp4;base64," + encoded
     await processor.process_openai_request(
         {"multi_modal_data": {"video_url": [{"Url": uri}]}, "token_ids": [1]},
         embeddings=None,
         ep_disaggregated_params=None,
     )
-    assert len(nvdec.call_args.args[0]) == processor.max_file_size_bytes
+    nvdec.assert_called_once_with(raw, processor.num_video_frames)
 
 
 @pytest.mark.asyncio
