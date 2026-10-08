@@ -296,6 +296,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-openai"
+version = "0.42.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63077bf55857e6963effefb5f28134c40cc2ee68bc176cc601bbdeb070017fba"
+dependencies = [
+ "bytes",
+ "derive_builder",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2090,6 +2103,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-decisions"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=6ce6582b25e78d8dd85b5f4e9dc107838217e1fa#6ce6582b25e78d8dd85b5f4e9dc107838217e1fa"
+dependencies = [
+ "dynamo-protocols 7.0.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "unicode-casefold",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.6.0"
 dependencies = [
@@ -2174,12 +2199,13 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-custom-policy-builtin",
+ "dynamo-decisions",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-parsers-v2",
- "dynamo-protocols",
+ "dynamo-protocols 6.1.0",
  "dynamo-renderer",
  "dynamo-rl",
  "dynamo-runtime",
@@ -2305,7 +2331,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "async-stream",
- "dynamo-protocols",
+ "dynamo-protocols 6.1.0",
  "futures",
  "num-traits",
  "openai-harmony",
@@ -2343,7 +2369,25 @@ version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "774a621dbee86866def6f59eac858651bf080af0732e9c3c4e46081563749c9a"
 dependencies = [
- "async-openai",
+ "async-openai 0.41.1",
+ "derive_builder",
+ "futures",
+ "indexmap 2.14.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "dynamo-protocols"
+version = "7.0.0"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=6ce6582b25e78d8dd85b5f4e9dc107838217e1fa#6ce6582b25e78d8dd85b5f4e9dc107838217e1fa"
+dependencies = [
+ "async-openai 0.42.1",
  "derive_builder",
  "futures",
  "indexmap 2.14.0",
@@ -2364,7 +2408,7 @@ checksum = "144979b6e4a9fe44556c02ea92d17413d803b704de73e1f1f8255da9ce9dd99d"
 dependencies = [
  "anyhow",
  "chrono",
- "dynamo-protocols",
+ "dynamo-protocols 6.1.0",
  "dynamo-tokenizers",
  "either",
  "minijinja",
@@ -8598,6 +8642,12 @@ name = "unicase"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
+
+[[package]]
+name = "unicode-casefold"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f66b1c8f8caa2ab31dc6d3f35386f16efdab89668f93411e565ac368908e8f"
 
 [[package]]
 name = "unicode-general-category"
