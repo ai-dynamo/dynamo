@@ -86,6 +86,9 @@ pub struct PublicFile {
 pub struct RuntimeRequirements {
     pub minimum_runtime_version: String,
     pub required_load_format: String,
+    /// V1 packages imply TPM. V2 signs the chosen software/TPM access profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection_profile: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -200,7 +203,19 @@ impl Manifest {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.format != FORMAT_NAME || self.format_version != FORMAT_VERSION {
+        if self.format != FORMAT_NAME
+            || !matches!(
+                (
+                    self.format_version,
+                    self.runtime.protection_profile.as_deref()
+                ),
+                (FORMAT_VERSION, None)
+                    | (
+                        2,
+                        Some("encrypted-file" | "encrypted-file-license" | "encrypted-tpm")
+                    )
+            )
+        {
             return Err(ProtectionError::InvalidPackage("format version"));
         }
         self.artifact_id_bytes()?;
@@ -360,8 +375,20 @@ pub fn validate_safetensors_index(manifest: &Manifest, index_bytes: Option<&[u8]
         .iter()
         .map(|file| file.output_path.as_str())
         .collect();
+    let unified_speech = manifest
+        .public_files
+        .iter()
+        .any(|file| file.output_path == "composite_manifest.json");
+    if unified_speech && !protected.contains("speech_head.safetensors") {
+        return Err(ProtectionError::InvalidPackage("speech head required"));
+    }
+    let indexed: BTreeSet<&str> = protected
+        .iter()
+        .copied()
+        .filter(|path| !unified_speech || *path != "speech_head.safetensors")
+        .collect();
     let Some(bytes) = index_bytes else {
-        if protected.len() > 1 {
+        if indexed.len() > 1 {
             return Err(ProtectionError::InvalidPackage(
                 "safetensors index required",
             ));
@@ -376,12 +403,12 @@ pub fn validate_safetensors_index(manifest: &Manifest, index_bytes: Option<&[u8]
     let mut referenced = BTreeSet::new();
     for output in index.weight_map.values() {
         validate_relative_path(output)?;
-        if !protected.contains(output.as_str()) {
+        if !indexed.contains(output.as_str()) {
             return Err(ProtectionError::InvalidPackage("safetensors index"));
         }
         referenced.insert(output.as_str());
     }
-    if referenced != protected {
+    if referenced != indexed {
         return Err(ProtectionError::InvalidPackage("safetensors index"));
     }
     Ok(())
@@ -427,6 +454,12 @@ pub fn is_allowed_public_metadata(path: &str) -> bool {
             | "spiece.model"
             | "preprocessor_config.json"
             | "processor_config.json"
+            | "speech_config.json"
+            | "codec_config.json"
+            | "codec_manifest.json"
+            | "verbalizer.json"
+            | "speaker_vocab.json"
+            | "composite_manifest.json"
             | "chat_template.json"
             | "chat_template.jinja"
             | "model.safetensors.index.json"
@@ -513,11 +546,11 @@ fn hex_nibble(byte: u8) -> u8 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ring::signature::{Ed25519KeyPair, KeyPair};
 
-    fn valid_manifest_json() -> Vec<u8> {
+    pub(crate) fn valid_manifest_json() -> Vec<u8> {
         br#"{
           "format":"secure-model-package",
           "format_version":1,
@@ -544,6 +577,22 @@ mod tests {
             parse_manifest(duplicate.as_bytes()),
             Err(ProtectionError::InvalidPackage("manifest json"))
         ));
+    }
+
+    #[test]
+    fn allows_only_explicit_unified_speech_metadata() {
+        for path in [
+            "speech_config.json",
+            "codec_config.json",
+            "codec_manifest.json",
+            "verbalizer.json",
+            "speaker_vocab.json",
+            "composite_manifest.json",
+        ] {
+            assert!(is_allowed_public_metadata(path), "rejected {path}");
+        }
+        assert!(!is_allowed_public_metadata("custom_runner.json"));
+        assert!(!is_allowed_public_metadata("nested/speech_config.json"));
     }
 
     #[test]
@@ -628,6 +677,30 @@ mod tests {
         assert!(validate_safetensors_index(&manifest, Some(valid)).is_ok());
         let incomplete = br#"{"weight_map":{"a":"model-00001.safetensors"}}"#;
         assert!(validate_safetensors_index(&manifest, Some(incomplete)).is_err());
+    }
+
+    #[test]
+    fn unified_speech_head_is_not_a_base_model_shard() {
+        let mut manifest = parse_manifest(&valid_manifest_json()).unwrap();
+        let mut speech_head = manifest.protected_files[0].clone();
+        speech_head.file_id = 2;
+        speech_head.container_path = "weights/speech_head.safetensors.protected".to_string();
+        speech_head.output_path = "speech_head.safetensors".to_string();
+        speech_head.first_global_record_counter = 1;
+        manifest.protected_files.push(speech_head);
+        let mut composite = manifest.public_files[0].clone();
+        composite.source_path = "public/composite_manifest.json".to_string();
+        composite.output_path = "composite_manifest.json".to_string();
+        manifest.public_files.push(composite);
+
+        assert!(validate_safetensors_index(&manifest, None).is_ok());
+        manifest
+            .protected_files
+            .retain(|file| file.output_path != "speech_head.safetensors");
+        assert!(matches!(
+            validate_safetensors_index(&manifest, None),
+            Err(ProtectionError::InvalidPackage("speech head required"))
+        ));
     }
 
     #[test]

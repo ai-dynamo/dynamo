@@ -95,3 +95,19 @@ docs/_build/
 # AI
 .cursor/
 .claude/
+
+# Protected-model issuer custody must never enter the Docker build context.
+**/*.pk8
+**/*-signing.pem
+**/*.pass
+**/issuer-kek*.bin
+**/enrollment-state-kek*.bin
+**/state-kek*.bin
+**/activation-state*.json
+**/enrollment-state*.json
+**/provision-journal*.json
+**/issuer-record.json
+**/issuer-record.sig
+**/issuer-secrets/
+**/enrollment-secrets/
+**/registry.sqlite*

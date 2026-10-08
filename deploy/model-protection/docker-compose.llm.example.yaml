@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example cloned from ocr_service/deploy/prod/docker-compose.model-llm.yaml.
+# This file uses the encrypted-file package layout: <LLM_MODEL_PATH>/file-v1/.
+# The external network must contain nats-server and etcd-server.
+
+x-protected-runtime: &protected-runtime
+  image: "${LLM_PROTECTED_IMAGE:-dynamo-vllm-protected-prod:1.5.0}"
+  pull_policy: never
+  restart: unless-stopped
+  stop_grace_period: 180s
+  read_only: true
+  user: "${MODEL_PROTECTION_UID:-1000}:${MODEL_PROTECTION_GID:-1000}"
+  mem_limit: "${LLM_PROTECTED_MEMORY_LIMIT:-24g}"
+  memswap_limit: "${LLM_PROTECTED_MEMORY_LIMIT:-24g}"
+  ulimits:
+    core:
+      soft: 0
+      hard: 0
+    memlock:
+      soft: "${MEMLOCK_BYTES:-67108864}"
+      hard: "${MEMLOCK_BYTES:-67108864}"
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  environment: &protected-environment
+    DYN_NAMESPACE: "${LLM_DYN_NAMESPACE:?Set the namespace used when packaging the model}"
+    DYN_NAMESPACE_WORKER_SUFFIX: ""
+    DYN_SYSTEM_PORT: "9090"
+    DYN_SELF_HOST_METADATA: "true"
+    HOME: /tmp
+    CUPY_CACHE_DIR: /tmp/cache/cupy
+    VLLM_CACHE_ROOT: /tmp/cache/vllm
+    TORCHINDUCTOR_CACHE_DIR: /tmp/cache/torchinductor
+    TORCH_EXTENSIONS_DIR: /tmp/cache/torch_extensions
+    NUMBA_CACHE_DIR: /tmp/cache/numba
+    TRITON_CACHE_DIR: /tmp/cache/triton
+    HF_TOKEN: "${HF_TOKEN:-}"
+    OMP_NUM_THREADS: "${OMP_NUM_THREADS:-4}"
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    NATS_SERVER: nats://nats-server:4222
+    ETCD_ENDPOINTS: http://etcd-server:2379
+    DYN_DISCOVERY_BACKEND: etcd
+    UCX_RCACHE_MAX_UNRELEASED: "1024"
+    VLLM_USE_V2_MODEL_RUNNER: "1"
+  tmpfs:
+    - /run/${LLM_DYN_NAMESPACE:?Set the namespace used when packaging the model}-models:rw,noexec,nosuid,nodev,size=${LLM_PROTECTED_TMPFS_SIZE:-12g},mode=0700,uid=${MODEL_PROTECTION_UID:-1000},gid=${MODEL_PROTECTION_GID:-1000}
+    - /tmp:rw,nodev,nosuid,size=${LLM_PROTECTED_TMP_SIZE:-2g}
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ["${LLM_GPU_ID:-0}"]
+            capabilities: [gpu]
+  networks:
+    - model_network
+
+services:
+  vllm-llm-server:
+    image: "${LLM_PROTECTED_IMAGE:-dynamo-vllm-protected-prod:1.5.0}"
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${LLM_SERVICE_HTTP_PORT:-8989}:${LLM_SERVICE_HTTP_PORT:-8989}"
+    environment:
+      DYN_NAMESPACE: "${LLM_DYN_NAMESPACE:?Set the namespace used when packaging the model}"
+      HF_TOKEN: "${HF_TOKEN:-}"
+      OMP_NUM_THREADS: "${OMP_NUM_THREADS:-4}"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      NATS_SERVER: nats://nats-server:4222
+      ETCD_ENDPOINTS: http://etcd-server:2379
+      DYN_DISCOVERY_BACKEND: etcd
+      UCX_RCACHE_MAX_UNRELEASED: "1024"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    command:
+      - bash
+      - -lc
+      - |
+        exec python3 -m dynamo.frontend \
+          --http-port ${LLM_SERVICE_HTTP_PORT:-8989} \
+          --dyn-chat-processor dynamo \
+          --dyn-preprocess-workers ${LLM_DYN_PREPROCESS_WORKERS:-4} \
+          --model-name ${LLM_MODEL_NAME:?Set LLM_MODEL_NAME}
+    user: "${MODEL_PROTECTION_UID:-1000}:${MODEL_PROTECTION_GID:-1000}"
+    networks:
+      - model_network
+
+  vllm-llm-worker:
+    <<: *protected-runtime
+    environment:
+      <<: *protected-environment
+      DYN_MODEL_PROTECTION_CONFIG: "${LLM_MODEL_PROTECTION_CONFIG:-${DYN_MODEL_PROTECTION_CONFIG:-/runtime/runtime.json}}"
+    volumes:
+      - type: bind
+        source: "${LLM_MODEL_PATH:?Set LLM_MODEL_PATH}/file-v1/package"
+        target: /models/package
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${LLM_MODEL_PATH:?Set LLM_MODEL_PATH}/file-v1/runtime"
+        target: /runtime
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - bash
+      - -lc
+      - |
+        exec python3 -m dynamo.vllm \
+          --model /models/package \
+          --load-format safetensors \
+          --served-model-name ${LLM_MODEL_NAME:?Set LLM_MODEL_NAME} \
+          --tensor-parallel-size 1 \
+          --runner generate \
+          --language-model-only \
+          --max-num-seqs ${LLM_MAX_NUM_SEQS:-2} \
+          --max-num-batched-tokens ${LLM_MAX_NUM_BATCHED_TOKENS:-8192} \
+          --gpu-memory-utilization ${LLM_GPU_MEMORY_UTILIZATION:-0.94} \
+          --dyn-enable-structural-tag \
+          --dyn-structural-tag-schema strict \
+          --dyn-tool-call-parser qwen3_coder \
+          --max-model-len ${LLM_MAX_MODEL_LEN:-49152} \
+          --enable-prefix-caching \
+          --generation-config vllm \
+          --structured-outputs-config '{"backend":"auto","enable_in_reasoning":false}' \
+          --kv-cache-dtype ${LLM_KV_CACHE_DTYPE:-auto}
+    depends_on:
+      - vllm-llm-server
+
+networks:
+  model_network:
+    name: "${LLM_DYN_NETWORK:-ocr_network}"
+    external: true

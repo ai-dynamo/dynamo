@@ -34,6 +34,21 @@ use software_keys::{
 };
 
 const RECORD_BYTES: u32 = 16 * 1024 * 1024;
+const UNIFIED_SPEECH_FILES: &[&str] = &[
+    "chat_template.jinja",
+    "codec_config.json",
+    "codec_manifest.json",
+    "composite_manifest.json",
+    "config.json",
+    "generation_config.json",
+    "processor_config.json",
+    "speaker_vocab.json",
+    "speech_config.json",
+    "speech_head.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "verbalizer.json",
+];
 const USAGE: &str = "Usage: model-protection-pack --source PATH --output PATH --issuer-record PATH --customer-scope-id ID --model-id ID --model-version VERSION --minimum-runtime-version VERSION --package-signing-key PATH --package-key-passphrase-file PATH --package-key-id ID --kek-key-file PATH --kek-key-id ID --kek-key-version VERSION";
 
 type Result<T> = std::result::Result<T, PackError>;
@@ -60,6 +75,9 @@ impl std::error::Error for PackError {}
 fn main() {
     if env::args().len() == 2 && env::args().nth(1).as_deref() == Some("--help") {
         println!("{USAGE}");
+        println!(
+            "Optional: --protection-profile encrypted-file|encrypted-file-license|encrypted-tpm. Unset retains legacy TPM format."
+        );
         return;
     }
     if let Err(error) = run() {
@@ -71,6 +89,14 @@ fn main() {
 fn run() -> Result<()> {
     lock_process_memory().map_err(PackError)?;
     let args = parse_args()?;
+    if args.get("--protection-profile").is_some_and(|profile| {
+        !matches!(
+            profile.as_str(),
+            "encrypted-file" | "encrypted-file-license" | "encrypted-tpm"
+        )
+    }) {
+        return Err(PackError("PACKAGE_CONFIG_INVALID"));
+    }
     let source = required_path(&args, "--source")?;
     let output = required_path(&args, "--output")?;
     let issuer_record = required_path(&args, "--issuer-record")?;
@@ -204,10 +230,11 @@ fn build_package(
     artifact_id: [u8; 16],
     nonce_prefix: [u8; 4],
 ) -> Result<Manifest> {
-    fs::create_dir(output.join("weights")).map_err(|_| PackError("PACKAGE_IO_ERROR"))?;
-    fs::create_dir(output.join("public")).map_err(|_| PackError("PACKAGE_IO_ERROR"))?;
     let mut names = source_names(source)?;
     names.sort();
+    validate_unified_speech_source(&names)?;
+    fs::create_dir(output.join("weights")).map_err(|_| PackError("PACKAGE_IO_ERROR"))?;
+    fs::create_dir(output.join("public")).map_err(|_| PackError("PACKAGE_IO_ERROR"))?;
     let mut protected_files = Vec::new();
     let mut public_files = Vec::new();
     let mut counter = 0_u64;
@@ -274,7 +301,11 @@ fn build_package(
 
     Ok(Manifest {
         format: "secure-model-package".to_string(),
-        format_version: 1,
+        format_version: if args.contains_key("--protection-profile") {
+            2
+        } else {
+            1
+        },
         artifact_id: lower_hex(&artifact_id),
         customer_scope_id: required(args, "--customer-scope-id")?.to_string(),
         model: ModelIdentity {
@@ -293,8 +324,25 @@ fn build_package(
         runtime: RuntimeRequirements {
             minimum_runtime_version: required(args, "--minimum-runtime-version")?.to_string(),
             required_load_format: "safetensors".to_string(),
+            protection_profile: args.get("--protection-profile").cloned(),
         },
     })
+}
+
+fn validate_unified_speech_source(names: &[String]) -> Result<()> {
+    if !names.iter().any(|name| name == "composite_manifest.json") {
+        return Ok(());
+    }
+    if UNIFIED_SPEECH_FILES
+        .iter()
+        .any(|required| !names.iter().any(|name| name == required))
+        || !names
+            .iter()
+            .any(|name| name.starts_with("model") && name.ends_with(".safetensors"))
+    {
+        return Err(PackError("SOURCE_INVALID"));
+    }
+    Ok(())
 }
 
 fn software_finalize(
@@ -359,6 +407,7 @@ fn allowed_argument(name: &str) -> bool {
             | "--model-id"
             | "--model-version"
             | "--minimum-runtime-version"
+            | "--protection-profile"
             | "--package-signing-key"
             | "--package-key-passphrase-file"
             | "--package-key-id"
@@ -504,6 +553,24 @@ mod tests {
             require_runtime_version(&args).unwrap_err().to_string(),
             "PACKAGE_CONFIG_INVALID"
         );
+    }
+
+    #[test]
+    fn unified_speech_package_requires_its_complete_profile() {
+        let mut names = UNIFIED_SPEECH_FILES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+        names.push("model.safetensors".to_string());
+        assert!(validate_unified_speech_source(&names).is_ok());
+        names.retain(|name| name != "speaker_vocab.json");
+        assert_eq!(
+            validate_unified_speech_source(&names)
+                .unwrap_err()
+                .to_string(),
+            "SOURCE_INVALID"
+        );
+        assert!(validate_unified_speech_source(&["config.json".to_string()]).is_ok());
     }
 
     #[test]

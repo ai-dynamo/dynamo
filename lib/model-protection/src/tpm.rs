@@ -14,25 +14,31 @@ use tss_esapi::attributes::SessionAttributesBuilder;
 use tss_esapi::constants::{CommandCode, SessionType};
 use tss_esapi::handles::{KeyHandle, PersistentTpmHandle, SessionHandle, TpmHandle};
 use tss_esapi::interface_types::algorithm::{HashingAlgorithm, RsaDecryptAlgorithm};
-use tss_esapi::interface_types::key_bits::RsaKeyBits;
+use tss_esapi::interface_types::resource_handles::Hierarchy;
 use tss_esapi::interface_types::session_handles::{AuthSession, PolicySession};
 use tss_esapi::structures::{
     Data, Digest, EccParameter, EccSignature, Name, Nonce, Public, PublicKeyRsa,
-    RsaDecryptionScheme, RsaScheme, Signature, SymmetricDefinition, SymmetricDefinitionObject,
-    VerifiedTicket,
+    RsaDecryptionScheme, Signature, SymmetricDefinition, VerifiedTicket,
 };
-use tss_esapi::traits::Marshall;
+use tss_esapi::traits::{Marshall, UnMarshall};
 
-use crate::license::{TPM_OAEP_LABEL, decode_license_hex, policy_authorize_auth_policy};
+/// Production loads a public-only signer transiently in the owner hierarchy.
+pub enum TpmPolicyAuthority {
+    Persistent(u32),
+    Public(Vec<u8>),
+}
+
+use crate::license::{TPM_OAEP_LABEL, decode_license_hex};
 use crate::{
     AuthorizedModel, CancellationToken, ProtectionError, Result, SecretDek, SecureModelSession,
-    load_authorized_model,
+    load_authorized_model, validate_tpm_device_public,
 };
 
 /// Verify, authorize, unwrap, and materialize one protected model.
 ///
-/// The TPM handles must refer to persistent, passwordless objects provisioned
-/// according to the V1 profile. The DEK never crosses this Rust boundary.
+/// Legacy handle-based entrypoint. New deployments load the public-only policy
+/// signer transiently with `materialize_tpm_model_with_policy`. The DUK remains
+/// persistent and policy-only; the DEK never crosses this Rust boundary.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_tpm_model(
     package_root: &Path,
@@ -84,13 +90,46 @@ pub fn materialize_tpm_model(
     policy_authority_key_handle: u32,
     cancellation: &CancellationToken,
 ) -> Result<()> {
+    materialize_tpm_model_with_policy(
+        session,
+        package_root,
+        authorized,
+        policy_authority_key_id,
+        tcti,
+        device_key_handle,
+        &TpmPolicyAuthority::Persistent(policy_authority_key_handle),
+        cancellation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn materialize_tpm_model_with_policy(
+    session: &mut SecureModelSession,
+    package_root: &Path,
+    authorized: &AuthorizedModel,
+    policy_authority_key_id: &str,
+    tcti: &str,
+    device_key_handle: u32,
+    policy: &TpmPolicyAuthority,
+    cancellation: &CancellationToken,
+) -> Result<()> {
     if authorized.license().recipient.policy_authority_key_id != policy_authority_key_id {
         return Err(ProtectionError::LicenseBindingMismatch);
     }
     let tcti = TctiNameConf::from_str(tcti).map_err(|_| ProtectionError::TpmUnavailable)?;
     let mut context = Context::new(tcti).map_err(|_| ProtectionError::TpmUnavailable)?;
     let device_key = persistent_key(&mut context, device_key_handle)?;
-    let policy_authority_key = persistent_key(&mut context, policy_authority_key_handle)?;
+    let policy_authority_key = match policy {
+        TpmPolicyAuthority::Persistent(handle) => persistent_key(&mut context, *handle)?,
+        TpmPolicyAuthority::Public(bytes) => {
+            crate::validate_tpm_policy_authority_public(bytes)?;
+            let public =
+                Public::unmarshall(bytes).map_err(|_| ProtectionError::TpmAuthorizationFailed)?;
+            context
+                .load_external_public(public, Hierarchy::Owner)
+                .map_err(|_| ProtectionError::TpmAuthorizationFailed)?
+        }
+    };
     let key = unwrap_tpm_dek(&mut context, device_key, policy_authority_key, authorized)?;
     session.materialize_protected_cancellable(package_root, authorized, key, cancellation)
 }
@@ -128,12 +167,19 @@ pub fn unwrap_tpm_dek(
     let policy_authority_name = context
         .tr_get_name(policy_authority_key.into())
         .map_err(|_| ProtectionError::TpmAuthorizationFailed)?;
-    validate_device_key_profile(&device_public, &policy_authority_name)?;
     let public_bytes = device_public
         .marshall()
         .map_err(|_| ProtectionError::TpmAuthorizationFailed)?;
-    let public_digest: [u8; 32] = Sha256::digest(public_bytes).into();
-    if device_name.value() != expected_name || public_digest != expected_public_digest {
+    let policy_name = policy_authority_name
+        .value()
+        .try_into()
+        .map_err(|_| ProtectionError::TpmAuthorizationFailed)?;
+    let public = validate_tpm_device_public(&public_bytes, &policy_name)
+        .map_err(|_| ProtectionError::TpmAuthorizationFailed)?;
+    if device_name.value() != expected_name
+        || public.name() != &expected_name
+        || public.digest() != &expected_public_digest
+    {
         return Err(ProtectionError::LicenseBindingMismatch);
     }
 
@@ -215,36 +261,6 @@ pub fn unwrap_tpm_dek(
         return Err(ProtectionError::TpmAuthorizationFailed);
     }
     result
-}
-
-fn validate_device_key_profile(device_public: &Public, policy_authority_name: &Name) -> Result<()> {
-    const REQUIRED_ATTRIBUTES: u32 = 0x0002_04b2;
-    let Public::Rsa {
-        object_attributes,
-        name_hashing_algorithm,
-        auth_policy,
-        parameters,
-        unique,
-    } = device_public
-    else {
-        return Err(ProtectionError::TpmAuthorizationFailed);
-    };
-    let attributes: u32 = (*object_attributes).into();
-    let policy_ref =
-        decode_license_hex::<32>(crate::license::TPM_POLICY_REF_HEX, "license policy ref")?;
-    let expected_policy = policy_authorize_auth_policy(policy_authority_name.value(), &policy_ref);
-    if attributes != REQUIRED_ATTRIBUTES
-        || *name_hashing_algorithm != HashingAlgorithm::Sha256
-        || auth_policy.value() != expected_policy
-        || parameters.symmetric_definition_object() != SymmetricDefinitionObject::Null
-        || parameters.rsa_scheme() != RsaScheme::Null
-        || parameters.key_bits() != RsaKeyBits::Rsa2048
-        || parameters.exponent().value() != 0
-        || unique.value().len() != 256
-    {
-        return Err(ProtectionError::TpmAuthorizationFailed);
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

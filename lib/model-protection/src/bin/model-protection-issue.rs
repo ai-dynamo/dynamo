@@ -3,23 +3,28 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use dynamo_model_protection::{
-    Entitlement, License, MAX_ISSUER_RECORD_BYTES, SignatureEnvelope, TPM_OAEP_LABEL,
+    Entitlement, License, MAX_CERTIFIED_DEVICE_BYTES, MAX_ISSUER_RECORD_BYTES, TPM_OAEP_LABEL,
     TPM_POLICY_REF_HEX, TPM_POLICY_SIGNATURE, TPM_PROFILE, TpmRecipient,
-    approved_rsa_decrypt_policy, license_signature_payload, policy_authorize_auth_policy,
-    rsa_decrypt_cp_hash, verify_issuer_record, verify_manifest,
+    approved_rsa_decrypt_policy, license_signature_payload, rsa_decrypt_cp_hash,
+    verify_certified_device, verify_issuer_record, verify_manifest,
 };
-use ring::signature;
-use rustix::fs::{CWD, RenameFlags, renameat_with};
-use serde::{Deserialize, Serialize};
+use p256::pkcs8::DecodePublicKey;
+use rustix::fs::{CWD, Mode, OFlags, RenameFlags, ResolveFlags, openat, openat2, renameat_with};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
+
+#[path = "support/atomic_file.rs"]
+mod atomic_file;
+
+#[path = "support/file_issue.rs"]
+mod file_issue;
 
 #[path = "support/secure_file.rs"]
 mod secure_file;
@@ -32,10 +37,8 @@ use software_keys::{
     sign_ed25519, sign_p256_digest, unwrap_dek, wrap_to_tpm,
 };
 
-const CERTIFIED_DEVICE_SIGNATURE_DOMAIN: &[u8] =
-    b"model-protection-certified-device-signature-v1\0";
 const MAX_CONTROL_BYTES: u64 = 4 * 1024 * 1024;
-const USAGE: &str = "Usage: model-protection-issue --package PATH --issuer-record PATH --certified-device PATH --certified-device-signature PATH --output PATH --package-key-id ID --package-public-key PATH --enrollment-key-id ID --enrollment-public-key PATH --license-signing-key PATH --license-key-passphrase-file PATH --license-key-id ID --policy-signing-key PATH --policy-key-passphrase-file PATH --policy-key-id ID --kek-key-file PATH --kek-key-id ID --kek-key-version VERSION --license-id ID --generation NUMBER";
+const USAGE: &str = "Usage: model-protection-issue --package PATH --issuer-record PATH --certified-device PATH --certified-device-signature PATH --output PATH --package-key-id ID --package-public-key PATH --enrollment-key-id ID --enrollment-public-key PATH --license-signing-key PATH --license-key-passphrase-file PATH --license-key-id ID --policy-signing-key PATH --policy-key-passphrase-file PATH --policy-key-id ID --kek-key-file PATH --kek-key-id ID --kek-key-version VERSION --license-id ID --generation NUMBER [--registry PATH]\nProduction admission requires build feature enrollment-authority and --registry.\nPackager-only pilot issuance requires explicit --allow-development-certification true; not production enrollment.";
 
 type Result<T> = std::result::Result<T, IssueError>;
 
@@ -50,18 +53,6 @@ impl std::fmt::Display for IssueError {
 
 impl std::error::Error for IssueError {}
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CertifiedDevice {
-    format: String,
-    format_version: u16,
-    certification_id: String,
-    customer_scope_id: String,
-    artifact_id: String,
-    tpm_public: String,
-    policy_authority_name: String,
-}
-
 #[derive(Serialize)]
 struct LicenseEnvelope {
     algorithm: &'static str,
@@ -72,6 +63,15 @@ struct LicenseEnvelope {
 fn main() {
     if env::args().len() == 2 && env::args().nth(1).as_deref() == Some("--help") {
         println!("{USAGE}");
+        println!(
+            "Software profiles: export-file-key or issue-file-license --package PATH --issuer-record PATH --package-key-id ID --package-public-key PATH --kek-key-file PATH --kek-key-id ID --kek-key-version VERSION --output PATH"
+        );
+        println!(
+            "issue-file-license additionally requires --license-signing-key PATH --license-key-passphrase-file PATH --license-key-id ID --license-id ID --generation NUMBER. Software profiles are not device-bound."
+        );
+        println!(
+            "Public-key export (issuer host): model-protection-issue export-policy-public --policy-public-key PATH_TO_P256_PUBLIC_PEM --output PATH_TO_TPMT_PUBLIC"
+        );
         return;
     }
     if let Err(error) = run() {
@@ -81,8 +81,31 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    lock_process_memory().map_err(IssueError)?;
+    let command: Vec<String> = env::args().skip(1).collect();
+    if let Some(name @ ("export-file-key" | "issue-file-license")) =
+        command.first().map(String::as_str)
+    {
+        return file_issue::run(name, &command[1..]);
+    }
+    if command
+        .first()
+        .is_some_and(|value| value == "export-policy-public")
+    {
+        return export_policy_public(&command[1..]);
+    }
     let args = parse_args()?;
+    enforce_admission_mode(&args)?;
+    lock_process_memory().map_err(IssueError)?;
+    #[cfg(feature = "enrollment-authority")]
+    let mut registry = dynamo_model_protection::enrollment::registry::Registry::open(
+        &required_path(&args, "--registry")?,
+        false,
+    )
+    .map_err(|_| IssueError("ISSUER_REGISTRY_REQUIRED"))?;
+    #[cfg(not(feature = "enrollment-authority"))]
+    if args.contains_key("--registry") {
+        return Err(IssueError("ISSUER_REGISTRY_UNSUPPORTED"));
+    }
     let package = required_path(&args, "--package")?;
     let issuer_record_path = required_path(&args, "--issuer-record")?;
     let certified_device_path = required_path(&args, "--certified-device")?;
@@ -97,7 +120,6 @@ fn run() -> Result<()> {
     .iter()
     .any(|path| !path.is_absolute())
         || !certified_device_signature_path.is_absolute()
-        || output.exists()
     {
         return Err(IssueError("ISSUER_CONFIG_INVALID"));
     }
@@ -142,29 +164,37 @@ fn run() -> Result<()> {
     )
     .map_err(|_| IssueError("PACKAGE_VERIFICATION_FAILED"))?;
 
-    let certified_bytes = read_bounded(&certified_device_path, MAX_CONTROL_BYTES)?;
-    let certified_signature = read_bounded(&certified_device_signature_path, MAX_CONTROL_BYTES)?;
-    verify_envelope(
-        CERTIFIED_DEVICE_SIGNATURE_DOMAIN,
+    let certified_bytes = read_bounded(&certified_device_path, MAX_CERTIFIED_DEVICE_BYTES as u64)?;
+    let certified_signature = read_bounded(
+        &certified_device_signature_path,
+        MAX_CERTIFIED_DEVICE_BYTES as u64,
+    )?;
+    let manifest = verified.manifest();
+    if !matches!(
+        manifest.runtime.protection_profile.as_deref(),
+        None | Some("encrypted-tpm")
+    ) {
+        return Err(IssueError("TPM_PROFILE_REQUIRED"));
+    }
+    let certified = verify_certified_device(
         &certified_bytes,
         &certified_signature,
         enrollment_key_id,
         &enrollment_key,
-    )?;
-    let certified: CertifiedDevice = serde_json::from_slice(&certified_bytes)
-        .map_err(|_| IssueError("CERTIFIED_DEVICE_INVALID"))?;
-    let manifest = verified.manifest();
-    if certified.format != "model-protection-certified-device"
-        || certified.format_version != 1
-        || !valid_identifier(&certified.certification_id)
-        || certified.customer_scope_id != manifest.customer_scope_id
-        || certified.artifact_id != manifest.artifact_id
-    {
-        return Err(IssueError("CERTIFIED_DEVICE_INVALID"));
+        &manifest.customer_scope_id,
+        &manifest.artifact_id,
+    )
+    .map_err(|_| IssueError("CERTIFIED_DEVICE_INVALID"))?;
+    let expected_policy_authority_name = certified.policy_authority_name();
+    let device_name = certified.public().name();
+    let device_public_digest = certified.public().digest();
+    let modulus = certified.public().modulus();
+    let generation = required(&args, "--generation")?
+        .parse::<u64>()
+        .map_err(|_| IssueError("ISSUER_CONFIG_INVALID"))?;
+    if generation == 0 {
+        return Err(IssueError("ISSUER_CONFIG_INVALID"));
     }
-    let expected_policy_authority_name = decode_hex::<34>(&certified.policy_authority_name)?;
-    let (device_name, device_public_digest, modulus) =
-        parse_tpm_public(&certified.tpm_public, &expected_policy_authority_name)?;
 
     let record_bytes = read_bounded(&issuer_record_path, MAX_ISSUER_RECORD_BYTES as u64)?;
     let record = verify_issuer_record(&record_bytes, package_key_id, &package_key)
@@ -208,15 +238,58 @@ fn run() -> Result<()> {
         b"\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07",
         policy_point.as_bytes(),
     )
-    .is_none_or(|name| name != expected_policy_authority_name)
+    .is_none_or(|name| &name != expected_policy_authority_name)
     {
         return Err(IssueError("ISSUER_KEY_INVALID"));
     }
+    #[cfg(feature = "enrollment-authority")]
+    let binding = dynamo_model_protection::enrollment::format::Binding {
+        customer_scope_id: manifest.customer_scope_id.clone(),
+        artifact_id: manifest.artifact_id.clone(),
+        manifest_sha256: lower_hex(verified.digest()),
+        policy_authority_name: lower_hex(expected_policy_authority_name),
+    };
+    #[cfg(feature = "enrollment-authority")]
+    let intent_digest: [u8; 32] = Sha256::digest(
+        serde_json::to_vec(&(
+            "model-protection-issuance-intent-v1",
+            &binding,
+            Sha256::digest(&record_bytes).as_slice(),
+            key_ids,
+            kek_key_version,
+            package_key,
+            enrollment_key,
+            license_signer.verifying_key().as_bytes(),
+            policy_point.as_bytes(),
+        ))
+        .map_err(|_| IssueError("ISSUER_CONFIG_INVALID"))?,
+    )
+    .into();
+    #[cfg(feature = "enrollment-authority")]
+    let intent = dynamo_model_protection::enrollment::registry::IssuanceIntent {
+        certification_id: certified.certification_id(),
+        certificate_bytes: &certified_bytes,
+        binding: &binding,
+        license_id: required(&args, "--license-id")?,
+        generation,
+        digest: &intent_digest,
+    };
+    #[cfg(feature = "enrollment-authority")]
+    if let Some(bundle) = registry
+        .begin_issuance(&intent)
+        .map_err(|_| IssueError("ISSUER_ADMISSION_DENIED"))?
+    {
+        return write_license_bundle(&output, &bundle.license, &bundle.signature);
+    }
+    #[cfg(not(feature = "enrollment-authority"))]
+    if output.exists() {
+        return Err(IssueError("ISSUER_CONFIG_INVALID"));
+    }
     let dek = unwrap_dek(&kek, &wrapped_issuer_dek).map_err(IssueError)?;
-    let wrapped_dek = wrap_to_tpm(&modulus, &dek, TPM_OAEP_LABEL).map_err(IssueError)?;
+    let wrapped_dek = wrap_to_tpm(modulus, &dek, TPM_OAEP_LABEL).map_err(IssueError)?;
 
     let operation = (|| {
-        let cp_hash = rsa_decrypt_cp_hash(&device_name, &wrapped_dek);
+        let cp_hash = rsa_decrypt_cp_hash(device_name, &wrapped_dek);
         let approved_policy = approved_rsa_decrypt_policy(&cp_hash);
         let policy_ref = decode_hex::<32>(TPM_POLICY_REF_HEX)?;
         let mut policy_digest = Sha256::new();
@@ -226,12 +299,6 @@ fn run() -> Result<()> {
         let policy_signature =
             sign_p256_digest(&policy_signer, &policy_digest).map_err(IssueError)?;
 
-        let generation = required(&args, "--generation")?
-            .parse::<u64>()
-            .map_err(|_| IssueError("ISSUER_CONFIG_INVALID"))?;
-        if generation == 0 {
-            return Err(IssueError("ISSUER_CONFIG_INVALID"));
-        }
         let license = License {
             format: "model-protection-license".to_string(),
             format_version: 1,
@@ -248,8 +315,8 @@ fn run() -> Result<()> {
             recipient: TpmRecipient {
                 kind: "tpm2".to_string(),
                 profile: TPM_PROFILE.to_string(),
-                device_key_name: lower_hex(&device_name),
-                device_public_key_sha256: lower_hex(&device_public_digest),
+                device_key_name: lower_hex(device_name),
+                device_public_key_sha256: lower_hex(device_public_digest),
                 command_parameters_hash: lower_hex(&cp_hash),
                 approved_policy_digest: lower_hex(&approved_policy),
                 policy_ref: TPM_POLICY_REF_HEX.to_string(),
@@ -273,7 +340,34 @@ fn run() -> Result<()> {
     })();
 
     let (license, signature) = operation?;
+    let signature =
+        serde_json::to_vec_pretty(&signature).map_err(|_| IssueError("LICENSE_INVALID"))?;
+    #[cfg(feature = "enrollment-authority")]
+    let dynamo_model_protection::enrollment::registry::IssuedBundle { license, signature } =
+        registry
+            .finalize_issuance(
+                &intent,
+                dynamo_model_protection::enrollment::registry::IssuedBundle { license, signature },
+            )
+            .map_err(|_| IssueError("ISSUER_ADMISSION_DENIED"))?;
     write_license_bundle(&output, &license, &signature)
+}
+
+fn enforce_admission_mode(args: &BTreeMap<String, String>) -> Result<()> {
+    #[cfg(feature = "enrollment-authority")]
+    if !args.contains_key("--registry") || args.contains_key("--allow-development-certification") {
+        return Err(IssueError("ISSUER_REGISTRY_REQUIRED"));
+    }
+    #[cfg(not(feature = "enrollment-authority"))]
+    if args.contains_key("--registry")
+        || args
+            .get("--allow-development-certification")
+            .map(String::as_str)
+            != Some("true")
+    {
+        return Err(IssueError("ISSUER_PRODUCTION_FEATURE_REQUIRED"));
+    }
+    Ok(())
 }
 
 fn policy_authority_name(parameters: &[u8], encoded_point: &[u8]) -> Option<[u8; 34]> {
@@ -287,106 +381,199 @@ fn policy_authority_name(parameters: &[u8], encoded_point: &[u8]) -> Option<[u8;
         return None;
     }
 
-    // Frozen TPMT_PUBLIC for the external P-256 ECDSA/SHA-256 policy authority.
-    let mut public = Vec::with_capacity(86);
-    public.extend_from_slice(&0x0023_u16.to_be_bytes()); // TPM_ALG_ECC
-    public.extend_from_slice(&0x000b_u16.to_be_bytes()); // TPM_ALG_SHA256
-    public.extend_from_slice(&0x0004_0040_u32.to_be_bytes()); // sign | userWithAuth
-    public.extend_from_slice(&0_u16.to_be_bytes()); // empty authPolicy
-    public.extend_from_slice(&0x0010_u16.to_be_bytes()); // symmetric: TPM_ALG_NULL
-    public.extend_from_slice(&0x0018_u16.to_be_bytes()); // scheme: TPM_ALG_ECDSA
-    public.extend_from_slice(&0x000b_u16.to_be_bytes()); // scheme hash: SHA256
-    public.extend_from_slice(&0x0003_u16.to_be_bytes()); // curve: NIST P-256
-    public.extend_from_slice(&0x0010_u16.to_be_bytes()); // KDF: TPM_ALG_NULL
-    public.extend_from_slice(&32_u16.to_be_bytes());
-    public.extend_from_slice(&point[1..33]);
-    public.extend_from_slice(&32_u16.to_be_bytes());
-    public.extend_from_slice(&point[33..65]);
-
-    let mut name = [0_u8; 34];
-    name[..2].copy_from_slice(&0x000b_u16.to_be_bytes());
-    name[2..].copy_from_slice(&Sha256::digest(public));
-    Some(name)
+    let public = dynamo_model_protection::tpm_policy_authority_public(point).ok()?;
+    dynamo_model_protection::validate_tpm_policy_authority_public(&public).ok()
 }
 
-fn parse_tpm_public(
-    encoded: &str,
-    policy_authority_name: &[u8; 34],
-) -> Result<([u8; 34], [u8; 32], [u8; 256])> {
-    let public = BASE64
-        .decode(encoded.as_bytes())
-        .map_err(|_| IssueError("CERTIFIED_DEVICE_INVALID"))?;
-    if public.len() != 310
-        || public[0..2] != [0x00, 0x01]
-        || public[2..4] != [0x00, 0x0b]
-        || public[4..8] != [0x00, 0x02, 0x04, 0xb2]
-        || public[8..10] != [0x00, 0x20]
-        || public[42..44] != [0x00, 0x10]
-        || public[44..46] != [0x00, 0x10]
-        || public[46..48] != [0x08, 0x00]
-        || public[48..52] != [0, 0, 0, 0]
-        || public[52..54] != [0x01, 0x00]
-    {
-        return Err(IssueError("CERTIFIED_DEVICE_INVALID"));
+fn export_policy_public(args: &[String]) -> Result<()> {
+    let mut options = BTreeMap::new();
+    let mut pairs = args.chunks_exact(2);
+    for pair in &mut pairs {
+        if !matches!(pair[0].as_str(), "--policy-public-key" | "--output")
+            || pair[1].is_empty()
+            || options.insert(pair[0].clone(), pair[1].clone()).is_some()
+        {
+            return Err(IssueError("ISSUER_CONFIG_INVALID"));
+        }
     }
-    let policy_ref = decode_hex::<32>(TPM_POLICY_REF_HEX)?;
-    if policy_authority_name[..2] != [0, 0x0b] {
-        return Err(IssueError("CERTIFIED_DEVICE_INVALID"));
+    if !pairs.remainder().is_empty() {
+        return Err(IssueError("ISSUER_CONFIG_INVALID"));
     }
-    let expected_policy = policy_authorize_auth_policy(policy_authority_name, &policy_ref);
-    if public[10..42] != expected_policy {
-        return Err(IssueError("CERTIFIED_DEVICE_INVALID"));
-    }
-    let digest: [u8; 32] = Sha256::digest(&public).into();
-    let mut name = [0_u8; 34];
-    name[..2].copy_from_slice(&[0, 0x0b]);
-    name[2..].copy_from_slice(&digest);
-    let modulus = public[54..]
-        .try_into()
-        .map_err(|_| IssueError("CERTIFIED_DEVICE_INVALID"))?;
-    Ok((name, digest, modulus))
+    let input = read_bounded(&required_path(&options, "--policy-public-key")?, 4096)?;
+    let pem = std::str::from_utf8(&input).map_err(|_| IssueError("INPUT_FILE_INVALID"))?;
+    let key =
+        p256::PublicKey::from_public_key_pem(pem).map_err(|_| IssueError("INPUT_FILE_INVALID"))?;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    let public = dynamo_model_protection::tpm_policy_authority_public(
+        key.to_encoded_point(false).as_bytes(),
+    )
+    .map_err(|_| IssueError("INPUT_FILE_INVALID"))?;
+    atomic_file::publish_new(&required_path(&options, "--output")?, &public)
+        .map_err(|_| IssueError("POLICY_PUBLIC_EXPORT_FAILED"))?;
+    println!(
+        "policy_authority_name={}",
+        lower_hex(
+            &dynamo_model_protection::validate_tpm_policy_authority_public(&public)
+                .map_err(|_| IssueError("INPUT_FILE_INVALID"))?
+        )
+    );
+    Ok(())
 }
 
-fn verify_envelope(
-    domain: &[u8],
-    payload: &[u8],
-    envelope: &[u8],
-    expected_key_id: &str,
-    public_key: &[u8; 32],
-) -> Result<()> {
-    let envelope: SignatureEnvelope =
-        serde_json::from_slice(envelope).map_err(|_| IssueError("CERTIFIED_DEVICE_INVALID"))?;
-    if envelope.algorithm != "Ed25519" || envelope.key_id != expected_key_id {
-        return Err(IssueError("CERTIFIED_DEVICE_INVALID"));
+fn write_license_bundle(output: &Path, license: &[u8], signature: &[u8]) -> Result<()> {
+    // All writes/renames are relative to a pinned, owner-only directory descriptor.
+    let parent = openat2(
+        CWD,
+        output.parent().ok_or(IssueError("LICENSE_IO_ERROR"))?,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )
+    .map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
+    validate_private_directory(&parent)?;
+    let name = output.file_name().ok_or(IssueError("LICENSE_IO_ERROR"))?;
+    match openat(
+        &parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(existing) => {
+            verify_published(&existing, license, signature)?;
+            File::from(parent)
+                .sync_all()
+                .map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
+            return Ok(());
+        }
+        Err(rustix::io::Errno::NOENT) => {}
+        Err(_) => return Err(IssueError("LICENSE_IO_ERROR")),
     }
-    let signature_bytes = BASE64
-        .decode(envelope.signature.as_bytes())
-        .map_err(|_| IssueError("CERTIFIED_DEVICE_INVALID"))?;
-    let signed = [domain, payload].concat();
-    signature::UnparsedPublicKey::new(&signature::ED25519, public_key)
-        .verify(&signed, &signature_bytes)
-        .map_err(|_| IssueError("CERTIFIED_DEVICE_INVALID"))
-}
-
-fn write_license_bundle(output: &Path, license: &[u8], signature: &LicenseEnvelope) -> Result<()> {
-    let temporary = output.with_extension(format!("partial-{}", uuid::Uuid::new_v4().simple()));
-    fs::create_dir(&temporary).map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o700))
+    let temporary = format!(".license-partial-{}", uuid::Uuid::new_v4().simple());
+    rustix::fs::mkdirat(&parent, &temporary, Mode::from_raw_mode(0o700))
         .map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
+    let directory = openat(
+        &parent,
+        &temporary,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
     let result = (|| {
-        write_new(&temporary.join("model.protection.license.json"), license)?;
-        let signature =
-            serde_json::to_vec_pretty(signature).map_err(|_| IssueError("LICENSE_INVALID"))?;
-        write_new(&temporary.join("model.protection.license.sig"), &signature)?;
-        sync_directory(&temporary)?;
-        renameat_with(CWD, &temporary, CWD, output, RenameFlags::NOREPLACE)
+        for (name, bytes) in [
+            ("model.protection.license.json", license),
+            ("model.protection.license.sig", signature),
+        ] {
+            let fd = openat(
+                &directory,
+                name,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            )
             .map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
-        sync_directory(output.parent().ok_or(IssueError("LICENSE_IO_ERROR"))?)
+            let mut file = File::from(fd);
+            file.write_all(bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
+        }
+        File::from(
+            directory
+                .try_clone()
+                .map_err(|_| IssueError("LICENSE_IO_ERROR"))?,
+        )
+        .sync_all()
+        .map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
+        match renameat_with(&parent, &temporary, &parent, name, RenameFlags::NOREPLACE) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::EXIST) => {
+                let existing = openat(
+                    &parent,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
+                verify_published(&existing, license, signature)?;
+            }
+            Err(_) => return Err(IssueError("LICENSE_IO_ERROR")),
+        }
+        File::from(
+            parent
+                .try_clone()
+                .map_err(|_| IssueError("LICENSE_IO_ERROR"))?,
+        )
+        .sync_all()
+        .map_err(|_| IssueError("LICENSE_IO_ERROR"))
     })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&temporary);
+    // Never remove the published bundle, even after a parent fsync failure.
+    if openat(
+        &parent,
+        &temporary,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .is_ok()
+    {
+        for name in [
+            "model.protection.license.json",
+            "model.protection.license.sig",
+        ] {
+            let _ = rustix::fs::unlinkat(&directory, name, rustix::fs::AtFlags::empty());
+        }
+        let _ = rustix::fs::unlinkat(&parent, &temporary, rustix::fs::AtFlags::REMOVEDIR);
     }
     result
+}
+
+fn validate_private_directory(fd: &rustix::fd::OwnedFd) -> Result<()> {
+    let stat = rustix::fs::fstat(fd).map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
+    if stat.st_uid != rustix::process::geteuid().as_raw() || stat.st_mode & 0o077 != 0 {
+        return Err(IssueError("LICENSE_IO_ERROR"));
+    }
+    Ok(())
+}
+
+fn verify_published(
+    directory: &rustix::fd::OwnedFd,
+    license: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    validate_private_directory(directory)?;
+    for (name, expected) in [
+        ("model.protection.license.json", license),
+        ("model.protection.license.sig", signature),
+    ] {
+        let fd = openat(
+            directory,
+            name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
+        let stat = rustix::fs::fstat(&fd).map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile
+            || stat.st_nlink != 1
+            || stat.st_uid != rustix::process::geteuid().as_raw()
+            || stat.st_mode & 0o077 != 0
+            || stat.st_size != expected.len() as i64
+        {
+            return Err(IssueError("LICENSE_IO_ERROR"));
+        }
+        let mut bytes = Vec::new();
+        File::from(fd)
+            .take(expected.len() as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
+        if bytes != expected {
+            return Err(IssueError("LICENSE_IO_ERROR"));
+        }
+    }
+    File::from(
+        directory
+            .try_clone()
+            .map_err(|_| IssueError("LICENSE_IO_ERROR"))?,
+    )
+    .sync_all()
+    .map_err(|_| IssueError("LICENSE_IO_ERROR"))
 }
 
 fn parse_args() -> Result<BTreeMap<String, String>> {
@@ -428,6 +615,8 @@ fn allowed_argument(name: &str) -> bool {
             | "--kek-key-version"
             | "--license-id"
             | "--generation"
+            | "--registry"
+            | "--allow-development-certification"
     )
 }
 
@@ -471,24 +660,6 @@ fn read_exact_key(path: &Path) -> Result<[u8; 32]> {
         .map_err(|_| IssueError("INPUT_FILE_INVALID"))
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|_| IssueError("LICENSE_IO_ERROR"))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| IssueError("LICENSE_IO_ERROR"))
-}
-
-fn sync_directory(path: &Path) -> Result<()> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| IssueError("LICENSE_IO_ERROR"))
-}
-
 fn lower_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -496,6 +667,70 @@ fn lower_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exports_only_public_p256_template_without_overwrite() {
+        use p256::pkcs8::EncodePublicKey;
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let signer = p256::ecdsa::SigningKey::from_slice(&[0x22; 32]).unwrap();
+        let pem = signer
+            .verifying_key()
+            .to_public_key_pem(p256::pkcs8::LineEnding::LF)
+            .unwrap();
+        let input = directory.path().join("policy.pem");
+        let output = directory.path().join("policy.tpmt-public");
+        atomic_file::publish_new(&input, pem.as_bytes()).unwrap();
+        let args = vec![
+            "--policy-public-key".into(),
+            input.display().to_string(),
+            "--output".into(),
+            output.display().to_string(),
+        ];
+        export_policy_public(&args).unwrap();
+        let public = std::fs::read(&output).unwrap();
+        assert_eq!(public.len(), 88);
+        assert!(dynamo_model_protection::validate_tpm_policy_authority_public(&public).is_ok());
+        assert!(export_policy_public(&args).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), public);
+    }
+
+    #[test]
+    fn publication_retry_is_exact_private_and_never_overwrites() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = parent.path().join("license");
+        write_license_bundle(&output, b"license", b"signature").unwrap();
+        write_license_bundle(&output, b"license", b"signature").unwrap();
+        assert!(write_license_bundle(&output, b"changed", b"signature").is_err());
+        assert_eq!(
+            std::fs::read(output.join("model.protection.license.json")).unwrap(),
+            b"license"
+        );
+        let link = parent.path().join("link");
+        std::os::unix::fs::symlink(&output, &link).unwrap();
+        assert!(write_license_bundle(&link, b"license", b"signature").is_err());
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(write_license_bundle(&output, b"license", b"signature").is_err());
+    }
+
+    #[test]
+    fn production_admission_cannot_silently_fall_back_to_development() {
+        let mut args = BTreeMap::new();
+        assert!(enforce_admission_mode(&args).is_err());
+        args.insert("--allow-development-certification".into(), "true".into());
+        #[cfg(not(feature = "enrollment-authority"))]
+        assert!(enforce_admission_mode(&args).is_ok());
+        #[cfg(feature = "enrollment-authority")]
+        assert!(enforce_admission_mode(&args).is_err());
+        args.insert("--registry".into(), "/issuer/registry.sqlite".into());
+        assert!(enforce_admission_mode(&args).is_err());
+        args.remove("--allow-development-certification");
+        #[cfg(feature = "enrollment-authority")]
+        assert!(enforce_admission_mode(&args).is_ok());
+    }
 
     #[test]
     fn freezes_policy_authority_tpm_name_template() {

@@ -13,6 +13,9 @@ description = "Protected model package verification and materialization"
 
 [features]
 tpm2 = ["dep:tss-esapi"]
+enrollment-client = ["tpm2", "enrollment"]
+enrollment = []
+enrollment-authority = ["enrollment", "packager", "dep:rusqlite", "dep:openssl", "dep:x509-parser"]
 packager = [
     "dep:aes-kw",
     "dep:ed25519-dalek",
@@ -27,6 +30,16 @@ path = "src/bin/model-protection-pack.rs"
 required-features = ["packager"]
 
 [[bin]]
+name = "model-protection-enroll"
+path = "src/bin/model-protection-enroll.rs"
+required-features = ["enrollment-client"]
+
+[[bin]]
+name = "model-protection-enrollment-authority"
+path = "src/bin/model-protection-enrollment-authority.rs"
+required-features = ["enrollment-authority"]
+
+[[bin]]
 name = "model-protection-issue"
 path = "src/bin/model-protection-issue.rs"
 required-features = ["packager"]
@@ -38,6 +51,9 @@ ed25519-dalek = { version = "2", features = ["pkcs8"], optional = true }
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"], optional = true }
 pkcs8 = { version = "0.10", features = ["encryption", "pem"], optional = true }
 rsa = { version = "0.9", features = ["sha2"], optional = true }
+rusqlite = { version = "0.37", features = ["backup"], optional = true }
+openssl = { version = "0.10", optional = true }
+x509-parser = { version = "0.18", optional = true }
 ring = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }

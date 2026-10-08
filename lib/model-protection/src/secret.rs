@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(all(target_os = "linux", feature = "tpm2"))]
+#[cfg(target_os = "linux")]
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
-#[cfg(all(target_os = "linux", feature = "tpm2"))]
+#[cfg(target_os = "linux")]
 use rustix::mm::{Advice, MapFlags, ProtFlags, madvise, mlock, mmap_anonymous, munlock, munmap};
-#[cfg(all(target_os = "linux", feature = "tpm2"))]
+#[cfg(target_os = "linux")]
 use std::ffi::c_void;
-#[cfg(all(target_os = "linux", feature = "tpm2"))]
+#[cfg(target_os = "linux")]
 use std::ptr::NonNull;
 
 /// An owned model data-encryption key. Its bytes are never exposed by the public API.
@@ -18,22 +18,22 @@ pub struct SecretDek(SecretStorage);
 enum SecretStorage {
     #[allow(dead_code)]
     Test(Zeroizing<[u8; 32]>),
-    #[cfg(all(target_os = "linux", feature = "tpm2"))]
+    #[cfg(target_os = "linux")]
     Locked(LockedSecret),
 }
 
-#[cfg(all(target_os = "linux", feature = "tpm2"))]
+#[cfg(target_os = "linux")]
 struct LockedSecret {
     page: NonNull<c_void>,
     page_size: usize,
 }
 
-#[cfg(all(target_os = "linux", feature = "tpm2"))]
+#[cfg(target_os = "linux")]
 // SAFETY: the mapping is uniquely owned, has no interior aliases, and is only
 // read through `SecretDek::as_bytes` while its owner is alive.
 unsafe impl Send for LockedSecret {}
 
-#[cfg(all(target_os = "linux", feature = "tpm2"))]
+#[cfg(target_os = "linux")]
 impl LockedSecret {
     fn new(bytes: &[u8; 32]) -> crate::Result<Self> {
         let page_size = rustix::param::page_size();
@@ -75,7 +75,7 @@ impl LockedSecret {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "tpm2"))]
+#[cfg(target_os = "linux")]
 impl Drop for LockedSecret {
     fn drop(&mut self) {
         // SAFETY: this owner has exclusive access to the live mapping.
@@ -87,6 +87,13 @@ impl Drop for LockedSecret {
 }
 
 impl SecretDek {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_file(mut bytes: [u8; 32]) -> crate::Result<Self> {
+        let secret = LockedSecret::new(&bytes).map(|secret| Self(SecretStorage::Locked(secret)));
+        bytes.zeroize();
+        secret
+    }
+
     #[cfg(all(target_os = "linux", feature = "tpm2"))]
     pub(crate) fn from_tpm(mut bytes: [u8; 32]) -> crate::Result<Self> {
         let secret = LockedSecret::new(&bytes).map(|secret| Self(SecretStorage::Locked(secret)));
@@ -102,7 +109,7 @@ impl SecretDek {
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         match &self.0 {
             SecretStorage::Test(bytes) => bytes,
-            #[cfg(all(target_os = "linux", feature = "tpm2"))]
+            #[cfg(target_os = "linux")]
             SecretStorage::Locked(secret) => secret.bytes(),
         }
     }

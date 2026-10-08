@@ -41,6 +41,7 @@ class _Session:
 
 
 def test_plain_model_does_not_enter_protection_pipeline(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_MODEL_PROTECTION_CONFIG", "not valid JSON")
     monkeypatch.setenv("VLLM_PLUGINS", "plain-plugin")
     monkeypatch.setattr(bootstrap, "is_protected_model", lambda _: False)
     monkeypatch.setattr(
@@ -53,6 +54,28 @@ def test_plain_model_does_not_enter_protection_pipeline(monkeypatch) -> None:
 
     assert prepared.argv == ["--model", "Qwen/Qwen3-0.6B"]
     assert not prepared.protected
+    assert os.environ["VLLM_PLUGINS"] == "plain-plugin"
+
+
+def test_inline_layer_config_is_forwarded_without_writing_files(monkeypatch) -> None:
+    config = '{"schema_version":2,"layers":{"package_verification":true}}'
+    monkeypatch.setenv("DYN_MODEL_PROTECTION_CONFIG", config)
+    monkeypatch.setenv("VLLM_PLUGINS", "plain-plugin")
+    monkeypatch.setattr(bootstrap, "is_protected_model", lambda _: True)
+    session = _Session()
+
+    def prepare(model, namespace, config_input):
+        assert model == "/packages/model"
+        assert namespace == "test"
+        assert config_input == config
+        return session
+
+    monkeypatch.setattr(bootstrap, "prepare_protected_model", prepare)
+    result = bootstrap.prepare_model_argv(
+        ["--model", "/packages/model", "--namespace", "test"]
+    )
+    result.cleanup()
+    assert session.cleaned
     assert os.environ["VLLM_PLUGINS"] == "plain-plugin"
 
 
@@ -156,6 +179,7 @@ def test_protected_model_restores_plugin_policy_when_cleanup_fails(monkeypatch) 
         ("scheduler_cls", "external.Scheduler", "MODEL_PROTECTION_MODE_UNSUPPORTED"),
         ("kv_transfer_config", object(), "MODEL_PROTECTION_MODE_UNSUPPORTED"),
         ("ec_transfer_config", object(), "MODEL_PROTECTION_MODE_UNSUPPORTED"),
+        ("load_format", "ipc_cache", "MODEL_PROTECTION_MODE_UNSUPPORTED"),
     ],
 )
 def test_effective_gate_rejects_external_or_mutable_inputs(
@@ -207,14 +231,14 @@ def test_effective_gate_rejects_external_or_mutable_inputs(
     )
 
     with pytest.raises(ModelProtectionError, match=code):
-        bootstrap.validate_protected_engine_args(config, prepared, "0.29.0")
+        bootstrap.validate_protected_engine_args(config, prepared, "0.30.0")
 
 
 def test_effective_gate_accepts_pinned_vllm_engine_args(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("VLLM_CONFIG_ROOT", str(tmp_path))
     vllm = pytest.importorskip("vllm")
-    if not vllm.__version__.startswith(bootstrap.SUPPORTED_VLLM_SERIES):
-        pytest.skip(f"requires vLLM {bootstrap.SUPPORTED_VLLM_SERIES}x")
+    if vllm.__version__ != bootstrap.SUPPORTED_VLLM_VERSION:
+        pytest.skip(f"requires vLLM {bootstrap.SUPPORTED_VLLM_VERSION}")
     from vllm.engine import arg_utils
 
     AsyncEngineArgs = pytest.importorskip("vllm.engine.arg_utils").AsyncEngineArgs
@@ -250,7 +274,7 @@ def test_effective_gate_accepts_pinned_vllm_engine_args(monkeypatch, tmp_path) -
         engine_args=engine,
     )
 
-    bootstrap.validate_protected_engine_args(config, prepared, "0.29.0")
+    bootstrap.validate_protected_engine_args(config, prepared, vllm.__version__)
     normalized = engine.create_engine_config(
         usage_context=UsageContext.OPENAI_API_SERVER
     )
@@ -259,8 +283,8 @@ def test_effective_gate_accepts_pinned_vllm_engine_args(monkeypatch, tmp_path) -
 
 def test_effective_gate_accepts_multimodal_vllm_engine(tmp_path) -> None:
     vllm = pytest.importorskip("vllm")
-    if not vllm.__version__.startswith(bootstrap.SUPPORTED_VLLM_SERIES):
-        pytest.skip(f"requires vLLM {bootstrap.SUPPORTED_VLLM_SERIES}x")
+    if vllm.__version__ != bootstrap.SUPPORTED_VLLM_VERSION:
+        pytest.skip(f"requires vLLM {bootstrap.SUPPORTED_VLLM_VERSION}")
     AsyncEngineArgs = pytest.importorskip("vllm.engine.arg_utils").AsyncEngineArgs
 
     session = _Session()
@@ -286,15 +310,16 @@ def test_effective_gate_accepts_multimodal_vllm_engine(tmp_path) -> None:
         engine_args=engine,
     )
 
-    bootstrap.validate_protected_engine_args(config, prepared, "0.29.0")
+    bootstrap.validate_protected_engine_args(config, prepared, vllm.__version__)
 
 
-def test_effective_gate_rejects_unprofiled_vllm_version() -> None:
+@pytest.mark.parametrize("version", ["0.29.0", "0.30.1", "0.30.0rc1"])
+def test_effective_gate_rejects_unprofiled_vllm_version(version) -> None:
     session = _Session()
     prepared = bootstrap.ProtectionBootstrap([], session, session.model_path, "test")
 
     with pytest.raises(ModelProtectionError, match="MODEL_PROTECTION_MODE_UNSUPPORTED"):
-        bootstrap.validate_protected_engine_args(object(), prepared, "0.28.0")
+        bootstrap.validate_protected_engine_args(object(), prepared, version)
 
 
 def test_normalized_gate_allows_only_dynamo_multimodal_cache() -> None:
@@ -366,6 +391,39 @@ def test_engine_core_policy_is_installed_and_runs_in_child(monkeypatch) -> None:
         bootstrap.uninstall_protected_engine_core_policy()
     assert EngineCoreProc.run_engine_core("restored") == "restored"
     assert calls[-1] == "restored"
+
+
+def test_engine_core_policy_accepts_pinned_vllm_entrypoint(monkeypatch) -> None:
+    vllm = pytest.importorskip("vllm")
+    if vllm.__version__ != bootstrap.SUPPORTED_VLLM_VERSION:
+        pytest.skip(f"requires vLLM {bootstrap.SUPPORTED_VLLM_VERSION}")
+    from vllm.v1.engine.core import EngineCoreProc
+
+    import dynamo._core as core
+
+    original = EngineCoreProc.run_engine_core
+    calls = []
+    monkeypatch.setattr(
+        core,
+        "enforce_model_protection_process_policy",
+        lambda: calls.append("policy"),
+        raising=False,
+    )
+    bootstrap.install_protected_engine_core_policy()
+    try:
+        assert EngineCoreProc._dynamo_model_protection_original is original
+        child_entry = pickle.loads(pickle.dumps(EngineCoreProc.run_engine_core))
+        setattr(
+            EngineCoreProc,
+            "_dynamo_model_protection_original",
+            staticmethod(lambda **kwargs: calls.append(kwargs)),
+        )
+        child_entry(dp_rank=0, local_dp_rank=0)
+        assert calls == ["policy", {"dp_rank": 0, "local_dp_rank": 0}]
+    finally:
+        EngineCoreProc._dynamo_model_protection_original = original
+        bootstrap.uninstall_protected_engine_core_policy()
+    assert EngineCoreProc.run_engine_core is original
 
 
 def test_shutdown_cancels_and_joins_materialization_before_return() -> None:

@@ -109,7 +109,7 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_MODEL_PROTECTION_CONFIG",
             default=None,
             help=(
-                "Path to the public trust and TPM runtime configuration. It is "
+                "Inline JSON layer configuration or absolute runtime JSON path. It is "
                 "read only when --model contains protected-package markers."
             ),
         )

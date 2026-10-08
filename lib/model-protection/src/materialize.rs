@@ -81,6 +81,20 @@ pub fn load_authorized_model(
         return Err(ProtectionError::LicenseInvalid("trust domain"));
     }
     let manifest = load_verified_manifest(package_root, package_key_id, package_verifying_key)?;
+    load_authorized_verified(
+        license_root,
+        license_key_id,
+        license_verifying_key,
+        manifest,
+    )
+}
+
+pub(crate) fn load_authorized_verified(
+    license_root: &Path,
+    license_key_id: &str,
+    license_verifying_key: &[u8; 32],
+    manifest: VerifiedManifest,
+) -> Result<AuthorizedModel> {
     let license_root = SafeDir::open(license_root, false)?;
     let license = license_root.read_bounded(
         "model.protection.license.json",
@@ -243,9 +257,36 @@ impl SecureModelSession {
         Self::prepare_at(root_path, authorized, process_memory_margin, true)
     }
 
+    pub fn prepare_verified(
+        namespace: &str,
+        verified: &VerifiedManifest,
+        process_memory_margin: u64,
+    ) -> Result<Self> {
+        Self::prepare_manifest_at(
+            secure_model_root(namespace)?,
+            verified,
+            process_memory_margin,
+            true,
+        )
+    }
+
     fn prepare_at(
         root_path: PathBuf,
         authorized: &AuthorizedModel,
+        process_memory_margin: u64,
+        require_mount_root: bool,
+    ) -> Result<Self> {
+        Self::prepare_manifest_at(
+            root_path,
+            authorized.manifest(),
+            process_memory_margin,
+            require_mount_root,
+        )
+    }
+
+    fn prepare_manifest_at(
+        root_path: PathBuf,
+        verified: &VerifiedManifest,
         process_memory_margin: u64,
         require_mount_root: bool,
     ) -> Result<Self> {
@@ -255,7 +296,7 @@ impl SecureModelSession {
         }
         let owner_lock = root.acquire_owner_lock()?;
         root.remove_stale_sessions()?;
-        let required = required_tmpfs_bytes(authorized)?;
+        let required = required_tmpfs_bytes(verified)?;
         root.require_capacity(required)?;
         require_memory_headroom(
             required
@@ -279,7 +320,7 @@ impl SecureModelSession {
             _owner_lock: owner_lock,
             name,
             path,
-            manifest_digest: *authorized.manifest().digest(),
+            manifest_digest: *verified.digest(),
             public_staged: false,
             active: true,
         })
@@ -295,11 +336,18 @@ impl SecureModelSession {
         package_root: &Path,
         authorized: &AuthorizedModel,
     ) -> Result<()> {
-        if self.public_staged || self.manifest_digest != *authorized.manifest().digest() {
+        self.stage_verified_metadata(package_root, authorized.manifest())
+    }
+
+    pub fn stage_verified_metadata(
+        &mut self,
+        package_root: &Path,
+        verified: &VerifiedManifest,
+    ) -> Result<()> {
+        if self.public_staged || self.manifest_digest != *verified.digest() {
             return Err(ProtectionError::SessionConflict);
         }
-        if let Err(error) = stage_public_metadata(package_root, &self.model, authorized.manifest())
-        {
+        if let Err(error) = stage_public_metadata(package_root, &self.model, verified) {
             self.remove()?;
             return Err(error);
         }
@@ -337,16 +385,27 @@ impl SecureModelSession {
         key: SecretDek,
         cancellation: &CancellationToken,
     ) -> Result<()> {
-        if !self.public_staged || self.manifest_digest != *authorized.manifest().digest() {
-            return Err(ProtectionError::SessionConflict);
-        }
-        if let Err(error) = materialize_protected_files(
+        self.materialize_verified_cancellable(
             package_root,
-            &self.model,
             authorized.manifest(),
             key,
             cancellation,
-        ) {
+        )
+    }
+
+    pub fn materialize_verified_cancellable(
+        &mut self,
+        package_root: &Path,
+        verified: &VerifiedManifest,
+        key: SecretDek,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        if !self.public_staged || self.manifest_digest != *verified.digest() {
+            return Err(ProtectionError::SessionConflict);
+        }
+        if let Err(error) =
+            materialize_protected_files(package_root, &self.model, verified, key, cancellation)
+        {
             self.remove()?;
             return Err(error);
         }
@@ -598,8 +657,8 @@ impl SafeDir {
     }
 }
 
-fn required_tmpfs_bytes(authorized: &AuthorizedModel) -> Result<u64> {
-    let manifest = authorized.manifest().manifest();
+fn required_tmpfs_bytes(verified: &VerifiedManifest) -> Result<u64> {
+    let manifest = verified.manifest();
     manifest
         .protected_files
         .iter()
@@ -972,6 +1031,7 @@ mod tests {
             }],
             public_files: Vec::new(),
             runtime: crate::RuntimeRequirements {
+                protection_profile: None,
                 minimum_runtime_version: env!("CARGO_PKG_VERSION").to_string(),
                 required_load_format: "safetensors".to_string(),
             },
@@ -1115,6 +1175,90 @@ mod tests {
     }
 
     #[test]
+    fn file_key_profile_materializes_without_tpm_or_device_license_and_cleans_wrong_key() {
+        let package = tempfile::tempdir().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("dynamo-file-profile-")
+            .tempdir_in("/dev/shm")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::create_dir(package.path().join("weights")).unwrap();
+        let key = [0x42; 32];
+        let plain = b"tiny-file-profile-weights";
+        let mut manifest =
+            crate::parse_manifest(&crate::format::tests::valid_manifest_json()).unwrap();
+        manifest.format_version = 2;
+        manifest.runtime.protection_profile = Some("encrypted-file".into());
+        manifest.public_files.clear();
+        let mut container = Vec::new();
+        let result = crate::encrypt_records(
+            plain.as_slice(),
+            &mut container,
+            &key,
+            &manifest.artifact_id_bytes().unwrap(),
+            &manifest.nonce_prefix_bytes().unwrap(),
+            1,
+            0,
+            1024,
+        )
+        .unwrap();
+        let protected = &mut manifest.protected_files[0];
+        protected.container_size = result.container_size;
+        protected.container_sha256 = lower_hex(&result.container_sha256);
+        protected.plaintext_size = result.plaintext_size;
+        protected.plaintext_sha256 = lower_hex(&result.plaintext_sha256);
+        protected.record_count = result.record_count;
+        std::fs::write(package.path().join(&protected.container_path), container).unwrap();
+        let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let signature = serde_json::to_vec(&crate::SignatureEnvelope {
+            algorithm: "Ed25519".into(),
+            key_id: "test".into(),
+            signature: BASE64.encode(
+                signer
+                    .sign(&crate::manifest_signature_payload(&bytes))
+                    .as_ref(),
+            ),
+        })
+        .unwrap();
+        let verified = crate::verify_manifest(
+            &bytes,
+            &signature,
+            "test",
+            signer.public_key().as_ref().try_into().unwrap(),
+        )
+        .unwrap();
+        for (dek, success) in [(key, true), ([0x43; 32], false)] {
+            let mut session = SecureModelSession::prepare_manifest_at(
+                root.path().to_path_buf(),
+                &verified,
+                0,
+                false,
+            )
+            .unwrap();
+            let path = session.model_path().to_path_buf();
+            session
+                .stage_verified_metadata(package.path(), &verified)
+                .unwrap();
+            let materialized = session.materialize_verified_cancellable(
+                package.path(),
+                &verified,
+                SecretDek::from_file(dek).unwrap(),
+                &CancellationToken::default(),
+            );
+            assert_eq!(materialized.is_ok(), success);
+            if success {
+                assert_eq!(
+                    std::fs::read(path.join("model.safetensors")).unwrap(),
+                    plain
+                );
+            }
+            session.cleanup().unwrap();
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
     fn materializes_public_and_authenticated_files_into_tmpfs() {
         let package = tempfile::tempdir().unwrap();
         let Some(tmpfs_parent) = Path::new("/dev/shm")
@@ -1190,6 +1334,7 @@ mod tests {
                 publish_to_model_card: true,
             }],
             runtime: crate::RuntimeRequirements {
+                protection_profile: None,
                 minimum_runtime_version: "1.5.0".to_string(),
                 required_load_format: "safetensors".to_string(),
             },

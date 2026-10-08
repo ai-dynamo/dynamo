@@ -9,7 +9,36 @@ This guide describes the Phase 1 protected-model profile. It covers package
 creation on the issuer host, runtime image construction, and local or
 Kubernetes startup on a customer server.
 
+Production enrollment is not yet hardware-qualified. The authority verifier,
+registry, resumable collector provisioning/response and intent-bound issuance
+recovery are implemented. Native simulator tests pass; physical acceptance
+remains open. The public policy signer is loaded transiently from a TPMT_PUBLIC
+file, not persisted as an external public object. See
+[implementation status](../../docs/project-memory/TPM-Implementation-Status.md).
+Single-/multi-GPU product configurations require separate process and lifecycle
+acceptance; this guide's baseline does not enable multi-worker loading.
+
 ## Runtime behavior
+
+Layer schema V2 accepts inline JSON in `DYN_MODEL_PROTECTION_CONFIG` or an
+absolute JSON file path. The four flags `package_verification`,
+`license_verification`, `tpm_binding`, `secure_materialization` default false.
+The signed package profile determines the required combination; false flags
+do not authorize a downgrade of an existing TPM package.
+
+New packages may use `PROTECTION_PROFILE=encrypted-file` for a private per-model
+key file, or `encrypted-file-license` to additionally verify a software license.
+Use `model-protection-issue export-file-key` / `issue-file-license` only on the
+issuer host. These profiles do not bind the model to a device. They retain
+tmpfs, no-swap, memlock and loader requirements. Runtime examples are
+`runtime.file.json.example` and `runtime.file-license.json.example`.
+Legacy V1 packages/configuration files retain the fixed TPM profile.
+
+Protected image builds pin the base to vLLM 0.30.0 and Omni 0.30.0rc1.
+`SKIP_BASE_BUILD=true` reuses a local base only if both vLLM and the protected
+loader support exactly 0.30.0. Final diagnostics separate version/loader mismatch
+from a missing TPM-enabled extension. Rebuild the base after this source update;
+an older base may contain the previous Python loader even with vLLM 0.30.0 installed.
 
 Normal and protected models use separate paths:
 
@@ -24,7 +53,7 @@ if verification, machine binding, or decryption fails. Plaintext weights are
 written only below `/run/<validated-namespace>-models/<session-id>` and are
 never stored as a normal disk directory.
 
-Phase 1 supports one aggregated vLLM 0.29.x process, one GPU, local
+Phase 1 supports one aggregated vLLM 0.30.0 process, one GPU, local
 safetensors, and the Dynamo-created multimodal cache connector. LoRA,
 snapshot/CRIU, remote code, external tokenizer/config, speculative loading,
 runtime weight updates, and multi-worker protected loading are rejected before
@@ -60,6 +89,14 @@ cargo build -p dynamo-model-protection \
 The resulting binaries are `target/release/model-protection-pack` and
 `target/release/model-protection-issue`. Keep the issuer binaries and key
 directory off the customer server.
+
+For registry-enforced issuance, build with `--features packager,enrollment-authority`
+instead; OpenSSL and SQLite development libraries are required. This also builds
+`model-protection-enrollment-authority`. A packager-only issuer refuses issuance
+unless explicitly given `--allow-development-certification true` for pilot use;
+that opt-in is not production enrollment. Authority-mode issuance always requires
+an issuer-owned registry. Do not copy authority keys/state or binaries into the
+customer runtime image.
 
 ## 2. Create or provision issuer keys
 
@@ -114,9 +151,13 @@ enrollment process. Issue the license on the same offline issuer host with
 `model-protection-issue`. The command requires the package, issuer record,
 certified TPM identity, package public key, enrollment public key, license and
 policy signing keys, and the same KEK ID/version used by the packager.
+The example requires the `enrollment-authority` build and an active certification
+committed by the authority in `/srv/enrollment/registry.sqlite`, in an owner-only
+directory. A signed device JSON alone is not an admission source.
 
 ```bash
 model-protection-issue \
+  --registry /srv/enrollment/registry.sqlite \
   --package /srv/artifacts/LFM2.5-2.6B-secure/package \
   --issuer-record /srv/artifacts/LFM2.5-2.6B-secure/issuer-record.json \
   --certified-device /srv/enrollment/device.json \
@@ -141,12 +182,18 @@ model-protection-issue \
 
 The license output and its signature are customer artifacts. The issuer keys,
 passphrase files, and issuer record are not.
+Failed issuance publication retains its quota reservation. Retry with identical
+inputs/license ID/generation resumes it or publishes the exact committed bundle;
+changed intent and disabled certificates fail closed. Historical V1 reservations
+without an intent digest cannot be resumed automatically. Do not delete reservations
+to bypass admission; use the
+[operations runbook](../../docs/project-memory/TPM-Operations-Runbook.md).
 
 ## 5. Build the protected runtime image
 
 Build the base and protected image from the same reviewed source revision. The
 build script compiles the TPM-enabled wheel and the Dockerfile rejects an image
-without the TPM binding or with a vLLM version outside 0.29.x:
+without the TPM binding or with a vLLM/loader version other than 0.30.0:
 
 ```bash
 IMAGE_TAG=registry.example.com/dynamo-vllm-protected:1.5.0 \
@@ -181,6 +228,43 @@ the issuer record to this process. The loader verifies signatures and machine
 binding, unwraps the DEK through TPM, materializes to tmpfs, and keeps the
 plaintext session for the worker lifetime required by vLLM.
 
+### Docker Compose example for an encrypted-file LLM
+
+The [LLM Compose example](docker-compose.llm.example.yaml) is a copy adapted
+from `ocr_service/deploy/prod/docker-compose.model-llm.yaml`. It does not
+modify that production file. It starts a frontend and one vLLM worker. The
+example expects this directory layout on the customer host:
+
+```text
+<LLM_MODEL_PATH>/file-v1/package/
+<LLM_MODEL_PATH>/file-v1/runtime/runtime.json
+```
+
+Set `LLM_DYN_NAMESPACE` to the namespace signed into the package. The
+example mounts a tmpfs at `/run/<LLM_DYN_NAMESPACE>-models` to match that
+namespace. The external Docker network must have services named
+`nats-server` and `etcd-server`. Set the GPU ID and memory limits for the
+customer host. Do not copy issuer private keys into `runtime/`.
+
+```bash
+export LLM_PROTECTED_IMAGE=dynamo-vllm-protected-prod:1.5.0
+export LLM_MODEL_PATH=/srv/protected-models/my-llm
+export LLM_MODEL_NAME=my-llm
+export LLM_DYN_NAMESPACE=protected-llm
+export LLM_DYN_NETWORK=ocr_network
+export LLM_GPU_ID=0
+test -d "$LLM_MODEL_PATH/file-v1/package"
+test -f "$LLM_MODEL_PATH/file-v1/runtime/runtime.json"
+docker network inspect "$LLM_DYN_NETWORK" >/dev/null
+docker compose -f deploy/model-protection/docker-compose.llm.example.yaml config --quiet
+docker compose -f deploy/model-protection/docker-compose.llm.example.yaml up -d
+docker compose -f deploy/model-protection/docker-compose.llm.example.yaml logs -f vllm-llm-worker
+```
+
+This example uses the `encrypted-file` profile. The TPM profile needs TPM
+device access and a different runtime configuration. Do not use this example
+unchanged for a TPM-bound package.
+
 ## 7. Kubernetes profile
 
 Start from `dgd.yaml` and replace the image digest, package PVC, and projected
@@ -206,7 +290,7 @@ cargo clippy -p dynamo-model-protection --features packager --all-targets -- -D 
 ```
 
 A deployment is not release-ready until the protected image runs the real vLLM
-0.29 classes, plain and protected model smoke tests pass, and TPM/GPU,
+0.30.0 classes, plain and protected model smoke tests pass, and TPM/GPU,
 SIGTERM, tmpfs cleanup, and cross-server binding checks are recorded. Roll back
 by restoring the previous signed image digest, package, and license as a
 matched set. Never replace an encrypted package or license independently.

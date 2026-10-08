@@ -4,7 +4,6 @@
 """Fail-closed protected-model bootstrap before vLLM argument construction."""
 
 import asyncio
-import logging
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -14,11 +13,10 @@ from dynamo._core import (
     is_protected_model,
     prepare_protected_model,
 )
+from dynamo.common.utils.model_protection import materialize_protected_session
 from dynamo.common.utils.namespace import get_worker_namespace
 
-logger = logging.getLogger(__name__)
-
-SUPPORTED_VLLM_SERIES = "0.29."
+SUPPORTED_VLLM_VERSION = "0.30.0"
 _CONFIG_ENV = "DYN_MODEL_PROTECTION_CONFIG"
 _DISABLED_VLLM_PLUGINS = ""
 _MULTIMODAL_CACHE_CONNECTOR = "DynamoMultimodalEmbeddingCacheConnector"
@@ -139,7 +137,7 @@ def validate_protected_engine_args(
     """Validate the normalized vLLM arguments before TPM key release."""
     if not bootstrap.protected:
         return
-    if not vllm_version.startswith(SUPPORTED_VLLM_SERIES):
+    if vllm_version != SUPPORTED_VLLM_VERSION:
         raise ModelProtectionError("MODEL_PROTECTION_MODE_UNSUPPORTED")
     if config.namespace != bootstrap.namespace or config.model != bootstrap.model_path:
         raise ModelProtectionError("MODEL_PROTECTION_CONFIG_INVALID")
@@ -286,38 +284,7 @@ async def materialize_protected_weights(
     """Materialize off-loop and stop the writer before shutdown cleanup."""
     if bootstrap.session is None:
         return
-    cancellation = bootstrap.session.cancellation()
-    materialize = asyncio.create_task(asyncio.to_thread(bootstrap.session.materialize))
-    shutdown = asyncio.create_task(shutdown_event.wait())
-    try:
-        done, _ = await asyncio.wait(
-            (materialize, shutdown), return_when=asyncio.FIRST_COMPLETED
-        )
-        if shutdown in done and not materialize.done():
-            cancellation.cancel()
-        await asyncio.shield(materialize)
-    except BaseException:
-        cancellation.cancel()
-        while not materialize.done():
-            try:
-                await asyncio.shield(materialize)
-            except asyncio.CancelledError:
-                cancellation.cancel()
-            except BaseException:
-                break
-        if materialize.done() and not materialize.cancelled():
-            try:
-                materialize.result()
-            except BaseException:
-                logger.debug(
-                    "protected weight materialization failed while the caller "
-                    "was already unwinding",
-                    exc_info=True,
-                )
-        raise
-    finally:
-        shutdown.cancel()
-        await asyncio.gather(shutdown, return_exceptions=True)
+    await materialize_protected_session(bootstrap.session, shutdown_event)
 
 
 def _option_values(argv: list[str], option: str) -> list[str]:

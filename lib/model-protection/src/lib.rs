@@ -8,7 +8,13 @@
 //! safe filesystem operations used by backend adapters.
 
 mod cancellation;
+#[cfg(feature = "packager")]
+mod certified_device;
 mod detector;
+mod device;
+#[cfg(feature = "enrollment")]
+pub mod enrollment;
+mod file_license;
 mod format;
 mod issuer_record;
 mod license;
@@ -17,12 +23,28 @@ mod materialize;
 #[cfg(target_os = "linux")]
 mod persistence;
 mod records;
+#[cfg(target_os = "linux")]
+pub mod runtime;
 mod secret;
 #[cfg(all(target_os = "linux", feature = "tpm2"))]
 mod tpm;
 
 pub use cancellation::CancellationToken;
+#[cfg(feature = "packager")]
+pub use certified_device::{
+    CERTIFIED_DEVICE_FORMAT, CERTIFIED_DEVICE_SIGNATURE_DOMAIN, CERTIFIED_DEVICE_VERSION,
+    CertifiedDevice, MAX_CERTIFIED_DEVICE_BYTES, VerifiedCertifiedDevice,
+    certified_device_signature_payload, verify_certified_device,
+};
 pub use detector::{ModelProtectionKind, detect_model_protection};
+pub use device::{
+    TPM_DEVICE_PUBLIC_BYTES, TpmDevicePublic, tpm_policy_authority_public,
+    validate_tpm_device_public, validate_tpm_policy_authority_public,
+};
+pub use file_license::{
+    FILE_LICENSE_FORMAT, FILE_LICENSE_SIGNATURE_DOMAIN, FileLicense,
+    file_license_signature_payload, verify_file_license,
+};
 pub use format::{
     Encryption, MANIFEST_SIGNATURE_DOMAIN, MAX_FILE_BYTES, MAX_SAFETENSORS_INDEX_BYTES, Manifest,
     ModelIdentity, ProtectedFile, PublicFile, RuntimeRequirements, SignatureEnvelope,
@@ -50,7 +72,10 @@ pub use persistence::enforce_process_persistence_policy;
 pub use records::{EncryptResult, encrypt_records};
 pub use secret::SecretDek;
 #[cfg(all(target_os = "linux", feature = "tpm2"))]
-pub use tpm::{materialize_tpm_model, prepare_tpm_model, unwrap_tpm_dek};
+pub use tpm::{
+    TpmPolicyAuthority, materialize_tpm_model, materialize_tpm_model_with_policy,
+    prepare_tpm_model, unwrap_tpm_dek,
+};
 
 use std::fmt;
 
@@ -59,6 +84,9 @@ use thiserror::Error;
 /// Stable machine-readable failures for logs and the Python boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorCode {
+    RuntimeConfigInvalid,
+    ProtectionLayerDisabled,
+    KeyProviderInvalid,
     SecurePackageInvalid,
     ManifestSignatureInvalid,
     PackageIntegrityInvalid,
@@ -78,11 +106,15 @@ pub enum ErrorCode {
     HostPolicyInvalid,
     IssuerRecordInvalid,
     MaterializationCancelled,
+    CertifiedDeviceInvalid,
 }
 
 impl ErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::RuntimeConfigInvalid => "MODEL_PROTECTION_CONFIG_INVALID",
+            Self::ProtectionLayerDisabled => "MODEL_PROTECTION_LAYER_DISABLED",
+            Self::KeyProviderInvalid => "MODEL_PROTECTION_KEY_INVALID",
             Self::SecurePackageInvalid => "SECURE_PACKAGE_INVALID",
             Self::ManifestSignatureInvalid => "MANIFEST_SIGNATURE_INVALID",
             Self::PackageIntegrityInvalid => "PACKAGE_INTEGRITY_INVALID",
@@ -102,6 +134,7 @@ impl ErrorCode {
             Self::HostPolicyInvalid => "HOST_POLICY_INVALID",
             Self::IssuerRecordInvalid => "ISSUER_RECORD_INVALID",
             Self::MaterializationCancelled => "MATERIALIZATION_CANCELLED",
+            Self::CertifiedDeviceInvalid => "CERTIFIED_DEVICE_INVALID",
         }
     }
 }
@@ -109,6 +142,12 @@ impl ErrorCode {
 /// Stable, sanitized failures exposed by the protection boundary.
 #[derive(Error)]
 pub enum ProtectionError {
+    #[error("MODEL_PROTECTION_CONFIG_INVALID")]
+    RuntimeConfigInvalid,
+    #[error("MODEL_PROTECTION_LAYER_DISABLED")]
+    ProtectionLayerDisabled(&'static str),
+    #[error("MODEL_PROTECTION_KEY_INVALID")]
+    KeyProviderInvalid,
     #[error("SECURE_PACKAGE_INVALID")]
     InvalidPackage(&'static str),
     #[error("MANIFEST_SIGNATURE_INVALID")]
@@ -147,6 +186,8 @@ pub enum ProtectionError {
     IssuerRecordInvalid,
     #[error("MATERIALIZATION_CANCELLED")]
     MaterializationCancelled,
+    #[error("CERTIFIED_DEVICE_INVALID")]
+    CertifiedDeviceInvalid,
 }
 
 impl fmt::Debug for ProtectionError {
@@ -164,6 +205,9 @@ impl From<std::io::Error> for ProtectionError {
 impl ProtectionError {
     pub const fn code(&self) -> ErrorCode {
         match self {
+            Self::RuntimeConfigInvalid => ErrorCode::RuntimeConfigInvalid,
+            Self::ProtectionLayerDisabled(_) => ErrorCode::ProtectionLayerDisabled,
+            Self::KeyProviderInvalid => ErrorCode::KeyProviderInvalid,
             Self::InvalidPackage(_) => ErrorCode::SecurePackageInvalid,
             Self::ManifestSignatureInvalid => ErrorCode::ManifestSignatureInvalid,
             Self::PackageIntegrityMismatch => ErrorCode::PackageIntegrityInvalid,
@@ -183,12 +227,14 @@ impl ProtectionError {
             Self::HostPolicyInvalid => ErrorCode::HostPolicyInvalid,
             Self::IssuerRecordInvalid => ErrorCode::IssuerRecordInvalid,
             Self::MaterializationCancelled => ErrorCode::MaterializationCancelled,
+            Self::CertifiedDeviceInvalid => ErrorCode::CertifiedDeviceInvalid,
         }
     }
 
     /// A bounded, non-secret reason suitable for internal structured logs.
     pub const fn sanitized_reason(&self) -> Option<&'static str> {
         match self {
+            Self::ProtectionLayerDisabled(layer) => Some(layer),
             Self::InvalidPackage(reason) | Self::LicenseInvalid(reason) => Some(reason),
             _ => None,
         }

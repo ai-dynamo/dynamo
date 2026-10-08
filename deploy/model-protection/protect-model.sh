@@ -18,6 +18,8 @@ Optional environment:
   PACK_BIN                   model-protection-pack binary
   PACKAGE_KEY_ID             package signing key id (default: package-signing-v1)
   MIN_RUNTIME_VERSION       minimum Dynamo runtime version (default: 0.1.0)
+  PROTECTION_PROFILE        encrypted-file, encrypted-file-license, encrypted-tpm
+                            unset keeps the legacy TPM package format
 EOF
 }
 
@@ -31,6 +33,14 @@ MODEL_VERSION="$5"
 
 PACK_BIN="${PACK_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/target/release/model-protection-pack}"
 MIN_RUNTIME_VERSION="${MIN_RUNTIME_VERSION:-0.1.0}"
+PROFILE_ARGS=()
+if [[ -n "${PROTECTION_PROFILE:-}" ]]; then
+  case "$PROTECTION_PROFILE" in
+    encrypted-file|encrypted-file-license|encrypted-tpm) ;;
+    *) echo 'Unsupported PROTECTION_PROFILE' >&2; exit 2 ;;
+  esac
+  PROFILE_ARGS=(--protection-profile "$PROTECTION_PROFILE")
+fi
 
 : "${PACKAGE_SIGNING_KEY:?PACKAGE_SIGNING_KEY is required}"
 : "${PACKAGE_PASSPHRASE_FILE:?PACKAGE_PASSPHRASE_FILE is required}"
@@ -75,7 +85,8 @@ ISSUER_RECORD="$OUTPUT_DIR/issuer-record.json"
   --package-key-id "${PACKAGE_KEY_ID:-package-signing-v1}" \
   --kek-key-file "$KEK_KEY_FILE" \
   --kek-key-id "$KEK_KEY_ID" \
-  --kek-key-version "$KEK_KEY_VERSION"
+  --kek-key-version "$KEK_KEY_VERSION" \
+  "${PROFILE_ARGS[@]}"
 
 echo "encrypted package: $PACKAGE_DIR"
 echo "issuer record (do not ship): $ISSUER_RECORD"
