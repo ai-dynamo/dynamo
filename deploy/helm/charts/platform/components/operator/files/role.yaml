@@ -266,6 +266,7 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/finalizers
+  - dynamographdeploymentenginegroups/finalizers
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
@@ -275,6 +276,7 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/status
+  - dynamographdeploymentenginegroups/status
   - dynamographdeploymentrequests/status
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
@@ -283,6 +285,16 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentenginegroups
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - nvidia.com
   resources:
