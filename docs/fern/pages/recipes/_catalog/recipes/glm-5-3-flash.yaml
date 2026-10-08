@@ -8,8 +8,8 @@ provider: zai
 model:
   name: GLM-5.3-Flash
   hf_id: zai-org/GLM-5.3-Flash
-  precision: FP8-quantized checkpoint
-status: experimental
+  precision: FP8 (vLLM) or NVFP4 (SGLang)
+status: validated
 targets:
 - id: vllm-agg-gb200
   recommended: true
@@ -103,6 +103,63 @@ targets:
     traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
   deploy:
     asset: recipes/glm-5.3-flash/vllm/disagg-h200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: sglang-agg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 4
+  runtime:
+    framework: sglang
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
+  model:
+    hf_id: RadixArk/GLM-5.3-Flash-NVFP4
+    revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
+    precision: NVFP4
+  topology: aggregated
+  techniques:
+  - nvfp4
+  - fp8-kv-cache
+  - eagle-speculative-decode
+  - replayssm
+  - hicache
+  - mnnvl
+  workload:
+    type: agentic
+  deploy:
+    asset: recipes/glm-5.3-flash/sglang/agg-gb200-agentic/deploy-gb200.yaml
+    kustomization: recipes/glm-5.3-flash/sglang/agg-gb200-agentic/kustomize/overlays/gb200/kustomization.yaml
+  expected_performance:
+    available: false
+- id: sglang-disagg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 12
+  runtime:
+    framework: sglang
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
+  model:
+    hf_id: RadixArk/GLM-5.3-Flash-NVFP4
+    revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
+    precision: NVFP4
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nvfp4
+  - fp8-kv-cache
+  - eagle-speculative-decode
+  - replayssm
+  - hicache
+  - mooncake
+  - mnnvl
+  workload:
+    type: agentic
+  deploy:
+    asset: recipes/glm-5.3-flash/sglang/disagg-gb200-agentic/deploy-gb200.yaml
+    kustomization: recipes/glm-5.3-flash/sglang/disagg-gb200-agentic/kustomize/overlays/gb200/kustomization.yaml
   expected_performance:
     available: false
 related_benchmarks: []

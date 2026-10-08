@@ -1,0 +1,238 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Generated file. For repository contributors, do not edit this checked-in copy.
+# Regenerate every public overlay and rendered manifest of this matrix (from the repository root):
+#   scripts/kustomize-matrix.py unfold recipes/glm-5.3-flash/sglang/agg-gb200-agentic/.kustomize-matrix.yaml
+#   scripts/kustomize-matrix.py render recipes/glm-5.3-flash/sglang/agg-gb200-agentic/.kustomize-matrix.yaml
+# Inspect only this Kustomize overlay (from the repository root):
+#   kustomize build recipes/glm-5.3-flash/sglang/agg-gb200-agentic/kustomize/overlays/gb200
+# You may edit a copy before applying it.
+
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  labels:
+    app.kubernetes.io/name: glm53-flash-sglang-agg-gb200
+  name: glm53-flash-sglang-agg-gb200
+spec:
+  backendFramework: sglang
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - round-robin
+          - --http-host
+          - 0.0.0.0
+          - --http-port
+          - "8000"
+          - --trust-remote-code
+          command:
+          - python3
+          env:
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
+          imagePullPolicy: IfNotPresent
+          name: main
+          ports:
+          - containerPort: 8000
+            name: http
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+        - effect: NoSchedule
+          key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+    replicas: 1
+    runtimeVersionOverride: 1.6.0
+    type: frontend
+  - name: Worker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.sglang
+          - --enable-multimodal
+          - --frontend-decoding
+          - --model-path
+          - /shared-model-cache/hub/models--RadixArk--GLM-5.3-Flash-NVFP4/snapshots/f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
+          - --revision
+          - f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
+          - --served-model-name
+          - RadixArk/GLM-5.3-Flash-NVFP4
+          - --quantization
+          - modelopt_fp4
+          - --tp-size
+          - "4"
+          - --dsa-prefill-backend
+          - trtllm
+          - --dsa-decode-backend
+          - trtllm
+          - --kv-cache-dtype
+          - fp8_e4m3
+          - --moe-runner-backend
+          - flashinfer_trtllm
+          - --speculative-algorithm
+          - EAGLE
+          - --speculative-num-steps
+          - "3"
+          - --speculative-eagle-topk
+          - "1"
+          - --speculative-num-draft-tokens
+          - "4"
+          - --mem-fraction-static
+          - "0.7"
+          - --cuda-graph-max-bs-decode
+          - "64"
+          - --host
+          - 0.0.0.0
+          - --port
+          - "30000"
+          - --chunked-prefill-size
+          - "16384"
+          - --cuda-graph-backend-prefill
+          - breakable
+          - --dyn-reasoning-parser
+          - glm45
+          - --dyn-tool-call-parser
+          - glm47
+          - --enable-metrics
+          - --linear-attn-decode-backend
+          - triton
+          - --linear-attn-prefill-backend
+          - ptx_kda
+          - --linear-attn-verify-backend
+          - triton
+          - --mamba-ssm-dtype
+          - float32
+          - --max-prefill-tokens
+          - "16384"
+          - --page-size
+          - "64"
+          - --weight-loader-prefetch-checkpoints
+          - --enable-nccl-nvls
+          - --max-running-requests
+          - "64"
+          - --enable-linear-replayssm-spec
+          - --enable-hierarchical-cache
+          - --hicache-size
+          - "100"
+          command:
+          - python3
+          env:
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: NCCL_DEBUG
+            value: INFO
+          - name: NCCL_MNNVL_ENABLE
+            value: "1"
+          - name: NCCL_NVLS_ENABLE
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          - name: SGLANG_OPT_USE_CUSTOM_ALL_REDUCE_V2
+            value: "1"
+          - name: SGLANG_ENABLE_CUSTOM_ALL_REDUCE_V2_MULTINODE
+            value: "1"
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
+          imagePullPolicy: IfNotPresent
+          name: main
+          ports:
+          - containerPort: 9090
+            name: system
+          resources:
+            claims:
+            - name: compute-domain-channel
+            limits:
+              nvidia.com/gpu: "4"
+            requests:
+              cpu: "16"
+              memory: 256Gi
+              nvidia.com/gpu: "4"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+            runAsGroup: 0
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /shared-model-cache
+            name: shared-model-cache
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: glm53-flash-sglang-agg-gb200-channel
+        tolerations:
+        - effect: NoSchedule
+          key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Equal
+          value: present
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+    replicas: 1
+    runtimeVersionOverride: 1.6.0
+    sharedMemorySize: 64Gi
+    type: worker
+---
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: glm53-flash-sglang-agg-gb200
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: glm53-flash-sglang-agg-gb200-channel
+  numNodes: 0
