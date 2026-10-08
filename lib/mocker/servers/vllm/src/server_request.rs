@@ -77,6 +77,12 @@ impl PreparedRequest {
         block_size: usize,
         max_model_len: Option<u32>,
     ) -> BoxedStatusResult<Self> {
+        if !config.supports_multimodal && !request.media.is_empty() {
+            return Err(Status::unimplemented(
+                "media is disabled; start the mock server with --supports-multimodal",
+            )
+            .into());
+        }
         validate_media(&request.media)?;
         if !request.lora_name.is_empty() {
             return Err(Status::unimplemented("LoRA is not supported by the mock server").into());
@@ -408,8 +414,18 @@ fn validate_media(media: &[pb::MediaItem]) -> BoxedStatusResult<()> {
     use pb::media_item::Source;
 
     for item in media {
-        if item.modality != pb::Modality::Image as i32 {
-            return Err(Status::unimplemented("the mock server supports image media only").into());
+        match pb::Modality::try_from(item.modality) {
+            Ok(pb::Modality::Image) => {}
+            Ok(pb::Modality::Audio | pb::Modality::Video) => {
+                return Err(
+                    Status::unimplemented("the mock server supports image media only").into(),
+                );
+            }
+            Ok(pb::Modality::Unspecified) | Err(_) => {
+                return Err(
+                    Status::invalid_argument("media modality must be specified and valid").into(),
+                );
+            }
         }
         let has_payload = match item.source.as_ref() {
             Some(Source::Url(value) | Source::DataUri(value)) => !value.trim().is_empty(),

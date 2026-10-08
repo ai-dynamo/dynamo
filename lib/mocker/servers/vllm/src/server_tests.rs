@@ -159,29 +159,39 @@ fn image_sources_are_opaque_but_require_payloads() {
             false,
         ),
     ];
-    let config = MockerServerConfig::default();
+    let config = MockerServerConfig {
+        supports_multimodal: true,
+        ..Default::default()
+    };
     let text = PreparedRequest::new(request("image"), &config, 4, None).unwrap();
     for (name, source, valid) in cases {
         for modality in [
-            pb::Modality::Image,
-            pb::Modality::Video,
-            pb::Modality::Audio,
-            pb::Modality::Unspecified,
+            pb::Modality::Image as i32,
+            pb::Modality::Video as i32,
+            pb::Modality::Audio as i32,
+            pb::Modality::Unspecified as i32,
+            99,
         ] {
             let mut req = request("image");
             req.media.push(pb::MediaItem {
-                modality: modality as i32,
+                modality,
                 source: source.clone(),
                 ..Default::default()
             });
+            if valid && modality == pb::Modality::Image as i32 {
+                let error =
+                    PreparedRequest::new(req.clone(), &MockerServerConfig::default(), 4, None)
+                        .unwrap_err();
+                assert_eq!(error.code(), tonic::Code::Unimplemented, "{name}");
+            }
             let result = PreparedRequest::new(req, &config, 4, None);
-            if modality != pb::Modality::Image {
+            if modality == pb::Modality::Audio as i32 || modality == pb::Modality::Video as i32 {
                 assert_eq!(
                     result.unwrap_err().code(),
                     tonic::Code::Unimplemented,
                     "{name}"
                 );
-            } else if valid {
+            } else if valid && modality == pb::Modality::Image as i32 {
                 let prepared = result.unwrap();
                 assert_eq!(
                     prepared.direct_request().tokens,
@@ -197,6 +207,28 @@ fn image_sources_are_opaque_but_require_payloads() {
                 );
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn model_discovery_reports_configured_multimodal_support() {
+    for supports_multimodal in [false, true] {
+        let service = VllmMockerService::new(
+            MockerServerConfig {
+                supports_multimodal,
+                ..Default::default()
+            },
+            admitting_args(),
+        )
+        .unwrap();
+        let model = pb::control_server::Control::get_model_info(
+            &service,
+            Request::new(pb::GetModelInfoRequest::default()),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(model.supports_multimodal, supports_multimodal);
     }
 }
 

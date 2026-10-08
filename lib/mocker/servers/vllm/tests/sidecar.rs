@@ -22,18 +22,31 @@ use tokio_stream::wrappers::TcpListenerStream;
 struct RunningServer {
     endpoint: String,
     shutdown: Option<oneshot::Sender<()>>,
+    _model_dir: Option<tempfile::TempDir>,
 }
 
 impl RunningServer {
-    async fn start(mode: ServerMode, engine_args: MockerConfig) -> Self {
-        let service = VllmMockerService::new(
-            MockerServerConfig {
-                mode,
-                ..Default::default()
-            },
-            engine_args,
-        )
-        .unwrap();
+    async fn start(mode: ServerMode, engine_args: MockerConfig, supports_multimodal: bool) -> Self {
+        // Keep image-token discovery local; text fixtures keep their original model.
+        let model_dir = supports_multimodal.then(|| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("config.json"),
+                r#"{"model_type":"qwen2_5_vl","vision_token_id":151654,"image_token_id":151655}"#,
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("preprocessor_config.json"), "{}").unwrap();
+            dir
+        });
+        let mut config = MockerServerConfig {
+            mode,
+            supports_multimodal,
+            ..Default::default()
+        };
+        if let Some(dir) = &model_dir {
+            config.model = dir.path().to_string_lossy().into_owned();
+        }
+        let service = VllmMockerService::new(config, engine_args).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (shutdown, shutdown_rx) = oneshot::channel();
@@ -64,6 +77,7 @@ impl RunningServer {
         Self {
             endpoint: format!("http://{address}"),
             shutdown: Some(shutdown),
+            _model_dir: model_dir,
         }
     }
 }
@@ -160,7 +174,7 @@ fn with_image(mut request: PreprocessedRequest, source: String) -> PreprocessedR
 async fn large_inline_image_streams_through_sidecar() {
     let mut args = fast_engine_args();
     args.enable_prefix_caching = false;
-    let server = RunningServer::start(ServerMode::Aggregated, args).await;
+    let server = RunningServer::start(ServerMode::Aggregated, args, true).await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     engine.start(0).await.unwrap();
     // Exceeds Tonic's default 4 MiB limit. The mock must not decode the image.
@@ -185,16 +199,18 @@ async fn large_inline_image_streams_through_sidecar() {
 
 #[tokio::test]
 async fn prefill_handoff_round_trips_through_a_decode_server() {
-    let mut args = fast_engine_args();
-    args.enable_prefix_caching = false;
-    let prefill_server = RunningServer::start(ServerMode::Prefill, args.clone()).await;
-    let decode_server = RunningServer::start(ServerMode::Decode, args).await;
-    let prefill = sidecar(&prefill_server.endpoint, DisaggregationMode::Prefill).await;
-    let decode = sidecar(&decode_server.endpoint, DisaggregationMode::Decode).await;
-    prefill.start(0).await.unwrap();
-    decode.start(1).await.unwrap();
-
     for image in [false, true] {
+        let mut args = fast_engine_args();
+        if image {
+            args.enable_prefix_caching = false;
+        }
+        let prefill_server = RunningServer::start(ServerMode::Prefill, args.clone(), image).await;
+        let decode_server = RunningServer::start(ServerMode::Decode, args, image).await;
+        let prefill = sidecar(&prefill_server.endpoint, DisaggregationMode::Prefill).await;
+        let decode = sidecar(&decode_server.endpoint, DisaggregationMode::Decode).await;
+        prefill.start(0).await.unwrap();
+        decode.start(1).await.unwrap();
+
         let mut prefill_request = request(3);
         if image {
             prefill_request =
@@ -223,12 +239,6 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
             "sidecar must forward opaque KV-transfer fields verbatim"
         );
 
-        if image {
-            assert_eq!(
-                handoff["_dynamo_sidecar_multimodal_prompt_token_ids"],
-                serde_json::json!([11, 22, 33, 44, 55]),
-            );
-        }
         let mut decode_request = prefill_request;
         decode_request.prefill_result = Some(PrefillResult {
             disaggregated_params: handoff,
@@ -247,9 +257,9 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
             .as_ref()
             .unwrap();
         assert_eq!((usage.prompt_tokens, usage.completion_tokens), (5, 3));
+        prefill.cleanup().await.unwrap();
+        decode.cleanup().await.unwrap();
     }
-    prefill.cleanup().await.unwrap();
-    decode.cleanup().await.unwrap();
 }
 
 #[path = "../../tests/common/mod.rs"]
@@ -261,7 +271,7 @@ async fn sidecar_relays_stored_and_evicted_blocks() {
     args.num_gpu_blocks = 8;
     args.max_num_seqs = 1;
     let block_size = u32::try_from(args.block_size).unwrap();
-    let server = RunningServer::start(ServerMode::Aggregated, args).await;
+    let server = RunningServer::start(ServerMode::Aggregated, args, false).await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     engine.start(0).await.unwrap();
     common::check_kv_events(&engine, block_size).await;

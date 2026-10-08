@@ -28,6 +28,10 @@ struct Args {
     #[arg(long, default_value = "mocker-model")]
     model: String,
 
+    /// Accept opaque image payloads and advertise multimodal support.
+    #[arg(long)]
+    supports_multimodal: bool,
+
     /// Wire-level serving role to emulate.
     #[arg(long, value_enum, default_value_t = ServerMode::Aggregated)]
     disaggregation_mode: ServerMode,
@@ -73,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
         MockerServerConfig {
             model: args.model,
             mode: args.disaggregation_mode,
+            supports_multimodal: args.supports_multimodal,
             seed: args.seed,
             max_concurrent_requests: args.max_concurrent_requests,
         },

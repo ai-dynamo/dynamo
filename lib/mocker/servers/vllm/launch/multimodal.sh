@@ -28,6 +28,12 @@ if (( $# > 1 )); then
     exit 1
 fi
 
+# Validate required managed ports before starting any processes.
+SYSTEM_PORT1="$(dyn_port DYN_SYSTEM_PORT 1 0)"
+if [[ "$MODE" == disagg ]]; then
+    SYSTEM_PORT2="$(dyn_port DYN_SYSTEM_PORT 2 0)"
+fi
+
 trap dynamo_exit_trap EXIT
 
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
@@ -44,23 +50,23 @@ ENGINE_ARGS='{"engine":{"enable_prefix_caching":false,"speedup_ratio":0.0,"max_m
 print_launch_banner --multimodal "vLLM image mock: $MODE (CPU only)" "$MODEL" "$DYN_HTTP_PORT"
 
 # The sidecar advertises URL passthrough. No frontend media-decoder override is needed.
-DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-0}" \
-    python3 -m dynamo.frontend --router-mode round-robin --namespace "$DYN_NAMESPACE" &
+python3 -m dynamo.frontend --router-mode round-robin --namespace "$DYN_NAMESPACE" &
 
 launch_worker() {
     local role="$1" grpc_port="$2" system_port="$3"
     dynamo-vllm-mocker-server \
         --listen "127.0.0.1:$grpc_port" --model "$MODEL" \
+        --supports-multimodal \
         --disaggregation-mode "$role" --extra-engine-args "$ENGINE_ARGS" &
     DYN_SYSTEM_PORT="$system_port" dynamo-vllm-sidecar \
         --grpc-endpoint "127.0.0.1:$grpc_port" --disaggregation-mode "$role" &
 }
 
 if [[ "$MODE" == aggregated ]]; then
-    launch_worker aggregated "${VLLM_GRPC_PORT1:-50051}" "${DYN_SYSTEM_PORT1:-0}"
+    launch_worker aggregated "${VLLM_GRPC_PORT1:-50051}" "$SYSTEM_PORT1"
 else
-    launch_worker decode "${VLLM_GRPC_PORT1:-50051}" "${DYN_SYSTEM_PORT1:-0}"
-    launch_worker prefill "${VLLM_GRPC_PORT2:-50052}" "${DYN_SYSTEM_PORT2:-0}"
+    launch_worker decode "${VLLM_GRPC_PORT1:-50051}" "$SYSTEM_PORT1"
+    launch_worker prefill "${VLLM_GRPC_PORT2:-50052}" "$SYSTEM_PORT2"
 fi
 
 wait_any_exit

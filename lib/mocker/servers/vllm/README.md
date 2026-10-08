@@ -40,22 +40,31 @@ turning declared output length into a second admission-control policy.
 
 ## Image mock deployments
 
-The mock advertises multimodal support and accepts image URLs, data URIs, raw
-bytes, and preprocessed feature payloads in aggregated, prefill, and decode
-roles. Sources must be non-empty; features must contain non-empty `kwargs`, an
+Start the mock with `--supports-multimodal` to advertise image support and accept
+image URLs, data URIs, raw bytes, and preprocessed feature payloads. The flag is
+off by default; text-only deployments reject media and skip the sidecar's image
+model metadata lookup. Supported mock roles are aggregated, prefill, and decode;
+separate encoder workers are not supported.
+
+Sources must be non-empty; features must contain non-empty `kwargs`, an
 `identifier`, and a positive `length`. Audio and video are rejected. Image
 contents remain opaque: the mock does not fetch URLs, decode images, or parse
-feature tensors. Its gRPC message limit is 64 MiB, matching the sidecar.
+feature tensors. Its gRPC message limit is 64 MiB, matching the sidecar. This is
+a per-message limit, not a total memory limit: gRPC decodes each incoming message
+before the mock checks `max_concurrent_requests`.
 
 Prompt usage, scheduling, and synthetic output use the supplied token IDs.
 The mock does not expand image placeholders or simulate image-aware KV or
-encoder caching. Disable prefix caching for these deployments. Prefill returns
+encoder caching. Disable prefix caching for these deployments. If both image
+support and prefix caching are enabled, the mock warns once at startup because
+different images can share the same token-only cache entry. Prefill returns
 the supplied prompt IDs and synthetic handoff metadata, which lets the real
 sidecars complete the image P/D request flow without NIXL or KV data transfer.
 
-The launch example runs the real Dynamo HTTP frontend, discovery, routing, and
-sidecars. It requires the `ai-dynamo` and `ai-dynamo-runtime` Python packages and
-the Rust binaries, but no vLLM installation, model weights, or GPUs:
+The launch example enables `--supports-multimodal` and runs the real Dynamo HTTP
+frontend, discovery, routing, and sidecars. It requires the `ai-dynamo` and
+`ai-dynamo-runtime` Python packages and the Rust binaries, but no vLLM
+installation, model weights, or GPUs:
 
 ```bash
 cargo build -p dynamo-vllm-mocker -p dynamo-vllm-sidecar
@@ -74,9 +83,14 @@ metadata directory for offline use. The example uses URL passthrough,
 round-robin routing, disabled prefix caching, and file discovery under
 `$PWD/.dynamo-mm-mock`; no etcd or NATS service is required. All processes must
 share the discovery directory. Ports and namespace can be set through the
-environment; run the script with `--help` for details.
+environment; run the script with `--help` for details. The default discovery
+directory is ignored by Git. After all processes that use it have stopped,
+remove `.dynamo-mm-mock/` to clear saved registrations. If you set `DYN_FILE_KV`,
+manage that directory separately.
 
-After the model appears in `/v1/models`, send a streaming image request:
+After the model appears in `/v1/models`, send a streaming image request. The
+example below uses the default model name. If you set `MODEL`, replace the
+request's `model` value with that exact value, including a local directory path.
 
 ```bash
 curl -N http://localhost:8000/v1/chat/completions \
