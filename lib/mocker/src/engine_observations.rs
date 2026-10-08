@@ -55,6 +55,7 @@ pub(crate) fn dynamo_kv_event(event: KvEvent) -> (KvCacheEvent, Option<Vec<Vec<u
             }),
             None,
         ),
+        KvEventData::Cleared => (KvCacheEventData::Cleared, None),
     };
     (
         KvCacheEvent {
