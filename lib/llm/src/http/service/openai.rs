@@ -5105,6 +5105,8 @@ async fn images_with_request(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    validate_request_fields_generic(&request, "images")?;
+
     request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -5236,6 +5238,8 @@ async fn videos(
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
+
+    validate_request_fields_generic(&request, "videos")?;
 
     request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
@@ -5371,6 +5375,8 @@ async fn video_stream(
     let mut request: NvCreateVideoRequest = parse_json_request("video stream", &body)?;
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
+
+    validate_request_fields_generic(&request, "videos")?;
 
     request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);

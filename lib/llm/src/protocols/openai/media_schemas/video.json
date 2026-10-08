@@ -44,7 +44,8 @@
               "null"
             ],
             "format": "int32",
-            "description": "Clip duration in seconds"
+            "description": "Clip duration in seconds, at least 1. The frontend rejects a value\noutside the range, so a worker never sees one.",
+            "minimum": 1
           },
           "size": {
             "type": [
@@ -232,7 +233,8 @@
               "null"
             ],
             "format": "int32",
-            "description": "Frames per second (default: 24)"
+            "description": "Frames per second, at least 1 (default: 24)",
+            "minimum": 1
           },
           "num_frames": {
             "type": [
@@ -240,7 +242,8 @@
               "null"
             ],
             "format": "int32",
-            "description": "Number of frames to generate (overrides fps * seconds if set)"
+            "description": "Number of frames to generate, at least 1 (overrides fps * seconds if set)",
+            "minimum": 1
           },
           "negative_prompt": {
             "type": [

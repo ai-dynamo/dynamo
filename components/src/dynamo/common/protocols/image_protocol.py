@@ -105,9 +105,11 @@ class NvCreateImageRequest(BaseModel):
 
     prompt: str
     model: str | None = None
-    n: conint(ge=0) | None = None
+    n: conint(ge=1, le=10) | None = None
     """
-    Number of images to generate
+    Number of images to generate, 1 to 10 as the OpenAI API documents.
+    The frontend rejects a value outside the range, so a worker never
+    sees one and needs no range check of its own.
     """
     quality: Literal['standard', 'hd', 'high', 'medium', 'low', 'auto'] | None = None
     response_format: Literal['url', 'b64_json'] | None = None

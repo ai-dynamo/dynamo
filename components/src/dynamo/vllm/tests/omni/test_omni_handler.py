@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from dynamo.common.lora.manager import LoRAInfo
 
@@ -239,19 +240,6 @@ class TestBuildEngineInputs:
             req, RequestType.VIDEO_GENERATION, image=img
         )
         assert i2v.response_format == response_format
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("fps", [0, -1])
-    async def test_video_generation_rejects_non_positive_fps(self, fps):
-        handler = _make_handler()
-        req = NvCreateVideoRequest(
-            prompt="a drone",
-            model="test-model",
-            nvext=VideoNvExt(num_frames=24, fps=fps),
-        )
-
-        with pytest.raises(ValueError, match="fps must be greater than zero"):
-            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
 
     @pytest.mark.asyncio
     async def test_video_generation_normalizes_mp4_output_format(self):
@@ -718,36 +706,11 @@ class TestI2VEngineInputs:
         assert isinstance(sp.num_frames, int)
         assert result.fps == 24
 
-    @pytest.mark.parametrize(
-        ("field", "value", "message"),
-        [
-            ("num_frames", 0, "nvext.num_frames must be greater than zero"),
-            ("num_frames", -1, "nvext.num_frames must be greater than zero"),
-            ("fps", 0, "nvext.fps must be greater than zero"),
-            ("fps", -1, "nvext.fps must be greater than zero"),
-        ],
-    )
     @pytest.mark.asyncio
-    async def test_video_rejects_non_positive_overrides(self, field, value, message):
-        handler = _make_handler()
-        req = NvCreateVideoRequest(
-            prompt="cat", model="video-model", nvext=VideoNvExt(**{field: value})
-        )
-
-        with pytest.raises(ValueError, match=message):
-            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
-
-    @pytest.mark.parametrize("seconds", [0, -1])
-    @pytest.mark.asyncio
-    async def test_video_rejects_non_positive_duration(self, seconds):
-        handler = _make_handler()
-        req = NvCreateVideoRequest(prompt="cat", model="video-model", seconds=seconds)
-
-        with pytest.raises(ValueError, match="seconds must be greater than zero"):
-            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
-
-    @pytest.mark.asyncio
-    async def test_video_rejection_propagates_as_invalid_argument(self):
+    async def test_video_rejection_by_the_model_propagates(self):
+        """The shared request model rejects a non-positive fps, as the frontend
+        does. The handler lets the error out, naming the field, rather than
+        turning it into an error chunk; the binding maps a ValueError to a 400."""
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
         request = {
@@ -756,11 +719,9 @@ class TestI2VEngineInputs:
             "nvext": {"fps": 0},
         }
 
-        with pytest.raises(InvalidArgument) as excinfo:
+        with pytest.raises(ValidationError, match="fps"):
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pass
-
-        assert str(excinfo.value) == "nvext.fps must be greater than zero"
 
     async def test_media_passthrough_reaches_sampling_params(self):
         """A top-level SDK extra_body field, nested by the frontend under
