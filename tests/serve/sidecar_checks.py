@@ -32,10 +32,10 @@ def assert_native_cancellation_and_recovery(
     metrics: EngineMetrics,
     model: str,
     namespace: str,
+    max_tokens: int,
     discovery_backend: str = "etcd",
 ) -> None:
     """Check explicit native stop and consumer drop on the existing deployment."""
-    max_tokens = 2048
     completion_progress = metrics.completion_progress(max_tokens)
 
     async def native_checks() -> None:

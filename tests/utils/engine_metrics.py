@@ -3,12 +3,10 @@
 
 """Engine observations for cancellation and completed KV transfer checks."""
 
-import json
 import math
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
 
 import requests
 
@@ -110,8 +108,6 @@ class EngineMetrics(ABC):
 
 @dataclass
 class VllmMetricsChecker(EngineMetrics):
-    transfer_probe: Path | None = None
-
     def scheduler_counts(self) -> tuple[float, float]:
         body = self.scrape()
         return (
@@ -130,17 +126,19 @@ class VllmMetricsChecker(EngineMetrics):
         self._wait_for_progress(before=before, minimum=max_tokens, maximum=max_tokens)
 
     def transfer_progress(self) -> float:
-        assert self.transfer_probe is not None, "Missing completed-transfer probe"
         return sum(
-            json.loads(line)["bytes"]
-            for line in self.transfer_probe.read_text().splitlines()
+            self.samples(
+                self.scrape(),
+                "vllm:prompt_tokens_by_source_total",
+                {"source": "external_kv_transfer"},
+            )
         )
 
 
 @dataclass
 class SGLangMetricsChecker(EngineMetrics):
-    # Idle scheduler gauges may only be published every 30 seconds.
-    settle_timeout: float = 40
+    minimum_context_length: int | None = field(default=None, kw_only=True)
+    minimum_kv_capacity: int | None = field(default=None, kw_only=True)
 
     def scheduler_counts(self) -> tuple[float, float]:
         body = self.scrape()
@@ -157,12 +155,18 @@ class SGLangMetricsChecker(EngineMetrics):
         )
 
     def completion_progress(self, max_tokens: int) -> float:
-        # Leave room for the short prompt and prevent capacity-driven truncation
-        # from looking like successful cancellation.
+        assert self.minimum_context_length is not None, "Missing context prerequisite"
+        assert self.minimum_kv_capacity is not None, "Missing KV capacity prerequisite"
+        assert (
+            0 < max_tokens < self.minimum_context_length
+        ), "Cancellation request needs context space for its prompt"
+        assert (
+            max_tokens < self.minimum_kv_capacity
+        ), "Cancellation request exceeds its KV capacity prerequisite"
         body = self.scrape()
         for name, minimum in (
-            ("sglang:context_len", 2 * max_tokens),
-            ("sglang:max_total_num_tokens", 4 * max_tokens),
+            ("sglang:context_len", self.minimum_context_length),
+            ("sglang:max_total_num_tokens", self.minimum_kv_capacity),
         ):
             assert (
                 min(self.samples(body, name)) >= minimum
