@@ -502,7 +502,7 @@ class DGDRRunOutputAdapter:
         self._render_attempts[item.id] = self._render_attempts.get(item.id, 0) + 1
         try:
             manifest = render_dgd(
-                _RenderInput(config=item.parameters),
+                _RenderInput(config=item.parameters, used_gpus=item.used_gpus),
                 self._workload,
                 self._options,
                 dgd_name=f"{self._config.name}-{item.id.removeprefix(_ID_PREFIX)}",
@@ -531,9 +531,10 @@ class DGDRRunOutputAdapter:
 
 @dataclass(frozen=True)
 class _RenderInput:
-    """What ``render_dgd`` reads from a candidate: its resolved config."""
+    """The evaluated candidate as the renderer sees it: its config and GPU count."""
 
     config: dict[str, Any]
+    used_gpus: int
 
 
 class DGDRRunOutputPlugin:
