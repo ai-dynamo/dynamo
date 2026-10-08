@@ -7,6 +7,12 @@ SPDX-License-Identifier: Apache-2.0
 
 See the [Motif-3 NVFP4 recipe documentation](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/recipes/model-recipes/motif-3.mdx) for deployment, smoke-test, benchmarking, and configuration guidance.
 
+Experimental [disaggregated chat variants](vllm/disagg-b200-chat/README.md)
+provide **1P1D (4 GPUs)** and **2P1D (6 GPUs)**, with TP2 and expert
+parallelism on every worker. They preserve the aggregated runtime and model
+settings and add NIXL KV transfer. The disaggregated benchmark matrix uses the
+chat 15% trace at concurrency 8, 16, and 32.
+
 ## Nscale B200
 
 The scheduling component selects amd64 nodes and schedules the worker on

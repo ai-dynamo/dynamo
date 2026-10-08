@@ -1,0 +1,435 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Generated file. For repository contributors, do not edit this checked-in copy.
+# Regenerate every public overlay and rendered manifest of this matrix (from the repository root):
+#   scripts/kustomize-matrix.py unfold recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
+#   scripts/kustomize-matrix.py render recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
+# Inspect only this Kustomize overlay (from the repository root):
+#   kustomize build recipes/motif-3/vllm/disagg-b200-chat/kustomize/overlays/nscale-1p1d
+# You may edit a copy before applying it.
+
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# The prefill and decode workers share the aggregated model and MTP settings.
+# NIXL transfers the real KV cache between roles.
+# Avoid mixing HPC-X UCX with the UCX version bundled by NIXL.
+# TP2 stays within a node; cross-node KV transfer uses NIXL independently.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/name: motif3-disagg-b200-chat
+    app.kubernetes.io/part-of: dynamo
+  name: motif3-disagg-b200-chat-config
+data:
+  speculative-config: |-
+    {
+      "method": "mtp",
+      "num_speculative_tokens": 2
+    }
+  speculative-config-synthetic: |-
+    {
+      "method": "mtp",
+      "num_speculative_tokens": 2,
+      "rejection_sample_method": "synthetic",
+      "synthetic_acceptance_length": 2.13
+    }
+---
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  labels:
+    app.kubernetes.io/name: motif3-disagg-b200
+  name: motif3-disagg-b200
+spec:
+  backendFramework: vllm
+  components:
+  - name: PrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model=Motif-Technologies/Motif-3-NVFP4
+          - --served-model-name=Motif-Technologies/Motif-3-NVFP4
+          - --trust-remote-code
+          - --quantization=modelopt_nvfp4
+          - --speculative-config=$(SPECULATIVE_CONFIG)
+          - --tensor-parallel-size=2
+          - --data-parallel-size=1
+          - --data-parallel-size-local=1
+          - --enable-expert-parallel
+          - --dtype=bfloat16
+          - --gpu-memory-utilization=0.85
+          - --max-model-len=262144
+          - --block-size=128
+          - --kv-cache-dtype=fp8
+          - --scheduler-cls
+          - vllm.v1.core.sched.async_scheduler.AsyncScheduler
+          - --dyn-enable-structural-tag
+          - --disaggregation-mode=prefill
+          - --kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}}
+          - --enable-prefix-caching
+          command:
+          - python3
+          - /motif-runtime/launch_motif_disagg.py
+          env:
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy,cuda_ipc
+          - name: NIXL_LOG_LEVEL
+            value: INFO
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: DYN_SELF_HOST_METADATA
+            value: "1"
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: VLLM_USE_V2_MODEL_RUNNER
+            value: "1"
+          - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+            value: "300"
+          - name: SPECULATIVE_CONFIG
+            valueFrom:
+              configMapKeyRef:
+                key: speculative-config
+                name: motif3-disagg-b200-chat-config
+          - name: UCX_RCACHE_MAX_UNRELEASED
+            value: "1024"
+          - name: NCCL_NET_PLUGIN
+            value: none
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "2"
+              rdma/shared_ib: "1"
+            requests:
+              nvidia.com/gpu: "2"
+              rdma/shared_ib: "1"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+            runAsGroup: 0
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /shared-model-cache
+            name: shared-model-cache
+          - mountPath: /motif-runtime
+            name: motif-runtime-patch
+            readOnly: true
+        nodeSelector:
+          kubernetes.io/arch: amd64
+          node.kubernetes.io/instance-type: g.192.b200.8
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - configMap:
+            name: motif3-disagg-runtime-patch
+          name: motif-runtime-patch
+    replicas: 1
+    runtimeVersionOverride: 1.5.0
+    sharedMemorySize: 64Gi
+    type: worker
+  - name: DecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model=Motif-Technologies/Motif-3-NVFP4
+          - --served-model-name=Motif-Technologies/Motif-3-NVFP4
+          - --trust-remote-code
+          - --quantization=modelopt_nvfp4
+          - --speculative-config=$(SPECULATIVE_CONFIG)
+          - --tensor-parallel-size=2
+          - --data-parallel-size=1
+          - --data-parallel-size-local=1
+          - --enable-expert-parallel
+          - --dtype=bfloat16
+          - --gpu-memory-utilization=0.85
+          - --max-model-len=262144
+          - --block-size=128
+          - --kv-cache-dtype=fp8
+          - --scheduler-cls
+          - vllm.v1.core.sched.async_scheduler.AsyncScheduler
+          - --dyn-enable-structural-tag
+          - --disaggregation-mode=decode
+          - --kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}}
+          - --enable-prefix-caching
+          command:
+          - python3
+          - /motif-runtime/launch_motif_disagg.py
+          env:
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy,cuda_ipc
+          - name: NIXL_LOG_LEVEL
+            value: INFO
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: DYN_SELF_HOST_METADATA
+            value: "1"
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: VLLM_USE_V2_MODEL_RUNNER
+            value: "1"
+          - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+            value: "300"
+          - name: SPECULATIVE_CONFIG
+            valueFrom:
+              configMapKeyRef:
+                key: speculative-config
+                name: motif3-disagg-b200-chat-config
+          - name: UCX_RCACHE_MAX_UNRELEASED
+            value: "1024"
+          - name: NCCL_NET_PLUGIN
+            value: none
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "2"
+              rdma/shared_ib: "1"
+            requests:
+              nvidia.com/gpu: "2"
+              rdma/shared_ib: "1"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+            runAsGroup: 0
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /shared-model-cache
+            name: shared-model-cache
+          - mountPath: /motif-runtime
+            name: motif-runtime-patch
+            readOnly: true
+        nodeSelector:
+          kubernetes.io/arch: amd64
+          node.kubernetes.io/instance-type: g.192.b200.8
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - configMap:
+            name: motif3-disagg-runtime-patch
+          name: motif-runtime-patch
+    replicas: 1
+    runtimeVersionOverride: 1.5.0
+    sharedMemorySize: 64Gi
+    type: worker
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.frontend
+          - --dyn-chat-processor
+          - vllm
+          - --model-name
+          - Motif-Technologies/Motif-3-NVFP4
+          - --trust-remote-code
+          - --http-port
+          - "8000"
+          - --tool-call-parser
+          - motif
+          - --reasoning-parser
+          - motif
+          - --enable-auto-tool-choice
+          command:
+          - python3
+          env:
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: DYN_ROUTER_MODE
+            value: round-robin
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources: {}
+          volumeMounts:
+          - mountPath: /shared-model-cache
+            name: shared-model-cache
+        nodeSelector:
+          kubernetes.io/arch: amd64
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+    replicas: 1
+    runtimeVersionOverride: 1.5.0
+    type: frontend
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: motif3-disagg-runtime-patch
+data:
+  launch_motif_disagg.py: |
+    #!/usr/bin/env python3
+    # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    # SPDX-License-Identifier: Apache-2.0
+    #
+    # Licensed under the Apache License, Version 2.0 (the "License");
+    # you may not use this file except in compliance with the License.
+    # You may obtain a copy of the License at
+    #
+    # http://www.apache.org/licenses/LICENSE-2.0
+    #
+    # Unless required by applicable law or agreed to in writing, software
+    # distributed under the License is distributed on an "AS IS" BASIS,
+    # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    # See the License for the specific language governing permissions and
+    # limitations under the License.
+    """Apply guarded NIXL fixes to the pinned Motif image, then launch Dynamo.
+
+    The model mixes MLA and GQA. Keep its global TP/replication policy unchanged,
+    validate the first backend's actual layout, and retain Motif's NHD layout.
+    Only homogeneous TP2 is supported by this recipe.
+    """
+
+    import hashlib
+    import importlib.util
+    import os
+    import sys
+    from pathlib import Path
+
+    PATCHES = [
+        (
+            "distributed/kv_transfer/kv_connector/utils.py",
+            "a005d542161b71d824338a0fbbf329291ee580c5113787d8e080bb8cf6909a9b",
+            """            if not self.is_mla:
+                    assert len(kv_cache_shape) == 4, (
+                        "Attention KV cache layout must be standardized as "
+                        "[num_blocks, num_kv_heads, block_size, content_size], "
+                        f"got shape {kv_cache_shape}."
+                    )""",
+            """            # Motif mixes MLA and GQA: model-wide is_mla is False.
+                # Layout belongs to this backend; global replication stays unchanged.
+                expected_rank = 3 if attn_backend.is_mla() else 4
+                assert len(kv_cache_shape) == expected_rank, (
+                    f"Unexpected {attn_backend.get_name()} KV cache rank: "
+                    f"expected {expected_rank}, got shape {kv_cache_shape}."
+                )""",
+        ),
+        (
+            "distributed/kv_transfer/kv_connector/v1/nixl/connector.py",
+            "95b0a138309ff6de80440a5cf604acda6187ab3125ccaa2d04ccf745afb809e4",
+            """        use_mla = vllm_config.model_config.use_mla
+            if use_mla:""",
+            """        if vllm_config.model_config.hf_config.model_type == "Motif":
+                # The pinned Motif cute-dsl / DiffKV kernels use NHD in aggregate.
+                # Equal TP transfers complete blocks and needs no HND head slicing.
+                assert vllm_config.parallel_config.tensor_parallel_size == 2, (
+                    "This Motif NIXL compatibility patch is validated only for TP2"
+                )
+                logger.info_once("Motif NIXL compatibility: retaining NHD cache layout")
+                return "NHD"
+            use_mla = vllm_config.model_config.use_mla
+            if use_mla:""",
+        ),
+    ]
+
+
+    def apply(root: Path) -> None:
+        pending = []
+        for relative, expected_hash, old, new in PATCHES:
+            path = root / relative
+            source = path.read_text()
+            if source.count(new) == 1:
+                # Idempotence is checked against the original pinned file too.
+                original = source.replace(new, old, 1)
+                if hashlib.sha256(original.encode()).hexdigest() != expected_hash:
+                    raise RuntimeError(f"Unrecognized patched runtime source: {path}")
+                continue
+            if hashlib.sha256(source.encode()).hexdigest() != expected_hash:
+                raise RuntimeError(
+                    f"Unrecognized runtime source: {path}; refusing to patch"
+                )
+            if source.count(old) != 1:
+                raise RuntimeError(f"Runtime patch target is not unique: {path}")
+            patched = source.replace(old, new, 1)
+            compile(patched, str(path), "exec")
+            pending.append((path, patched))
+        for path, patched in pending:
+            path.write_text(patched)
+            print(
+                f"Motif NIXL patch {path}: "
+                f"sha256={hashlib.sha256(patched.encode()).hexdigest()}",
+                flush=True,
+            )
+
+
+    if __name__ == "__main__":
+        spec = importlib.util.find_spec("vllm")
+        if spec is None or spec.origin is None:
+            raise RuntimeError("The pinned Motif vLLM runtime is required")
+        apply(Path(spec.origin).parent)
+        os.execv(sys.executable, [sys.executable, "-m", "dynamo.vllm", *sys.argv[1:]])
