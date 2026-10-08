@@ -45,6 +45,12 @@ var candidateIDPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
 const dgdKind = "DynamoGraphDeployment"
 
+// supportedDGDAPIVersions are the DGD versions the candidate path can convert to v1beta1.
+var supportedDGDAPIVersions = map[string]bool{
+	"nvidia.com/v1alpha1": true,
+	"nvidia.com/v1beta1":  true,
+}
+
 // Manifest is one rendered candidate: exactly one DynamoGraphDeployment plus any
 // companion resources (for example generated ConfigMaps) the renderer emitted with it.
 type Manifest struct {
@@ -75,6 +81,9 @@ func ParseManifest(manifest string) (*Manifest, error) {
 		}
 		if out.DGD != nil {
 			return nil, errors.New("manifest has more than one DynamoGraphDeployment")
+		}
+		if version, _ := obj["apiVersion"].(string); !supportedDGDAPIVersions[version] {
+			return nil, fmt.Errorf("DynamoGraphDeployment has unsupported apiVersion %q", version)
 		}
 		if _, ok := obj["spec"].(map[string]any); !ok {
 			return nil, errors.New("DynamoGraphDeployment has no spec")

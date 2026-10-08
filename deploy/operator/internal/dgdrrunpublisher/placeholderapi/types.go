@@ -83,7 +83,6 @@ type DynamoGraphDeploymentCandidate struct {
 	Status DynamoGraphDeploymentCandidateStatus `json:"status,omitempty"`
 }
 
-// DynamoGraphDeploymentCandidateList contains a list of candidates.
 type DynamoGraphDeploymentCandidateList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
@@ -140,7 +139,6 @@ type DynamoGraphDeploymentRun struct {
 	Status DynamoGraphDeploymentRunStatus `json:"status,omitempty"`
 }
 
-// DynamoGraphDeploymentRunList contains a list of runs.
 type DynamoGraphDeploymentRunList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
