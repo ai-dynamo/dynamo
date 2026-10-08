@@ -387,10 +387,8 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     runtime.shutdown();
 }
 
-// An explicit prefill pin is a hard pin chosen upstream. Local inhibition only
-// filters this router's own selection, so the pinned worker is still dispatched
-// while it remains in discovery. LeastLoaded covers the occupancy path and
-// DeviceAwareWeighted covers the device-aware path.
+// Local inhibition must not reject an upstream prefill pin while the worker is discovered.
+// LeastLoaded and DeviceAwareWeighted cover the occupancy and device-aware paths.
 #[tokio::test]
 #[serial_test::serial]
 async fn builtin_explicit_prefill_pin_ignores_local_inhibition() {
