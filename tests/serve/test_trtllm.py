@@ -153,10 +153,8 @@ trtllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
-            # Per-worker KV cap. Without it the 0.85 fraction in the qwen3
-            # prefill/decode.yaml gives a ~64.5 GiB pool on H100, and UCX
-            # gdr_copy intermittently fails to pin that NIXL region (ret 12,
-            # ENOMEM). 2592 matches the aggregated Qwen3-0.6B cases.
+            # Per-worker KV cap: the yaml's 0.85 fraction (~64.5 GiB on H100)
+            # makes UCX gdr_copy intermittently fail to pin the NIXL region.
             pytest.mark.requested_trtllm_kv_tokens(2592),
         ],
         model="Qwen/Qwen3-0.6B",
