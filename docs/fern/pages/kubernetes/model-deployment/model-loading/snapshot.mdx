@@ -17,69 +17,73 @@ using another backend or topology.
 
 ## Prerequisites
 
-- A [Dynamo Platform installation](../../installation/install-dynamo.md) with a
-  matching TensorRT-LLM runtime image and chart version.
-- A GPU node with MIG disabled, the `nvidia` RuntimeClass, and `/dev/net/tun`.
-  Review Snapshot's [driver, runtime, and privilege requirements](https://github.com/ai-dynamo/snapshot/tree/v0.2.0-rc.1#prerequisites).
-- A storage class that supports `ReadWriteMany` for Snapshot artifacts, and a
+- A Kubernetes cluster with [NVIDIA GPU support](../../installation/install-dynamo.md)
+  and a full GPU with MIG disabled. Review Snapshot's
+  [driver, runtime, and privilege requirements](https://github.com/ai-dynamo/snapshot#prerequisites).
+- A storage class that supports `ReadWriteMany` (RWX) for Snapshot artifacts, and a
   writable `model-cache` PersistentVolumeClaim (PVC) in the workload namespace.
   These are separate volumes. See [Model Storage](../../installation/model-storage/overview.md).
 - `helm`, `kubectl`, `curl`, and `jq`, plus access to the runtime image registry and
   Hugging Face. The capture Pod downloads the model if it is not cached.
 
-Set the namespaces and version to match your installation. Replace the storage
-class with your cluster's RWX storage class:
+The TensorRT-LLM example selects `runtimeClassName: nvidia` and mounts
+`/dev/net/tun`. To run it unchanged, that RuntimeClass and device must exist.
+Match the RuntimeClass to your cluster's GPU runtime if it uses a different name
+or the default runtime. The TUN mount supports CRIU restoring network devices
+created by the TensorRT-LLM stack; it is specific to this example.
+
+Set `RELEASE_VERSION` to your chosen published [Dynamo release](https://github.com/ai-dynamo/dynamo/releases),
+without the leading `v`. Use the same value for the
+platform chart, runtime image, and example manifest. Replace the storage class
+with your cluster's RWX storage class:
 
 ```bash
+: "${RELEASE_VERSION:?Set RELEASE_VERSION to your published Dynamo release}"
 export PLATFORM_NAMESPACE=dynamo-system
 export NAMESPACE=dynamo-snapshot
-export RELEASE_VERSION=1.6.0
 export RWX_STORAGE_CLASS=your-rwx-storage-class
 export TRTLLM_IMAGE="nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:${RELEASE_VERSION}"
 export DGD=qwen3-0-6b-trtllm-snapshot-restore
 ```
 
-For a release candidate, use its chart and image tag in `RELEASE_VERSION`.
-Provision `model-cache` in `NAMESPACE` before proceeding; it must be accessible to
-both the capture and serving Pods.
+Provision `model-cache` in `NAMESPACE` before deploying the example; it must be
+accessible to both the capture and serving Pods.
 
 <Steps>
-<Step title="Install Snapshot">
+<Step title="Install the platform with Snapshot">
 
-If Snapshot is already installed, verify its version and readiness instead of
-installing a second cluster-wide operator. Dynamo v1.6.0 bundles Snapshot chart
-`0.2.0-rc.1`; this walkthrough installs that version separately:
+For a test installation, enable the bundled Snapshot chart and the Dynamo
+integration together. The platform chart selects the matching Snapshot version;
+no separate Snapshot version is needed.
 
 ```bash
-helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
-  --version 0.2.0-rc.1 \
-  --namespace snapshot --create-namespace \
-  --set-string storage.pvc.storageClass="$RWX_STORAGE_CLASS"
+helm upgrade --install dynamo-platform \
+  "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz" \
+  --namespace "$PLATFORM_NAMESPACE" --create-namespace --reuse-values \
+  --set global.snapshot.install=true \
+  --set dynamo-operator.checkpoint.enabled=true \
+  --set-string snapshot.storage.pvc.storageClass="$RWX_STORAGE_CLASS" \
+  --wait --timeout 10m
 
-kubectl rollout status deployment/snapshot-operator -n snapshot --timeout=300s
-kubectl rollout status daemonset/snapshot-agent -n snapshot --timeout=300s
+kubectl rollout status deployment/dynamo-platform-snapshot-operator \
+  -n "$PLATFORM_NAMESPACE" --timeout=300s
+kubectl rollout status daemonset/dynamo-platform-snapshot-agent \
+  -n "$PLATFORM_NAMESPACE" --timeout=300s
 kubectl get crd snapshotjobs.nvidia.com podsnapshots.nvidia.com
 ```
 
-The chart creates an RWX artifact PVC with a default request of `1Ti`.
-For an existing claim or a different runtime socket, follow the
-[Snapshot installation](https://github.com/ai-dynamo/snapshot/blob/v0.2.0-rc.1/docs/operations/install.md)
-and [storage configuration](https://github.com/ai-dynamo/snapshot/blob/v0.2.0-rc.1/docs/operations/storage.md).
+For an existing platform release, use its name, namespace, and version.
+`--reuse-values` preserves its settings. The Snapshot chart creates an RWX
+artifact PVC; use `snapshot.storage.pvc` values to customize its size or reuse an
+existing claim. See [Snapshot storage configuration](https://github.com/ai-dynamo/snapshot/blob/main/docs/operations/storage.md).
 
-</Step>
-<Step title="Enable the Dynamo integration">
-
-After the Snapshot APIs are available, enable checkpoint support on the existing
-Dynamo Platform release. Keep its current values and version:
-
-```bash
-helm upgrade dynamo-platform \
-  "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz" \
-  --namespace "$PLATFORM_NAMESPACE" --reuse-values \
-  --set dynamo-operator.checkpoint.enabled=true --wait --timeout 5m
-```
-
-Use your installed Helm release name if it differs from `dynamo-platform`.
+<Note>
+If Snapshot is already managed separately, keep `global.snapshot.install=false`
+and omit the `snapshot.storage.pvc` setting. Verify that its APIs and agents are
+ready before enabling `dynamo-operator.checkpoint.enabled`. Do not install a
+second cluster-wide Snapshot operator. Separate installation is recommended for
+production; see [Snapshot installation](https://github.com/ai-dynamo/snapshot/blob/main/docs/operations/install.md).
+</Note>
 
 </Step>
 <Step title="Deploy the capture and serving configuration">
@@ -176,7 +180,7 @@ kubectl get pods -n "$NAMESPACE"
 - **Capture fails:** inspect the `SnapshotJob` failure reason and capture Pod logs.
   Keep the example's `UCX_TLS=tcp,self`; this smoke test does not use RDMA.
 - **Restore fails:** inspect the worker's `nvidia.com/Restored` condition and
-  [Snapshot troubleshooting](https://github.com/ai-dynamo/snapshot/blob/v0.2.0-rc.1/docs/operations/troubleshooting.md).
+  [Snapshot troubleshooting](https://github.com/ai-dynamo/snapshot/blob/main/docs/operations/troubleshooting.md).
 
 ## Clean Up
 
