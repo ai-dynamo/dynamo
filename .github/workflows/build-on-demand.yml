@@ -34,11 +34,55 @@ on:
         description: 'Validate the Kimi recipe without deploying'
         type: boolean
         default: true
+      capture_trtllm_baseline:
+        description: 'Capture the matching daily-image SBOM before building'
+        type: boolean
+        default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
+
+  trtllm-baseline:
+    if: inputs.capture_trtllm_baseline
+    runs-on:
+      group: Fastchecker
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install baseline tooling
+        run: |
+          set -euo pipefail
+          python3 -c 'import yaml' 2>/dev/null \
+            || python3 -m pip install --quiet --user --break-system-packages pyyaml
+          mkdir -p "${RUNNER_TEMP}/bin"
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b "${RUNNER_TEMP}/bin"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+      - name: Capture daily-image baseline
+        env:
+          REF: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc0.dev202610070001
+        run: |
+          set -euo pipefail
+          digest=$(docker buildx imagetools inspect "$REF" --format '{{.Manifest.Digest}}')
+          [[ "$digest" == sha256:4b814c463dfb9574bc9299ed4228c99b1e614f004745fd0303439bd9e01d5206 ]]
+          for platform in linux/amd64 linux/arm64; do
+            python3 container/compliance/base_sboms/capture_baseline_sbom.py \
+              --from "$REF" --baseline "$REF" --platform "$platform" --prune-superseded -v
+          done
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: kimi-fixed-trtllm-baseline
+          path: |
+            container/compliance/base_sboms/manifest.json
+            container/compliance/base_sboms/*.cdx.json
+          if-no-files-found: error
+          retention-days: 7
 
   init:
     runs-on: ubuntu-slim
