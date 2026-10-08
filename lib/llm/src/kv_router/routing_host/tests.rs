@@ -387,7 +387,6 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     runtime.shutdown();
 }
 
-// Local inhibition must not reject an upstream prefill pin while the worker is discovered.
 // LeastLoaded and DeviceAwareWeighted cover the occupancy and device-aware paths.
 #[tokio::test]
 #[serial_test::serial]
