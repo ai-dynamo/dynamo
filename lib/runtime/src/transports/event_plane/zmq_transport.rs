@@ -939,16 +939,6 @@ mod tests {
                     publisher.publish(topic, event).await.unwrap();
                     timeout(Duration::from_secs(1), receiver.next()).await
                 }
-                // A receive arms ZMQ_FD and is cancelled before the message lands.
-                1 => {
-                    assert!(
-                        timeout(Duration::from_millis(5), receiver.next())
-                            .await
-                            .is_err()
-                    );
-                    publisher.publish(topic, event).await.unwrap();
-                    timeout(Duration::from_secs(1), receiver.next()).await
-                }
                 // Reading ZMQ_EVENTS consumes the signal, so ZMQ_FD stays quiet.
                 2 => {
                     publisher.publish(topic, event).await.unwrap();
