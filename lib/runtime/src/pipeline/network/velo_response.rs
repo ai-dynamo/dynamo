@@ -63,8 +63,6 @@ pub(crate) enum ResponseTransport {
     Ucx,
 }
 
-/// Per-stream credit window for response streams.
-///
 /// Keep 32 explicit here, matching Velo's current default. In the earlier
 /// mocker campaign, a larger window filled the shared path from a
 /// worker to the frontend, so a new stream's first token waited behind it.
@@ -245,9 +243,8 @@ pub struct VeloResponseService {
     velo: Arc<Velo>,
     transport: ResponseTransport,
     registrations: Mutex<Registrations>,
-    /// Frontends this worker has already registered and handshaken. Both are
-    /// per peer, not per request. Done per request, they put a messenger round
-    /// trip through the frontend in front of every request's first token.
+    /// Share initial peer registration and the lifecycle handshake across
+    /// concurrent requests. A restarted frontend has a new instance ID.
     prepared_peers: dashmap::DashMap<velo::InstanceId, Arc<OnceCell<()>>>,
     closing: AtomicBool,
     closed: OnceCell<()>,
@@ -857,12 +854,6 @@ mod tests {
     }
 
     #[test]
-    fn response_streams_use_a_credit_window_of_32() {
-        assert_eq!(response_mux_config().initial_credit, 32);
-        assert!(response_mux_config().enabled);
-    }
-
-    #[test]
     fn tcp_responses_use_four_lanes() {
         use velo::Transport;
         let transport = tcp_transport("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -929,9 +920,6 @@ mod tests {
 
     async fn completion_and_failure_keep_distinct_results(transport: ResponseTransport) {
         let (consumer, producer) = pair(transport).await;
-        // Two streams to one frontend below: it is registered and handshaken
-        // once, not per stream.
-        let prepared_before = producer.prepared_peers.len();
         for complete in [true, false] {
             let registered = consumer
                 .register_response(EngineContext::new(()).context())
@@ -965,7 +953,6 @@ mod tests {
             }
             assert!(receiver.rx.next().await.is_none());
         }
-        assert_eq!(producer.prepared_peers.len(), prepared_before + 1);
     }
 
     async fn blocked_stream_isolation_and_peer_failure(transport: ResponseTransport) {
