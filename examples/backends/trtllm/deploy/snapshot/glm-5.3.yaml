@@ -1,0 +1,153 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# Adapted from ai-dynamo/snapshot PR #456 (c1abd78401f4).
+# Uses Dynamo-managed capture and restore with the normal Dynamo entrypoint.
+# Prefetch the pinned model with glm-5.3-model-cache.yaml before applying.
+# Dynamo retains KV during capture; the KV allocation is reduced to 10%.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glm-5-3-trtllm-snapshot-restore-engine
+data:
+  config.yaml: |
+    dtype: bfloat16
+    moe_expert_parallel_size: 8
+    allreduce_strategy: NCCL
+    max_seq_len: 131072
+    max_num_tokens: 8192
+    max_batch_size: 32
+    enable_chunked_prefill: true
+    moe_config:
+      backend: TRTLLM
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.1
+      dtype: fp8
+      enable_block_reuse: false
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 32
+    tensor_parallel_size: 8
+    enable_attention_dp: false
+    trust_remote_code: true
+    backend: pytorch
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: glm-5-3-trtllm-snapshot-restore
+  annotations:
+    nvidia.com/enable-grove: 'false'
+spec:
+  backendFramework: trtllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: my-registry/tensorrtllm-runtime:my-tag
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+          - name: hf-cache
+            mountPath: /home/dynamo/.cache/huggingface
+            readOnly: true
+        volumes:
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+  - name: TRTLLMWorker
+    type: worker
+    replicas: 1
+    experimental:
+      checkpoint:
+        enabled: true
+        startupPolicy: WaitForCheckpoint
+    podTemplate:
+      spec:
+        runtimeClassName: nvidia
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        securityContext:
+          fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
+        volumes:
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        - name: criu-work
+          emptyDir: {}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: engine-config
+          configMap:
+            name: glm-5-3-trtllm-snapshot-restore-engine
+        containers:
+        - name: main
+          image: my-registry/tensorrtllm-runtime:my-tag
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace/
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --model-path
+          - /home/dynamo/.cache/huggingface/hub/models--RadixArk--GLM-5.3-NVFP4/snapshots/363e8f086905afd83db356a620f9aa401c23800a
+          - --served-model-name
+          - RadixArk/GLM-5.3-NVFP4
+          - --tensor-parallel-size
+          - '8'
+          - --expert-parallel-size
+          - '8'
+          - --extra-engine-args
+          - /etc/dynamo-engine/config.yaml
+          env:
+          - name: OMPI_MCA_pml
+            value: ob1
+          - name: OMPI_MCA_btl
+            value: tcp,self
+          - name: TORCHINDUCTOR_COMPILE_THREADS
+            value: '1'
+          resources:
+            requests:
+              cpu: '16'
+              memory: 1Ti
+              nvidia.com/gpu: '8'
+              ephemeral-storage: 10Gi
+            limits:
+              cpu: '32'
+              memory: 1Ti
+              nvidia.com/gpu: '8'
+          volumeMounts:
+          - name: hf-cache
+            mountPath: /home/dynamo/.cache/huggingface
+          - name: criu-work
+            mountPath: /var/criu-work
+          - name: shm
+            mountPath: /dev/shm
+          - name: engine-config
+            mountPath: /etc/dynamo-engine
+            readOnly: true
+      metadata:
+        annotations:
+          nvidia.com/cuda-shared-memory-support: enabled
