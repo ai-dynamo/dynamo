@@ -201,8 +201,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		))
 	}
 
-	// Deprecation warnings are independent of the selected rollout strategy.
-	if spec.MinAvailable != nil && options.grovePathway {
+	// Warn when a deprecated minimum is introduced or changed, regardless of strategy.
+	if spec.MinAvailable != nil && options.grovePathway && (options.oldComponent == nil || !k8sptr.Equal(spec.MinAvailable, options.oldComponent.MinAvailable)) {
 		minimumPath := fldPath.Child("minAvailable")
 		if spec.IsLPX() && spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
 			v.warnf("%s (%q) is deprecated; remove this field and configure minimum availability on the shared target component; the draft's effective minimum remains 1", minimumPath.String(), spec.ComponentName)

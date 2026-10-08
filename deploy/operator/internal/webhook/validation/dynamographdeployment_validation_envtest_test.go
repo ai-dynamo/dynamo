@@ -862,6 +862,38 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 
+		{
+			name:          "legacy minima do not repeat warnings on an unrelated label edit",
+			oldDeployment: legacyMinimumDGDForAdmission(1),
+			deployment:    dgdAdmissionWithLabel(t, legacyMinimumDGDForAdmission(1)),
+		},
+		{
+			name:          "legacy minima do not repeat warnings on a replica-only update",
+			oldDeployment: legacyMinimumDGDForAdmission(1),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.MinAvailable = k8sptr.To(int32(1))
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+		},
+		{
+			name: "legacy alpha minima do not repeat warnings on a replica-only update",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].MinAvailable = k8sptr.To(int32(1))
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.MinAvailable = k8sptr.To(int32(1))
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+		},
+		{
+			name:          "migrating back to legacy minima warns about their introduction",
+			oldDeployment: nativeMinimumDGDForAdmission(2),
+			deployment:    legacyMinimumDGDForAdmission(2),
+			wantWarnings:  []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+		},
+
 		// Native availability and migration use the same production schema/conversion/webhook chain.
 		{
 			name: "native standalone minimum is accepted",
@@ -1069,7 +1101,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
 			}),
-			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "v1beta1 changed effective minAvailable is rejected by admission",
@@ -1102,8 +1133,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
 			}),
-			deployment:   betaDGDForAdmission(nil),
-			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+			deployment: betaDGDForAdmission(nil),
 		},
 		{
 			name: "v1beta1 power tuple is accepted on create",

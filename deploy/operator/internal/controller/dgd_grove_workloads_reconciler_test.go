@@ -162,12 +162,10 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	require.Zero(t, scaleUpdates)
 	require.Contains(t, result.ComponentStatus, "frontend")
 
-	t.Log("Observe the PCS configuration and Grove's acknowledgement before scaling")
+	t.Log("Observe the PCS configuration without waiting for Grove's observed generation")
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dgd), pcs))
-	pcs.Generation = 1
-	pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
-	require.NoError(t, kubeClient.Update(t.Context(), pcs))
+	require.Nil(t, pcs.Status.ObservedGeneration)
 	podCliqueReads = 0
 	result, err = reconciler.newGroveProgram().workloads.Reconcile(t.Context(), groveReconcileRequest{DGD: dgd, IsDelegated: (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, nil, nil)
 
@@ -877,20 +875,34 @@ func newUnstructuredGrovePodCliqueSet() *unstructured.Unstructured {
 	return object
 }
 
-func TestGroveProgram_DefersScalingAndPreservesStatus(t *testing.T) {
+func TestGroveProgram_ScalingDuringUpdatesPreservesStatus(t *testing.T) {
 	for _, test := range []struct {
-		name                                                     string
-		active, unobserved, configurationChange, guard, mixedLPX bool
+		name, strategy                                              string
+		active, unobserved, missingObservation, configurationChange bool
+		guard, mixedLPX, allowScaling, scaleDown                    bool
 	}{
-		{name: "active coherent update waits for completion", active: true},
-		{name: "cached configuration awaits Grove acknowledgement", unobserved: true},
-		{name: "previous generation acknowledgement cannot authorize a PCS write", configurationChange: true},
-		{name: "webhook lags observed completion", guard: true},
-		{name: "settled LPX child cannot wake rejected frontend scale", guard: true, mixedLPX: true},
+		{name: "active coherent update waits for completion", strategy: "Coherent", active: true, unobserved: true},
+		{name: "coherent configuration with lagging observed generation can scale", strategy: "Coherent", unobserved: true, allowScaling: true},
+		{name: "initial coherent configuration without observed generation can scale", strategy: "Coherent", missingObservation: true, allowScaling: true},
+		{name: "default rolling recreate can scale during a rollout", active: true, unobserved: true, allowScaling: true},
+		{name: "explicit rolling recreate can scale during a rollout", strategy: "RollingRecreate", active: true, unobserved: true, allowScaling: true},
+		{name: "default rolling recreate can scale down during a rollout", active: true, unobserved: true, allowScaling: true, scaleDown: true},
+		{name: "on delete with lagging observed generation can scale", strategy: "OnDelete", unobserved: true, allowScaling: true},
+		{name: "a PCS write waits for cached configuration", strategy: "Coherent", configurationChange: true},
+		{name: "webhook lags observed completion", strategy: "Coherent", guard: true},
+		{name: "settled LPX child cannot wake rejected frontend scale", strategy: "Coherent", guard: true, mixedLPX: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Observe a coherent PCS serving one frontend replica while the DGD requests two")
+			t.Log("Observe a PCS serving one frontend replica while the DGD requests a different capacity")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid", Generation: 1, Annotations: map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}}, Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "frontend", ComponentType: consts.ComponentTypeFrontend, Replicas: ptr.To(int32(2))}}}}
+			if test.strategy == "" {
+				delete(dgd.Annotations, consts.KubeAnnotationGroveUpdateStrategy)
+			} else {
+				dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = test.strategy
+			}
+			if test.scaleDown {
+				dgd.Spec.Components[0].Replicas = ptr.To(int32(0))
+			}
 			if test.mixedLPX {
 				dgd.Spec.Components = append(dgd.Spec.Components, newLPXHandoffSource(t, "single_v2").Spec.Components[0])
 			}
@@ -909,6 +921,10 @@ func TestGroveProgram_DefersScalingAndPreservesStatus(t *testing.T) {
 			pcs.Status.ObservedGeneration = ptr.To(int64(1))
 			if test.unobserved {
 				pcs.Generation = 2
+			}
+			if test.missingObservation {
+				pcs.Status.ObservedGeneration = nil
+				pcs.Status.UpdateProgress = nil
 			}
 			if test.configurationChange {
 				pcs.Spec.UpdateStrategy.Type = grovev1alpha1.RollingRecreateStrategy
@@ -945,7 +961,7 @@ func TestGroveProgram_DefersScalingAndPreservesStatus(t *testing.T) {
 			}
 			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Config: config, RuntimeConfig: runtimeConfig, Recorder: events.NewFakeRecorder(10), DockerSecretRetriever: secrets}
 
-			t.Log("Run the complete program without scaling or dropping observed component facts")
+			t.Log("Run the complete program and preserve component facts while applying the scaling policy")
 			result, err := reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
 			if test.guard {
 				require.Error(t, err)
@@ -953,10 +969,18 @@ func TestGroveProgram_DefersScalingAndPreservesStatus(t *testing.T) {
 				require.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
 			} else {
 				require.NoError(t, err)
-				require.Equal(t, nvidiacomv1beta1.DGDStatePending, result.Status.State)
-				require.True(t, meta.IsStatusConditionTrue(result.Status.Conditions, "ScalingDeferred"))
+				if test.allowScaling {
+					require.False(t, meta.IsStatusConditionTrue(result.Status.Conditions, "ScalingDeferred"))
+				} else {
+					require.Equal(t, nvidiacomv1beta1.DGDStatePending, result.Status.State)
+					require.True(t, meta.IsStatusConditionTrue(result.Status.Conditions, "ScalingDeferred"))
+				}
 			}
-			require.Zero(t, writes)
+			if test.allowScaling {
+				require.Equal(t, 1, writes)
+			} else {
+				require.Zero(t, writes)
+			}
 			require.Contains(t, result.Status.Components, "frontend")
 			require.NotNil(t, result.Status.Components["frontend"].GPUsPerReplica)
 			require.Equal(t, []string{"graph-0-frontend"}, result.Status.Components["frontend"].ComponentNames)
@@ -972,23 +996,22 @@ func TestGroveProgram_DefersScalingAndPreservesStatus(t *testing.T) {
 			t.Log("Persist program status before the next reconciliation")
 			dgd.Status = result.Status
 
-			t.Log("Apply the authored count once both controllers observe completion")
+			t.Log("Retry failures or complete the Coherent rollout without advancing observed generation")
 			guardActive = false
-			if !test.guard {
+			if !test.guard && !test.allowScaling {
 				require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
 				pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
-				pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
 				require.NoError(t, kubeClient.Update(t.Context(), pcs))
 			}
 			result, err = reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
 			require.NoError(t, err)
 			require.Equal(t, 1, writes)
-			if !test.guard {
+			if !test.guard && !test.allowScaling {
 				require.True(t, meta.IsStatusConditionFalse(result.Status.Conditions, "ScalingDeferred"))
 			}
 			require.Zero(t, result.Result)
 			require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(pclq), pclq))
-			require.Equal(t, int32(2), pclq.Spec.Replicas)
+			require.Equal(t, *dgd.Spec.Components[0].Replicas, pclq.Spec.Replicas)
 		})
 	}
 }

@@ -233,45 +233,49 @@ func mustJSON(t *testing.T, value any) string {
 	return string(raw)
 }
 
-func TestGroveScalingBlocked(t *testing.T) {
+func TestGroveCoherentUpdateInProgress(t *testing.T) {
 	for _, test := range []struct {
-		name                                   string
-		strategy                               grovev1alpha1.UpdateStrategyType
-		missingPCS, missingObservation, active bool
-		observed                               int64
-		blocked                                bool
+		name                           string
+		strategy                       grovev1alpha1.UpdateStrategyType
+		missingPCS, noProgress, active bool
+		observed                       *int64
+		blocked                        bool
 	}{
-		{name: "before creation", missingPCS: true, blocked: true},
-		{name: "Grove has not acknowledged any generation", missingObservation: true, blocked: true},
-		{name: "Grove has not acknowledged this generation", observed: 1, blocked: true},
-		{name: "acknowledged coherent update is still active", strategy: grovev1alpha1.CoherentStrategy, observed: 2, active: true, blocked: true},
-		{name: "completed coherent update", strategy: grovev1alpha1.CoherentStrategy, observed: 2},
-		{name: "acknowledged rolling recreate update", strategy: grovev1alpha1.RollingRecreateStrategy, observed: 2, active: true},
-		{name: "acknowledged on delete configuration", strategy: grovev1alpha1.OnDeleteStrategy, observed: 2},
-		{name: "implicit rolling recreate", observed: 2},
+		{name: "before creation", missingPCS: true},
+		{name: "initial configuration without observed generation", noProgress: true},
+		{name: "coherent configuration before an update starts", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(1)), noProgress: true},
+		{name: "active coherent update with lagging observed generation", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(1)), active: true, blocked: true},
+		{name: "active coherent update without observed generation", strategy: grovev1alpha1.CoherentStrategy, active: true, blocked: true},
+		{name: "completed coherent update with lagging observed generation", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(1))},
+		{name: "active rolling recreate with lagging observed generation", strategy: grovev1alpha1.RollingRecreateStrategy, observed: ptr.To(int64(1)), active: true},
+		{name: "on delete with lagging observed generation", strategy: grovev1alpha1.OnDeleteStrategy, observed: ptr.To(int64(1))},
+		{name: "implicit rolling recreate with lagging observed generation", observed: ptr.To(int64(1)), active: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Combine configuration synchronization with Grove acknowledgement and update progress")
+			t.Log("Observe provider update progress independently of observed generation")
 			pcs := &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{Generation: 2},
-				Status:     grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: ptr.To(test.observed)},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					ObservedGeneration: test.observed,
+					UpdateProgress:     &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()},
+				},
 			}
 			if test.strategy != "" {
 				pcs.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: test.strategy}
 			}
-			if test.active {
-				pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
+			if !test.active {
+				pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
 			}
-			if test.missingObservation {
-				pcs.Status.ObservedGeneration = nil
+			if test.noProgress {
+				pcs.Status.UpdateProgress = nil
 			}
 			if test.missingPCS {
 				pcs = nil
 			}
 			before := pcs.DeepCopy()
 
-			t.Log("Keep the decision pure and block every incomplete synchronization step")
-			require.Equal(t, test.blocked, GroveScalingBlocked(pcs))
+			t.Log("Only an active Coherent update holds the provider scaling lock")
+			require.Equal(t, test.blocked, GroveCoherentUpdateInProgress(pcs))
 			require.Equal(t, before, pcs)
 		})
 	}

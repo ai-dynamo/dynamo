@@ -2446,19 +2446,8 @@ func TestLPXStartupScalesMinimumSeedBeforePublishingRequests(t *testing.T) {
 			}
 			require.NoError(t, r.Create(t.Context(), pcsg))
 
-			t.Log("A created group does not authorize scaling before Grove acknowledges the PCS")
-			result, err = r.Reconcile(t.Context(), key)
-			require.NoError(t, err)
-			require.Zero(t, result)
-			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcsg), pcsg))
-			require.Equal(t, seed, pcsg.Spec.Replicas)
-			requests, err = r.getPipelineRequests(t.Context(), pcs)
-			require.NoError(t, err)
-			require.Empty(t, requests, "explicit desired capacity must be applied before publication")
-			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
-			pcs.Generation = 1
-			pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
-			require.NoError(t, r.Update(t.Context(), pcs))
+			t.Log("Scale the observed group without waiting for Grove's observed generation")
+			require.Nil(t, pcs.Status.ObservedGeneration)
 
 			t.Log("Publish requests in ordinal order only after live capacity reaches the explicit desired count")
 			var published []int64
@@ -3844,6 +3833,82 @@ func TestIndependentLPXDeadlineCleanup(t *testing.T) {
 	}
 }
 
+func TestLPXRollingRecreateScalesWithLaggingObservedGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		initial, desired int32
+	}{
+		{name: "scale out and publish missing requests", initial: 1, desired: 2},
+		{name: "scale in and retire removed requests", initial: 2, desired: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			t.Log("Publish the initial LPX workload under the default RollingRecreate strategy")
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			dgd.Spec.Components[0].Replicas = ptr.To(tc.initial)
+			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+			createLPXTestObjects(t, ctx, r.Client, objects...)
+			publishSelectedLPXForTest(t, ctx, r, child, selected)
+			retained := getTestPipelineRequest(t, ctx, r.Client, child.Namespace, selected.requests[0].Name)
+
+			t.Log("Observe an active rollout whose generation has not completed resource synchronization")
+			pcs := findLPXTestPodCliqueSet(t, objects)
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+			require.Nil(t, pcs.Spec.UpdateStrategy)
+			pcs.Generation = 2
+			pcs.Status.ObservedGeneration = ptr.To(int64(1))
+			pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
+			pcs.Annotations[commoncontroller.NvidiaAnnotationGenerationKey] = fmt.Sprint(pcs.Generation)
+			require.NoError(t, r.Update(ctx, pcs))
+
+			t.Log("Apply a replica-only DGD edit while the RollingRecreate rollout remains active")
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+			dgd.Spec.Components[0].Replicas = ptr.To(tc.desired)
+			require.NoError(t, r.Update(ctx, dgd))
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+			var err error
+			child.Spec.InputRevision, err = dynamo.LPXInputRevision(dgd, "")
+			require.NoError(t, err)
+			child.Generation++
+			require.NoError(t, r.Update(ctx, child))
+			key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+			_, err = r.Reconcile(ctx, key)
+			require.NoError(t, err)
+			group := &grovev1alpha1.PodCliqueScalingGroup{}
+			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: selected.plan.LPXScalingGroup}, group))
+			require.Equal(t, tc.desired, group.Spec.Replicas)
+
+			t.Log("Observe any new Grove cliques before publishing requests at the new capacity")
+			selected.plan.Replicas = tc.desired
+			for _, object := range materializeLPXTestPCS(t, child, pcs.DeepCopy(), selected.plan) {
+				if clique, ok := object.(*grovev1alpha1.PodClique); ok {
+					err := r.Get(ctx, client.ObjectKeyFromObject(clique), &grovev1alpha1.PodClique{})
+					if apierrors.IsNotFound(err) {
+						require.NoError(t, r.Create(ctx, clique))
+					} else {
+						require.NoError(t, err)
+					}
+				}
+			}
+			_, err = r.Reconcile(ctx, key)
+			require.NoError(t, err)
+			requests, err := r.getPipelineRequests(ctx, pcs)
+			require.NoError(t, err)
+			require.Len(t, requests, int(tc.desired))
+			require.Equal(t, retained.UID, requests[retained.Name].UID)
+			require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+			require.False(t, meta.IsStatusConditionTrue(child.Status.Conditions, "ScalingDeferred"))
+
+			t.Log("Scaling does not advance Grove's generation observation or complete its rollout")
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+			require.EqualValues(t, 2, pcs.Generation)
+			require.EqualValues(t, 1, *pcs.Status.ObservedGeneration)
+			require.Nil(t, pcs.Status.UpdateProgress.UpdateEndedAt)
+		})
+	}
+}
+
 func TestLPXCoherentUpdateDefersScaleAndRequestRetirement(t *testing.T) {
 	ctx := t.Context()
 	t.Log("Start with two published LPX replicas and an active coherent PCS")
@@ -4106,11 +4171,11 @@ func TestLPXCoherentUpdateDefersCyborgScaleUntilLiveCapacityMatches(t *testing.T
 	require.True(t, meta.IsStatusConditionTrue(child.Status.Conditions, v1alpha1.LPXReadyCondition))
 }
 
-func TestLPXScalingWaitsForAcknowledgedConfiguration(t *testing.T) {
+func TestLPXScalingWaitsForCachedConfigurationAndCoherentCompletion(t *testing.T) {
 	for _, desiredReplicas := range []int32{1, 3} {
 		t.Run(fmt.Sprintf("replicas=%d", desiredReplicas), func(t *testing.T) {
 			ctx := t.Context()
-			t.Log("Publish two replicas from an acknowledged PCS configuration")
+			t.Log("Publish two replicas from the observed PCS configuration")
 			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
 			dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
 			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
@@ -4133,7 +4198,7 @@ func TestLPXScalingWaitsForAcknowledgedConfiguration(t *testing.T) {
 					return delegated.Get(ctx, key, object, opts...)
 				},
 				Update: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
-					// Emulate API-server generation increments, without acknowledging Grove's work.
+					// Emulate API-server generation increments without advancing observedGeneration.
 					if desired, ok := object.(*grovev1alpha1.PodCliqueSet); ok {
 						current := &grovev1alpha1.PodCliqueSet{}
 						require.NoError(t, delegated.Get(ctx, client.ObjectKeyFromObject(desired), current))
@@ -4166,7 +4231,7 @@ func TestLPXScalingWaitsForAcknowledgedConfiguration(t *testing.T) {
 			child.Generation++
 			require.NoError(t, r.Update(ctx, child))
 
-			t.Log("A PCS write cannot use the previously acknowledged generation to scale")
+			t.Log("A PCS write waits for the cache before changing capacity or retiring requests")
 			result, err := r.Reconcile(ctx, key)
 			require.NoError(t, err)
 			require.Zero(t, result)
@@ -4189,18 +4254,9 @@ func TestLPXScalingWaitsForAcknowledgedConfiguration(t *testing.T) {
 			require.Zero(t, scaleWrites)
 			staleCache = false
 
-			t.Log("Observing the new PCS spec is insufficient until Grove acknowledges it")
-			result, err = r.Reconcile(ctx, key)
-			require.NoError(t, err)
-			require.Zero(t, result)
-			require.Zero(t, scaleWrites)
-			requests, err = r.getPipelineRequests(ctx, pcs)
-			require.NoError(t, err)
-			require.Len(t, requests, 2)
-
-			t.Log("Acknowledgement during an active Coherent rollout still defers scaling")
+			t.Log("Observe the new PCS configuration with an active Coherent rollout")
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
-			pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+			require.EqualValues(t, 1, *pcs.Status.ObservedGeneration)
 			pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
 			require.NoError(t, r.Update(ctx, pcs))
 			result, err = r.Reconcile(ctx, key)
@@ -4208,7 +4264,11 @@ func TestLPXScalingWaitsForAcknowledgedConfiguration(t *testing.T) {
 			require.Zero(t, result)
 			require.Zero(t, scaleWrites)
 
-			t.Log("The PCS completion observation permits the queued capacity change")
+			requests, err = r.getPipelineRequests(ctx, pcs)
+			require.NoError(t, err)
+			require.Len(t, requests, 2, "active Coherent progress preserves the existing requests")
+
+			t.Log("Coherent completion permits scaling even while observedGeneration still lags")
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
 			pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
 			require.NoError(t, r.Update(ctx, pcs))
@@ -4218,6 +4278,8 @@ func TestLPXScalingWaitsForAcknowledgedConfiguration(t *testing.T) {
 			group := &grovev1alpha1.PodCliqueScalingGroup{}
 			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: selected.plan.LPXScalingGroup}, group))
 			require.Equal(t, desiredReplicas, group.Spec.Replicas)
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+			require.EqualValues(t, 1, *pcs.Status.ObservedGeneration)
 		})
 	}
 }

@@ -223,7 +223,7 @@ func (r *graphReconciler) reconcileWorkloads(
 	// Resolve capacity and requests for the complete graph before any group is changed.
 	var (
 		scalingRequired bool
-		scalingBlocked  = dynamo.GroveScalingBlocked(pcs)
+		scalingBlocked  = dynamo.GroveCoherentUpdateInProgress(pcs)
 		groupNames      = slices.Sorted(maps.Keys(workloads))
 
 		desiredRequests  = make(map[string]*lpxv1alpha1.LPUPipelineRequest)

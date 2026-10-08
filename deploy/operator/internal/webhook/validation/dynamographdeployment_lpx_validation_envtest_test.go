@@ -63,7 +63,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				dgd.Spec.Components[0].MinAvailable = k8sptr.To(int32(2))
 			}),
 			wantReplicas: map[string]*int32{"lpx": nil},
-			wantWarnings: []string{`spec.components[0].minAvailable ("lpx") is deprecated; use spec.components[0].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "v1alpha1 LPX preserves omitted replicas with minimum availability above one on UPDATE",
@@ -76,7 +75,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				dgd.Spec.Services["lpx"].MinAvailable = k8sptr.To(int32(2))
 			}),
 			wantReplicas: map[string]*int32{"lpx": nil},
-			wantWarnings: []string{`spec.components[0].minAvailable ("lpx") is deprecated; use spec.components[0].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "LPX rejects explicit replicas below minimum availability",

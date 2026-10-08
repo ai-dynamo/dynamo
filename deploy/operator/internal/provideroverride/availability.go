@@ -58,6 +58,8 @@ func GroveMinAvailable(raw []byte) (int32, bool) {
 
 // EffectiveGroveMinAvailable resolves both API forms and the native default of one.
 // component must be non-nil. Admission rejects mixing the forms and malformed values.
+// The omitted default is part of the immutable minimum contract; changing it
+// requires origin-version gating to preserve existing deployments.
 func EffectiveGroveMinAvailable(component *v1beta1.DynamoComponentDeploymentSharedSpec) int32 {
 	if component.MinAvailable != nil {
 		return *component.MinAvailable

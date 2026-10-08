@@ -75,9 +75,11 @@ SPDX-License-Identifier: Apache-2.0
   is the follow-up after recording `SchedulingFailed`, because status-only
   LPXGD updates are filtered. Ordinary errors use controller-runtime backoff.
 - Synchronize the desired PCS before any replica write, including scale-down and
-  deadline cleanup. Use the shared Grove scaling gate to wait for the cached intent,
-  Grove generation acknowledgement, and completion of an active Coherent rollout.
-  Continue observing readiness and component status while scaling is deferred.
+  deadline cleanup. After a PCS write, wait for its watched cache observation. Use
+  the shared Coherent-update predicate to defer replica writes during that rollout.
+  Do not gate scaling on Grove's observed generation: it can lag throughout a
+  RollingRecreate rollout. Continue observing readiness and component status while
+  scaling is deferred.
 - After writing a PCS, wait for its watched observation before publishing LPRs.
   An LPR `AlreadyExists` response means wait for observation, not adopt an
   unverified object. Never adopt a foreign resource with the expected name.
