@@ -1408,7 +1408,10 @@ async def test_parallel_choices_prefill_once_and_fan_out_on_decode():
         captured_prefill_params.append(sampling_params)
         for index in range(sampling_params.n):
             yield SimpleNamespace(
-                kv_transfer_params={"remote_request_id": f"{index}_{request_id}"},
+                kv_transfer_params={
+                    "remote_request_id": f"{index}_{request_id}",
+                    "do_remote_prefill": True,
+                },
                 outputs=[SimpleNamespace(token_ids=[100 + index])],
                 prompt_token_ids=list(prompt["prompt_token_ids"]),
                 num_cached_tokens=None,
@@ -1481,6 +1484,12 @@ async def test_parallel_choices_prefill_once_and_fan_out_on_decode():
 
     assert len(captured_decode_params) == 1
     assert captured_decode_params[0].n == 3
+    assert (
+        captured_decode_params[0].extra_args["kv_transfer_params"][
+            "dynamo_parallel_consumers"
+        ]
+        == 3
+    )
     assert len(decode_outputs) == 3
     if supports_best_of:
         assert captured_decode_params[0].best_of == 4

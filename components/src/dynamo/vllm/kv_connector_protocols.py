@@ -21,6 +21,37 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Tuple, Type
 
+PARALLEL_CONSUMERS_KEY = "dynamo_parallel_consumers"
+PARALLEL_NIXL_MODULE = "dynamo.vllm.parallel_nixl_connector"
+
+
+def configure_parallel_nixl_connector(kv_config: Any) -> None:
+    """Use shared-lease accounting for builtin NIXL, including wrapper children."""
+    if kv_config is None:
+        return
+    if isinstance(kv_config, dict):
+        name = kv_config.get("kv_connector")
+        module = kv_config.get("kv_connector_module_path")
+        extra = kv_config.get("kv_connector_extra_config") or {}
+        if name == "NixlConnector" and module is None:
+            kv_config["kv_connector_module_path"] = PARALLEL_NIXL_MODULE
+    else:
+        name = kv_config.kv_connector
+        module = getattr(kv_config, "kv_connector_module_path", None)
+        extra = getattr(kv_config, "kv_connector_extra_config", None) or {}
+        if name == "NixlConnector" and module is None:
+            kv_config.kv_connector_module_path = PARALLEL_NIXL_MODULE
+    if name in MULTI_CONNECTOR_WRAPPERS:
+        for child in extra.get("connectors", []):
+            configure_parallel_nixl_connector(child)
+
+
+def parallel_decode_kv_params(kv_params: Dict[str, Any], n: int) -> Dict[str, Any]:
+    """Record fan-out before vLLM turns a parallel request into n=1 children."""
+    if kv_params.get("do_remote_prefill") and kv_params.get("remote_request_id"):
+        return {**kv_params, PARALLEL_CONSUMERS_KEY: n}
+    return kv_params
+
 
 class KvConnectorProtocol(ABC):
     """One instance per prefill request; carries any per-request state."""

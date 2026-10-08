@@ -91,6 +91,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
+    parallel_decode_kv_params,
 )
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 
@@ -4011,6 +4012,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         if kv_params is not None:
+            kv_params = parallel_decode_kv_params(kv_params, sampling_params.n)
             _update_kv_transfer_params(sampling_params, kv_params)
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"

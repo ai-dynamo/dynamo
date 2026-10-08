@@ -33,6 +33,7 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.kv_connector_protocols import configure_parallel_nixl_connector
 
 from . import envs
 
@@ -366,6 +367,8 @@ def update_engine_config_with_dynamo(
 
     if _uses_nixl_connector(engine_config):
         ensure_side_channel_host()
+
+    configure_parallel_nixl_connector(engine_config.kv_transfer_config)
 
     defaults: Dict[str, Any] = {
         # As of vLLM >=0.10.0 the engine unconditionally calls
