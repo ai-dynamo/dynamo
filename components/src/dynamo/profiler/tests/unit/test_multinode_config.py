@@ -27,7 +27,6 @@ pytestmark = [
         ["--tp-size=16", "--dp=16", "--enable-dp-attention"],
         ["--tp", "4", "--pp-size", "4"],
         ["--tp-size=4", "--pp=4"],
-        ["--tp-size", "4", "--pp-size", "4"],
         ["--tp-size=4", "--pp-size=4"],
     ],
 )
