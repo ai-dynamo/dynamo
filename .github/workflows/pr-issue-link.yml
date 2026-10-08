@@ -42,6 +42,14 @@ on:
       - ".github/workflows/pr_issue_link.py"
       - ".github/workflows/test_pr_issue_link.py"
 
+# A newer edit supersedes an older run. Without this, a run that started
+# before the author added the link could still finish by drafting the pull
+# request the newer run passed. The event name keeps the unit-test run and
+# the check run from cancelling each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 env:
   # Referenced in the failure message; on this date the check is added to the
   # required status checks in branch protection after the announced notice.

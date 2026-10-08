@@ -713,6 +713,16 @@ def test_only_the_draft_job_holds_a_write_token() -> None:
     assert "needs.check-issue-link.outputs.draft == 'true'" in draft
 
 
+def test_a_newer_run_cancels_an_older_one_for_the_same_pull_request() -> None:
+    """A stale run must not draft a pull request a newer edit already fixed."""
+    workflow = (Path(__file__).parent / "pr-issue-link.yml").read_text()
+    block = re.search(r"\nconcurrency:\n((?:  [^\n]*\n)*)", workflow)
+    assert block, "the workflow sets no concurrency group"
+    assert "github.event.pull_request.number" in block.group(1)
+    assert "github.event_name" in block.group(1)
+    assert "cancel-in-progress: true" in block.group(1)
+
+
 # ------------------------------------------------------------------
 # The blocking date, which lives in three files a human edits
 # ------------------------------------------------------------------
