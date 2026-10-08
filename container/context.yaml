@@ -66,7 +66,7 @@ dynamo:
   etcd_version: v3.5.34
 
   nixl_ref: v1.3.2
-  nixl_ucx_ref: v1.21.0
+  nixl_ucx_ref: v1.22.x
   nixl_gdrcopy_ref: v2.5.2
   nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
   nixl_libfabric_ref: v2.4.0
