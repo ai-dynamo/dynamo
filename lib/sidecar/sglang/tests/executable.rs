@@ -17,6 +17,10 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
     );
     let stdout = String::from_utf8(output.stdout).expect("help output is UTF-8");
     for expected in [
+        "--discovery-backend",
+        "--request-plane",
+        "--response-plane",
+        "--event-plane",
         "--grpc-endpoint",
         "DYN_SIDECAR_GRPC_ENDPOINT",
         "--grpc-connections",
@@ -59,7 +63,7 @@ fn invalid_arguments_fail_before_runtime_configuration() {
             "http://127.0.0.1:0",
             "--route-to-encoder",
         ])
-        .env("DYN_DISCOVERY_BACKEND", "invalid-backend")
+        .env("ETCD_ENDPOINTS", "://invalid")
         .output()
         .unwrap();
     assert!(!output.status.success());

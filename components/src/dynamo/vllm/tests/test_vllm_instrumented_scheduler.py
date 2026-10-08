@@ -490,6 +490,28 @@ def test_empty_queues():
     assert q.var_decode_kv_tokens == 0.0
 
 
+def test_kv_holding_waiting_counts_each_request_once():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.waiting = [
+        _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=128),
+    ]
+    stub.kv_holding_waiting = [
+        _make_request(RequestStatus.PREEMPTED, num_tokens=512, num_computed_tokens=480),
+        _make_request(
+            RequestStatus.WAITING_FOR_REMOTE_KVS,
+            num_tokens=1024,
+            num_computed_tokens=1024,
+        ),
+    ]
+
+    q = InstrumentedScheduler._compute_queued(stub)
+
+    assert q.num_prefill_requests == 1
+    assert q.sum_prefill_tokens == 128
+    assert q.num_decode_requests == 2
+    assert q.sum_decode_kv_tokens == 1504
+
+
 # ---------------------------------------------------------------------------
 # Variance correctness across both queues
 # ---------------------------------------------------------------------------
@@ -792,6 +814,24 @@ def test_capacity_digest_ignores_request_limit_filtered_capture_sizes():
         ]
     )
     assert common.max_num_running_reqs == 128
+
+
+@pytest.mark.parametrize(
+    "cap_attribute",
+    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
+)
+def test_capacity_digest_tracks_admission_cap(cap_attribute):
+    stub = _digest_stub(max_num_running_reqs=128)
+    manager = SimpleNamespace(block_size=16)
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=[manager])
+    )
+    setattr(manager, cap_attribute, 32)
+    initial_digest = stub._bench_grid_invariants_digest()
+
+    setattr(manager, cap_attribute, 64)
+
+    assert stub._bench_grid_invariants_digest() != initial_digest
 
 
 def test_benchmark_synchronizer_rejects_grid_mismatch_before_warmup():
@@ -5729,15 +5769,20 @@ def test_kvwarm_shadow_registration_keeps_positional_table_for_sliding_window():
     assert mgr.num_cached_block["shadow"] == 9
 
 
-def test_kvwarm_shadow_registration_forks_circular_tail_table():
+@pytest.mark.parametrize(
+    "cap_attribute",
+    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
+)
+def test_kvwarm_shadow_registration_forks_circular_tail_table(cap_attribute):
     """GLM5-Next's k-pool tail: one circularly reused block per request
     (admission cap 1, excluded from prefix caching). The chain holds a single
     block whatever its depth; the shadow shares nothing and forks that block."""
     stub, mgr, pool, chain = _shadow_stub(cow=True)
     mgr.req_to_blocks["chain"] = chain[:1]
     mgr.block_size = 4
-    mgr._max_admission_blocks_per_request = 1
+    setattr(mgr, cap_attribute, 1)
     mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=False)
+    assert stub._bench_blocks_per_req(152, apply_admission_cap=True) == 1
     table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
         stub, "shadow", "chain", 152, 3
     )

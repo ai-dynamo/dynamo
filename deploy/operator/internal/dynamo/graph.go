@@ -2077,6 +2077,12 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			continue
 		}
 
+		// Resolve the frontend image independently of the component runtime.
+		var resolvedRuntimeVersion *runtimeversion.Version
+		if version, err := runtimeversion.ParseImageVersion(podSpec.Containers[i].Image); err == nil {
+			resolvedRuntimeVersion = &version
+		}
+
 		// Co-located frontend discovery uses its own identity in both worker layouts.
 		frontendContext := ComponentContext{
 			numberOfNodes:                  1,
@@ -2087,6 +2093,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			Discovery:                      parentContext.Discovery,
 			Infrastructure:                 parentContext.Infrastructure,
 			DynamoNamespace:                parentContext.DynamoNamespace,
+			RuntimeVersion:                 resolvedRuntimeVersion,
 		}
 
 		frontendDefaults := NewFrontendDefaults()
