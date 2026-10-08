@@ -403,7 +403,7 @@ The upgrade does not delete the legacy `DynamoCheckpoint` CRD, instances, `PodSn
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Delete</Badge> <Badge intent="note" minimal>Retain</Badge></span>
   </ParamField>
   <ParamField path="checkpointRef" type="string">
-    Names an existing `PodSnapshot` in the same namespace. Before workers can restore, the snapshot must be Ready and carry matching Dynamo compatibility metadata for the target worker configuration. A missing, failed, or incompatible snapshot is rejected; changing `startupPolicy` does not bypass these checks.
+    Names an existing `PodSnapshot` in the same namespace. Before workers can restore, the snapshot must be Ready and carry matching Dynamo compatibility metadata for the target worker configuration. If the named snapshot does not exist, its capture has failed, or its compatibility metadata does not match, the operator reports an error and does not restore workers from it. Both startup policies perform these checks.
 
     Standalone worker-class (`worker`, `prefill`, or `decode`) `DynamoComponentDeployment` resources cannot set this field; configure it on the component in the owning DGD. Do not set `job` with `checkpointRef`.
   </ParamField>
