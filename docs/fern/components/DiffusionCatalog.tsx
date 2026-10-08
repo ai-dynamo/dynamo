@@ -26,8 +26,8 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
 /* Surfaces, fields, and chips mirror the shared site palette: the Reference
    panels and badges (ReferenceStyles), the CompatibilityHero select, and the
    main.css .dynamo-chip-* tints. Values stay literal because the published
-   theme drops main.css. The type chip carries each card's modality color,
-   backend chips carry per-backend tints, and green remains the interactive accent. */
+   theme drops main.css. Each card's modality color marks its top bar, logo glow, and
+   type badge; backend chips carry per-backend tints, and green remains the interactive accent. */
 .dynamo-diffusion {
   --diffusion-text: #1a1a1a;
   --diffusion-muted: #666666;
@@ -165,6 +165,11 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
   background-color: var(--diffusion-card);
   /* Modality glow behind the logo, after the green glow on Home and Mermaid canvases. */
   background-image: radial-gradient(240px circle at 44px 44px, color-mix(in srgb, var(--diffusion-accent-bg) 60%, transparent), transparent 70%);
+  /* The modality's top bar reuses the site's 3px inset accent bar (recommended recipe rows,
+     the active sidebar link) rather than a heavier colored border. */
+  --diffusion-card-bar: inset 0 3px 0 var(--diffusion-accent-fg);
+  box-shadow: var(--diffusion-card-bar);
+  container-type: inline-size;
   transition: border-color .18s ease, box-shadow .18s ease;
 }
 .dynamo-diffusion-card[data-case="text-to-text"] {
@@ -188,14 +193,19 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
   --diffusion-accent-border: var(--diffusion-blue-border);
 }
 .dynamo-diffusion-card[hidden] { display: none !important; }
-.dynamo-diffusion-card:hover { border-color: var(--diffusion-green); box-shadow: 0 12px 28px rgba(0, 0, 0, .09); }
-.dark .dynamo-diffusion-card:hover, [data-theme="dark"] .dynamo-diffusion-card:hover { box-shadow: 0 14px 32px rgba(0, 0, 0, .32); }
-/* The type chip shares the top line with the provider, at the card's top right, so the
+.dynamo-diffusion-card:hover { border-color: var(--diffusion-green); box-shadow: var(--diffusion-card-bar), 0 12px 28px rgba(0, 0, 0, .09); }
+.dark .dynamo-diffusion-card:hover, [data-theme="dark"] .dynamo-diffusion-card:hover { box-shadow: var(--diffusion-card-bar), 0 14px 32px rgba(0, 0, 0, .32); }
+/* The type badge shares the top line with the provider, at the card's top right, so the
    title keeps the full width beside the logo. */
 .dynamo-diffusion-card-top {
   display: grid; grid-template-columns: 48px minmax(0, 1fr) auto;
   grid-template-areas: "logo provider type" "logo name name";
   align-items: center; gap: 2px 14px;
+}
+/* On narrow cards the badge keeps the top right on its own line, so the provider beside it
+   neither wraps nor breaks mid-word. */
+@container (max-width: 359px) {
+  .dynamo-diffusion-card-top { grid-template-areas: "logo . type" "logo provider provider" "logo name name"; }
 }
 .dynamo-diffusion .dynamo-diffusion-logo {
   display: block; width: 48px; height: 48px;
@@ -218,11 +228,14 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
   border: 1px solid transparent; border-radius: 999px;
   font-size: 11.5px; font-weight: 600; line-height: 1.2; white-space: nowrap;
 }
+/* The type badge sits a level above the other chips: larger, with the destination page's icon. */
 .dynamo-diffusion-modality {
-  grid-area: type; align-self: start;
+  grid-area: type; align-self: start; gap: 6px; min-height: 28px; padding: 4px 12px 4px 10px;
   color: var(--diffusion-accent-fg); background: var(--diffusion-accent-bg); border-color: var(--diffusion-accent-border);
-  font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
 }
+/* Fern's Icon sets its size inline and its gray color in a cascade layer. */
+.dynamo-diffusion-modality svg { flex: 0 0 auto; width: 13px !important; height: 13px !important; color: inherit; }
 .dynamo-diffusion-backend {
   color: var(--diffusion-gray-fg); background: var(--diffusion-gray-bg); border-color: var(--diffusion-gray-border);
 }
@@ -262,8 +275,6 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
 }
 @media (max-width: 380px) {
   .dynamo-diffusion-filters { grid-template-columns: minmax(0, 1fr); }
-  /* Keep the type chip top right, on its own line, so the provider does not break mid-word. */
-  .dynamo-diffusion-card-top { grid-template-areas: "logo . type" "logo provider provider" "logo name name"; }
 }
 @media (prefers-reduced-motion: reduce) {
   .dynamo-diffusion-card, .dynamo-diffusion-reset,

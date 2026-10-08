@@ -31,7 +31,9 @@ native MDX images and one stretched page link per card preserve Fern's asset, ve
 rewriting. The widget reads the existing card metadata, the modality label, and chip labels, without
 a second catalog or browser-side metadata requests. Keep the title's `dynamo-diffusion-name` class
 so name sorting uses the visible title, and end the top row with the `dynamo-diffusion-modality`
-type chip so it sits top right and the type filter uses its text. The title already names the
+type badge so it sits top right and the type filter uses its text. Start the badge with the
+`<Icon>` that `overview.mdx` uses for the destination page, such as `image` or `film`; `data-case`
+sets the matching color for the badge and the card's top bar. The title already names the
 model, so the Hugging Face ID stays in `data-model`, where search reads it, rather than in the
 visible card. Cards carry no description line or arrow; the stretched link keeps its descriptive
 accessible name. Do not embed DGDs or add secondary links to these cards. Keep it first under

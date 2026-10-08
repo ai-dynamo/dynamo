@@ -727,6 +727,10 @@ def test_diffusion_overview_cards_match_the_dgd_models_and_backends() -> None:
     assert "<CardGroup" not in text
     entries = diffusion_cards()
     assert len(entries) == len(source_pages)
+    topic_icons = {
+        attributes["data-example"]: CARD_BODY.fullmatch(body)["icon"]
+        for attributes, body in card_blocks(EXAMPLES / "overview.mdx")
+    }
     seen = set()
     models = set()
     for attributes, body in entries:
@@ -755,15 +759,17 @@ def test_diffusion_overview_cards_match_the_dgd_models_and_backends() -> None:
         assert "aria-label=" in body
         assert 'className="dynamo-diffusion-name"' in body
         assert "dynamo-diffusion-card-footer" not in body
-        # The type chip closes the top row, after the title, so the grid places it
-        # top right. Cards have no arrow and no description line.
+        # The type badge closes the top row, after the title, so the grid places it
+        # top right. It reuses the main catalog's icon for the page it opens. Cards
+        # have no arrow and no description line.
         header, _ = body.split('<div className="dynamo-diffusion-chips">', 1)
-        (modality,) = re.findall(
+        ((icon, modality),) = re.findall(
             r'</h3>\n<span className="dynamo-diffusion-chip dynamo-diffusion-modality">'
-            r"([^<]+)</span>\n</div>\n\n$",
+            r'<Icon icon="([a-z0-9-]+)" />([^<]+)</span>\n</div>\n\n$',
             header,
         )
         assert modality == DIFFUSION_MODALITY_LABELS[attributes["data-case"]]
+        assert icon == topic_icons[source_pages[source]]
         assert body.count("dynamo-diffusion-modality") == 1
         assert "dynamo-diffusion-card-arrow" not in body
         assert "dynamo-diffusion-description" not in body
@@ -830,6 +836,14 @@ def test_diffusion_catalog_is_server_styled_accessible_and_responsive() -> None:
     assert "dynamo-diffusion-card-arrow" not in component
     assert "dynamo-diffusion-description" not in component
     assert '"logo provider type" "logo name name"' in component
+    # Narrow cards move the type badge onto its own top-right line.
+    assert "container-type: inline-size" in component
+    assert '"logo . type" "logo provider provider" "logo name name"' in component
+    # The modality's top bar is an inset accent bar that persists on hover.
+    assert (
+        "--diffusion-card-bar: inset 0 3px 0 var(--diffusion-accent-fg);" in component
+    )
+    assert component.count("box-shadow: var(--diffusion-card-bar)") == 3
     assert "dynamo-diffusion-card-footer" not in component
     assert ":focus-visible" in component
     assert "prefers-reduced-motion" in component
