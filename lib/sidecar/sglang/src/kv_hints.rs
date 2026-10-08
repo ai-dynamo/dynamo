@@ -34,12 +34,25 @@ pub(crate) fn discovery_runtime_data(
         None | Some(Value::Null) => Map::new(),
         Some(Value::Object(extra)) => extra.clone(),
         Some(Value::String(raw)) if raw.is_empty() => Map::new(),
-        Some(Value::String(raw)) => serde_json::from_str::<Map<String, Value>>(raw).map_err(|_| {
-            client::invalid_arg(format!(
-                "SGLang {extra_key} must report a resolved object or JSON object, not an @file reference"
-            ))
-        })?,
-        _ => return Err(client::invalid_arg(format!("SGLang {extra_key} must be a JSON object"))),
+        Some(Value::String(raw)) if raw.starts_with('@') => {
+            tracing::warn!(
+                extra_config_field = extra_key,
+                "SGLang reports an unresolved @file config; KVCR hint discovery is disabled until the engine reports resolved JSON"
+            );
+            return Ok(HashMap::new());
+        }
+        Some(Value::String(raw)) => {
+            serde_json::from_str::<Map<String, Value>>(raw).map_err(|_| {
+                client::invalid_arg(format!(
+                    "SGLang {extra_key} must report a resolved object or JSON object"
+                ))
+            })?
+        }
+        _ => {
+            return Err(client::invalid_arg(format!(
+                "SGLang {extra_key} must be a JSON object"
+            )));
+        }
     };
     match extra.get("enable_remote_hint") {
         None | Some(Value::Bool(false)) => return Ok(HashMap::new()),
@@ -266,10 +279,9 @@ mod tests {
     }
 
     #[test]
-    fn invalid_config_and_unresolved_file_references_fail_closed() {
+    fn invalid_config_is_rejected() {
         for extra in [
             json!([]),
-            json!("@/engine/config.json"),
             json!("not json"),
             json!("[]"),
             json!({"enable_remote_hint": "true"}),
@@ -277,6 +289,29 @@ mod tests {
             let mut info = info();
             info["unified_cache_external_linker_extra_config"] = extra;
             assert!(discovery_runtime_data(&info, DisaggregationMode::Aggregated).is_err());
+        }
+    }
+
+    #[test]
+    fn unresolved_engine_file_disables_only_hint_discovery() {
+        for extra_key in [
+            "unified_cache_external_linker_extra_config",
+            "hicache_storage_backend_extra_config",
+        ] {
+            let mut info = info();
+            if extra_key == "hicache_storage_backend_extra_config" {
+                info["enable_unified_cache_external_linker"] = json!(false);
+                info["enable_hierarchical_cache"] = json!(true);
+                info["hicache_storage_backend"] = json!("kvcr");
+            }
+            info[extra_key] = json!("@/engine/config.json");
+            // Do not read the engine's file or reject ordinary multinode serving.
+            info["nnodes"] = json!(2);
+            assert!(
+                discovery_runtime_data(&info, DisaggregationMode::Aggregated)
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 

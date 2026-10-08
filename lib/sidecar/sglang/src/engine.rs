@@ -1751,6 +1751,31 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_kvcr_config_keeps_engine_registration_without_hints() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "enable_hierarchical_cache": true,
+                "hicache_storage_backend": "kvcr",
+                "hicache_storage_backend_extra_config": "@/engine/config.json",
+                "nnodes": 2, "dp_size": 2, "enable_dp_attention": true,
+                "page_size": 256,
+            })),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!config.runtime_data.contains_key("router_hint"));
+        assert_eq!(
+            config.runtime_data["grpc_service"],
+            "sglang.runtime.v1.SglangService"
+        );
+        let llm = config.llm.unwrap();
+        assert_eq!(llm.data_parallel_size, Some(2));
+        assert_eq!(llm.kv_cache_block_size, Some(256));
+    }
+
+    #[test]
     fn pure_dp_preserves_per_rank_max_num_seqs() {
         let config = build_engine_config(
             &discovery(json!({
