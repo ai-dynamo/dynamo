@@ -953,6 +953,7 @@ class TestGenerateLocally:
         assert chunks[-1].get("engine_data", {}).get("kv_cache_hit") == expected
 
     @pytest.mark.asyncio
+    @pytest.mark.multimodal
     async def test_audio_inputs_reach_generate_async(self):
         handler = self._make_handler()
         audio = object()
