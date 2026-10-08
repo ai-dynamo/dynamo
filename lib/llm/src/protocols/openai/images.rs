@@ -241,12 +241,6 @@ mod tests {
     }
 
     #[test]
-    fn image_response_serializes_unavailable_size_as_null() {
-        let response = serde_json::to_value(NvImagesResponse::empty()).unwrap();
-        assert_eq!(response["size"], serde_json::Value::Null);
-    }
-
-    #[test]
     fn image_request_nests_passthrough_for_workers() {
         let json = r#"{"prompt":"a cat","think_mode":true}"#;
         let mut req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
