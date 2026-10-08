@@ -524,9 +524,9 @@ class FastVideoBackend:
 
         nvext = request.nvext or VideoNvExt()
         width, height = self._parse_size(request.size)
+        # A request's fps arrives at least 1 (the shared model bounds it), and
+        # --default-fps is checked at startup.
         fps = nvext.fps if nvext.fps is not None else self.args.default_fps
-        if fps <= 0:
-            raise ValueError("fps must be positive")
 
         num_frames = self._compute_num_frames(request, nvext)
         num_inference_steps = (
@@ -937,6 +937,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--max-video-height must be > 0")
     if args.max_num_frames <= 0:
         parser.error("--max-num-frames must be > 0")
+    if args.default_fps <= 0:
+        parser.error("--default-fps must be > 0")
     if args.max_num_inference_steps <= 0:
         parser.error("--max-num-inference-steps must be > 0")
     return args

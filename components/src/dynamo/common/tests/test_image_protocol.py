@@ -78,3 +78,10 @@ def test_image_request_rejects_a_value_outside_the_enum():
     # The frontend rejects the value too. The model matches the frontend.
     with pytest.raises(ValidationError):
         NvCreateImageRequest(prompt="a cat", quality="ultra")
+
+
+@pytest.mark.parametrize("n", [0, 11])
+def test_image_request_rejects_n_outside_supported_range(n):
+    # The frontend rejects the value too. The model matches the frontend.
+    with pytest.raises(ValidationError):
+        NvCreateImageRequest(prompt="a cat", n=n)

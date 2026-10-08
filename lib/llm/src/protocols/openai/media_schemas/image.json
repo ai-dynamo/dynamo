@@ -231,8 +231,9 @@
               "null"
             ],
             "format": "int32",
-            "description": "Number of images to generate",
-            "minimum": 0
+            "description": "Number of images to generate, 1 to 10 as the OpenAI API documents.\nThe frontend rejects a value outside the range, so a worker never\nsees one and needs no range check of its own.",
+            "maximum": 10,
+            "minimum": 1
           },
           "quality": {
             "oneOf": [

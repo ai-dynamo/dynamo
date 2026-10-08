@@ -4,8 +4,10 @@
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use validator::Validate;
 
 use super::MediaDelivery;
+use crate::engines::ValidateRequest;
 
 mod aggregator;
 mod nvext;
@@ -17,15 +19,19 @@ pub use nvext::NvExt;
 /// The OpenAI fields keep the wire format of the OpenAI `CreateImageRequest`.
 /// `model` and `size` are free text, because the OpenAI type accepts any
 /// string there.
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateImageRequest {
     pub prompt: String,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// Number of images to generate
+    /// Number of images to generate, 1 to 10 as the OpenAI API documents.
+    /// The frontend rejects a value outside the range, so a worker never
+    /// sees one and needs no range check of its own.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1, maximum = 10)]
+    #[validate(range(min = 1, max = 10, message = "n must be between 1 and 10"))]
     pub n: Option<u8>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -234,6 +240,14 @@ impl NvImagesResponse {
 
 /// Implements `AnnotationsProvider` for `NvCreateImageRequest`,
 /// enabling retrieval and management of request annotations.
+impl ValidateRequest for NvCreateImageRequest {
+    fn validate(&self) -> Result<(), anyhow::Error> {
+        // `Validate` and `ValidateRequest` share the method name, so the
+        // derived one is called by trait path.
+        Validate::validate(self).map_err(anyhow::Error::from)
+    }
+}
+
 impl AnnotationsProvider for NvCreateImageRequest {
     /// Retrieves the list of annotations from `NvExt`, if present.
     fn annotations(&self) -> Option<Vec<String>> {
@@ -433,5 +447,36 @@ mod tests {
         let req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
         assert!(req.extra_args.is_none());
         assert_eq!(req.passthrough["extra_args"]["x"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn image_request_n_in_range_passes_validation() {
+        // The bounds are inclusive. An absent `n` is the worker's default.
+        for json in [
+            r#"{"prompt":"a cat"}"#,
+            r#"{"prompt":"a cat","n":1}"#,
+            r#"{"prompt":"a cat","n":10}"#,
+        ] {
+            let req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
+            assert!(
+                ValidateRequest::validate(&req).is_ok(),
+                "expected {json} to pass validation"
+            );
+        }
+    }
+
+    #[test]
+    fn image_request_n_out_of_range_fails_validation() {
+        for json in [
+            r#"{"prompt":"a cat","n":0}"#,
+            r#"{"prompt":"a cat","n":11}"#,
+        ] {
+            let req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
+            let message = ValidateRequest::validate(&req).unwrap_err().to_string();
+            assert!(
+                message.contains("n must be between 1 and 10"),
+                "expected the error for {json} to state the rule; got: {message}"
+            );
+        }
     }
 }

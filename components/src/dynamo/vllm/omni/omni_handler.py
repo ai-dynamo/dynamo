@@ -734,14 +734,11 @@ class OmniHandler(BaseOmniHandler):
         req: NvCreateVideoRequest,
         nvext: VideoNvExt,
     ) -> None:
-        """Overlay only fields explicitly supplied by a video request."""
-        if nvext.num_frames is not None and nvext.num_frames <= 0:
-            raise ValueError("nvext.num_frames must be greater than zero")
-        if nvext.fps is not None and nvext.fps <= 0:
-            raise ValueError("nvext.fps must be greater than zero")
-        if req.seconds is not None and req.seconds <= 0:
-            raise ValueError("seconds must be greater than zero")
+        """Overlay only fields explicitly supplied by a video request.
 
+        `num_frames`, `fps`, and `seconds` arrive at least 1: the shared
+        request model bounds them as the frontend does.
+        """
         if req.size is not None:
             width, height = parse_size(req.size)
             sp.width = width
