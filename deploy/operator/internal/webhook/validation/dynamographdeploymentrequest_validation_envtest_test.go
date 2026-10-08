@@ -62,6 +62,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		wantImage          string
 		wantSchemaErr      string
 		wantCELErr         string
+		wantAdmissionErrs  []string
 		wantWebhook        []string
 		wantWarnings       []string
 	}{
@@ -172,6 +173,23 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeGB200}
 			}),
+		},
+		{
+			name: "RTX PRO 6000 hardware is admitted",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server}
+			}),
+		},
+		{
+			name: "invalid GPU SKU is rejected by the source schema",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUType("invalid_sku")}
+			}),
+			gpuDiscovery: true,
+			wantAdmissionErrs: []string{
+				`spec.hardware.gpuSku: Unsupported value: "invalid_sku": supported values: "gb200", "gb200_sxm", "gb10", "b300_sxm", "b200_sxm", "rtx_pro_6000_server", "h200_sxm", "h100_sxm", "h100_pcie", "a100_sxm", "a100_pcie", "a30", "l40s", "l40", "l4", "v100_sxm", "v100_pcie", "t4", "mi200", "mi300"`,
+				`<nil>: Invalid value: "": "spec.hardware.gpuSku" must validate all the schemas (allOf). None validated`,
+			},
 		},
 		{
 			name: "independent create failures aggregate in API declaration order",
@@ -510,6 +528,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				seedWithoutWebhook: tt.seedWithoutWebhook,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
+				wantAdmissionErrs:  tt.wantAdmissionErrs,
 				wantWebhookErrors:  tt.wantWebhook,
 				wantWarnings:       tt.wantWarnings,
 			}
