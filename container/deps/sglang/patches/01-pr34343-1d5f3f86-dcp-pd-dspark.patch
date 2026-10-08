@@ -1,0 +1,542 @@
+diff --git a/python/sglang/srt/arg_groups/pd_disaggregation_hook.py b/python/sglang/srt/arg_groups/pd_disaggregation_hook.py
+index ddaf80744..63316ae90 100644
+--- a/python/sglang/srt/arg_groups/pd_disaggregation_hook.py
++++ b/python/sglang/srt/arg_groups/pd_disaggregation_hook.py
+@@ -34,6 +34,27 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
+             "overhead without improving prefill performance."
+         )
+
++    if (
++        server_args.disaggregation_mode in ("prefill", "decode")
++        and server_args.speculative_algorithm == "DSPARK"
++        and server_args.disaggregation_transfer_backend == "nixl"
++    ):
++        raise ValueError(
++            "PD with DSPARK requires --disaggregation-transfer-backend mooncake; "
++            "the nixl backend has no transfer path for the DSPARK draft KV state."
++        )
++
++    if (
++        server_args.disaggregation_mode == "prefill"
++        and server_args.speculative_algorithm == "DSPARK"
++        and server_args.enable_prefill_context_parallel
++    ):
++        raise ValueError(
++            "PD prefill with DSPARK is incompatible with "
++            "--enable-prefill-context-parallel: each CP rank only writes "
++            "draft KV for its own token shard."
++        )
++
+     if server_args.disaggregation_mode == "decode" and server_args.dcp_size > 1:
+         if server_args.disaggregation_transfer_backend not in ("mooncake", "nixl"):
+             raise ValueError(
+diff --git a/python/sglang/srt/disaggregation/base/conn.py b/python/sglang/srt/disaggregation/base/conn.py
+index f88eda509..2844f885e 100644
+--- a/python/sglang/srt/disaggregation/base/conn.py
++++ b/python/sglang/srt/disaggregation/base/conn.py
+@@ -24,6 +24,7 @@ class StateType(str, enum.Enum):
+     SWA_RING = "swa_ring"
+     # DeepSeek-V4 online C128 request-scoped state.
+     C128_STATE = "c128_state"
++    DSPARK_DRAFT_KV = "dspark_draft_kv"
+
+
+ @dataclasses.dataclass
+diff --git a/python/sglang/srt/disaggregation/decode.py b/python/sglang/srt/disaggregation/decode.py
+index 240e20def..40c651d50 100644
+--- a/python/sglang/srt/disaggregation/decode.py
++++ b/python/sglang/srt/disaggregation/decode.py
+@@ -450,7 +450,12 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
+             kv_data_lens += device_kv_data_lens[c4_layer_num:]
+             kv_item_lens += device_kv_item_lens[c4_layer_num:]
+             kv_data_mem_kinds += ["VRAM"] * len(device_kv_data_ptrs[c4_layer_num:])
+-        if self.draft_token_to_kv_pool is not None:
++        use_dspark_draft_kv_state = self.scheduler.spec_algorithm.is_dspark()
++
++        if (
++            self.draft_token_to_kv_pool is not None
++            and not use_dspark_draft_kv_state
++        ):
+             # We should also transfer draft model kv cache. The indices are
+             # always shared with a target model.
+             draft_kv_data_ptrs, draft_kv_data_lens, draft_kv_item_lens = (
+@@ -466,7 +471,10 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
+         kv_args.kv_item_lens = kv_item_lens
+         kv_args.kv_layer_ids = (
+             self.token_to_kv_pool.get_kv_layer_ids()
+-            if self.draft_token_to_kv_pool is None
++            if (
++                self.draft_token_to_kv_pool is None
++                or use_dspark_draft_kv_state
++            )
+             and hasattr(self.token_to_kv_pool, "get_kv_layer_ids")
+             else []
+         )
+@@ -484,6 +492,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
+             self.draft_token_to_kv_pool,
+             total_kv_layers=self.scheduler.model_config.num_hidden_layers,
+             req_to_token_pool=getattr(self, "req_to_token_pool", None),
++            use_dspark_draft_kv_state=use_dspark_draft_kv_state,
+         )
+
+         kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
+@@ -1203,9 +1212,21 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
+                 )
+                 if clear_c128_state is not None:
+                     clear_c128_state(int(decode_req.req.req_pool_idx))
++
++            def _dspark_draft_kv_payload():
++                return (
++                    self.req_to_token_pool.req_to_token[
++                        decode_req.req.req_pool_idx, :seq_len
++                    ]
++                    .cpu()
++                    .numpy()
++                    .astype(np.int32)
++                )
++
+             # MINIMAX_INDEX_K reuses _dsa_payload: index rows live at the same loc
+             # as main KV on the same page_size.
+             payloads = {
++                StateType.DSPARK_DRAFT_KV: _dspark_draft_kv_payload,
+                 StateType.MAMBA: _mamba_payload,
+                 StateType.SWA: _swa_payload,
+                 StateType.DSA: _dsa_payload,
+diff --git a/python/sglang/srt/disaggregation/mooncake/conn.py b/python/sglang/srt/disaggregation/mooncake/conn.py
+index 1907e0ee6..0378b5e2c 100644
+--- a/python/sglang/srt/disaggregation/mooncake/conn.py
++++ b/python/sglang/srt/disaggregation/mooncake/conn.py
+@@ -1275,6 +1275,42 @@ class MooncakeKVManager(CommonKVManager):
+                         )
+                         or rc
+                     )
++            elif st == StateType.DSPARK_DRAFT_KV:
++                # Empty dst_item_lens means the decode side registered fewer
++                # state components than prefill, i.e. no draft KV component at
++                # all -- treat that as a mismatch rather than skipping the
++                # comparison, matching the MAMBA branch above. Per-rank draft
++                # geometry differing between the two sides silently corrupts
++                # low pages and overruns the registered buffer on high ones.
++                if list(src_item_lens) != list(dst_item_lens) or len(indices) != len(
++                    dst_indices
++                ):
++                    logger.error(
++                        "DSPARK draft KV mismatch for room %s: item_lens %s vs %s, "
++                        "indices %d vs %d",
++                        req.room,
++                        list(src_item_lens),
++                        list(dst_item_lens),
++                        len(indices),
++                        len(dst_indices),
++                    )
++                    rc = -1
++                else:
++                    rc = (
++                        self._send_kvcache_generic(
++                            mooncake_session_id=req.mooncake_session_id,
++                            src_data_ptrs=src_data_ptrs,
++                            dst_data_ptrs=dst_data_ptrs,
++                            item_lens=src_item_lens,
++                            prefill_data_indices=np.asarray(indices, dtype=np.int32),
++                            dst_data_indices=np.asarray(dst_indices, dtype=np.int32),
++                            executor=executor,
++                            state_type=st,
++                            src_layer_ids=src_state_layer_ids,
++                            dst_layer_ids=dst_state_layer_ids,
++                        )
++                        or rc
++                    )
+             elif self._is_generic_kvcache_state_type(st):
+                 if (
+                     target_rank_registration_info is not None
+@@ -1593,6 +1629,22 @@ class MooncakeKVManager(CommonKVManager):
+                                 )
+                                 break
+
++                        if req.mooncake_session_id not in self.decode_kv_args_table:
++                            self.record_failure(
++                                kv_chunk.room,
++                                f"KV args of remote mooncake session {req.mooncake_session_id} "
++                                f"are not registered",
++                            )
++                            self.update_status(kv_chunk.room, KVPoll.Failed)
++                            self.sync_status_to_decode_endpoint(
++                                req.endpoint,
++                                req.dst_port,
++                                req.room,
++                                KVPoll.Failed,
++                                prefill_unique_rank,
++                            )
++                            break
++
+                         target_rank_registration_info: KVArgsRegisterInfo = (
+                             self.decode_kv_args_table[req.mooncake_session_id]
+                         )
+@@ -1833,114 +1885,139 @@ class MooncakeKVManager(CommonKVManager):
+                     f"Transfer thread failed because of {e}. Prefill instance with bootstrap_port={self.bootstrap_port} is dead."
+                 )
+
++    def _handle_bootstrap_message(self, waiting_req_bytes: List[bytes]):
++        room = waiting_req_bytes[0].decode("ascii")
++        # Staging: decode reports consumption watermark back to prefill
++        if room == "WATERMARK":
++            from sglang.srt.disaggregation.common.staging_handler import (
++                handle_watermark_msg,
++            )
++
++            handle_watermark_msg(self._staging_ctx, waiting_req_bytes)
++            return
++        # Staging: decode replies with allocated staging offset
++        if room == "STAGING_RSP":
++            from sglang.srt.disaggregation.common.staging_handler import (
++                handle_staging_rsp,
++            )
++
++            handle_staging_rsp(waiting_req_bytes, self.transfer_infos)
++            return
++        # Decode-side abort notification: mark room as failed and ACK
++        if room == "ABORT":
++            room_to_be_aborted = int(waiting_req_bytes[1].decode("ascii"))
++            decode_ip = waiting_req_bytes[2].decode("ascii")
++            decode_port = int(waiting_req_bytes[3].decode("ascii"))
++            # No need to abort the room if it has already succeeded
++            if (
++                room_to_be_aborted in self.request_status
++                and self.check_status(room_to_be_aborted) != KVPoll.Success
++            ):
++                self.update_status(room_to_be_aborted, KVPoll.Failed)
++                logger.debug(
++                    f"Received abort notification for room {room_to_be_aborted}, "
++                    f"marked as Failed"
++                )
++            else:
++                logger.debug(
++                    f"Received abort notification for room {room_to_be_aborted}, "
++                    f"ignoring (already completed or unknown)"
++                )
++            # Send ACK back to decode endpoint
++            try:
++                na = NetworkAddress(decode_ip, decode_port)
++                self._send_multipart_locked(
++                    na.to_tcp(),
++                    [
++                        b"ABORT_ACK",
++                        str(room_to_be_aborted).encode("ascii"),
++                    ],
++                    is_ipv6=na.is_ipv6,
++                )
++                logger.debug(
++                    f"Sent ABORT_ACK for room {room_to_be_aborted} to "
++                    f"{decode_ip}:{decode_port}"
++                )
++            except Exception as e:
++                logger.debug(
++                    f"Failed to send ABORT_ACK for room {room_to_be_aborted}: {e}"
++                )
++            return
++        mooncake_session_id = waiting_req_bytes[3].decode("ascii")
++        if room == "None":
++            decode_kv_args = KVArgsRegisterInfo.from_zmq(waiting_req_bytes)
++            decode_kv_args.requires_dcp_relayout = self.requires_dcp_relayout(
++                decode_kv_args.dst_dcp_size,
++                decode_kv_args.dst_dcp_rank,
++            )
++            if decode_kv_args.requires_dcp_relayout:
++                decode_kv_args.dcp_token_item_lens = self.prepare_dcp_token_item_lens(
++                    [decode_kv_args.dst_kv_item_len] * len(self.kv_args.kv_item_lens)
++                )
++            self.decode_kv_args_table[mooncake_session_id] = decode_kv_args
++            with self.session_lock:
++                if mooncake_session_id in self.failed_sessions:
++                    self.failed_sessions.remove(mooncake_session_id)
++                if mooncake_session_id in self.session_failures:
++                    del self.session_failures[mooncake_session_id]
++            logger.debug(f"Register KVArgs from {mooncake_session_id} successfully")
++            return
++        else:
++            required_dst_info_num = int(waiting_req_bytes[7].decode("ascii"))
++            room = int(room)
++            if room not in self.transfer_infos:
++                self.transfer_infos[room] = {}
++
++            self.transfer_infos[room][mooncake_session_id] = TransferInfo.from_zmq(
++                waiting_req_bytes
++            )
++            # NOTE: after bootstrapping we can mark the req as waiting for input
++            if len(self.transfer_infos[room]) == required_dst_info_num:
++                self.resolve_kv_replica_factor(self.transfer_infos[room])
++                self.req_to_decode_prefix_len[room] = next(
++                    (
++                        info.decode_prefix_len
++                        for info in self.transfer_infos[room].values()
++                        if info.decode_prefix_len is not None
++                    ),
++                    0,
++                )
++                self.update_status(room, KVPoll.WaitingForInput)
++
++    @staticmethod
++    def _bootstrap_message_session_id(
++        waiting_req_bytes: List[bytes],
++    ) -> Optional[str]:
++        if not waiting_req_bytes or waiting_req_bytes[0] == b"ABORT":
++            return None
++        session_index = 6 if waiting_req_bytes[0] == b"STAGING_RSP" else 3
++        if len(waiting_req_bytes) <= session_index:
++            return None
++        return waiting_req_bytes[session_index].decode("ascii", errors="replace")
++
++    def _fail_bootstrap_message(self, waiting_req_bytes: List[bytes]):
++        session_id = self._bootstrap_message_session_id(waiting_req_bytes)
++        if session_id is None:
++            logger.exception("Failed to handle bootstrap message without a session ID.")
++            return
++        logger.exception(
++            f"Failed to handle bootstrap message (session={session_id}). "
++            "Marking the session failed so pending rooms abort instead of hanging."
++        )
++        with self.session_lock:
++            self.session_failures[session_id] += 1
++            self.failed_sessions.add(session_id)
++
+     def start_prefill_thread(self):
+         def bootstrap_thread():
+             """This thread recvs pre-alloc notification from the decode engine"""
+             # KVPoll.Bootstrapping -> KVPoll.WaitingForInput
+             while True:
+                 waiting_req_bytes = self.server_socket.recv_multipart()
+-                room = waiting_req_bytes[0].decode("ascii")
+-                # Staging: decode reports consumption watermark back to prefill
+-                if room == "WATERMARK":
+-                    from sglang.srt.disaggregation.common.staging_handler import (
+-                        handle_watermark_msg,
+-                    )
+-
+-                    handle_watermark_msg(self._staging_ctx, waiting_req_bytes)
+-                    continue
+-                # Staging: decode replies with allocated staging offset
+-                if room == "STAGING_RSP":
+-                    from sglang.srt.disaggregation.common.staging_handler import (
+-                        handle_staging_rsp,
+-                    )
+-
+-                    handle_staging_rsp(waiting_req_bytes, self.transfer_infos)
+-                    continue
+-                # Decode-side abort notification: mark room as failed and ACK
+-                if room == "ABORT":
+-                    room_to_be_aborted = int(waiting_req_bytes[1].decode("ascii"))
+-                    decode_ip = waiting_req_bytes[2].decode("ascii")
+-                    decode_port = int(waiting_req_bytes[3].decode("ascii"))
+-                    # No need to abort the room if it has already succeeded
+-                    if (
+-                        room_to_be_aborted in self.request_status
+-                        and self.check_status(room_to_be_aborted) != KVPoll.Success
+-                    ):
+-                        self.update_status(room_to_be_aborted, KVPoll.Failed)
+-                        logger.debug(
+-                            f"Received abort notification for room {room_to_be_aborted}, "
+-                            f"marked as Failed"
+-                        )
+-                    else:
+-                        logger.debug(
+-                            f"Received abort notification for room {room_to_be_aborted}, "
+-                            f"ignoring (already completed or unknown)"
+-                        )
+-                    # Send ACK back to decode endpoint
+-                    try:
+-                        na = NetworkAddress(decode_ip, decode_port)
+-                        self._send_multipart_locked(
+-                            na.to_tcp(),
+-                            [
+-                                b"ABORT_ACK",
+-                                str(room_to_be_aborted).encode("ascii"),
+-                            ],
+-                            is_ipv6=na.is_ipv6,
+-                        )
+-                        logger.debug(
+-                            f"Sent ABORT_ACK for room {room_to_be_aborted} to "
+-                            f"{decode_ip}:{decode_port}"
+-                        )
+-                    except Exception as e:
+-                        logger.debug(
+-                            f"Failed to send ABORT_ACK for room {room_to_be_aborted}: {e}"
+-                        )
+-                    continue
+-                mooncake_session_id = waiting_req_bytes[3].decode("ascii")
+-                if room == "None":
+-                    decode_kv_args = KVArgsRegisterInfo.from_zmq(waiting_req_bytes)
+-                    decode_kv_args.requires_dcp_relayout = self.requires_dcp_relayout(
+-                        decode_kv_args.dst_dcp_size,
+-                        decode_kv_args.dst_dcp_rank,
+-                    )
+-                    if decode_kv_args.requires_dcp_relayout:
+-                        decode_kv_args.dcp_token_item_lens = (
+-                            self.prepare_dcp_token_item_lens(
+-                                [decode_kv_args.dst_kv_item_len]
+-                                * len(self.kv_args.kv_item_lens)
+-                            )
+-                        )
+-                    self.decode_kv_args_table[mooncake_session_id] = decode_kv_args
+-                    with self.session_lock:
+-                        if mooncake_session_id in self.failed_sessions:
+-                            self.failed_sessions.remove(mooncake_session_id)
+-                        if mooncake_session_id in self.session_failures:
+-                            del self.session_failures[mooncake_session_id]
+-                    logger.debug(
+-                        f"Register KVArgs from {mooncake_session_id} successfully"
+-                    )
+-                    continue
+-                else:
+-                    required_dst_info_num = int(waiting_req_bytes[7].decode("ascii"))
+-                    room = int(room)
+-                    if room not in self.transfer_infos:
+-                        self.transfer_infos[room] = {}
+-
+-                    self.transfer_infos[room][mooncake_session_id] = (
+-                        TransferInfo.from_zmq(waiting_req_bytes)
+-                    )
+-                    # NOTE: after bootstrapping we can mark the req as waiting for input
+-                    if len(self.transfer_infos[room]) == required_dst_info_num:
+-                        self.resolve_kv_replica_factor(self.transfer_infos[room])
+-                        self.req_to_decode_prefix_len[room] = next(
+-                            (
+-                                info.decode_prefix_len
+-                                for info in self.transfer_infos[room].values()
+-                                if info.decode_prefix_len is not None
+-                            ),
+-                            0,
+-                        )
+-                        self.update_status(room, KVPoll.WaitingForInput)
++                try:
++                    self._handle_bootstrap_message(waiting_req_bytes)
++                except Exception:
++                    self._fail_bootstrap_message(waiting_req_bytes)
+
+         threading.Thread(target=bootstrap_thread).start()
+
+diff --git a/python/sglang/srt/disaggregation/prefill.py b/python/sglang/srt/disaggregation/prefill.py
+index 5642c64ef..f4c277a28 100644
+--- a/python/sglang/srt/disaggregation/prefill.py
++++ b/python/sglang/srt/disaggregation/prefill.py
+@@ -214,7 +214,13 @@ class PrefillBootstrapQueue:
+             else getattr(self.token_to_kv_pool, "end_layer", None)
+         )
+
+-        if self.draft_token_to_kv_pool is not None and transfer_draft_cache:
++        use_dspark_draft_kv_state = self.scheduler.spec_algorithm.is_dspark()
++
++        if (
++            self.draft_token_to_kv_pool is not None
++            and transfer_draft_cache
++            and not use_dspark_draft_kv_state
++        ):
+             # We should also transfer draft model kv cache. The indices are
+             # always shared with a target model.
+             draft_kv_data_ptrs, draft_kv_data_lens, draft_kv_item_lens = (
+@@ -229,7 +235,10 @@ class PrefillBootstrapQueue:
+         kv_args.kv_item_lens = kv_item_lens
+         kv_args.kv_layer_ids = (
+             self.token_to_kv_pool.get_kv_layer_ids()
+-            if self.draft_token_to_kv_pool is None
++            if (
++                self.draft_token_to_kv_pool is None
++                or use_dspark_draft_kv_state
++            )
+             and hasattr(self.token_to_kv_pool, "get_kv_layer_ids")
+             else []
+         )
+@@ -253,6 +262,7 @@ class PrefillBootstrapQueue:
+             self.draft_token_to_kv_pool if transfer_draft_cache else None,
+             self.scheduler.model_config.num_hidden_layers,
+             req_to_token_pool=req_to_token_pool,
++            use_dspark_draft_kv_state=use_dspark_draft_kv_state,
+         )
+
+         if isinstance(self.token_to_kv_pool, DeepSeekV4TokenToKVPool):
+@@ -1206,9 +1216,21 @@ class SchedulerDisaggregationPrefillMixin:
+             state_types = (
+                 self.disagg_prefill_bootstrap_queue.kv_manager.kv_args.state_types
+             )
++
++            def _dspark_draft_kv_payload():
++                return (
++                    self.req_to_token_pool.req_to_token[
++                        req.req_pool_idx, :transfer_input_len
++                    ]
++                    .cpu()
++                    .numpy()
++                    .astype(np.int32)
++                )
++
+             # MINIMAX_INDEX_K reuses _dsa_payload: index rows live at the same loc
+             # as main KV on the same page_size.
+             payloads = {
++                StateType.DSPARK_DRAFT_KV: _dspark_draft_kv_payload,
+                 StateType.MAMBA: _mamba_payload,
+                 StateType.SWA: _swa_payload,
+                 StateType.DSA: _dsa_payload,
+diff --git a/python/sglang/srt/disaggregation/utils.py b/python/sglang/srt/disaggregation/utils.py
+index 237f293ec..bc50ee4be 100644
+--- a/python/sglang/srt/disaggregation/utils.py
++++ b/python/sglang/srt/disaggregation/utils.py
+@@ -988,6 +988,7 @@ def setup_state_kv_args(
+     draft_token_to_kv_pool=None,
+     total_kv_layers: int = None,
+     req_to_token_pool=None,
++    use_dspark_draft_kv_state: bool = False,
+ ) -> None:
+     """Populate ``kv_args`` state-buffer fields from the given pool.
+     Shared by prefill and decode bootstrap paths so the state_type dispatch
+@@ -1000,6 +1001,7 @@ def setup_state_kv_args(
+     from sglang.srt.mem_cache.memory_pool import (
+         DSATokenToKVPool,
+         HybridLinearKVPool,
++        MHATokenToKVPool,
+         MiniMaxSparseKVPool,
+     )
+
+@@ -1233,6 +1235,44 @@ def setup_state_kv_args(
+                 slice_outer_counts,
+             )
+
++    if use_dspark_draft_kv_state and draft_token_to_kv_pool is not None:
++        if isinstance(draft_token_to_kv_pool, MHATokenToKVPool):
++            draft_ptrs, draft_lens, draft_page_item_lens = (
++                draft_token_to_kv_pool.get_contiguous_buf_infos()
++            )
++            if draft_ptrs:
++                draft_page_size = draft_token_to_kv_pool.page_size
++                if any(
++                    item_len % draft_page_size
++                    for item_len in draft_page_item_lens
++                ):
++                    raise RuntimeError(
++                        "DSPARK draft KV page item length must be divisible by the "
++                        f"draft page size: item_lens={draft_page_item_lens}, "
++                        f"page_size={draft_page_size}"
++                    )
++                draft_token_item_lens = [
++                    item_len // draft_page_size
++                    for item_len in draft_page_item_lens
++                ]
++                append_state_component(
++                    kv_args,
++                    StateType.DSPARK_DRAFT_KV,
++                    draft_ptrs,
++                    draft_lens,
++                    draft_token_item_lens,
++                    layer_ids=list(range(len(draft_ptrs))),
++                )
++        elif not (
++            isinstance(token_to_kv_pool, DeepSeekV4TokenToKVPool)
++            and isinstance(draft_token_to_kv_pool, DeepSeekV4TokenToKVPool)
++        ):
++            raise NotImplementedError(
++                "Unsupported PD DSPARK draft KV pool combination: "
++                f"target={type(token_to_kv_pool).__name__}, "
++                f"draft={type(draft_token_to_kv_pool).__name__}"
++            )
++
+
+ def prepare_abort(req: Req, error_message: str, status_code=None):
+     from sglang.srt.managers.schedule_batch import FINISH_ABORT

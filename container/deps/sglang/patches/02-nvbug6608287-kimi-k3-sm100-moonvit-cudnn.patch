@@ -1,0 +1,38 @@
+diff --git a/python/sglang/srt/models/kimi_k3_vl.py b/python/sglang/srt/models/kimi_k3_vl.py
+index a1c37bbf85c5e505d7815ee9e9300e01b32e7b0d..3c496770e3ea86547b32dcfee38a3fca6a7c5e97 100644
+--- a/python/sglang/srt/models/kimi_k3_vl.py
++++ b/python/sglang/srt/models/kimi_k3_vl.py
+@@ -45,6 +45,7 @@ if _use_aiter:
+ 
+ _SM103_TRITON_MAX_SEQLEN = 1536
+ _SM103_FA4_MIN_ATTENTION_WORK = 3_000_000
++_SM100_CAPABILITY = (10, 0)
+ 
+ GridTHW = Tuple[int, int, int]
+ SegmentBounds = Tuple[Tuple[int, int], ...]
+@@ -75,6 +76,12 @@ def _is_fa4_available() -> bool:
+     return is_flash_attention_v4_available()
+ 
+ 
++def _is_sm100(device: torch.device) -> bool:
++    return device.type == "cuda" and torch.cuda.get_device_capability(
++        device
++    ) == _SM100_CAPABILITY
++
++
+ def _resolve_mm_attention_backend(
+     configured_backend: str,
+     *,
+@@ -328,6 +335,12 @@ class MoonVision3dPatchEmbed(nn.Module):
+             ).view(x.size(0), -1)
+         elif _is_hip:
+             x = F.linear(x.flatten(1), self.proj.weight.flatten(1), self.proj.bias)
++        elif _is_sm100(x.device):
++            # Concurrent cudnnCreate calls from multinode TP workers can crash
++            # MoonViT patch embedding on GB200. Keep the workaround local to
++            # this convolution so unrelated cuDNN kernels remain enabled.
++            with torch.backends.cudnn.flags(enabled=False):
++                x = self.proj(x).view(x.size(0), -1)
+         else:
+             x = self.proj(x).view(x.size(0), -1)
+         return self.pos_emb(
