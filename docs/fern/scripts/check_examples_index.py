@@ -8,9 +8,11 @@ The examples index page
 surface for the user-facing tree under ``examples/``. This checker keeps that
 surface honest without a separate machine-readable schema:
 
-  ORPHAN  every user-facing example directory or file listed in DETECTED must be
-          referenced from the docs site (directly, or via one of its children),
-          unless it is explicitly dispositioned in NON_USER_FACING.
+  ORPHAN  every user-facing example (a directory that ships a README or a
+          runnable entrypoint, plus the files in EXTRA_USER_FACING) must be
+          referenced from the Recipes examples index, directly or via one of
+          its children, unless it is explicitly dispositioned in
+          NON_USER_FACING.
   STALE   every ``examples/...`` path referenced from the docs site must exist
           on disk. Broken links on the examples index page and the reference
           examples page are errors; elsewhere they are reported as warnings so
@@ -30,7 +32,6 @@ import os
 import re
 import sys
 
-# Repo root, derived from this file's location (docs/fern/scripts/check_examples_index.py).
 REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
@@ -44,16 +45,17 @@ OWNED_FILES = (
     os.path.join("docs", "fern", "pages", "reference", "general", "examples.md"),
 )
 
-# User-facing paths with no README. The index page must surface these just like
-# README-bearing directories; they are called out explicitly because a bare
-# directory scan cannot tell them apart from internal plumbing.
+# A directory is a user-facing candidate when it directly contains one of these.
+# Detection is content-based rather than README-only so that a new example added
+# without a README is still caught: a missing example must be dispositioned in
+# NON_USER_FACING, not silently ignored.
+USER_FACING_FILENAMES = ("README.md",)
+USER_FACING_SUFFIXES = (".sh", ".py")
+
+# User-facing example files that live inside a shared directory rather than in a
+# dedicated example directory, so per-directory content detection cannot see
+# them. Directories themselves are detected automatically and need no entry here.
 EXTRA_USER_FACING = (
-    "examples/backends/vllm/launch",
-    "examples/backends/vllm/launch/xpu",
-    "examples/backends/vllm/launch/lora/xpu",
-    "examples/backends/sglang/launch",
-    "examples/backends/trtllm/launch",
-    "examples/custom_encoder",
     "examples/common/gpu_utils.md",
     "examples/common/lora.md",
     "examples/router/policy-class-queues.yaml",
@@ -63,7 +65,9 @@ EXTRA_USER_FACING = (
 # They are still checked for existence so the disposition does not go stale.
 NON_USER_FACING = {
     "examples/backends/sample": "test-only CPU smoke backends",
+    "examples/backends/sample/launch": "test-only CPU smoke launch scripts",
     "examples/backends/mocker": "GPU-free mocker workers used by CI",
+    "examples/backends/sglang": "test helpers for the SGLang backend",
     "examples/backends/vllm/omni": "internal dev/qualification overlay",
     "examples/backends/vllm/deploy/v1beta1": "obsolete legacy manifest path",
     "examples/backends/vllm/deploy/gaie": "supporting Gateway API Inference Extension manifest",
@@ -72,7 +76,10 @@ NON_USER_FACING = {
     "examples/backends/tokenspeed/tests": "test-only",
     "examples/nemotron_speech_cascaded_pipeline/container": "supporting adapter image build",
     "examples/nemotron_speech_cascaded_pipeline/nemotron_speech": "internal adapter code",
+    "examples/nemotron_speech_cascaded_pipeline/nemotron_speech/asr": "internal adapter code",
+    "examples/nemotron_speech_cascaded_pipeline/nemotron_speech/tts": "internal adapter code",
     "examples/nemotron_speech_cascaded_pipeline/tests": "test-only",
+    "examples/custom_encoder/launch": "supporting launch scripts for the encoder example",
     "examples/deployments/EKS/manifests": "supporting EKS manifests",
     "examples/deployments/EKS/templates": "supporting eksctl template",
     "examples/deployments/GKE/vllm": "supporting GKE manifests",
@@ -106,18 +113,33 @@ def normalize_ref(raw: str) -> str:
     return ref
 
 
+def has_user_facing_content(filenames: list[str]) -> bool:
+    """True when a directory directly holds a README or a runnable entrypoint."""
+    if any(name in USER_FACING_FILENAMES for name in filenames):
+        return True
+    return any(name.endswith(USER_FACING_SUFFIXES) for name in filenames)
+
+
 def detected_user_facing() -> dict[str, str]:
-    """Path -> why it is user-facing, for every path the index must cover."""
+    """Path -> why it is user-facing, for every path the index must cover.
+
+    Directories are detected by content, not by README presence alone, so a new
+    example without a README is still surfaced as an orphan unless it is
+    dispositioned in NON_USER_FACING.
+    """
     found: dict[str, str] = {}
     examples_root = os.path.join(REPO_ROOT, EXAMPLES_DIR)
     for dirpath, dirnames, filenames in os.walk(examples_root):
         dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        rel = os.path.relpath(dirpath, REPO_ROOT).replace(os.sep, "/")
+        if rel == EXAMPLES_DIR:
+            continue
         if "README.md" in filenames:
-            rel = os.path.relpath(dirpath, REPO_ROOT).replace(os.sep, "/")
-            if rel != EXAMPLES_DIR:
-                found[rel] = "README"
+            found[rel] = "README"
+        elif has_user_facing_content(filenames):
+            found[rel] = "runnable example entrypoint"
     for rel in EXTRA_USER_FACING:
-        found[rel] = "user-facing (no README)"
+        found[rel] = "user-facing file"
     return found
 
 
@@ -132,11 +154,8 @@ def collect_doc_refs() -> dict[str, set[str]]:
                 continue
             abs_path = os.path.join(dirpath, name)
             rel_file = os.path.relpath(abs_path, REPO_ROOT).replace(os.sep, "/")
-            try:
-                with open(abs_path, encoding="utf-8") as handle:
-                    text = handle.read()
-            except OSError:
-                continue
+            with open(abs_path, encoding="utf-8") as handle:
+                text = handle.read()
             for raw in REF_RE.findall(text):
                 ref = normalize_ref(raw)
                 if ref and ref != EXAMPLES_DIR and "/" in ref[len(EXAMPLES_DIR) :]:
@@ -145,6 +164,7 @@ def collect_doc_refs() -> dict[str, set[str]]:
 
 
 def main() -> int:
+    """Run the orphan and stale-link checks; return the process exit code."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--strict",
@@ -161,12 +181,17 @@ def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
 
-    covered_refs = set(refs)
+    # Coverage is judged against the curated Recipes index only: a link from an
+    # unrelated page must not satisfy the orphan check. The site-wide ``refs``
+    # scan is still used below to detect stale links everywhere.
+    index_file = OWNED_FILES[0]
+    index_refs = {ref for ref, where in refs.items() if index_file in where}
     for path, why in sorted(required.items()):
-        covered = any(ref == path or ref.startswith(path + "/") for ref in covered_refs)
+        covered = any(ref == path or ref.startswith(path + "/") for ref in index_refs)
         if not covered:
             errors.append(
-                f"ORPHAN  {path} ({why}) is not referenced from the docs site"
+                f"ORPHAN  {path} ({why}) is not referenced from the Recipes "
+                "examples index"
             )
 
     for path, where in sorted(refs.items()):

@@ -37,4 +37,4 @@ release branch before using a script.
 
 Browse the full [examples directory](https://github.com/ai-dynamo/dynamo/tree/main/examples)
 in the repository, or use the maintained [Examples index](../../recipes/examples/overview.mdx)
-when you want every supported example with its purpose and hardware requirements.
+when you want every supported example with its purpose and repository source.
