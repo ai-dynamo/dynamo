@@ -71,6 +71,11 @@ jobs:
           "${k[@]}" get pods -l "$selector" -o yaml > "$bundle/pods.yaml" || true
           "${k[@]}" describe pods -l "$selector" > "$bundle/pods-describe.txt" || true
           "${k[@]}" get events --sort-by=.lastTimestamp > "$bundle/events.txt" || true
+          "${k[@]}" get limitrange -o yaml > "$bundle/limitranges.yaml" || true
+          "${k[@]}" get nodes -l cloud.google.com/gke-nodepool=customer-gpu-o7v \
+            -o json > "$bundle/nodes.json" || true
+          "${k[@]}" describe nodes -l cloud.google.com/gke-nodepool=customer-gpu-o7v \
+            > "$bundle/nodes-describe.txt" || true
           "${k[@]}" logs -l "$selector" -c main --prefix --tail=500 \
             > "$bundle/deployment.log" 2>&1 || true
           for pod in $("${k[@]}" get pods -l "$selector" -o name); do
