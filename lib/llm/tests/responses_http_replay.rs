@@ -280,7 +280,7 @@ async fn colliding_namespace_tools_round_trip_through_http() {
                 let response = post_responses(&svc, &body).await;
                 assert_eq!(response.status(), reqwest::StatusCode::OK);
                 let response_body = if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap()).await.unwrap();
+                    let events = parse_responses_sse(&response.text().await.unwrap()).await.unwrap();
                     for kind in ["response.output_item.added", "response.output_item.done"] {
                         let call = events.iter().find(|event| event.event == kind
                             && event.data["item"]["type"] == "function_call").unwrap();

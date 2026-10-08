@@ -18,10 +18,7 @@ except Exception:
 __all__ = ["__version__"]
 
 try:
-    from dynamo._core import MockEngineArgs as MockEngineArgs
     from dynamo._core import ReasoningConfig as ReasoningConfig
-    from dynamo._core import SglangArgs as SglangArgs
-    from dynamo._core import TrtllmArgs as TrtllmArgs
 except ImportError:
     # The Rust extension is provided by ai-dynamo-runtime. Keep importing the
     # package itself cheap in static tooling environments where _core is absent.
@@ -31,10 +28,7 @@ else:
 
     __all__.extend(
         [
-            "MockEngineArgs",
             "ReasoningConfig",
-            "SglangArgs",
-            "TrtllmArgs",
             "run_mocker_trace_replay",
         ]
     )

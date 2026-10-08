@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import base64
-import binascii
 import hashlib
 import logging
 import os
@@ -29,8 +27,10 @@ from ..http.media_reference import max_media_bytes
 from ..http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
+    describe_media_source,
     validate_media_url,
 )
+from .media_source import decode_data_uri
 from .shared_image_cache import SharedImageCache, SharedImageCacheStats
 
 logger = logging.getLogger(__name__)
@@ -159,8 +159,8 @@ class ImageLoader:
                 decoded images directly from frontend memory, bypassing standard
                 network transport. Defaults to False.
             url_policy: Policy for validating URLs. Defaults to UrlValidationPolicy.from_env().
-            max_bytes: Maximum remote image size in bytes. When omitted, resolve
-                DYN_MM_MAX_FILE_SIZE_MB for each request.
+            max_bytes: Maximum remote or inline image size in bytes. When omitted,
+                resolve DYN_MM_MAX_FILE_SIZE_MB for each request.
             session_scoped_cache: Include a caller-provided cache scope in local,
                 in-flight, and shared-cache keys. ``None`` (default) reads
                 DYN_MM_IMAGE_CACHE_SESSION_SCOPED (default off). When enabled,
@@ -267,8 +267,8 @@ class ImageLoader:
                     except (OSError, ValueError) as exc:
                         logger.warning(
                             "Discarding invalid shared image cache entry for '%s': %s",
-                            image_url[:80],
-                            exc,
+                            describe_media_source(image_url),
+                            type(exc).__name__,
                         )
                         await self._shared_image_cache.delete(key)
 
@@ -293,12 +293,18 @@ class ImageLoader:
             return image
 
         except HttpStatusError as e:
-            logger.error(f"HTTP {e.status} loading image: '{image_url}'")
+            logger.error(
+                "HTTP %s loading image: '%s'",
+                e.status,
+                describe_media_source(image_url),
+            )
             raise
         except HttpTimeoutError as e:
             logger.error(
-                f"{type(e).__name__} loading image: '{image_url}' "
-                f"(timeout={self._http_timeout}s)"
+                "%s loading image: '%s' (timeout=%ss)",
+                type(e).__name__,
+                describe_media_source(image_url),
+                self._http_timeout,
             )
             raise HttpStatusError(
                 408,
@@ -309,31 +315,57 @@ class ImageLoader:
         except HttpConnectionError as e:
             # Treat a user-supplied unreachable URL as a client error (400)
             # rather than an internal server fault.
-            logger.error("%s loading image: '%s': %s", type(e).__name__, image_url, e)
+            logger.error(
+                "%s loading image: '%s'",
+                type(e).__name__,
+                describe_media_source(image_url),
+            )
             raise HttpStatusError(
                 400,
                 f"Connection error loading image: '{image_url}': {e}",
                 image_url,
             ) from e
         except HttpError as e:
-            logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
+            # Exception messages can repeat signed URLs; preserve the exception
+            # for callers, but log only its type and a redacted source label.
+            logger.error(
+                "%s loading image: '%s'",
+                type(e).__name__,
+                describe_media_source(image_url),
+            )
             raise
         except Image.UnidentifiedImageError as e:
-            logger.error(f"Unsupported image format loading: '{image_url}'")
+            logger.error(
+                "Unsupported image format loading: '%s'",
+                describe_media_source(image_url),
+            )
             raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
-        except UrlValidationError as e:
+        except UrlValidationError:
             # Keep the type (must precede ValueError, its base) so the batch
             # caller can still map this client error to a 4xx, not a 500.
-            logger.error("URL rejected loading image: '%s': %s", image_url, e)
+            logger.error(
+                "URL rejected loading image: '%s'", describe_media_source(image_url)
+            )
             raise
         except ValueError as e:
             if "Unsupported image format" in str(e):
-                logger.error(f"Unsupported image format loading: '{image_url}'")
+                logger.error(
+                    "Unsupported image format loading: '%s'",
+                    describe_media_source(image_url),
+                )
                 raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
-            logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
+            logger.error(
+                "%s loading image: '%s'",
+                type(e).__name__,
+                describe_media_source(image_url),
+            )
             raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
         except Exception as e:
-            logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
+            logger.error(
+                "%s loading image: '%s'",
+                type(e).__name__,
+                describe_media_source(image_url),
+            )
             raise
 
     async def _fetch_and_cache(self, key: str, image_url: str) -> Image.Image:
@@ -377,7 +409,11 @@ class ImageLoader:
                 return await self._fetch_and_process(None, normalized_url)
 
             if key in self._image_cache:
-                logger.debug(f"Image found in cache for URL: {image_url}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Image found in cache for URL: %s",
+                        describe_media_source(image_url),
+                    )
                 self._image_cache.move_to_end(key)
                 return self._image_cache[key]
 
@@ -397,34 +433,44 @@ class ImageLoader:
                     if not parsed_url.path.startswith("image/"):
                         raise ValueError("Data URL must be an image type")
 
-                    media_type, data = parsed_url.path.split(",", 1)
-                    if ";base64" not in media_type:
-                        raise ValueError("Data URL must be base64 encoded")
-
-                    try:
-                        image_bytes = base64.b64decode(data, validate=True)
-                    except binascii.Error as e:
-                        raise ValueError(f"Invalid base64 encoding: {e}") from e
+                    image_bytes = decode_data_uri(
+                        normalized_url, max_bytes=self._max_bytes()
+                    )
                     image_data = BytesIO(image_bytes)
                 return await self._open_image(image_data)
             except Image.UnidentifiedImageError as e:
-                logger.error(f"Unsupported image format decoding: '{image_url}'")
+                logger.error(
+                    "Unsupported image format decoding: '%s'",
+                    describe_media_source(image_url),
+                )
                 raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
+            except UrlValidationError as e:
+                raise ValueError(f"Failed to decode image: {e}") from e
             except ValueError as e:
                 if "Unsupported image format" in str(e):
-                    logger.error(f"Unsupported image format decoding: '{image_url}'")
+                    logger.error(
+                        "Unsupported image format decoding: '%s'",
+                        describe_media_source(image_url),
+                    )
                     raise HttpStatusError(
                         415, "Unsupported Media Type", image_url
                     ) from e
-                logger.error(f"{type(e).__name__} decoding image: '{image_url}': {e}")
-                raise ValueError(f"Failed to decoding image: '{image_url}': {e}") from e
+                source = describe_media_source(image_url)
+                logger.error("%s decoding image: '%s': %s", type(e).__name__, source, e)
+                raise ValueError(f"Failed to decoding image: '{source}': {e}") from e
             except OSError as e:
-                logger.error(f"Invalid or truncated image data: '{image_url}'")
+                logger.error(
+                    "Invalid or truncated image data: '%s'",
+                    describe_media_source(image_url),
+                )
                 raise HttpStatusError(
                     400, "Invalid or truncated image data", image_url
                 ) from e
             except Exception:
-                logger.error(f"Unexpected error decoding image: '{image_url}'")
+                logger.error(
+                    "Unexpected error decoding image: '%s'",
+                    describe_media_source(image_url),
+                )
                 raise
 
         # It's not file:, http:, https:, or data:
@@ -500,7 +546,11 @@ class ImageLoader:
                 url = item[URL_VARIANT_KEY]
                 slot_to_future_idx.append(len(image_futures))
                 image_futures.append(self.load_image(url, cache_scope=cache_scope))
-                logger.debug(f"Preparing to load image from URL: {url[:80]}...")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Preparing to load image from URL: %s",
+                        describe_media_source(url),
+                    )
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self._enable_frontend_decoding:
                     metadata = item[DECODED_VARIANT_KEY]
@@ -547,10 +597,14 @@ class ImageLoader:
                 # image-loading error.
                 if not isinstance(result, Exception):
                     raise result
-                source = media_item.get(URL_VARIANT_KEY, "decoded")
-                logger.error(f"Failed to load image from {source[:80]}...: {result}")
+                source = describe_media_source(
+                    media_item.get(URL_VARIANT_KEY, "decoded")
+                )
+                logger.error(
+                    "Failed to load image from %s: %s", source, type(result).__name__
+                )
                 collective_exceptions += (
-                    f"Failed to load image from {source[:80]}...: {result}\n"
+                    f"Failed to load image from {source}: {result}\n"
                 )
                 # Preserve HTTP status semantics (e.g. 415 Unsupported Media Type).
                 # Folding an HttpStatusError into a generic Exception below would

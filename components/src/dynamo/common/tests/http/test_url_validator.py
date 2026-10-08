@@ -564,12 +564,40 @@ def test_describe_media_source_bounds_data_uri_metadata() -> None:
         assert f"({len(source)} chars" in label  # true size stays visible
 
 
-def test_describe_media_source_keeps_an_ordinary_data_uri_intact() -> None:
-    """Control: a real media type is short and must survive the new bound."""
-    label = describe_media_source("data:image/png;base64," + "A" * 50_000)
+@pytest.mark.parametrize("scheme", ["data", "DATA", " \tDaTa"])
+def test_describe_media_source_elides_data_uri_payload(scheme) -> None:
+    label = describe_media_source(scheme + ":image/png;base64," + "A" * 50_000)
 
     assert label.startswith("data:image/png (")
     assert "payload elided" in label
+
+
+@pytest.mark.parametrize("scheme", ["data", "DATA", " \tDaTa"])
+def test_malformed_inline_source_label_elides_payload(scheme) -> None:
+    source = scheme + "://[;base64,private-inline-payload"
+
+    label = describe_media_source(source)
+
+    assert "private-inline-payload" not in label
+    assert len(label) < 200
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (
+            "https://user:private-password@example.com/ref.png?sig=private-token#private-fragment",
+            "https://example.com/ref.png",
+        ),
+        ("http://example.com/ref.png?sig=private-token", "http://example.com/ref.png"),
+        (
+            "https://user:private-password@[::1]:1234/ref.png?sig=private-token",
+            "https://[::1]:1234/ref.png",
+        ),
+    ],
+)
+def test_http_source_label_redacts_credentials(source, expected) -> None:
+    assert describe_media_source(source) == expected
 
 
 def test_validate_local_path_keeps_an_ordinary_path_intact(tmp_path) -> None:
@@ -594,6 +622,7 @@ async def test_validate_media_reference_rejects_empty(tmp_path) -> None:
         "https:///" + "A" * 200_000,  # no host component
         "A" * 200_000 + "://x",  # scheme is client-supplied too
     ],
+    ids=["missing-host", "oversized-scheme"],
 )
 async def test_validate_url_bounds_the_url_in_its_message(url) -> None:
     """These messages became client-visible once the diffusion handlers
@@ -611,11 +640,13 @@ async def test_redirect_chain_in_the_limit_message_is_bounded() -> None:
     long_hop = "https://example.com/" + "A" * 200_000
 
     class _Client(HttpClient):
-        async def _fetch_simple(self, url, timeout, *, max_bytes=None, policy=None):
+        async def _fetch_simple(
+            self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
+        ):
             raise AssertionError("unused")
 
         async def _fetch_body_or_redirect(
-            self, url, timeout, *, max_bytes=None, policy=None
+            self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
         ):
             return None, long_hop
 

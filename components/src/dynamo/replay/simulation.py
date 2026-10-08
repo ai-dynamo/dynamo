@@ -18,7 +18,10 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
-from aisimulate.runner import EngineReplayRunnerFactory
+from aisimulate.runner import (
+    EngineReplayRunnerFactory,
+    materialize_engine_launch_config,
+)
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     HookCapability,
@@ -29,13 +32,12 @@ from aisimulate.sweeper.replay import (
 )
 
 from dynamo.llm import AisPerfConfig, KvRouterConfig
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay.api import (
     TelemetryOptions,
     run_synthetic_trace_replay,
     run_trace_replay,
 )
-from dynamo.replay.config import lower_upstream_engine_args
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -322,10 +324,22 @@ class DynamoReplayRunner:
         raise ValueError("agentic execution requires a configured target model")
 
     @staticmethod
-    def _engine_args(payload: dict[str, JSONValue] | None) -> MockEngineArgs:
+    def _engine_args(deployment, role: str) -> dict[str, JSONValue]:
+        payload = getattr(
+            deployment,
+            "agg_engine_args" if role == "aggregated" else f"{role}_engine_args",
+        )
         if payload is None:
             raise ValueError("ReplaySpec is missing required engine arguments")
-        return MockEngineArgs.from_json(json.dumps(lower_upstream_engine_args(payload)))
+        return normalize_mocker_config(
+            materialize_engine_launch_config(
+                deployment.backend,
+                deployment.backend_version,
+                deployment.parallel_config,
+                payload,
+                role,
+            )
+        )
 
     def _run_trace(
         self,
@@ -369,7 +383,7 @@ class DynamoReplayRunner:
                 max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
                 agentic_lanes=agentic_lanes,
                 execution_model=execution_model,
-                extra_engine_args=self._engine_args(deployment.agg_engine_args),
+                extra_engine_args=self._engine_args(deployment, "aggregated"),
                 num_workers=deployment.num_workers,
                 **common,
             )
@@ -383,8 +397,8 @@ class DynamoReplayRunner:
             max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
             agentic_lanes=agentic_lanes,
             execution_model=execution_model,
-            prefill_engine_args=self._engine_args(deployment.prefill_engine_args),
-            decode_engine_args=self._engine_args(deployment.decode_engine_args),
+            prefill_engine_args=self._engine_args(deployment, "prefill"),
+            decode_engine_args=self._engine_args(deployment, "decode"),
             num_prefill_workers=deployment.num_prefill_workers,
             num_decode_workers=deployment.num_decode_workers,
             **common,
@@ -394,13 +408,13 @@ class DynamoReplayRunner:
         deployment = spec.backend_deployment
         if deployment.deployment_mode == "agg":
             return run_synthetic_trace_replay(
-                extra_engine_args=self._engine_args(deployment.agg_engine_args),
+                extra_engine_args=self._engine_args(deployment, "aggregated"),
                 num_workers=deployment.num_workers,
                 **common,
             )
         return run_synthetic_trace_replay(
-            prefill_engine_args=self._engine_args(deployment.prefill_engine_args),
-            decode_engine_args=self._engine_args(deployment.decode_engine_args),
+            prefill_engine_args=self._engine_args(deployment, "prefill"),
+            decode_engine_args=self._engine_args(deployment, "decode"),
             num_prefill_workers=deployment.num_prefill_workers,
             num_decode_workers=deployment.num_decode_workers,
             **common,
@@ -579,16 +593,17 @@ def _kv_load_concurrency(spec: ReplaySpec) -> int:
         raise ValueError(f"kv_load_ratio must be finite and non-negative, got {ratio}")
     deployment = spec.backend_deployment
     if deployment.deployment_mode == "disagg":
-        payload = deployment.decode_engine_args
         replicas = deployment.num_decode_workers
         role = "decode"
     else:
-        payload = deployment.agg_engine_args
         replicas = deployment.num_workers
         role = "aggregated"
-    args = DynamoReplayRunner._engine_args(payload)
+    args = DynamoReplayRunner._engine_args(deployment, role)
     capacity_tokens = (
-        args.num_gpu_blocks * args.block_size * max(args.dp_size, 1) * max(replicas, 1)
+        args["engine"]["num_gpu_blocks"]
+        * args["engine"]["block_size"]
+        * max(args["dp_size"], 1)
+        * max(replicas, 1)
     )
     expected_tokens = _int_value(spec.workload["isl"], "isl") + (
         _int_value(spec.workload["osl"], "osl") // 2

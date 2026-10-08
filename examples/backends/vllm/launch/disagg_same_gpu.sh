@@ -77,7 +77,7 @@ python3 -m "$WORKER_MODULE" \
   --model "$MODEL" \
   --enforce-eager \
   --disaggregation-mode decode \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
   $GPU_MEM_ARGS \
   --max-model-len "$MAX_MODEL_LEN" &
 
@@ -97,7 +97,7 @@ python3 -m "$WORKER_MODULE" \
   --model "$MODEL" \
   --enforce-eager \
   --disaggregation-mode prefill \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
   $GPU_MEM_ARGS \
   --max-model-len "$MAX_MODEL_LEN" \
   --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PREFILL}\",\"enable_kv_cache_events\":true}" &
