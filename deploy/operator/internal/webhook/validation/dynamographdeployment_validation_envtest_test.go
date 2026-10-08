@@ -78,12 +78,89 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	const initialSidecarImage = "runtime:1.5.0"
 	const unrelatedInitContainerName = "setup"
 	const customSidecarImage = "runtime:custom"
+	const trtllmBackendFramework = "trtllm"
 
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
 
 	tests := []dgdAdmissionTestCase{
+		{name: "vLLM multi-GPU snapshot failover is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), "vllm")
+		})},
+		{name: "SGLang multi-GPU snapshot failover is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = sglangBackendFramework
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), sglangBackendFramework)
+		})},
+		{name: "TRT-LLM snapshot failover is rejected at admission", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = trtllmBackendFramework
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), trtllmBackendFramework)
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
+		{name: "inferred TRT-LLM snapshot failover is rejected at admission", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = ""
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), trtllmBackendFramework)
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
+		{name: "TRT-LLM snapshot without failover remains admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			dgd.Spec.BackendFramework = trtllmBackendFramework
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, trtllmBackendFramework)
+			worker.Experimental.Failover = nil
+		})},
+		{name: "TRT-LLM snapshot failover cannot be enabled on update", oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = trtllmBackendFramework
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, trtllmBackendFramework)
+			worker.Experimental.Failover = nil
+		}), deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = trtllmBackendFramework
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), trtllmBackendFramework)
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
+		{name: "snapshot failover rejects conflicting backend selection", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), sglangBackendFramework)
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover requires a consistent vLLM or SGLang backend"}},
+		{name: "automatic snapshot failover cannot use Immediate startup", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, "vllm")
+			worker.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicyImmediate
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"}},
+		{name: "blank checkpointRef cannot bypass automatic snapshot failover startup policy", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, "vllm")
+			worker.Experimental.Checkpoint.CheckpointRef = k8sptr.To(" \t ")
+			worker.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicyImmediate
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"}},
+		{name: "snapshot failover rejects a helper capture target", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, "vllm")
+			worker.Experimental.Checkpoint.TargetContainerName = "helper"
+		}), wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint.targetContainerName: Invalid value: "helper": must be main for intra-pod failover`}},
+		{name: "snapshot failover rejects multiple nodes", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, "vllm")
+			worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+		}), wantWebhookErrs: []string{"spec.components[1].multinode: Forbidden: Snapshot-backed intra-pod failover requires a single node setup"}},
+		{name: "snapshot failover update cannot enable Immediate startup", oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), sglangBackendFramework)
+			dgd.Spec.BackendFramework = sglangBackendFramework
+		}), deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, sglangBackendFramework)
+			dgd.Spec.BackendFramework = sglangBackendFramework
+			worker.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicyImmediate
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"}},
 		// Sidecar mode is derived from live init-container names in both API versions.
 		{name: "beta unrelated init container retains standard mode", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
@@ -4160,6 +4237,23 @@ func enableBetaInterPodGMS(component *nvidiacomv1beta1.DynamoComponentDeployment
 			}},
 		},
 	}
+}
+
+// enableBetaSnapshotFailover constructs a fresh multi-GPU capture/election
+// contract in each admission fixture; no fixture objects are shared.
+func enableBetaSnapshotFailover(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, backend string) {
+	component.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+		GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
+		Failover:         &nvidiacomv1beta1.FailoverSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
+		Checkpoint:       &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true, StartupPolicy: nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint},
+	}
+	tpFlag := "--tensor-parallel-size"
+	if backend == sglangBackendFramework {
+		tpFlag = "--tp"
+	}
+	component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo." + backend}
+	component.PodTemplate.Spec.Containers[0].Args = []string{"--model", "Qwen/Qwen3-0.6B", tpFlag, "2"}
+	component.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("2")}
 }
 
 func enableBetaIntraPodGMS(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
