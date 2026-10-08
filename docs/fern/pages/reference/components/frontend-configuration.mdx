@@ -723,28 +723,41 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 ## Host memory allocator
 
 The frontend performs per-request host-memory allocations. Under high CPU load, allocator
-contention can cap frontend throughput before the GPU workers saturate. The frontend does not
-preload jemalloc by default.
+contention can cap frontend throughput before the GPU workers saturate. The frontend uses the glibc
+allocator unless jemalloc is preloaded, for example with `DYN_FRONTEND_JEMALLOC` or `LD_PRELOAD`. A
+preloaded jemalloc serves every `malloc` call in the process, including those from the Rust code in
+the Dynamo Python extension.
 
 <Note>
 Whether the container image ships jemalloc depends on how the image is built. Images built with
 `dynamo_runtime.Dockerfile` without an inference backend (`--framework dynamo`, the `dev` /
 `local-dev` / `runtime` targets used for development containers and backend-less components)
-include `libjemalloc2` since v1.3.0. The released vLLM, SGLang, and TensorRT-LLM images (runtime and
-dev targets), as well as the standalone frontend entrypoint image do not. Verify with
-`dpkg -L libjemalloc2 | grep 'libjemalloc.so'`; if the library is missing, either build a custom
-frontend image that includes it, or install it from an initContainer into a shared volume mounted
-by both containers and point `LD_PRELOAD` at the copied library path. Pointing `LD_PRELOAD` at a
-path that does not exist only prints a loader warning, and the process continues with the default
-glibc allocator.
+include `libjemalloc2` since v1.3.0. Released vLLM, SGLang, TensorRT-LLM, and standalone frontend
+images up to and including v1.5.1 do not; these images include it starting with v1.6.0. Verify with
+`dpkg -L libjemalloc2 | grep 'libjemalloc.so'`;
+if the library is missing, either build a custom frontend image that includes it, or install it
+from an initContainer into a shared volume mounted by both containers and point `LD_PRELOAD` at the
+copied library path. Pointing `LD_PRELOAD` at a path that does not exist only prints a loader
+warning, and the process continues with the default glibc allocator.
 </Note>
 
-<Note>
-  Released vLLM, SGLang, TensorRT-LLM, and standalone frontend images up to and including v1.5.0 do
-  not ship `libjemalloc2`; images from later releases include it. Verify with
-  `dpkg -L libjemalloc2 | grep 'libjemalloc.so'`. On older images, install the package into a shared
-  volume with an initContainer or use a custom image.
-</Note>
+<ParamField path="DYN_FRONTEND_JEMALLOC" type="boolean" default="false">
+  **Available since Dynamo 1.6.0.** Earlier releases ignore this variable.
+
+  Preload jemalloc into the frontend. Accepts `1`, `true`, or `yes` (case-insensitive). At startup,
+  `python -m dynamo.frontend` looks up the library with `ctypes.util.find_library("jemalloc")`,
+  adds it to the front of `LD_PRELOAD`, and re-executes itself once. Child processes inherit the
+  preload. If `LD_PRELOAD` already names a `libjemalloc` library, the frontend starts without
+  re-executing. If the library is not found or the re-execution fails, the frontend prints a warning
+  and continues without jemalloc.
+
+  The lookup searches the dynamic linker cache and may not find a library copied into a shared
+  volume; set `LD_PRELOAD` to the copied path instead.
+
+  This variable applies only to the frontend. `LD_PRELOAD` works for any process, including other
+  Dynamo processes such as the standalone router (`python -m dynamo.router`) and the standalone KV
+  indexer (`python -m dynamo.indexer`).
+</ParamField>
 
 <ParamField path="LD_PRELOAD" type="string" default="unset">
   Preload jemalloc for the frontend process. The library path depends on the container architecture:
@@ -764,8 +777,8 @@ glibc allocator.
 
 <Warning>
 The TensorRT-LLM image bakes its own `LD_PRELOAD` (`/opt/dynamo/libstdc++.so.6` and TensorRT-LLM's
-bundled `libnixl.so`). Assigning `LD_PRELOAD` as shown above replaces that value. On TensorRT-LLM images, prepend the jemalloc
-library instead:
+bundled `libnixl.so`). Assigning `LD_PRELOAD` as shown above replaces that value. On TensorRT-LLM
+images, prepend the jemalloc library instead, or set `DYN_FRONTEND_JEMALLOC`, which prepends it:
 
 ```bash
 export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
@@ -774,11 +787,24 @@ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 <ParamField path="MALLOC_CONF" type="string" default="jemalloc defaults">
   Configure jemalloc when it is preloaded. The best values depend on the request workload and CPU
-  allocation. This is an empirical starting point, not a production default:
+  allocation. Start with background threads enabled:
 
   ```bash
-  export MALLOC_CONF="narenas:32,tcache:true,lg_tcache_max:15,dirty_decay_ms:5000,muzzy_decay_ms:5000"
+  export MALLOC_CONF="background_thread:true"
   ```
+
+  Background threads return unused memory to the operating system off the request path, including
+  while the process is idle. Without them, the threads that allocate and free memory purge it
+  themselves, which adds latency to the operations that trigger a purge, and an idle process keeps
+  the memory. To return memory sooner after load drops, lower `dirty_decay_ms` from its default of
+  `10000`; purging more often costs CPU.
+
+  Do not use `narenas:32,tcache:true,lg_tcache_max:15,dirty_decay_ms:5000,muzzy_decay_ms:5000`,
+  which earlier versions of this page suggested. In KV router indexer benchmarks with jemalloc
+  preloaded, it used more CPU at light load and lowered write throughput under overload compared
+  with jemalloc's defaults. `tcache:true` and `lg_tcache_max:15` restate jemalloc's defaults,
+  `narenas:32` caps arenas below the default of four per CPU when the process can run on more than
+  eight CPUs, and `muzzy_decay_ms:5000` turns on a second purge stage that is off by default.
 
   Validate allocator changes with the same AIPerf workload before and after enabling them. See
   [Bound frontend host memory growth](../../kubernetes/operations/performance-tuning.md#bound-frontend-host-memory-growth)
