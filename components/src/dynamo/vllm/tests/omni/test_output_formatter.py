@@ -202,7 +202,7 @@ class TestDiffusionFormatterImage:
                 assert decoded.size == (37, 19)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("image_mode", ["RGBA", "P"])
+    @pytest.mark.parametrize("image_mode", ["RGBA", "P", "RGB", "L"])
     async def test_jpeg_encodes_transparent_outputs(self, image_mode):
         from dynamo.common.utils.output_modalities import RequestType
 
@@ -210,9 +210,17 @@ class TestDiffusionFormatterImage:
         if image_mode == "RGBA":
             image = Image.new("RGBA", (12, 9), color=(20, 40, 60, 128))
             expected_pixel = (137, 147, 157)
-        else:
+        elif image_mode == "P":
             image = Image.new("P", (12, 9), color=0)
             image.putpalette([20, 40, 60] + [0, 0, 0] * 255)
+            image.info["transparency"] = 0
+            expected_pixel = (255, 255, 255)
+        elif image_mode == "RGB":
+            image = Image.new("RGB", (12, 9), color=(20, 40, 60))
+            image.info["transparency"] = (20, 40, 60)
+            expected_pixel = (255, 255, 255)
+        else:
+            image = Image.new("L", (12, 9), color=0)
             image.info["transparency"] = 0
             expected_pixel = (255, 255, 255)
 
@@ -233,6 +241,20 @@ class TestDiffusionFormatterImage:
                 abs(actual - expected) < 12
                 for actual, expected in zip(decoded.getpixel((0, 0)), expected_pixel)
             )
+
+    @pytest.mark.asyncio
+    async def test_b64_outputs_omit_size_for_mixed_dimensions(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        response = await f._encode_image(
+            [Image.new("RGB", (37, 19)), Image.new("RGB", (41, 23))],
+            "req-mixed-size",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+        )
+
+        assert "size" not in response
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

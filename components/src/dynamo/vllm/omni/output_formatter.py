@@ -855,13 +855,15 @@ class DiffusionFormatter:
         for img in images:
             buf = BytesIO()
             encoded_image = img
-            if image_encoder == "JPEG" and img.mode not in ("L", "RGB"):
-                if "A" in img.getbands() or "transparency" in img.info:
-                    rgba = img.convert("RGBA")
-                    encoded_image = Image.new("RGB", rgba.size, "white")
-                    encoded_image.paste(rgba, mask=rgba.getchannel("A"))
-                else:
-                    encoded_image = img.convert("RGB")
+            if image_encoder == "JPEG":
+                has_transparency = "transparency" in img.info
+                if img.mode not in ("L", "RGB") or has_transparency:
+                    if "A" in img.getbands() or has_transparency:
+                        rgba = img.convert("RGBA")
+                        encoded_image = Image.new("RGB", rgba.size, "white")
+                        encoded_image.paste(rgba, mask=rgba.getchannel("A"))
+                    else:
+                        encoded_image = img.convert("RGB")
             encoded_image.save(buf, format=image_encoder)
             image_bytes = buf.getvalue()
             if response_format == "url":
