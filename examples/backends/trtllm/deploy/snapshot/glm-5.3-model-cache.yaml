@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Download the pinned GLM model before the one-hour capture deadline starts.
+# Allow for large model shards and limit concurrent transfers.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -34,12 +35,16 @@ spec:
         - -c
         args:
         - from huggingface_hub import snapshot_download; snapshot_download(repo_id="RadixArk/GLM-5.3-NVFP4",
-          revision="363e8f086905afd83db356a620f9aa401c23800a")
+          revision="363e8f086905afd83db356a620f9aa401c23800a", max_workers=2)
         env:
         - name: HF_HOME
           value: /home/dynamo/.cache/huggingface
         - name: HF_HUB_DISABLE_XET
           value: '1'
+        - name: HF_HUB_DOWNLOAD_TIMEOUT
+          value: '120'
+        - name: HF_HUB_ETAG_TIMEOUT
+          value: '30'
         resources:
           requests:
             cpu: '4'

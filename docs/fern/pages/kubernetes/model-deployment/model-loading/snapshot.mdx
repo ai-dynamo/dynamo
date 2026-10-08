@@ -199,7 +199,7 @@ curl --fail --retry 6 --retry-all-errors --retry-delay 5 \
   http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d "$(jq -n --arg model "$MODEL" \
-    '{model:$model,messages:[{role:"user",content:"What is the capital of France?"}],max_tokens:256,stream:false}')" \
+    '{model:$model,messages:[{role:"user",content:"What is the capital of France?"}],max_tokens:256,temperature:0,stream:false,chat_template_kwargs:{enable_thinking:false}}')" \
   | jq -e '.choices[0].message.content | select(test("Paris"; "i"))'
 ```
 
