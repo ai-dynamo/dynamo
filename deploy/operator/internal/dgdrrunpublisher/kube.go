@@ -21,7 +21,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
+	dgdv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher/placeholderapi"
@@ -29,11 +31,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -45,7 +47,11 @@ const (
 	LabelCandidateID = "nvidia.com/dgdr-candidate-id"
 
 	evaluatedCondition = "Evaluated"
-	dgdKind            = "DynamoGraphDeployment"
+
+	// AnnotationAdditionalResources carries the companion resources (for example
+	// generated ConfigMaps) rendered next to the DGD, as multi-document YAML. It is the
+	// same key and format the DGDR controller uses.
+	AnnotationAdditionalResources = "dgdr.nvidia.com/additional-resources"
 )
 
 // KubeCluster is the Cluster implementation backed by a controller-runtime client. It
@@ -94,30 +100,40 @@ func (k *KubeCluster) ListCandidates(ctx context.Context) ([]dgdcreconcile.Curre
 	return out, nil
 }
 
-// decodeSpec extracts the DGD spec from a rendered manifest, rejecting anything that is
-// not a DynamoGraphDeployment with a spec rather than creating an empty candidate.
-func decodeSpec(candidate dgdcreconcile.DesiredCandidate) (*v1beta1.DynamoGraphDeploymentSpec, error) {
-	var doc struct {
-		Kind string                             `json:"kind"`
-		Spec *v1beta1.DynamoGraphDeploymentSpec `json:"spec"`
+// decodeManifest extracts the DGD spec and the companion resources from a rendered
+// manifest. A DGD in either supported apiVersion is converted to v1beta1, the same way
+// the DGDR controller does it.
+func decodeManifest(candidate dgdcreconcile.DesiredCandidate) (*v1beta1.DynamoGraphDeploymentSpec, string, error) {
+	manifest, err := ParseManifest(candidate.Spec)
+	if err != nil {
+		return nil, "", fmt.Errorf("candidate %s: %w", candidate.ID, err)
 	}
-	if err := yaml.Unmarshal([]byte(candidate.Spec), &doc); err != nil {
-		return nil, fmt.Errorf("decoding manifest of candidate %s: %w", candidate.ID, err)
+	obj := &unstructured.Unstructured{Object: manifest.DGD}
+	var beta v1beta1.DynamoGraphDeployment
+	switch obj.GetAPIVersion() {
+	case dgdv1alpha1.GroupVersion.String():
+		var alpha dgdv1alpha1.DynamoGraphDeployment
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &alpha); err != nil {
+			return nil, "", fmt.Errorf("candidate %s: %w", candidate.ID, err)
+		}
+		if err := alpha.ConvertTo(&beta); err != nil {
+			return nil, "", fmt.Errorf("candidate %s: %w", candidate.ID, err)
+		}
+	case v1beta1.GroupVersion.String():
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &beta); err != nil {
+			return nil, "", fmt.Errorf("candidate %s: %w", candidate.ID, err)
+		}
+	default:
+		return nil, "", fmt.Errorf("candidate %s: unsupported DynamoGraphDeployment apiVersion %q", candidate.ID, obj.GetAPIVersion())
 	}
-	if doc.Kind != dgdKind {
-		return nil, fmt.Errorf("manifest of candidate %s is a %q, want %s", candidate.ID, doc.Kind, dgdKind)
-	}
-	if doc.Spec == nil {
-		return nil, fmt.Errorf("manifest of candidate %s has no spec", candidate.ID)
-	}
-	return doc.Spec, nil
+	return &beta.Spec, strings.Join(manifest.Companions, "\n---\n"), nil
 }
 
 // CreateCandidate creates the candidate and populates its status exactly once. Both
 // steps are idempotent so a retry after a partial failure converges; the publisher
 // calls it again for a candidate whose status was never populated.
 func (k *KubeCluster) CreateCandidate(ctx context.Context, name string, candidate dgdcreconcile.DesiredCandidate) error {
-	spec, err := decodeSpec(candidate)
+	spec, companions, err := decodeManifest(candidate)
 	if err != nil {
 		return err
 	}
@@ -140,19 +156,23 @@ func (k *KubeCluster) CreateCandidate(ctx context.Context, name string, candidat
 			Parameters:                parameters,
 		},
 	}
+	if companions != "" {
+		object.Annotations = map[string]string{AnnotationAdditionalResources: companions}
+	}
 	if err := controllerutil.SetControllerReference(run, object, k.Client.Scheme()); err != nil {
 		return err
 	}
-	if err := k.Client.Create(ctx, object); err != nil && !apierrors.IsAlreadyExists(err) {
+	err = k.Client.Create(ctx, object)
+	if apierrors.IsAlreadyExists(err) {
+		err = k.replaceIfIncomplete(ctx, object, run)
+	}
+	if err != nil {
 		return err
 	}
 
 	var stored v1beta2.DynamoGraphDeploymentCandidate
 	if err := k.Client.Get(ctx, types.NamespacedName{Namespace: k.Namespace, Name: name}, &stored); err != nil {
 		return err
-	}
-	if !metav1.IsControlledBy(&stored, run) {
-		return fmt.Errorf("candidate %s already exists and is not controlled by run %s (uid %s)", name, k.RunName, run.UID)
 	}
 	if meta.IsStatusConditionTrue(stored.Status.Conditions, evaluatedCondition) {
 		return nil // status already populated; candidates are immutable afterwards
@@ -169,6 +189,31 @@ func (k *KubeCluster) CreateCandidate(ctx context.Context, name string, candidat
 		Message: "evaluated by the Sweeper",
 	})
 	return k.Client.Status().Update(ctx, &stored)
+}
+
+// replaceIfIncomplete handles a candidate that already exists. One controlled by another
+// run is an error. A complete one is left untouched (candidates are immutable). One whose
+// status was never written may hold the spec of an earlier snapshot that reused the id,
+// so it is deleted and created again from the current manifest.
+func (k *KubeCluster) replaceIfIncomplete(ctx context.Context, object *v1beta2.DynamoGraphDeploymentCandidate, run *v1beta2.DynamoGraphDeploymentRun) error {
+	var stored v1beta2.DynamoGraphDeploymentCandidate
+	if err := k.Client.Get(ctx, types.NamespacedName{Namespace: k.Namespace, Name: object.Name}, &stored); err != nil {
+		return err
+	}
+	if !metav1.IsControlledBy(&stored, run) {
+		return fmt.Errorf("candidate %s already exists and is not controlled by run %s (uid %s)", object.Name, k.RunName, run.UID)
+	}
+	if meta.IsStatusConditionTrue(stored.Status.Conditions, evaluatedCondition) {
+		return nil
+	}
+	uid := stored.UID
+	if err := k.Client.Delete(ctx, &stored, client.Preconditions{UID: &uid}); client.IgnoreNotFound(err) != nil {
+		return err
+	}
+	if err := k.Client.Create(ctx, object.DeepCopy()); err != nil {
+		return fmt.Errorf("recreating incomplete candidate %s: %w", object.Name, err)
+	}
+	return nil
 }
 
 func rawExtension(value map[string]any) (*runtime.RawExtension, error) {

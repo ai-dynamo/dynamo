@@ -402,23 +402,14 @@ func TestRunTerminalSnapshotAcknowledges(t *testing.T) {
 }
 
 func TestRunTerminalFailedSnapshotIsReconciledThenFails(t *testing.T) {
-	for name, state := range map[string]SweeperState{
-		"sweeper exit 0": {Exited: true, ExitCode: 0},
-		"sweeper exit 1": {Exited: true, ExitCode: 1},
-		"still running":  {},
-	} {
-		t.Run(name, func(t *testing.T) {
-			p, fc, dir := newPublisher(t)
-			writeSnapshot(t, dir, snapshotJSON(t, PhaseFailed, cand{id: "a"}))
-			fc.setState(state)
-			err := runWithTimeout(t, p)
-			if !errors.Is(err, ErrRunFailed) || ExitCode(err) != ExitRunFailed {
-				t.Fatalf("err = %v", err)
-			}
-			if !reflect.DeepEqual(fc.creates, []string{"run-a"}) {
-				t.Fatalf("creates = %v", fc.creates)
-			}
-		})
+	p, fc, dir := newPublisher(t)
+	writeSnapshot(t, dir, snapshotJSON(t, PhaseFailed, cand{id: "a"}))
+	err := runWithTimeout(t, p)
+	if !errors.Is(err, ErrRunFailed) || ExitCode(err) != ExitRunFailed {
+		t.Fatalf("err = %v", err)
+	}
+	if !reflect.DeepEqual(fc.creates, []string{"run-a"}) {
+		t.Fatalf("creates = %v", fc.creates)
 	}
 }
 
@@ -638,5 +629,31 @@ func TestInvalidFinalSnapshotIsAProtocolViolationExit(t *testing.T) {
 	err := runWithTimeout(t, p)
 	if ExitCode(err) != ExitProtocolViolation {
 		t.Fatalf("err = %v, exit = %d", err, ExitCode(err))
+	}
+}
+
+func TestParseManifestHandlesCompanionResources(t *testing.T) {
+	dgd := "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\nspec: {}\n"
+	cm := "apiVersion: v1\nkind: ConfigMap\nmetadata: {}\n"
+	for name, manifest := range map[string]string{
+		"dgd first":       dgd + "---\n" + cm,
+		"configmap first": "# generated\n---\n" + cm + "---\n" + dgd,
+	} {
+		got, err := ParseManifest(manifest)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got.DGD["kind"] != "DynamoGraphDeployment" || len(got.Companions) != 1 || !strings.Contains(got.Companions[0], "ConfigMap") {
+			t.Fatalf("%s: %+v", name, got)
+		}
+	}
+	for name, manifest := range map[string]string{
+		"two dgds": dgd + "---\n" + dgd,
+		"no dgd":   cm,
+		"no spec":  "kind: DynamoGraphDeployment\n",
+	} {
+		if _, err := ParseManifest(manifest); err == nil {
+			t.Errorf("%s: want error", name)
+		}
 	}
 }

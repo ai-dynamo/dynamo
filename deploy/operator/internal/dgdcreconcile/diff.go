@@ -44,7 +44,6 @@ func newDiffInputError(format string, args ...any) *DiffInputError {
 	return &DiffInputError{msg: fmt.Sprintf(format, args...)}
 }
 
-// DesiredCandidate is one candidate the snapshot wants to exist.
 type DesiredCandidate struct {
 	// ID is the stable candidate identity from the snapshot.
 	ID string
