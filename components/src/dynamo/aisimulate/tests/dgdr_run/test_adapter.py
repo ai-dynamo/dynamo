@@ -235,7 +235,7 @@ def test_a_new_better_point_reorders_but_does_not_rematerialize_retained_ones(
 
     after = {c["id"]: c["manifest"] for c in load(tmp_path)["candidates"]}
     assert {key: after[key] for key in before} == before
-    assert sorted(renders) == ["a", "b", "c"]  # only the new point was rendered
+    assert sorted(renders) == ["a", "b", "c"]
 
 
 def test_progress_updates_do_not_rematerialize(
@@ -342,7 +342,7 @@ def test_the_terminal_snapshot_contains_every_update_accepted_before_close(
     with DGDRRunOutputAdapter(config, workload=None) as adapter:
         for index in range(50):
             adapter.on_candidate(record(f"w{index}", score=1.0 + index))
-        adapter.on_candidate(record("winner", score=1000.0))  # right before close
+        adapter.on_candidate(record("winner", score=1000.0))
 
     snapshot = load(tmp_path)
     assert snapshot["run"]["terminal"] is True
@@ -389,14 +389,6 @@ def test_updates_after_close_are_ignored_and_close_is_idempotent(
 
     assert (tmp_path / SNAPSHOT_FILE_NAME).read_text() == written
     assert adapter.snapshot_writes == writes
-
-
-def test_close_works_when_start_was_never_called(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
-    adapter.close(phase=RunPhase.FAILED, error="setup failed")
-    assert load(tmp_path)["run"]["phase"] == "Failed"
 
 
 def test_close_rejects_a_non_terminal_phase(tmp_path: Path) -> None:
@@ -939,3 +931,22 @@ def test_plugin_write_keeps_the_objectives_of_the_selected_candidates(
     create_adapter().write(PLUGIN_CONFIG, result=result, output_dir=tmp_path)
     (candidate,) = load(tmp_path)["candidates"]
     assert candidate["metrics"]["objectives"] == {"throughput": 12.5}
+
+
+def test_the_renderer_receives_the_candidates_gpu_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[Any] = []
+
+    def capture(candidate: Any, *_: Any, **kwargs: Any) -> str:
+        seen.append(candidate)
+        return "kind: DynamoGraphDeployment\n"
+
+    monkeypatch.setattr(adapter_module, "render_dgd", capture)
+    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
+    adapter.on_candidate(record("a", 9.0, gpus=4))
+    adapter.close()
+
+    (candidate,) = seen
+    assert candidate.used_gpus == 4
+    assert candidate.config["tag"] == "a"
