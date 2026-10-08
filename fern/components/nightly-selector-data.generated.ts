@@ -39,9 +39,9 @@ export const NIGHTLY_BACKEND_BUILDS: NightlyBackendBuild[] = [
 ];
 
 export const NIGHTLY_BUILDS: NightlyBuild[] = [
+  { version: "1.6.0.dev20261008", date: "Oct 8, 2026", packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"] },
   { version: "1.6.0.dev20261007", date: "Oct 7, 2026", packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"] },
   { version: "1.6.0.dev20261006", date: "Oct 6, 2026", packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"] },
-  { version: "1.6.0.dev20261004", date: "Oct 4, 2026", packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"] },
 ];
 
 export default NIGHTLY_BACKEND_BUILDS;
