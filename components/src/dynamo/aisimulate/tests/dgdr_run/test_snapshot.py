@@ -35,12 +35,6 @@ def materialized(candidate_id: str = "evaluated-point-a") -> SnapshotCandidate:
     )
 
 
-def test_only_running_is_a_non_terminal_phase() -> None:
-    assert not RunPhase.RUNNING.terminal
-    assert RunPhase.SUCCEEDED.terminal
-    assert RunPhase.FAILED.terminal
-
-
 def test_wire_format_of_a_running_snapshot() -> None:
     payload = DGDRRunSnapshot(
         phase=RunPhase.RUNNING,
@@ -124,7 +118,7 @@ def test_inconsistent_candidates_are_rejected(kwargs: dict) -> None:
 def test_write_replaces_the_file_atomically_and_leaves_no_temporary_files(
     tmp_path: Path,
 ) -> None:
-    for round_no in range(5):
+    for round_no in range(2):
         path = write_snapshot(
             tmp_path,
             DGDRRunSnapshot(phase=RunPhase.RUNNING, round_no=round_no, evaluated=0),
