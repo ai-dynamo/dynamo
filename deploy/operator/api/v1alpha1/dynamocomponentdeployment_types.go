@@ -40,6 +40,7 @@ const (
 
 // DynamoComponentDeploymentSpec defines the desired state of DynamoComponentDeployment
 // +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx')",message="standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 type DynamoComponentDeploymentSpec struct {
 	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm")
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
@@ -51,7 +52,6 @@ type DynamoComponentDeploymentSpec struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (!has(self.replicas) && has(self.componentType) && self.componentType == 'lpx') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)",message="componentType is immutable after it is set"
 // +kubebuilder:validation:XValidation:rule="!has(self.lpx) || (has(self.componentType) && self.componentType == 'lpx')",message="lpx may only be set when componentType is lpx"
 // +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx') || has(self.lpx)",message="lpx is required when componentType is lpx"
@@ -161,11 +161,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// gang-scheduled, and 2) when violating minAvailable replicas triggers gang
 	// termination.
 	//
-	// For Grove-backed DynamoGraphDeployment components, minAvailable defaults to
-	// 1 when omitted and is immutable after creation. Positive replica counts must
-	// be greater than or equal to minAvailable. Replicas may be scaled to 0 as a
-	// special scale-to-zero state; minAvailable remains configured but is not
-	// enforced again until replicas is scaled back to a positive value.
+	// Deprecated: use providerOverride.value.spec.minAvailable for a standalone
+	// Grove PodClique, or providerOverride.value.minAvailable for a scaling group.
+	// The effective minimum is immutable after creation; moving the same value
+	// to the new form is supported without changing the update strategy.
+	// Grove uses RollingRecreate unless a strategy annotation explicitly overrides it.
+	// New Grove deployments default the provider-native form to 1. Scale-to-zero
+	// preserves the minimum until replicas becomes positive again.
 	//
 	// For non-Grove deployments, setting this field will result in a validation error.
 	// +kubebuilder:validation:Minimum=1

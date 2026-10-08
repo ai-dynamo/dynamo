@@ -1411,6 +1411,8 @@ async def test_generator_forwards_chat_logprobs_count(
                     max_tokens=1,
                     logprobs=True,
                     top_logprobs=1,
+                    top_k=None,
+                    min_p=None,
                     cache_salt=None,
                     mm_processor_kwargs=None,
                 ),
@@ -1676,6 +1678,7 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
         max_tokens=1,
         cache_salt=None,
         mm_processor_kwargs=None,
+        logprobs=None,
         **{"temperature": None, "top_k": None, "min_p": None, **requested},
     )
     monkeypatch.setattr(
@@ -2712,8 +2715,9 @@ class TestToolCallGuidedDecoding:
         assert request.tools[0].function.strict is None
         assert parser.requests[0].messages is request.messages
 
-    # Auto schema mode must preserve an omitted strict flag as unset.
-    def test_auto_schema_preserves_unset_strict(self, tokenizer):
+    # In auto schema mode, omitted strict is schema-enforced. Only an explicit
+    # strict:false opts out.
+    def test_auto_schema_enforces_omitted_strict(self, tokenizer):
         parser = _FakeStructuralTagParser()
         guided = build_tool_call_guided_decoding(
             self._request(tokenizer),
@@ -2723,7 +2727,203 @@ class TestToolCallGuidedDecoding:
             structural_tag_schema="auto",
         )
 
-        assert guided == {"structural_tag": {"format": {"strict": [None]}}}
+        assert guided == {"structural_tag": {"format": {"strict": [True]}}}
+
+    def test_auto_schema_preserves_explicit_strict_false(self, tokenizer):
+        parser = _FakeStructuralTagParser()
+        request = self._request(
+            tokenizer,
+            tools=[
+                {
+                    **TOOL_REQUEST["tools"][0],
+                    "function": {
+                        **TOOL_REQUEST["tools"][0]["function"],
+                        "strict": False,
+                    },
+                }
+            ],
+        )
+
+        guided = build_tool_call_guided_decoding(
+            request,
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema="auto",
+        )
+
+        assert guided == {"structural_tag": {"format": {"strict": [False]}}}
+
+    @pytest.mark.parametrize(
+        "token_suffix", [":6124c78e", ""], ids=["suffixed", "plain"]
+    )
+    @pytest.mark.parametrize("tool_choice_kind", ["auto", "required", "named"])
+    @pytest.mark.parametrize("stream_response", [False, True], ids=["batch", "stream"])
+    def test_hyv4_structural_tag_matches_checkpoint_tokens(
+        self, tokenizer, monkeypatch, token_suffix, tool_choice_kind, stream_response
+    ):
+        import vllm.envs as vllm_envs
+        import xgrammar as xgr
+        from vllm.tool_parsers.hy_v4_tool_parser import HYV4ToolParser
+
+        # Dynamo's explicit policy must work without vLLM's environment gate.
+        monkeypatch.setattr(vllm_envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", False)
+        request = self._request(
+            tokenizer,
+            tools=[parity_tool()],
+            tool_choice=tool_choice_value(tool_choice_kind),
+        )
+        markers = [
+            f"<{closing}{name}{token_suffix}>"
+            for name in ("tool_calls", "tool_call", "arg_key", "arg_value")
+            for closing in ("", "/")
+        ]
+        # Only the vocabulary is needed to detect this checkpoint's suffix.
+        vocab = {marker: index for index, marker in enumerate(markers)}
+        parser = HYV4ToolParser(
+            SimpleNamespace(get_vocab=lambda: vocab, init_kwargs={}), request.tools
+        )
+        assert parser.get_structural_tag(request) is None
+
+        guided = build_tool_call_guided_decoding(
+            request,
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+        assert guided is not None
+        assert set(guided) == {"structural_tag"}
+        compiler = xgr.GrammarCompiler(
+            xgr.TokenizerInfo(["x"], vocab_type=xgr.VocabType.RAW), max_threads=1
+        )
+        compiled = compiler.compile_structural_tag(json.dumps(guided["structural_tag"]))
+        native_output = (
+            f"<tool_calls{token_suffix}><tool_call{token_suffix}>get_weather"
+            f"<arg_key{token_suffix}>city</arg_key{token_suffix}>"
+            f"<arg_value{token_suffix}>Paris</arg_value{token_suffix}>"
+            f"</tool_call{token_suffix}></tool_calls{token_suffix}>"
+        )
+        assert xgr.GrammarMatcher(compiled).accept_string(native_output)
+        assert not xgr.GrammarMatcher(compiled).accept_string(
+            native_output.replace("get_weather", "unknown_tool")
+        )
+
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=parser,
+            reasoning_parser_class=None,
+            chat_template_kwargs={},
+            stream_response=stream_response,
+        )
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=native_output,
+                token_ids=list(vocab.values()),
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+        assert choice is not None
+        assert choice["finish_reason"] == "tool_calls"
+        assert not choice["delta"].get("content")
+        function = choice["delta"]["tool_calls"][0]["function"]
+        assert function["name"] == "get_weather"
+        assert json.loads(function["arguments"]) == {"city": "Paris"}
+
+    def test_structural_tag_builder_error_uses_forced_json_fallback(self, tokenizer):
+        class RaisingParser(_FakeStructuralTagParser):
+            def get_structural_tag(self, request, *, reasoning=False):
+                del request, reasoning
+                raise ValueError("unsupported schema")
+
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer, tool_choice="required"),
+            RaisingParser(),
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        assert guided is not None
+        assert set(guided) == {"json"}
+
+    @pytest.mark.parametrize("strict, expects_tag", [(True, True), (False, False)])
+    def test_declared_model_registry_matches_pinned_vllm_auto_floor(
+        self, tokenizer, monkeypatch, strict, expects_tag
+    ):
+        seen = {}
+
+        class RegistryParser:
+            structural_tag_model = "qwen_3_coder"
+
+            def get_structural_tag(self, request):
+                raise AssertionError(f"unexpected parser-level env gate: {request}")
+
+        # vLLM 0.29.0 has no strict_level argument and returns no auto tag
+        # when every tool is explicitly non-strict.
+        def fake_get_model_structural_tag(*, model, tools, tool_choice, reasoning):
+            seen.update(
+                model=model,
+                strict=tools[0].function.strict,
+                tool_choice=tool_choice,
+                reasoning=reasoning,
+            )
+            return _FakeStructuralTag({"format": {"type": "tag"}}) if strict else None
+
+        monkeypatch.setattr(
+            prepost_module,
+            "get_model_structural_tag",
+            fake_get_model_structural_tag,
+        )
+
+        request = self._request(
+            tokenizer,
+            tools=[
+                {
+                    **TOOL_REQUEST["tools"][0],
+                    "function": {
+                        **TOOL_REQUEST["tools"][0]["function"],
+                        "strict": strict,
+                    },
+                }
+            ],
+        )
+        guided = build_tool_call_guided_decoding(
+            request,
+            RegistryParser(),
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        assert guided == (
+            {"structural_tag": {"format": {"type": "tag"}}} if expects_tag else None
+        )
+        assert seen == {
+            "model": "qwen_3_coder",
+            "strict": strict,
+            "tool_choice": "auto",
+            "reasoning": False,
+        }
+
+    def test_missing_registry_uses_parser_method(self, tokenizer, monkeypatch):
+        class CompatibleParser(_FakeStructuralTagParser):
+            structural_tag_model = "qwen_3_coder"
+
+        parser = CompatibleParser()
+        monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
+
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer),
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        assert guided == {"structural_tag": {"format": {"strict": [True]}}}
+        assert len(parser.requests) == 1
 
     # Parser-created grammar must survive preprocessing as guided decoding.
     @pytest.mark.asyncio
@@ -3422,22 +3622,6 @@ def test_runtime_config_context_length(vllm_processor_module, runtime_config, ex
     mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
 
     assert vllm_processor_module._runtime_config_context_length(mdc) == expected
-
-
-def test_runtime_config_structural_tag_options(vllm_processor_module):
-    mdc = SimpleNamespace(
-        runtime_config=lambda: {
-            "structural_tag_mode": "on",
-            "structural_tag_scope": "always",
-            "structural_tag_schema": "strict",
-        }
-    )
-
-    assert vllm_processor_module._runtime_config_structural_tag_options(mdc) == (
-        "on",
-        "always",
-        "strict",
-    )
 
 
 # Regression: MistralTokenizer (--tokenizer-mode mistral) has no chat_template
