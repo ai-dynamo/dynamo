@@ -70,12 +70,16 @@ struct SourceVideoTiming {
 }
 
 fn get_source_timing_from_video_packets(
-    input: &mut ffmpeg_next::format::context::Input,
+    input_path: &str,
     stream_index: usize,
     stream_time_base: Rational,
     frame_rate: f64,
     total_frames: u64,
 ) -> Result<SourceVideoTiming> {
+    // Packet timing requires reading to EOF. Keep that scan on a separate
+    // demuxer so decoding starts from a fresh context instead of seeking a
+    // Matroska stream after its longer audio track has been consumed.
+    let mut input = ffmpeg_next::format::input(input_path).map_err(video_open_error)?;
     let mut first_pts = None;
     let mut max_pts = None;
     let mut max_packet_end = None;
@@ -98,8 +102,6 @@ fn get_source_timing_from_video_packets(
             }));
         }
     }
-
-    input.seek(0, ..)?;
 
     let frame_count_duration = if frame_rate > 0.0 {
         total_frames as f64 / frame_rate
@@ -349,7 +351,7 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
         }
     } else {
         get_source_timing_from_video_packets(
-            &mut input,
+            &fd_path,
             stream_index,
             stream_time_base,
             source_fps,
