@@ -2,15 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Ordering + inclusion index for the Dynamo Recipes catalog.
-# Each id must have a matching docs/recipes/_catalog/recipes/<id>.yaml file.
-# `recipes:` lists the ACTIVE (customer-visible) recipes in nav order — this
-# order controls the sidebar/landing order and matches the Recipes tab in
-# docs/index.yml. `deferred_recipes:` lists recipes held back from the rendered
+# Each id must have a matching docs/fern/pages/recipes/_catalog/recipes/<id>.yaml file.
+# `recipes:` lists the ACTIVE (customer-visible) recipes. Within a provider,
+# list order is sidebar order, newest model first. Provider order comes from
+# providers.yaml: docs/fern/scripts/gen_recipe_nav.py re-sorts this list by
+# provider and generates the Recipes sidebar in docs/fern/index.yml from it.
+# Add a new id anywhere; the generator moves it into its provider's group.
+# `deferred_recipes:` lists recipes held back from the rendered
 # R1 surface (no rendered page); their per-entry files live alongside the
 # active ones in recipes/<id>.yaml.
 schema_version: 1
 recipes:
-- motif-3
 - glm-5-3-flash
 - glm-5-2
 - glm-5-nvfp4
@@ -35,6 +37,8 @@ recipes:
 - gpt-oss-120b
 - k-exaone-2
 - ax-k2
+- solar-open2-250b
+- motif-3
 deferred_recipes:
 - qwen3-6-35b
 - kimi-k2-5

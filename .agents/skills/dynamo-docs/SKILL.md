@@ -206,17 +206,22 @@ Each page is a triple — page + catalog entry + nav:
    requires `id`, `recommended`, `hardware`, `runtime`, `topology`, `techniques`, `workload`,
    `deploy`, `expected_performance`. Internal `id:` **must equal the filename**; active entries carry
    `page:`, deferred ones carry `deferred_reason` and omit `page:`. Add the `<id>` to the matching
-   `_catalog/index.yaml` (`recipes:` for active, `deferred_recipes:` for deferred — it controls
-   sidebar/landing order).
-3. **Wire navigation** in `docs/fern/index.yml`: everything here lives under `- tab: recipes` — a
-   `- page:` in the **Model Recipes** section for recipes, or in the **Feature Benchmarks** section
-   for benchmarks. Per-benchmark pages are usually `hidden: true` (surfaced from the landing page).
+   `_catalog/index.yaml` (`recipes:` for active, `deferred_recipes:` for deferred). A recipe's
+   `provider:` must be a key in `_catalog/providers.yaml`; add a new model maker there first.
+3. **Navigation**: for a **recipe**, run `python3 docs/fern/scripts/gen_recipe_nav.py` (the
+   `gen-recipe-nav` pre-commit hook does it for you). It generates the Model Recipes sidebar in
+   `docs/fern/index.yml`, the overview's provider filter and counts, and the provider CSS from the
+   catalog; never edit those spans by hand. Provider order is popularity-ranked, then alphabetical
+   (see the catalog README's Provider order section). For a **benchmark**, add the `- page:` under
+   the **Feature Benchmarks** section of `docs/fern/index.yml` by hand; per-benchmark pages are
+   usually `hidden: true` (surfaced from the landing page).
 4. **Patch `docs/fern/main.css` only if** the page introduces a picker axis value not already supported
    (`recipe-sku`: `b200`/`h200`/`h100`/`gb200`/`hopper`/`blackwell`; `recipe-usecase`:
    `chat`/`agentic`; `recipe-variant`: `agg`/`disagg`/…). A value missing from CSS renders but
    filters nothing. After editing `main.css`, run `python3 docs/fern/scripts/sync_site_css.py` so the
    footer's CSS mirror stays in sync — pre-commit fails otherwise.
-5. **Add the landing card** in `docs/fern/pages/recipes/model-recipes/overview.mdx` and update the model/target counts.
+5. **Add the landing card** in `docs/fern/pages/recipes/model-recipes/overview.mdx`, with `data-provider` set to the
+   recipe's `provider:` key. The model/target counts are generated.
 6. **Validate**: `python3 docs/fern/pages/recipes/_catalog/validate.py` (covers both catalogs), then `fern
    check` and `fern docs broken-links`.
 
@@ -230,7 +235,7 @@ valid active entry:
 ```yaml
 id: llama-3-1-8b                  # == filename; pattern ^[a-z0-9][a-z0-9-]*$
 title: Llama 3.1 8B
-provider: meta                    # landing-page filter key (meta, qwen, nvidia, …)
+provider: meta                    # a key in _catalog/providers.yaml (qwen, nvidia, …)
 model:
   name: Llama 3.1 8B
   hf_id: Meta-Llama/Llama-3.1-8B
@@ -282,15 +287,16 @@ radios, no `data-*`:
 A catalog page is a triple (page + entry + nav) — never touch just one part:
 
 - **Rename or move**: rename `_catalog/<id>.yaml` and its `id:` together, update the `page:` path, the
-  `<id>` in `index.yaml`, the `- page:` in `docs/fern/index.yml`, and the landing card; add a
-  `docs/fern/docs.yml` redirect for the old URL.
+  `<id>` in `index.yaml`, and the landing card; add a `docs/fern/docs.yml` redirect for the old URL
+  (or set `slug:` on the entry to keep the old one).
 - **Defer** (hold off the rendered surface): drop `page:` from the entry, add `deferred_reason`, move
-  the `<id>` from `recipes:` to `deferred_recipes:` in `index.yaml`, and delete the `.mdx` page, its
-  nav `- page:`, and its landing card.
-- **Remove**: delete the `.mdx`, the `_catalog/<id>.yaml`, the `index.yaml` entry, the nav `- page:`,
-  and the landing card; update the model/target counts; add a redirect.
+  the `<id>` from `recipes:` to `deferred_recipes:` in `index.yaml`, and delete the `.mdx` page and
+  its landing card.
+- **Remove**: delete the `.mdx`, the `_catalog/<id>.yaml`, the `index.yaml` entry, and the landing
+  card; add a redirect.
 
-Run `python3 docs/fern/pages/recipes/_catalog/validate.py` after any of these.
+Then run `python3 docs/fern/scripts/gen_recipe_nav.py` to regenerate the sidebar, provider filter,
+and counts, and `python3 docs/fern/pages/recipes/_catalog/validate.py`.
 
 ### Add an Example or Recipe (code)
 
@@ -465,7 +471,8 @@ git commit -s -m "docs: <add|update|move|remove> <page-title>"
 | Page missing from site | Ensure the nav entry exists in `index.yml`; allow a few minutes for sync |
 | Target picker renders but filters nothing | Use `className` (not `class`) and the exact `dynamo-target-picker` classes; and ensure the axis `value=` is in `docs/fern/main.css` (add its hide rule) |
 | `validate.py` fails (orphan/dangling/id) | `_catalog/<id>.yaml` filename, internal `id:`, and the `index.yaml` entry must all match; every deploy/perf asset path must resolve |
-| Recipe page absent from the Recipes tab | Add the `- page:` under `- tab: recipes` **and** the `<id>` to `_catalog/index.yaml` |
+| Recipe page absent from the Recipes tab | Add the `<id>` to `_catalog/index.yaml`, then run `python3 docs/fern/scripts/gen_recipe_nav.py` |
+| `gen_recipe_nav.py` fails on a provider | Add the provider key to `_catalog/providers.yaml`, and give each provider with recipes at least one overview card |
 
 ## Key References
 

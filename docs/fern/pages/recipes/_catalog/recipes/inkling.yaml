@@ -4,6 +4,7 @@
 id: inkling
 title: Inkling NVFP4
 page: pages/recipes/model-recipes/inkling-nvfp4.mdx
+slug: inkling
 provider: thinkingmachines
 model:
   name: Inkling

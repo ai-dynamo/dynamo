@@ -17,7 +17,7 @@
   "properties": {
     "id": {
       "type": "string",
-      "description": "Stable slug; must match the filename and the page slug in docs/index.yml.",
+      "description": "Stable identifier; must match the filename.",
       "pattern": "^[a-z0-9][a-z0-9-]*$"
     },
     "title": {
@@ -29,9 +29,15 @@
       "description": "docs-relative path to the rendered MDX page (active recipes only).",
       "pattern": "\\.mdx$"
     },
+    "slug": {
+      "type": "string",
+      "description": "URL slug for the page (active recipes only). Defaults to the page file name without .mdx; set it only to keep an existing URL.",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
     "provider": {
       "type": "string",
-      "description": "Model provider key used by landing-page filters (e.g. moonshot, nvidia, qwen)."
+      "description": "Model provider key: groups the Recipes sidebar and drives the landing-page provider filter. Must be a key in providers.yaml (e.g. moonshot, nvidia, qwen).",
+      "pattern": "^[a-z0-9]+$"
     },
     "model": {
       "type": "object",

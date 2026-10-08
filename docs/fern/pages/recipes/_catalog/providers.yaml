@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Model providers for the Recipes tab. A recipe's `provider:` key must be one
+# of the keys below.
+#
+# docs/fern/scripts/gen_recipe_nav.py groups the Model Recipes sidebar and the
+# overview's provider filter by these providers. Providers in `ranked:` come
+# first, in that order; every other provider follows, alphabetically by
+# `name`. A provider with no active recipe is left out of both. To add a
+# provider, add it to `providers:`; rank it only to place it above the
+# alphabetical tail.
+schema_version: 1
+
+# Ordered by model-maker popularity.
+ranked:
+- zai
+- moonshot
+- deepseek
+- qwen
+- nvidia
+- google
+- thinkingmachines
+- openai
+- lg
+- skt
+- upstage
+
+# key: the `provider:` value in recipes/<id>.yaml, and the overview's
+#   data-provider filter token. Lowercase letters and digits only.
+# name: the sidebar section title.
+# chip: the overview's filter-chip label, when it differs from `name`.
+providers:
+  deepseek:
+    name: DeepSeek
+  google:
+    name: Google
+  lg:
+    name: LG AI Research
+  moonshot:
+    name: Moonshot AI
+    chip: Moonshot
+  motif:
+    name: Motif Technologies
+  nvidia:
+    name: NVIDIA
+  openai:
+    name: OpenAI
+  qwen:
+    name: Qwen
+  skt:
+    name: SK Telecom
+  thinkingmachines:
+    name: Thinking Machines
+  upstage:
+    name: Upstage
+  zai:
+    name: Z.ai
+    chip: Z.AI

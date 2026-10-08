@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: solar-open2-250b
+title: Solar Open2 250B
+page: pages/recipes/model-recipes/solar-open2-250b.mdx
+provider: upstage
+model:
+  name: Solar-Open2-250B-Nota-NVFP4
+  hf_id: nota-ai/Solar-Open2-250B-Nota-NVFP4
+  precision: NVFP4 weights with FP8 KV cache
+status: experimental
+maintainer: null
+targets:
+- id: vllm-agg-b200-chat
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-solar-open2-250b-post.1@sha256:42fd3ed0607aa19b7d4c1b0a8f8aaaefefc8ec6292294ea2b5e6757353891f49
+  topology: aggregated
+  techniques:
+  - tp2
+  - fp8-kv-cache
+  - prefix-caching
+  - kv-aware-routing
+  workload:
+    type: trace-replay
+    traffic: Mooncake chat trace, 1,805 requests, mean ISL 37.4K / OSL 1,008, concurrency 20
+  deploy:
+    asset: recipes/solar-open2-250b/vllm/agg-b200-chat/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/solar-open2-250b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 216.88 output tok/s/GPU at concurrency 20, 52.02 tok/s/user P50, TTFT P50 308 ms, meeting a joint gate of
+      user output >= 50 tok/s and TTFT P50 < 5 s
+- id: vllm-disagg-b200-chat
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-solar-open2-250b-post.1@sha256:42fd3ed0607aa19b7d4c1b0a8f8aaaefefc8ec6292294ea2b5e6757353891f49
+  topology: disaggregated
+  techniques:
+  - disagg-pd
+  - expert-parallel
+  - fp8-kv-cache
+  - nixl-ucx
+  workload:
+    type: trace-replay
+    traffic: Mooncake chat trace, 1,805 requests, mean ISL 37.4K / OSL 1,008, concurrency 44
+  deploy:
+    asset: recipes/solar-open2-250b/vllm/disagg-b200-chat/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/solar-open2-250b/perf/perf-disagg.yaml
+  expected_performance:
+    available: true
+    summary: 206.20 output tok/s/GPU at concurrency 44, 51.69 tok/s/user P50, TTFT P50 2,277 ms, meeting a joint gate of
+      user output >= 50 tok/s and TTFT P50 < 5 s with little margin on per-user throughput
+gaps:
+- maintainer unknown
+- Speculative decoding is not supported on this checkpoint.
+- The disaggregated manifest requests the cluster-specific rdma/ib extended resource, which must be adjusted per cluster.
