@@ -1,129 +1,48 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Note to AI agents: keep this README minimal (installation and one example).
+Do not edit it unless the user explicitly asks you to.
+-->
+
 # Sidecars
 
-Rust sidecars connect Dynamo workers to inference engines over their native
-gRPC APIs. Dynamo owns worker registration and request handling; the engine
-runs in a separate process.
+Rust sidecars connect Dynamo to vLLM, SGLang, and TensorRT-LLM engines over
+their native gRPC APIs. The engine runs in its own process; the sidecar
+registers it with Dynamo and serves its requests.
 
-```text
-common/         Shared gRPC arguments, transport, and errors
-sglang/         SGLang sidecar
-trtllm/         TensorRT-LLM sidecar
-vllm/           vLLM sidecar
-Dockerfile      Builds all three sidecar executables into a CPU-only image
-dynamo-sidecar  Convenience entrypoint mapping vllm/sglang/trtllm to the above
-```
+> [!WARNING]
+> **Experimental.** The sidecars and their deployment examples are
+> experimental. Manifests, flags, and behavior may change without notice.
 
-Engine protocols and request conversion remain in each engine's crate.
+Engine-specific guides: [vLLM](vllm/README.md), [SGLang](sglang/README.md),
+[TensorRT-LLM](trtllm/README.md).
 
-## Runtime configuration
+## Installation
 
-All three sidecars accept the same Dynamo runtime flags through both their
-standalone executables and Python module launchers:
+### pip
 
-| Flag | Environment variable | Values | Default |
-|------|----------------------|--------|---------|
-| `--discovery-backend` | `DYN_DISCOVERY_BACKEND` | `etcd`, `kubernetes`, `file`, `mem` | `etcd` |
-| `--request-plane` | `DYN_REQUEST_PLANE` | `tcp`, `nats` | `tcp` |
-| `--response-plane` | `DYN_RESPONSE_PLANE` | `tcp`, `quic` | `tcp` |
-| `--event-plane` | `DYN_EVENT_PLANE` | `zmq`, `nats` | `zmq` |
-
-Explicit CLI values override the corresponding environment variables. When both
-are unset, the runtime defaults apply. These settings are resolved before
-connecting runtime dependencies or discovering engine metadata.
-
-For example, with a vLLM engine listening on port 50051:
+The sidecars ship in the `ai-dynamo` wheel:
 
 ```bash
-python -m dynamo.vllm.sidecar \
-  --grpc-endpoint 127.0.0.1:50051 \
-  --discovery-backend file \
-  --request-plane tcp \
-  --response-plane tcp \
-  --event-plane zmq
+pip install ai-dynamo
+python -m dynamo.vllm.sidecar --help    # also dynamo.sglang.sidecar, dynamo.trtllm.sidecar
 ```
 
-Configure the frontend with matching transports and discovery settings. File
-discovery requires all participants to share the same directory, selected by
-`DYN_FILE_KV` (default: `$TMPDIR/dynamo_store_kv`). The engine's native gRPC
-connection is configured separately with `--grpc-endpoint`.
+### Docker
 
-## Health and startup
+The CPU-only `dynamo-sidecar` image contains all three sidecars and is
+published to NGC:
 
-Set `DYN_SYSTEM_PORT` to enable the sidecar HTTP server. The standalone sidecar
-executables and Python module launchers (`python -m dynamo.<engine>.sidecar`)
-initialize runtime dependencies, then bind one listener before waiting for
-engine metadata. A startup probe on `/live` remains unsuccessful until the
-listener starts:
+```bash
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>
+docker run --rm nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version> vllm --help
+```
 
-- `/live` returns HTTP 200 whenever the listener can respond, including while
-  the engine is absent or loading and after runtime connectivity is lost.
-- `/health` returns HTTP 503 while a required discovery or NATS connection is
-  unavailable, and once shutdown starts.
-  It returns HTTP 200 when those dependencies are reachable, independently of
-  engine readiness and model registration. Discovery reads have a one-second
-  timeout; NATS readiness follows the client connection state. Neither check
-  issues inference requests.
-
-The distributed runtime owns the listener. Sidecar launchers select runtime-only
-probes; integrated workers retain their existing worker-health probe behavior.
-
-The existing `DYN_SYSTEM_LIVE_PATH` and `DYN_SYSTEM_HEALTH_PATH` settings also
-apply. Metrics, metadata, and engine routes are registered on the same listener
-at startup. Keep a separate engine startup/readiness probe: a
-healthy sidecar alone does not mean the engine can serve requests.
-
-Shutdown withdraws sidecar readiness immediately. Metadata discovery before
-`Worker.start()` is cancelled; once engine startup has begun, the existing Worker
-startup, drain, and cleanup ordering remains in effect.
-
-Continuous engine health reconciliation, engine replacement and KV recovery, and
-changes to shutdown drain policy remain separate work. The synchronous engine
-constructors used by embedded callers retain their existing behavior.
-
-## Build the image
-
-There is no published sidecar image yet. `Dockerfile` builds one CPU-only image
-carrying all three engine-specific executables — `dynamo-vllm-sidecar`,
-`dynamo-sglang-sidecar`, and `dynamo-trtllm-sidecar` — in `/usr/local/bin`.
-Official packaging is deferred to a follow-up change.
-
-Build a multi-arch image from the repository root so it runs on any node —
-`amd64` (x86) or `arm64` (GB200/Grace):
+To build it from the repository root instead:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/Dockerfile \
-  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
+  -f lib/sidecar/Dockerfile -t <your-registry>/dynamo-sidecar:dev --push .
 ```
-
-To build faster for one architecture, pass just that platform (for example
-`linux/arm64` for GB200/Grace).
-
-### Selecting an engine
-
-Deployments run the executable they need directly, as the container `command`
-(see each backend's `deploy/` manifests):
-
-```yaml
-command:
-- dynamo-vllm-sidecar
-args:
-- --grpc-endpoint
-- 127.0.0.1:50051
-```
-
-The image's default entrypoint, `dynamo-sidecar`, is a convenience wrapper that
-maps the short names `vllm`, `sglang`, and `trtllm` onto those executables, so
-ad-hoc `docker run` needs only the engine name. Deployments override it with
-`command`, so the two paths never interact:
-
-```bash
-docker run --rm <your-registry>/dynamo-sidecar:1.3.0 vllm --help
-docker run --rm <your-registry>/dynamo-sidecar:1.3.0 sglang --help
-docker run --rm <your-registry>/dynamo-sidecar:1.3.0 trtllm --help
-```
-
-Plain `docker run` with no arguments uses the image `CMD` of `--help`, prints
-usage, and exits `0`. Under Kubernetes, a container that overrides `command`
-but omits `args` reaches the entrypoint with no engine name; it prints usage to
-standard error and exits `2`, so the misconfiguration fails loudly.
