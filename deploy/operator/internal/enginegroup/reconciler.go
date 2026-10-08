@@ -35,6 +35,40 @@ type Coordinator struct {
 	now        func() time.Time
 }
 
+// ObservationAuthority identifies the external truth source whose current state could not be established.
+type ObservationAuthority string
+
+const (
+	// ObservationAuthorityCapacity owns physical allocation state.
+	ObservationAuthorityCapacity ObservationAuthority = "capacity"
+	// ObservationAuthorityTraffic owns admission and drain state.
+	ObservationAuthorityTraffic ObservationAuthority = "traffic"
+	// ObservationAuthorityMembership owns committed engine topology and correlated transition state.
+	ObservationAuthorityMembership ObservationAuthority = "membership"
+	// ObservationAuthorityCorrelation validates a complete observation set against the durable journal.
+	ObservationAuthorityCorrelation ObservationAuthority = "correlation"
+)
+
+// ObservationError means reconciliation could not establish fresh authoritative external state. Callers may retain
+// the durable journal, but must not publish its previous health projection as a current observation.
+type ObservationError struct {
+	Authority ObservationAuthority
+	Err       error
+}
+
+func (e *ObservationError) Error() string {
+	return fmt.Sprintf("observe %s authority: %v", e.Authority, e.Err)
+}
+
+// Unwrap exposes the authority's underlying observation or validation failure.
+func (e *ObservationError) Unwrap() error {
+	return e.Err
+}
+
+func observationError(authority ObservationAuthority, err error) error {
+	return &ObservationError{Authority: authority, Err: err}
+}
+
 // NewCoordinator constructs an Engine Group coordinator. Every adapter must be non-nil.
 func NewCoordinator(
 	capacity CapacityAdapter,
@@ -106,17 +140,11 @@ func (c *Coordinator) observeGroup(
 ) (MembershipTopology, error) {
 	capacity, err := c.capacity.Observe(ctx, groupID)
 	if err != nil {
-		return MembershipTopology{}, fmt.Errorf("observe capacity: %w", err)
-	}
-	if err := validateCapacityObservation(capacity); err != nil {
-		return MembershipTopology{}, fmt.Errorf("validate capacity observation: %w", err)
+		return MembershipTopology{}, observationError(ObservationAuthorityCapacity, err)
 	}
 	traffic, err := c.traffic.Observe(ctx, groupID)
 	if err != nil {
-		return MembershipTopology{}, fmt.Errorf("observe traffic: %w", err)
-	}
-	if err := validateTrafficObservation(traffic); err != nil {
-		return MembershipTopology{}, fmt.Errorf("validate traffic observation: %w", err)
+		return MembershipTopology{}, observationError(ObservationAuthorityTraffic, err)
 	}
 	transitionID := ""
 	if status.Membership.Desired != nil {
@@ -124,29 +152,64 @@ func (c *Coordinator) observeGroup(
 	}
 	membership, err := c.membership.Observe(ctx, groupID, transitionID)
 	if err != nil {
-		return MembershipTopology{}, fmt.Errorf("observe membership: %w", err)
-	}
-	if err := validateMembershipObservation(membership, status.Membership.Desired); err != nil {
-		return MembershipTopology{}, fmt.Errorf("validate membership observation: %w", err)
-	}
-	if err := validateMembershipObservationEvolution(status.Membership.Observed, membership); err != nil {
-		return MembershipTopology{}, fmt.Errorf("validate membership observation evolution: %w", err)
+		return MembershipTopology{}, observationError(ObservationAuthorityMembership, err)
 	}
 
-	// Surface fresh physical and traffic truth without making either observation the authority for membership.
-	status.Capacity.Observed = cloneCapacityObservation(capacity)
-	status.Traffic.Observed = cloneTrafficObservation(traffic)
-	status.Membership.Observed = cloneMembershipObservation(membership)
-	if err := validateObservedRevisions(*status); err != nil {
+	// Validate the complete fresh observation set in isolation. Invalid or inconclusive external state must never
+	// replace the last valid durable observations returned to the caller.
+	candidate, err := statusWithFreshObservations(*status, capacity, traffic, membership)
+	if err != nil {
 		return MembershipTopology{}, err
+	}
+	*status = candidate
+	return cloneTopology(membership.CommittedTopology), nil
+}
+
+func statusWithFreshObservations(
+	status GroupStatus,
+	capacity CapacityObservation,
+	traffic TrafficObservation,
+	membership MembershipObservation,
+) (GroupStatus, error) {
+	if err := validateCapacityObservation(capacity); err != nil {
+		return status, observationError(
+			ObservationAuthorityCapacity,
+			fmt.Errorf("validate observation: %w", err),
+		)
+	}
+	if err := validateTrafficObservation(traffic); err != nil {
+		return status, observationError(
+			ObservationAuthorityTraffic,
+			fmt.Errorf("validate observation: %w", err),
+		)
+	}
+	if err := validateMembershipObservation(membership, status.Membership.Desired); err != nil {
+		return status, observationError(
+			ObservationAuthorityMembership,
+			fmt.Errorf("validate observation: %w", err),
+		)
+	}
+	if err := validateMembershipObservationEvolution(status.Membership.Observed, membership); err != nil {
+		return status, observationError(
+			ObservationAuthorityMembership,
+			fmt.Errorf("validate observation evolution: %w", err),
+		)
+	}
+
+	candidate := cloneStatus(status)
+	candidate.Capacity.Observed = cloneCapacityObservation(capacity)
+	candidate.Traffic.Observed = cloneTrafficObservation(traffic)
+	candidate.Membership.Observed = cloneMembershipObservation(membership)
+	if err := validateObservedRevisions(candidate); err != nil {
+		return status, observationError(ObservationAuthorityCorrelation, err)
 	}
 
 	// Retain the payload behind each adapter-acknowledged revision before a newer desired target can replace it.
-	promoteAcceptedTargets(status)
-	if err := validateAcceptedTargets(*status); err != nil {
-		return MembershipTopology{}, err
+	promoteAcceptedTargets(&candidate)
+	if err := validateAcceptedTargets(candidate); err != nil {
+		return status, observationError(ObservationAuthorityCorrelation, err)
 	}
-	return cloneTopology(membership.CommittedTopology), nil
+	return candidate, nil
 }
 
 func promoteAcceptedTargets(status *GroupStatus) {
