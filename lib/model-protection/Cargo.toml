@@ -13,7 +13,7 @@ description = "Protected model package verification and materialization"
 
 [features]
 tpm2 = ["dep:tss-esapi"]
-enrollment-client = ["tpm2", "enrollment"]
+enrollment-client = ["tpm2", "enrollment", "dep:dynamo-truthy"]
 enrollment = ["dep:aes"]
 enrollment-authority = [
     "enrollment",
@@ -52,6 +52,7 @@ path = "src/bin/model-protection-issue.rs"
 required-features = ["packager"]
 
 [dependencies]
+dynamo-truthy = { workspace = true, optional = true }
 base64 = "0.22"
 aes-kw = { version = "0.2", optional = true }
 ed25519-dalek = { version = "2", features = ["pkcs8"], optional = true }

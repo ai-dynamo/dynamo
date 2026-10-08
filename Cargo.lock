@@ -3012,6 +3012,7 @@ dependencies = [
  "aes",
  "aes-kw",
  "base64 0.22.1",
+ "dynamo-truthy",
  "ed25519-dalek",
  "p256 0.13.2",
  "pkcs8 0.10.2",

@@ -206,6 +206,16 @@ mod linux {
 
     type ActivationState = dynamo_model_protection::enrollment::provision::ActivationState;
 
+    fn require_provision_confirmation(value: &str) -> Result<(), &'static str> {
+        let confirmed = dynamo_truthy::parse_bool(value)
+            .map_err(|_| "ENROLLMENT_PROVISION_CONFIRMATION_REQUIRED")?;
+        // Persistent TPM provisioning requires the canonical spelling, without aliases.
+        if !confirmed || value != confirmed.to_string() {
+            return Err("ENROLLMENT_PROVISION_CONFIRMATION_REQUIRED");
+        }
+        Ok(())
+    }
+
     pub(super) fn provision(args: &[String]) -> Result<(), &'static str> {
         use dynamo_model_protection::enrollment::provision;
         use std::collections::BTreeMap;
@@ -232,9 +242,7 @@ mod linux {
             return Err("ENROLLMENT_CONFIG_INVALID");
         }
         let required = |name| parsed.get(name).copied().ok_or("ENROLLMENT_CONFIG_INVALID");
-        if required("--confirm-new-handles")? != "true" {
-            return Err("ENROLLMENT_PROVISION_CONFIRMATION_REQUIRED");
-        }
+        require_provision_confirmation(required("--confirm-new-handles")?)?;
         let handle = |name| {
             let value = required(name)?;
             if value.len() != 10 || !value.starts_with("0x") {
@@ -548,6 +556,20 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn provision_requires_canonical_confirmation() {
+            assert_eq!(require_provision_confirmation("true"), Ok(()));
+            for value in [
+                "TRUE", "True", " true ", "1", "yes", "on", "false", "0", "off", "no", "", "maybe",
+            ] {
+                assert_eq!(
+                    require_provision_confirmation(value),
+                    Err("ENROLLMENT_PROVISION_CONFIRMATION_REQUIRED"),
+                    "value={value:?}"
+                );
+            }
+        }
 
         #[test]
         fn rejects_regular_files_and_symlinks_without_tpm_io() {
