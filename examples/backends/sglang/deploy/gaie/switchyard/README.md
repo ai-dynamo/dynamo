@@ -40,9 +40,9 @@ The gateway and PreProc configuration
 is backend-independent and also works with existing vLLM pools that expose the same interface.
 
 The Kustomization assumes the existing namespace is `switchyard`. Change `namespace` in
-[kustomization.yaml](kustomization.yaml) to your workload namespace, and adjust the target model IDs
-in [routes.toml](routes.toml) and pool references in
-[http-routes.yaml](http-routes.yaml) if they differ. PreProc and the example's dedicated Gateway run
+[kustomization.yaml](kustomization.yaml) to your workload namespace. If your model IDs or pool names differ,
+change the target model IDs in [routes.toml](routes.toml), and both the `X-Gateway-Model-Name` header
+values and the pool references in [http-routes.yaml](http-routes.yaml). PreProc and the example's dedicated Gateway run
 in that same namespace. Do not downgrade newer controller CRDs to run this example.
 
 You also need Docker, `kubectl` with Kustomize support, and a registry the cluster can pull from.
