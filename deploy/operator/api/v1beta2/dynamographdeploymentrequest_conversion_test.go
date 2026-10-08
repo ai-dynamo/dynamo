@@ -89,7 +89,6 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 		Spec: DynamoGraphDeploymentRequestSpec{
 			ModelRef:  &ModelReference{Name: "Qwen/Qwen3-32B"},
 			Backends:  []Backend{BackendVLLM},
-			Image:     "nvcr.io/nvidia/dynamo:latest",
 			Hardware:  &HardwareSpec{},
 			Workload:  &WorkloadSpec{},
 			Objective: &ObjectiveSpec{},

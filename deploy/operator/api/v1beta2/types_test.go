@@ -104,6 +104,7 @@ func TestRequestSpecUsesMVPFieldSet(t *testing.T) {
 		"Objective",
 		"Search",
 		"Recommendation",
+		"V1Beta1",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("request spec fields = %v, want %v", got, want)
