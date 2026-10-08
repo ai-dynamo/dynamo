@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from dynamo.common.protocols.image_protocol import NvCreateImageRequest
 from dynamo.common.utils.output_modalities import RequestType
+from dynamo.llm.exceptions import InvalidArgument
 
 try:
     from dynamo.vllm.omni import stage_router
@@ -252,11 +254,20 @@ async def test_generate_delegates_formatting_to_output_formatter():
         formatter=mock_formatter,
     )
 
-    request = {"prompt": "x", "response_format": "b64_json"}
+    request = {
+        "prompt": "x",
+        "response_format": "b64_json",
+        "output_format": "JPEG",
+    }
     with patch.object(stage_router, "shm_deserialize", return_value=fake_result):
         with patch(
             "dynamo.vllm.omni.stage_router.parse_request_type",
-            return_value=(None, "image_generation"),
+            return_value=(
+                NvCreateImageRequest(
+                    prompt="x", response_format="b64_json", output_format="JPEG"
+                ),
+                RequestType.IMAGE_GENERATION,
+            ),
         ):
             with patch(
                 "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-fmt"
@@ -267,9 +278,42 @@ async def test_generate_delegates_formatting_to_output_formatter():
     mock_formatter.format.assert_awaited_once_with(
         fake_result,
         "req-fmt",
-        request_type="image_generation",
+        request_type=RequestType.IMAGE_GENERATION,
         response_format="b64_json",
+        output_format="jpeg",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("output_format", "gif", "Unsupported output_format"),
+        ("quality", "high", "quality is not supported"),
+        ("background", "transparent", "background is not supported"),
+    ],
+)
+async def test_image_request_options_are_rejected_before_stage_call(
+    field, value, message
+):
+    stage_called = False
+
+    async def stage0_handler(request):
+        nonlocal stage_called
+        stage_called = True
+        return {"shm_meta": {"x": 1}, "finished": True}
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={"stage0": _StageClient(stage0_handler)},
+        output_modalities=["image"],
+    )
+    request = {"prompt": "x", field: value}
+
+    with pytest.raises(InvalidArgument, match=message):
+        [chunk async for chunk in router.generate(request, context=None)]
+
+    assert not stage_called
 
 
 @pytest.mark.asyncio

@@ -40,6 +40,8 @@ bash examples/backends/vllm/launch/agg_omni_image.sh
 
 Image generation is available on two endpoints: `/v1/chat/completions` returns base64-encoded images inline in `choices[].delta.content[].image_url`, while `/v1/images/generations` returns a URL or base64 depending on `response_format`.
 
+For `/v1/images/generations` and `/v1/images/edits`, Dynamo's vLLM-Omni image handler accepts `output_format` values `png` (default), `jpeg` (`jpg` is an alias), and `webp`. It reports the encoded format and actual generated dimensions in `output_format` and `size`. This handler accepts `response_format` values `url` and `b64_json`; if omitted, the response uses base64. JPEG output composites transparent pixels onto white. This handler does not apply `quality` or `background`; requests that set either field are rejected with HTTP 400 rather than echoing values that were not used.
+
 <Tabs>
 <Tab title="/v1/images/generations">
 

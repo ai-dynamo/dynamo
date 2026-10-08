@@ -184,6 +184,35 @@ class TestBuildEngineInputs:
         assert sp.width == 512
 
     @pytest.mark.asyncio
+    async def test_image_generation_normalizes_output_format(self):
+        handler = _make_handler()
+        req = NvCreateImageRequest(prompt="a cat", size="512x512", output_format="JPEG")
+
+        inputs = await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
+
+        assert inputs.output_format == "jpeg"
+
+    @pytest.mark.parametrize(
+        ("request_overrides", "error"),
+        [
+            ({"output_format": "gif"}, "Unsupported output_format"),
+            ({"quality": "high"}, "quality is not supported"),
+            ({"background": "transparent"}, "background is not supported"),
+            ({"response_format": "xml"}, "Unsupported response_format"),
+            ({"response_format": "file"}, "Unsupported response_format"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_image_generation_rejects_unsupported_image_options(
+        self, request_overrides, error
+    ):
+        handler = _make_handler()
+        req = NvCreateImageRequest(prompt="a cat", **request_overrides)
+
+        with pytest.raises(ValueError, match=error):
+            await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
+
+    @pytest.mark.asyncio
     async def test_image_chat_completion_uses_multimodal_prompt(self):
         """Image chat requests must use vLLM-Omni multimodal preprocessing."""
         handler = _make_handler(stage_types=("llm", "diffusion"))
