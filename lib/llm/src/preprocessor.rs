@@ -143,6 +143,10 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
 
 #[derive(Debug, thiserror::Error)]
 #[error("prompt has {tokens} tokens but the remaining System One prompt limit is {limit}")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Consumed by decision execution integration")
+)]
 pub(crate) struct SystemOnePromptTooLong {
     pub(crate) tokens: usize,
     pub(crate) limit: usize,
@@ -150,6 +154,10 @@ pub(crate) struct SystemOnePromptTooLong {
 
 #[derive(Debug, thiserror::Error)]
 #[error("prompt validation needs {bytes} encoded text bytes; the remaining limit is {limit}")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Consumed by decision execution integration")
+)]
 pub(crate) struct SystemOneEncodingTooLarge {
     pub(crate) bytes: usize,
     pub(crate) limit: usize,
@@ -2995,6 +3003,10 @@ impl OpenAIPreprocessor {
     /// Render a System One question through the model's normal chat template and resolve
     /// candidate labels that each add exactly one distinct token at the answer position.
     /// Reject over-budget prompts before repeating tokenization for candidate labels.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Consumed by decision execution integration")
+    )]
     pub(crate) fn render_systemone_question(
         &self,
         model: &str,
