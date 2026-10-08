@@ -305,6 +305,29 @@ impl<'de> Deserialize<'de> for MultimodalData {
     }
 }
 
+/// Check complete blocks without a per-byte early exit so LLVM can vectorize.
+fn is_base64_payload(payload: &[u8]) -> bool {
+    fn allowed(b: u8) -> bool {
+        (b.wrapping_sub(b'A') <= 25)
+            | (b.wrapping_sub(b'a') <= 25)
+            | (b.wrapping_sub(b'0') <= 9)
+            | (b == b'+')
+            | (b == b'/')
+            | (b == b'=')
+    }
+    let (blocks, tail) = payload.as_chunks::<32>();
+    for block in blocks {
+        let mut valid = true;
+        for &byte in block {
+            valid &= allowed(byte);
+        }
+        if !valid {
+            return false;
+        }
+    }
+    tail.iter().copied().all(allowed)
+}
+
 /// Recognize data URIs whose bytes, and therefore cache keys, need no normalization.
 fn is_plain_base64_data_uri(value: &str) -> bool {
     let Some(rest) = value.strip_prefix("data:") else {
@@ -319,9 +342,7 @@ fn is_plain_base64_data_uri(value: &str) -> bool {
         && header
             .bytes()
             .all(|b| b.is_ascii_graphic() && b != b'?' && b != b'#')
-        && payload
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        && is_base64_payload(payload.as_bytes())
 }
 
 // multimodal map containing {mm_part_type: [data...]}
@@ -781,6 +802,28 @@ impl PreprocessedEmbeddingRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_blocks_match_scalar_for_all_bytes_and_tails() {
+        for length in [0, 1, 31, 32, 33, 63, 64, 65] {
+            let mut payload = vec![b'A'; length];
+            assert!(is_base64_payload(&payload));
+            for offset in 0..length {
+                for byte in 0..=255 {
+                    payload[offset] = byte;
+                    let expected = payload
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
+                    assert_eq!(
+                        is_base64_payload(&payload),
+                        expected,
+                        "{length}/{offset}/{byte}"
+                    );
+                }
+                payload[offset] = b'A';
+            }
+        }
+    }
 
     #[test]
     fn multimodal_uri_wire_compatibility_and_order() {
