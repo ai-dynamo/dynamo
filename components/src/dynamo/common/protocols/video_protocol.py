@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, conint
 
 
 class VideoData(BaseModel):
@@ -49,13 +49,13 @@ class VideoNvExt(BaseModel):
     User requests triggers which result in the request issue back out-of-band information in the SSE
     stream using the `event:` field.
     """
-    fps: int | None = None
+    fps: conint(ge=1) | None = None
     """
-    Frames per second (default: 24)
+    Frames per second, at least 1 (default: 24)
     """
-    num_frames: int | None = None
+    num_frames: conint(ge=1) | None = None
     """
-    Number of frames to generate (overrides fps * seconds if set)
+    Number of frames to generate, at least 1 (overrides fps * seconds if set)
     """
     negative_prompt: str | None = None
     """
@@ -100,9 +100,10 @@ class NvCreateVideoRequest(BaseModel):
     """
     Optional image reference that guides generation (for I2V)
     """
-    seconds: int | None = None
+    seconds: conint(ge=1) | None = None
     """
-    Clip duration in seconds
+    Clip duration in seconds, at least 1. The frontend rejects a value
+    outside the range, so a worker never sees one.
     """
     size: str | None = None
     """

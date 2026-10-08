@@ -3,9 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use validator::Validate;
 
 /// NVIDIA extensions to the OpenAI Videos API
-#[derive(ToSchema, Serialize, Deserialize, Default, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Default, Debug, Clone)]
 #[schema(as = VideoNvExt)]
 pub struct NvExt {
     /// Annotations
@@ -14,12 +15,16 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Vec<String>>,
 
-    /// Frames per second (default: 24)
+    /// Frames per second, at least 1 (default: 24)
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1)]
+    #[validate(range(min = 1, message = "fps must be at least 1"))]
     pub fps: Option<i32>,
 
-    /// Number of frames to generate (overrides fps * seconds if set)
+    /// Number of frames to generate, at least 1 (overrides fps * seconds if set)
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1)]
+    #[validate(range(min = 1, message = "num_frames must be at least 1"))]
     pub num_frames: Option<i32>,
 
     /// A text description of the undesired video content.
