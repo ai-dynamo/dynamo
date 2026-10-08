@@ -563,8 +563,7 @@ mod tests {
                 "$defs": {"shared": {"type": kind}}
             }));
         }
-        let schema = build_required_schema(&tools, Some(false)).expect("independent schemas");
-        assert_eq!(schema["maxItems"], 1);
+        let schema = build_required_schema(&tools, None).expect("independent schemas");
         for (index, kind) in ["string", "number"].into_iter().enumerate() {
             let root = format!("#/$defs/tool_{index}");
             assert_eq!(

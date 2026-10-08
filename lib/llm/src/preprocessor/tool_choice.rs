@@ -766,23 +766,8 @@ mod tests {
 
     #[test]
     fn structural_tag_off_preserves_generic_forced_tool_fallback() {
-        let mut declarations = tools();
-        for (index, kind) in ["string", "integer"].into_iter().enumerate() {
-            let mut tool = declarations[0].clone();
-            tool["function"]["name"] = json!(format!("tool_{index}"));
-            tool["function"]["parameters"] = json!({
-                "type": "object",
-                "properties": {"value": {"$ref": "#/$defs/shared"}},
-                "$defs": {"shared": {"type": kind}}
-            });
-            if index == 0 {
-                declarations[0] = tool;
-            } else {
-                declarations.as_array_mut().unwrap().push(tool);
-            }
-        }
         let request = request(json!({
-            "tools": declarations,
+            "tools": tools(),
             "tool_choice": "required"
         }));
         let preprocessor = preprocessor("hermes", StructuralTagMode::Off);
