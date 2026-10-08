@@ -9,7 +9,7 @@ model:
   name: Solar-Open2-250B-Nota-NVFP4
   hf_id: nota-ai/Solar-Open2-250B-Nota-NVFP4
   precision: NVFP4 weights with FP8 KV cache
-status: experimental
+status: validated
 maintainer: null
 targets:
 - id: vllm-agg-b200-chat
