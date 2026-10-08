@@ -711,15 +711,12 @@ fn ends_on_a_finished_value(trimmed: &str) -> bool {
 /// Preserve a matched string stop without confusing token stops with delimiters.
 pub(super) fn anthropic_stop_fields(
     finish_reason: &dynamo_protocols::types::FinishReason,
-    nvext: Option<&serde_json::Value>,
+    stop_reason: Option<&serde_json::Value>,
 ) -> (AnthropicStopReason, Option<String>) {
     use dynamo_protocols::types::FinishReason;
 
     match finish_reason {
-        FinishReason::Stop => match nvext
-            .and_then(|ext| ext.get("stop_reason"))
-            .and_then(serde_json::Value::as_str)
-        {
+        FinishReason::Stop => match stop_reason.and_then(serde_json::Value::as_str) {
             Some(sequence) => (
                 AnthropicStopReason::StopSequence,
                 Some(sequence.to_string()),
@@ -758,7 +755,13 @@ pub fn chat_completion_to_anthropic_response(
         );
 
         if let Some(finish_reason) = &choice.finish_reason {
-            let fields = anthropic_stop_fields(finish_reason, chat_resp.nvext.as_ref());
+            let fields = anthropic_stop_fields(
+                finish_reason,
+                chat_resp
+                    .nvext
+                    .as_ref()
+                    .and_then(|ext| ext.get("stop_reason")),
+            );
             stop_reason = Some(fields.0);
             stop_sequence = fields.1;
         }

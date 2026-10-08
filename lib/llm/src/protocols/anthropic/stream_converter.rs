@@ -55,6 +55,7 @@ pub struct AnthropicStreamConverter {
     // Stop reason
     stop_reason: Option<AnthropicStopReason>,
     stop_sequence: Option<String>,
+    backend_stop_reason: Option<serde_json::Value>,
 }
 
 /// Text that arrived after `after_calls` tool calls had started.
@@ -115,6 +116,7 @@ impl AnthropicStreamConverter {
             next_block_index: 0,
             stop_reason: None,
             stop_sequence: None,
+            backend_stop_reason: None,
         }
     }
 
@@ -376,6 +378,14 @@ impl AnthropicStreamConverter {
         self.saw_backend_usage = true;
     }
 
+    /// Keep the latest backend stop metadata across chunks. A tool parser can
+    /// release it on an earlier chunk than the finish reason.
+    fn record_backend_stop_reason(&mut self, chunk: &NvCreateChatCompletionStreamResponse) {
+        if let Some(stop_reason) = chunk.nvext.as_ref().and_then(|ext| ext.get("stop_reason")) {
+            self.backend_stop_reason = Some(stop_reason.clone());
+        }
+    }
+
     /// Serialize an event to SSE, stamping the current cumulative `usage` onto
     /// every `content_block_delta`.
     ///
@@ -494,6 +504,7 @@ impl AnthropicStreamConverter {
         // not the final count at flush time. `self.usage` is stable for the rest
         // of this call (record_usage / the fallback above already ran).
         let usage_snapshot = self.usage.clone();
+        self.record_backend_stop_reason(chunk);
 
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
@@ -505,7 +516,8 @@ impl AnthropicStreamConverter {
                     dynamo_protocols::types::FinishReason::ToolCalls
                         | dynamo_protocols::types::FinishReason::FunctionCall
                 );
-                let (stop_reason, stop_sequence) = anthropic_stop_fields(fr, chunk.nvext.as_ref());
+                let (stop_reason, stop_sequence) =
+                    anthropic_stop_fields(fr, self.backend_stop_reason.as_ref());
                 self.stop_reason = Some(stop_reason);
                 self.stop_sequence = stop_sequence;
             }
@@ -855,6 +867,7 @@ impl AnthropicStreamConverter {
         }
 
         let usage_snapshot = self.usage.clone();
+        self.record_backend_stop_reason(chunk);
 
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
@@ -865,7 +878,8 @@ impl AnthropicStreamConverter {
                     dynamo_protocols::types::FinishReason::ToolCalls
                         | dynamo_protocols::types::FinishReason::FunctionCall
                 );
-                let (stop_reason, stop_sequence) = anthropic_stop_fields(fr, chunk.nvext.as_ref());
+                let (stop_reason, stop_sequence) =
+                    anthropic_stop_fields(fr, self.backend_stop_reason.as_ref());
                 self.stop_reason = Some(stop_reason);
                 self.stop_sequence = stop_sequence;
             }
@@ -1241,6 +1255,75 @@ mod tests {
                 1
             );
             assert_eq!(values.last().unwrap()["type"], "message_stop");
+        }
+    }
+
+    /// A tool parser can hold a possible call opener past the chunk that
+    /// carries the matched stop, then release it with the finish reason.
+    #[tokio::test]
+    async fn test_stream_stop_sequence_survives_tool_parser_split() {
+        use crate::model_card::ModelDeploymentCard;
+        use crate::preprocessor::OpenAIPreprocessor;
+        use dynamo_runtime::protocols::annotated::Annotated;
+        use futures::StreamExt;
+
+        let request: crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true,
+                "tools": [{"type": "function", "function": {"name": "calculate"}}]
+            }))
+            .unwrap();
+        for parser in ["hermes", "glm47"] {
+            for text in ["hello<", "hello<tool"] {
+                let mut card = ModelDeploymentCard::load_from_disk(
+                    "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                    None,
+                )
+                .unwrap();
+                card.runtime_config.tool_call_parser = Some(parser.to_string());
+                let mut terminal = text_chunk(text);
+                terminal.inner.choices[0].finish_reason = Some(FinishReason::Stop);
+                terminal.nvext = Some(serde_json::json!({"stop_reason": "</answer>"}));
+                let parsed: Vec<_> = OpenAIPreprocessor::new(card)
+                    .unwrap()
+                    .postprocessor_parsing_stream(
+                        futures::stream::iter([Annotated::from_data(terminal)]),
+                        &request,
+                        false,
+                        false,
+                    )
+                    .unwrap()
+                    .filter_map(|chunk| async move { chunk.data })
+                    .collect()
+                    .await;
+
+                let mut converter = AnthropicStreamConverter::new("test-model".into(), 0);
+                let mut events = converter.emit_start_events();
+                for chunk in &parsed {
+                    converter.append_chunk_events(chunk, &mut events);
+                }
+                converter.append_end_events(&mut events);
+                let values = sse_values(events).await;
+                let streamed: String = values
+                    .iter()
+                    .filter_map(|event| event["delta"]["text"].as_str())
+                    .collect();
+                assert_eq!(streamed, text, "{parser}");
+                let terminal = values
+                    .iter()
+                    .find(|event| event["type"] == "message_delta")
+                    .unwrap();
+                assert_eq!(
+                    terminal["delta"]["stop_reason"], "stop_sequence",
+                    "{parser}: {text}"
+                );
+                assert_eq!(
+                    terminal["delta"]["stop_sequence"], "</answer>",
+                    "{parser}: {text}"
+                );
+            }
         }
     }
 
