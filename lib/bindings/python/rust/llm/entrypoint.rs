@@ -34,11 +34,12 @@ use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::reasoning_field::ReasoningField;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
-use dynamo_mocker::common::perf_model::PerfModel;
 
-use super::ais_callback::{create_ais_callback, create_ais_prefill_load_estimator};
-use super::replay::MockEngineArgs as PyMockEngineArgs;
-use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
+use super::ais_callback::create_ais_prefill_load_estimator;
+use super::replay::{
+    materialize_mocker_config, mocker_config_from_json, mocker_config_from_python,
+};
+use dynamo_mocker::config::MockerConfig;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
@@ -474,7 +475,7 @@ pub(crate) struct EntrypointArgs {
     tls_key_path: Option<PathBuf>,
     tls_client_ca_cert_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
-    mocker_engine_args: Option<PyMockEngineArgs>,
+    mocker_engine_args: Option<MockerConfig>,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
     namespace_prefix: Option<String>,
@@ -506,7 +507,7 @@ impl EntrypointArgs {
         tls_cert_path: Option<PathBuf>,
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
-        mocker_engine_args: Option<PyMockEngineArgs>,
+        mocker_engine_args: Option<&Bound<'_, PyAny>>,
         runtime_config: Option<ModelRuntimeConfig>,
         namespace: Option<String>,
         namespace_prefix: Option<String>,
@@ -607,7 +608,9 @@ impl EntrypointArgs {
             tls_key_path,
             tls_client_ca_cert_path,
             extra_engine_args,
-            mocker_engine_args,
+            mocker_engine_args: mocker_engine_args
+                .map(|value| mocker_config_from_python(value.py(), value))
+                .transpose()?,
             runtime_config,
             namespace,
             namespace_prefix,
@@ -786,15 +789,13 @@ async fn select_engine(
         }
         EngineType::Mocker => {
             let mut mocker_args = if let Some(mocker_engine_args) = args.mocker_engine_args {
-                mocker_engine_args.inner()
+                mocker_engine_args
             } else if let Some(extra_args_path) = args.extra_engine_args {
                 tokio::fs::read_to_string(&extra_args_path)
                     .await
                     .map_err(anyhow::Error::from)
                     .and_then(|config_json| {
-                        Python::with_gil(|py| {
-                            Ok(PyMockEngineArgs::from_json(py, &config_json)?.inner())
-                        })
+                        Python::with_gil(|py| Ok(mocker_config_from_json(py, &config_json)?))
                     })
                     .map_err(|e| {
                         anyhow::anyhow!(
@@ -807,13 +808,10 @@ async fn select_engine(
                 tracing::warn!(
                     "No extra_engine_args specified for mocker engine. Using default mocker args."
                 );
-                RsMockEngineArgs::default()
+                MockerConfig::default()
             };
 
-            if let Some(config) = mocker_args.ais_perf_config.as_ref() {
-                let callback = Python::with_gil(|py| create_ais_callback(py, config))?;
-                mocker_args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
-            }
+            mocker_args = Python::with_gil(|py| materialize_mocker_config(py, mocker_args))?;
 
             let endpoint = local_model.endpoint_id().clone();
 

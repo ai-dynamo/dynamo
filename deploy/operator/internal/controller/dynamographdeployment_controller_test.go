@@ -42,6 +42,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -71,6 +72,7 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 		v1alpha1.AddToScheme,
 		v1beta1.AddToScheme,
 		grovev1alpha1.AddToScheme,
+		apiextensionsv1.AddToScheme,
 		snapshotv1alpha1.AddToScheme,
 	} {
 		if err := addToScheme(s); err != nil {
@@ -93,9 +95,11 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 			Generation: 7,
 		},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName: "prefill",
+					ComponentType: v1beta1.ComponentTypeWorker,
 					Experimental: &v1beta1.ExperimentalSpec{
 						Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
 						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
@@ -104,6 +108,7 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 				},
 				{
 					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeWorker,
 					Experimental: &v1beta1.ExperimentalSpec{
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
 						Failover:   &v1beta1.FailoverSpec{},
@@ -143,8 +148,7 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 	require.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
 	require.Equal(t,
 		"component \"prefill\": Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
-			"component \"prefill\": Snapshot with active/passive failover is temporarily unsupported\n"+
-			"component \"decode\": Snapshot with active/passive failover is temporarily unsupported",
+			"spec.components[1].experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture",
 		ready.Message,
 	)
 	require.Zero(t, stored.Status.ObservedGeneration)
@@ -1302,7 +1306,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 				)
 				wantFinal.ComponentStatus[component.ComponentName] = componentStatus
 			}
-			g.Expect(result).To(gomega.Equal(wantFinal))
+			g.Expect(result.ReconcileResult).To(gomega.Equal(wantFinal))
 		})
 	}
 }
@@ -3793,7 +3797,9 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				builder = builder.WithObjects(tt.existingPCS)
 			}
 			r := &DynamoGraphDeploymentReconciler{
-				Client: builder.Build(),
+				Client:        builder.Build(),
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
 			reqs := newGroveWatchSetup(r.Client).
 				mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
