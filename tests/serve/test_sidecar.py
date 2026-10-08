@@ -8,6 +8,8 @@ import importlib.util
 import json
 import os
 import pathlib
+import shlex
+import sys
 from functools import partial
 
 import pytest
@@ -19,7 +21,12 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.sidecar_checks import assert_native_cancellation_and_recovery
+from tests.serve.sidecar_checks import (
+    assert_cancellation_and_recovery,
+    assert_kv_transfer,
+    assert_native_cancellation_and_recovery,
+)
+from tests.serve.trtllm_checks import assert_handoff_parity_and_cancellation
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_metrics import EngineMetrics, VllmMetricsChecker
 from tests.utils.engine_process import EngineConfig
@@ -42,6 +49,7 @@ from tests.utils.port_utils import (
     deallocate_ports,
     reserved_ports,
 )
+from tests.utils.test_output import resolve_test_output_path
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/vllm"
@@ -185,6 +193,30 @@ def _trtllm_handoff_payload():
     payload.expected_finish_reason = "length"
     payload.expected_completion_tokens = 8
     return payload
+
+
+def _trtllm_transfer_probe_env(tmp_path):
+    # Keep the launcher's binding check and install calls; only replace serve.
+    wrapper = tmp_path / "trtllm-python"
+    python = shlex.quote(sys.executable)
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        'if [[ "$1" == "-m" && "$2" == "tensorrt_llm.commands.serve" ]]; then\n'
+        "  shift 2\n"
+        f'  exec {python} -m tests.serve.trtllm_transfer_probe "$@"\n'
+        "fi\n"
+        f'exec {python} "$@"\n'
+    )
+    wrapper.chmod(0o700)
+    probe = tmp_path / "transfers.jsonl"
+    probe.write_text("")
+    return probe, {
+        "TRTLLM_PYTHON": str(wrapper),
+        "DYN_TEST_TRANSFER_PROBE": str(probe),
+        "PYTHONPATH": os.pathsep.join(
+            [WORKSPACE_DIR, os.environ.get("PYTHONPATH", "")]
+        ),
+    }
 
 
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
@@ -388,6 +420,42 @@ def sidecar_config_test(
                 )
             elif backend == "trtllm":
                 engine_env["DYN_DISCOVERY_BACKEND"] = discovery_backend
+                probe_path, probe_env = _trtllm_transfer_probe_env(tmp_path)
+                engine_env.update(probe_env)
+                engine_env["DYN_LOGGING_CONSOLE_FORMAT"] = "jsonl"
+
+                def validate_transfer():
+                    payload = _trtllm_handoff_payload().with_model(config.model)
+                    payload.port = dynamo_dynamic_ports.frontend_port
+                    result = assert_kv_transfer(
+                        backend=backend,
+                        payload=payload,
+                        prefill_port=int(engine_env["TRTLLM_PREFILL_GRPC_PORT"]),
+                        decode_port=int(engine_env["TRTLLM_DECODE_GRPC_PORT"]),
+                        probe_path=probe_path,
+                    )
+                    assert_handoff_parity_and_cancellation(
+                        model=config.model,
+                        namespace=engine_env["DYN_NAMESPACE"],
+                        discovery_backend=discovery_backend,
+                        prefill_port=int(engine_env["TRTLLM_PREFILL_GRPC_PORT"]),
+                        decode_port=int(engine_env["TRTLLM_DECODE_GRPC_PORT"]),
+                        probe_path=probe_path,
+                        result=result,
+                        worker_log=pathlib.Path(
+                            resolve_test_output_path(request.node.name)
+                        )
+                        / "bash.log.txt",
+                    )
+                    assert_kv_transfer(
+                        backend=backend,
+                        payload=payload,
+                        prefill_port=int(engine_env["TRTLLM_PREFILL_GRPC_PORT"]),
+                        decode_port=int(engine_env["TRTLLM_DECODE_GRPC_PORT"]),
+                        probe_path=probe_path,
+                    )
+
+                post_validation = validate_transfer
 
             if backend == "vllm":
                 prefill_url = f"http://127.0.0.1:{engine_env[f'{backend.upper()}_PREFILL_HTTP_PORT']}/metrics"
@@ -423,6 +491,26 @@ def sidecar_config_test(
             )
             config = dataclasses.replace(
                 config, script_args=["--extra_llm_api_options", str(engine_config)]
+            )
+            probe_path, probe_env = _trtllm_transfer_probe_env(tmp_path)
+            namespace = f"sidecar-agg-{generate_random_suffix()}"
+            monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
+            monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
+            engine_env = {
+                **probe_env,
+                "DYN_NAMESPACE": namespace,
+                "TRTLLM_GRPC_PORT": str(engine_ports[0]),
+                "DYN_DISCOVERY_BACKEND": discovery_backend,
+            }
+            post_validation = partial(
+                assert_cancellation_and_recovery,
+                backend="trtllm",
+                model=config.model,
+                namespace=namespace,
+                frontend_port=dynamo_dynamic_ports.frontend_port,
+                engine_port=engine_ports[0],
+                discovery_backend=discovery_backend,
+                probe_path=probe_path,
             )
         elif backend == "vllm":
             namespace = f"sidecar-agg-{generate_random_suffix()}"
