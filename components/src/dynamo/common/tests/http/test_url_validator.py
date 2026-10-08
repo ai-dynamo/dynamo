@@ -594,6 +594,7 @@ async def test_validate_media_reference_rejects_empty(tmp_path) -> None:
         "https:///" + "A" * 200_000,  # no host component
         "A" * 200_000 + "://x",  # scheme is client-supplied too
     ],
+    ids=["missing-host", "oversized-scheme"],
 )
 async def test_validate_url_bounds_the_url_in_its_message(url) -> None:
     """These messages became client-visible once the diffusion handlers
