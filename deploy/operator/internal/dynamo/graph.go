@@ -1864,6 +1864,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	// generateGrovePodCliqueSet → gmsWeightServerPodSpec); re-applying the
 	// claim and injecting a sidecar here would produce a double-wired engine
 	// pod (stray GMS sidecar, conflicting claim).
+	snapshotEnabled := GetCheckpoint(component) != nil
 	gmsSpec := GetGPUMemoryService(component)
 	if gmsSpec != nil && !component.IsInterPodGMSEnabled() {
 		// Recheck rendered containers to protect direct or legacy DCDs that bypass admission.
@@ -1875,10 +1876,8 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
-		// Snapshot + intra-pod GMS uses V1 for every backend. GMS or
-		// failover without checkpoint stays on the V0 sidecar.
-		useV1 := GetCheckpoint(component) != nil
-		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0], useV1)
+		// Snapshot workers use GMS V1; snapshot-less workers retain GMS V0.
+		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0], snapshotEnabled)
 		for _, name := range gmsSpec.ExtraClientContainers {
 			var container *corev1.Container
 			for i := range podSpec.Containers {
@@ -1891,16 +1890,22 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 				return nil, fmt.Errorf("gpuMemoryService extra client container %q disappeared while rendering the pod", name)
 			}
 			gms.EnsureClient(&podSpec, container)
-			if useV1 {
+			if snapshotEnabled {
 				gms.EnableV1(container)
 			}
 		}
 	}
 
-	// Clone main container into two engine containers (active + standby) for failover.
-	// Runs after GMS so the main container already has DRA claims and shared volume.
+	// Select the failover path once, after GMS has attached the shared resources.
+	// Snapshot: vLLM/SGLang restored election. No snapshot: cold-start failover, vLLM with GMS V0 shadow mode.
 	if IsIntraPodFailoverEnabled(component) {
-		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
+		var err error
+		if snapshotEnabled {
+			err = buildSnapshotFailoverPod(&podSpec, numberOfNodes, backendFramework)
+		} else {
+			err = buildColdStartFailoverPod(&podSpec, numberOfNodes, backendFramework)
+		}
+		if err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
 	}
