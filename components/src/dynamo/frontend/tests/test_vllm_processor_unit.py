@@ -1397,6 +1397,8 @@ async def test_generator_forwards_chat_logprobs_count(
                     max_tokens=1,
                     logprobs=True,
                     top_logprobs=1,
+                    top_k=None,
+                    min_p=None,
                     cache_salt=None,
                     mm_processor_kwargs=None,
                 ),
@@ -1662,6 +1664,7 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
         max_tokens=1,
         cache_salt=None,
         mm_processor_kwargs=None,
+        logprobs=None,
         **{"temperature": None, "top_k": None, "min_p": None, **requested},
     )
     monkeypatch.setattr(
