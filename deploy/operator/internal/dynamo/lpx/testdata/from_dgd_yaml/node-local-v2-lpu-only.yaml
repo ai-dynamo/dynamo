@@ -1,31 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-data:
-  nodes_per_partition: |-
-    2
-    2
-  partition_ids: |-
-    0
-    1
-  partition_node_offsets: |-
-    0
-    2
-  partition_paths: |-
-    part-0
-    part-1
-  topologies: |-
-    test-topology
-    test-topology
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: node-local-v2-lpu-only
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-lpu-only-33b1-lpu-bc28ad8b58b97be6
-  namespace: test
----
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v2-lpu-only
@@ -41,7 +16,6 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-lpu-only
-        nvidia.com/extra-resources-hash: bc28ad8b58b97be60c2d1c08e866c24118f26ae618eb0ac449c8b13614ff54e7
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:886fe4bd8b53d2f8b1e5e251389d1aa03932410d2e622c23a0b5add02bc8a9a2
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:62f97fac431d09ef5dc7903e63394738955cbfed8086027893d62d3c324a298d
         scheduling.lpu.nvidia.com/model: default
@@ -121,8 +95,6 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /configs
-              name: config
             - mountPath: /dev
               name: host-dev
             - mountPath: /sys
@@ -169,14 +141,10 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: node-local-v2-lpu-only-33b1-lpu-bc28ad8b58b97be6
-            name: config
         replicas: 4
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-lpu-only
-        nvidia.com/extra-resources-hash: bc28ad8b58b97be60c2d1c08e866c24118f26ae618eb0ac449c8b13614ff54e7
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:62f97fac431d09ef5dc7903e63394738955cbfed8086027893d62d3c324a298d
         scheduling.lpu.nvidia.com/role: conductor
       labels:
@@ -252,10 +220,6 @@ spec:
               value: /nfs
             - name: NOVA_MODEL_PATH
               value: $(LPX_MODEL_PATH)
-            - name: NOVA_NODE_NAME_TEMPLATE
-              value: ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}
-            - name: NOVA_RESOLVED_PARTITIONS_DIR
-              value: /configs
             - name: OMPI_ALLOW_RUN_AS_ROOT
               value: "1"
             - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
@@ -295,8 +259,6 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /configs
-              name: config
             - mountPath: /tmp/dynamo-lpu-ssh
               name: single-v2-ssh-key
             - mountPath: /dev/shm
@@ -338,9 +300,6 @@ spec:
             secret:
               defaultMode: 384
               secretName: ssh-secret
-          - configMap:
-              name: node-local-v2-lpu-only-33b1-lpu-bc28ad8b58b97be6
-            name: config
         replicas: 1
         roleName: cond
         startsAfter:

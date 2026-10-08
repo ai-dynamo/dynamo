@@ -298,23 +298,31 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 	require.Equal(t, childGeneration, child.Generation)
 	require.Empty(t, source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeName)
 
-	t.Log("Release quota and observe alpha LGD ownership of the published PCS and runtime resources without waiting for scheduling")
+	t.Log("Release quota and observe alpha LGD ownership of the published PCS and service without waiting for scheduling")
 	require.NoError(t, env.Client().Delete(t.Context(), quota))
 	pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: dynamo.PCSNameForLPX(child), Namespace: source.Namespace}}
-	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: source.Namespace}}
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: pcs.Name + "-serve", Namespace: source.Namespace}}
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		if !assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs)) {
 			return
 		}
-		configMap.Name = fmt.Sprintf("%s-lpu-%.16s", pcs.Name, pcs.Spec.Template.Cliques[0].Annotations[v1alpha1.AnnotationExtraResourcesHash])
-		for _, resource := range []client.Object{pcs, configMap, service} {
+		for _, resource := range []client.Object{pcs, service} {
 			if assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(resource), resource)) {
 				assert.Equal(c, metav1.NewControllerRef(child, v1alpha1.LPXGraphDeploymentGVK), metav1.GetControllerOf(resource))
 			}
 		}
-		assert.Equal(c, ptr.To(true), configMap.Immutable)
 	}, 20*time.Second, 50*time.Millisecond)
+
+	t.Log("Publish runtime selection on the cliques without runtime ConfigMaps")
+	configMaps := &corev1.ConfigMapList{}
+	require.NoError(t, env.Client().List(t.Context(), configMaps, client.InNamespace(source.Namespace)))
+	require.Empty(t, configMaps.Items)
+	for _, clique := range pcs.Spec.Template.Cliques {
+		require.NotContains(t, clique.Annotations, v1alpha1.AnnotationExtraResourcesHash)
+		for _, volume := range clique.Spec.PodSpec.Volumes {
+			require.Nil(t, volume.ConfigMap)
+		}
+	}
 }
 
 func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {

@@ -36,7 +36,7 @@ SPDX-License-Identifier: Apache-2.0
 # Ownership and Identity
 
 - The DynamoGraphDeployment (DGD) owns the LPXGraphDeployment (LPXGD). The LPXGD
-  owns its PodCliqueSet (PCS), runtime ConfigMaps, and Services. The PCS owns the
+  owns its PodCliqueSet (PCS) and Services. The PCS owns the
   LPUPipelineRequests (LPRs) and Grove hierarchy. Each independent workload has one
   PodCliqueScalingGroup (PCSG). A shared draft/target runtime remains one workload.
 - LPRs have a controlling PCS owner reference with `blockOwnerDeletion: true`.
@@ -225,10 +225,10 @@ SPDX-License-Identifier: Apache-2.0
   Reuse fresh successful observations by build URL across revisions, without
   renewing `LastCheckedAt`. Check new or expired builds. Only a Ready deployment
   whose generation has been observed may ignore a failed periodic refresh.
-- Runtime ConfigMaps are immutable, content-addressed, LPXGD-owned, and labeled
-  with its UID. Find obsolete maps by label, verify ownership before deletion,
-  and retain desired names. Delete obsolete maps only after readiness, not during
-  PCS replacement, so existing pods keep their configuration.
+- Runtime selection is operator-owned and published on the pod cliques. Agents
+  and conductors resolve the selected source IDs from the compiler manifest;
+  there are no runtime ConfigMaps to render, mount, hash, or clean up. Preserve
+  workload identity and scheduler placement independently of runtime resolution.
 
 # Tests
 

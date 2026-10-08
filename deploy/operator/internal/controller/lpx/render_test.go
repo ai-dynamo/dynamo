@@ -201,7 +201,7 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 			require.NoError(t, err)
 			before := dgd.DeepCopy()
 
-			t.Log("Render ConfigMaps and optional Services without writing resources or mutating the DGD")
+			t.Log("Render optional Services without writing resources or mutating the DGD")
 			pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 			require.NoError(t, err)
 			require.Equal(t, before, dgd)
@@ -214,7 +214,7 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 					configMapCount++
 				}
 			}
-			require.Positive(t, configMapCount)
+			require.Zero(t, configMapCount)
 			if !tc.wantServices {
 				require.Zero(t, serviceCount)
 				return
@@ -597,9 +597,6 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 			require.Equal(t, "independent-conductor-runtime", container.Image)
 			require.Equal(t, []string{"/bin/nova"}, container.Command)
 			require.NotContains(t, container.Args, "--datacenter-config-filepath")
-			require.Contains(t, container.Env, corev1.EnvVar{
-				Name: "NOVA_NODE_NAME_TEMPLATE", Value: "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}",
-			})
 			require.Equal(t, "explicit-conductor", clique.Labels["owner"])
 			require.Equal(t, template.Spec.NodeSelector, clique.Spec.PodSpec.NodeSelector)
 			require.Equal(t, template.Spec.Affinity, clique.Spec.PodSpec.Affinity)
@@ -617,7 +614,7 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 	require.Equal(t, before, dgd)
 }
 
-func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
+func TestRuntimeTemplateChangesPreservePartitionSelection(t *testing.T) {
 	controllerConfig := &configv1alpha1.OperatorConfiguration{
 		Orchestrators: configv1alpha1.OrchestratorConfiguration{
 			Grove: configv1alpha1.GroveConfiguration{TerminationDelay: metav1.Duration{Duration: 15 * time.Minute}},
@@ -630,7 +627,6 @@ func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Log("Render runtime overrides supplied directly by the conductor template")
-	var partitionData map[string]string
 	for _, env := range []corev1.EnvVar{
 		{Name: "NOVA_BATCH_SIZE", Value: "1"},
 		{Name: "NOVA_SEQUENCE_LENGTH", Value: "65536"},
@@ -653,24 +649,17 @@ func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
 		pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, &deployment, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan}, nil)
 		require.NoError(t, err)
 
-		t.Log("Keep authored environment values without changing shared partition files")
-		var hash string
+		t.Log("Keep authored environment values without changing selected partitions")
 		for _, clique := range pcs.Spec.Template.Cliques {
 			if clique.Name == plan.ConductorTemplate {
 				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: filepath.Join("/nfs", buildID)})
 				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, env)
-				hash = clique.Annotations[v1alpha1.AnnotationExtraResourcesHash]
+				require.False(t, slices.ContainsFunc(clique.Spec.PodSpec.Containers[0].Env, func(variable corev1.EnvVar) bool {
+					return variable.Name == "NOVA_REMOTE_PARTITION_IDS"
+				}), "authored runtime options do not replace manifest placement")
 			}
 		}
-		require.NotEmpty(t, hash)
-		configMap := getResource[*corev1.ConfigMap](t, resources, fmt.Sprintf("%s-lpu-%.16s", dynamo.PCSNameForLPX(child), hash))
-		require.NotContains(t, configMap.Data, "model_config.toml")
-		require.NotContains(t, configMap.Data, "datacenter.toml")
-		if partitionData == nil {
-			partitionData = configMap.Data
-		} else {
-			require.Equal(t, partitionData, configMap.Data)
-		}
+		require.Empty(t, resources)
 	}
 }
 
@@ -1160,5 +1149,50 @@ func TestHybridWorkloadUsesLPXSchedulerWithKaiEnabled(t *testing.T) {
 	for _, clique := range rendered.Cliques {
 		require.Equal(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 		require.NotContains(t, clique.Labels, consts.KubeLabelKaiSchedulerQueue, "clique %s", clique.Name)
+	}
+}
+
+func TestManifestRuntimeSelectionsAcrossPipelineFamilies(t *testing.T) {
+	t.Log("Resolve manifest-backed rendering against each pipeline family")
+	registry := newTestDataModelRegistry(t, t.TempDir())
+	for _, name := range []string{
+		"node-local-v2-lpu-only", "node-local-v2-hybrid", "node-local-v2-specdecode",
+		"node-local-v3-hx-lpu-only", "node-local-v3-hx-hybrid", "node-local-v3-hx-specdecode",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Log("Render a workload with its selected compiler placement")
+			payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/" + name + ".input.yaml")
+			require.NoError(t, err)
+			dgd := &v1beta1.DynamoGraphDeployment{}
+			require.NoError(t, yaml.Unmarshal(payload, dgd))
+			child := newLPXRenderDeployment(t, dgd)
+			r := &graphReconciler{config: &configv1alpha1.OperatorConfiguration{}, runtimeConfig: &commoncontroller.RuntimeConfig{}, modelRegistry: registry}
+			workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
+			require.NoError(t, err)
+			migrated, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
+			require.NoError(t, err)
+
+			t.Log("Keep placement, compiler identity and resource sizing without runtime ConfigMaps")
+			for _, resource := range resources {
+				_, configMap := resource.(*corev1.ConfigMap)
+				require.False(t, configMap)
+			}
+			for _, clique := range migrated.Spec.Template.Cliques {
+				require.NotEmpty(t, clique.Annotations[lpx.WorkloadDigestAnnotation])
+				container := clique.Spec.PodSpec.Containers[0]
+				selection := "LPX_REMOTE_PARTITION_IDS"
+				if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleConductor {
+					selection = "NOVA_REMOTE_PARTITION_IDS"
+					if strings.Contains(name, "specdecode") {
+						selection = "NOVA_DRAFT_REMOTE_PARTITION_IDS"
+					}
+				}
+				require.False(t, slices.ContainsFunc(container.Env, func(e corev1.EnvVar) bool { return e.Name == selection }), "ordinary placement uses manifest defaults")
+				require.NotContains(t, clique.Annotations, v1alpha1.AnnotationExtraResourcesHash)
+				for _, volume := range clique.Spec.PodSpec.Volumes {
+					require.NotEqual(t, "config", volume.Name)
+				}
+			}
+		})
 	}
 }

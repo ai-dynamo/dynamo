@@ -28,7 +28,6 @@ spec:
               image: example.invalid/gpu-runtime:test
               command:
               - /usr/local/bin/cyborg-entrypoint
-              - --expand-hosts
               - --
               - /opt/gpu-runtime
               args:
@@ -36,8 +35,6 @@ spec:
               env:
               - name: RDMA_PORT
                 value: '19877'
-              - name: SERVER_HOSTS_FILE
-                value: /tmp/lpu_servers
               - name: CYBORG_FPGA_GPI_REPLICA_INDEX
                 valueFrom:
                   fieldRef:
@@ -64,8 +61,6 @@ spec:
                 periodSeconds: 5
                 timeoutSeconds: 4
               volumeMounts:
-              - name: config
-                mountPath: /configs
               - name: infiniband
                 mountPath: /dev/infiniband
               - name: model-storage
@@ -139,8 +134,6 @@ spec:
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage
-              - name: config
-                mountPath: /configs
               - name: hugepages
                 mountPath: /dev/hugepages
               - name: host-sys

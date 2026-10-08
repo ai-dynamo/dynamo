@@ -123,8 +123,8 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	t.Log("Use independently provisioned Cyborg model storage at the shared runtime path")
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ClaimName = "cyborg-models"
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
-	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].SubPath = "cyborg"
-	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].ReadOnly = true
+	decode.Spec.PodSpec.Containers[0].VolumeMounts[0].SubPath = "cyborg"
+	decode.Spec.PodSpec.Containers[0].VolumeMounts[0].ReadOnly = true
 	input := RenderInput{
 		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 	}
@@ -138,7 +138,6 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	}
 	require.Equal(t, append([]corev1.EnvVar{
 		{Name: allocationEnvVar, Value: "agt"},
-		{Name: "LPX_AGENT_HOST_TEMPLATE", Value: "${GROVE_PCS_NAME}-${GROVE_PCS_INDEX}-lpx-${GROVE_PCSG_INDEX}-agt-${LPX_LEADER_OFFSET}.${GROVE_HEADLESS_SERVICE}"},
 		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
 		manifestEnv}, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
 	require.Equal(t, &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cyborg-models", ReadOnly: true}, cyborg.Spec.PodSpec.Volumes[0].PersistentVolumeClaim)
@@ -156,7 +155,6 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args = []string{"serve"}
 	imageEntrypointEnv := append([]corev1.EnvVar{
 		{Name: allocationEnvVar, Value: "agt"},
-		{Name: "LPX_AGENT_HOST_TEMPLATE", Value: "${GROVE_PCS_NAME}-${GROVE_PCS_INDEX}-lpx-${GROVE_PCSG_INDEX}-agt-${LPX_LEADER_OFFSET}.${GROVE_HEADLESS_SERVICE}"},
 		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
 		manifestEnv}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
 
@@ -188,7 +186,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 			cyborg.Spec.Replicas = test.replicas
 			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
 			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
-			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = test.mountPath
+			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[0].MountPath = test.mountPath
 			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 			})

@@ -31,8 +31,7 @@ spec:
                   hugepages-2Mi: 4Gi
               command:
               - /bin/quasar-entrypoint
-              args:
-              - --partition-metadata
+              args: []
               readinessProbe:
                 failureThreshold: 3
                 initialDelaySeconds: 10
@@ -51,8 +50,6 @@ spec:
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage
-              - name: config
-                mountPath: /configs
               - name: host-dev
                 mountPath: /dev
               - name: host-sys
@@ -144,16 +141,10 @@ spec:
                 value: 'SpecDecode'
               - name: NOVA_DRAFT_MODEL_PATH
                 value: '$(LPX_DRAFT_MODEL_PATH)'
-              - name: NOVA_DRAFT_RESOLVED_PARTITIONS_DIR
-                value: '/configs'
               - name: NOVA_TARGET_MODEL_PATH
                 value: '$(LPX_TARGET_MODEL_PATH)'
-              - name: NOVA_TARGET_RESOLVED_PARTITIONS_DIR
-                value: '/configs'
               - name: NOVA_MODEL_BASE_PATHS
                 value: /nfs
-              - name: NOVA_NODE_NAME_TEMPLATE
-                value: ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}
               - name: OMPI_ALLOW_RUN_AS_ROOT
                 value: '1'
               - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
@@ -173,8 +164,6 @@ spec:
               volumeMounts:
               - name: model-storage
                 mountPath: /nfs
-              - name: config
-                mountPath: /configs
               - name: single-v2-ssh-key
                 mountPath: /tmp/dynamo-lpu-ssh
             initContainers:
