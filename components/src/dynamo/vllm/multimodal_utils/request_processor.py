@@ -502,7 +502,10 @@ class VllmMultimodalRequestProcessor:
         ):
             items = mm_map.get(key, [])
             count = len(items)
-            limit = mm_config.get_limit_per_prompt(modality)
+            limit_modality = _normalize_forwarded_mm_modality(
+                modality, self.use_unified_vision_chunk
+            )
+            limit = mm_config.get_limit_per_prompt(limit_modality)
             if count > limit:
                 raise InvalidArgument(
                     f"At most {limit} {modality}(s) may be provided in one prompt. "

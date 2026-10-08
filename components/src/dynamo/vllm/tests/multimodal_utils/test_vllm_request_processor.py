@@ -34,6 +34,7 @@ def _processor(
     frontend_decoding: bool = False,
     media_limits: dict[str, int] | None = None,
 ) -> mod.VllmMultimodalRequestProcessor:
+    """Build a processor with mocked loaders and optional real vLLM limits."""
     engine_client = None
     if media_limits is not None:
         from vllm.config.multimodal import MultiModalConfig
@@ -2116,8 +2117,15 @@ class TestLoadQwenGridParams:
     "mode",
     [DisaggregationMode.AGGREGATED, DisaggregationMode.PREFILL],
 )
-async def test_zero_video_limit_rejects_before_any_media_loader(media_variant, mode):
-    processor = _processor(media_limits={"image": 8, "video": 0})
+@pytest.mark.parametrize("unified_vision_chunk", [False, True])
+async def test_zero_video_limit_rejects_before_any_media_loader(
+    media_variant, mode, unified_vision_chunk
+):
+    """A forbidden video cannot reach loaders, even in unified vision mode."""
+    processor = _processor(
+        media_limits={"image": 8, "video": 0},
+        unified_vision_chunk=unified_vision_chunk,
+    )
     processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
     request = {
         "token_ids": [1, 2, 3],
@@ -2141,6 +2149,7 @@ async def test_zero_video_limit_rejects_before_any_media_loader(media_variant, m
     [("image", 8, 9), ("video", 1, 2), ("audio", 2, 3)],
 )
 def test_media_item_limits_are_checked_before_loading(modality, limit, count):
+    """Reject original media item counts above the configured modality limit."""
     processor = _processor(media_limits={modality: limit})
     request = {
         "multi_modal_data": {
@@ -2153,6 +2162,7 @@ def test_media_item_limits_are_checked_before_loading(modality, limit, count):
 
 @pytest.mark.parametrize("count", [0, 1])
 def test_video_at_configured_limit_is_allowed(count):
+    """Allow video counts below or equal to a nonzero video limit."""
     processor = _processor(media_limits={"video": 1})
     processor.validate_multimodal_request(
         {"multi_modal_data": {"video_url": [{"Url": "video"}] * count}}
@@ -2160,7 +2170,36 @@ def test_video_at_configured_limit_is_allowed(count):
 
 
 def test_zero_video_limit_preserves_image_only_requests():
+    """Disabling video must preserve permitted image-only traffic."""
     processor = _processor(media_limits={"image": 8, "video": 0})
     processor.validate_multimodal_request(
         {"multi_modal_data": {"image_url": [{"Url": "image"}] * 8}}
     )
+
+
+@pytest.mark.parametrize("unified_vision_chunk", [False, True])
+@pytest.mark.parametrize(
+    "image_limit,chunk_limit,count",
+    [(0, 2, 1), (8, 0, 1), (8, 2, 2), (8, 2, 3)],
+)
+def test_image_admission_uses_model_modality_limit(
+    unified_vision_chunk, image_limit, chunk_limit, count
+):
+    """Image admission follows the same modality mapping as preparation."""
+    processor = _processor(
+        unified_vision_chunk=unified_vision_chunk,
+        media_limits={"image": image_limit, "vision_chunk": chunk_limit},
+    )
+    request = {
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}] * count
+        }
+    }
+    limit = chunk_limit if unified_vision_chunk else image_limit
+    if count > limit:
+        with pytest.raises(mod.InvalidArgument, match=f"At most {limit} image"):
+            processor.validate_multimodal_request(request)
+    else:
+        processor.validate_multimodal_request(request)
+
+    processor.image_loader.load_image_batch.assert_not_awaited()
