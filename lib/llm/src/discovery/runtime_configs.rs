@@ -324,9 +324,18 @@ mod tests {
             unreachable!()
         };
 
-        tx.send(Ok(DiscoveryEvent::Added(base_instance))).unwrap();
+        tx.send(Ok(DiscoveryEvent::Added(base_instance.clone())))
+            .unwrap();
         configs.changed().await.unwrap();
         configs.borrow_and_update();
+
+        tx.send(Ok(DiscoveryEvent::Resync(vec![base_instance])))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), configs.changed())
+                .await
+                .is_err()
+        );
 
         let updated_taints = vec!["blue".to_string(), "gpu".to_string()];
         tx.send(Ok(DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {

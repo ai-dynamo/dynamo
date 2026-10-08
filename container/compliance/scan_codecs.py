@@ -111,6 +111,12 @@ class CodecPolicy:
                 return "exception", (exc.get("reason") or "").strip()
         return "violation", None
 
+    def violates(self, abspath: str) -> bool:
+        """True if `abspath` hits a deny glob and is neither allowed nor excepted."""
+        if _matches_any(abspath, self.deny_globs) is None:
+            return False
+        return self.classify(abspath)[0] == "violation"
+
 
 def scan_filesystem(root: Path, policy: CodecPolicy):
     """Walk `root`, returning (violations, exceptions, allowed) lists of dicts."""

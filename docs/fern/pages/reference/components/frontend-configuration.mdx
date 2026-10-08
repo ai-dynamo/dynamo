@@ -16,7 +16,8 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
 ## HTTP and networking
 
 <ParamField path="--http-host" type="string" default="0.0.0.0">
-  HTTP listen address.
+  HTTP listen address: an IPv4 or IPv6 address, with optional brackets around IPv6. `0.0.0.0`
+  accepts IPv4 connections only; on IPv6-only hosts, set `::`.
 
   Environment variable: `DYN_HTTP_HOST`
 </ParamField>
@@ -134,14 +135,20 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 
 ### KV scoring and cache locality
 
+Configure scoring through [default policy parameters](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configure-the-default-policy) in `--router-policy-config`. Deprecated flags and their environment variables remain accepted until removal in v1.7.
+
 <ParamField path="--load-aware / --no-load-aware" type="boolean" default="false">
+  **Deprecated.** Use [policy parameters and explicit tracking settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#replace-the-load-aware-preset).
+
   Preset for KV load-aware routing; implies `--router-mode kv`. Disables device-cache credit, KV event consumption, and remote/shared cache indexers. The worker-selection policy's `CACHE` declaration still controls local approximate indexing.
 
   Environment variable: `DYN_ROUTER_LOAD_AWARE`
 </ParamField>
 
 <ParamField path="--router-kv-overlap-score-credit" type="float" default="1.0">
-  Credit multiplier for device-local prefix overlap. The value must be finite and nonnegative. Setting it to zero does not disable indexing; cache setup follows the worker-selection policy's `WorkerInputs::CACHE` declaration.
+  **Deprecated.** Set `overlap_score_credit` in the default policy parameters.
+
+  Credit multiplier for device-local prefix overlap. The value must be finite and nonnegative. Cache setup follows the policy’s input requirements; the default policy skips cache inputs at zero overlap credit.
   Values greater than `1.0` give device overlap extra credit, but adjusted prefill cost is
   clamped at zero. See [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#tuning-guidelines).
 
@@ -149,6 +156,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-kv-overlap-score-credit-decay" type="float" default="0.0">
+  **Deprecated.** Set `overlap_score_credit_decay` in the default policy parameters.
+
   Decay rate for device-local overlap credit as active prefill load rises above the least-loaded
   eligible worker. `0` disables decay; `1` halves the credit at one request-equivalent of excess
   active prefill load.
@@ -157,6 +166,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-prefill-load-scale" type="float" default="1.0">
+  **Deprecated.** Set `prefill_load_scale` in the default policy parameters.
+
   Scale applied to adjusted prompt-side prefill load after overlap and lower-tier cache-hit credits
   are subtracted. The minimum is `0.0`; there is no hard maximum.
 
@@ -175,7 +186,9 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_DISK_CACHE_HIT_WEIGHT`
 </ParamField>
 
-<ParamField path="--shared-cache-multiplier" type="float" default="0.5">
+<ParamField path="--shared-cache-multiplier" type="float">
+  **Deprecated.** Set `shared_cache_multiplier` in the default policy parameters. The policy defaults to `0.5` when shared cache is enabled.
+
   **Experimental.** Credit multiplier from `0.0` through `1.0` for external shared-cache hits.
 
   Environment variable: `DYN_SHARED_CACHE_MULTIPLIER`
@@ -190,6 +203,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-temperature" type="float" default="0.0">
+  **Deprecated.** Set `router_temperature` in the default policy parameters.
+
   Softmax temperature for normalized worker sampling. `0` selects the lowest-cost worker
   deterministically; higher values add randomness.
 
@@ -288,6 +303,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-decode-active-request-weight" type="float" default="0.0">
+  **Deprecated.** Set `decode_active_request_weight` in the default policy parameters.
+
   **Experimental.** Finite, nonnegative block-equivalent decode cost added for each active request on
   a candidate worker. Tune this value only when decode step latency depends materially on active batch
   size.
@@ -302,15 +319,17 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-prefill-load-model" type="string" default="none">
-  Prompt-side load model. `none` keeps static prompt load; `aic` decays the oldest active prefill
-  request using an AIC prediction. See [AIC prefill load model](#aic-prefill-load-model).
+  Prompt-side load model. `none` keeps static prompt load; `ais` decays the oldest active prefill
+  request using an AIS prediction. See [AIS prefill load model](#ais-prefill-load-model).
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>none</Badge> <Badge intent="note" minimal>aic</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>none</Badge> <Badge intent="note" minimal>ais</Badge></span>
 
   Environment variable: `DYN_ROUTER_PREFILL_LOAD_MODEL`
 </ParamField>
 
 <ParamField path="--router-queue-threshold" type="float" default="null">
+  **Deprecated; removal in v1.7.** Set `policy_classes[].prefill_busy_threshold_frac` in `--router-policy-config`.
+
   Queue threshold fraction of prefill capacity. Setting a nonnegative numeric value enables queueing;
   priority hints affect only requests waiting in this queue.
 
@@ -318,6 +337,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-queue-policy" type="string" default="fcfs">
+  **Deprecated; removal in v1.7.** Set `policy_classes[].queue_policy` in `--router-policy-config`.
+
   Queue scheduling policy. `fcfs` optimizes tail Time To First Token (TTFT); `wspt` optimizes average
   TTFT.
 
@@ -327,14 +348,16 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only YAML for policy-class queues and custom worker-selection instances. When omitted,
+  Startup-only YAML for shared `router` settings, policy-class queues, and worker-selection instances. When omitted,
   `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
-  Queueing remains disabled until a threshold is configured. See [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
+  Queueing remains disabled until a threshold is configured. See [Shared Router Settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#shared-router-settings), [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
 
   Environment variable: `DYN_ROUTER_POLICY_CONFIG`
 </ParamField>
 
 <ParamField path="--router-prefill-policy" type="string" default="null">
+  **Deprecated; removal in v1.7.** Set `worker_selection.prefill` in `--router-policy-config`.
+
   Worker-selection instance for disaggregated prefill workers in the current router process. This
   option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
   worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
@@ -343,6 +366,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-decode-policy" type="string" default="null">
+  **Deprecated; removal in v1.7.** Set `worker_selection.decode` in `--router-policy-config`.
+
   Worker-selection instance for decode workers in the current router process. This option
   overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
   model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
@@ -351,61 +376,71 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_DECODE_POLICY`
 </ParamField>
 
-## AIC prefill load model
+## AIS prefill load model
 
-These options apply only when `--router-mode kv` is combined with `--router-prefill-load-model aic`.
+<ParamField path="--ais-perf-config" type="JSON object or JSON/YAML file" default="null">
+  Complete AISimulate `ForwardPassPerfModelConfig`, including immutable worker role,
+  data roots, selection policy and nested estimator controls. Defaults to
+  `estimation_mode: auto` and `fallback_policy: deny`. Do not combine this input
+  with flat AIS identity flags. Cold regression is rejected by Router and Mocker.
+</ParamField>
+
+Legacy `--aic-*` spellings remain input aliases. Use `--ais-*` in new configurations.
+
+
+These options apply only when `--router-mode kv` is combined with `--router-prefill-load-model ais`.
 
 When enabled, the frontend's embedded KV router predicts one expected prefill duration per admitted request, using the selected worker's overlap-derived cached prefix, then decays only the oldest active prefill request on each worker for prompt-side load accounting.
 
-<ParamField path="--aic-backend" type="string" default="null">
-  Backend family to model in AIC, for example `vllm` or `sglang`.
+<ParamField path="--ais-backend" type="string" default="null">
+  Backend family to model in AIS, for example `vllm` or `sglang`.
 
-  Environment variable: `DYN_AIC_BACKEND`
+  Environment variable: `DYN_AIS_BACKEND`
 </ParamField>
 
-<ParamField path="--aic-system" type="string" default="null">
-  AIC hardware/system identifier, for example `h200_sxm`.
+<ParamField path="--ais-system" type="string" default="null">
+  AIS hardware/system identifier, for example `h200_sxm`.
 
-  Environment variable: `DYN_AIC_SYSTEM`
+  Environment variable: `DYN_AIS_SYSTEM`
 </ParamField>
 
-<ParamField path="--aic-model-path" type="string" default="null">
-  Model path or model identifier used for AIC perf lookup.
+<ParamField path="--ais-model-path" type="string" default="null">
+  Model path or model identifier used for AIS perf lookup.
 
-  Environment variable: `DYN_AIC_MODEL_PATH`
+  Environment variable: `DYN_AIS_MODEL_PATH`
 </ParamField>
 
-<ParamField path="--aic-backend-version" type="string" default="backend-specific">
-  Pinned AIC database version. If omitted, Dynamo uses the backend default.
+<ParamField path="--ais-backend-version" type="string" default="backend-specific">
+  Pinned AIS database version. If omitted, Dynamo uses the backend default.
 
-  Environment variable: `DYN_AIC_BACKEND_VERSION`
+  Environment variable: `DYN_AIS_BACKEND_VERSION`
 </ParamField>
 
-<ParamField path="--aic-tp-size" type="integer" default="1">
-  Tensor-parallel size to model in AIC.
+<ParamField path="--ais-tp-size" type="integer" default="1">
+  Tensor-parallel size to model in AIS.
 
-  Environment variable: `DYN_AIC_TP_SIZE`
+  Environment variable: `DYN_AIS_TP_SIZE`
 </ParamField>
 
-<ParamField path="--aic-moe-tp-size" type="integer" default="null">
-  MoE tensor-parallel size for models that require AIC MoE parallelism.
+<ParamField path="--ais-moe-tp-size" type="integer" default="null">
+  MoE tensor-parallel size for models that require AIS MoE parallelism.
 
-  Environment variable: `DYN_AIC_MOE_TP_SIZE`
+  Environment variable: `DYN_AIS_MOE_TP_SIZE`
 </ParamField>
 
-<ParamField path="--aic-moe-ep-size" type="integer" default="null">
-  MoE expert-parallel size for models that require AIC MoE parallelism.
+<ParamField path="--ais-moe-ep-size" type="integer" default="null">
+  MoE expert-parallel size for models that require AIS MoE parallelism.
 
-  Environment variable: `DYN_AIC_MOE_EP_SIZE`
+  Environment variable: `DYN_AIS_MOE_EP_SIZE`
 </ParamField>
 
-<ParamField path="--aic-attention-dp-size" type="integer" default="null">
-  Attention data-parallel size for models that require AIC MoE parallelism.
+<ParamField path="--ais-attention-dp-size" type="integer" default="null">
+  Attention data-parallel size for models that require AIS MoE parallelism.
 
-  Environment variable: `DYN_AIC_ATTENTION_DP_SIZE`
+  Environment variable: `DYN_AIS_ATTENTION_DP_SIZE`
 </ParamField>
 
-For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--aic-moe-tp-size` to the same value as `--aic-tp-size`, with `--aic-moe-ep-size 1` and `--aic-attention-dp-size 1`.
+For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--ais-moe-tp-size` to the same value as `--ais-tp-size`, with `--ais-moe-ep-size 1` and `--ais-attention-dp-size 1`.
 
 ## Fault tolerance
 
@@ -497,8 +532,10 @@ For guidance on choosing thresholds, see [Request Rejection](../../kubernetes/fa
   Environment variable: `DYN_REQUEST_PLANE`
 </ParamField>
 
-<ParamField path="--event-plane" type="string" default="auto">
-  Event publishing transport. Defaults to `zmq` for `file`/`mem` discovery and `nats` for `etcd`/`kubernetes`.
+<ParamField path="--event-plane" type="string" default="zmq">
+  Event publishing transport. ZMQ is the default for every discovery backend, including `etcd`
+  and `kubernetes`, when neither `--event-plane` nor `DYN_EVENT_PLANE` is set. Set
+  `--event-plane nats` or `DYN_EVENT_PLANE=nats` to use NATS instead.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>zmq</Badge></span>
 
@@ -793,8 +830,14 @@ options such as `--router-mode kv` or `--router-track-output-blocks`.
 
 ### Frontend feature switches
 
-Environment variables controlling frontend extensions. Extensions are enabled by default. Set a
-truthy value (`1`, `true`, `yes`, or `on`, case-insensitive) to disable the corresponding surface.
+Environment variables controlling frontend extensions and protocol admission. The variables below
+are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-insensitive.
+
+<ParamField path="DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS" type="boolean" default="false">
+  When truthy, `/v1/chat/completions` and `/v1/completions` ignore and drop unknown top-level
+  request fields instead of rejecting the request. This does not forward arbitrary fields to a
+  backend. Named passthrough fields remain subject to their normal validation and handling.
+</ParamField>
 
 <ParamField path="DYN_DISABLE_FRONTEND_NVEXT" type="boolean" default="false">
   When truthy, the frontend drops all request NvExt fields except `cache_salt` on
