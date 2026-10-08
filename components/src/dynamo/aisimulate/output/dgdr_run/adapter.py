@@ -80,6 +80,7 @@ logger = logging.getLogger(__name__)
 _ID_PREFIX = "evaluated-point-"
 _MAX_RENDER_ATTEMPTS = 3
 _MAX_ERROR_MESSAGE = 500
+_WRITE_RETRY_BACKOFF = 1.0
 _ID_HEX_LENGTH = 12
 
 
@@ -442,12 +443,15 @@ class DGDRRunOutputAdapter:
             delay = self._next_allowed - time.monotonic()
             if delay > 0 and self._stop.wait(delay):
                 return
+            wait = self._interval
             try:
                 self._publish()
             except Exception:  # keep the writer alive; retry
                 logger.exception("dgdr_run: snapshot write failed; will retry")
                 self._wake.set()
-            self._next_allowed = time.monotonic() + self._interval
+                # Even with a zero interval, a persistent failure must not spin.
+                wait = max(wait, _WRITE_RETRY_BACKOFF)
+            self._next_allowed = time.monotonic() + wait
 
     def _publish(self, *, render: bool = True) -> None:
         with self._publish_lock:
@@ -644,6 +648,7 @@ class _FinalCandidate:
     config: dict[str, Any]
     score: float | None
     used_gpus: int | None
+    objectives: dict[str, float] | None = None
     status: str = "feasible"
 
 
@@ -659,6 +664,7 @@ def _as_feasible(candidate: Any) -> _FinalCandidate:
         config=dict(candidate.config),
         score=score,
         used_gpus=used_gpus,
+        objectives=getattr(candidate, "objectives", None),
     )
 
 
