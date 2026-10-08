@@ -68,6 +68,7 @@ fn apply_request_tool_call_parsing_options(
     );
     parsing_options.structured_response =
         OpenAIPreprocessor::has_structured_response_format(request);
+    parsing_options.tool_choice = request.inner.tool_choice.clone();
     let tool_call_parsing_enabled = OpenAIPreprocessor::tool_call_parsing_enabled(request);
     let tool_choice = request
         .inner
@@ -361,7 +362,7 @@ mod tests {
         assert_eq!(
             result.guided_tool_constraint,
             GuidedToolConstraint::StructuralTag,
-            "kimi_k2 + required must use the intrinsic structural tag, not a reconstructed JSON schema"
+            "kimi_k2 + required must retain its native structural tag when mode is off"
         );
     }
 
@@ -377,7 +378,7 @@ mod tests {
         assert_eq!(
             result.guided_tool_constraint,
             GuidedToolConstraint::StructuralTag,
-            "kimi_k2 + a named tool choice must use the intrinsic structural tag, not a reconstructed JSON schema"
+            "kimi_k2 + a named tool choice must retain its native structural tag when mode is off"
         );
     }
 
@@ -423,11 +424,12 @@ mod tests {
         );
     }
 
-    // With the operator default (`structural_tag_mode = Off`), the same non-Kimi
-    // parser must NOT get a structural tag — confirms the mode gate above is real,
-    // not a permanently-on regression.
+    // With the low-level ParsingOptions default (`structural_tag_mode = Off`),
+    // the same non-Kimi parser must NOT get a structural tag. Regular workers
+    // explicitly publish the deployment's default-on policy into the model card;
+    // native sidecars that do not do so retain this conservative default.
     #[test]
-    fn operator_default_mode_off_does_not_resolve_structural_tag_for_a_non_kimi_parser() {
+    fn parsing_options_default_mode_off_does_not_resolve_structural_tag() {
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("qwen3_coder".to_string()),
             ..Default::default()

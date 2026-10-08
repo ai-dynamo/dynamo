@@ -452,12 +452,11 @@ fn response_with_choice(
     template: &NvCreateChatCompletionStreamResponse,
     choice: dynamo_protocols::types::ChatChoiceStream,
 ) -> Annotated<NvCreateChatCompletionStreamResponse> {
-    let mut data = template.clone();
+    let mut response = Annotated::from_data(template.clone());
+    super::scrub_synthetic_chunk_metadata(&mut response);
+    let data = response.data.as_mut().expect("template has response data");
     data.inner.choices = vec![choice];
-    data.inner.usage = None;
-    data.nvext = None;
-    data.llm_metrics = None;
-    Annotated::from_data(data)
+    response
 }
 
 /// Streaming path: replace the jail with the `family` v2 parser. Each upstream text
@@ -858,6 +857,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
         Annotated {
             data: Some(response),
@@ -1456,16 +1456,19 @@ mod tests {
         for parser in ["muse_glimmer", "muse"] {
             assert_eq!(
                 unified_family(Some(parser), None).as_deref(),
-                None,
-                "Muse's default streaming exception is selected by request mode"
+                enabled().then_some("muse_glimmer"),
+                "explicit V2 selects Muse; its auto exception is request-mode dependent"
             );
             assert_eq!(
                 unified_family(None, Some(parser)).as_deref(),
-                None,
-                "Muse's default streaming exception is selected by request mode"
+                enabled().then_some("muse_glimmer"),
+                "explicit V2 selects Muse; its auto exception is request-mode dependent"
             );
         }
-        assert_eq!(unified_family(Some("qwen3_coder"), None).as_deref(), None);
+        assert_eq!(
+            unified_family(Some("qwen3_coder"), None).as_deref(),
+            enabled().then_some("qwen3")
+        );
         assert_eq!(unified_family(Some("muse"), Some("qwen3")), None);
         assert_eq!(unified_family(None, None), None);
     }
