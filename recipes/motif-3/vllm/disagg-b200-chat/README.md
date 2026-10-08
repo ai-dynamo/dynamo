@@ -96,6 +96,12 @@ resetting caches.
 
 ## Benchmark
 
+The [historical round-robin baseline report](../../perf/results/disagg-round-robin-b200-2026-10-08/README.md)
+compares 1P1D and 2P1D at concurrency 8, 16, and 32 on B200 with synthetic
+MTP acceptance length 2.13. It includes p50 TTFT, throughput, plots, and
+measurement provenance. Those measurements use an earlier runtime image and
+do not establish the performance of this KV-aware recipe.
+
 Use AIPerf 0.13.0 with a separate, tokenizer-only Hugging Face cache. The
 client must not load Motif's model configuration from the workers' full model
 cache. The helper below copies and verifies the three tokenizer files at the

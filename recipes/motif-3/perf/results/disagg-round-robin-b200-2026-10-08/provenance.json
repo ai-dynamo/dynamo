@@ -1,0 +1,154 @@
+{
+  "generated_at": "2026-10-08T18:04:59.724283+00:00",
+  "trace_sha256": "b1221bca72b69f842897f339624306a84857f1b55ea0d866525f94d9ceb9b871",
+  "measurement_mode": "MTP2, synthetic acceptance length 2.13",
+  "routing_mode": "round-robin",
+  "image_digest": "sha256:76e2612108f820640ff1d5a00542b41c909a0e6a473ed02b700c817b34f65878",
+  "gpu": "NVIDIA B200",
+  "six_case_audit_passed": true,
+  "local_full_audit_sha256": "fb8eb9887aad9e614a7347dbaa3920e1fb545fb75e1093f7cdf10982b38a065d",
+  "model": "Motif-Technologies/Motif-3-NVFP4",
+  "model_revision": "79f2fad1f8229f5db8a7ad08bbd24a20d6fb0bff",
+  "historical_recipe_commit": "9b61fbb13ce2087b5a96ac87ce3754bb29c85c18",
+  "validated_runs_per_point": 1,
+  "case_provenance": [
+    {
+      "layout": "1p1d",
+      "concurrency": 8,
+      "recovered": true,
+      "original_finished_marker": false,
+      "start_time": "2026-10-07T23:58:16.653366",
+      "end_time": "2026-10-08T00:46:24.721983",
+      "measured_artifact_sha256": {
+        "report_aiperf.json": "106a2d3b90a93af696cfa6cffa2320ca8ac15b72a4264eb782840190ad757cad",
+        "report_aiperf.jsonl": "7e7f2248836ccf18489cf4df16f6c32fba090bbb0f4e445d7d058f0e0522b0a4",
+        "report_aiperf_raw.jsonl": "b1fb6052363c8a4cb3d24089bf86c86e7a98c2c00506ba9a4a9ddd6b2ef5474e"
+      },
+      "placement": {
+        "prefill_hosts": 1,
+        "decode_hosts": 1,
+        "prefill_and_decode_on_separate_hosts": true
+      },
+      "nixl_metric_deltas": {
+        "vllm:nixl_num_failed_transfers_total": 0.0,
+        "vllm:nixl_num_failed_notifications_total": 0.0,
+        "vllm:nixl_num_kv_expired_reqs_total": 0.0
+      }
+    },
+    {
+      "layout": "1p1d",
+      "concurrency": 16,
+      "recovered": false,
+      "original_finished_marker": true,
+      "start_time": "2026-10-08T07:22:55.200970",
+      "end_time": "2026-10-08T07:58:35.926596",
+      "measured_artifact_sha256": {
+        "report_aiperf.json": "0a99966a996e18f0e9cf3f4996e8bba6cc619690ccdd48c03ed94a55857c3be3",
+        "report_aiperf.jsonl": "a3f35159094f1ee45f7a6ef3df4add622ea75259e9b519370ab7e9388c77c531",
+        "report_aiperf_raw.jsonl": "e1030713efcfd6787d8f076e4d0b1b74c4ba8f6d68f6218deee97e02f0e8639e"
+      },
+      "placement": {
+        "prefill_hosts": 1,
+        "decode_hosts": 1,
+        "prefill_and_decode_on_separate_hosts": true
+      },
+      "nixl_metric_deltas": {
+        "vllm:nixl_num_failed_transfers_total": 0.0,
+        "vllm:nixl_num_failed_notifications_total": 0.0,
+        "vllm:nixl_num_kv_expired_reqs_total": 0.0
+      }
+    },
+    {
+      "layout": "1p1d",
+      "concurrency": 32,
+      "recovered": false,
+      "original_finished_marker": true,
+      "start_time": "2026-10-08T14:47:47.598120",
+      "end_time": "2026-10-08T15:20:42.367092",
+      "measured_artifact_sha256": {
+        "report_aiperf.json": "71a51904378f5c3f01f2e1ff179ab490545e0076295e4adf7fe8db3a0d255c17",
+        "report_aiperf.jsonl": "4bcf9ab29b0039b51f751f1a1dedfd9fd2d02e09dce074eb42f3b4f1e3899daa",
+        "report_aiperf_raw.jsonl": "db063fffbdf3e5fe6bcc59dbe4965fcc6184a739d34528449744023e81568783"
+      },
+      "placement": {
+        "prefill_hosts": 1,
+        "decode_hosts": 1,
+        "prefill_and_decode_on_separate_hosts": true
+      },
+      "nixl_metric_deltas": {
+        "vllm:nixl_num_failed_transfers_total": 0.0,
+        "vllm:nixl_num_failed_notifications_total": 0.0,
+        "vllm:nixl_num_kv_expired_reqs_total": 0.0
+      }
+    },
+    {
+      "layout": "2p1d",
+      "concurrency": 8,
+      "recovered": false,
+      "original_finished_marker": true,
+      "start_time": "2026-10-08T16:15:06.545872",
+      "end_time": "2026-10-08T16:59:06.171989",
+      "measured_artifact_sha256": {
+        "report_aiperf.json": "53e488a5261f61cb748c11d086399d1cae70e6b686cfd36bf3ea8f4c5ef3c092",
+        "report_aiperf.jsonl": "46226a59b1c47be97e3db6180ce01122d3d5490922a99d8211adf3bafa854286",
+        "report_aiperf_raw.jsonl": "c575de4d83cee3363fbd5949e399864a7e63f2634cde0b7f1680f85007f78898"
+      },
+      "placement": {
+        "prefill_hosts": 1,
+        "decode_hosts": 1,
+        "prefill_and_decode_on_separate_hosts": true
+      },
+      "nixl_metric_deltas": {
+        "vllm:nixl_num_failed_transfers_total": 0.0,
+        "vllm:nixl_num_failed_notifications_total": 0.0,
+        "vllm:nixl_num_kv_expired_reqs_total": 0.0
+      }
+    },
+    {
+      "layout": "2p1d",
+      "concurrency": 16,
+      "recovered": false,
+      "original_finished_marker": true,
+      "start_time": "2026-10-08T17:01:23.413578",
+      "end_time": "2026-10-08T17:29:51.424502",
+      "measured_artifact_sha256": {
+        "report_aiperf.json": "ac93dd21a485afa4faeceb885555a699a0c72b9d12e7b002808c97f4d4bbb899",
+        "report_aiperf.jsonl": "c8c3adec2aeb90fb3bcb2c54da1b3d119a3537637631f66f324ceb233501b7f9",
+        "report_aiperf_raw.jsonl": "0096970419724af88c6388d703d1e86f7d44e7a1848a27dd9d963cf567e2a357"
+      },
+      "placement": {
+        "prefill_hosts": 1,
+        "decode_hosts": 1,
+        "prefill_and_decode_on_separate_hosts": true
+      },
+      "nixl_metric_deltas": {
+        "vllm:nixl_num_failed_transfers_total": 0.0,
+        "vllm:nixl_num_failed_notifications_total": 0.0,
+        "vllm:nixl_num_kv_expired_reqs_total": 0.0
+      }
+    },
+    {
+      "layout": "2p1d",
+      "concurrency": 32,
+      "recovered": false,
+      "original_finished_marker": true,
+      "start_time": "2026-10-08T17:31:21.733715",
+      "end_time": "2026-10-08T17:52:17.065969",
+      "measured_artifact_sha256": {
+        "report_aiperf.json": "1c15f2e9a294c786d70d4451f5eed99bb730795b6ab48b5743cd7b309e643c10",
+        "report_aiperf.jsonl": "dc1267dc23005bd6ffe487335bf659d1796a1b96bfaa72ef2929c2030501cdcc",
+        "report_aiperf_raw.jsonl": "d62284990bd19cf59b7f8e02e82413237e2539e7c8110731efa84aba8373dac2"
+      },
+      "placement": {
+        "prefill_hosts": 1,
+        "decode_hosts": 1,
+        "prefill_and_decode_on_separate_hosts": true
+      },
+      "nixl_metric_deltas": {
+        "vllm:nixl_num_failed_transfers_total": 0.0,
+        "vllm:nixl_num_failed_notifications_total": 0.0,
+        "vllm:nixl_num_kv_expired_reqs_total": 0.0
+      }
+    }
+  ]
+}
