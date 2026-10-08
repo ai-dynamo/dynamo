@@ -74,16 +74,6 @@ COPY examples/router/custom-policy-example/ examples/router/custom-policy-exampl
 COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
-# Exercise Cargo freshness with old checkout mtimes before using shared caches.
-RUN python3 -B -m unittest discover -s lib/sidecar -p test_build_cache.py
-
-# The shared target cache can contain artifacts newer than a fresh checkout.
-# The build helper hashes all copied inputs and restores their mtimes to a
-# shared source timestamp before Cargo checks freshness. This invalidates stale
-# local crates and protobuf outputs and preserves third-party dependency reuse.
-# Use a separate cache generation so older builders cannot replace artifacts
-# without updating the helper's source stamp.
-
 # ---- sidecar builder --------------------------------------------------------
 FROM builder-base AS sidecar-builder
 
@@ -102,14 +92,11 @@ ARG CARGO_CYCLONEDX_VERSION=0.5.9
 # release link expensive. Every id is per-architecture so the amd64 and arm64
 # halves of a multi-platform build do not serialize against each other.
 #
-# The target cache outlives this build and is shared with builds of other
-# revisions, and Cargo checks workspace crates by mtime, so a cached workspace
-# artifact newer than this checkout would be reused. `cargo clean --workspace`
-# drops only workspace artifacts; registry and git dependencies stay cached.
-#
 # Each sidecar keeps its own `cargo build -p` call. One
 # `cargo build -p a -p b -p c` would unify features and link the vLLM-only
 # features into the SGLang and TensorRT-LLM binaries.
+# The target directory exists only during this RUN. The final step removes it
+# so the intermediate layer retains only the installed binaries and metadata.
 #
 # The SBOM step runs first so a registry or network failure fails fast,
 # before the long compile. Development and build-only dependencies cannot be
@@ -117,7 +104,6 @@ ARG CARGO_CYCLONEDX_VERSION=0.5.9
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-tools-${TARGETARCH},target=/tmp/cargo-tools,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-proto-v2,target=/src/target,sharing=locked \
     set -e; \
     RUSTARCH=$(case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
         amd64) echo "x86_64-unknown-linux-gnu" ;; \
@@ -142,7 +128,6 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
             "/out/sidecar-sboms/${pkg}.cyclonedx.json"; \
         test -s "/out/sidecar-sboms/${pkg}.cyclonedx.json"; \
     done; \
-    cargo clean --workspace --release --locked; \
     for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar; do \
         cargo build --release --locked -p "${pkg}"; \
         strip "target/release/${pkg}"; \
@@ -157,7 +142,8 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
                 mkdir -p "${dest}" && cp "${license}" "${dest}/"; \
             done; \
         done; \
-    done
+    done; \
+    rm -rf target
 
 # ---- runtime base ------------------------------------------------------------
 FROM ${BASE_IMAGE} AS runtime-base
