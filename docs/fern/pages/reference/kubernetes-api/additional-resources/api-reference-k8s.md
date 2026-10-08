@@ -3314,11 +3314,14 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `modelRef` _[ModelReference](#modelreference)_ | ModelRef identifies the model whose deployment configurations are evaluated. |  |  |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by Sweeper and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br /> |
+| `image` _string_ | Image is the versioned container image used by the controller-generated search Job. |  | MinLength: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search. |  |  |
 | `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines exactly one traffic model used for every candidate evaluation. |  |  |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization or a multi-objective Pareto search. |  |  |
 | `search` _[SearchSpec](#searchspec)_ | Search configures current Sweeper run control and implementation-owned dimensions. |  |  |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `rerun` _[RerunSpec](#rerunspec)_ | Rerun intentionally changes the DGDR spec when search inputs otherwise remain unchanged. |  | Optional: \{\} <br /> |
+| `overrides` _[OverridesSpec](#overridesspec)_ | Overrides customizes the generated Job and DGD without changing modeled search semantics. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRequestStatus
@@ -3456,6 +3459,41 @@ _Appears in:_
 
 
 
+#### ModelCacheSpec
+
+
+
+ModelCacheSpec identifies model weights already available to the search Job
+and generated DGD.
+
+
+
+_Appears in:_
+- [ModelReference](#modelreference)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `pvc` _[ModelPVCSpec](#modelpvcspec)_ | PVC mounts model weights from a PersistentVolumeClaim in the DGDR namespace. |  |  |
+
+
+#### ModelPVCSpec
+
+
+
+ModelPVCSpec identifies model weights on a PersistentVolumeClaim in the DGDR namespace.
+
+
+
+_Appears in:_
+- [ModelCacheSpec](#modelcachespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the PersistentVolumeClaim containing the model weights. |  | MinLength: 1 <br /> |
+| `modelPath` _string_ | ModelPath is the model directory relative to the root of the claim. |  | MinLength: 1 <br /> |
+| `mountPath` _string_ | MountPath is the absolute mount path in generated containers. |  | Pattern: `^/` <br /> |
+
+
 #### ModelReference
 
 
@@ -3471,6 +3509,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name identifies the model in the syntax accepted by the selected backend. |  | MinLength: 1 <br /> |
 | `revision` _string_ | Revision pins repository contents. Backends that do not support revisions reject this field. |  | Optional: \{\} <br /> |
+| `remoteCode` _[RemoteCodePolicy](#remotecodepolicy)_ | RemoteCode controls whether generated backend commands may execute model-repository Python code. | Never | Enum: [Never TrustCacheAndRevision AlwaysTrust] <br />Optional: \{\} <br /> |
+| `cache` _[ModelCacheSpec](#modelcachespec)_ | Cache identifies model weights already available to the search Job and generated DGD. |  | Optional: \{\} <br /> |
 
 
 #### ObjectiveMetric
@@ -3542,6 +3582,23 @@ _Appears in:_
 | `sla` _[ObjectiveSLASpec](#objectiveslaspec)_ | SLA defines per-request latency bounds used to calculate goodput. |  | Optional: \{\} <br /> |
 
 
+#### OverridesSpec
+
+
+
+OverridesSpec customizes the generated Job and DGD without changing modeled search semantics.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `profilingJob` _[JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch)_ | ProfilingJob is a partial batch/v1 JobSpec merged into the controller-generated Job. |  | Optional: \{\} <br /> |
+| `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD is a partial versioned DGD merged after candidate materialization and before hashing. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
+
+
 #### RecommendationSpec
 
 
@@ -3556,6 +3613,42 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `maxCandidates` _integer_ | MaxCandidates is the maximum number of DGDCs owned by one run. It does not limit internal trials. | 5 | Minimum: 1 <br />Optional: \{\} <br /> |
+
+
+#### RemoteCodePolicy
+
+_Underlying type:_ _string_
+
+RemoteCodePolicy controls whether generated backend commands may execute
+Python code from the model repository.
+
+_Validation:_
+- Enum: [Never TrustCacheAndRevision AlwaysTrust]
+
+_Appears in:_
+- [ModelReference](#modelreference)
+
+| Field | Description |
+| --- | --- |
+| `Never` |  |
+| `TrustCacheAndRevision` |  |
+| `AlwaysTrust` |  |
+
+
+#### RerunSpec
+
+
+
+RerunSpec intentionally changes the DGDR spec when search inputs otherwise remain unchanged.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `reason` _string_ | Reason records why the user requested another run. Any new value creates a new generation. |  | MinLength: 1 <br /> |
 
 
 #### ResourceReference

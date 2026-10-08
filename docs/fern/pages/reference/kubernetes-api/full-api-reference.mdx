@@ -10,12 +10,12 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 4 Kubernetes API packages with 206 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 211 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">74 types</Card>
-<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">34 types</Card>
+<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">39 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
 
@@ -4542,6 +4542,11 @@ See [Backend](#backend).
 **Validation:** Enum: [vllm sglang trtllm]  MinItems: 1
 </ParamField>
 
+<ParamField path="image" type="string">
+Image is the versioned container image used by the controller-generated search Job.
+**Validation:** MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="hardware" type="HardwareSpec">
 Hardware bounds the accelerator configurations evaluated by the search.
 See [HardwareSpec](#v1beta2-hardwarespec).
@@ -4565,6 +4570,18 @@ See [SearchSpec](#searchspec).
 <ParamField path="recommendation" type="RecommendationSpec">
 Recommendation controls bounded projection into DGDC resources.
 See [RecommendationSpec](#recommendationspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="rerun" type="RerunSpec">
+Rerun intentionally changes the DGDR spec when search inputs otherwise remain unchanged.
+See [RerunSpec](#rerunspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="overrides" type="OverridesSpec">
+Overrides customizes the generated Job and DGD without changing modeled search semantics.
+See [OverridesSpec](#v1beta2-overridesspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -4761,6 +4778,43 @@ The installed Sweeper performs mode-specific validation.
 **Appears in:** [StaticWorkloadSpec](#staticworkloadspec)
 </Accordion>
 
+<Accordion id="v1beta2-modelcachespec" title="ModelCacheSpec">
+ModelCacheSpec identifies model weights already available to the search Job
+and generated DGD.
+
+
+**Kind:** `type`
+**Appears in:** [ModelReference](#v1beta2-modelreference)
+
+<ParamField path="pvc" type="ModelPVCSpec">
+PVC mounts model weights from a PersistentVolumeClaim in the DGDR namespace.
+See [ModelPVCSpec](#modelpvcspec).
+</ParamField>
+</Accordion>
+
+<Accordion id="modelpvcspec" title="ModelPVCSpec">
+ModelPVCSpec identifies model weights on a PersistentVolumeClaim in the DGDR namespace.
+
+
+**Kind:** `type`
+**Appears in:** [ModelCacheSpec](#v1beta2-modelcachespec)
+
+<ParamField path="name" type="string">
+Name is the PersistentVolumeClaim containing the model weights.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="modelPath" type="string">
+ModelPath is the model directory relative to the root of the claim.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="mountPath" type="string">
+MountPath is the absolute mount path in generated containers.
+**Validation:** Pattern: `^/`
+</ParamField>
+</Accordion>
+
 <Accordion id="v1beta2-modelreference" title="ModelReference">
 ModelReference identifies the model whose deployment configurations are evaluated.
 
@@ -4775,6 +4829,18 @@ Name identifies the model in the syntax accepted by the selected backend.
 
 <ParamField path="revision" type="string">
 Revision pins repository contents. Backends that do not support revisions reject this field.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="remoteCode" type="RemoteCodePolicy" default="Never">
+RemoteCode controls whether generated backend commands may execute model-repository Python code.
+See [RemoteCodePolicy](#remotecodepolicy).
+**Validation:** Enum: [Never TrustCacheAndRevision AlwaysTrust]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="cache" type="ModelCacheSpec">
+Cache identifies model weights already available to the search Job and generated DGD.
+See [ModelCacheSpec](#v1beta2-modelcachespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -4859,6 +4925,26 @@ See [ObjectiveSLASpec](#objectiveslaspec).
 </ParamField>
 </Accordion>
 
+<Accordion id="v1beta2-overridesspec" title="OverridesSpec">
+OverridesSpec customizes the generated Job and DGD without changing modeled search semantics.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec)
+
+<ParamField path="profilingJob" type="JobSpec">
+ProfilingJob is a partial batch/v1 JobSpec merged into the controller-generated Job.
+See [JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="dgd" type="RawExtension">
+DGD is a partial versioned DGD merged after candidate materialization and before hashing.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
+**Validation:** EmbeddedResource: \&#123;\&#125;  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
 <Accordion id="recommendationspec" title="RecommendationSpec">
 RecommendationSpec controls bounded projection into DGDC resources.
 
@@ -4869,6 +4955,36 @@ RecommendationSpec controls bounded projection into DGDC resources.
 <ParamField path="maxCandidates" type="integer" default="5">
 MaxCandidates is the maximum number of DGDCs owned by one run. It does not limit internal trials.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="remotecodepolicy" title="RemoteCodePolicy">
+RemoteCodePolicy controls whether generated backend commands may execute
+Python code from the model repository.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Never TrustCacheAndRevision AlwaysTrust]
+**Appears in:** [ModelReference](#v1beta2-modelreference)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Never</Badge>
+- <Badge intent="note" minimal>TrustCacheAndRevision</Badge>
+- <Badge intent="note" minimal>AlwaysTrust</Badge>
+</Accordion>
+
+<Accordion id="rerunspec" title="RerunSpec">
+RerunSpec intentionally changes the DGDR spec when search inputs otherwise remain unchanged.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec)
+
+<ParamField path="reason" type="string">
+Reason records why the user requested another run. Any new value creates a new generation.
+**Validation:** MinLength: 1
 </ParamField>
 </Accordion>
 

@@ -19,9 +19,11 @@ package v1beta2
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -87,10 +89,10 @@ func TestCandidateSpecUsesV1Beta1DGDContract(t *testing.T) {
 	}
 }
 
-func TestRequestSpecUsesMVPFieldSet(t *testing.T) {
+func TestRequestSpecPreservesMVPFieldsWithOptionalPostMVPControls(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Verify the request spec contains only MVP search intent.")
+	t.Log("Verify the request spec preserves MVP search intent and layers post-MVP controls.")
 	specType := reflect.TypeOf(DynamoGraphDeploymentRequestSpec{})
 	got := make([]string, specType.NumField())
 	for i := range specType.NumField() {
@@ -99,34 +101,57 @@ func TestRequestSpecUsesMVPFieldSet(t *testing.T) {
 	want := []string{
 		"ModelRef",
 		"Backends",
+		"Image",
 		"Hardware",
 		"Workload",
 		"Objective",
 		"Search",
 		"Recommendation",
+		"Rerun",
+		"Overrides",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("request spec fields = %v, want %v", got, want)
 	}
 
-	t.Log("Verify the model reference retains only model identity and revision.")
+	t.Log("Verify the model reference preserves identity and revision before optional post-MVP controls.")
 	modelType := reflect.TypeOf(ModelReference{})
 	got = make([]string, modelType.NumField())
 	for i := range modelType.NumField() {
 		got[i] = modelType.Field(i).Name
 	}
-	want = []string{"Name", "Revision"}
+	want = []string{"Name", "Revision", "RemoteCode", "Cache"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("model reference fields = %v, want %v", got, want)
 	}
 
-	t.Log("Verify the optional recommendation is omitted when absent.")
-	recommendationField, ok := specType.FieldByName("Recommendation")
+	t.Log("Verify MVP recommendation remains pointer-shaped and optional.")
+	assertOptionalFieldType(t, specType, "Recommendation", reflect.TypeOf((*RecommendationSpec)(nil)))
+
+	t.Log("Verify post-MVP request controls are optional.")
+	assertOptionalFieldType(t, specType, "Image", reflect.TypeOf(""))
+	assertOptionalFieldType(t, specType, "Rerun", reflect.TypeOf((*RerunSpec)(nil)))
+	assertOptionalFieldType(t, specType, "Overrides", reflect.TypeOf((*OverridesSpec)(nil)))
+	assertOptionalFieldType(t, modelType, "RemoteCode", reflect.TypeOf(RemoteCodePolicy("")))
+	assertOptionalFieldType(t, modelType, "Cache", reflect.TypeOf((*ModelCacheSpec)(nil)))
+
+	t.Log("Verify post-MVP override controls retain their typed API shapes.")
+	overridesType := reflect.TypeOf(OverridesSpec{})
+	assertOptionalFieldType(t, overridesType, "ProfilingJob", reflect.TypeOf((*batchv1.JobSpec)(nil)))
+	assertOptionalFieldType(t, overridesType, "DGD", reflect.TypeOf((*runtime.RawExtension)(nil)))
+}
+
+func assertOptionalFieldType(t *testing.T, owner reflect.Type, name string, want reflect.Type) {
+	t.Helper()
+
+	field, ok := owner.FieldByName(name)
 	if !ok {
-		t.Fatal("request spec has no Recommendation field")
+		t.Fatalf("%v has no %s field", owner, name)
 	}
-	wantRecommendationType := reflect.TypeOf((*RecommendationSpec)(nil))
-	if recommendationField.Type != wantRecommendationType {
-		t.Fatalf("recommendation type = %v, want %v", recommendationField.Type, wantRecommendationType)
+	if field.Type != want {
+		t.Fatalf("%v.%s type = %v, want %v", owner, name, field.Type, want)
+	}
+	if !strings.Contains(field.Tag.Get("json"), "omitempty") {
+		t.Fatalf("%v.%s json tag = %q, want omitempty", owner, name, field.Tag.Get("json"))
 	}
 }
