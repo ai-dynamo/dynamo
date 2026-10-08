@@ -493,6 +493,14 @@ class VllmMultimodalRequestProcessor:
         if mm_config is None:
             return
 
+        mm_processor_kwargs = get_mm_processor_kwargs(request)
+        video_audio_count = (
+            len(mm_map.get(VIDEO_URL_KEY, []))
+            if mm_processor_kwargs
+            and mm_processor_kwargs.get("use_audio_in_video", False)
+            else 0
+        )
+
         # These are inbound media items, not decoded frames or image crops.
         # Validate every modality before any loader or encoder gets to run.
         for modality, key in (
@@ -502,6 +510,8 @@ class VllmMultimodalRequestProcessor:
         ):
             items = mm_map.get(key, [])
             count = len(items)
+            if modality == "audio":
+                count += video_audio_count
             limit_modality = _normalize_forwarded_mm_modality(
                 modality, self.use_unified_vision_chunk
             )

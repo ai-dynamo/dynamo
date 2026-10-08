@@ -2203,3 +2203,59 @@ def test_image_admission_uses_model_modality_limit(
         processor.validate_multimodal_request(request)
 
     processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs_location", ["top_level", "extra_args"])
+@pytest.mark.parametrize(
+    "mode", [DisaggregationMode.AGGREGATED, DisaggregationMode.PREFILL]
+)
+@pytest.mark.parametrize("audio_limit,explicit_audio_count", [(0, 0), (1, 1)])
+async def test_video_derived_audio_rejects_before_any_media_loader(
+    kwargs_location, mode, audio_limit, explicit_audio_count
+):
+    """Count video-derived audio together with explicit audio before decoding."""
+    processor = _processor(media_limits={"video": 1, "audio": audio_limit})
+    processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "video_url": [{"Url": "https://example.com/video.mp4"}],
+            "audio_url": [{"Url": "https://example.com/audio.wav"}]
+            * explicit_audio_count,
+        },
+    }
+    kwargs = {"mm_processor_kwargs": {"use_audio_in_video": True}}
+    if kwargs_location == "extra_args":
+        request["extra_args"] = kwargs
+    else:
+        request.update(kwargs)
+
+    with pytest.raises(mod.InvalidArgument, match=f"At most {audio_limit} audio"):
+        processor.validate_multimodal_request(request)
+    with pytest.raises(mod.InvalidArgument, match=f"At most {audio_limit} audio"):
+        await processor.prepare_input(request, "video-audio", None, mode)
+
+    processor.video_loader.load_video_batch.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.audio_loader.load_audio.assert_not_awaited()
+    processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
+
+
+@pytest.mark.parametrize("kwargs_location", ["top_level", "extra_args"])
+@pytest.mark.parametrize(
+    "use_audio_in_video,audio_limit", [(False, 0), (True, 1), (True, 2)]
+)
+def test_video_derived_audio_respects_flag_and_limit(
+    kwargs_location, use_audio_in_video, audio_limit
+):
+    """Video without derived audio and permitted derived audio remain admitted."""
+    processor = _processor(media_limits={"video": 1, "audio": audio_limit})
+    request = {"multi_modal_data": {"video_url": [{"Url": "video"}]}}
+    kwargs = {"mm_processor_kwargs": {"use_audio_in_video": use_audio_in_video}}
+    if kwargs_location == "extra_args":
+        request["extra_args"] = kwargs
+    else:
+        request.update(kwargs)
+    processor.validate_multimodal_request(request)
