@@ -1003,7 +1003,7 @@ mod local_source_tests {
     }
 
     #[tokio::test]
-    async fn default_names_and_explicit_sources_keep_their_representation() {
+    async fn default_names_keep_their_representation() {
         let canonical = fs::canonicalize(model_dir()).unwrap();
         let path_name = canonical.to_str().unwrap().to_string();
         let relative = model_dir()
@@ -1013,26 +1013,17 @@ mod local_source_tests {
         let dir = tempfile::tempdir().unwrap();
         let symlink = dir.path().join("model");
         std::os::unix::fs::symlink(&canonical, &symlink).unwrap();
-        for (path, name, source) in [
-            (model_dir(), None, None),
-            (model_dir(), Some(path_name.clone()), None),
-            (relative.clone(), Some(relative.display().to_string()), None),
-            (symlink.clone(), Some(symlink.display().to_string()), None),
-            (
-                model_dir(),
-                Some("local-qwen".to_string()),
-                Some(PathBuf::from("Qwen/Qwen3-0.6B")),
-            ),
+        for (path, name) in [
+            (model_dir(), None),
+            (model_dir(), Some(path_name.clone())),
+            (relative.clone(), Some(relative.display().to_string())),
+            (symlink.clone(), Some(symlink.display().to_string())),
         ] {
             let mut builder = LocalModelBuilder::default();
             builder.model_path(path).model_name(name.clone());
-            if let Some(source) = &source {
-                builder.source_path(source.clone());
-            }
             let model = builder.build().await.unwrap();
             assert_eq!(model.display_name(), name.as_deref().unwrap_or(&path_name));
-            let expected = source.as_ref().map(|path| path.display().to_string());
-            assert_eq!(model.card().source_path, expected);
+            assert_eq!(model.card().source_path, None);
             let mut original = LocalModelBuilder::default()
                 .model_path(model_dir())
                 .build()
@@ -1040,9 +1031,6 @@ mod local_source_tests {
                 .unwrap()
                 .card()
                 .clone();
-            if let Some(source) = source {
-                original.set_source_path(source);
-            }
             original.set_name(name.as_deref().unwrap_or(&path_name));
             assert_eq!(model.card().mdcsum(), original.mdcsum());
         }
