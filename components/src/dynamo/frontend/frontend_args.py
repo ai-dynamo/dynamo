@@ -563,7 +563,7 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--strip-anthropic-preamble",
             env_var="DYN_STRIP_ANTHROPIC_PREAMBLE",
-            default=False,
+            default=True,
             help=(
                 "Strip the Claude Code billing preamble (x-anthropic-billing-header) "
                 "from the system prompt. Saves tokens and improves prompt caching."

@@ -338,3 +338,18 @@ def test_ais_perf_model_accepts_mode_required_roles():
 
     assert config.ais_perf_model is not None
     assert config.ais_perf_model.roles["decode"]["tp"] == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("load_predictor", "unknown"),
+        ("max_num_fpm_samples", 0),
+        ("fpm_sample_bucket_size", 0),
+        ("prophet_window_size", 0),
+        ("load_scaling_down_sensitivity", 101),
+    ],
+)
+def test_invalid_sampling_settings_fail_before_plugin_construction(field, value):
+    with pytest.raises(ValidationError, match=field):
+        PlannerConfig(**{field: value})

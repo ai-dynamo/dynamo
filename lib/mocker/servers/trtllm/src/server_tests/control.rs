@@ -178,11 +178,6 @@ async fn health_is_ready_but_the_inference_probe_is_not_simulated() {
     assert_eq!(error.code(), Code::Unimplemented);
 }
 
-/// The engine finishing is not the same as the client being told. The pump
-/// makes that window wide -- the engine can run to completion while the
-/// consumer has read nothing -- and an abort landing inside it is honoured,
-/// because no terminal event has reached the client yet. What must never
-/// happen is the two disagreeing.
 #[tokio::test]
 async fn abort_before_the_terminal_reaches_the_client_cancels_it() {
     let service = service();
@@ -280,66 +275,82 @@ async fn concurrent_abort_and_terminal_event_agree() {
     }
 }
 
-/// `LiveEngine::cancel` cannot stop a request the scheduler has not seen yet,
-/// and the window between registering a request and submitting it is real. The
-/// stream honours the claim itself, so an abort that lands there stops
-/// generation instead of reporting ABORTED while the request streams its whole
-/// budget.
 #[tokio::test]
 async fn an_abort_that_beats_submission_still_stops_generation() {
-    let mut service = service();
-    let gate = service.gate_submissions();
+    for mode in [ServerMode::Aggregated, ServerMode::Decode] {
+        let mut args = admitting_args();
+        args.num_gpu_blocks = 129;
+        let mut service =
+            TrtllmMockerService::new(MockerServerConfig { mode, ..config() }, args).unwrap();
+        let mut early_request = request("req-early", 512);
+        let held = if mode == ServerMode::Decode {
+            early_request.kv = Some(pb::KvOptions {
+                session: Some(prefill_session("pf-early").await),
+                ..Default::default()
+            });
+            let (control, mut events) = service
+                .engine
+                .register_handoff(dynamo_mocker::common::handoff::HandoffId::new())
+                .unwrap();
+            let (registration, live) = service
+                .engine
+                .prepare_request(dynamo_mocker::common::protocols::DirectRequest {
+                    tokens: vec![9; 8],
+                    max_output_tokens: 1,
+                    ..Default::default()
+                })
+                .unwrap();
+            control.reserve_destination(registration).await.unwrap();
+            assert!(events.recv().await.is_some());
+            Some(live)
+        } else {
+            None
+        };
+        let gate = service.gate_submissions();
+        let streaming = service.clone();
+        let stream = tokio::spawn(async move {
+            streaming
+                .generate(Request::new(early_request))
+                .await
+                .unwrap()
+                .into_inner()
+        });
 
-    let streaming = service.clone();
-    let stream = tokio::spawn(async move {
-        streaming
-            .generate(Request::new(request("req-early", 512)))
+        while service.registered_request_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(service.active_request_count(), usize::from(held.is_some()));
+        let status = service
+            .abort(Request::new(pb::AbortRequest {
+                target: Some(pb::abort_request::Target::RequestId("req-early".into())),
+            }))
             .await
             .unwrap()
             .into_inner()
-    });
+            .status;
+        assert_eq!(status, pb::AbortStatus::Aborted as i32);
+        gate.notify_waiters();
 
-    // Wait until the request is registered but still held before submission.
-    // The scheduler's own count stays zero throughout: that is the point.
-    while service.registered_request_count() == 0 {
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        service.active_request_count(),
-        0,
-        "the scheduler must not have seen this request yet"
-    );
-    let status = service
-        .abort(Request::new(pb::AbortRequest {
-            target: Some(pb::abort_request::Target::RequestId("req-early".into())),
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .status;
-    assert_eq!(
-        status,
-        pb::AbortStatus::Aborted as i32,
-        "a live request reports ABORTED even though the scheduler has not seen it"
-    );
-    gate.notify_waiters();
-
-    let mut stream = stream.await.unwrap();
-    let mut tokens = 0usize;
-    let mut terminal = None;
-    while let Some(item) = stream.next().await {
-        match item.unwrap().event {
-            Some(pb::generate_response::Event::Token(_)) => tokens += 1,
-            Some(pb::generate_response::Event::Finished(finished)) => terminal = Some(finished),
-            _ => {}
+        let mut stream = tokio::time::timeout(std::time::Duration::from_secs(3), stream)
+            .await
+            .expect("an aborted decode must not wait for KV capacity")
+            .unwrap();
+        let mut tokens = 0usize;
+        let mut terminal = None;
+        while let Some(item) = stream.next().await {
+            match item.unwrap().event {
+                Some(pb::generate_response::Event::Token(_)) => tokens += 1,
+                Some(pb::generate_response::Event::Finished(finished)) => terminal = Some(finished),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            terminal.expect("the request still terminates").reason,
+            pb::FinishReason::Cancelled as i32
+        );
+        assert_eq!(tokens, 0);
+        if let Some(held) = held {
+            held.cancel().await.unwrap();
         }
     }
-    assert_eq!(
-        terminal.expect("the request still terminates").reason,
-        pb::FinishReason::Cancelled as i32
-    );
-    assert_eq!(
-        tokens, 0,
-        "an abort the scheduler never saw must still stop generation"
-    );
 }

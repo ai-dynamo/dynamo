@@ -64,7 +64,7 @@ vLLM offers the broadest feature coverage in Dynamo, with full support for disag
 | **Speculative Decoding**  | <span className="dynref-badge dynref-badge--green">✓</span> | Eagle3 ([Source][vllm-spec])                                                                                                                 |
 | **GPU Memory Service** | <span className="dynref-badge dynref-badge--green">✓</span> | Weights and KV; upstream integration remains in progress |
 | **Shadow Engine Failover** | <span className="dynref-badge dynref-badge--amber">!</span> | Software-process failover only; no KV-cache reuse or hardware fault tolerance |
-| **[Dynamo Snapshot API](../kubernetes-api/full-api-reference.mdx#componentcheckpointconfig)** | <span className="dynref-badge dynref-badge--amber">!</span> | Single-GPU supported; multi-GPU is highly experimental and multinode remains in progress |
+| **[Dynamo Snapshot API](../kubernetes-api/full-api-reference.mdx#componentcheckpointconfig)** | <span className="dynref-badge dynref-badge--amber">!</span> | Single-node single- and multi-GPU supported; multinode remains in progress |
 
   </Tab>
   <Tab title="SGLang">
@@ -87,7 +87,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **Speculative Decoding**  | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                       |
 | **GPU Memory Service** | <span className="dynref-badge dynref-badge--green">✓</span> | Weights and KV; upstream integration remains in progress |
 | **Shadow Engine Failover** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental; no KV-cache reuse or hardware fault tolerance |
-| **[Dynamo Snapshot API](../kubernetes-api/full-api-reference.mdx#componentcheckpointconfig)** | <span className="dynref-badge dynref-badge--amber">!</span> | Single-GPU supported; multi-GPU and multinode remain in progress |
+| **[Dynamo Snapshot API](../kubernetes-api/full-api-reference.mdx#componentcheckpointconfig)** | <span className="dynref-badge dynref-badge--amber">!</span> | Single-node single- and multi-GPU supported; multinode remains in progress |
 
   </Tab>
   <Tab title="TensorRT-LLM">
@@ -110,7 +110,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 | **Speculative Decoding**  | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
 | **GPU Memory Service** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Weights only; multinode and upstream integration remain in progress |
 | **Shadow Engine Failover** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental; no KV-cache reuse or hardware fault tolerance |
-| **[Dynamo Snapshot API](../kubernetes-api/full-api-reference.mdx#componentcheckpointconfig)** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental single-GPU aggregated text-worker path only |
+| **[Dynamo Snapshot API](../kubernetes-api/full-api-reference.mdx#componentcheckpointconfig)** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental aggregated text-worker path only |
 
   </Tab>
 </Tabs>
@@ -172,7 +172,7 @@ Current stable release: v1.5.0 (container tag `1.5.0`, wheel version `1.5.0`).
 
 | Dynamo | Type | SGLang | TensorRT-LLM | vLLM | NIXL (SGL / TRT / vLLM) | UCX |
 | --- | --- | --- | --- | --- | --- | --- |
-| main (ToT) | development head | 0.5.21 | 1.3.0rc29 | 0.30.0 | 1.4.0 / 1.3.1 / 1.3.2 | - |
+| main (ToT) | development head | 0.5.21 | 1.3.0rc29 | 0.31.0 | 1.4.0 / 1.3.1 / 1.3.2 | - |
 | v1.5.0 | stable | 0.5.18 | 1.3.0rc25 | 0.28.0 | 1.4.0 / 1.3.1 / 1.3.2 | 1.21.x |
 | v1.4.2 | patch | 0.5.16 | 1.3.0rc22 | 0.26.0 | 1.3.0 / 1.3.1 / 1.3.2 | 1.21.x |
 | v1.4.1 | patch | 0.5.16 | 1.3.0rc22 | 0.26.0 | 1.3.0 / 1.3.1 / 1.3.2 | 1.21.x |
@@ -308,7 +308,7 @@ Current stable release: v1.5.0 (container tag `1.5.0`, wheel version `1.5.0`).
 | Speculative Decoding | Supported | Supported | Supported (Eagle3) |
 | GPU Memory Service | Supported (Weights and KV; upstream integration remains in progress) | Experimental (Weights only; multinode and upstream integration remain in progress) | Supported (Weights and KV; upstream integration remains in progress) |
 | Shadow Engine Failover | Experimental (No KV-cache reuse or hardware fault tolerance) | Experimental (No KV-cache reuse or hardware fault tolerance) | Supported with caveat (Software-process failover only; no KV-cache reuse or hardware fault tolerance) |
-| Dynamo Snapshot | Supported with caveat (Single-GPU supported; multi-GPU and multinode remain in progress) | Experimental (Single-GPU aggregated text-worker path only) | Supported with caveat (Single-GPU supported; multi-GPU is highly experimental and multinode remains in progress) |
+| Dynamo Snapshot | Supported with caveat (Single-node single- and multi-GPU supported; multinode remains in progress) | Experimental (Aggregated text-worker path only) | Supported with caveat (Single-node single- and multi-GPU supported; multinode remains in progress) |
 
 **Feature interactions by backend**
 

@@ -71,6 +71,8 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 		"from_dgd_yaml/node-local-v3-hx-lpu-only",
 		"from_dgd_yaml/node-local-v3-hx-specdecode",
 		"from_dgd_yaml/node-local-v3-hx-hybrid",
+		"from_dgd_yaml/node-local-v3-hx-hybrid-all-local",
+		"from_dgd_yaml/lpx-v3-hx-local-partitions",
 		"from_dgd_yaml/single_v2",
 		"from_dgd_yaml/lpu-cyborg-specdec",
 		"from_dgd_yaml/lpu-gpu-specdecode",
@@ -738,6 +740,12 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 			compilationMode:   manifestcapnpv2.CompilationMode_lpx,
 			nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
 		},
+		"gpt-oss-20b-lp30-hx-lpx": {
+			compilationMode:   manifestcapnpv2.CompilationMode_lpx,
+			nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
+			lpuPartitions:     14,
+			firstPartitionID:  0,
+		},
 		"node-local-v3-hx-sd-draft":  {},
 		"node-local-v3-hx-sd-target": {},
 	}
@@ -965,31 +973,41 @@ func testV3GraphManifestCapnp(t *testing.T, fixture testV3GraphManifestFixture) 
 
 	message, manifest := newTestGraphManifest(t)
 
-	_, program := newTestGraphProgram(t, manifest, fixture.compilationMode, 2, 8192)
+	// Keep the original one-partition fixture shape unless a test describes a larger build.
+	lpuPartitions, firstPartitionID, numLPUNodes := 1, uint32(1), uint32(2)
+	if fixture.lpuPartitions != 0 {
+		lpuPartitions, firstPartitionID, numLPUNodes = fixture.lpuPartitions, fixture.firstPartitionID, uint32(fixture.lpuPartitions)
+	}
+	_, program := newTestGraphProgram(t, manifest, fixture.compilationMode, numLPUNodes, 8192)
 	program.SetNumKvCaches(1)
 
 	artifacts, err := manifest.NewArtifacts()
 	require.NoError(t, err)
-	partitions, err := artifacts.NewPartitions(int32(1 + len(fixture.nonLPUDeviceTypes)))
+	partitions, err := artifacts.NewPartitions(int32(lpuPartitions + len(fixture.nonLPUDeviceTypes)))
 	require.NoError(t, err)
-	partition := partitions.At(0)
-	ref, err := partition.NewPartition()
-	require.NoError(t, err)
-	ref.SetDeviceType(manifestcapnpv2.DeviceType_lpu)
-	ref.SetPartitionId(1)
-	detail, err := partition.Detail().NewLpu()
-	require.NoError(t, err)
-	require.NoError(t, detail.SetPath("part-1"))
-	require.NoError(t, detail.SetTopology("opaque-v3-topology"))
-	detail.SetNumChips(16)
-	detail.SetDevicesPerNode(16)
-	setTestChipArchitecture(t, detail, "polarisB0")
+
+	for index := range lpuPartitions {
+		partitionID := firstPartitionID + uint32(index)
+		partition := partitions.At(index)
+		ref, err := partition.NewPartition()
+		require.NoError(t, err)
+		ref.SetDeviceType(manifestcapnpv2.DeviceType_lpu)
+		ref.SetPartitionId(partitionID)
+		detail, err := partition.Detail().NewLpu()
+		require.NoError(t, err)
+		require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", partitionID)))
+		require.NoError(t, detail.SetTopology("opaque-v3-topology"))
+		detail.SetNumChips(16)
+		detail.SetDevicesPerNode(16)
+		setTestChipArchitecture(t, detail, "polarisB0")
+	}
+
 	for offset, deviceType := range fixture.nonLPUDeviceTypes {
-		partition := partitions.At(1 + offset)
+		partition := partitions.At(lpuPartitions + offset)
 		ref, err := partition.NewPartition()
 		require.NoError(t, err)
 		ref.SetDeviceType(deviceType)
-		ref.SetPartitionId(uint32(2 + offset))
+		ref.SetPartitionId(firstPartitionID + uint32(lpuPartitions+offset))
 		switch deviceType {
 		case manifestcapnpv2.DeviceType_cuda:
 			_, err = partition.Detail().NewCuda()
@@ -1009,6 +1027,11 @@ func testV3GraphManifestCapnp(t *testing.T, fixture testV3GraphManifestFixture) 
 type testV3GraphManifestFixture struct {
 	compilationMode   manifestcapnpv2.CompilationMode
 	nonLPUDeviceTypes []manifestcapnpv2.DeviceType
+	// lpuPartitions is the number of single-node LPU partitions; zero selects one
+	// partition with ID 1 on a two-node deployment.
+	lpuPartitions int
+	// firstPartitionID is the first compiler ID when lpuPartitions is nonzero.
+	firstPartitionID uint32
 }
 
 func writeTestGraphBuild(t *testing.T, registryRoot, buildID string, manifest []byte) {
