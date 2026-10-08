@@ -48,6 +48,35 @@ def test_worker_namespace_applies_suffix_once(source, namespace, expected, monke
     assert config.namespace == expected
 
 
+def test_structural_tags_default_on_for_supported_parsers(monkeypatch):
+    monkeypatch.delenv("DYN_ENABLE_STRUCTURAL_TAG", raising=False)
+    monkeypatch.delenv("DYN_STRUCTURAL_TAG_SCOPE", raising=False)
+    monkeypatch.delenv("DYN_STRUCTURAL_TAG_SCHEMA", raising=False)
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.dyn_enable_structural_tag is True
+    assert config.dyn_structural_tag_scope == "always"
+    assert config.dyn_structural_tag_schema == "auto"
+
+
+def test_structural_tag_schema_help_describes_omitted_strict(monkeypatch):
+    monkeypatch.delenv("DYN_STRUCTURAL_TAG_SCHEMA", raising=False)
+
+    _, help_text = _parse_runtime_args([])
+
+    assert "strict omitted or true" in help_text
+    assert "overriding strict=false" in help_text
+
+
+def test_structural_tag_global_opt_out(monkeypatch):
+    monkeypatch.setenv("DYN_ENABLE_STRUCTURAL_TAG", "false")
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.dyn_enable_structural_tag is False
+
+
 def test_fpm_trace_defaults_disabled(monkeypatch):
     monkeypatch.delenv("DYN_FPM_TRACE", raising=False)
 
