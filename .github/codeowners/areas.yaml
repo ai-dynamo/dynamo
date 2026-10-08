@@ -478,6 +478,7 @@ areas:
   - benchmarks/README.md
   - benchmarks/__init__.py
   - benchmarks/burstgpt_loadgen/
+  - benchmarks/decision_api/
   - benchmarks/frontend/
   - benchmarks/incluster/
   - benchmarks/mocker/README.md

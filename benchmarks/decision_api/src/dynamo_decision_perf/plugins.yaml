@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: "1.0"
+
+transport:
+  decision_http:
+    class: dynamo_decision_perf.transport:DecisionHttpTransport
+    description: HTTP transport preserving measurement correlation while requesting server-generated IDs.
+    metadata:
+      transport_type: http
+      url_schemes: [http, https]
+
+endpoint:
+  decision_systemone:
+    class: dynamo_decision_perf.endpoints:SystemOneEndpoint
+    description: Jev-compatible text evaluation with strict structured response validation.
+    metadata:
+      endpoint_path: /v1/systemone
+      supports_streaming: false
+      produces_tokens: false
+      tokenizes_input: false
+      metrics_title: Decision Evaluation Metrics
+  decision_oai:
+    class: dynamo_decision_perf.endpoints:OpenAIDecisionEndpoint
+    description: OpenAI Decisions text evaluation without generated-token metrics.
+    metadata:
+      endpoint_path: /v1/decisions
+      supports_streaming: false
+      produces_tokens: false
+      tokenizes_input: false
+      metrics_title: Decision Evaluation Metrics
+  decision_sglang:
+    class: dynamo_decision_perf.endpoints:SGLangDecisionEndpoint
+    description: SGLang-native decision response contract and genuine label mass.
+    metadata:
+      endpoint_path: /v1/decisions
+      supports_streaming: false
+      produces_tokens: false
+      tokenizes_input: false
+      metrics_title: Decision Evaluation Metrics
+  native_score:
+    class: dynamo_decision_perf.endpoints:NativeScoreEndpoint
+    description: Terminal zero-decode native SGLang scoring with per-request cache isolation.
+    metadata:
+      endpoint_path: /generate
+      supports_streaming: true
+      produces_tokens: false
+      tokenizes_input: false
+      metrics_title: Native Scoring Metrics
