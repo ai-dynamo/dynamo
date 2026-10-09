@@ -240,6 +240,11 @@ func main() {
 
 	mgrOpts := ctrl.Options{
 		Scheme: crdScheme,
+		// Fetch ConfigMap payloads on demand without creating a full-object cache
+		// alongside the metadata-only watches.
+		Client: client.Options{Cache: &client.CacheOptions{
+			DisableFor: []client.Object{&corev1.ConfigMap{}},
+		}},
 		Metrics: metricsserver.Options{
 			BindAddress:    metricsBindAddr,
 			SecureServing:  ptr.Deref(operatorCfg.Server.Metrics.Secure, true),

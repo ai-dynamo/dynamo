@@ -2597,9 +2597,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
 				// Only trigger for ConfigMaps with DGDR labels (written by the sidecar)
-				cm := obj.(*corev1.ConfigMap)
-				dgdrName, hasName := cm.Labels[nvidiacomv1beta1.LabelDGDRName]
-				dgdrNamespace, hasNamespace := cm.Labels[nvidiacomv1beta1.LabelDGDRNamespace]
+				labels := obj.GetLabels()
+				dgdrName, hasName := labels[nvidiacomv1beta1.LabelDGDRName]
+				dgdrNamespace, hasNamespace := labels[nvidiacomv1beta1.LabelDGDRNamespace]
 				if !hasName || !hasNamespace {
 					return nil
 				}
@@ -2626,6 +2626,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 				DeleteFunc:  func(de event.DeleteEvent) bool { return false },
 				GenericFunc: func(ge event.GenericEvent) bool { return false },
 			}),
+			builder.OnlyMetadata,
 		).
 		// Set the event filter to ignore resources handled by other controllers in namespace-restricted mode
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
