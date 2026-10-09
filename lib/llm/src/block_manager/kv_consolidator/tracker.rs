@@ -233,14 +233,14 @@ pub trait CacheStatusTracker: std::fmt::Debug + Send + Sync {
 #[derive(Debug)]
 struct DedupBlock {
     metadata: BlockMetadata,
-    extra_aliases: Vec<String>,
+    extra_aliases: Vec<Box<str>>,
 }
 
 /// Deduplicating cache-status tracker.
 #[derive(Debug, Default)]
 pub struct DedupCacheStatusTracker {
     blocks: HashMap<SequenceHash, DedupBlock>,
-    hash_mapping: HashMap<String, SequenceHash>,
+    hash_mapping: HashMap<Box<str>, SequenceHash>,
     event_queue: Vec<ConsolidatedEvent>,
 }
 
@@ -319,7 +319,7 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
         let local_block_hash = compute_local_block_hash(&token_ids);
         let parent_sequence_hash = parent_hash
             .as_ref()
-            .and_then(|ph| self.hash_mapping.get(ph).copied());
+            .and_then(|ph| self.hash_mapping.get(ph.as_str()).copied());
         let sequence_hash = compute_sequence_hash(parent_sequence_hash, local_block_hash);
 
         tracing::debug!(
@@ -329,24 +329,20 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
             sequence_hash
         );
 
-        let previous = self.hash_mapping.insert(block_hash.clone(), sequence_hash);
+        let previous = self
+            .hash_mapping
+            .insert(block_hash.clone().into_boxed_str(), sequence_hash);
         if let Some(previous) = previous.filter(|&previous| previous != sequence_hash)
             && let Some(block) = self.blocks.get_mut(&previous)
         {
-            block.extra_aliases.retain(|alias| alias != &block_hash);
+            block
+                .extra_aliases
+                .retain(|alias| alias.as_ref() != block_hash);
         }
 
         if let Some(block) = self.blocks.get_mut(&sequence_hash) {
             let metadata = &mut block.metadata;
             let is_new_source = metadata.add_source(source);
-            if metadata.first_block_hash != block_hash && !block.extra_aliases.contains(&block_hash)
-            {
-                if block.extra_aliases.is_empty() {
-                    block.extra_aliases.reserve_exact(1);
-                }
-                block.extra_aliases.push(block_hash.clone());
-            }
-
             if is_new_source {
                 tracing::debug!(
                     "DEDUP: Block {} (seq_hash={}) added to source {:?} (already exists in {} source(s), {} tokens, external_hash={})\n  Token IDs: {:?}",
@@ -367,6 +363,12 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
                     &block_hash[..16.min(block_hash.len())],
                     &token_ids
                 );
+            }
+            if previous != Some(sequence_hash) && metadata.first_block_hash != block_hash {
+                if block.extra_aliases.is_empty() {
+                    block.extra_aliases.reserve_exact(1);
+                }
+                block.extra_aliases.push(block_hash.into_boxed_str());
             }
             false
         } else {
@@ -398,11 +400,13 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
             );
 
             let resolved_parent_hash = parent_hash.and_then(|ph| {
-                self.hash_mapping.get(&ph).and_then(|&parent_seq_hash| {
-                    self.blocks
-                        .get(&parent_seq_hash)
-                        .map(|parent_metadata| parent_metadata.metadata.first_block_hash.clone())
-                })
+                self.hash_mapping
+                    .get(ph.as_str())
+                    .and_then(|&parent_seq_hash| {
+                        self.blocks.get(&parent_seq_hash).map(|parent_metadata| {
+                            parent_metadata.metadata.first_block_hash.clone()
+                        })
+                    })
             });
 
             // Always tag dedup'd stores as Device: the indexer dispatches by
@@ -440,7 +444,7 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
             tier: _,
         } = event;
 
-        let sequence_hash = match self.hash_mapping.get(&block_hash) {
+        let sequence_hash = match self.hash_mapping.get(block_hash.as_str()) {
             Some(&hash) => hash,
             None => {
                 tracing::warn!(
@@ -473,7 +477,9 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
             if !metadata.exists_in_any_source() {
                 let block = entry.remove();
                 let first_block_hash = block.metadata.first_block_hash;
-                for alias in std::iter::once(&first_block_hash).chain(block.extra_aliases.iter()) {
+                for alias in std::iter::once(first_block_hash.as_str())
+                    .chain(block.extra_aliases.iter().map(AsRef::as_ref))
+                {
                     if self.hash_mapping.get(alias) == Some(&sequence_hash) {
                         self.hash_mapping.remove(alias);
                     }
