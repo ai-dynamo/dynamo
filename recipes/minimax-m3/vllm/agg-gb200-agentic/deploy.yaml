@@ -66,13 +66,13 @@ spec:
   components:
     - name: Frontend
       type: frontend
-      runtimeVersionOverride: "1.5.0"
+      runtimeVersionOverride: "1.6.0"
       replicas: 1
       podTemplate:
         spec:
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e46c79195aa3b138aa99e4a3e1cbddb0f4c54b14-vllm-runtime
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-minimax-m3-dev.1
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -113,7 +113,7 @@ spec:
 
     - name: Worker
       type: worker
-      runtimeVersionOverride: "1.5.0"
+      runtimeVersionOverride: "1.6.0"
       replicas: 3
       sharedMemorySize: 64Gi
       podTemplate:
@@ -126,7 +126,7 @@ spec:
               resourceClaimTemplateName: minimax-m3-agg-gb200-agentic-cd-channel
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e46c79195aa3b138aa99e4a3e1cbddb0f4c54b14-vllm-runtime
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-minimax-m3-dev.1
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
