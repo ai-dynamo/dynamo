@@ -13,7 +13,7 @@ Stop the first worker before switching modes on a single GPU.
 ## Prerequisites
 
 - A Dynamo environment containing this change, compatible Dynamo Python/runtime
-  wheels, vLLM `0.30.0`, and vLLM-Omni `0.30.0rc1`.
+  wheels, vLLM `0.31.0`, and vLLM-Omni `0.31.0rc1`.
 - One GPU with enough memory for the model and generation. Qualification used
   one GH200 with 95.6 GiB GPU-visible memory; this is not a minimum
   memory claim. Smaller devices and offload configurations need separate tests.
@@ -130,19 +130,25 @@ disaggregated serving are separate qualification targets.
 
 ## Validated Configuration
 
-The pinned checkpoint and engine versions above were tested with matched
-Dynamo Python/runtime wheels (`1.6.0.dev20261006`) and the source changes in
-this example. The runs used eager execution, guardrails disabled, one GPU,
-and one output per request.
+The pinned checkpoint and engine versions above were tested in a prepared
+Arm64 development environment. It used the Dynamo Python source and `1.6.0`
+wheel built from this change, the prebuilt `ai-dynamo-runtime` wheel
+`1.6.0.dev20261006`, and matching FlashInfer Python/cubin/JIT packages at
+`0.7.0.post1` (CUDA 13.0 JIT cache). The runs used eager execution, guardrails
+disabled, one GPU, and one output per request. This qualification does not
+cover a clean build of the full Dynamo container.
 
 | Workflow | Validation |
 | --- | --- |
 | Text-to-image | Five requests, including a repeated seed and guidance/step variations, matched native vLLM-Omni pixels exactly |
-| Text-to-video | The 33-frame 720p response decoded at 24 FPS and matched native output after the same VP9 encoding |
-| Image-to-video | Two contrasting references with the same prompt and seed produced reference-conditioned videos; both matched native output after the same encoding |
+| Text-to-video | The 33-frame 720p response decoded at 24 FPS and matched native output byte-for-byte after the same VP9 encoding |
+| Image-to-video | Two contrasting references with the same prompt and seed produced reference-conditioned videos; both matched native output byte-for-byte after the same encoding |
 
 Video comparisons account for the delivery codec: an MP4 decoded after lossy
 VP9 compression need not equal the raw native frames. The example client also
 succeeded after deliberate HTTP disconnects in both image and video modes.
+Invalid dimensions, FPS, and image references returned HTTP 400/415, and
+subsequent valid requests succeeded. Disconnect recovery does not establish
+immediate cancellation of GPU work.
 These checks establish this configuration, not performance or support for
 every Cosmos checkpoint and generation setting.
