@@ -1,6 +1,6 @@
 ---
 name: release-cherry-pick
-description: Prepares and follows through Dynamo release-branch cherry-picks after a fix has merged to main, including request and approval gates, signed-off cherry-picks, release PR metadata, and release CI ownership. Use when asked to backport or cherry-pick a Dynamo change to a release/X.Y.Z branch. Do not use for ordinary main-branch fixes.
+description: Prepares and follows through Dynamo release-branch cherry-picks after a fix has merged to main, including request and approval gates, signed-off cherry-picks, release PR metadata, and release CI ownership. Use when asked to backport, cherry-pick, or pick to release a Dynamo change on a release/X.Y.Z branch. Do not use for ordinary main-branch fixes.
 license: Apache-2.0
 metadata:
   author: NVIDIA
