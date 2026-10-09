@@ -1,5 +1,6 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
+# CI admission qualification: retain the vLLM processor unit-test contract.
 
 """Unit tests for vLLM processor components.
 
