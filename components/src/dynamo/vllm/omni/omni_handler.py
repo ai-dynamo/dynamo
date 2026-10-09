@@ -343,9 +343,13 @@ class OmniHandler(BaseOmniHandler):
             and isinstance(parsed_request, NvCreateVideoRequest)
             and parsed_request.input_reference
         ):
-            # Preserve loader errors for the binding's HTTP error mapping.
-            # Invalid references must fail before engine admission.
-            image = await self._image_loader.load_image(parsed_request.input_reference)
+            try:
+                image = await self._image_loader.load_image(
+                    parsed_request.input_reference
+                )
+            except (ValueError, PIL.Image.DecompressionBombError) as e:
+                # Keep URLs and inline image data out of the client error.
+                raise ValueError("Failed to load input_reference") from e
 
         try:
             inputs = await self.build_engine_inputs(
