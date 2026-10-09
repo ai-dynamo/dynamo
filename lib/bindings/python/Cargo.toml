@@ -7,7 +7,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "1.6.0-dev20261009"
+version = "1.6.0-dev20261010"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -59,7 +59,7 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 # former AIC crate surface. The `python` feature is required for
 # AicEngineBuilder; this extension supplies the interpreter, so the dependency
 # must not enable `extension-module`.
-aisimulate-core = { version = "=0.13.0-dev.202610060000000067", optional = true, features = ["python"] }
+aisimulate-core = { version = "=0.13.0-dev.2", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "=9.2.7" }

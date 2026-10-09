@@ -5,7 +5,7 @@
 
 [package]
 name = "kvbm-py3"
-version = "1.6.0-dev20261009"
+version = "1.6.0-dev20261010"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"

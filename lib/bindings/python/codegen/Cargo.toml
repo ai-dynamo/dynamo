@@ -3,7 +3,7 @@
 
 [package]
 name = "dynamo-codegen"
-version = "0.1.0-dev20261009"
+version = "0.1.0-dev20261010"
 edition = "2021"
 license = "Apache-2.0"
 
