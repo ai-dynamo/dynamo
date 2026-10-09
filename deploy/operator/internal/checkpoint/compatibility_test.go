@@ -59,7 +59,6 @@ func TestValidateCheckpointCompatibility(t *testing.T) {
 			},
 			wantErrs: []string{
 				checkpointInterPodCompatibilityMessage,
-				checkpointFailoverCompatibilityMessage,
 			},
 		},
 	}

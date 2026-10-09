@@ -603,6 +603,7 @@ spec:
                     gpuSku:
                       allOf:
                         - enum:
+                            - vr_nvl72
                             - gb200
                             - gb200_sxm
                             - gb10
@@ -623,6 +624,7 @@ spec:
                             - mi200
                             - mi300
                         - enum:
+                            - vr_nvl72
                             - gb200
                             - gb200_sxm
                             - gb10

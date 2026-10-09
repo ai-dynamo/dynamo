@@ -58,8 +58,13 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
 <ParamField path="--enable-layerwise-offload" type="flag">
   Enable layerwise offloading on DiT modules to reduce GPU memory.
 </ParamField>
-<ParamField path="--layerwise-num-gpu-layers" type="int" default="1">
-  Number of ready layers to keep on GPU during generation.
+<ParamField path="--layerwise-num-gpu-layers" type="int">
+  <Warning>
+    This legacy option is no longer supported and causes a configuration error
+    when set. Remove the flag or unset `DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS`.
+    Use `--enable-layerwise-offload` without a layer-count override to let
+    vLLM-Omni manage layerwise offloading.
+  </Warning>
 </ParamField>
 <ParamField path="--enforce-eager" type="flag">
   Disable torch.compile for diffusion models.
