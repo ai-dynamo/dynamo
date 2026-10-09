@@ -466,6 +466,35 @@ async fn teardown_with_live_clients<F: WireFixture>() -> (Outputs, Vec<u32>) {
     (outputs, handle.tokens())
 }
 
+#[tokio::test]
+async fn sglang_shutdown_releases_pending_health_check() {
+    use dynamo_sglang_sidecar::proto::{
+        HealthCheckRequest, sglang_service_client::SglangServiceClient,
+    };
+
+    let mut fixture =
+        support::sglang::Fixture::start(Controller::default(), FixtureConfig::default()).await;
+    fixture.set_health(None);
+    let mut client = bounded(
+        "connect health client",
+        SglangServiceClient::connect(fixture.endpoint()),
+    )
+    .await
+    .unwrap();
+    let health = client.health_check(HealthCheckRequest {});
+    tokio::pin!(health);
+    tokio::select! {
+        result = &mut health => panic!("health check completed before shutdown: {result:?}"),
+        _ = fixture.health_check_received() => {},
+    }
+    fixture.shutdown().await;
+    assert!(
+        bounded("pending health check terminated", health)
+            .await
+            .is_err()
+    );
+}
+
 macro_rules! enroll_baseline {
     ($backend:ident, $fixture:ty) => {
         mod $backend {
@@ -490,30 +519,35 @@ macro_rules! enroll_baseline {
             async fn cleanup_before_start_during_read_and_after_shutdown() {
                 bounded("cleanup conformance", cleanup::<$fixture>()).await;
             }
+
+            #[tokio::test]
+            async fn explicit_cancel_releases_active_scheduler_work() {
+                bounded(
+                    "active cancellation and recovery",
+                    active_work::<$fixture>(Cancellation::Explicit),
+                )
+                .await;
+            }
+
+            #[tokio::test]
+            async fn consumer_drop_releases_active_scheduler_work() {
+                bounded(
+                    "consumer drop and recovery",
+                    active_work::<$fixture>(Cancellation::ConsumerDrop),
+                )
+                .await;
+            }
+
+            #[tokio::test]
+            async fn request_fields_logprobs_and_usage() {
+                bounded("request fields and responses", request_fields::<$fixture>()).await;
+            }
         }
     };
 }
 
 enroll_baseline!(vllm, support::vllm::Fixture);
 enroll_baseline!(sglang, support::sglang::Fixture);
-
-#[tokio::test]
-async fn vllm_explicit_cancel_releases_active_scheduler_work() {
-    bounded(
-        "active cancellation and recovery",
-        active_work::<vllm_fixture::Fixture>(Cancellation::Explicit),
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn vllm_consumer_drop_releases_active_scheduler_work() {
-    bounded(
-        "consumer drop and recovery",
-        active_work::<vllm_fixture::Fixture>(Cancellation::ConsumerDrop),
-    )
-    .await;
-}
 
 #[tokio::test]
 async fn vllm_teardown_terminates_handlers_with_clients_alive() {
@@ -526,64 +560,96 @@ async fn vllm_teardown_terminates_handlers_with_clients_alive() {
     assert!(error.to_string().contains("GenerateStream"));
 }
 
-#[tokio::test]
-async fn vllm_request_fields_logprobs_and_usage() {
-    bounded("vLLM wire fields", async {
-        let control = Controller::<vllm_fixture::Adapter>::default();
-        let mut fixture =
-            vllm_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
-        let engine = fixture.engine().await;
-        engine.start(0).await.unwrap();
-        let mut req = request("mocker-model", vec![10, 20, 30, 40, 50], 7);
-        vllm_fixture::Fixture::configure_request(&mut req);
-        let ctx = mock_context();
-        let handle = control.request(ctx.id(), RequestPlan::default());
-        let outputs = collect(&engine, req.clone(), GenerateContext::new(ctx, None)).await;
-        vllm_fixture::Fixture::assert_stream(&handle, &req, &outputs);
-        terminal(
-            outputs,
-            &handle.tokens(),
-            req.token_ids.len() as u32,
-            FinishReason::Length,
-        );
-        bounded("wire fields remote drop", handle.wait(Event::Dropped)).await;
-        fixture.scheduler_idle().await;
-        finish(&mut fixture, &engine).await;
-    })
-    .await;
+async fn request_fields<F: ProcessFixture>() {
+    let control = Controller::<F::Protocol>::default();
+    let mut fixture = F::start(control.clone(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let mut req = request("mocker-model", vec![10, 20, 30, 40, 50], 7);
+    F::configure_request(&mut req);
+    let ctx = mock_context();
+    let handle = control.request(ctx.id(), RequestPlan::default());
+    let outputs = collect(&engine, req.clone(), GenerateContext::new(ctx, None)).await;
+    F::assert_stream(&handle, &req, &outputs);
+    terminal(
+        outputs,
+        &handle.tokens(),
+        req.token_ids.len() as u32,
+        FinishReason::Length,
+    );
+    bounded("wire fields remote drop", handle.wait(Event::Dropped)).await;
+    fixture.scheduler_idle().await;
+    finish(&mut fixture, &engine).await;
+}
+
+async fn native_rejection<F: WireFixture>(max_tokens: u32) -> DynamoError {
+    let control = Controller::<F::Protocol>::default();
+    let mut fixture = F::start(control.clone(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let ctx = mock_context();
+    let handle = control.request(ctx.id(), RequestPlan::default());
+    let opening = engine
+        .generate(
+            request("mocker-model", vec![1, 2, 3], max_tokens),
+            GenerateContext::new(ctx, None),
+        )
+        .await;
+    let outputs = match F::GENERATE_OPENING {
+        GenerateOpening::WaitsForHeaders => vec![Err(opening
+            .err()
+            .expect("native rejection must fail before a response stream opens"))],
+        GenerateOpening::OnStreamPoll => {
+            bounded("native rejection", opening.unwrap().collect::<Outputs>()).await
+        }
+    };
+    let error = failure(outputs, &[], BackendError::InvalidArgument);
+    bounded("rejected request drop", handle.wait(Event::Dropped)).await;
+    fixture.scheduler_idle().await;
+    healthy(&fixture, &engine, &control).await;
+    finish(&mut fixture, &engine).await;
+    error
 }
 
 #[tokio::test]
 async fn vllm_native_rejection_recovers_on_same_engine() {
-    bounded("native rejection and recovery", async {
-        let control = Controller::<vllm_fixture::Adapter>::default();
-        let mut fixture =
-            vllm_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
-        let engine = fixture.engine().await;
-        engine.start(0).await.unwrap();
-        let ctx = mock_context();
-        let handle = control.request(ctx.id(), RequestPlan::default());
-        let error = engine
-            .generate(
-                request("mocker-model", vec![1, 2, 3], 32_769),
-                GenerateContext::new(ctx, None),
-            )
-            .await
-            .err()
-            .expect("native rejection must fail before a response stream opens");
-        let error = failure(vec![Err(error)], &[], BackendError::InvalidArgument);
-        assert!(
-            error
-                .to_string()
-                .contains("max_new_tokens must not exceed 32768")
-        );
-        assert!(error.to_string().contains("GenerateStream"));
-        bounded("rejected request drop", handle.wait(Event::Dropped)).await;
-        fixture.scheduler_idle().await;
-        healthy(&fixture, &engine, &control).await;
-        finish(&mut fixture, &engine).await;
-    })
+    let error = bounded(
+        "native rejection and recovery",
+        native_rejection::<vllm_fixture::Fixture>(1_000_001),
+    )
     .await;
+    assert!(error.to_string().contains("GenerateStream"));
+    assert!(
+        error
+            .to_string()
+            .contains("max_new_tokens must not exceed 1000000")
+    );
+}
+
+#[tokio::test]
+async fn sglang_native_rejection_recovers_on_same_engine() {
+    let error = bounded(
+        "native rejection and recovery",
+        native_rejection::<support::sglang::Fixture>(32_769),
+    )
+    .await;
+    assert!(error.to_string().contains("Generate"));
+    assert!(
+        error
+            .to_string()
+            .contains("prompt tokens (3) plus max_new_tokens (32769) exceed context_length 32768")
+    );
+}
+
+#[tokio::test]
+async fn sglang_teardown_terminates_handlers_with_clients_alive() {
+    let (outputs, tokens) = bounded(
+        "server teardown with live clients",
+        teardown_with_live_clients::<support::sglang::Fixture>(),
+    )
+    .await;
+    let error = failure(outputs, &tokens, BackendError::Unknown);
+    assert!(error.to_string().contains("Generate"));
 }
 
 #[tokio::test]
@@ -636,6 +702,209 @@ async fn vllm_malformed_terminal_fails_then_recovers() {
         healthy(&fixture, &engine, &control).await;
         engine.cleanup().await.unwrap();
         fixture.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn sglang_malformed_terminal_fails_then_recovers() {
+    bounded("malformed terminal and recovery", async {
+        use dynamo_sglang_sidecar::proto as pb;
+        let control = Controller::<support::sglang::Adapter>::default();
+        let mut fixture =
+            support::sglang::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        fixture.respond(
+            ctx.id(),
+            vec![
+                pb::GenerateResponse {
+                    output_ids: vec![101],
+                    ..Default::default()
+                },
+                pb::GenerateResponse {
+                    finished: true,
+                    ..Default::default()
+                },
+            ],
+        );
+        let error = failure(
+            collect(
+                &engine,
+                request("mocker-model", vec![1, 2, 3], 3),
+                GenerateContext::new(ctx, None),
+            )
+            .await,
+            &[101],
+            BackendError::Unknown,
+        );
+        assert!(error.to_string().contains("missing finish_reason"));
+        bounded("malformed RPC released", handle.wait(Event::Dropped)).await;
+        healthy(&fixture, &engine, &control).await;
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
+
+// Regression: the gate's false/zero values and exact forbidden sequences can
+// disappear at the Dynamo-to-native protobuf boundary.
+#[tokio::test]
+async fn vllm_generation_controls_preserve_values_over_grpc() {
+    bounded("vLLM engine generation controls", async {
+        use dynamo_vllm_sidecar::{VllmSidecarEngine, proto as pb};
+        use serde_json::json;
+        let controller = Controller::<vllm_fixture::Adapter>::default();
+        let mut fixture =
+            vllm_fixture::Fixture::start(controller.clone(), FixtureConfig::default()).await;
+        fixture.set_reasoning_parser("deepseek_r1");
+        let endpoint = fixture.server.endpoint();
+        let (engine, _) = tokio::task::spawn_blocking(move || {
+            VllmSidecarEngine::try_from_args(vec![
+                "sidecar".into(),
+                "--grpc-endpoint".into(),
+                endpoint,
+                "--dyn-reasoning-parser".into(),
+                "qwen3".into(),
+            ])
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let config = engine.start(0).await.unwrap();
+        assert_eq!(
+            config
+                .runtime_data
+                .get("tool_call_structural_tag_excludes_reasoning"),
+            Some(&json!(true))
+        );
+        for control in [
+            "default",
+            "reasoning_parser_kwargs",
+            "reasoning_ended",
+            "thinking_token_budget",
+            "bad_words_token_ids",
+            "top_k",
+            "min_p",
+        ] {
+            let mut req = request("mocker-model", vec![11, 22, 33], 1);
+            match control {
+                "reasoning_parser_kwargs" => {
+                    req.extra_args = Some(json!({
+                        "reasoning_parser_kwargs": {"chat_template_kwargs": {"enable_thinking": false}}
+                    }))
+                }
+                "reasoning_ended" => req.extra_args = Some(json!({"reasoning_ended": false})),
+                "thinking_token_budget" => req.stop_conditions.max_thinking_tokens = Some(0),
+                "bad_words_token_ids" => {
+                    req.extra_args =
+                        Some(json!({"sampling_options": {"bad_words_token_ids": [[7, 11], [0]]}}))
+                }
+                "top_k" => req.sampling_options.top_k = Some(-1),
+                "min_p" => req.sampling_options.min_p = Some(0.0),
+                _ => {}
+            }
+            let ctx = mock_context();
+            let handle = controller.request(ctx.id(), RequestPlan::default());
+            let outputs = collect(&engine, req, GenerateContext::new(ctx, None)).await;
+            terminal(outputs, &handle.tokens(), 3, FinishReason::Length);
+            let wire = handle.native_request().expect("native request");
+            match control {
+                "reasoning_parser_kwargs" => assert_eq!(
+                    wire.engine_reasoning_gate
+                        .as_ref().unwrap()
+                        .chat_template_kwargs.as_ref().unwrap()
+                        .fields["enable_thinking"].kind,
+                    Some(prost_types_v14::value::Kind::BoolValue(false)),
+                ),
+                "reasoning_ended" => assert_eq!(
+                    wire.engine_reasoning_gate.as_ref().unwrap().reasoning_ended,
+                    Some(false)
+                ),
+                "thinking_token_budget" => assert_eq!(
+                    wire.stopping.as_ref().unwrap().thinking_token_budget,
+                    Some(0)
+                ),
+                "bad_words_token_ids" => assert_eq!(
+                    wire.decoding.as_ref().unwrap().bad_words_token_ids,
+                    vec![
+                        pb::TokenIds { ids: vec![7, 11] },
+                        pb::TokenIds { ids: vec![0] }
+                    ]
+                ),
+                "top_k" => assert_eq!(wire.sampling.as_ref().unwrap().top_k, Some(0)),
+                "min_p" => assert_eq!(wire.sampling.as_ref().unwrap().min_p, Some(0.0)),
+                _ => {
+                    assert!(wire.engine_reasoning_gate.is_none());
+                    assert!(
+                        wire.stopping
+                            .as_ref()
+                            .unwrap()
+                            .thinking_token_budget
+                            .is_none()
+                    );
+                    let sampling = wire.sampling.as_ref().unwrap();
+                    assert_eq!(
+                        (sampling.top_k, sampling.top_p, sampling.min_p),
+                        (None, None, None)
+                    );
+                }
+            }
+        }
+        engine.cleanup().await.unwrap();
+        fixture.shutdown().await;
+    })
+    .await;
+}
+
+// Regression: native text strips tool-closing EOS tokens; exposing even empty
+// text bypasses the frontend decoder and loses the tool delimiter.
+#[tokio::test]
+async fn vllm_visible_stop_tokens_preserve_tool_delimiters() {
+    bounded("visible tool delimiter", async {
+        use dynamo_vllm_sidecar::proto as pb;
+        let control = Controller::<vllm_fixture::Adapter>::default();
+        let mut fixture =
+            vllm_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        fixture.respond(
+            ctx.id(),
+            vec![pb::GenerateResponse {
+                outputs: Some(pb::SequenceOutput {
+                    token_ids: vec![42],
+                    num_tokens: 1,
+                    finish_info: Some(pb::FinishInfo {
+                        num_output_tokens: 1,
+                        finish_reason: pb::finish_info::FinishReason::Stop as i32,
+                        stop_reason: Some(pb::finish_info::StopReason::EosTokenId(42)),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+        );
+        let mut req = request("mocker-model", vec![11, 22, 33], 1);
+        req.stop_conditions.stop_token_ids_visible = Some(vec![42]);
+        req.stop_conditions.stop_token_ids_hidden = Some(vec![2]);
+        req.output_options.skip_special_tokens = Some(false);
+        let outputs = collect(&engine, req, GenerateContext::new(ctx, None)).await;
+        assert!(
+            outputs
+                .iter()
+                .all(|output| output.as_ref().unwrap().text.is_none())
+        );
+        terminal(outputs, &[42], 3, FinishReason::Stop);
+        let wire = handle.native_request().unwrap();
+        assert_eq!(wire.stopping.unwrap().stop_token_ids, [2, 42]);
+        let response = wire.response.unwrap();
+        assert_eq!(response.output_text, Some(false));
+        assert!(response.output_token_ids);
+        finish(&mut fixture, &engine).await;
     })
     .await;
 }

@@ -25,7 +25,9 @@ import (
 	"sort"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/utils/ptr"
 )
 
@@ -63,7 +65,7 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 
 	workerDCDs := make(map[string]workerTemplate, len(dcds))
 	for _, dcd := range dcds {
-		if dcd != nil && IsWorkerComponent(string(dcd.Spec.ComponentType)) {
+		if dcd != nil && (IsWorkerComponent(string(dcd.Spec.ComponentType)) || dcd.Spec.IsLPX()) {
 			componentName := GetDCDComponentName(dcd)
 			if componentName == "" {
 				return "", fmt.Errorf("generated worker DCD %q has no component name label", dcd.Name)
@@ -97,7 +99,17 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	// active DCD. They must not create a new worker generation.
 	spec.Replicas = nil
 	spec.MinAvailable = nil
+	spec.ProviderOverride = workerTemplateProviderOverride(spec.ProviderOverride)
 	spec.ScalingAdapter = nil
+	if spec.IsLPX() {
+		// Agent-only replicas expand speculative models; conductor replicas scale engines.
+		spec.LPX.Scheduling = nil
+		if conductor := spec.ComponentRole(v1beta1.ComponentRoleLPXConductor); conductor != nil {
+			conductor.Replicas = nil
+		} else {
+			spec.Replicas = ptr.To(ptr.Deref(dcd.Spec.Replicas, 1))
+		}
+	}
 
 	// Hash the resolved version separately so equivalent image-derived and
 	// explicit versions produce the same worker hash.
@@ -208,8 +220,8 @@ func resolvedRuntimeVersionForHash(component *v1beta1.DynamoComponentDeploymentS
 	}
 
 	image := ""
-	if main := GetMainContainer(component); main != nil {
-		image = main.Image
+	if runtime := GetDynamoContainer(component); runtime != nil {
+		image = runtime.Image
 	}
 	version, err := runtimeversion.Resolve(image, component.RuntimeVersionOverride)
 	if err != nil || version.Compare(minimumHashedRuntimeVersion) < 0 {
@@ -217,4 +229,37 @@ func resolvedRuntimeVersionForHash(component *v1beta1.DynamoComponentDeploymentS
 	}
 
 	return version.String()
+}
+
+// workerTemplateProviderOverride removes availability fields from Pod-template identity.
+// A nil override means there are no provider template fields to hash.
+func workerTemplateProviderOverride(override *v1beta1.ProviderOverride) *v1beta1.ProviderOverride {
+	if override == nil || override.APIVersion != provideroverride.GroveAPIVersion {
+		return override
+	}
+
+	// Decode sparse fragments without changing the authored provider value.
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal(override.Value.Raw, &value); err != nil || value == nil {
+		return override
+	}
+	delete(value, "minAvailable")
+	if raw, exists := value["spec"]; exists {
+		var spec map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &spec); err == nil && spec != nil {
+			delete(spec, "minAvailable")
+			if len(spec) == 0 {
+				delete(value, "spec")
+			} else {
+				value["spec"], _ = json.Marshal(spec)
+			}
+		}
+	}
+	if len(value) == 0 {
+		return nil
+	}
+	result := override.DeepCopy()
+	result.Value = apiextensionsv1.JSON{}
+	result.Value.Raw, _ = json.Marshal(value)
+	return result
 }

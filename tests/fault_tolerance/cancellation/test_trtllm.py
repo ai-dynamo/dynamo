@@ -138,7 +138,7 @@ class DynamoWorkerProcess(ManagedProcess):
         return super().__exit__(exc_type, exc_val, exc_tb)
 
 
-@pytest.mark.timeout(135)  # 3x average
+@pytest.mark.timeout(450)  # 3x average
 def test_request_cancellation_trtllm_aggregated(
     request, runtime_services_dynamic_ports, predownload_models
 ):

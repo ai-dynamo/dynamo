@@ -7,7 +7,8 @@ use super::*;
 
 #[test]
 fn request_maps_sampling_stop_and_output_fields() {
-    let proto = build_generate_request(&request(), "req-1", "served-model", None, AGG)
+    let request = request();
+    let proto = build_generate_request(&request, "req-1", "served-model", None, AGG)
         .expect("build request");
     assert_eq!(proto.request_id, "req-1");
     assert_eq!(proto.model, "served-model");
@@ -15,6 +16,12 @@ fn request_maps_sampling_stop_and_output_fields() {
         pb::generate_request::Input::TokenIds(tokens) => assert_eq!(tokens.ids, [11, 22, 33]),
         other => panic!("expected token IDs input, got {other:?}"),
     }
+
+    assert_eq!(
+        proto.extra.as_ref().unwrap().fields["detokenize"].kind,
+        Some(prost_types::value::Kind::BoolValue(false)),
+        "Dynamo consumes token IDs and must disable unused engine text"
+    );
 
     let stopping = proto.stopping.as_ref().unwrap();
     assert_eq!(stopping.max_tokens, Some(16));

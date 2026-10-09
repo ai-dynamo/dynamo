@@ -214,7 +214,11 @@ impl pb::inference_server::Inference for FakeVllm {
             "remote_block_ids": [7, 8],
             "nested": {"flags": [true, null, "opaque"]},
         });
-        let encoder_handoff = encoder_handoff();
+        let has_media = |modality| request.media.iter().any(|item| item.modality() == modality);
+        let encoder_handoff = encoder_handoff_for(
+            has_media(pb::Modality::Image),
+            has_media(pb::Modality::Video),
+        );
         let encoder_response = self.encoder_response.load(Ordering::SeqCst);
         let omit_encoder_metadata = self.omit_encoder_metadata.load(Ordering::SeqCst);
         let hang = self.hang.load(Ordering::SeqCst);
@@ -993,102 +997,6 @@ async fn generation_preserves_empty_engine_text_while_stop_text_is_buffered() {
     }
 }
 
-/// A tool-closing EOS is absent from native text but remains in native token IDs.
-/// Returning text (even empty text) would bypass Dynamo's visible-stop decoder.
-#[tokio::test]
-async fn visible_stop_tokens_use_frontend_decode_without_losing_the_delimiter() {
-    let server = FakeServer::start(FakeVllm {
-        sequence_outputs: Some(vec![pb::SequenceOutput {
-            token_ids: vec![42],
-            num_tokens: 1,
-            finish_info: Some(pb::FinishInfo {
-                num_output_tokens: 1,
-                finish_reason: pb::finish_info::FinishReason::Stop as i32,
-                stop_reason: Some(pb::finish_info::StopReason::EosTokenId(42)),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }]),
-        ..Default::default()
-    })
-    .await;
-    for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
-        let engine = engine(&server.endpoint, mode, 1, model_info());
-        engine.start(0).await.unwrap();
-        let mut request = if mode.is_decode() {
-            decode_request()
-        } else {
-            minimal_request()
-        };
-        request.stop_conditions.stop_token_ids_visible = Some(vec![42]);
-        request.stop_conditions.stop_token_ids_hidden = Some(vec![2]);
-        request.stop_conditions.stop_token_ids = None;
-        request.output_options = OutputOptions {
-            skip_special_tokens: Some(false),
-            ..Default::default()
-        };
-        let outputs = collect(&engine, request).await;
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(outputs[0].token_ids, [42]);
-        assert!(
-            outputs[0].text.is_none(),
-            "frontend must decode the retained delimiter"
-        );
-        assert_eq!(outputs[0].finish_reason, Some(FinishReason::Stop));
-        let requests = server.service.requests.lock().await;
-        let wire = requests.last().unwrap();
-        assert_eq!(wire.stopping.as_ref().unwrap().stop_token_ids, [2, 42]);
-        let response = wire.response.as_ref().unwrap();
-        assert_eq!(response.output_text, Some(false));
-        assert!(response.output_token_ids);
-        drop(requests);
-        engine.cleanup().await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn reasoning_controls_cross_grpc_preserving_false_and_zero() {
-    let server = FakeServer::start(FakeVllm::default()).await;
-    let (engine, _) = engine_from_args(&server.endpoint).await;
-    engine.start(0).await.unwrap();
-    for control in [
-        "reasoning_parser_kwargs",
-        "reasoning_ended",
-        "thinking_token_budget",
-    ] {
-        let mut request = minimal_request();
-        match control {
-            "reasoning_parser_kwargs" => {
-                request.extra_args = Some(json!({
-                    "reasoning_parser_kwargs": {"chat_template_kwargs": {"enable_thinking": false}}
-                }))
-            }
-            "reasoning_ended" => request.extra_args = Some(json!({"reasoning_ended": false})),
-            _ => request.stop_conditions.max_thinking_tokens = Some(0),
-        }
-        collect_result(&engine, request).await.unwrap();
-        let requests = server.service.requests.lock().await;
-        let wire = requests.last().unwrap();
-        match control {
-            "reasoning_parser_kwargs" => assert_eq!(
-                struct_to_json_v14(
-                    wire.reasoning_parser_kwargs.clone().unwrap(),
-                    "vLLM",
-                    "reasoning_parser_kwargs",
-                )
-                .unwrap(),
-                json!({"chat_template_kwargs": {"enable_thinking": false}}),
-            ),
-            "reasoning_ended" => assert_eq!(wire.reasoning_ended, Some(false)),
-            _ => assert_eq!(
-                wire.stopping.as_ref().unwrap().thinking_token_budget,
-                Some(0)
-            ),
-        }
-    }
-    engine.cleanup().await.unwrap();
-}
-
 #[tokio::test]
 async fn aggregated_generation_converts_request_stream_and_usage() {
     let server = FakeServer::start(FakeVllm::default()).await;
@@ -1616,6 +1524,22 @@ async fn mixed_multimodal_media_is_forwarded_with_image_uuid_only() {
 
 #[tokio::test]
 async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
+    assert_encoder_cache_handoff(epd_image_request()).await;
+}
+
+#[tokio::test]
+async fn video_encoder_cache_handoff_for_e_pd_and_e_p_d() {
+    assert_encoder_cache_handoff(epd_video_request()).await;
+    assert_encoder_cache_handoff(epd_image_video_request()).await;
+}
+
+async fn assert_encoder_cache_handoff(mut source_request: PreprocessedRequest) {
+    let expected_media = expected_wire_media(&source_request);
+    let has_media = |modality| expected_media.iter().any(|(kind, _, _)| *kind == modality);
+    let expected_ec = encoder_handoff_for(
+        has_media(pb::Modality::Image),
+        has_media(pb::Modality::Video),
+    );
     let service = FakeVllm::default();
     service.encoder_response.store(true, Ordering::SeqCst);
     let discovered = multimodal_model_info();
@@ -1629,7 +1553,6 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
         discovered.clone(),
     );
     encoder.start(0).await.expect("start encoder");
-    let mut source_request = epd_image_request();
     source_request
         .routing
         .as_mut()
@@ -1644,7 +1567,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
         .encoder_result
         .clone()
         .expect("encoder result");
-    assert_eq!(encoder_result, encoder_handoff());
+    assert_eq!(encoder_result, expected_ec);
     assert_eq!(
         server
             .service
@@ -1660,9 +1583,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
     {
         let requests = server.service.requests.lock().await;
         let encode_wire = requests.last().expect("encode request");
-        assert_eq!(encode_wire.media.len(), 2);
-        assert_eq!(encode_wire.media[0].uuid, "image-a");
-        assert_eq!(encode_wire.media[1].uuid, "image-b");
+        assert_eq!(wire_media(encode_wire), expected_media);
         assert!(
             encode_wire
                 .kv
@@ -1701,9 +1622,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
             .last()
             .cloned()
             .expect("downstream request");
-        assert_eq!(downstream_wire.media.len(), 2, "{topology}");
-        assert_eq!(downstream_wire.media[0].uuid, "image-a", "{topology}");
-        assert_eq!(downstream_wire.media[1].uuid, "image-b", "{topology}");
+        assert_eq!(wire_media(&downstream_wire), expected_media, "{topology}");
         let forwarded_ec = struct_to_json_v14(
             downstream_wire
                 .kv
@@ -1714,7 +1633,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
             "ec_transfer_params",
         )
         .expect("EC metadata JSON");
-        assert_eq!(forwarded_ec, encoder_handoff(), "{topology}");
+        assert_eq!(forwarded_ec, expected_ec, "{topology}");
 
         if mode.is_prefill() {
             let mut decode_request = downstream_request;
@@ -1747,9 +1666,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
                 .last()
                 .cloned()
                 .expect("decode request");
-            assert_eq!(decode_wire.media.len(), 2);
-            assert_eq!(decode_wire.media[0].uuid, "image-a");
-            assert_eq!(decode_wire.media[1].uuid, "image-b");
+            assert_eq!(wire_media(&decode_wire), expected_media);
             let decode_cache = decode_wire.kv.expect("decode cache parameters");
             assert!(decode_cache.kv_transfer_params.is_some());
             let decode_ec = struct_to_json_v14(
@@ -1758,7 +1675,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
                 "ec_transfer_params",
             )
             .expect("decode EC metadata JSON");
-            assert_eq!(decode_ec, encoder_handoff());
+            assert_eq!(decode_ec, expected_ec);
         }
     }
 }

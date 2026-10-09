@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput, MultimodalData,
-    PrefillResult, PreprocessedRequest, StopReason, TopLogprob, usage,
+    PrefillResult, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
 };
 use dynamo_llm::protocols::common::{preprocessed_mm_identifier, preprocessed_mm_routing_hash};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -216,10 +216,10 @@ pub(crate) fn build_generate_request(
     if mode.is_encode()
         && media
             .iter()
-            .any(|item| item.modality() != pb::Modality::Image)
+            .any(|item| !matches!(item.modality(), pb::Modality::Image | pb::Modality::Video))
     {
         return Err(client::invalid_argument(
-            "encode requests support image media only",
+            "encode requests support image and video media only",
         ));
     }
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
@@ -229,22 +229,8 @@ pub(crate) fn build_generate_request(
         extra.remove("formatted_prompt");
         extra.remove(MM_HASHES_KEY);
     }
-    let reasoning_ended = bool_extra(
-        extra_args.as_ref().and_then(serde_json::Value::as_object),
-        "reasoning_ended",
-    )?;
-    let reasoning_parser_kwargs = if let Some(extra) = extra_args
-        .as_mut()
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        extra.remove("reasoning_ended");
-        extra
-            .remove("reasoning_parser_kwargs")
-            .map(|value| json_to_struct_v14(value, "reasoning_parser_kwargs"))
-            .transpose()?
-    } else {
-        None
-    };
+    let engine_reasoning_gate = take_engine_reasoning_gate(&mut extra_args)?;
+    let bad_words_token_ids = take_bad_words_token_ids(&mut extra_args)?;
     let kv = build_kv_parameters(extra_args, prefill_result, encoder_result, cache_salt, mode)?;
 
     Ok(pb::GenerateRequest {
@@ -257,8 +243,8 @@ pub(crate) fn build_generate_request(
         sampling: Some(pb::RandomSampling {
             num_sequences: 1,
             top_k: normalize_top_k(sampling.top_k)?,
-            top_p: sampling.top_p.unwrap_or(0.0),
-            min_p: sampling.min_p.unwrap_or(0.0),
+            top_p: sampling.top_p,
+            min_p: sampling.min_p,
             seed: sampling.seed,
         }),
         decoding: Some(pb::DecodingParameters {
@@ -268,6 +254,7 @@ pub(crate) fn build_generate_request(
             logit_bias: Default::default(),
             allowed_token_ids: Vec::new(),
             structured_output: structured_output(sampling.guided_decoding)?,
+            bad_words_token_ids,
         }),
         stopping: Some(pb::StoppingCriteria {
             max_new_tokens,
@@ -299,8 +286,7 @@ pub(crate) fn build_generate_request(
         media,
         lora_name,
         watermarking: None,
-        reasoning_parser_kwargs,
-        reasoning_ended,
+        engine_reasoning_gate,
         kv_hints: None,
     })
 }
@@ -564,6 +550,76 @@ fn consume_preprocessed_mm_routing_hashes(
     }
     Ok(Some(hashes))
 }
+
+fn take_engine_reasoning_gate(
+    extra_args: &mut Option<serde_json::Value>,
+) -> Result<Option<pb::EngineReasoningGate>, DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return Ok(None);
+    };
+    let reasoning_ended = bool_extra(Some(extra), "reasoning_ended")?;
+    extra.remove("reasoning_ended");
+    // Keep the frontend's established envelope on the Dynamo wire. Only the
+    // vLLM boundary unwraps it into the transitional proto 0.5 gate.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ReasoningParserKwargs {
+        chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+    }
+    let chat_template_kwargs = extra
+        .remove("reasoning_parser_kwargs")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<ReasoningParserKwargs>(value).map_err(|error| {
+                client::invalid_argument(format!("reasoning_parser_kwargs is invalid: {error}"))
+            })
+        })
+        .transpose()?
+        .and_then(|kwargs| kwargs.chat_template_kwargs)
+        .map(|kwargs| json_to_struct_v14(kwargs.into(), "chat_template_kwargs"))
+        .transpose()?;
+    Ok(
+        (reasoning_ended.is_some() || chat_template_kwargs.is_some()).then_some(
+            pb::EngineReasoningGate {
+                reasoning_ended,
+                chat_template_kwargs,
+            },
+        ),
+    )
+}
+
+fn take_bad_words_token_ids(
+    extra_args: &mut Option<serde_json::Value>,
+) -> Result<Vec<pb::TokenIds>, DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return Ok(Vec::new());
+    };
+    let Some(value) = extra.remove("sampling_options") else {
+        return Ok(Vec::new());
+    };
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SamplingExtensions {
+        bad_words_token_ids: Option<Vec<Vec<u32>>>,
+    }
+    let sampling: SamplingExtensions = serde_json::from_value(value).map_err(|error| {
+        client::invalid_argument(format!("extra_args.sampling_options is invalid: {error}"))
+    })?;
+    sampling
+        .bad_words_token_ids
+        .unwrap_or_default()
+        .into_iter()
+        .map(|ids| {
+            if ids.is_empty() {
+                return Err(client::invalid_argument(
+                    "bad_words_token_ids sequences must not be empty",
+                ));
+            }
+            Ok(pb::TokenIds { ids })
+        })
+        .collect()
+}
+
 fn consume_redundant_nvext(
     extra_args: &mut Option<serde_json::Value>,
     cache_namespace: Option<&str>,
@@ -1001,10 +1057,11 @@ fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
     })
 }
 
-fn normalize_top_k(top_k: Option<i32>) -> Result<u32, DynamoError> {
+fn normalize_top_k(top_k: Option<i32>) -> Result<Option<u32>, DynamoError> {
     match top_k {
-        None | Some(-1) | Some(0) => Ok(0),
-        Some(value) if value > 0 => Ok(value as u32),
+        None => Ok(None),
+        Some(-1 | 0) => Ok(Some(0)),
+        Some(value) if value > 0 => Ok(Some(value as u32)),
         Some(value) => Err(client::invalid_argument(format!(
             "top_k must be -1, 0, or positive; got {value}"
         ))),
@@ -1231,17 +1288,6 @@ fn validate_request(
             "encode requests require multimodal media",
         ));
     }
-    if mode.is_encode()
-        && request.multi_modal_data.as_ref().is_some_and(|media| {
-            media
-                .iter()
-                .any(|(modality, items)| modality != IMAGE_URL_KEY && !items.is_empty())
-        })
-    {
-        return Err(client::invalid_argument(
-            "encode requests support image media only",
-        ));
-    }
     if mode.is_encode() && request.encoder_result.is_some() {
         return Err(client::invalid_argument(
             "encode requests must not include encoder_result",
@@ -1262,17 +1308,11 @@ fn validate_request(
     if sampling.use_beam_search.unwrap_or(false) {
         return Err(client::invalid_argument("beam search is not supported"));
     }
-    if !mode.is_prefill() && !mode.is_encode() {
-        if matches!(sampling.top_k, Some(-1 | 0)) {
-            return Err(client::invalid_argument(
-                "top_k=-1 or top_k=0 cannot be represented by vLLM gRPC",
-            ));
-        }
-        if sampling.min_p == Some(0.0) {
-            return Err(client::invalid_argument(
-                "min_p=0 cannot be represented by vLLM gRPC",
-            ));
-        }
+    if sampling
+        .top_p
+        .is_some_and(|value| !value.is_finite() || value <= 0.0 || value > 1.0)
+    {
+        return Err(client::invalid_argument("top_p must be in (0, 1]"));
     }
     if let Some(length_penalty) = sampling.length_penalty
         && (length_penalty - 1.0).abs() > f32::EPSILON
@@ -1451,7 +1491,15 @@ impl ResponseState {
                 .then_some(StopReason::Int(i64::from(id))),
             pb::finish_info::StopReason::StopString(value) => Some(StopReason::String(value)),
         });
-        mapped.completion_usage = Some(usage(self.prompt_tokens, completion_tokens));
+        let mut completion_usage = usage(self.prompt_tokens, completion_tokens);
+        completion_usage.prompt_tokens_details =
+            finish
+                .num_cached_tokens
+                .map(|cached_tokens| PromptTokensDetails {
+                    cached_tokens: Some(cached_tokens.min(self.prompt_tokens)),
+                    ..Default::default()
+                });
+        mapped.completion_usage = Some(completion_usage);
         if self.mode.is_encode() {
             if matches!(
                 mapped.finish_reason,

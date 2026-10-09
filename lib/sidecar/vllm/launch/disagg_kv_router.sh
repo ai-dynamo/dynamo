@@ -108,8 +108,8 @@ if [[ -z "$GPU_MEM_ARGS" ]]; then
     GPU_MEM_ARGS="--kv-cache-memory-bytes $DEFAULT_KV_CACHE_BYTES --gpu-memory-utilization 0.01"
 fi
 
-KV_PRODUCER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
-KV_CONSUMER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+KV_TRANSFER_CONFIG_PREFILL='{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+KV_TRANSFER_CONFIG_DECODE='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
 KV_EVENTS_CONFIG_1="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL1_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
 KV_EVENTS_CONFIG_2="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL2_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
 
@@ -136,7 +136,7 @@ vllm-rs serve "$MODEL" \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --block-size "$VLLM_BLOCK_SIZE" \
-    --kv-transfer-config "$KV_CONSUMER_CONFIG" \
+    --kv-transfer-config "$KV_TRANSFER_CONFIG_DECODE" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
@@ -152,7 +152,7 @@ vllm-rs serve "$MODEL" \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --block-size "$VLLM_BLOCK_SIZE" \
-    --kv-transfer-config "$KV_CONSUMER_CONFIG" \
+    --kv-transfer-config "$KV_TRANSFER_CONFIG_DECODE" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
@@ -168,7 +168,7 @@ vllm-rs serve "$MODEL" \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --block-size "$VLLM_BLOCK_SIZE" \
-    --kv-transfer-config "$KV_PRODUCER_CONFIG" \
+    --kv-transfer-config "$KV_TRANSFER_CONFIG_PREFILL" \
     --kv-events-config "$KV_EVENTS_CONFIG_1" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
@@ -185,7 +185,7 @@ vllm-rs serve "$MODEL" \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --block-size "$VLLM_BLOCK_SIZE" \
-    --kv-transfer-config "$KV_PRODUCER_CONFIG" \
+    --kv-transfer-config "$KV_TRANSFER_CONFIG_PREFILL" \
     --kv-events-config "$KV_EVENTS_CONFIG_2" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &

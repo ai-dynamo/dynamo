@@ -8,7 +8,7 @@ use dynamo_backend_common::{
     DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
     PreprocessedRequest, SamplingOptions, StopConditions,
 };
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_mocker::common::protocols::MockerConfig;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
 use dynamo_vllm_sidecar::proto::control_server::ControlServer;
@@ -24,7 +24,7 @@ struct RunningServer {
 }
 
 impl RunningServer {
-    async fn start(mode: ServerMode, engine_args: MockEngineArgs) -> Self {
+    async fn start(mode: ServerMode, engine_args: MockerConfig) -> Self {
         let service = VllmMockerService::new(
             MockerServerConfig {
                 mode,
@@ -71,16 +71,18 @@ impl Drop for RunningServer {
     }
 }
 
-fn fast_engine_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .block_size(4)
-        .num_gpu_blocks(4096)
-        .max_num_seqs(Some(64))
-        .max_num_batched_tokens(Some(1024))
-        .speedup_ratio(0.0)
-        .dp_size(1)
-        .build()
-        .unwrap()
+fn fast_engine_args() -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "block_size": 4,
+            "num_gpu_blocks": 4096,
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 1024,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap()
 }
 
 async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> VllmSidecarEngine {
@@ -150,7 +152,9 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     prefill.start(0).await.unwrap();
     decode.start(1).await.unwrap();
 
-    let prefill_outputs = collect(&prefill, request(3)).await;
+    let mut prefill_request = request(3);
+    prefill_request.token_ids = vec![11, 22, 33, 44, 55].into();
+    let prefill_outputs = collect(&prefill, prefill_request.clone()).await;
     assert_eq!(prefill_outputs.len(), 1);
     assert!(prefill_outputs[0].token_ids.is_empty());
     let handoff = prefill_outputs[0]
@@ -159,6 +163,12 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
         .expect("prefill response should carry an opaque KV handoff");
     assert_eq!(handoff["do_remote_prefill"], true);
     assert!(handoff["remote_engine_id"].is_string());
+    assert!(handoff["remote_request_id"].is_string());
+    let groups = handoff["remote_block_ids"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    let blocks = groups[0].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert!(blocks.iter().all(|block| block.as_u64().is_some()));
     // The non-rendezvous sentinel proves the sidecar preserved opaque handoff
     // fields rather than reconstructing only the keys it recognizes.
     assert!(
@@ -166,7 +176,7 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
         "sidecar must forward opaque KV-transfer fields verbatim"
     );
 
-    let mut decode_request = request(3);
+    let mut decode_request = prefill_request;
     decode_request.prefill_result = Some(PrefillResult {
         disaggregated_params: handoff,
         prompt_tokens_details: None,
@@ -186,7 +196,7 @@ mod common;
 async fn sidecar_relays_stored_and_evicted_blocks() {
     let mut args = fast_engine_args();
     args.num_gpu_blocks = 8;
-    args.max_num_seqs = Some(1);
+    args.max_num_seqs = 1;
     let block_size = u32::try_from(args.block_size).unwrap();
     let server = RunningServer::start(ServerMode::Aggregated, args).await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;

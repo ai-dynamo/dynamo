@@ -381,47 +381,57 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
 
 #[test]
 fn empty_chunks_and_delta_tokens_preserve_terminal_usage() {
-    let request = minimal_request();
-    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
-    assert!(
-        state
-            .convert(pb::GenerateResponse {
-                outputs: Some(pb::SequenceOutput::default()),
-                ..Default::default()
-            })
+    // Old servers omit cached usage; explicit zero from new servers is meaningful.
+    for cached in [None, Some(0), Some(2)] {
+        let request = minimal_request();
+        let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+        assert!(
+            state
+                .convert(pb::GenerateResponse {
+                    outputs: Some(pb::SequenceOutput::default()),
+                    ..Default::default()
+                })
+                .unwrap()
+                .is_none()
+        );
+        let first = state
+            .convert(sequence_response(false, false, None))
             .unwrap()
-            .is_none()
-    );
-    let first = state
-        .convert(sequence_response(false, false, None))
-        .unwrap()
-        .unwrap();
-    assert_eq!(first.token_ids, vec![42]);
-    assert!(first.completion_usage.is_none());
-    let mut response = sequence_response(true, false, None);
-    let output = response.outputs.as_mut().unwrap();
-    output.token_ids = vec![43, 44];
-    output.num_tokens = 2;
-    output.finish_info.as_mut().unwrap().num_output_tokens = 3;
-    let terminal = state.convert(response).unwrap().unwrap();
-    assert_eq!(terminal.token_ids, vec![43, 44]);
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
-    assert!(terminal.disaggregated_params.is_none());
-    let usage = terminal.completion_usage.unwrap();
-    assert_eq!(
-        (
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            usage.total_tokens
-        ),
-        (3, 3, 6)
-    );
+            .unwrap();
+        assert_eq!(first.token_ids, vec![42]);
+        assert!(first.completion_usage.is_none());
+        let mut response = sequence_response(true, false, None);
+        let output = response.outputs.as_mut().unwrap();
+        output.token_ids = vec![43, 44];
+        output.num_tokens = 2;
+        output.finish_info.as_mut().unwrap().num_output_tokens = 3;
+        output.finish_info.as_mut().unwrap().num_cached_tokens = cached;
+        let terminal = state.convert(response).unwrap().unwrap();
+        assert_eq!(terminal.token_ids, vec![43, 44]);
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+        assert!(terminal.disaggregated_params.is_none());
+        let usage = terminal.completion_usage.unwrap();
+        assert_eq!(
+            usage
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            cached
+        );
+        assert_eq!(
+            (
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens
+            ),
+            (3, 3, 6)
+        );
 
-    let decode = ResponseState::new(&request, DisaggregationMode::Decode)
-        .convert(sequence_response(true, false, None))
-        .unwrap()
-        .unwrap();
-    assert!(decode.disaggregated_params.is_none());
+        let decode = ResponseState::new(&request, DisaggregationMode::Decode)
+            .convert(sequence_response(true, false, None))
+            .unwrap()
+            .unwrap();
+        assert!(decode.disaggregated_params.is_none());
+    }
 }
 
 #[test]
