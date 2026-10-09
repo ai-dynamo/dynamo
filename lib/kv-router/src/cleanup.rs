@@ -76,6 +76,12 @@ impl CleanupState {
             return false;
         }
 
+        self.try_claim()
+    }
+
+    /// Schedules a cleanup regardless of the interval, unless one is already in flight.
+    /// For owners with their own trigger besides the timer.
+    pub fn try_claim(&self) -> bool {
         self.scheduled
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()

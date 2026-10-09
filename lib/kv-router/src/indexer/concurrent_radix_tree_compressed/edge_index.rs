@@ -174,7 +174,7 @@ impl EdgeIndex {
         self.rebuild(edge);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub(super) fn capacity(&self) -> usize {
         self.slots.len()
     }

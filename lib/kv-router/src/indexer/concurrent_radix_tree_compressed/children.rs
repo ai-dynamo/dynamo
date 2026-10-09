@@ -528,6 +528,64 @@ impl NodeChildren {
         Some(unsafe { &*Arc::as_ptr(child) })
     }
 
+    /// Heap bytes of the published child map: `(compact, sharded)`. A `DashMap` is
+    /// estimated from its capacity.
+    #[cfg(any(test, feature = "bench"))]
+    pub(super) fn memory_bytes(&self) -> (usize, usize) {
+        let state_box = size_of::<ChildrenState>();
+        self.with_state(|state| match state {
+            ChildrenState::Empty | ChildrenState::Singleton(_) => (state_box, 0),
+            ChildrenState::Small(children) => {
+                (state_box + children.len() * size_of::<ChildEntry>(), 0)
+            }
+            ChildrenState::Sharded(children) => {
+                // Shard headers are left out; one control byte per bucket is not.
+                let entry = size_of::<(LocalBlockHash, SharedNode)>() + 1;
+                (state_box, children.capacity() * entry)
+            }
+        })
+    }
+
+    /// Graves waiting in the shared graveyard.
+    #[cfg(any(test, feature = "bench"))]
+    pub(super) fn shared_graves() -> usize {
+        SHARED_GRAVEYARD.len()
+    }
+
+    /// Whether the map, loaded under `guard`, has no children.
+    pub(super) fn is_empty_in(&self, guard: &Guard) -> bool {
+        match self.load(guard) {
+            ChildrenState::Empty => true,
+            ChildrenState::Singleton(_) => false,
+            ChildrenState::Small(children) => children.is_empty(),
+            ChildrenState::Sharded(children) => children.is_empty(),
+        }
+    }
+
+    /// Visits every child by reference under `guard`, without cloning its `Arc`. A sharded
+    /// map is visited one shard at a time under the shard's read lock, so `visit` must not
+    /// write to this map.
+    pub(super) fn for_each_child(
+        &self,
+        guard: &Guard,
+        mut visit: impl FnMut(LocalBlockHash, &SharedNode),
+    ) {
+        match self.load(guard) {
+            ChildrenState::Empty => {}
+            ChildrenState::Singleton(entry) => visit(entry.hash, &entry.node),
+            ChildrenState::Small(children) => {
+                for entry in children.iter() {
+                    visit(entry.hash, &entry.node);
+                }
+            }
+            ChildrenState::Sharded(children) => {
+                for entry in children.iter() {
+                    visit(*entry.key(), entry.value());
+                }
+            }
+        }
+    }
+
     pub(super) fn values_snapshot(&self) -> Vec<SharedNode> {
         self.with_state(|state| match state {
             ChildrenState::Empty => Vec::new(),
@@ -541,6 +599,7 @@ impl NodeChildren {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn entries_snapshot(&self) -> Vec<(LocalBlockHash, SharedNode)> {
         self.with_state(|state| match state {
             ChildrenState::Empty => Vec::new(),

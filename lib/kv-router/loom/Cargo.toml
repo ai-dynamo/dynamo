@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Loom models of dynamo-kv-router's lock-free protocols. They include the protocol modules'
+# sources directly, so the models check the shipped code. Not a workspace member: run with
+#   RUSTFLAGS="--cfg loom" cargo test --release --manifest-path lib/kv-router/loom/Cargo.toml
+[package]
+name = "dynamo-kv-router-loom"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

@@ -2674,10 +2674,10 @@ mod slot_coverage_tests {
                     for _ in 0..ROUNDS {
                         assert_eq!(node.promote_to_full_with_version(slot, version), Some(true));
                         assert!(node.coverage_for_test().0.contains(slot));
-                        let (consumed, stale) = node
+                        let removal = node
                             .remove_worker_for_leading_hashes(slot, &[head])
                             .unwrap();
-                        assert_eq!((consumed, stale.len()), (1, 3));
+                        assert_eq!((removal.consumed, removal.stale_hashes.len()), (1, 3));
                         assert!(!node.coverage_for_test().0.contains(slot));
                     }
                 })
@@ -2984,7 +2984,7 @@ mod slot_coverage_tests {
         let slots = index.slots.unmap(WorkerRemovalTarget::WorkerId(1));
         wait_for_pinned_threads();
         let mut split = false;
-        index.sweep_slots(&slots.iter().copied().collect(), |node, _| {
+        index.sweep_slots(&slots.iter().copied().collect(), &mut 0, |node, _| {
             if !split && Arc::as_ptr(node) as usize == target {
                 split = true;
                 // Another lane splits [22, 23 | 24, 25] just before the sweep reaches it.
@@ -3054,7 +3054,7 @@ mod slot_coverage_tests {
         );
 
         wait_for_pinned_threads();
-        index.sweep_slots(&slots.iter().copied().collect(), |_, _| true);
+        index.sweep_slots(&slots.iter().copied().collect(), &mut 0, |_, _| true);
         index.slots.release(slots);
         for loser in losers {
             loser.join().unwrap();
@@ -3097,7 +3097,7 @@ mod slot_coverage_tests {
         );
 
         wait_for_pinned_threads();
-        index.sweep_slots(&slots.iter().copied().collect(), |_, _| true);
+        index.sweep_slots(&slots.iter().copied().collect(), &mut 0, |_, _| true);
         index.slots.release(slots);
         clearer.join().unwrap();
         assert_eq!(done_rx.recv().unwrap(), [None, None]);
@@ -3120,7 +3120,7 @@ mod slot_coverage_tests {
         apply_direct(&index, &mut lane, make_store_event(2, &[1, 2, 3]));
         assert_eq!(index.slot_for_test(fresh), Some(stale_slot));
 
-        let finished = index.clear_rank_slot(removed, stale_slot);
+        let finished = index.clear_rank_slot(removed, stale_slot, &mut 0);
         assert_direct_score(&index, &[1, 2, 3], fresh, 3);
         assert!(!finished);
     }
@@ -3145,5 +3145,391 @@ mod slot_coverage_tests {
             .map(|event| event.worker_id)
             .collect();
         assert_eq!(workers, vec![1, 1, 3, 3]);
+    }
+}
+
+/// Volume-triggered stale-leaf reclamation (`reclaim.rs`) and the sweep's anchor seeds.
+mod reclaim_tests {
+    use super::*;
+    use crate::test_utils::{make_remove_event, stored_blocks_with_sequence_hashes};
+
+    /// Sweeps as soon as any block is dead, with no gap between sweeps.
+    fn eager() -> ReclaimConfig {
+        ReclaimConfig {
+            volume_sweep: true,
+            dead_floor: 1,
+            min_gap: Duration::ZERO,
+        }
+    }
+
+    fn store_with_seq(
+        worker_id: u64,
+        parent: Option<u64>,
+        locals: &[u64],
+        seqs: &[u64],
+    ) -> RouterEvent {
+        crate::test_utils::router_event(
+            worker_id,
+            0,
+            0,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent.map(ExternalSequenceBlockHash),
+                start_position: None,
+                blocks: stored_blocks_with_sequence_hashes(&local_hashes(locals), seqs),
+            }),
+        )
+    }
+
+    /// Worker 0 holds `[1, 2, 3]` with two children and worker 1 stores twelve leaves of
+    /// four blocks under it, then evicts them all. With the volume trigger the next enqueue schedules a
+    /// sweep and the tree returns to its baseline shape; without it, the dead leaves stay
+    /// until the five-minute timer.
+    async fn evict_leaves_and_count(config: ReclaimConfig) -> (CrtcShapeReport, u64) {
+        let index = ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::with_reclaim_config(config),
+            1,
+            32,
+        );
+        // `[1, 2, 3]` is internal before the baseline, so the leaves below cannot split it.
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        for tail in [4, 5] {
+            index
+                .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[tail]))
+                .await;
+        }
+        index.apply_event(make_store_event(1, &[1, 2, 3])).await;
+        flush_and_settle(&index).await;
+        let baseline = index.backend().probe_shape().nodes;
+
+        for leaf in 0..12u64 {
+            let tail: Vec<u64> = (0..4).map(|i| 100 + leaf * 10 + i).collect();
+            index
+                .apply_event(make_store_event_with_parent(1, &[1, 2, 3], &tail))
+                .await;
+        }
+        flush_and_settle(&index).await;
+        assert!(index.backend().probe_shape().nodes > baseline);
+        for leaf in 0..12u64 {
+            let tail: Vec<u64> = (0..4).map(|i| 100 + leaf * 10 + i).collect();
+            index
+                .apply_event(make_remove_event_with_parent(1, &[1, 2, 3], &tail))
+                .await;
+        }
+        flush_and_settle(&index).await;
+        // The lane flushed its tally when it went idle; the next enqueue sees the volume.
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        flush_and_settle(&index).await;
+
+        assert_score(&index, &[1, 2, 3, 4], worker(0), 4).await;
+        (index.backend().probe_shape(), baseline)
+    }
+
+    #[tokio::test]
+    async fn volume_trigger_returns_node_count_to_baseline() {
+        let (shape, baseline) = evict_leaves_and_count(eager()).await;
+        assert_eq!(shape.nodes, baseline, "{shape:?}");
+        assert_eq!(shape.dead_blocks, 0, "{shape:?}");
+        assert!(shape.sweeps_volume >= 1, "{shape:?}");
+        assert_eq!(shape.reclaimed_blocks, 48, "{shape:?}");
+
+        // The control: the timer alone leaves the dead leaves linked.
+        let (shape, baseline) = evict_leaves_and_count(ReclaimConfig::legacy()).await;
+        assert!(shape.nodes > baseline, "{shape:?}");
+        assert_eq!(shape.sweeps_volume + shape.sweeps_other, 0, "{shape:?}");
+    }
+
+    /// The default floor keeps small trees from sweeping on volume.
+    #[tokio::test]
+    async fn default_floor_does_not_sweep_small_trees() {
+        let (shape, baseline) = evict_leaves_and_count(ReclaimConfig::default()).await;
+        assert!(shape.nodes > baseline, "{shape:?}");
+        assert_eq!(shape.sweeps_volume, 0, "{shape:?}");
+    }
+
+    /// Stores and evictions move the lane tally, and a sweep overwrites the shared
+    /// estimates with its exact recount.
+    #[test]
+    fn estimates_follow_stores_evictions_and_sweeps() {
+        let index = ConcurrentRadixTreeCompressed::with_reclaim_config(eager());
+        let mut lookup = direct_lookup();
+        // A root child, a leaf extension, a split with a new tail, and a new child.
+        apply_direct(&index, &mut lookup, make_store_event(0, &[1, 2, 3]));
+        apply_direct(
+            &index,
+            &mut lookup,
+            make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup,
+            make_store_event_with_parent(0, &[1, 2, 3], &[6]),
+        );
+        apply_direct(&index, &mut lookup, make_store_event(1, &[9, 8]));
+        index.reclaim.flush(&mut lookup.tally, true);
+        assert_eq!(index.reclaim.estimates(), (0, 8));
+        assert_eq!(index.probe_shape().linked_blocks, 8);
+
+        // Worker 1 leaves `[9, 8]` holder-less; worker 0 leaves `[4, 5]` holder-less.
+        apply_direct(&index, &mut lookup, make_remove_event(1, &[9]));
+        apply_direct(
+            &index,
+            &mut lookup,
+            make_remove_event_with_parent(0, &[1, 2, 3], &[4]),
+        );
+        index.reclaim.flush(&mut lookup.tally, true);
+        assert_eq!(index.reclaim.estimates(), (4, 8));
+        let shape = index.probe_shape();
+        assert_eq!((shape.dead_blocks, shape.linked_blocks), (4, 8));
+
+        let outcome = index.sweep_stale_children();
+        assert_eq!(outcome.reclaimed_blocks, 4);
+        assert_eq!(index.reclaim.estimates(), (0, 4));
+        let shape = index.probe_shape();
+        assert_eq!((shape.dead_blocks, shape.linked_blocks), (0, 4));
+        assert_eq!(index.probe_check(&[&lookup]), Ok(0));
+        assert_direct_score(&index, &[1, 2, 3, 6], worker(0), 4);
+    }
+
+    /// A dead child under a branch anchor is reclaimed: the sweep seeds from every anchor
+    /// as well as the root, and never unlinks the anchor itself.
+    #[test]
+    fn sweep_reclaims_dead_child_under_anchor() {
+        let index = ConcurrentRadixTreeCompressed::with_reclaim_config(eager());
+        let mut lookup = direct_lookup();
+        let anchor_id = 0xA11C_0000;
+        index
+            .apply_anchor(
+                worker(1),
+                AnchorTask {
+                    anchor_id: ExternalSequenceBlockHash(anchor_id),
+                    anchor_local_hash: LocalBlockHash(2),
+                    anchor_depth: 2,
+                },
+            )
+            .unwrap();
+        apply_direct(
+            &index,
+            &mut lookup,
+            store_with_seq(1, Some(anchor_id), &[5, 6], &[0xA5, 0xA6]),
+        );
+        let anchor = index
+            .anchor_nodes
+            .get(&ExternalSequenceBlockHash(anchor_id))
+            .unwrap()
+            .clone();
+        assert_eq!(anchor.children_snapshot().len(), 1);
+
+        apply_direct(
+            &index,
+            &mut lookup,
+            remove_event(
+                1,
+                1,
+                0,
+                vec![
+                    ExternalSequenceBlockHash(0xA5),
+                    ExternalSequenceBlockHash(0xA6),
+                ],
+            ),
+        );
+        assert_eq!(index.probe_shape().dead_leaves, 1);
+
+        let outcome = index.sweep_stale_children();
+        assert_eq!(outcome.reclaimed_nodes, 1);
+        assert!(anchor.children_snapshot().is_empty());
+        assert!(
+            index
+                .anchor_nodes
+                .contains_key(&ExternalSequenceBlockHash(anchor_id))
+        );
+        assert_eq!(index.probe_check(&[&lookup]), Ok(0));
+
+        // The anchor still takes stores.
+        apply_direct(
+            &index,
+            &mut lookup,
+            store_with_seq(1, Some(anchor_id), &[5], &[0xA5]),
+        );
+        assert_eq!(anchor.children_snapshot().len(), 1);
+    }
+
+    /// A holder-less internal node whose children all die is unlinked in the same pass,
+    /// after them.
+    #[test]
+    fn sweep_cascades_through_dead_internal_nodes() {
+        let index = ConcurrentRadixTreeCompressed::with_reclaim_config(eager());
+        let mut lookup = direct_lookup();
+        apply_direct(&index, &mut lookup, make_store_event(0, &[1, 2, 3, 4]));
+        // Splits `[1, 2, 3, 4]` into `[1, 2] -> {[3, 4], [7]}`.
+        apply_direct(
+            &index,
+            &mut lookup,
+            make_store_event_with_parent(0, &[1, 2], &[7]),
+        );
+        let prefix = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        // Drop every holder from the whole chain without clearing children, as a racing
+        // removal can leave it.
+        let guard = crossbeam_epoch::pin();
+        let mut nodes = vec![prefix.clone()];
+        prefix.for_each_child(&guard, |_, child| nodes.push(child.clone()));
+        drop(guard);
+        for node in &nodes {
+            node.set_coverage_for_test(&[], &[]);
+        }
+        drop(nodes);
+        drop(prefix);
+        drop(lookup);
+
+        let outcome = index.sweep_stale_children();
+        assert_eq!(outcome.reclaimed_nodes, 3, "{outcome:?}");
+        assert_eq!(index.raw_child_edge_count(), 0);
+    }
+
+    /// A dead leaf a lane still names stays linked, and the probe says why.
+    #[test]
+    fn held_dead_leaf_is_skipped_and_reported() {
+        let index = ConcurrentRadixTreeCompressed::with_reclaim_config(eager());
+        let mut lookup = direct_lookup();
+        apply_direct(&index, &mut lookup, make_store_event(0, &[1, 2]));
+        let leaf = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        leaf.set_coverage_for_test(&[], &[]);
+
+        let outcome = index.sweep_stale_children();
+        assert_eq!((outcome.reclaimed_nodes, outcome.skipped_held), (0, 1));
+        drop(leaf);
+        assert_eq!(index.probe_check(&[&lookup]), Ok(1));
+        assert_eq!(index.probe_shape().dead_leaves_held, 1);
+    }
+
+    /// Two scheduling paths share one in-flight flag: while a volume sweep is scheduled,
+    /// neither the volume check nor the timer schedules another.
+    #[test]
+    fn volume_and_timer_share_one_in_flight_sweep() {
+        let index = ConcurrentRadixTreeCompressed::with_reclaim_config(eager());
+        let mut lookup = direct_lookup();
+        apply_direct(&index, &mut lookup, make_store_event(0, &[1, 2]));
+        apply_direct(&index, &mut lookup, make_remove_event(0, &[1]));
+        index.reclaim.flush(&mut lookup.tally, true);
+
+        assert!(index.try_schedule_cleanup());
+        assert!(!index.try_schedule_cleanup());
+        index.run_cleanup_task();
+        // The sweep reclaimed everything, so nothing is due any more.
+        assert!(!index.try_schedule_cleanup());
+        assert_eq!(index.probe_shape().sweeps_volume, 1);
+    }
+
+    /// The gap rule: after a sweep, a volume sweep waits `min_gap`.
+    #[test]
+    fn min_gap_delays_the_next_volume_sweep() {
+        let index = ConcurrentRadixTreeCompressed::with_reclaim_config(ReclaimConfig {
+            min_gap: Duration::from_secs(3600),
+            ..eager()
+        });
+        let mut lookup = direct_lookup();
+        index.sweep_stale_children();
+        apply_direct(&index, &mut lookup, make_store_event(0, &[1, 2]));
+        apply_direct(&index, &mut lookup, make_remove_event(0, &[1]));
+        index.reclaim.flush(&mut lookup.tally, true);
+        assert!(!index.try_schedule_cleanup());
+
+        index.probe_set_reclaim(eager());
+        // The gap is still ten times the last sweep's duration.
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(index.try_schedule_cleanup());
+        index.cancel_scheduled_cleanup();
+    }
+
+    /// The two race tests, with sweeps running back to back on two threads throughout.
+    #[test]
+    fn races_hold_under_back_to_back_sweeps() {
+        for round in 0..50 {
+            let index = Arc::new(ConcurrentRadixTreeCompressed::with_reclaim_config(eager()));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let sweepers: Vec<_> = (0..2)
+                .map(|_| {
+                    let index = index.clone();
+                    let stop = stop.clone();
+                    thread::spawn(move || {
+                        while !stop.load(Ordering::Relaxed) {
+                            index.run_cleanup_task();
+                        }
+                    })
+                })
+                .collect();
+
+            // race_remove_keeps_children_needed_by_another_full_worker
+            let (worker1, worker2, worker3) = (worker(1), worker(2), worker(3));
+            let (mut lookup1, mut lookup2, mut lookup3) =
+                (direct_lookup(), direct_lookup(), direct_lookup());
+            apply_direct(&index, &mut lookup1, make_store_event(1, &[1, 2, 3, 4]));
+            apply_direct(&index, &mut lookup2, make_store_event(2, &[1, 2, 3, 4]));
+            apply_direct(
+                &index,
+                &mut lookup1,
+                make_store_event_with_parent(1, &[1, 2, 3, 4], &[5, 6]),
+            );
+            apply_direct(&index, &mut lookup3, make_store_event(3, &[1, 2, 3, 4]));
+            apply_direct(
+                &index,
+                &mut lookup3,
+                make_store_event_with_parent(3, &[1, 2, 3, 4], &[7, 8]),
+            );
+            let reader_index = index.clone();
+            let reader = thread::spawn(move || {
+                for _ in 0..256 {
+                    assert_direct_score(&reader_index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+                }
+            });
+            apply_direct(
+                &index,
+                &mut lookup2,
+                make_remove_event_with_parent(2, &[1], &[2]),
+            );
+            reader.join().unwrap();
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+            assert_direct_score(&index, &[1, 2, 3, 4], worker2, 1);
+            assert_direct_score(&index, &[1, 2, 3, 4, 7, 8], worker3, 6);
+
+            // race_cleanup_with_dead_child_reuse_keeps_restored_child, on worker 4
+            let worker4 = worker(4);
+            let mut lookup4 = direct_lookup();
+            apply_direct(&index, &mut lookup4, make_store_event(4, &[11, 12, 13]));
+            for tail in [[14, 15], [16, 17]] {
+                apply_direct(
+                    &index,
+                    &mut lookup4,
+                    make_store_event_with_parent(4, &[11, 12, 13], &tail),
+                );
+            }
+            for tail in [[14, 15], [16, 17]] {
+                apply_direct(
+                    &index,
+                    &mut lookup4,
+                    make_remove_event_with_parent(4, &[11, 12, 13], &tail),
+                );
+            }
+            if round % 2 == 0 {
+                thread::yield_now();
+            }
+            apply_direct(
+                &index,
+                &mut lookup4,
+                make_store_event_with_parent(4, &[11, 12, 13], &[14, 15]),
+            );
+            assert_direct_score(&index, &[11, 12, 13, 14, 15], worker4, 5);
+
+            stop.store(true, Ordering::Relaxed);
+            for sweeper in sweepers {
+                sweeper.join().unwrap();
+            }
+            index.probe_quiesce();
+            assert_direct_score(&index, &[11, 12, 13, 14, 15], worker4, 5);
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+            let held = index
+                .probe_check(&[&lookup1, &lookup2, &lookup3, &lookup4])
+                .unwrap();
+            assert_eq!(held, 0, "round {round}");
+        }
     }
 }

@@ -127,6 +127,9 @@ pub(super) struct FindStepOutcome<'g> {
 /// Data returned by a split for deferred lookup updates.
 pub(super) struct SplitLookupData {
     pub(super) suffix: SharedNode,
+    /// Change in blocks on holder-less nodes: a suffix can come out of a split holder-less,
+    /// and a holder-less node's prefix stops being dead once the splitting store covers it.
+    pub(super) dead_delta: i64,
 }
 
 #[derive(Clone, Copy)]
@@ -152,7 +155,11 @@ pub(super) enum StoreParentResolution {
 
 pub(super) enum ParentEdgeAction {
     Stale,
-    ReuseExistingEdge { coverage_changed: bool },
+    /// `appended` counts blocks a leaf extension linked onto the edge.
+    ReuseExistingEdge {
+        coverage_changed: bool,
+        appended: usize,
+    },
     InsertFromParent(Option<SplitLookupData>),
 }
 

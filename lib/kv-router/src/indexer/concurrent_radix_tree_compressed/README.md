@@ -179,6 +179,46 @@ After the coverage update, removal may clear children only when no full-edge
 workers remain. Because `internal` is sticky, clearing those children does not
 make the node eligible for future leaf extension.
 
+## Stale-Leaf Reclamation
+
+Removal leaves a node without holders linked; a sweep unlinks it later. The sweep is
+scheduled by volume as well as by the five-minute timer (see `reclaim.rs` and
+`trigger.rs`; the eager-reclamation idea is credited to the chain index in
+smg-project/smg #2814):
+
+- Each event lane keeps a lane-local tally of blocks it links into the tree (new
+  children, split tails, leaf appends) and blocks it leaves on holder-less nodes (a
+  removal, clear or slot sweep that drops a node's last holder, or a split that leaves a
+  holder-less suffix). It folds the tally into two shared estimates once either delta
+  reaches 1,024 blocks, and whenever the lane goes idle or flushes. No event pays a
+  shared read-modify-write.
+- `try_schedule_cleanup`, called on every enqueue, schedules a sweep when the dead
+  estimate reaches an eighth of the live one and a floor (65,536 blocks by default), and
+  the previous sweep ended at least `max(100 ms, 10 x its duration)` ago. That caps the
+  sweep duty cycle near 10% of one lane. The check reads only the two estimates until
+  the volume condition holds, and shares the timer's one-in-flight flag.
+- The sweep walks from the root and every branch anchor, visiting children by reference
+  under its epoch pin. It records only holder-less children as candidates and clones only
+  children that have children of their own. It then unlinks candidates deepest-first:
+  an unlocked check skips covered or childful candidates, and the unlink re-validates
+  under the parent's exclusive gate, a child `try_write`, and the exact live strong
+  count, as before. A holder-less internal node whose children all went earlier in the
+  pass goes too. Anchors are never unlinked, but their dead children now are.
+- The sweep drains a bounded amount of epoch garbage first instead of all of it.
+  Leftover retired snapshots keep their children counted in `retired_snapshot_refs`,
+  which the strong-count check subtracts, so they only delay some unlinks.
+- The walk recounts linked and holder-less blocks exactly, and the estimates are
+  overwritten with those counts minus what it unlinked.
+
+Reclamation changes no lookup, store, remove, slot or dump semantics by itself. It does
+change the tree's shape afterwards: a store that would have reused a dead node creates a
+fresh one, which can then grow by leaf extension. Shape can matter after a mid-chain
+eviction: a later head eviction on one long edge scrubs the whole edge's entries, where
+the same eviction on a chain of short nodes leaves the descendants' entries behind. So
+streams with holes can see different hole undercounts and different rejected stores
+under orphaned parents than a tree that was never swept, as the timer sweep already
+could. Reclamation never adds an overcount.
+
 ## Lookup Repair
 
 Cross-thread splits can make a worker lookup entry stale: the lookup still points

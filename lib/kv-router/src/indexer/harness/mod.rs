@@ -117,6 +117,12 @@ pub(crate) fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or_else(|_| panic!("{name} must be an unsigned integer, got {value:?}"))
 }
 
+/// Runs the pool differential for `T` on `lanes` lanes, for backend-specific tests.
+#[cfg(test)]
+pub(crate) fn differential_pool_for_test<T: HarnessBackend>(name: &str, lanes: usize) {
+    differential::run_suite::<T>(name, differential::Mode::Pool { lanes });
+}
+
 fn new_backend<T: HarnessBackend>() -> Arc<T> {
     Arc::new(T::harness_new())
 }
@@ -173,4 +179,9 @@ macro_rules! harness_suite {
 harness_suite!(
     crtc,
     crate::indexer::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed
+);
+
+harness_suite!(
+    crtc_eager,
+    crate::indexer::concurrent_radix_tree_compressed::harness_impl::EagerReclaimCrtc
 );

@@ -11,10 +11,6 @@ use crate::indexer::{AnchorCapableSyncIndexer, ApproximateLruLane, ApproximateLr
 // SyncIndexer implementation for ConcurrentRadixTreeCompressed
 // ============================================================================
 
-/// Epoch garbage a busy event lane frees between tasks, bounding the time it spends away
-/// from events while keeping the graveyard from growing under sustained load.
-const GRAVEYARD_NODES_PER_TASK: usize = 256;
-
 impl SyncIndexer for ConcurrentRadixTreeCompressed {
     #[cfg_attr(feature = "profile", inline(never))]
     fn worker(
@@ -32,8 +28,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
 
         loop {
             if event_receiver.is_empty() {
-                // Going idle: hand off this thread's retired child snapshots and free
-                // expired epoch garbage in chunks until an event arrives.
+                // Going idle: publish this lane's volume tally, hand off its retired child
+                // snapshots, and free expired epoch garbage in chunks until an event arrives.
+                self.reclaim.flush(&mut lookup.tally, true);
                 NodeChildren::flush_retired();
                 NodeChildren::drain_graveyard_while(GRAVEYARD_NODES_PER_TASK, || {
                     event_receiver.is_empty()
@@ -145,6 +142,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                         WorkerRemovalTarget::WorkerId(worker_id),
                         sweep_tree,
                     );
+                    self.reclaim.flush(&mut lookup.tally, false);
                     let _ = resp.send(());
                 }
                 WorkerTask::RemoveWorkerDpRank {
@@ -158,8 +156,13 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                         WorkerRemovalTarget::DpRank(WorkerWithDpRank::new(worker_id, dp_rank)),
                         sweep_tree,
                     );
+                    self.reclaim.flush(&mut lookup.tally, false);
                 }
                 WorkerTask::CleanupStaleChildren => {
+                    // The sweep's recount covers this lane's changes so far; publishing
+                    // them first lets the recount replace them instead of adding them
+                    // twice.
+                    self.reclaim.flush(&mut lookup.tally, true);
                     self.run_cleanup_task();
                 }
                 WorkerTask::DumpEvents(_sender) => {
@@ -178,6 +181,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     let _ = resp.send(resident);
                 }
                 WorkerTask::Flush(sender) => {
+                    self.reclaim.flush(&mut lookup.tally, true);
                     NodeChildren::flush_retired();
                     NodeChildren::drain_graveyard(usize::MAX);
                     let _ = sender.send(());
@@ -269,10 +273,21 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
     }
 
     fn try_schedule_cleanup(&self) -> bool {
-        self.cleanup.try_schedule()
+        // The volume check reads two estimates that change only on tally flushes, and the
+        // clock only once enough dead volume has built up.
+        if self.reclaim.volume_due() && self.cleanup.try_claim() {
+            self.reclaim.note_scheduled(SweepTrigger::Volume);
+            return true;
+        }
+        if self.cleanup.try_schedule() {
+            self.reclaim.note_scheduled(SweepTrigger::Timer);
+            return true;
+        }
+        false
     }
 
     fn cancel_scheduled_cleanup(&self) {
+        self.reclaim.note_scheduled(SweepTrigger::Timer);
         self.cleanup.cancel();
     }
 
@@ -290,6 +305,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
 
         #[cfg(feature = "bench")]
         {
+            let stats = &self.reclaim.stats;
+            let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+            let (dead_estimate, linked_estimate) = self.reclaim.estimates();
             let node_splits = self.bench_metrics.node_splits.load(Ordering::Relaxed);
             let lookup_repair_scans = self
                 .bench_metrics
@@ -303,7 +321,24 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 "ConcurrentRadixTreeCompressed bench metrics:\n  \
                  node splits = {node_splits}\n  \
                  lookup repair scans = {lookup_repair_scans}\n  \
-                 lookup repair entries = {lookup_repair_entries}"
+                 lookup repair entries = {lookup_repair_entries}\n  \
+                 sweeps (volume / other) = {} / {}\n  \
+                 sweep time total / max = {} us / {} us\n  \
+                 reclaimed nodes / blocks = {} / {}\n  \
+                 sweep candidates skipped (held / busy) = {} / {}\n  \
+                 last sweep nodes / linked / dead blocks = {} / {} / {}\n  \
+                 dead / linked estimates = {dead_estimate} / {linked_estimate}",
+                load(&stats.sweeps_volume),
+                load(&stats.sweeps_other),
+                load(&stats.total_us),
+                load(&stats.max_us),
+                load(&stats.reclaimed_nodes),
+                load(&stats.reclaimed_blocks),
+                load(&stats.skipped_held),
+                load(&stats.skipped_busy),
+                load(&stats.last_nodes),
+                load(&stats.last_linked),
+                load(&stats.last_dead),
             )
         }
     }

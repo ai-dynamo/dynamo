@@ -63,6 +63,11 @@ impl SlotCutoffs {
     pub(super) fn len(&self) -> usize {
         self.0.len()
     }
+
+    #[cfg(any(test, feature = "bench"))]
+    pub(super) fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
 }
 
 /// A node's compressed edge and partial coverage. Full-edge coverage is the node's
@@ -124,6 +129,40 @@ impl CrtcNodeState {
 
     pub(super) fn has_any_workers(&self, full: &FullCoverage) -> bool {
         !self.cutoffs.is_empty() || !full.is_empty()
+    }
+
+    #[cfg(any(test, feature = "bench"))]
+    pub(super) fn edge_index_slots(&self) -> usize {
+        self.edge_index.capacity()
+    }
+
+    /// Checks the edge index against the edge and the cutoffs against the edge and `full`.
+    #[cfg(test)]
+    pub(super) fn check_invariants(&self, full: &FullCoverage) -> Result<(), String> {
+        let len = self.edge.len();
+        for (pos, &(_, hash)) in self.edge.iter().enumerate() {
+            let last = self.edge.iter().rposition(|&(_, other)| other == hash);
+            if self.position(hash) != last {
+                return Err(format!(
+                    "edge index finds {hash:?} at {:?}, last copy at {last:?} (pos {pos})",
+                    self.position(hash)
+                ));
+            }
+        }
+        let mut previous = None;
+        for (slot, cutoff) in self.cutoffs.iter() {
+            if cutoff == 0 || cutoff >= len {
+                return Err(format!("cutoff {cutoff} of {slot:?} outside (0, {len})"));
+            }
+            if previous.is_some_and(|previous| previous >= slot) {
+                return Err(format!("cutoffs not sorted at {slot:?}"));
+            }
+            if full.contains(slot) {
+                return Err(format!("{slot:?} is both full and cut off at {cutoff}"));
+            }
+            previous = Some(slot);
+        }
+        Ok(())
     }
 
     /// Sets the bit before dropping the cutoff, so the slot is never uncovered between.

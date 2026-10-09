@@ -81,6 +81,10 @@ chrono = { workspace = true, optional = true }
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"], optional = true }
 tracing-appender = { version = "0.2", optional = true }
 
+[lints.rust]
+# `lib/kv-router/loom` builds lock-free protocol modules with `--cfg loom`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
 [dev-dependencies]
 criterion = "0.5"
 rstest = "0.18.2"

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use super::block_lookup::BlockLookup;
+use super::reclaim::ReclaimTally;
 use super::types::SharedNode;
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
@@ -134,11 +135,13 @@ impl NodeHolds {
 }
 
 /// One event lane's block lookups: for each rank on the lane, the node holding each
-/// stored block hash.
+/// stored block hash. Also carries the lane's reclamation tally, which every event on the
+/// lane updates and which is flushed into the tree's shared estimates in batches.
 #[derive(Default)]
 pub(super) struct LaneLookup {
     workers: FxHashMap<WorkerWithDpRank, BlockLookup<NodeId>>,
     nodes: NodeHolds,
+    pub(super) tally: ReclaimTally,
 }
 
 impl LaneLookup {
@@ -262,7 +265,7 @@ impl LaneLookup {
     where
         I: Iterator<Item = ExternalSequenceBlockHash> + Clone,
     {
-        let Self { workers, nodes } = self;
+        let Self { workers, nodes, .. } = self;
         let id = nodes.hold(node);
         let changed = workers
             .entry(worker)

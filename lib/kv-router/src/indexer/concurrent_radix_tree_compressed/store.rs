@@ -118,7 +118,11 @@ impl ConcurrentRadixTreeCompressed {
 
             match edge_action {
                 ParentEdgeAction::Stale => continue,
-                ParentEdgeAction::ReuseExistingEdge { coverage_changed } => {
+                ParentEdgeAction::ReuseExistingEdge {
+                    coverage_changed,
+                    appended,
+                } => {
+                    lookup.tally.linked += appended as i64;
                     return Ok(StoreParentResolution::ReusedExistingEdge {
                         node,
                         coverage_changed,
@@ -341,7 +345,11 @@ impl ConcurrentRadixTreeCompressed {
                             parent_is_anchor: cursor.parent_is_anchor,
                         });
                     }
-                    ParentEdgeAction::ReuseExistingEdge { coverage_changed } => {
+                    ParentEdgeAction::ReuseExistingEdge {
+                        coverage_changed,
+                        appended,
+                    } => {
+                        lookup.tally.linked += appended as i64;
                         return Ok(StoreInsertStep::Done(self.finish_with_lookup_update(
                             lookup,
                             worker,
@@ -381,6 +389,7 @@ impl ConcurrentRadixTreeCompressed {
                     });
                 }
                 Some(true) => {
+                    lookup.tally.linked += remaining.len() as i64;
                     return Ok(StoreInsertStep::Done(self.finish_with_lookup_update(
                         lookup,
                         worker,
@@ -412,6 +421,7 @@ impl ConcurrentRadixTreeCompressed {
                     });
                 }
                 Some(true) => {
+                    lookup.tally.linked += remaining.len() as i64;
                     return Ok(StoreInsertStep::Done(self.finish_with_lookup_update(
                         lookup,
                         worker,
@@ -433,9 +443,12 @@ impl ConcurrentRadixTreeCompressed {
                 parent_is_anchor: cursor.parent_is_anchor,
             }),
             InsertChildOutcome::Existing(child) => Ok(StoreInsertStep::Descend(child)),
-            InsertChildOutcome::Inserted(new_node) => Ok(StoreInsertStep::Done(
-                self.finish_with_lookup_update(lookup, worker, remaining, &new_node, false),
-            )),
+            InsertChildOutcome::Inserted(new_node) => {
+                lookup.tally.linked += remaining.len() as i64;
+                Ok(StoreInsertStep::Done(self.finish_with_lookup_update(
+                    lookup, worker, remaining, &new_node, false,
+                )))
+            }
         }
     }
 
@@ -490,6 +503,7 @@ impl ConcurrentRadixTreeCompressed {
                 ) else {
                     continue;
                 };
+                lookup.tally.linked += tail.len() as i64;
                 return ChildInsertStep::Done(self.finish_after_split_lookup(
                     lookup,
                     worker,

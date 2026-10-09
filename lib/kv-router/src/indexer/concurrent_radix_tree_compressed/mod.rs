@@ -3,8 +3,10 @@
 
 //! Concurrent Radix Tree (compressed trie) implementation for KV cache routing.
 //!
-//! See `README.md` in this module for structure, removal, split, and concurrency
-//! notes.
+//! See `README.md` in this module for structure, removal, split, reclamation, and
+//! concurrency notes. The volume-triggered stale-leaf reclamation is inspired by the chain
+//! index in smg-project/smg #2814 (eager reclamation of emptied storage); it shares no code
+//! with SMG.
 
 use std::sync::Arc;
 
@@ -28,15 +30,26 @@ mod coverage;
 mod edge_index;
 mod lane_lookup;
 mod node;
+mod reclaim;
 mod state;
+mod trigger;
 mod types;
 use coverage::{Slot, SlotRegistry, SlotSet, SlotTable, wait_for_pinned_threads};
 use lane_lookup::LaneLookup;
 use node::*;
+#[cfg(not(any(test, feature = "bench")))]
+use reclaim::ReclaimConfig;
+#[cfg(any(test, feature = "bench"))]
+pub use reclaim::{DEFAULT_DEAD_FLOOR, DEFAULT_MIN_GAP, ReclaimConfig};
+use reclaim::{ReclaimState, SweepOutcome, SweepTrigger};
 use types::*;
 
 mod dump;
 mod matches;
+#[cfg(any(test, feature = "bench"))]
+mod probe;
+#[cfg(any(test, feature = "bench"))]
+pub use probe::{CrtcMemoryReport, CrtcShapeReport};
 mod remove;
 mod repair;
 mod store;
@@ -46,7 +59,7 @@ mod sync_impl;
 mod tests;
 
 #[cfg(test)]
-mod harness_impl;
+pub(crate) mod harness_impl;
 
 /// Thread-safe radix tree (compressed trie) for concurrent KV cache lookups.
 pub struct ConcurrentRadixTreeCompressed {
@@ -57,10 +70,16 @@ pub struct ConcurrentRadixTreeCompressed {
     /// Dense slots of the ranks with coverage in this tree.
     slots: SlotRegistry,
     cleanup: CleanupState,
+    /// Volume-triggered stale-leaf reclamation; see `reclaim.rs`.
+    reclaim: ReclaimState,
     lifecycle: super::HashLifecycle,
     #[cfg(any(test, feature = "bench"))]
     bench_metrics: CrtcBenchMetrics,
 }
+
+/// Epoch garbage a busy event lane frees between tasks, bounding the time it spends away
+/// from events while keeping the graveyard from growing under sustained load.
+const GRAVEYARD_NODES_PER_TASK: usize = 256;
 
 #[cfg(any(test, feature = "bench"))]
 struct CrtcBenchMetrics {
@@ -131,11 +150,22 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     pub fn new() -> Self {
+        Self::with_reclaim(ReclaimConfig::default())
+    }
+
+    /// A tree with explicit reclamation settings, for benchmarks and tests.
+    #[cfg(any(test, feature = "bench"))]
+    pub fn with_reclaim_config(config: ReclaimConfig) -> Self {
+        Self::with_reclaim(config)
+    }
+
+    fn with_reclaim(config: ReclaimConfig) -> Self {
         Self {
             root: Arc::new(Node::new()),
             anchor_nodes: DashMap::with_hasher(FxBuildHasher),
             slots: SlotRegistry::default(),
             cleanup: CleanupState::new(),
+            reclaim: ReclaimState::new(config),
             lifecycle: super::HashLifecycle::default(),
             #[cfg(any(test, feature = "bench"))]
             bench_metrics: CrtcBenchMetrics::new(),
@@ -271,6 +301,7 @@ impl ConcurrentRadixTreeCompressed {
         self.bench_metrics
             .node_splits
             .fetch_add(1, Ordering::Relaxed);
+        lookup.tally.dead += split.dead_delta;
         if !lookup.names(prefix) {
             return;
         }
@@ -321,7 +352,7 @@ impl ConcurrentRadixTreeCompressed {
         // and it keeps the rank's slot from being released mid-event. A clear walks the
         // whole tree and repins every few nodes instead, so it cannot hold back epoch
         // reclamation for the length of the walk.
-        match op {
+        let result = match op {
             KvCacheEventData::Stored(op) => {
                 let guard = crossbeam_epoch::pin();
                 self.apply_stored(lookup, worker, op, id, counters, &guard)
@@ -334,6 +365,8 @@ impl ConcurrentRadixTreeCompressed {
                 self.clear_worker_coverage(lookup, worker);
                 Ok(())
             }
-        }
+        };
+        self.reclaim.flush(&mut lookup.tally, false);
+        result
     }
 }

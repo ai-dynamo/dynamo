@@ -208,6 +208,7 @@ impl Node {
         self.children.extend_values(queue);
     }
 
+    #[cfg(test)]
     pub(super) fn child_edges_snapshot(&self) -> Vec<(LocalBlockHash, SharedNode)> {
         self.children.entries_snapshot()
     }
@@ -329,7 +330,12 @@ impl Node {
         Some(true)
     }
 
-    pub(super) fn remove_slots_and_snapshot_children(&self, slots: &SlotSet) -> Vec<SharedNode> {
+    /// Drops `slots` from this node and returns its children, plus the edge length if the
+    /// node had holders and now has none.
+    pub(super) fn remove_slots_and_snapshot_children(
+        &self,
+        slots: &SlotSet,
+    ) -> (Vec<SharedNode>, usize) {
         let _gate = self.shape_gate.write();
         let mut state = self.write_state();
         let old_cutoff_len = state.cutoffs.len();
@@ -337,13 +343,15 @@ impl Node {
         let removed_full = self.full.remove_all(slots);
         let removed_worker = removed_full || old_cutoff_len != state.cutoffs.len();
         let should_clear_children = removed_worker && self.full.is_empty();
+        let became_dead = removed_worker && !self.anchor && !state.has_any_workers(&self.full);
+        let dead = if became_dead { state.edge.len() } else { 0 };
 
         // A concurrent split is either visible in this snapshot or starts after
         // the target coverage is gone and therefore cannot copy it forward.
         let children = self.children.values_snapshot();
         drop(state);
         self.clear_children_if_unreachable(should_clear_children);
-        children
+        (children, dead)
     }
 
     fn clear_children_if_unreachable(&self, should_clear_children: bool) {
@@ -511,15 +519,20 @@ impl Node {
                 .unwrap_or(ParentEdgeAction::Stale),
             ParentEdgePlanAction::ReuseExistingEdge {
                 covers_edge: true, ..
-            } => self
-                .promote_full(slot, Some(plan.shape_version))
-                .map_or(ParentEdgeAction::Stale, |coverage_changed| {
-                    ParentEdgeAction::ReuseExistingEdge { coverage_changed }
-                }),
+            } => self.promote_full(slot, Some(plan.shape_version)).map_or(
+                ParentEdgeAction::Stale,
+                |coverage_changed| ParentEdgeAction::ReuseExistingEdge {
+                    coverage_changed,
+                    appended: 0,
+                },
+            ),
             ParentEdgePlanAction::ReuseExistingEdge { cutoff, .. } => self
                 .cover_prefix_with_version(slot, cutoff, plan.shape_version)
                 .map_or(ParentEdgeAction::Stale, |coverage_changed| {
-                    ParentEdgeAction::ReuseExistingEdge { coverage_changed }
+                    ParentEdgeAction::ReuseExistingEdge {
+                        coverage_changed,
+                        appended: 0,
+                    }
                 }),
             // NOTE(perf): An additional sticky-internal rejection before this
             // commit did not improve throughput. The check inside the gate
@@ -531,6 +544,7 @@ impl Node {
                         (
                             ParentEdgeAction::ReuseExistingEdge {
                                 coverage_changed: true,
+                                appended: blocks.len() - append_start,
                             },
                             true,
                         )
@@ -598,8 +612,13 @@ impl Node {
         shape_version: u64,
     ) -> SplitStoreOutcome {
         self.apply_edge_shape_update(shape_version, |state, children| {
-            let split = self.split_at_locked(state, split_pos);
+            let was_dead = !state.has_any_workers(&self.full);
+            let mut split = self.split_at_locked(state, split_pos);
             state.promote_to_full(&self.full, slot);
+            if was_dead {
+                // The prefix stayed holder-less through the split; the store covers it now.
+                split.dead_delta -= split_pos as i64;
+            }
             children.insert(tail_first_local, tail_node.clone());
             (SplitStoreOutcome::Done { split, tail_node }, true)
         })
@@ -692,16 +711,26 @@ impl Node {
     fn split_at_locked(&self, state: &mut CrtcNodeState, pos: usize) -> SplitLookupData {
         // The suffix inherits this node's full coverage as it was before the split
         // promotes partial ranks that reach the split point.
-        let suffix_full = FullCoverage::from_set(&self.full.snapshot());
+        let full_before = self.full.snapshot();
+        let was_dead = full_before.is_empty() && state.cutoffs.is_empty();
+        let suffix_full = FullCoverage::from_set(&full_before);
         let suffix_state = state.split_off_suffix(&self.full, pos);
         let suffix_first_local = suffix_state.edge[0].0;
+        let suffix_len = suffix_state.edge.len();
+        // A live node can leave a holder-less suffix when only cutoffs short of `pos`
+        // covered it. A holder-less node stays holder-less on both sides.
+        let dead_delta = if !was_dead && full_before.is_empty() && suffix_state.cutoffs.is_empty() {
+            suffix_len as i64
+        } else {
+            0
+        };
         let suffix_children = self.children.transfer_for_split();
 
         let suffix = Arc::new(Node::from_parts(suffix_state, suffix_full, suffix_children));
         self.children.insert(suffix_first_local, suffix.clone());
         self.internal.store(true, Ordering::Release);
 
-        SplitLookupData { suffix }
+        SplitLookupData { suffix, dead_delta }
     }
 
     /// Removes `slot` from the leading run of `hashes` found in this edge, under one
@@ -713,7 +742,7 @@ impl Node {
         &self,
         slot: Slot,
         hashes: &[ExternalSequenceBlockHash],
-    ) -> Option<(usize, Vec<ExternalSequenceBlockHash>)> {
+    ) -> Option<RunRemoval> {
         // The exclusive gate keeps every other writer off this node, so the run is read
         // alongside readers, and only a cutoff change upgrades to the write lock.
         let _gate = self.shape_gate.write();
@@ -749,24 +778,37 @@ impl Node {
         } else {
             Vec::new()
         };
-        let mut outcome = if pos >= old_cutoff {
+        let edge_len = state.edge.len();
+        let (mut outcome, holder_less) = if pos >= old_cutoff {
             debug_assert!(beyond.contains(&block_hash));
-            RemoveOutcome {
+            let outcome = RemoveOutcome {
                 stale_hashes: Vec::new(),
-            }
+            };
+            (outcome, false)
         } else if pos == 0 && self.full.contains(slot) {
-            state.drop_full_slot(&self.full, slot)
+            let outcome = state.drop_full_slot(&self.full, slot);
+            (outcome, !state.has_any_workers(&self.full))
         } else {
-            StateWriteGuard {
+            let mut state = StateWriteGuard {
                 has_cutoffs: &self.has_cutoffs,
                 state: RwLockUpgradableReadGuard::upgrade(state),
-            }
-            .remove_worker_at_pos(&self.full, slot, pos, block_hash)
+            };
+            let outcome = state.remove_worker_at_pos(&self.full, slot, pos, block_hash);
+            (outcome, !state.has_any_workers(&self.full))
         };
         outcome.stale_hashes.extend(beyond);
         let should_clear_children = self.full.is_empty();
         self.clear_children_if_unreachable(should_clear_children);
-        Some((consumed, outcome.stale_hashes))
+        Some(RunRemoval {
+            consumed,
+            stale_hashes: outcome.stale_hashes,
+            // The slot covered part of the run, so the node had a holder until now.
+            dead_blocks: if holder_less && !self.anchor {
+                edge_len
+            } else {
+                0
+            },
+        })
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
@@ -886,7 +928,13 @@ impl Node {
         }
     }
 
-    pub(super) fn remove_child_if_stale_leaf(&self, key: LocalBlockHash, child: &SharedNode) {
+    /// Unlinks `child` from this node if it is still attached under `key`, holder-less,
+    /// childless, and referenced only by this node's map and the caller.
+    pub(super) fn remove_child_if_stale_leaf(
+        &self,
+        key: LocalBlockHash,
+        child: &SharedNode,
+    ) -> StaleLeafOutcome {
         let _parent_gate = self.shape_gate.write();
         // Pin after the gate so a parked wait does not hold back epoch reclamation.
         let _guard = crossbeam_epoch::pin();
@@ -895,14 +943,21 @@ impl Node {
             .get(&key)
             .is_some_and(|current| Arc::ptr_eq(&current, child));
         if !still_attached {
-            return;
+            return StaleLeafOutcome::Detached;
         }
 
         let Some(_child_gate) = child.shape_gate.try_write() else {
-            return;
+            return StaleLeafOutcome::Busy;
         };
-        if child.has_any_workers() || !child.children.is_empty() {
-            return;
+        let edge_len = {
+            let state = child.state.read();
+            if state.has_any_workers(&child.full) {
+                return StaleLeafOutcome::Busy;
+            }
+            state.edge.len()
+        };
+        if !child.children.is_empty() {
+            return StaleLeafOutcome::Busy;
         }
         // The parent map and the caller's candidate must hold the only live references;
         // any other holder is a writer that may still cover or extend this node. Readers
@@ -910,12 +965,95 @@ impl Node {
         // standing on. That read sees no workers here and so cannot overcount, and the
         // epoch keeps the node allocated until it unpins.
         if Self::live_strong_count(child) != Some(2) {
-            return;
+            return StaleLeafOutcome::Held;
         }
 
         self.children.remove(&key);
         self.shape_version.fetch_add(1, Ordering::Release);
+        StaleLeafOutcome::Unlinked { edge_len }
     }
+
+    #[cfg(any(test, feature = "bench"))]
+    pub(super) fn probe(&self) -> super::probe::NodeProbe {
+        let state = self.state.read();
+        let (compact_child_bytes, sharded_child_bytes) = self.children.memory_bytes();
+        super::probe::NodeProbe {
+            edge_len: state.edge.len(),
+            edge_capacity: state.edge.capacity(),
+            edge_index_slots: state.edge_index_slots(),
+            cutoffs_capacity: state.cutoffs.capacity(),
+            holder_less: !state.has_any_workers(&self.full),
+            childless: self.children.is_empty(),
+            anchor: self.anchor,
+            compact_child_bytes,
+            sharded_child_bytes,
+            coverage_overflow_bytes: self.full.overflow_bytes(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn check_invariants(&self) -> Result<(), String> {
+        self.state.read().check_invariants(&self.full)
+    }
+
+    /// Strong references besides retired snapshots'; see `live_strong_count`.
+    #[cfg(any(test, feature = "bench"))]
+    pub(super) fn live_strong_count_for_probe(this: &SharedNode) -> Option<usize> {
+        Self::live_strong_count(this)
+    }
+
+    /// Edge length and whether no rank covers any of it, read under the state lock.
+    pub(super) fn sweep_probe(&self) -> (usize, bool) {
+        let state = self.state.read();
+        (state.edge.len(), !state.has_any_workers(&self.full))
+    }
+
+    /// The sweep's unlocked pre-check before it takes the parent's exclusive gate:
+    /// holder-less and childless as far as the atomics show. `remove_child_if_stale_leaf`
+    /// re-validates everything under the locks.
+    pub(super) fn looks_reclaimable(&self) -> bool {
+        !self.anchor
+            && self.full.is_empty()
+            && !self.has_cutoffs.load(Ordering::Acquire)
+            && self.children.is_empty()
+    }
+
+    /// Visits this node's children by reference, without cloning their `Arc`s.
+    pub(super) fn for_each_child(
+        &self,
+        guard: &Guard,
+        visit: impl FnMut(LocalBlockHash, &SharedNode),
+    ) {
+        self.children.for_each_child(guard, visit);
+    }
+
+    pub(super) fn has_children_in(&self, guard: &Guard) -> bool {
+        !self.children.is_empty_in(guard)
+    }
+}
+
+/// What one grouped removal did on one node.
+pub(super) struct RunRemoval {
+    /// Hashes of the run consumed on this node.
+    pub(super) consumed: usize,
+    /// Hashes whose lookup entries the removal retires.
+    pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
+    /// The node's edge length if the removal left it with no holder at all.
+    pub(super) dead_blocks: usize,
+}
+
+/// Why the sweep did or did not unlink a candidate.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum StaleLeafOutcome {
+    Unlinked {
+        edge_len: usize,
+    },
+    /// No longer attached under its key.
+    Detached,
+    /// A writer held its gate, covered it again, or gave it a child.
+    Busy,
+    /// Something besides the parent map and the sweep holds a reference.
+    Held,
 }
 
 /// The state write lock. Releasing it republishes whether any cutoffs remain.

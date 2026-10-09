@@ -11,25 +11,55 @@ impl ConcurrentRadixTreeCompressed {
         self.sweep_stale_children();
     }
 
-    pub(super) fn sweep_stale_children(&self) {
-        // Free expired retired snapshots first so their child `Arc`s are gone.
-        NodeChildren::drain_graveyard(usize::MAX);
+    /// Unlinks holder-less, childless leaves reachable from the root or a branch anchor.
+    ///
+    /// One BFS from the root and every anchor visits children by reference under the
+    /// walk's pin. It records an edge only for a holder-less child, and enqueues (clones)
+    /// only children that have children of their own. The unlink phase goes deepest-first:
+    /// an unlocked pre-check skips candidates that are covered or have children again,
+    /// and `remove_child_if_stale_leaf` re-validates under the parent's exclusive gate, a
+    /// child `try_write`, and the exact live strong count. A holder-less internal node
+    /// whose children were all unlinked earlier in the pass passes the pre-check when its
+    /// turn comes, so a cascade completes in one pass. Anchors are never unlinked.
+    ///
+    /// The walk recounts linked and holder-less blocks exactly; the reclamation estimates
+    /// are overwritten with those counts minus what was unlinked.
+    pub(super) fn sweep_stale_children(&self) -> SweepOutcome {
+        let started = std::time::Instant::now();
+        // Free some expired garbage first so its child `Arc`s are gone. Leftovers keep
+        // their children's `retired_snapshot_refs` counted, which the strong-count check
+        // subtracts, so a bounded drain only delays unlinks it would block.
+        NodeChildren::drain_graveyard(GRAVEYARD_NODES_PER_TASK);
+
         let mut queue = VecDeque::from([self.root.clone()]);
-        let mut edges = Vec::new();
+        queue.extend(self.anchor_nodes.iter().map(|entry| entry.value().clone()));
+        let mut candidates = Vec::new();
+        let mut outcome = SweepOutcome::default();
 
         let mut guard = crossbeam_epoch::pin();
         let mut visited = 0usize;
         while let Some(parent) = queue.pop_front() {
-            let children = parent.child_edges_snapshot();
-            for (key, child) in children {
-                queue.push_back(child.clone());
-                edges.push(CleanupEdge {
-                    parent: Arc::downgrade(&parent),
-                    key,
-                    child: Arc::downgrade(&child),
-                });
-            }
-            // Let the epoch advance during long walks; child loads above nest in `guard`.
+            let mut weak_parent = None;
+            parent.for_each_child(&guard, |key, child| {
+                let (len, holder_less) = child.sweep_probe();
+                outcome.nodes += 1;
+                outcome.linked += len as u64;
+                if holder_less {
+                    outcome.dead += len as u64;
+                    candidates.push(CleanupEdge {
+                        parent: weak_parent
+                            .get_or_insert_with(|| Arc::downgrade(&parent))
+                            .clone(),
+                        key,
+                        child: Arc::downgrade(child),
+                    });
+                }
+                if child.has_children_in(&guard) {
+                    queue.push_back(child.clone());
+                }
+            });
+            // Let the epoch advance during long walks. The queue owns its `Arc`s, so no
+            // borrow outlives the pin.
             visited += 1;
             if visited.is_multiple_of(64) {
                 guard.repin();
@@ -37,15 +67,28 @@ impl ConcurrentRadixTreeCompressed {
         }
         drop(guard);
 
-        for edge in edges.into_iter().rev() {
-            let Some(parent) = edge.parent.upgrade() else {
+        outcome.candidates = candidates.len() as u64;
+        for edge in candidates.into_iter().rev() {
+            let (Some(parent), Some(child)) = (edge.parent.upgrade(), edge.child.upgrade()) else {
                 continue;
             };
-            let Some(child) = edge.child.upgrade() else {
+            if !child.looks_reclaimable() {
+                outcome.skipped_busy += 1;
                 continue;
-            };
-            parent.remove_child_if_stale_leaf(edge.key, &child);
+            }
+            match parent.remove_child_if_stale_leaf(edge.key, &child) {
+                StaleLeafOutcome::Unlinked { edge_len } => {
+                    outcome.reclaimed_nodes += 1;
+                    outcome.reclaimed_blocks += edge_len as u64;
+                }
+                StaleLeafOutcome::Held => outcome.skipped_held += 1,
+                StaleLeafOutcome::Busy => outcome.skipped_busy += 1,
+                StaleLeafOutcome::Detached => {}
+            }
         }
+
+        self.reclaim.finish_sweep(started, &outcome);
+        outcome
     }
 
     /// Apply a remove operation (eviction).
@@ -122,18 +165,19 @@ impl ConcurrentRadixTreeCompressed {
                 // that coverage behind.
                 let run =
                     lookup.run_naming(worker.rank, &block_hashes[index..], node, stale_origin);
-                if let Some((consumed, stale_hashes)) = node.remove_worker_for_leading_hashes(
+                if let Some(removal) = node.remove_worker_for_leading_hashes(
                     worker.slot,
                     &block_hashes[index..index + run],
                 ) {
+                    lookup.tally.dead += removal.dead_blocks as i64;
                     self.remove_lookup_hashes_naming(
                         lookup,
                         worker.rank,
-                        &stale_hashes,
+                        &removal.stale_hashes,
                         node,
                         stale_origin,
                     );
-                    index += consumed;
+                    index += removal.consumed;
                     break;
                 }
 
@@ -221,7 +265,7 @@ impl ConcurrentRadixTreeCompressed {
         self.erase_lane_lookups(lookup, WorkerRemovalTarget::DpRank(worker));
         let slot = self.slots.table(&crossbeam_epoch::pin()).slot_of(worker);
         if let Some(slot) = slot {
-            self.clear_rank_slot(worker, slot);
+            self.clear_rank_slot(worker, slot, &mut lookup.tally.dead);
         }
         // A removal on another lane may have unmapped this slot or, if the rank has stored
         // since, an earlier one. Its sweep drops that coverage; wait for it.
@@ -231,8 +275,14 @@ impl ConcurrentRadixTreeCompressed {
 
     /// Clears `slot` from the tree for as long as it is still `worker`'s. Returns false
     /// once a removal has unmapped it; that removal sweeps the rest before releasing it.
-    pub(super) fn clear_rank_slot(&self, worker: WorkerWithDpRank, slot: Slot) -> bool {
-        self.sweep_slots(&SlotSet::from_iter([slot]), |_, table| {
+    /// Adds the blocks of nodes it leaves holder-less to `dead`.
+    pub(super) fn clear_rank_slot(
+        &self,
+        worker: WorkerWithDpRank,
+        slot: Slot,
+        dead: &mut i64,
+    ) -> bool {
+        self.sweep_slots(&SlotSet::from_iter([slot]), dead, |_, table| {
             table.slot_of(worker) == Some(slot)
         })
     }
@@ -259,7 +309,11 @@ impl ConcurrentRadixTreeCompressed {
             // Events on other lanes that resolved a slot before the unmap may still be
             // writing its bits; let them finish so the sweep below sees every bit.
             wait_for_pinned_threads();
-            self.sweep_slots(&slots.iter().copied().collect(), |_, _| true);
+            self.sweep_slots(
+                &slots.iter().copied().collect(),
+                &mut lookup.tally.dead,
+                |_, _| true,
+            );
             self.slots.release(slots);
         }
         // A removal on another lane may have unmapped some of these ranks first; return
@@ -270,10 +324,12 @@ impl ConcurrentRadixTreeCompressed {
     /// Clears `slots` from every node reachable from the root or an anchor, stopping
     /// with `false` as soon as `proceed` rejects a node. `proceed` gets the slot table
     /// current under the pin that stays held while the node is cleared, so a check
-    /// against it holds back the release of any slot it sees mapped.
+    /// against it holds back the release of any slot it sees mapped. Adds the blocks of
+    /// nodes it leaves holder-less to `dead`.
     pub(super) fn sweep_slots(
         &self,
         slots: &SlotSet,
+        dead: &mut i64,
         mut proceed: impl FnMut(&SharedNode, &SlotTable) -> bool,
     ) -> bool {
         let mut queue = VecDeque::new();
@@ -299,7 +355,9 @@ impl ConcurrentRadixTreeCompressed {
             if !proceed(&node, self.slots.table(&guard)) {
                 return false;
             }
-            queue.extend(node.remove_slots_and_snapshot_children(slots));
+            let (children, dead_blocks) = node.remove_slots_and_snapshot_children(slots);
+            *dead += dead_blocks as i64;
+            queue.extend(children);
         }
         true
     }

@@ -116,6 +116,12 @@ impl FullCoverage {
         coverage
     }
 
+    /// Heap bytes of the overflow chunks past the inline words.
+    #[cfg(any(test, feature = "bench"))]
+    pub(super) fn overflow_bytes(&self) -> usize {
+        self.chunks().count() * size_of::<CoverageChunk>()
+    }
+
     fn chunks(&self) -> impl Iterator<Item = &CoverageChunk> {
         std::iter::successors(self.overflow.get().map(Box::as_ref), |chunk| {
             chunk.next.get().map(Box::as_ref)
