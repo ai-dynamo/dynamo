@@ -311,9 +311,12 @@ impl ArenaIndexC {
         let len = run.len();
         let o = at.offset;
         if o > len {
+            // A split moved our position. Follow the last position the rank holds,
+            // `o - 1`: the suffix holding it is alive, while position `o` may lie in a
+            // later suffix that has died since (nobody held it).
             let moved = run
                 .flag(SEALED)
-                .then(|| store.forward_for(run, o))
+                .then(|| store.forward_for(run, o - 1))
                 .flatten()
                 .filter(|forward| {
                     store.run(forward.suffix).generation.load(Ordering::Relaxed)
@@ -604,5 +607,41 @@ impl ArenaIndexC {
             Step::Placed { .. } => None,
             _ => panic!("append did not run"),
         })
+    }
+}
+
+#[cfg(test)]
+impl ArenaIndexC {
+    /// Continues a store for `rank` at `(run, offset)`, as if a planning step had just
+    /// placed the blocks before it there.
+    pub(super) fn probe_place_at(
+        &self,
+        lane: &mut CLane,
+        rank: WorkerWithDpRank,
+        run: u32,
+        offset: u32,
+        blocks: &[KvCacheStoredBlockData],
+    ) -> Result<bool, KvCacheEventError> {
+        let slot = self
+            .slots
+            .table(&crossbeam_epoch::pin())
+            .slot_of(rank)
+            .expect("rank has a slot");
+        let CLane {
+            ranks, free, tally, ..
+        } = lane;
+        let lookup = ranks.entry(rank).or_default();
+        self.place(lookup, slot, Pos { run, offset }, blocks, free, tally)
+    }
+
+    /// Splits `run` at `at` under its locks, as a prefix-cap split would.
+    pub(super) fn probe_split(&self, run: u32, at: u32, lane: &mut CLane) {
+        let header = self.store.run(run);
+        let _gate = header.gate.write();
+        let _state = header.state.write();
+        self.store
+            .split_run(run, at, &mut lane.free, &self.store)
+            .unwrap();
+        header.bump_version();
     }
 }

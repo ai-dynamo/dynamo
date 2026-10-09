@@ -558,7 +558,7 @@ impl Storage {
             );
             return Ok(true);
         }
-        let grown = (capacity * 2).clamp(CUTOFF_MIN_CAP, PARTIAL_CAP);
+        let grown = (capacity * 2).clamp(CUTOFF_MIN_CAP.min(PARTIAL_CAP), PARTIAL_CAP);
         let block = self.arena.alloc(1 + grown, false)?;
         let words = self.arena.slice(block.addr, 1 + grown);
         if table != NONE {

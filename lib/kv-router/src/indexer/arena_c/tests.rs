@@ -428,6 +428,41 @@ fn moved_entries_resolve_through_forwards_and_compress_on_use() {
     rig.check();
 }
 
+/// A store that has placed blocks up to `(run, 3)` continues after `run` is split at 3,
+/// the suffix dies, and `run` is split again at 2: position 3 now has no live run, so the
+/// store follows its last held position (2) into the second suffix and continues there.
+#[test]
+fn a_store_mid_placement_follows_its_last_held_position_through_two_splits() {
+    let mut rig = Rig::new(1);
+    let long = [1, 2, 3, 4, 5, 6];
+    rig.store_all(rank(1), &long);
+    rig.store(rank(2), &long, 0, 3).unwrap();
+    let run_id = rig.pos(rank(1), &long, 0).run();
+    {
+        let (index, lane) = rig.split(rank(1));
+        index.probe_split(run_id, 3, lane);
+    }
+    // The first suffix [4, 5, 6] loses its only holder and unlinks.
+    rig.remove(rank(1), &long, &[3]);
+    assert_eq!(rig.shape().runs_live, 1);
+    {
+        let (index, lane) = rig.split(rank(1));
+        index.probe_split(run_id, 2, lane);
+    }
+    // Rank 2 continues with block 9 at position 3 of the original run.
+    let branch = [1, 2, 3, 9];
+    let blocks = stored_blocks_with_sequence_hashes(&locals(&[9]), &seqs(&branch)[3..4]);
+    let (index, lane) = rig.split(rank(2));
+    assert!(
+        index
+            .probe_place_at(lane, rank(2), run_id, 3, &blocks)
+            .unwrap()
+    );
+    assert_eq!(rig.score(rank(2), &branch), 4);
+    assert_eq!(rig.score(rank(1), &branch), 3);
+    rig.check();
+}
+
 #[test]
 fn removal_past_a_split_follows_the_forward() {
     let mut rig = Rig::new(2);
@@ -651,79 +686,77 @@ fn freed_ids_are_not_reissued_while_a_reader_is_pinned() {
 
 #[test]
 fn root_table_retirement_keeps_old_tables_readable_under_a_pin() {
-    let rig = std::sync::Mutex::new(Rig::new(1));
+    let index = ArenaIndexC::new();
+    let mut lane = index.new_lane();
+    let mut id = 0;
+    let mut store_root = |index: &ArenaIndexC, lane: &mut CLane, head: u64| {
+        id += 1;
+        index
+            .apply_event(lane, stored(rank(1), id, &[head], 0, 1), None)
+            .unwrap();
+    };
     let first: Vec<u64> = (1..=10).collect();
     for &head in &first {
-        rig.lock().unwrap().store_all(rank(1), &[head]);
+        store_root(&index, &mut lane, head);
     }
-    let root_table = |rig: &Rig| rig.index.store.run(ROOT).children.load(Ordering::Acquire);
-    let old = root_table(&rig.lock().unwrap());
+    let root_table = |index: &ArenaIndexC| index.store.run(ROOT).children.load(Ordering::Acquire);
+    let old = root_table(&index);
 
     let (looked_tx, looked_rx) = std::sync::mpsc::channel::<()>();
     let (grown_tx, grown_rx) = std::sync::mpsc::channel::<()>();
     thread::scope(|scope| {
-        let index_ptr = {
-            let rig = rig.lock().unwrap();
-            &rig.index as *const ArenaIndexC as usize
-        };
-        let first = &first;
+        let (index, first) = (&index, &first);
         let reader = scope.spawn(move || {
             let _pin = crossbeam_epoch::pin();
-            // SAFETY: the rig outlives the scope and its index never moves.
-            let index = unsafe { &*(index_ptr as *const ArenaIndexC) };
             let table = index.store.table(old);
-            let before: Vec<Option<u64>> = first
-                .iter()
-                .map(|&head| table.find(child_key(0, head)))
-                .collect();
+            let lookups = || -> Vec<Option<u64>> {
+                first
+                    .iter()
+                    .map(|&head| table.find(child_key(0, head)))
+                    .collect()
+            };
+            let before = lookups();
             looked_tx.send(()).unwrap();
             grown_rx.recv().unwrap();
             // The table was replaced twice meanwhile, yet reads the same under the pin.
-            let after: Vec<Option<u64>> = first
-                .iter()
-                .map(|&head| table.find(child_key(0, head)))
-                .collect();
-            assert_eq!(before, after);
+            assert_eq!(before, lookups());
             assert!(before.iter().all(Option::is_some));
         });
         looked_rx.recv().unwrap();
-        {
-            let mut rig = rig.lock().unwrap();
-            let mut tables = FxHashSet::default();
-            tables.insert(old);
-            for head in 1000..1300u64 {
-                rig.store_all(rank(1), &[head]);
-                tables.insert(root_table(&rig));
-            }
-            assert!(tables.len() >= 3, "ROOT's table grew twice");
-            rig.flush_lanes();
-            for _ in 0..256 {
-                crossbeam_epoch::pin().flush();
-            }
-            assert!(
-                !rig.index
-                    .store
-                    .arena
-                    .free_blocks()
-                    .iter()
-                    .any(|block| block.addr == old),
-                "a retired table is reused only after the pinned reader leaves"
-            );
+        let mut tables = FxHashSet::default();
+        tables.insert(old);
+        for head in 1000..1300u64 {
+            store_root(index, &mut lane, head);
+            tables.insert(root_table(index));
         }
+        assert!(tables.len() >= 3, "ROOT's table grew twice");
+        index.flush_frees(&mut lane);
+        for _ in 0..256 {
+            crossbeam_epoch::pin().flush();
+        }
+        assert!(
+            !index
+                .store
+                .arena
+                .free_blocks()
+                .iter()
+                .any(|block| block.addr == old),
+            "a retired table is reused only after the pinned reader leaves"
+        );
         grown_tx.send(()).unwrap();
         reader.join().unwrap();
     });
-    let mut rig = rig.into_inner().unwrap();
-    rig.quiesce();
+    index.probe_quiesce(&mut [&mut lane]);
     assert!(
-        rig.index
+        index
             .store
             .arena
             .free_blocks()
             .iter()
-            .any(|b| b.addr == old)
+            .any(|block| block.addr == old)
     );
-    rig.check();
+    index.probe_check(&[&lane]).unwrap();
+    index.flush_frees(&mut lane);
 }
 
 // ----------------------------------------------------------------------------
