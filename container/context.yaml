@@ -150,7 +150,7 @@ sglang:
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04
     runtime_image: intel/deep-learning-essentials
     runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
-    sglang_ref: v0.5.21
+    sglang_ref: v0.5.11
     sglang_git_url: https://github.com/sgl-project/sglang.git
     sglang_kernel_ref: 3fbd4d33721ce3cf818b1cec3978043951406f10
     sglang_kernel_git_url: https://github.com/sgl-project/sgl-kernel-xpu.git

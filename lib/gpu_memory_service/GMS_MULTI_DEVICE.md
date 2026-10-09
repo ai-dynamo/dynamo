@@ -24,6 +24,7 @@ This design introduces a **device-agnostic VMM abstraction layer** so that Intel
 | G10 | NixL staging backend for XPU | ⬜ Phase 3 |
 | G11 | Multi-device XPU — one GMS server per card, TP > 1 ranks | ✅ Phase 3 |
 
+Also need to ensure the dynamo XPU docker file updated for XPU GMS.
 
 ---
 
