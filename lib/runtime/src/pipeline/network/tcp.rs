@@ -186,6 +186,10 @@ pub struct TcpStreamConnectionInfo {
     pub subject: String,
     pub context: String,
     pub stream_type: StreamType,
+    /// This server can acknowledge a response prologue before worker admission.
+    /// The worker opts in by echoing this field in its call-home handshake.
+    #[serde(default)]
+    pub response_ack: bool,
 }
 
 impl From<TcpStreamConnectionInfo> for ConnectionInfo {
@@ -227,6 +231,9 @@ impl TryFrom<ConnectionInfo> for TcpStreamConnectionInfo {
 struct CallHomeHandshake {
     subject: String,
     stream_type: StreamType,
+    /// Request confirmation that discovery removal can no longer cancel setup.
+    #[serde(default)]
+    response_ack: bool,
 }
 
 #[cfg(test)]

@@ -539,6 +539,7 @@ impl ResponseService for TcpStreamServer {
                     subject: sender_subject,
                     context: options.context.id().to_string(),
                     stream_type: StreamType::Request,
+                    response_ack: false,
                 }
                 .into(),
                 pending_sender_rx,
@@ -587,6 +588,7 @@ impl ResponseService for TcpStreamServer {
                     subject: receiver_subject,
                     context: options.context.id().to_string(),
                     stream_type: StreamType::Response,
+                    response_ack: true,
                 }
                 .into(),
                 pending_recver_rx,
@@ -984,8 +986,14 @@ async fn tcp_listener(
                 process_request_stream(handshake.subject, state, framed_reader, framed_writer).await
             }
             StreamType::Response => {
-                process_response_stream(handshake.subject, state, framed_reader, framed_writer)
-                    .await
+                process_response_stream(
+                    handshake.subject,
+                    handshake.response_ack,
+                    state,
+                    framed_reader,
+                    framed_writer,
+                )
+                .await
             }
         }
     }
@@ -1119,6 +1127,7 @@ async fn tcp_listener(
 
     async fn process_response_stream(
         subject: String,
+        response_ack: bool,
         state: Arc<Mutex<State>>,
         mut reader: FramedRead<BoxRead, TwoPartCodec>,
         mut writer: FramedWrite<BoxWrite, TwoPartCodec>,
@@ -1247,6 +1256,19 @@ async fn tcp_listener(
             return Err(error!(
                 "The requester of the stream has been dropped before the connection was established"
             ));
+        }
+
+        if response_ack {
+            // accept() serialized with discovery removal, and the requester now
+            // owns the receiver. A worker may safely admit work after this ACK.
+            time::timeout(
+                Duration::from_secs(1),
+                writer.send(TwoPartMessage::from_header(Bytes::from_static(
+                    br#"{"accepted":true}"#,
+                ))),
+            )
+            .await
+            .map_err(|_| error!("Timed out acknowledging response acceptance"))??;
         }
 
         let (control_tx, control_rx) = mpsc::channel::<ControlMessage>(1);
@@ -2479,6 +2501,7 @@ mod tests {
         let handshake = CallHomeHandshake {
             subject: tcp_info.subject,
             stream_type: StreamType::Response,
+            response_ack: false,
         };
         framed_writer
             .send(TwoPartMessage::from_header(
@@ -2570,6 +2593,7 @@ mod tests {
         let handshake = CallHomeHandshake {
             subject: subject.clone(),
             stream_type: StreamType::Response,
+            response_ack: false,
         };
         framed_writer
             .send(TwoPartMessage::from_header(
@@ -2603,6 +2627,139 @@ mod tests {
         assert!(!state.rx_cancellations.contains_key(&subject));
         assert!(!state.subject_instance.contains_key(&subject));
         assert!(!state.instance_subjects.contains_key(&instance));
+    }
+
+    #[tokio::test]
+    async fn response_callback_ack_preserves_delivery_after_worker_removal() {
+        let server = test_server().await;
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+        let (info, provider) = server
+            .register(options)
+            .await
+            .recv_stream
+            .unwrap()
+            .into_parts();
+        let info: TcpStreamConnectionInfo = info.try_into().unwrap();
+        assert!(
+            info.response_ack,
+            "response server must advertise ACK support"
+        );
+        let instance = make_eid("ns", "comp", "generate", 44);
+        assert!(
+            server
+                .associate_instance(&info.subject, None, &instance)
+                .await
+        );
+        let stream = TcpStream::connect(&info.address).await.unwrap();
+        let (reader, writer) = tokio::io::split(stream);
+        let mut reader = FramedRead::new(reader, TwoPartCodec::default());
+        let mut writer = FramedWrite::new(writer, TwoPartCodec::default());
+        for header in [
+            serde_json::json!({"subject": info.subject, "stream_type": "response", "response_ack": true}),
+            serde_json::json!({"error": null}),
+        ] {
+            writer
+                .send(TwoPartMessage::from_header(
+                    serde_json::to_vec(&header).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+        }
+        let ack = time::timeout(Duration::from_secs(1), reader.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(ack.header().unwrap()).unwrap(),
+            serde_json::json!({"accepted": true})
+        );
+        assert_eq!(server.cancel_instance_streams(&instance).await, 0);
+        let mut receiver = provider.await.unwrap().unwrap();
+        writer
+            .send(TwoPartMessage::from_data(Bytes::from_static(
+                b"accepted response",
+            )))
+            .await
+            .unwrap();
+        assert_eq!(
+            time::timeout(Duration::from_secs(1), receiver.rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            "accepted response"
+        );
+        writer
+            .send(TwoPartMessage::from_header(Bytes::from_static(
+                br#""sentinel""#,
+            )))
+            .await
+            .unwrap();
+        assert!(
+            time::timeout(Duration::from_secs(1), receiver.rx.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Delay delivery of the callback while the worker has successfully flushed
+    /// both setup frames. This is the admission/removal race seen by Cyborg.
+    #[tokio::test]
+    async fn response_callback_removal_before_delivery_cannot_be_acknowledged() {
+        let server = test_server().await;
+        let (subject, provider) = register_and_get_subject(&server).await;
+        let instance = make_eid("ns", "comp", "generate", 43);
+        assert!(server.associate_instance(&subject, None, &instance).await);
+
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let worker = TcpStream::connect(proxy.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (buffered, _) = proxy.accept().await.unwrap();
+        let mut worker = FramedWrite::new(worker, TwoPartCodec::default());
+        let mut buffered = FramedRead::new(buffered, TwoPartCodec::default());
+        for header in [
+            serde_json::json!({"subject": subject, "stream_type": "response", "response_ack": true}),
+            serde_json::json!({"error": null}),
+        ] {
+            worker
+                .send(TwoPartMessage::from_header(
+                    serde_json::to_vec(&header).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+        }
+        let handshake = buffered.next().await.unwrap().unwrap();
+        let prologue = buffered.next().await.unwrap().unwrap();
+        // Both worker writes succeeded, so the old Cyborg code admits the request.
+        server.cancel_instance_streams(&instance).await;
+        let downstream = TcpStream::connect(&server.address).await.unwrap();
+        let (reader, writer) = tokio::io::split(downstream);
+        let mut downstream = FramedWrite::new(writer, TwoPartCodec::default());
+        let mut replies = FramedRead::new(reader, TwoPartCodec::default());
+        downstream.feed(handshake).await.unwrap();
+        downstream.send(prologue).await.unwrap();
+        let result = time::timeout(Duration::from_secs(1), provider)
+            .await
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "removal must still cancel pending callbacks"
+        );
+        let reply = time::timeout(Duration::from_secs(1), replies.next())
+            .await
+            .unwrap();
+        assert!(
+            matches!(reply, None | Some(Err(_))),
+            "a rejected callback must not receive an acceptance ACK"
+        );
     }
 
     /// Cover both orderings at the boundary between a pending handshake and an
@@ -2758,6 +2915,7 @@ mod tests {
         let handshake = CallHomeHandshake {
             subject: tcp_info.subject,
             stream_type: StreamType::Response,
+            response_ack: false,
         };
         framed_writer
             .send(TwoPartMessage::from_header(
@@ -2815,6 +2973,7 @@ mod tests {
         let handshake = CallHomeHandshake {
             subject: tcp_info.subject,
             stream_type: StreamType::Response,
+            response_ack: false,
         };
         framed_writer
             .send(TwoPartMessage::from_header(
@@ -3082,6 +3241,7 @@ mod tests {
         let handshake = super::CallHomeHandshake {
             subject: tcp_info.subject.clone(),
             stream_type: StreamType::Request,
+            response_ack: false,
         };
         let handshake_bytes = serde_json::to_vec(&handshake).unwrap();
         framed_writer
