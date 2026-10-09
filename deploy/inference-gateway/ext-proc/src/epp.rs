@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
@@ -500,7 +500,7 @@ impl Router {
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Prefill reservation failed: {e}"))
+            .context("Prefill reservation failed")
     }
 
     /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
@@ -1462,7 +1462,8 @@ impl EndpointPicker for Router {
         // Try prefill routing first (disaggregated mode).
         //
         // If the prefill router is not activated (no prefill workers discovered yet, or the inner
-        // router has been deactivated), fall back to aggregated routing.
+        // router has been deactivated), fall back to aggregated routing. A prefill refusal is
+        // final, as on the Frontend: falling back would bypass the prefill limits.
         let prefill_booking = self
             .route_prefill(
                 &format!("epp-prefill/{reservation_id}"),
@@ -1478,13 +1479,21 @@ impl EndpointPicker for Router {
 
         let is_disaggregated = match &prefill_booking {
             Ok(_) => true,
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "Prefill routing failed; falling back to aggregated mode"
-                );
-                false
-            }
+            Err(e) => match classify_router_error(e) {
+                rejection @ (RouterRejection::Overloaded
+                | RouterRejection::QueueRejected
+                | RouterRejection::DeadlineExceeded) => {
+                    record_rejection(rejection, e);
+                    return Err(rejection.into_pick_error());
+                }
+                _ => {
+                    tracing::debug!(
+                        error = %format_args!("{e:#}"),
+                        "Prefill routing failed; falling back to aggregated mode"
+                    );
+                    false
+                }
+            },
         };
 
         let (decode_worker, _overlap) = self
