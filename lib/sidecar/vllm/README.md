@@ -122,7 +122,7 @@ to that port to trusted consumers because KV events contain request token IDs.
 
 ### Native Generate compatibility
 
-`vllm-proto 0.3.0` does not include the native sampling JSON extension proposed in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421), so the sidecar projects typed controls into the gRPC request and advertises `vllm_inference_v1_generate`. During rolling upgrades, v1.4 frontends can supply the legacy `extra_args.vllm_tito.sampling_params` envelope; canonical typed fields take precedence when both are present. Requests that rely on distinctions proto 0.3 cannot represent, such as explicit `top_k=0`, `top_k=-1`, or `min_p=0`, fail explicitly instead of silently changing sampling behavior.
+The typed gRPC schema does not include the native sampling JSON extension proposed in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421), so the sidecar projects typed controls into the gRPC request and advertises `vllm_inference_v1_generate`. During rolling upgrades, v1.4 frontends can supply the legacy `extra_args.vllm_tito.sampling_params` envelope; canonical typed fields take precedence when both are present. The 0.5.0 schema preserves explicit `top_k=0`, `top_k=-1`, and `min_p=0` separately from omission; older native servers retain their earlier interpretation of these values.
 
 Prefill and encode use their canonical one-token request and do not apply decode sampling controls.
 
@@ -142,8 +142,7 @@ normal plugin discovery; the latter two do not install Omni.
 Start vLLM with its gRPC listener:
 
 ```bash
-vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051 \
-  --reasoning-parser none
+vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
 ```
 
 This listener is unauthenticated and plaintext. Keep colocated deployments on
@@ -188,20 +187,46 @@ the response twice.
 When these flags and environment variables are absent, the sidecar advertises no
 parsers. It does not infer Dynamo parser settings from vLLM's native parser names.
 
-Dynamo parsers need vLLM to run without its own reasoning parser, so start
-`vllm-rs` with `--reasoning-parser none`, as the launch scripts and deploy
-examples do. vLLM's reasoning parser decides where structured output starts from
-per-request reasoning metadata (`reasoning_ended` / `reasoning_parser_kwargs`)
-that the gRPC protocol cannot carry. If a Dynamo parser flag is set and vLLM
-reports its own reasoning parser, the sidecar exits at startup. With no engine
-reasoning parser, vLLM never reads that metadata, so the sidecar removes it, and
-vLLM applies structured output, such as a JSON schema or a required or named
-`tool_choice`, from the first output token. If vLLM runs its own reasoning
-parser, a request that carries this metadata still fails.
+For tool-closing tokens that are also EOS tokens, the sidecar requests native
+token IDs and uses Dynamo's frontend decoder to preserve the delimiter for
+parsing. vLLM still stops generation on that token. Other requests use native
+decoded text, including empty chunks while stop strings are buffered.
 
-Requests that require visible stop-token preservation or `max_thinking_tokens`
-still fail explicitly in the gRPC request converter. These limitations affect
-some tool terminators, such as `harmony` tool calls.
+The launch scripts and deploy examples use vLLM's normal reasoning-parser
+selection. When vLLM runs a reasoning parser, Dynamo forwards per-request
+thinking settings and advertises that tool grammars exclude the reasoning
+phase, so the engine decides when to apply them. Dynamo still parses the
+resulting tokens into reasoning and tool-call responses.
+
+For full-output grammars that already cover the reasoning phase, explicitly
+start `vllm-rs` with `--reasoning-parser none` instead. The engine then enforces
+the grammar from the first generated token and ignores the transitional gate.
+
+The sidecar forwards the generation controls added in `vllm-proto` 0.5.0:
+
+- Transitional engine reasoning gates: Dynamo's existing `reasoning_ended` and
+  `reasoning_parser_kwargs.chat_template_kwargs` map to the single
+  `GenerateRequest.engine_reasoning_gate`. When an engine reasoning parser is
+  configured, Dynamo advertises that its tool grammar excludes reasoning.
+  Leave vLLM's `enable_in_reasoning` disabled in this mode.
+- `max_thinking_tokens`, including zero, as `StoppingCriteria.thinking_token_budget`.
+  The native engine must be configured to enforce thinking budgets.
+- `bad_words_token_ids` as forbidden token sequences.
+- Explicit `top_k=-1`/`0` and `min_p=0` to disable model defaults. Omission
+  remains distinct; `top_p=0` is invalid and `top_p=1` disables that filter.
+
+These are additive wire changes. Older native servers accept requests and
+ignore unknown fields; they do not enforce the new reasoning controls, thinking
+budgets or forbidden sequences, and retain their old interpretation of explicit
+sampling zeros. A server implementing the 0.5.0 schema is needed for those
+behaviors. Future additive response fields are ignored. Dynamo's existing
+frontend/worker request envelope is unchanged; no protocol-version flag is
+required.
+
+Terminal cached-token counts are returned as `usage.prompt_tokens_details.cached_tokens`.
+A reported zero is preserved; older servers that omit the count leave the
+usage detail absent.
+
 
 ### RL workflows
 

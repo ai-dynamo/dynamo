@@ -350,7 +350,9 @@ impl PreparedRequest {
                 stop_reason: stop_token.map(pb::finish_info::StopReason::StopTokenId),
                 kv_transfer_params: (self.mode == ServerMode::Prefill).then(|| self.handoff()),
                 ec_transfer_params: None,
+                num_cached_tokens: None,
             }),
+            ..Default::default()
         }
     }
 

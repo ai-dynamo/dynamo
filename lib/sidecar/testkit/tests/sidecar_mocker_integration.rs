@@ -747,3 +747,164 @@ async fn sglang_malformed_terminal_fails_then_recovers() {
     })
     .await;
 }
+
+// Regression: the gate's false/zero values and exact forbidden sequences can
+// disappear at the Dynamo-to-native protobuf boundary.
+#[tokio::test]
+async fn vllm_generation_controls_preserve_values_over_grpc() {
+    bounded("vLLM engine generation controls", async {
+        use dynamo_vllm_sidecar::{VllmSidecarEngine, proto as pb};
+        use serde_json::json;
+        let controller = Controller::<vllm_fixture::Adapter>::default();
+        let mut fixture =
+            vllm_fixture::Fixture::start(controller.clone(), FixtureConfig::default()).await;
+        fixture.set_reasoning_parser("deepseek_r1");
+        let endpoint = fixture.server.endpoint();
+        let (engine, _) = tokio::task::spawn_blocking(move || {
+            VllmSidecarEngine::try_from_args(vec![
+                "sidecar".into(),
+                "--grpc-endpoint".into(),
+                endpoint,
+                "--dyn-reasoning-parser".into(),
+                "qwen3".into(),
+            ])
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let config = engine.start(0).await.unwrap();
+        assert_eq!(
+            config
+                .runtime_data
+                .get("tool_call_structural_tag_excludes_reasoning"),
+            Some(&json!(true))
+        );
+        for control in [
+            "default",
+            "reasoning_parser_kwargs",
+            "reasoning_ended",
+            "thinking_token_budget",
+            "bad_words_token_ids",
+            "top_k",
+            "min_p",
+        ] {
+            let mut req = request("mocker-model", vec![11, 22, 33], 1);
+            match control {
+                "reasoning_parser_kwargs" => {
+                    req.extra_args = Some(json!({
+                        "reasoning_parser_kwargs": {"chat_template_kwargs": {"enable_thinking": false}}
+                    }))
+                }
+                "reasoning_ended" => req.extra_args = Some(json!({"reasoning_ended": false})),
+                "thinking_token_budget" => req.stop_conditions.max_thinking_tokens = Some(0),
+                "bad_words_token_ids" => {
+                    req.extra_args =
+                        Some(json!({"sampling_options": {"bad_words_token_ids": [[7, 11], [0]]}}))
+                }
+                "top_k" => req.sampling_options.top_k = Some(-1),
+                "min_p" => req.sampling_options.min_p = Some(0.0),
+                _ => {}
+            }
+            let ctx = mock_context();
+            let handle = controller.request(ctx.id(), RequestPlan::default());
+            let outputs = collect(&engine, req, GenerateContext::new(ctx, None)).await;
+            terminal(outputs, &handle.tokens(), 3, FinishReason::Length);
+            let wire = handle.native_request().expect("native request");
+            match control {
+                "reasoning_parser_kwargs" => assert_eq!(
+                    wire.engine_reasoning_gate
+                        .as_ref().unwrap()
+                        .chat_template_kwargs.as_ref().unwrap()
+                        .fields["enable_thinking"].kind,
+                    Some(prost_types_v14::value::Kind::BoolValue(false)),
+                ),
+                "reasoning_ended" => assert_eq!(
+                    wire.engine_reasoning_gate.as_ref().unwrap().reasoning_ended,
+                    Some(false)
+                ),
+                "thinking_token_budget" => assert_eq!(
+                    wire.stopping.as_ref().unwrap().thinking_token_budget,
+                    Some(0)
+                ),
+                "bad_words_token_ids" => assert_eq!(
+                    wire.decoding.as_ref().unwrap().bad_words_token_ids,
+                    vec![
+                        pb::TokenIds { ids: vec![7, 11] },
+                        pb::TokenIds { ids: vec![0] }
+                    ]
+                ),
+                "top_k" => assert_eq!(wire.sampling.as_ref().unwrap().top_k, Some(0)),
+                "min_p" => assert_eq!(wire.sampling.as_ref().unwrap().min_p, Some(0.0)),
+                _ => {
+                    assert!(wire.engine_reasoning_gate.is_none());
+                    assert!(
+                        wire.stopping
+                            .as_ref()
+                            .unwrap()
+                            .thinking_token_budget
+                            .is_none()
+                    );
+                    let sampling = wire.sampling.as_ref().unwrap();
+                    assert_eq!(
+                        (sampling.top_k, sampling.top_p, sampling.min_p),
+                        (None, None, None)
+                    );
+                }
+            }
+        }
+        engine.cleanup().await.unwrap();
+        fixture.shutdown().await;
+    })
+    .await;
+}
+
+// Regression: native text strips tool-closing EOS tokens; exposing even empty
+// text bypasses the frontend decoder and loses the tool delimiter.
+#[tokio::test]
+async fn vllm_visible_stop_tokens_preserve_tool_delimiters() {
+    bounded("visible tool delimiter", async {
+        use dynamo_vllm_sidecar::proto as pb;
+        let control = Controller::<vllm_fixture::Adapter>::default();
+        let mut fixture =
+            vllm_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        fixture.respond(
+            ctx.id(),
+            vec![pb::GenerateResponse {
+                outputs: Some(pb::SequenceOutput {
+                    token_ids: vec![42],
+                    num_tokens: 1,
+                    finish_info: Some(pb::FinishInfo {
+                        num_output_tokens: 1,
+                        finish_reason: pb::finish_info::FinishReason::Stop as i32,
+                        stop_reason: Some(pb::finish_info::StopReason::EosTokenId(42)),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+        );
+        let mut req = request("mocker-model", vec![11, 22, 33], 1);
+        req.stop_conditions.stop_token_ids_visible = Some(vec![42]);
+        req.stop_conditions.stop_token_ids_hidden = Some(vec![2]);
+        req.output_options.skip_special_tokens = Some(false);
+        let outputs = collect(&engine, req, GenerateContext::new(ctx, None)).await;
+        assert!(
+            outputs
+                .iter()
+                .all(|output| output.as_ref().unwrap().text.is_none())
+        );
+        terminal(outputs, &[42], 3, FinishReason::Stop);
+        let wire = handle.native_request().unwrap();
+        assert_eq!(wire.stopping.unwrap().stop_token_ids, [2, 42]);
+        let response = wire.response.unwrap();
+        assert_eq!(response.output_text, Some(false));
+        assert!(response.output_token_ids);
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}

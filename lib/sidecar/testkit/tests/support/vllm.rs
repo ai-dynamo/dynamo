@@ -43,11 +43,16 @@ pub struct Fixture {
     pub server: TestServer,
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
     served_model_name: Arc<Mutex<Option<String>>>,
+    reasoning_parser: Arc<Mutex<String>>,
     readiness: watch::Sender<Option<bool>>,
     health_received: watch::Receiver<bool>,
 }
 
 impl Fixture {
+    pub fn set_reasoning_parser(&self, parser: &str) {
+        *self.reasoning_parser.lock().unwrap() = parser.to_owned();
+    }
+
     pub fn respond(&self, request_id: &str, responses: Vec<pb::GenerateResponse>) {
         assert!(
             self.scripted
@@ -83,11 +88,13 @@ impl SidecarFixture for Fixture {
         .unwrap();
         let scripted = Arc::new(Mutex::new(HashMap::new()));
         let served_model_name = Arc::new(Mutex::new(None));
+        let reasoning_parser = Arc::new(Mutex::new(String::new()));
         let controlled = ControlledService {
             inner: service.clone(),
             control,
             scripted: scripted.clone(),
             served_model_name: served_model_name.clone(),
+            reasoning_parser: reasoning_parser.clone(),
         };
         let control_service = controlled.clone();
         let health = tonic_health::server::HealthReporter::new();
@@ -127,6 +134,7 @@ impl SidecarFixture for Fixture {
             server,
             scripted,
             served_model_name,
+            reasoning_parser,
             readiness,
             health_received,
         }
@@ -350,6 +358,7 @@ struct ControlledService {
     control: Controller<Adapter>,
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
     served_model_name: Arc<Mutex<Option<String>>>,
+    reasoning_parser: Arc<Mutex<String>>,
 }
 
 impl ControlledService {
@@ -405,6 +414,7 @@ macro_rules! delegate_control {
                 if let Some(name) = self.served_model_name.lock().unwrap().as_ref() {
                     response.get_mut().served_model_name.clone_from(name);
                 }
+                response.get_mut().reasoning_parser.clone_from(&self.reasoning_parser.lock().unwrap());
                 Ok(response)
             }
 
@@ -423,6 +433,7 @@ macro_rules! delegate_control {
 delegate_control! {
     get_server_info(pb::GetServerInfoRequest) -> pb::ServerInfo;
     abort(pb::AbortRequest) -> pb::AbortResponse;
+    shutdown(pb::ShutdownRequest) -> pb::ShutdownResponse;
     load_lora(pb::LoadLoraRequest) -> pb::LoadLoraResponse;
     unload_lora(pb::UnloadLoraRequest) -> pb::UnloadLoraResponse;
     list_loras(pb::ListLorasRequest) -> pb::ListLorasResponse;
