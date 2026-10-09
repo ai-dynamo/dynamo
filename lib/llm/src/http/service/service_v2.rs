@@ -483,6 +483,7 @@ struct StateFlags {
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
     generate_endpoints_enabled: AtomicBool,
+    systemone_endpoints_enabled: AtomicBool,
     batch_endpoints_enabled: AtomicBool,
 }
 
@@ -504,6 +505,7 @@ impl StateFlags {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
             }
             EndpointType::Generate => self.generate_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::SystemOne => self.systemone_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Batch => self.batch_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
@@ -549,6 +551,9 @@ impl StateFlags {
             EndpointType::Generate => self
                 .generate_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            EndpointType::SystemOne => self
+                .systemone_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
             EndpointType::Batch => self
                 .batch_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
@@ -587,6 +592,7 @@ impl State {
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
                 generate_endpoints_enabled: AtomicBool::new(false),
+                systemone_endpoints_enabled: AtomicBool::new(false),
                 batch_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
@@ -640,6 +646,10 @@ impl State {
 
     pub(crate) fn systemone_request_timeout(&self) -> Duration {
         self.systemone_request_timeout
+    }
+
+    pub(crate) fn systemone_enabled(&self) -> bool {
+        self.frontend_api_config.systemone_enabled()
     }
 
     pub fn discovery(&self) -> Arc<dyn Discovery> {
@@ -1178,8 +1188,11 @@ impl HttpService {
     ///
     /// Batch API availability is configured when the service is built and cannot be changed here.
     pub fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) -> Result<()> {
-        if endpoint_type == EndpointType::Batch {
-            anyhow::bail!("batch endpoint availability is fixed when the HTTP service is built");
+        if matches!(endpoint_type, EndpointType::Batch | EndpointType::SystemOne) {
+            anyhow::bail!(
+                "{} endpoint availability is fixed when the HTTP service is built",
+                endpoint_type.as_str()
+            );
         }
 
         self.state.flags.set(&endpoint_type, enable);
@@ -1289,6 +1302,8 @@ pub(super) static SGLANG_ENABLE_GENERATE_ENV: &str = "DYN_SGLANG_ENABLE_GENERATE
 /// Environment variable to set the SGLang Generate endpoint path
 /// (default: `/generate`).
 pub(super) static HTTP_SVC_SGLANG_GENERATE_PATH_ENV: &str = "DYN_HTTP_SVC_SGLANG_GENERATE_PATH";
+/// Environment variable to set the System One endpoint path (default: `/v1/systemone`).
+pub(super) static HTTP_SVC_SYSTEMONE_PATH_ENV: &str = "DYN_HTTP_SVC_SYSTEMONE_PATH";
 fn validate_generate_route_path(path: &str) -> Result<()> {
     if !path.starts_with("/") {
         anyhow::bail!("Generate route path must start with '/': {path:?}");
@@ -1341,17 +1356,18 @@ impl HttpServiceConfigBuilder {
         let model_ready_metrics_prefix = metrics_config.prefix();
         let frontend_api_config = config.frontend_api_config.clone();
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
+        let systemone_enabled = frontend_api_config.systemone_enabled();
         let vllm_generate_enabled =
             config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
         let sglang_generate_enabled =
             config.enable_engine_apis || env_is_truthy(SGLANG_ENABLE_GENERATE_ENV);
-        let generate_engine_capabilities = [
-            vllm_generate_enabled.then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
-            sglang_generate_enabled.then_some(SGLANG_GENERATE_CAPABILITY),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        let mut generate_engine_capabilities = Vec::new();
+        if vllm_generate_enabled {
+            generate_engine_capabilities.push(VLLM_INFERENCE_V1_GENERATE_CAPABILITY);
+        }
+        if sglang_generate_enabled || systemone_enabled {
+            generate_engine_capabilities.push(SGLANG_GENERATE_CAPABILITY);
+        }
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -1403,8 +1419,9 @@ impl HttpServiceConfigBuilder {
         );
         state.flags.set(
             &EndpointType::Generate,
-            !generate_engine_capabilities.is_empty(),
+            vllm_generate_enabled || sglang_generate_enabled,
         );
+        state.flags.set(&EndpointType::SystemOne, systemone_enabled);
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -1513,6 +1530,7 @@ impl HttpServiceConfigBuilder {
             anthropic_endpoints_enabled,
             vllm_generate_enabled,
             sglang_generate_enabled,
+            systemone_enabled,
             config.enable_batch_endpoints,
         )?;
         let mut inference_router = axum::Router::new();
@@ -1663,6 +1681,7 @@ impl HttpServiceConfigBuilder {
         enable_anthropic_endpoints: bool,
         vllm_generate_enabled: bool,
         sglang_generate_enabled: bool,
+        systemone_enabled: bool,
         enable_batch_endpoints: bool,
     ) -> Result<Vec<(Vec<RouteDoc>, axum::Router)>> {
         let mut routes = Vec::new();
@@ -1724,6 +1743,20 @@ impl HttpServiceConfigBuilder {
                 EndpointType::AnthropicMessages,
                 (anthropic_docs, anthropic_route),
             );
+        }
+
+        if systemone_enabled {
+            tracing::warn!("The Decisions and System One APIs are experimental.");
+            let path = var(HTTP_SVC_SYSTEMONE_PATH_ENV).ok();
+            if let Some(path) = path.as_deref() {
+                validate_generate_route_path(path)?;
+                anyhow::ensure!(
+                    path != super::systemone::DECISIONS_PATH,
+                    "System One route must not collide with /v1/decisions"
+                );
+            }
+            let (docs, route) = super::systemone::router(state.clone(), path);
+            endpoint_routes.insert(EndpointType::SystemOne, (docs, route));
         }
 
         if vllm_generate_enabled || sglang_generate_enabled {
@@ -2934,6 +2967,57 @@ mod tests {
                 }
             },
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn decisions_mount_both_routes_and_internal_sglang_capability() {
+        temp_env::with_vars(
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
+                (SGLANG_ENABLE_GENERATE_ENV, None),
+                (HTTP_SVC_SYSTEMONE_PATH_ENV, None),
+            ],
+            || {
+                let mut api = FrontendApiConfig::default();
+                api.set_systemone_enabled(true);
+                let service = HttpService::builder()
+                    .frontend_api_config(api)
+                    .build()
+                    .unwrap();
+
+                assert_eq!(
+                    service.generate_engine_capabilities(),
+                    vec![SGLANG_GENERATE_CAPABILITY]
+                );
+                assert!(service.model_endpoint_enabled(EndpointType::SystemOne));
+                assert!(!service.model_endpoint_enabled(EndpointType::Generate));
+                let routes = service
+                    .route_docs()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                assert!(routes.contains(&"POST /v1/systemone".to_string()));
+                assert!(routes.contains(&"POST /v1/decisions".to_string()));
+                assert!(!routes.contains(&"POST /generate".to_string()));
+                assert!(
+                    service
+                        .enable_model_endpoint(EndpointType::SystemOne, false)
+                        .is_err()
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn systemone_route_cannot_override_decisions() {
+        temp_env::with_var(HTTP_SVC_SYSTEMONE_PATH_ENV, Some("/v1/decisions"), || {
+            let mut api = FrontendApiConfig::default();
+            api.set_systemone_enabled(true);
+            let result = HttpService::builder().frontend_api_config(api).build();
+            assert!(result.is_err());
+        });
     }
 
     #[test]

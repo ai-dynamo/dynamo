@@ -725,6 +725,7 @@ mod tests {
 pub struct RouteDoc {
     method: axum::http::Method,
     path: String,
+    documentation_path: Option<&'static str>,
 }
 
 impl std::fmt::Display for RouteDoc {
@@ -738,6 +739,7 @@ impl RouteDoc {
         RouteDoc {
             method,
             path: path.into(),
+            documentation_path: None,
         }
     }
 
@@ -747,5 +749,14 @@ impl RouteDoc {
 
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    pub(crate) fn with_documentation_path(mut self, path: &'static str) -> Self {
+        self.documentation_path = Some(path);
+        self
+    }
+
+    pub(crate) fn documentation_path(&self) -> &str {
+        self.documentation_path.unwrap_or(&self.path)
     }
 }

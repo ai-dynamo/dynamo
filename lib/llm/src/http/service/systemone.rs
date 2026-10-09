@@ -45,6 +45,13 @@ use crate::{
 mod response;
 use response::{attach_request_ids, decision_error, error};
 
+#[path = "systemone/http.rs"]
+mod http;
+pub use http::router;
+
+pub(super) const DEFAULT_PATH: &str = "/v1/systemone";
+pub(super) const DECISIONS_PATH: &str = "/v1/decisions";
+
 const MAX_TOKENIZATION_WORK: usize = 1_048_576;
 const MAX_TOKENIZATION_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONCURRENT_SIBLINGS: usize = 4;
@@ -214,7 +221,6 @@ fn pin_to_placement(preprocessed: &mut PreprocessedRequest, placement: Placement
     routing.dp_rank = Some(placement.dp_rank);
 }
 
-#[expect(dead_code, reason = "Called by the decision HTTP adapter")]
 async fn handle_request(
     state: Arc<service_v2::State>,
     request_id: String,
