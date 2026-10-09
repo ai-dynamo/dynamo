@@ -211,11 +211,10 @@ KV-aware routing, including exact token/usage accounting. Payloads also check
 HTTP disconnection, scheduler cleanup, recovery and fresh completed KV transfers.
 GPU assertions share each deployment's existing startup and teardown.
 
-GPU post-validation also uses the existing Dynamo client to check explicit
-cancellation and consumer drop on the same vLLM deployment. Cancellation must
-release scheduler work and allow subsequent generation. Exact cancelled-terminal
-delivery remains a CPU adapter assertion because the network transport can close
-first; GPU checks validate it when delivered.
+GPU requests and worker discovery use frontend HTTP, with engine metrics for
+scheduler and transfer assertions. Explicit native stop, consumer drop and exact
+cancelled-terminal delivery remain Rust CPU adapter assertions; frontend HTTP
+disconnection checks real-engine cleanup and recovery.
 
 The legacy Python backend suite is also distributed by behavior, including
 `tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and
@@ -227,8 +226,9 @@ The legacy Python backend suite is also distributed by behavior, including
    I/O belong beside production code. Direct native RPC behavior belongs in
    `sidecar_mocker_integration.rs`; Worker/discovery or process lifetime belongs in
    `router_sidecar_mocker_integration.rs`. Assertions requiring real inference or
-   GPU state belong in `tests/serve/test_sidecar.py`, as payloads or post-validation
-   checks on an existing deployment.
+   GPU state belong in `tests/serve/test_sidecar.py`, as frontend HTTP payloads or
+   HTTP routing checks on an existing deployment. Keep direct native-runtime
+   clients in Rust CPU tests.
 2. For shared behavior, write a scenario accepting only its fixture type. Use
    `SidecarFixture` for the common engine lifecycle, `WireFixture` when a test
    must observe active scheduler work, and `ProcessFixture` when it launches a
