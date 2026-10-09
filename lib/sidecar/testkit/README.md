@@ -211,12 +211,15 @@ KV-aware routing, including exact token/usage accounting. Payloads also check
 HTTP disconnection, scheduler cleanup, recovery and fresh completed KV transfers.
 GPU assertions share each deployment's existing startup and teardown.
 
-GPU post-validation also uses the existing Dynamo client to check explicit
-cancellation and consumer drop on the same deployment. Cancellation must release
-scheduler work and allow subsequent generation. The SGLang handoff repeats after
-cancelling an unmatched transfer wait. Exact cancelled-terminal delivery remains a
-CPU adapter assertion because the network transport can close first; GPU checks
-validate it when delivered.
+Python GPU scenarios send frontend HTTP payloads and observe engine metrics.
+Explicit native stop, consumer drop and cancelled-terminal delivery belong in
+Rust CPU scenarios, where controlled peers make those distinctions observable.
+
+SGLang disaggregation validates completed transfers through frontend requests.
+Cancellation of a real engine's unmatched KV-transfer wait remains deferred:
+the public frontend rejects caller-supplied bootstrap metadata, so creating that
+state requires dedicated fault injection. CPU handoff cancellation is not evidence
+that a real SGLang transfer-wait queue drains after cancellation.
 
 The legacy Python backend suite is also distributed by behavior, including
 `tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and
@@ -228,8 +231,9 @@ The legacy Python backend suite is also distributed by behavior, including
    I/O belong beside production code. Direct native RPC behavior belongs in
    `sidecar_mocker_integration.rs`; Worker/discovery or process lifetime belongs in
    `router_sidecar_mocker_integration.rs`. Assertions requiring real inference or
-   GPU state belong in `tests/serve/test_sidecar.py`, as payloads or post-validation
-   checks on an existing deployment.
+   GPU state belong in `tests/serve/test_sidecar.py`, as frontend HTTP payloads
+   and engine-metric assertions on an existing deployment. Do not drive native
+   sidecar requests through Python runtime clients.
 2. For shared behavior, write a scenario accepting only its fixture type. Use
    `SidecarFixture` for the common engine lifecycle, `WireFixture` when a test
    must observe active scheduler work, and `ProcessFixture` when it launches a

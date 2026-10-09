@@ -19,10 +19,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.sidecar_checks import (
-    SGLangTransferRecoveryPayload,
-    assert_native_cancellation_and_recovery,
-)
+from tests.serve.sidecar_checks import assert_native_cancellation_and_recovery
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_metrics import (
     EngineMetrics,
@@ -353,26 +350,6 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
                     decode_metrics=decode_metrics,
                     transfer_metrics=transfer_metrics,
                 )
-                if backend == "sglang":
-                    recovery = disaggregated_token_count_payload()
-                    payloads.append(
-                        SGLangTransferRecoveryPayload(
-                            body=recovery.body,
-                            expected_response=[],
-                            expected_log=[],
-                            expected_finish_reason=recovery.expected_finish_reason,
-                            expected_completion_tokens=recovery.expected_completion_tokens,
-                            prefill_metrics=prefill_metrics,
-                            decode_metrics=decode_metrics,
-                            transfer_metrics=transfer_metrics,
-                            namespace=engine_env["DYN_NAMESPACE"],
-                            decode_http_port=int(engine_env["SGLANG_DECODE_HTTP_PORT"]),
-                            bootstrap_port=int(
-                                engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"]
-                            ),
-                            discovery_backend=discovery_backend,
-                        )
-                    )
         elif backend in ("vllm", "sglang"):
             namespace = f"sidecar-agg-{generate_random_suffix()}"
             monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
@@ -394,14 +371,15 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
                 f"{backend.upper()}_GRPC_PORT": str(engine_ports[1]),
             }
             payloads = _aggregated_payloads(metrics)
-            post_validation = partial(
-                assert_native_cancellation_and_recovery,
-                metrics=metrics,
-                model=config.model,
-                namespace=namespace,
-                max_tokens=CANCELLATION_MAX_TOKENS,
-                discovery_backend=discovery_backend,
-            )
+            if backend == "vllm":
+                post_validation = partial(
+                    assert_native_cancellation_and_recovery,
+                    metrics=metrics,
+                    model=config.model,
+                    namespace=namespace,
+                    max_tokens=CANCELLATION_MAX_TOKENS,
+                    discovery_backend=discovery_backend,
+                )
         yield dataclasses.replace(
             config,
             frontend_port=dynamo_dynamic_ports.frontend_port,
