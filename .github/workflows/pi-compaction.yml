@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Pi compaction CPU POC
+
+on:
+  pull_request:
+    paths:
+      - 'components/src/dynamo/compaction/**'
+      - 'tests/unit/compaction/**'
+      - 'examples/agents/decision_compaction/**'
+      - '.github/workflows/pi-compaction.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'components/src/dynamo/compaction/**'
+      - 'tests/unit/compaction/**'
+      - 'examples/agents/decision_compaction/**'
+      - '.github/workflows/pi-compaction.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-compaction-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}/components/src
+      HF_HUB_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: '24'
+      - name: Install CPU test dependencies
+        run: python -m pip install openai==3.26.0 httpx==0.28.1 pytest==9.1.1 pytest-asyncio==1.4.0 pytest-timeout==2.4.0 pytest-cov==7.1.0
+      - name: Check Python coordinator
+        run: >-
+          python -m pytest tests/unit/compaction
+          --confcutdir=tests/unit/compaction
+          -o addopts= -o filterwarnings=
+          --cov=dynamo.compaction --cov-report=term-missing --cov-fail-under=80
+      - name: Install pinned Pi fixture
+        working-directory: examples/agents/decision_compaction/pi
+        run: npm ci --ignore-scripts
+      - name: Audit Pi dependencies
+        working-directory: examples/agents/decision_compaction/pi
+        run: npm audit --audit-level=high
+      - name: Check Pi types and lifecycle
+        working-directory: examples/agents/decision_compaction/pi
+        run: |
+          export DYNAMO_COMPACTION_PYTHON="$(command -v python)"
+          npm run typecheck
+          npm test
+          npm run demo
