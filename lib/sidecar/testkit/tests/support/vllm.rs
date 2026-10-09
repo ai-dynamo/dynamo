@@ -509,6 +509,10 @@ impl Protocol for Adapter {
     fn injected_error(message: &'static str) -> Self::Error {
         Status::unavailable(message)
     }
+
+    fn invalid_argument_error(message: &'static str) -> Self::Error {
+        Status::invalid_argument(message)
+    }
 }
 
 impl ProcessFixture for Fixture {
