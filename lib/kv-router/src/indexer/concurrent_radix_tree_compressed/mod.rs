@@ -43,6 +43,8 @@ mod store;
 mod sync_impl;
 
 #[cfg(test)]
+mod soak_tests;
+#[cfg(test)]
 mod tests;
 
 /// Thread-safe radix tree (compressed trie) for concurrent KV cache lookups.

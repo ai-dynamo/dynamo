@@ -349,6 +349,28 @@ the epoch guard that covers the event.
   previous owner's stale bits on an unlinked node. This needs a concurrent
   worker removal during the dump and only affects the dumped events.
 
+## Race Soak
+
+`soak_tests.rs` holds `crtc_race_soak`, an ignored stress test for the guarantees
+above. Writer lanes replay adversarial per-rank event streams over shared
+prefixes while readers look up. Every lookup, even mid-race, must stay within
+the blocks each rank has ever stored, which catches credit for blocks a rank
+never stored. Credit for blocks a rank has since evicted is caught only in
+strict mode, where the writers also pause periodically for exact parity against
+a sequence-hash model; chaos mode adds mid-chain removals and cannot detect it.
+In either mode, optional rank and worker removal churn recycles slots under
+load, and a slot offset moves every live rank onto the overflow slot chunks.
+Run it in release mode after changing locking, versioning, split, remove, lookup
+repair, or slot handling; its module docs list the modes, the `SOAK_*` knobs,
+and how to read the summary line. The second command below adds churn and the
+slot offset, which the defaults leave off:
+
+```bash
+SOAK_SECS=60 cargo test -p dynamo-kv-router --release --lib crtc_race_soak -- --ignored --nocapture
+SOAK_SECS=60 SOAK_CHURN=20 SOAK_SLOT_OFFSET=300 \
+  cargo test -p dynamo-kv-router --release --lib crtc_race_soak -- --ignored --nocapture
+```
+
 ## Wire Compatibility
 
 - `find_matches` leaves the legacy `OverlapScores.frequencies` field empty.
