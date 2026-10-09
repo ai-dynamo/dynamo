@@ -49,6 +49,7 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/workermetadata"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -86,6 +87,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentscalingadapters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamoworkermetadatas,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
@@ -319,6 +321,26 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+
+	// Worker rollouts wait for ready frontends to publish that they serve the
+	// replacement workers, so frontend readiness and discovery records requeue.
+	ctrlBuilder = ctrlBuilder.Watches(
+		&corev1.Pod{},
+		handler.EnqueueRequestsFromMapFunc(mapDGDFrontendPodToRequests),
+		builder.WithPredicates(dgdFrontendPodEventPredicate()),
+	)
+	if _, err := mgr.GetRESTMapper().RESTMapping(workermetadata.GVK.GroupKind(), workermetadata.GVK.Version); err != nil {
+		if !meta.IsNoMatchError(err) {
+			return fmt.Errorf("discover DynamoWorkerMetadata API: %w", err)
+		}
+		log.Log.Info("DynamoWorkerMetadata API unavailable; worker rollouts use pod availability alone")
+	} else {
+		ctrlBuilder = ctrlBuilder.Watches(
+			workermetadata.New(),
+			handler.EnqueueRequestsFromMapFunc(r.mapWorkerMetadataToDGDRequests),
+			builder.WithPredicates(workerMetadataChangedPredicate()),
+		)
+	}
 
 	// Watch standalone Snapshot resources only when their external APIs were detected.
 	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {

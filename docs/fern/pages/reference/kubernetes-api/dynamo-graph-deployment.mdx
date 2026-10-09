@@ -301,6 +301,8 @@ The operator maintains observed state under `status`.
 
 <ParamField path="status.rollingUpdate" type="RollingUpdateStatus">
   Progress of operator-managed rolling updates. Currently supported only for single-node, non-Grove deployments. See the [RollingUpdateStatus API](full-api-reference.mdx#rollingupdatestatus).
+
+  With Kubernetes discovery, a replacement worker counts as available only after every ready frontend of the graph serves it. A frontend serves a worker once it has built a pipeline for the worker's model and the worker's generation has every role it needs, such as both prefill and decode. A replacement that never becomes servable leaves the rollout `InProgress` while the previous generation keeps serving. When several previous generations remain, the operator retires replicas that no frontend serves first. Frontends that do not publish serving information, such as those from earlier releases, leave the rollout on pod readiness alone.
 </ParamField>
 
 <Indent>

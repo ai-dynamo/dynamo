@@ -3567,8 +3567,34 @@ func TestAllocateOldWorkerDCDReplicas(t *testing.T) {
 		name      string
 		oldTarget int32
 		dcds      []*nvidiacomv1beta1.DynamoComponentDeployment
+		served    map[string]int32
 		want      map[string]int32
 	}{
+		{
+			name:      "unserved newer generation retires before the served original",
+			oldTarget: 1,
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("test-dgd-worker-hashaaaa", earlier, 1, 1),
+				dcd("test-dgd-worker-hashbbbb", now, 1, 1),
+			},
+			served: map[string]int32{"test-dgd-worker-hashaaaa": 1},
+			want: map[string]int32{
+				"test-dgd-worker-hashaaaa": 1,
+				"test-dgd-worker-hashbbbb": 0,
+			},
+		},
+		{
+			name:      "without serving information the oldest generation retires first",
+			oldTarget: 1,
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("test-dgd-worker-hashaaaa", earlier, 1, 1),
+				dcd("test-dgd-worker-hashbbbb", now, 1, 1),
+			},
+			want: map[string]int32{
+				"test-dgd-worker-hashaaaa": 0,
+				"test-dgd-worker-hashbbbb": 1,
+			},
+		},
 		{
 			name:      "overlapping update keeps healthy original and drops unavailable intermediate",
 			oldTarget: 15,
@@ -3609,7 +3635,7 @@ func TestAllocateOldWorkerDCDReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := allocateOldWorkerDCDReplicas(tt.dcds, tt.oldTarget)
+			got := allocateOldWorkerDCDReplicas(tt.dcds, tt.oldTarget, tt.served)
 			assert.Equal(t, tt.want, got)
 		})
 	}
