@@ -60,7 +60,7 @@ fn system_message_content(content: &AnthropicMessageContent) -> String {
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
-    fn try_from(req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
+    fn try_from(mut req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
         let mut messages = Vec::new();
 
         // Prepend system message if present
@@ -139,8 +139,8 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
 
         let response_format = req
             .output_config
-            .as_ref()
-            .and_then(|config| config.get("format"))
+            .as_mut()
+            .and_then(|config| config.get_mut("format"))
             .filter(|format| !format.is_null())
             .map(|format| {
                 anyhow::ensure!(
@@ -148,7 +148,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                     "output_config.format.type must be json_schema"
                 );
                 let schema = format
-                    .get("schema")
+                    .get_mut("schema")
                     .filter(|schema| schema.is_object())
                     .ok_or_else(|| {
                         anyhow::anyhow!("output_config.format.schema must be an object")
@@ -157,7 +157,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                     json_schema: ResponseFormatJsonSchema {
                         name: "response".into(),
                         description: None,
-                        schema: schema.clone(),
+                        schema: schema.take(),
                         strict: Some(true),
                     },
                 })
