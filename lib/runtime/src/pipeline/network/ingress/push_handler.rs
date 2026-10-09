@@ -1205,6 +1205,7 @@ mod tests {
                             subject: "admission-probe".to_string(),
                             context: "admission-probe".to_string(),
                             stream_type: crate::pipeline::network::StreamType::Response,
+                            response_ack: false,
                         }
                         .into();
                         let metadata = if rooted {

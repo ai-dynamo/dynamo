@@ -164,6 +164,7 @@ impl TcpClient {
         let handshake = CallHomeHandshake {
             subject: info.subject.clone(),
             stream_type: StreamType::Response,
+            response_ack: false,
         };
 
         let handshake_bytes = match serde_json::to_vec(&handshake) {
@@ -265,6 +266,7 @@ impl TcpClient {
         let handshake = CallHomeHandshake {
             subject: info.subject.clone(),
             stream_type: StreamType::Request,
+            response_ack: false,
         };
         let handshake_bytes = serde_json::to_vec(&handshake).map_err(|err| {
             error!(
