@@ -161,6 +161,13 @@ spec:
                         x-kubernetes-list-map-keys:
                           - type
                         x-kubernetes-list-type: map
+                      gpuPowerLimitWatts:
+                        description: |-
+                          gpuPowerLimitWatts is the effective per-GPU power limit propagated to the
+                          component's Pods. Omission means no power limit is configured.
+                        format: int64
+                        minimum: 1
+                        type: integer
                       gpusPerEngine:
                         description: |-
                           gpusPerEngine is the number of GPUs assigned to one inference engine in a
@@ -194,6 +201,13 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      runtimeComponentName:
+                        description: |-
+                          runtimeComponentName is an explicit Dynamo runtime component identity
+                          resolved from the serving role's endpoint override. Omission means the
+                          backend default applies. During rolling updates, worker status keeps the
+                          old active revision value until cutover completes.
+                        type: string
                       runtimeNamespace:
                         description: |-
                           runtimeNamespace is the effective Dynamo runtime namespace for this
@@ -217,6 +231,12 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      servedModelName:
+                        description: |-
+                          servedModelName is the effective primary model identity exposed by this
+                          component's serving role. During rolling updates, worker status keeps the
+                          old active revision value until cutover completes.
+                        type: string
                       updatedReplicas:
                         description: updatedReplicas is the number of replicas at the current/desired revision.
                         format: int32

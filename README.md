@@ -42,6 +42,9 @@ Built in Rust for performance, Python for extensibility.
 <!-- EVENTS:START -->
 | Date | Event | Location |
 |:-----|:------|:---------|
+| Tue, Oct 13, 2026 | **[Dynamo community meeting](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20261013T160000Z%2F20261013T170000Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok)** | [Online](https://meet.google.com/heb-demu-qok) |
+| Tue, Oct 13, 2026 | **[Dynamo community meeting](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20261013T160000Z%2F20261013T170000Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok)** | [Online](https://meet.google.com/heb-demu-qok) |
+| Thu, Oct 15, 2026 | **[CoreWeave x NVIDIA Dynamo Meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=CoreWeave+x+NVIDIA+Dynamo+Meetup&dates=20261016T010000Z%2F20261016T040000Z&location=San+Francisco%2C+CA+%28venue+details+via+Luma+registration%29&details=Join+CoreWeave+and+NVIDIA+Dynamo+for+technical+talks+and+developer+networking+on+production+inference+and+RL+post-training.%0A%0ATopics%3A+CoreWeave+Forge%2C+Dynamo+inference+at+scale%2C+efficient+rollouts%2C+and+fast+weight+updates.%0A%0AAgenda+%28Pacific%29%3A%0A6%3A00+pm%3A+Doors+open%0A6%3A30+pm%3A+CoreWeave+talk%0A6%3A45+pm%3A+NVIDIA+Dynamo+talk%0A7%3A00%E2%80%939%3A00+pm%3A+Developer+networking%0A%0ARegister%3A+https%3A%2F%2Fluma.com%2FCWDynOctMeetup%0ARegistration+is+required.+Use+Luma+for+attendance+approval+and+venue+details.+Adding+this+calendar+event+does+not+register+you.)** | San Francisco |
 | Wed, Sep 23, 2026 | ~~[Dynamo community meeting](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260923T173000Z%2F20260923T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok)~~ | [Online](https://meet.google.com/heb-demu-qok) |
 | Thu, Sep 10, 2026 | ~~[Baseten x Dynamo x SGLang RL post training meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL)~~ | [Luma](https://luma.com/BaseDynSGL) |
 <!-- EVENTS:END -->
@@ -144,7 +147,7 @@ Choose either vLLM or SGLang:
 
 ```bash
 # Pull a prebuilt container
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.1
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -162,7 +165,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 
 ```bash
 # Pull a prebuilt container
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -176,7 +179,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+Also available: [`tensorrtllm-runtime:1.5.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 

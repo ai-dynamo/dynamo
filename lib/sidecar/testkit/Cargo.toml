@@ -20,6 +20,7 @@ futures = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+dynamo-sidecar-common = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 dynamo-mocker = { workspace = true }
 dynamo-vllm-mocker = { path = "../../mocker/servers/vllm" }
@@ -30,3 +31,10 @@ tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true }
 tonic-v14 = { workspace = true }
 tonic-health-v14 = { workspace = true }
+serde_json = { workspace = true }
+dynamo-runtime = { workspace = true }
+dynamo-llm = { path = "../../llm", default-features = false }
+tempfile = { workspace = true }
+tokio-util = { workspace = true }
+libc = { workspace = true }
+prost-types-v14 = { workspace = true }
