@@ -1,15 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Triton worker handling for the ``/v1/classify`` API.
+"""Triton worker handling for the ``/v1/classify`` and ``/v1/embeddings`` APIs.
 
-Token-ID input is rejected because a Triton token-input ensemble uses
-per-model tensor names (``input_ids`` / ``attention_mask`` / etc.) that
-are not carried on the OpenAI request.
+Both handlers register with ``skip_model_assets=True`` and read the Triton
+model config directly from ``config.pbtxt``. Token-ID input is rejected
+because a Triton token-input ensemble uses per-model tensor names
+(``input_ids`` / ``attention_mask`` / etc.) that are not carried on the
+OpenAI request.
 """
 
 from __future__ import annotations
 
+import base64
 import logging
 import time
 from typing import Any, AsyncGenerator, Final, Optional
@@ -45,7 +48,7 @@ class ClassifyWorkerHandler:
     Mirrors the entry-point shape of ``dynamo.vllm.pooling_handlers.ClassifyWorkerHandler``:
     ``generate(request, context)`` receives an ``NvCreateClassifyRequest``
     already deserialized to a dict, and yields ``NvCreateClassifyResponse``
-    as a dict — the frontend's aggregator folds the stream into the HTTP
+    as a dict. The frontend's aggregator folds the stream into the HTTP
     response.
     """
 
@@ -60,8 +63,27 @@ class ClassifyWorkerHandler:
         self._server = server
         self._model = model
         self._config = triton_model_config
-        self._input_name = self._resolve_input_name(classify_input_name)
-        self._output_name = self._resolve_output_name(classify_output_name)
+        self._input_name = _resolve_string_input_name(
+            self._config,
+            model.name,
+            classify_input_name,
+            task_label="classify",
+            cli_flag="--classify-input-name",
+        )
+        _validate_string_input_dims(
+            self._config,
+            self._input_name,
+            model.name,
+            task_label="classify",
+            endpoint="/v1/classify",
+        )
+        self._output_name = _resolve_fp32_output_name(
+            self._config,
+            model.name,
+            classify_output_name,
+            task_label="classify",
+            cli_flag="--classify-output-name",
+        )
         # Read batching from the parsed proto (not model.config()) so the
         # disk-fallback path in main.py._read_model_config still routes
         # batchable classifiers through the [N, 1] BYTES shape when the
@@ -75,74 +97,6 @@ class ClassifyWorkerHandler:
             self._batched,
         )
 
-    # ------------------------------------------------------------------
-    # Input / output tensor resolution
-    # ------------------------------------------------------------------
-
-    def _resolve_input_name(self, override: Optional[str] = None) -> str:
-        string_inputs = [
-            i.name for i in self._config.input if i.data_type == _TYPE_STRING
-        ]
-        if override is not None:
-            if override not in string_inputs:
-                raise ValueError(
-                    f"Triton classify model '{self._model.name}' has no "
-                    f"TYPE_STRING input named '{override}'; TYPE_STRING "
-                    f"inputs: {string_inputs}."
-                )
-            name = override
-        else:
-            if len(string_inputs) != 1:
-                raise ValueError(
-                    f"Triton classify model '{self._model.name}' has "
-                    f"{len(string_inputs)} TYPE_STRING input tensor(s); "
-                    "expected exactly 1. Pass --classify-input-name to "
-                    "disambiguate."
-                )
-            name = string_inputs[0]
-        # The handler builds [N, 1] (batched) or [1] (unbatched) request
-        # tensors, so the selected STRING input must declare dims=[1] (one
-        # string per request item) or dims=[-1] (variable, which still
-        # accepts shape 1). Reject other layouts at startup rather than
-        # letting the model pass readiness and fail every request with a
-        # Triton shape-mismatch error.
-        selected = next(i for i in self._config.input if i.name == name)
-        dims = list(selected.dims)
-        if not (len(dims) == 1 and dims[0] in (1, -1)):
-            raise ValueError(
-                f"Triton classify model '{self._model.name}' STRING input "
-                f"'{name}' has dims={dims}; the /v1/classify path supports "
-                "only dims=[1] or dims=[-1] (one string per request item). "
-                "Change the model's config.pbtxt to one of the supported "
-                "layouts, or serve the model with --task tensor and "
-                "address it over KServe gRPC."
-            )
-        return name
-
-    def _resolve_output_name(self, override: Optional[str] = None) -> str:
-        fp32_outputs = [
-            o.name for o in self._config.output if o.data_type == _TYPE_FP32
-        ]
-        if override is not None:
-            if override not in fp32_outputs:
-                raise ValueError(
-                    f"Triton classify model '{self._model.name}' has no "
-                    f"TYPE_FP32 output named '{override}'; TYPE_FP32 "
-                    f"outputs: {fp32_outputs}."
-                )
-            return override
-        if len(fp32_outputs) != 1:
-            raise ValueError(
-                f"Triton classify model '{self._model.name}' has "
-                f"{len(fp32_outputs)} TYPE_FP32 output tensor(s); expected "
-                "exactly 1. Pass --classify-output-name to disambiguate."
-            )
-        return fp32_outputs[0]
-
-    # ------------------------------------------------------------------
-    # Dispatch
-    # ------------------------------------------------------------------
-
     async def generate(
         self, request: dict, context: Any = None
     ) -> AsyncGenerator[dict, None]:
@@ -153,9 +107,9 @@ class ClassifyWorkerHandler:
             return
 
         # NvCreatePoolingRequest always carries ``encoding_format``; the
-        # NvCreateClassifyRequest never does. That's the same dispatch key
-        # vLLM's shared handler uses. We reject pooling explicitly rather
-        # than silently misroute — pooling support lands in a follow-up.
+        # NvCreateClassifyRequest never does. vLLM's shared handler uses the
+        # same dispatch key. Pooling support lands in a follow-up; reject
+        # rather than silently misroute to classify.
         if "encoding_format" in request:
             raise ValueError(
                 "the Triton worker does not yet serve /v1/pooling; register "
@@ -166,23 +120,21 @@ class ClassifyWorkerHandler:
         async for response in self._generate_classify(request, context):
             yield response
 
-    # ------------------------------------------------------------------
-    # Classify path
-    # ------------------------------------------------------------------
-
     async def _generate_classify(
         self, request: dict, context: Any = None
     ) -> AsyncGenerator[dict, None]:
         model_name = request.get("model") or self._model.name
-        prompts = _extract_text_input(request.get("input"))
-        if not self._batched and len(prompts) > 1:
-            raise ValueError(
-                f"Triton classify model '{self._model.name}' is unbatched "
-                f"(max_batch_size=0) and received {len(prompts)} prompts. "
-                "Send one prompt per request, or raise max_batch_size in "
-                "the model's config.pbtxt."
-            )
-        _reject_unsupported_controls(request)
+        prompts = _extract_text_input(request.get("input"), task_label="classify")
+        _require_batched_or_single(
+            prompts,
+            self._batched,
+            self._model.name,
+            self._config.max_batch_size,
+            task_label="classify",
+        )
+        _reject_unsupported_controls(
+            request, _UNSUPPORTED_CLASSIFY_CONTROLS, task_label="classify"
+        )
 
         # Mirror vLLM's fallback so concurrent classify responses stay
         # correlatable even when the client omits ``request_id``. Context
@@ -192,9 +144,7 @@ class ClassifyWorkerHandler:
         )
 
         # Send the whole batch through Triton in one InferRequest so the
-        # backend's dynamic batcher sees them together. Each response tensor
-        # slot corresponds to one input string; the top-level classify
-        # response's ``data`` array is one entry per input, ordered by index.
+        # backend's dynamic batcher sees them together.
         inference_request = self._model.create_request()
         # Triton BYTES input: object array of bytes-strings with shape [N, 1]
         # when the model is batchable (max_batch_size > 0), else [N].
@@ -210,7 +160,6 @@ class ClassifyWorkerHandler:
         async for inference_response in inference_responses:
             output_tensor = inference_response.outputs[self._output_name]
 
-            # Move GPU tensors to host so numpy can consume them.
             if (
                 isinstance(output_tensor, TritonTensor)
                 and output_tensor.memory_type != TritonMemoryType.CPU
@@ -220,21 +169,13 @@ class ClassifyWorkerHandler:
             # is FP32 by construction), avoiding a payload-sized copy.
             probs_arr = np.from_dlpack(output_tensor).astype(np.float32, copy=False)
 
-            # Branch on the batching contract rather than tensor rank:
-            # an unbatched model with dims=[a, b] returns shape (a, b)
-            # that is one classification, not two.
-            if self._batched:
-                if probs_arr.ndim < 2:
-                    raise RuntimeError(
-                        f"Triton model '{self._model.name}' declares "
-                        f"batching (max_batch_size={self._config.max_batch_size}) "
-                        f"but output '{self._output_name}' arrived with "
-                        f"shape {probs_arr.shape}; expected a leading "
-                        "batch axis."
-                    )
-                probs_arr = probs_arr.reshape(probs_arr.shape[0], -1)
-            else:
-                probs_arr = probs_arr.reshape(1, -1)
+            probs_arr = _normalize_fp32_by_batching_contract(
+                probs_arr,
+                self._batched,
+                self._model.name,
+                self._output_name,
+                self._config.max_batch_size,
+            )
             batch_size, num_classes = probs_arr.shape
 
             for idx in range(batch_size):
@@ -284,10 +225,6 @@ class ClassifyWorkerHandler:
             },
         }
 
-    # ------------------------------------------------------------------
-    # Readiness
-    # ------------------------------------------------------------------
-
     def _probe(self) -> dict:
         try:
             if not self._server.ready():
@@ -306,9 +243,167 @@ class ClassifyWorkerHandler:
         }
 
 
-# ---------------------------------------------------------------------------
-# Input parsing
-# ---------------------------------------------------------------------------
+class EmbeddingWorkerHandler:
+    """Serve OpenAI ``/v1/embeddings`` on top of one Triton model.
+
+    Always emits base64 on the worker->frontend wire; the frontend decodes
+    to float at the HTTP boundary when ``encoding_format`` is not ``base64``.
+    """
+
+    def __init__(
+        self,
+        server: TritonServer,
+        model: TritonModel,
+        triton_model_config: mc.ModelConfig,
+        embed_input_name: Optional[str] = None,
+        embed_output_name: Optional[str] = None,
+    ) -> None:
+        self._server = server
+        self._model = model
+        self._config = triton_model_config
+        self._input_name = _resolve_string_input_name(
+            self._config,
+            model.name,
+            embed_input_name,
+            task_label="embedding",
+            cli_flag="--embed-input-name",
+        )
+        _validate_string_input_dims(
+            self._config,
+            self._input_name,
+            model.name,
+            task_label="embedding",
+            endpoint="/v1/embeddings",
+        )
+        self._output_name = _resolve_fp32_output_name(
+            self._config,
+            model.name,
+            embed_output_name,
+            task_label="embedding",
+            cli_flag="--embed-output-name",
+        )
+        # Read batching from the parsed proto (not model.config()) so the
+        # disk-fallback path in main.py._read_model_config still routes
+        # batchable embeddings through the [N, 1] BYTES shape when the
+        # runtime config is unavailable.
+        self._batched = self._config.max_batch_size > 0
+        logger.info(
+            "Embedding worker for model '%s' initialized: input=%s, output=%s, batched=%s",
+            model.name,
+            self._input_name,
+            self._output_name,
+            self._batched,
+        )
+
+    async def generate(
+        self, request: dict, context: Any = None
+    ) -> AsyncGenerator[dict, None]:
+        logger.debug("Received embeddings request for model %s", self._model.name)
+
+        if is_probe(request):
+            yield self._probe()
+            return
+
+        async for response in self._generate_embedding(request):
+            yield response
+
+    async def _generate_embedding(self, request: dict) -> AsyncGenerator[dict, None]:
+        model_name = request.get("model") or self._model.name
+        prompts = _extract_text_input(request.get("input"), task_label="embedding")
+        _require_batched_or_single(
+            prompts,
+            self._batched,
+            self._model.name,
+            self._config.max_batch_size,
+            task_label="embedding",
+        )
+        _reject_unsupported_controls(
+            request, _UNSUPPORTED_EMBEDDING_CONTROLS, task_label="embedding"
+        )
+        _validate_encoding_format(request.get("encoding_format"))
+
+        # Send the whole batch through Triton in one InferRequest so the
+        # backend's dynamic batcher sees them together.
+        inference_request = self._model.create_request()
+        # Triton BYTES input: object array of bytes-strings with shape [N, 1]
+        # when the model is batchable (max_batch_size > 0), else [N].
+        arr = np.array([[s.encode()] for s in prompts], dtype=object)
+        if not self._batched:
+            arr = arr.reshape(-1)
+        inference_request.inputs[self._input_name] = arr
+
+        prompt_tokens = 0
+        data: list[dict[str, Any]] = []
+
+        inference_responses = self._model.async_infer(inference_request)
+        async for inference_response in inference_responses:
+            output_tensor = inference_response.outputs[self._output_name]
+
+            if (
+                isinstance(output_tensor, TritonTensor)
+                and output_tensor.memory_type != TritonMemoryType.CPU
+            ):
+                output_tensor = output_tensor.to_host()
+            # copy=False makes astype a no-op on FP32 (the resolved output
+            # is FP32 by construction), avoiding a payload-sized copy.
+            embeds_arr = np.from_dlpack(output_tensor).astype(np.float32, copy=False)
+
+            embeds_arr = _normalize_fp32_by_batching_contract(
+                embeds_arr,
+                self._batched,
+                self._model.name,
+                self._output_name,
+                self._config.max_batch_size,
+            )
+
+            for idx in range(embeds_arr.shape[0]):
+                data.append(
+                    {
+                        "object": "embedding",
+                        "embedding": _encode_fp32_vector_to_base64(embeds_arr[idx]),
+                        "index": len(data),
+                    }
+                )
+
+        # A batch of N inputs must produce exactly N embedding rows. A
+        # non-batch-aligned Triton response (misconfigured ensemble, unbatched
+        # model, wrong output shape) would otherwise silently return an
+        # incomplete response with the wrong indices.
+        if len(data) != len(prompts):
+            raise RuntimeError(
+                f"Triton model '{self._model.name}' returned {len(data)} "
+                f"embedding row(s) for {len(prompts)} input(s); expected "
+                "one row per input. Check the model's batching config or "
+                "ensemble output shape."
+            )
+
+        yield {
+            "object": "list",
+            "data": data,
+            "model": model_name,
+            "usage": {
+                # Triton does not surface per-request prompt-token counts
+                # from an ensemble; fields are kept for wire parity with
+                # vLLM's response and default to 0.
+                "prompt_tokens": prompt_tokens,
+                "total_tokens": prompt_tokens,
+            },
+        }
+
+    def _probe(self) -> dict:
+        try:
+            if not self._server.ready():
+                raise RuntimeError("server not ready")
+            if not self._model.ready():
+                raise RuntimeError(f"model {self._model.name} not ready")
+        except TritonError as exc:
+            raise RuntimeError(f"triton not ready: {exc}") from exc
+        return {
+            "object": "list",
+            "model": self._model.name,
+            "data": [],
+            "usage": {"prompt_tokens": 0, "total_tokens": 0},
+        }
 
 
 # NvCreateClassifyRequest carries controls the vLLM adapter honors during
@@ -329,14 +424,169 @@ _UNSUPPORTED_CLASSIFY_CONTROLS: Final[tuple[str, ...]] = (
 )
 
 
-def _reject_unsupported_controls(request: dict) -> None:
-    for field in _UNSUPPORTED_CLASSIFY_CONTROLS:
+# ``dimensions`` (Matryoshka truncation) and the tokenization kwargs are
+# baked into the Triton model plan; clients relying on them get a 400 so a
+# silent wrong-dim or wrong-tokenization vector is never possible.
+_UNSUPPORTED_EMBEDDING_CONTROLS: Final[tuple[str, ...]] = (
+    "dimensions",
+    "add_special_tokens",
+    "truncate_prompt_tokens",
+)
+
+
+_VALID_ENCODING_FORMATS: Final[tuple[str, ...]] = ("float", "base64")
+
+
+def _validate_encoding_format(value: Any) -> None:
+    if value is None or value in _VALID_ENCODING_FORMATS:
+        return
+    raise ValueError(
+        f"the Triton embedding worker only supports encoding_format values "
+        f"{list(_VALID_ENCODING_FORMATS)}; got {value!r}."
+    )
+
+
+def _encode_fp32_vector_to_base64(vec: np.ndarray) -> str:
+    """Encode as OpenAI's base64 format: concatenated little-endian IEEE 754
+    f32 bytes, standard-alphabet base64. Zero-copy on little-endian hosts."""
+    return base64.b64encode(vec.astype("<f4", copy=False).tobytes()).decode("ascii")
+
+
+def _resolve_string_input_name(
+    config: mc.ModelConfig,
+    model_name: str,
+    override: Optional[str],
+    task_label: str,
+    cli_flag: str,
+) -> str:
+    string_inputs = [i.name for i in config.input if i.data_type == _TYPE_STRING]
+    if override is not None:
+        if override not in string_inputs:
+            raise ValueError(
+                f"Triton {task_label} model '{model_name}' has no "
+                f"TYPE_STRING input named '{override}'; TYPE_STRING "
+                f"inputs: {string_inputs}."
+            )
+        return override
+    if len(string_inputs) != 1:
+        raise ValueError(
+            f"Triton {task_label} model '{model_name}' has "
+            f"{len(string_inputs)} TYPE_STRING input tensor(s); "
+            f"expected exactly 1. Pass {cli_flag} to disambiguate."
+        )
+    return string_inputs[0]
+
+
+def _validate_string_input_dims(
+    config: mc.ModelConfig,
+    name: str,
+    model_name: str,
+    task_label: str,
+    endpoint: str,
+) -> None:
+    # The handler builds [N, 1] (batched) or [1] (unbatched) request
+    # tensors, so the selected STRING input must declare dims=[1] (one
+    # string per request item) or dims=[-1] (variable, which still
+    # accepts shape 1). Reject other layouts at startup rather than
+    # letting the model pass readiness and fail every request with a
+    # Triton shape-mismatch error.
+    selected = next(i for i in config.input if i.name == name)
+    dims = list(selected.dims)
+    if not (len(dims) == 1 and dims[0] in (1, -1)):
+        raise ValueError(
+            f"Triton {task_label} model '{model_name}' STRING input "
+            f"'{name}' has dims={dims}; the {endpoint} path supports "
+            "only dims=[1] or dims=[-1] (one string per request item). "
+            "Change the model's config.pbtxt to one of the supported "
+            "layouts, or serve the model with --task tensor and "
+            "address it over KServe gRPC."
+        )
+
+
+def _resolve_fp32_output_name(
+    config: mc.ModelConfig,
+    model_name: str,
+    override: Optional[str],
+    task_label: str,
+    cli_flag: str,
+) -> str:
+    fp32_outputs = [o.name for o in config.output if o.data_type == _TYPE_FP32]
+    if override is not None:
+        if override not in fp32_outputs:
+            raise ValueError(
+                f"Triton {task_label} model '{model_name}' has no "
+                f"TYPE_FP32 output named '{override}'; TYPE_FP32 "
+                f"outputs: {fp32_outputs}."
+            )
+        return override
+    if len(fp32_outputs) != 1:
+        raise ValueError(
+            f"Triton {task_label} model '{model_name}' has "
+            f"{len(fp32_outputs)} TYPE_FP32 output tensor(s); expected "
+            f"exactly 1. Pass {cli_flag} to disambiguate."
+        )
+    return fp32_outputs[0]
+
+
+def _normalize_fp32_by_batching_contract(
+    arr: np.ndarray,
+    batched: bool,
+    model_name: str,
+    output_name: str,
+    max_batch_size: int,
+) -> np.ndarray:
+    """Reshape to ``(batch_size, flat_width)``.
+
+    Branches on the configured batching contract, not on tensor rank: an
+    unbatched model with ``dims=[a, b]`` returns shape ``(a, b)`` that is
+    one row, not ``a`` rows.
+    """
+    if batched:
+        if arr.ndim < 2:
+            raise RuntimeError(
+                f"Triton model '{model_name}' declares "
+                f"batching (max_batch_size={max_batch_size}) "
+                f"but output '{output_name}' arrived with "
+                f"shape {arr.shape}; expected a leading batch axis."
+            )
+        return arr.reshape(arr.shape[0], -1)
+    return arr.reshape(1, -1)
+
+
+def _require_batched_or_single(
+    prompts: list[str],
+    batched: bool,
+    model_name: str,
+    max_batch_size: int,
+    task_label: str,
+) -> None:
+    if not batched and len(prompts) > 1:
+        raise ValueError(
+            f"Triton {task_label} model '{model_name}' is unbatched "
+            f"(max_batch_size={max_batch_size}) and received {len(prompts)} prompts. "
+            "Send one prompt per request, or raise max_batch_size in "
+            "the model's config.pbtxt."
+        )
+    # Reject at the handler before Triton returns a server-side shape
+    # error so the client sees HTTP 400 with the model's limit, not 500.
+    if batched and len(prompts) > max_batch_size:
+        raise ValueError(
+            f"Triton {task_label} model '{model_name}' accepts at most "
+            f"{max_batch_size} prompts per request (max_batch_size); "
+            f"received {len(prompts)}. Split the batch or raise "
+            "max_batch_size in the model's config.pbtxt."
+        )
+
+
+def _reject_unsupported_controls(
+    request: dict,
+    unsupported: tuple[str, ...],
+    task_label: str,
+) -> None:
+    for field in unsupported:
         if request.get(field) is not None:
             raise ValueError(
-                f"the Triton classify worker does not honor '{field}'; this "
-                "control is not applicable to Triton's classify path "
-                "(tokenization, activation, processor kwargs, and prefix "
-                "cache are owned by the model plan or Triton internals). "
+                f"the Triton {task_label} worker does not honor '{field}'. "
                 "Send the field unset, or run the model behind a backend "
                 "that honors it (vLLM)."
             )
@@ -345,46 +595,47 @@ def _reject_unsupported_controls(request: dict) -> None:
     # only non-default values so the always-on-wire default passes through.
     if request.get("priority", 0) != 0:
         raise ValueError(
-            "the Triton classify worker does not honor 'priority'; Triton's "
+            f"the Triton {task_label} worker does not honor 'priority'; Triton's "
             "scheduling queue is not exposed to the Python worker. Send "
             "priority unset (0), or run the model behind a backend that "
             "honors it (vLLM)."
         )
 
 
-def _extract_text_input(input_field: Any) -> list[str]:
-    """Turn ``NvCreateClassifyRequest.input`` into a list of text prompts.
+def _extract_text_input(input_field: Any, task_label: str) -> list[str]:
+    """Convert the request's ``input`` field to a list of text prompts.
 
-    ``ClassificationInput`` in ``lib/llm/src/protocols/openai/classify.rs`` is
-    an untagged enum of four variants: ``Single(str)``, ``Batch(list[str])``,
-    ``Tokens(list[int])``, ``TokenBatch(list[list[int]])``. This handler
-    supports only the text variants; token-ID variants are rejected with 400
-    since Triton token-input needs per-model tensor names not carried on the
-    OpenAI request.
+    Both ``ClassificationInput`` (lib/llm/src/protocols/openai/classify.rs)
+    and ``EmbeddingInput`` (dynamo_protocols::types) are untagged enums
+    over single-str / list-of-str / single-token-list / list-of-token-lists.
+    The handler accepts text variants only; token-ID variants need per-model
+    Triton tensor names the OpenAI request does not carry.
     """
     if input_field is None:
-        raise ValueError("classify request missing required 'input' field")
+        raise ValueError(f"{task_label} request missing required 'input' field")
 
     if isinstance(input_field, str):
         if not input_field:
-            raise ValueError("classify 'input' cannot be an empty string")
+            raise ValueError(f"{task_label} 'input' cannot be an empty string")
         return [input_field]
 
     if isinstance(input_field, list):
         if not input_field:
-            raise ValueError("classify 'input' cannot be an empty list")
+            raise ValueError(f"{task_label} 'input' cannot be an empty list")
         if all(isinstance(item, str) for item in input_field):
             if any(not item for item in input_field):
-                raise ValueError("classify 'input' list must not contain empty strings")
+                raise ValueError(
+                    f"{task_label} 'input' list must not contain empty strings"
+                )
             return list(input_field)
         # Anything non-str at this point is a token-ID variant.
         raise ValueError(
-            "the Triton classify worker does not yet accept token-ID input "
+            f"the Triton {task_label} worker does not yet accept token-ID input "
             "(only text 'input' strings); ask the client to send text or run "
             "the model behind a backend that owns tokenization"
         )
 
     raise ValueError(
-        f"classify 'input' has unsupported type {type(input_field).__name__}; "
+        f"{task_label} 'input' has unsupported type {type(input_field).__name__}; "
         "expected str or list[str]"
     )

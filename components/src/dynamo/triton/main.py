@@ -28,7 +28,7 @@ from dynamo.triton.metrics import (
     _register_triton_metrics_bridge,
     _stop_triton_server,
 )
-from dynamo.triton.pooling_handlers import ClassifyWorkerHandler
+from dynamo.triton.pooling_handlers import ClassifyWorkerHandler, EmbeddingWorkerHandler
 from dynamo.triton.util import create_triton_log_callback, endpoint_slug
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ def _read_model_config(
         return serialized_config
 
 
-def _collect_classify_dependency_models(
+def _collect_ensemble_dependency_models(
     server: TritonServer,
     model_names: list[str],
     repository_path: str,
@@ -85,13 +85,12 @@ def _collect_classify_dependency_models(
     """Return names of models referenced as a step inside any model's
     ``ensemble_scheduling``.
 
-    Invoked only on the ``--task classify`` path. A typical classify
-    ensemble pairs one ``ensemble`` model with a Python tokenizer
-    dependency and a numeric classifier dependency; only the ensemble
-    carries the STRING-in / FP32-out contract the OpenAI
-    ``/v1/classify`` adapter needs. Constructing a
-    ``ClassifyWorkerHandler`` for the tokenizer or numeric stage raises,
-    which cancels the entire TaskGroup and aborts the valid ensemble.
+    Invoked on the ``--task classify`` and ``--task embed`` paths, which
+    both pair one user-facing ensemble (STRING in, FP32 out) with
+    tokenizer and numeric-model dependencies. Constructing a classify
+    or embedding handler for the tokenizer or numeric stage raises
+    (no STRING input or no FP32 output), which cancels the entire
+    TaskGroup and aborts the valid ensemble.
 
     Dependency discovery combines two sources:
 
@@ -190,17 +189,17 @@ async def _register_and_serve(
 
     triton_model_config = _read_model_config(model, model_name, model_repository)
 
-    if config.task == "classify":
+    if config.task in ("classify", "embed"):
         model_input = ModelInput.Text
-        model_type = ModelType.Classify
-        # Classify handler parses config.pbtxt locally; register_model
-        # just needs to skip HF asset fetching for a non-HF model.
+        model_type = (
+            ModelType.Classify if config.task == "classify" else ModelType.Embedding
+        )
+        # Handlers parse config.pbtxt locally; register_model only needs
+        # to skip HF asset fetching for a non-HF model.
         register_kwargs: dict = {"skip_model_assets": True}
     else:
         model_input = ModelInput.Tensor
         model_type = ModelType.TensorBased
-        # TensorBased consumers (KServe frontend) read the Triton model
-        # config bytes off the MDC.
         register_kwargs = {
             "tensor_model_config": {
                 "name": "",
@@ -242,7 +241,6 @@ def _build_handler(
     model: TritonModel,
     triton_model_config_bytes: bytes,
 ):
-    # Parsed once so both handlers share the same source of truth.
     parsed_config = mc.ModelConfig.FromString(triton_model_config_bytes)
     if config.task == "classify":
         return ClassifyWorkerHandler(
@@ -251,6 +249,14 @@ def _build_handler(
             parsed_config,
             classify_input_name=config.classify_input_name,
             classify_output_name=config.classify_output_name,
+        )
+    if config.task == "embed":
+        return EmbeddingWorkerHandler(
+            server,
+            model,
+            parsed_config,
+            embed_input_name=config.embed_input_name,
+            embed_output_name=config.embed_output_name,
         )
     return RequestHandler(server, model, parsed_config)
 
@@ -320,27 +326,31 @@ async def init_worker(
 
     logger.info(f"Auto-discovered {len(model_names)} model(s): {model_names}")
 
-    # See _collect_classify_dependency_models for why only user-facing
-    # ensembles are exposed on /v1/classify. The tensor path registers
-    # everything so a dependency model is still addressable directly over
-    # KServe gRPC for debugging.
-    if config.task == "classify":
-        deps = _collect_classify_dependency_models(
+    # See _collect_ensemble_dependency_models for why only user-facing
+    # ensembles are exposed on /v1/classify and /v1/embeddings. The
+    # tensor path registers everything so a dependency model stays
+    # addressable directly over KServe gRPC for debugging.
+    if config.task in ("classify", "embed"):
+        deps = _collect_ensemble_dependency_models(
             server, model_names, model_repository
         )
         skipped = sorted(set(model_names) & deps)
         exposed = [n for n in model_names if n not in deps]
+        endpoint_label = (
+            "/v1/classify" if config.task == "classify" else "/v1/embeddings"
+        )
         if skipped:
             logger.info(
                 "Skipping %d ensemble dependency model(s) from "
-                "/v1/classify registration (still loaded in Triton for use "
+                "%s registration (still loaded in Triton for use "
                 "by their ensembles): %s",
                 len(skipped),
+                endpoint_label,
                 skipped,
             )
         if not exposed:
             raise RuntimeError(
-                "No user-facing classify models found in "
+                f"No user-facing {config.task} models found in "
                 f"'{model_repository}'. Every ready model is referenced "
                 "as an ensemble step of another model. Add a user-facing "
                 "ensemble (STRING in, FP32 out) that wires these "
