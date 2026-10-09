@@ -142,3 +142,66 @@ def test_no_stop_trim_leaves_stopping_to_frontend() -> None:
     # TRT-LLM maps ignore_eos to end_id=-1 and an empty executor stop-word list.
     assert sampling_params.ignore_eos is True
     assert sampling_params.min_tokens == 2
+
+
+@pytest.mark.parametrize("hidden", [[], [163585]])
+def test_k3_visible_eos_stops_in_engine_and_retains_generated_token(hidden):
+    params = SimpleNamespace(ignore_eos=False, stop_token_ids=None, pad_id=None)
+    apply_stop_conditions_to_sampling_params(
+        params, {"stop_token_ids_visible": [163586], "stop_token_ids_hidden": hidden}
+    )
+    assert params.ignore_eos is False
+    assert params.end_id == -1
+    assert params.stop_token_ids == sorted([163586, *hidden])
+    assert params.include_stop_str_in_output is True
+    assert params.pad_id == 163839
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        {"ignore_eos": True},
+        {"min_tokens": 2},
+        {"stop": ["done"]},
+        {"stop_token_ids": [42]},
+        {"stop_token_ids_hidden": [42]},
+    ],
+)
+def test_k3_constrained_stopping_retains_frontend_fallback(constraint):
+    params = SimpleNamespace(ignore_eos=False, stop_token_ids=None, pad_id=7)
+    apply_stop_conditions_to_sampling_params(
+        params, {"stop_token_ids_visible": [163586], **constraint}
+    )
+    assert params.ignore_eos is True
+    assert params.pad_id == 7
+    assert not hasattr(params, "include_stop_str_in_output")
+
+
+def test_k3_no_stop_trim_retains_frontend_stopping():
+    params = SimpleNamespace(ignore_eos=False, stop_token_ids=None, pad_id=None)
+    apply_stop_conditions_to_sampling_params(
+        params, {"stop_token_ids_visible": [163586]}, no_stop_trim=True
+    )
+    assert params.ignore_eos is True
+    assert not hasattr(params, "include_stop_str_in_output")
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("bad", [1]),
+        ("min_tokens", 2),
+        ("use_beam_search", True),
+        ("stop", ["done"]),
+        ("stop_token_ids", [42]),
+        ("ignore_eos", True),
+    ],
+)
+def test_k3_existing_sampling_constraints_keep_fallback(field, value):
+    params = SimpleNamespace(ignore_eos=False, stop_token_ids=None, pad_id=None)
+    setattr(params, field, value)
+    apply_stop_conditions_to_sampling_params(
+        params, {"stop_token_ids_visible": [163586]}
+    )
+    assert params.ignore_eos is True
+    assert not hasattr(params, "include_stop_str_in_output")

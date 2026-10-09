@@ -5096,6 +5096,13 @@ impl OpenAIPreprocessor {
             "unified parser path decision"
         );
         if let Some(family) = family {
+            anyhow::ensure!(
+                !(matches!(
+                    self.tool_call_parser.as_deref(),
+                    Some("kimi_k3" | "kimi-k3")
+                ) && std::env::var("DYN_K3_NATIVE_TEXT_COMPAT").is_ok_and(|v| v == "1")),
+                "DYN_K3_NATIVE_TEXT_COMPAT requires the legacy Kimi K3 parser; disable DYN_PARSER_VERSION=2"
+            );
             return Ok(ToolProcessingRoute::Unified(family));
         }
 
@@ -5200,6 +5207,7 @@ impl OpenAIPreprocessor {
             prompt_injected_reasoning.into(),
             guided_tool_constraint,
             tool_processing_route,
+            request.inner.stream.unwrap_or(false),
         )
     }
 
@@ -5210,6 +5218,7 @@ impl OpenAIPreprocessor {
         prompt_injected_reasoning: PromptReasoningPrefill,
         guided_tool_constraint: crate::protocols::openai::GuidedToolConstraint,
         tool_processing_route: ToolProcessingRoute,
+        original_stream_flag: bool,
     ) -> anyhow::Result<
         impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     >
@@ -5342,8 +5351,18 @@ impl OpenAIPreprocessor {
             request.chat_template_args.as_ref(),
         );
 
+        // Optional native K3 wire compatibility affects response parsing only.
+        // Keep runtime metadata and all prompt/thinking normalization untouched.
+        static K3_NATIVE_TEXT_COMPAT: OnceLock<bool> = OnceLock::new();
+        let native_k3_text_compat = matches!(
+            self.runtime_config.reasoning_parser.as_deref(),
+            Some("kimi_k3" | "kimi-k3")
+        ) && *K3_NATIVE_TEXT_COMPAT.get_or_init(|| {
+            std::env::var("DYN_K3_NATIVE_TEXT_COMPAT").is_ok_and(|value| value == "1")
+        });
         // Try to parse reasoning content only if parser is configured.
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
+            && !native_k3_text_compat
             && !reasoning_disabled_by_request
             && !skip_reasoning_for_guided_json;
         let should_strip_disabled_reasoning_start = reasoning_disabled_by_request
@@ -5426,14 +5445,25 @@ impl OpenAIPreprocessor {
                     // jail keeps its own native fallback, so a backend that ignores the
                     // grammar (MiniMax M2 emits XML under `required`) still parses normally.
                     // Same request-scoped decision the unified path above was given.
-                    Box::pin(Self::apply_tool_calling_jail(
-                        effective_tool_call_parser,
-                        request.inner.tool_choice.clone(),
-                        tool_definitions,
-                        uses_tool_call_structural_tag,
-                        guided_tool_streaming,
-                        stream,
-                    ))
+                    if native_k3_text_compat
+                        && !original_stream_flag
+                        && effective_tool_call_parser
+                            .as_deref()
+                            .is_some_and(|name| matches!(name, "kimi_k3" | "kimi-k3"))
+                    {
+                        // Preserve aggregate bytes until the whole-response parser;
+                        // streaming EOF recovery would discard batch-recoverable calls.
+                        stream
+                    } else {
+                        Box::pin(Self::apply_tool_calling_jail(
+                            effective_tool_call_parser,
+                            request.inner.tool_choice.clone(),
+                            tool_definitions,
+                            uses_tool_call_structural_tag,
+                            guided_tool_streaming,
+                            stream,
+                        ))
+                    }
                 }
                 ToolProcessingRoute::PassThrough => Box::pin(stream),
                 ToolProcessingRoute::MuseUnified(_) | ToolProcessingRoute::Unified(_) => {
@@ -7750,6 +7780,7 @@ impl
             prompt_injected_reasoning,
             guided_tool_constraint,
             tool_processing_route,
+            original_stream_flag,
         )?;
         let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
@@ -8806,6 +8837,7 @@ mod tests {
                                 preprocessor
                                     .tool_processing_route(&request, &constraint)
                                     .unwrap(),
+                                request.inner.stream.unwrap_or(false),
                             )
                             .unwrap()
                             .collect::<Vec<_>>()
@@ -8880,6 +8912,7 @@ mod tests {
                     false.into(),
                     crate::protocols::openai::GuidedToolConstraint::None,
                     ToolProcessingRoute::Unified(unified_parser::KIMI_K2_UNIFIED_FAMILY),
+                    request.inner.stream.unwrap_or(false),
                 )
                 .unwrap()
                 .collect::<Vec<_>>()
@@ -8957,6 +8990,7 @@ mod tests {
                         prefill,
                         crate::protocols::openai::GuidedToolConstraint::None,
                         ToolProcessingRoute::Unified("gemma4"),
+                        request.inner.stream.unwrap_or(false),
                     )
                     .unwrap()
                     .collect::<Vec<_>>()
@@ -9069,6 +9103,7 @@ mod tests {
                     false.into(),
                     constraint,
                     route,
+                    request.inner.stream.unwrap_or(false),
                 )?;
             Ok(ResponseStream::new(Box::pin(parsed), context.context()))
         }

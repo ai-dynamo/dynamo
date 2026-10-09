@@ -63,13 +63,42 @@ def apply_stop_conditions_to_sampling_params(
 ) -> None:
     """Apply Dynamo stop conditions using TRT-LLM stopping semantics.
 
-    TRT-LLM cannot return a token that it consumes as an engine-side stop. If
+    Outside the narrow K3 mapping below, if
     Dynamo marks a stop token as visible or requests ``no_stop_trim``, disable
     TRT-LLM stopping and let the Dynamo decoder return the token and terminate
     the request. TRT-LLM maps
     ``ignore_eos=True`` to both ``end_id=-1`` and an empty stop-word list when
     it builds the executor request.
     """
+    # K3's visible EOS must reach the decoder, but generation should still stop
+    # in the engine. STOP_WORDS with include_stop_str_in_output retains the real
+    # generated token. Keep the general frontend-stopping fallback for constraints
+    # whose interaction with this mapping has not been validated.
+    visible = set(stop_conditions.get("stop_token_ids_visible") or [])
+    hidden = set(stop_conditions.get("stop_token_ids_hidden") or [])
+    if (
+        not no_stop_trim
+        and visible == {163586}
+        and hidden in (set(), {163585})
+        and not stop_conditions.get("ignore_eos")
+        and not stop_conditions.get("stop")
+        and not stop_conditions.get("stop_token_ids")
+        and not stop_conditions.get("min_tokens")
+        and not getattr(sampling_params, "bad", None)
+        and not getattr(sampling_params, "min_tokens", None)
+        and not getattr(sampling_params, "use_beam_search", False)
+        and not getattr(sampling_params, "stop", None)
+        and not getattr(sampling_params, "stop_token_ids", None)
+        and not getattr(sampling_params, "ignore_eos", False)
+    ):
+        sampling_params.end_id = -1
+        if sampling_params.pad_id is None:
+            sampling_params.pad_id = 163839
+        sampling_params.stop_token_ids = sorted(visible | hidden)
+        sampling_params.include_stop_str_in_output = True
+        sampling_params.ignore_eos = False
+        return
+
     visible_stop_token_ids = set(stop_conditions.get("stop_token_ids_visible") or [])
     if no_stop_trim or stop_conditions.get("ignore_eos") or visible_stop_token_ids:
         sampling_params.ignore_eos = True
