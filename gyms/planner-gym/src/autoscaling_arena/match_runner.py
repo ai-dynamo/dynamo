@@ -116,6 +116,7 @@ class _ExecutionContext:
     session_id: str
     session_root: Path
     external_trace_root: Optional[Path] = None
+    materialized_trace_root: Optional[Path] = None
     trace_paths: dict[tuple[Any, ...], Path] = field(default_factory=dict)
     trace_fingerprints: dict[Path, dict[str, Any]] = field(default_factory=dict)
     arrival_series: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
@@ -349,9 +350,13 @@ def _run_one_item(
     if config.execution.max_parallel_runs > 1:
         assert context.external_trace_root is not None
         context = _ExecutionContext(
-            context.session_id,
-            context.session_root,
-            context.external_trace_root / item.run_id,
+            session_id=context.session_id,
+            session_root=context.session_root,
+            external_trace_root=context.external_trace_root / item.run_id,
+            materialized_trace_root=context.session_root
+            / "runs"
+            / item.run_id
+            / "traces",
         )
         context.external_trace_root.mkdir(parents=True, exist_ok=True)
     try:
@@ -1130,7 +1135,7 @@ def _materialize_trace(
     key_hash = hashlib.sha256(
         json.dumps(key, separators=(",", ":")).encode()
     ).hexdigest()[:12]
-    trace_root = context.session_root / "traces"
+    trace_root = context.materialized_trace_root or context.session_root / "traces"
     if trace_path is not None and context.external_trace_root is not None:
         trace_root = context.external_trace_root
     trace_dir = trace_root / key_hash
@@ -1759,6 +1764,9 @@ def match_replay_sha256(config: MatchConfig) -> str:
     if isinstance(backend, dict):
         backend.pop("planner_config_path", None)
         backend.pop("endpoint_catalog", None)
+        planner = backend.get("planner_config", {})
+        if planner.get("load_predictor_warmup_trace") is not None:
+            planner["load_predictor_warmup_trace"] = "<predictor-warmup>"
     evaluations = payload.get("evaluations", [])
     if isinstance(evaluations, list):
         for evaluation in evaluations:
@@ -1766,6 +1774,8 @@ def match_replay_sha256(config: MatchConfig) -> str:
                 continue
             if evaluation.get("trace_path") is not None:
                 evaluation["trace_path"] = "<source-trace>"
+            if evaluation.get("warmup_path") is not None:
+                evaluation["warmup_path"] = "<predictor-warmup>"
             trace_paths = evaluation.get("trace_paths")
             if isinstance(trace_paths, list):
                 evaluation["trace_paths"] = [
@@ -1858,8 +1868,11 @@ def _redact_report_paths(
         protect(destination.path, "<publish-destination>")
     if isinstance(config.backend, RealBackendConfig):
         protect(config.backend.endpoint_catalog, "<endpoint-catalog>")
-    elif config.backend.planner_config_path is not None:
+    else:
         protect(config.backend.planner_config_path, "<planner-config>")
+        warmup = config.backend.planner_config.get("load_predictor_warmup_trace")
+        if warmup is not None:
+            protect(Path(warmup), "<predictor-warmup>")
 
     ordered = sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True)
 

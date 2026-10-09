@@ -10,14 +10,16 @@ import signal
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import psutil
 import pytest
-from autoscaling_arena import execution
+from autoscaling_arena import execution, match_runner
 from autoscaling_arena.execution import run_isolated
+from autoscaling_arena.match_config import load_match_config
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -229,3 +231,77 @@ def test_invalid_limits_fail_before_starting_worker(isolated_inputs, value):
     with pytest.raises(ValueError, match="finite and positive"):
         run_isolated(*isolated_inputs, timeout_s=value)
     assert not (isolated_inputs[2].session_root / "workers").exists()
+
+
+def test_parallel_builtin_trace_reader_survives_other_worker_write(
+    tmp_path, monkeypatch
+):
+    config = load_match_config(
+        Path(__file__).resolve().parents[1] / "configs/match.controlled.example.yaml"
+    )
+    first = next(config.iter_runs())
+    second = replace(first, index=2, run_id="0002-sim-second-flat")
+    context = match_runner._ExecutionContext(
+        "parallel-probe", tmp_path, tmp_path / "external"
+    )
+    first_written = threading.Event()
+    second_opened = threading.Event()
+    first_read = threading.Event()
+    worker = threading.local()
+    original_open = Path.open
+
+    def delayed_open(path, mode="r", *args, **kwargs):
+        handle = original_open(path, mode, *args, **kwargs)
+        if mode == "w" and path.name == "flat.jsonl" and worker.index == 2:
+            second_opened.set()
+            if not first_read.wait(timeout=5):
+                handle.close()
+                raise RuntimeError("first worker did not read its trace")
+        return handle
+
+    def consume_trace(config, item, run_context):
+        worker.index = item.index
+        run_dir = run_context.session_root / "runs" / item.run_id
+        run_dir.mkdir(parents=True)
+        if item.index == 2 and not first_written.wait(timeout=5):
+            raise RuntimeError("first worker did not write its trace")
+        trace = match_runner._materialize_trace(
+            run_context,
+            workload_name="flat",
+            seed=7,
+            max_requests=16,
+            arrival_speedup=1.0,
+            speedup_is_materialized=False,
+        )
+        if item.index == 1:
+            first_written.set()
+            if not second_opened.wait(timeout=5):
+                raise RuntimeError("second worker did not start writing")
+            try:
+                rows = trace.read_text().splitlines()
+            finally:
+                first_read.set()
+        else:
+            rows = trace.read_text().splitlines()
+        return {
+            "run_id": item.run_id,
+            "status": "ok",
+            "trace": trace,
+            "rows": rows,
+        }
+
+    monkeypatch.setattr(Path, "open", delayed_open)
+    monkeypatch.setattr(match_runner, "_run_sim_item", consume_trace)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(match_runner._run_one_item, config, item, context)
+            for item in (first, second)
+        ]
+        results = [future.result() for future in futures]
+
+    assert [result["status"] for result in results] == ["ok", "ok"], results
+    assert [len(result["rows"]) for result in results] == [16, 16]
+    assert results[0]["rows"] == results[1]["rows"]
+    assert results[0]["trace"] != results[1]["trace"]
+    for item, result in zip((first, second), results):
+        assert result["trace"].is_relative_to(tmp_path / "runs" / item.run_id)

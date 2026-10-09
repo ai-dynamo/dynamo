@@ -123,6 +123,60 @@ def test_fractional_thinning_is_reproducible_and_retains_declared_window(tmp_pat
     assert first.manifest["output"]["last_timestamp_ms"] < 11_000
 
 
+@pytest.mark.parametrize("session_id_field", [None, "conversation_id"])
+def test_scaling_isolates_native_sessions_without_a_session_phase_field(
+    tmp_path, session_id_field
+):
+    source = tmp_path / "source.jsonl"
+    original = _write_trace(source, timestamps=[0, 100, 200], session=True)
+    original[2]["session_id"] = "session-b"
+    for row in original:
+        row["conversation_id"] = "conversation-a"
+    source.write_text("\n".join(json.dumps(row) for row in original) + "\n")
+    result = prepare_trace(
+        source,
+        tmp_path / "scaled.jsonl",
+        config=TracePreparationConfig(
+            request_scale=3, session_id_field=session_id_field
+        ),
+        block_size=64,
+    )
+
+    rows = _read(result.path)
+    copies = [rows[index::3] for index in range(3)]
+    assert copies[0] == original
+    sessions = [{row["session_id"] for row in copy} for copy in copies]
+    assert len(set.union(*sessions)) == 6
+    for copy in copies:
+        assert copy[0]["session_id"] == copy[1]["session_id"]
+        assert copy[0]["session_id"] != copy[2]["session_id"]
+    if session_id_field is not None:
+        assert len({copy[0][session_id_field] for copy in copies}) == 3
+        assert all(len({row[session_id_field] for row in copy}) == 1 for copy in copies)
+
+
+def test_scaling_preserves_absent_and_null_native_sessions(tmp_path):
+    source = tmp_path / "source.jsonl"
+    original = _write_trace(source, timestamps=[0, 100, 200])
+    for row in original[1:]:
+        row["session_id"] = None
+        row["request_id"] = None
+    source.write_text("\n".join(json.dumps(row) for row in original) + "\n")
+    result = prepare_trace(
+        source,
+        tmp_path / "scaled.jsonl",
+        config=TracePreparationConfig(request_scale=2, session_id_field="session_id"),
+        block_size=64,
+    )
+
+    rows = _read(result.path)
+    assert rows[::2] == original
+    assert "session_id" not in rows[1]
+    for row in rows[2:]:
+        assert row["session_id"] is None
+        assert row["request_id"] is None
+
+
 @pytest.mark.parametrize("session_field", [None, "session_id"])
 def test_phase_jitter_is_bounded_sorted_and_preserves_interior_gaps(
     tmp_path, session_field

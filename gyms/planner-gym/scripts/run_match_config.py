@@ -191,11 +191,13 @@ def main() -> int:
         print(f"Artifact error: {exc}", file=sys.stderr)
         return 2
     if args.no_publish:
-        print(
-            "Artifacts: "
-            + str(config.publish.artifact_root / report["provenance"]["session_id"]),
-            flush=True,
+        explicit_root = args.resume if args.resume is not None else args.session_dir
+        artifacts = (
+            explicit_root.expanduser().resolve()
+            if explicit_root is not None
+            else config.publish.artifact_root / report["provenance"]["session_id"]
         )
+        print(f"Artifacts: {artifacts}", flush=True)
         written = []
     else:
         try:

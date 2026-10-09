@@ -224,8 +224,14 @@ def _scaled_rows(
                 transformed["hash_ids"] = [
                     mapped_hash(copy_index, item) for item in record["hash_ids"]
                 ]
-                for field in {"request_id", config.session_id_field} - {None}:
-                    if field in record:
+                # Native replay serializes rows sharing a session ID. Copies
+                # need independent sessions even without session-based jitter.
+                for field in {
+                    "request_id",
+                    "session_id",
+                    config.session_id_field,
+                } - {None}:
+                    if record.get(field) is not None:
                         transformed[field] = _digest(
                             "identifier", config.seed, copy_index, record[field]
                         ).hex()

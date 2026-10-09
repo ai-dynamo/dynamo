@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import runpy
 import shlex
 import subprocess
 import sys
@@ -538,6 +539,110 @@ def test_replay_config_digest_is_portable_across_workspace_roots(
     assert match_runner.match_replay_sha256(
         left_match
     ) == match_runner.match_replay_sha256(right_match)
+
+
+def test_cli_prints_explicit_artifact_root_on_create_and_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    config_path = _write_cli_sim_config(
+        tmp_path, name="session-path", destinations="- type: console"
+    )
+    calls = []
+
+    def fake_run(config, item, context):
+        calls.append(item.run_id)
+        return _ok_result(item)
+
+    monkeypatch.setattr(match_runner, "_run_sim_item", fake_run)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.chdir(tmp_path)
+    main = runpy.run_path(str(RUN_MATCH_CONFIG))["main"]
+    for option in ("--session-dir", "--resume"):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                str(RUN_MATCH_CONFIG),
+                str(config_path),
+                "--no-publish",
+                option,
+                "session",
+            ],
+        )
+        assert main() == 0
+        assert f"Artifacts: {tmp_path / 'session'}\n" in capsys.readouterr().out
+    assert len(calls) == 1
+    assert (tmp_path / "session" / "session-manifest.json").is_file()
+
+
+@pytest.mark.parametrize("source", ["evaluation", "planner"])
+def test_warmup_digest_is_portable_but_resume_pins_contents(tmp_path: Path, source):
+    configs = []
+    for name in ("left", "right"):
+        root = tmp_path / name
+        root.mkdir()
+        warmup = root / "warmup.jsonl"
+        warmup.write_text('{"timestamp":0,"input_length":8,"output_length":4}\n')
+        config = _sim_config(root)
+        if source == "evaluation":
+            config = replace(
+                config,
+                evaluations=(replace(config.evaluations[0], warmup_path=warmup),),
+            )
+        else:
+            config = replace(
+                config,
+                backend=replace(
+                    config.backend,
+                    planner_config={"load_predictor_warmup_trace": str(warmup)},
+                ),
+            )
+        configs.append(config)
+    left, right = configs
+    assert match_runner.match_replay_sha256(left) == match_runner.match_replay_sha256(
+        right
+    )
+    before = match_runner.execution_signature(left)
+    (tmp_path / "left" / "warmup.jsonl").write_text(
+        '{"timestamp":0,"input_length":16,"output_length":4}\n'
+    )
+    assert match_runner.execution_signature(left) != before
+
+
+def test_planner_warmup_outside_config_directory_is_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    warmup = tmp_path / "external" / "warmup.jsonl"
+    warmup.parent.mkdir()
+    warmup.write_text('{"timestamp":0,"input_length":8,"output_length":4}\n')
+    base = _sim_config(tmp_path / "config", autoscalers=("static",))
+    config = replace(
+        base,
+        backend=replace(
+            base.backend,
+            planner_config={"load_predictor_warmup_trace": str(warmup)},
+        ),
+    )
+
+    def fake_run(config, item, context):
+        return {
+            **_ok_result(item),
+            "runtime": {"planner_config": dict(config.backend.planner_config)},
+        }
+
+    monkeypatch.setattr(match_runner, "_run_sim_item", fake_run)
+    report = match_runner.execute_match_config(config)
+    assert str(warmup) not in json.dumps(report)
+    assert (
+        report["resolved_config"]["backend"]["planner_config"][
+            "load_predictor_warmup_trace"
+        ]
+        == "<predictor-warmup>"
+    )
+    assert (
+        report["results"][0]["runtime"]["planner_config"]["load_predictor_warmup_trace"]
+        == "<predictor-warmup>"
+    )
 
 
 @pytest.mark.timeout(30)
