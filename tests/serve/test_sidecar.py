@@ -8,7 +8,6 @@ import importlib.util
 import json
 import os
 import pathlib
-from functools import partial
 
 import pytest
 
@@ -18,11 +17,6 @@ from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
     run_serve_deployment,
-)
-from tests.serve.sidecar_checks import (
-    NativeCancellationPayload,
-    SGLangTransferRecoveryPayload,
-    assert_native_cancellation_and_recovery,
 )
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_metrics import (
@@ -298,7 +292,6 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
     config = sidecar_configs[request.param]
     backend, layout = config.name.split("_", 1)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
-    post_validation = None
     num_engine_ports = (
         {"vllm": 4, "sglang": 5, "trtllm": 2}[backend]
         if layout == "disaggregated"
@@ -360,26 +353,6 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
                     decode_metrics=decode_metrics,
                     transfer_metrics=transfer_metrics,
                 )
-                if backend == "sglang":
-                    recovery = disaggregated_token_count_payload()
-                    payloads.append(
-                        SGLangTransferRecoveryPayload(
-                            body=recovery.body,
-                            expected_response=[],
-                            expected_log=[],
-                            expected_finish_reason=recovery.expected_finish_reason,
-                            expected_completion_tokens=recovery.expected_completion_tokens,
-                            prefill_metrics=prefill_metrics,
-                            decode_metrics=decode_metrics,
-                            transfer_metrics=transfer_metrics,
-                            namespace=engine_env["DYN_NAMESPACE"],
-                            decode_http_port=int(engine_env["SGLANG_DECODE_HTTP_PORT"]),
-                            bootstrap_port=int(
-                                engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"]
-                            ),
-                            discovery_backend=discovery_backend,
-                        )
-                    )
         elif backend in ("vllm", "sglang"):
             namespace = f"sidecar-agg-{generate_random_suffix()}"
             monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
@@ -401,7 +374,6 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
                 f"{backend.upper()}_GRPC_PORT": str(engine_ports[1]),
             }
             payloads = _aggregated_payloads(metrics)
-            native_payloads = [NativeCancellationPayload(config.model)]
             if backend == "sglang":
                 engine_env["DYN_SGLANG_ENABLE_GENERATE"] = "1"
                 payloads.extend(
@@ -409,20 +381,12 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
                         metrics, max_tokens=CANCELLATION_MAX_TOKENS
                     )
                 )
-            post_validation = partial(
-                assert_native_cancellation_and_recovery,
-                metrics=metrics,
-                payloads=native_payloads,
-                namespace=namespace,
-                max_tokens=CANCELLATION_MAX_TOKENS,
-                discovery_backend=discovery_backend,
-            )
         yield dataclasses.replace(
             config,
             frontend_port=dynamo_dynamic_ports.frontend_port,
             env={**config.env, **engine_env},
             request_payloads=payloads,
-        ), post_validation
+        )
 
 
 @pytest.mark.core
@@ -441,12 +405,10 @@ def test_serve_deployment(
     assert (
         num_system_ports >= 2
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
-    config, post_validation = sidecar_config_test
     run_serve_deployment(
-        config,
+        sidecar_config_test,
         request,
         ports=dynamo_dynamic_ports,
-        post_validation=post_validation,
     )
 
 

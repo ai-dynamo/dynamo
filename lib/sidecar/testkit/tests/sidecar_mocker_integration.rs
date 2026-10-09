@@ -15,14 +15,14 @@ use dynamo_sidecar_testkit::control::{
 };
 use dynamo_sidecar_testkit::fixtures::{Outputs, collect, request};
 use futures::{StreamExt, poll, stream::BoxStream};
-use serde_json::{Value, json};
+use serde_json::json;
 
 #[allow(dead_code)]
 mod support;
 
+use support::sglang::{self as sglang_fixture, http};
 use support::vllm as vllm_fixture;
 use support::{FixtureConfig, GenerateOpening, ProcessFixture, SidecarFixture, WireFixture};
-use support::{sglang as sglang_fixture, sglang_http as http};
 
 fn after_token_responses(count: usize, action: StreamAction) -> RequestPlan {
     RequestPlan {
@@ -785,14 +785,10 @@ async fn http_checkpoint(
 #[tokio::test]
 async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
     bounded("HTTP cancellation phases and recovery", async {
-        let mut fixture =
-            sglang_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
         let control = Controller::<http::Adapter>::default();
-        let mut http = http::Fixture::start(control.clone()).await;
-        fixture.override_discovery(
-            Value::Null,
-            vec![json!({"port": http.port(), "incremental_streaming_output": true})],
-        );
+        let mut fixture =
+            sglang_fixture::Fixture::start_http(control.clone(), FixtureConfig::default()).await;
+        let http = fixture.http();
         let engine = fixture.engine().await;
         engine.start(0).await.unwrap();
         let mut aborted = Vec::new();
@@ -865,7 +861,6 @@ async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
             }
         }
         finish(&mut fixture, &engine).await;
-        http.shutdown().await;
     })
     .await;
 }
@@ -873,20 +868,16 @@ async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
 #[tokio::test]
 async fn sglang_http_decode_cancellation_waits_for_transfer() {
     bounded("HTTP decode transfer-safe cancellation", async {
-        let mut fixture = sglang_fixture::Fixture::start(
-            Controller::default(),
+        let control = Controller::<http::Adapter>::default();
+        let mut fixture = sglang_fixture::Fixture::start_http(
+            control.clone(),
             FixtureConfig {
                 disaggregation_mode: DisaggregationMode::Decode,
                 ..Default::default()
             },
         )
         .await;
-        let control = Controller::<http::Adapter>::default();
-        let mut http = http::Fixture::start(control.clone()).await;
-        fixture.override_discovery(
-            Value::Null,
-            vec![json!({"port": http.port(), "incremental_streaming_output": true})],
-        );
+        let http = fixture.http();
         let engine = fixture.engine().await;
         engine.start(0).await.unwrap();
         let mut aborted = Vec::new();
@@ -976,7 +967,6 @@ async fn sglang_http_decode_cancellation_waits_for_transfer() {
             }
         }
         finish(&mut fixture, &engine).await;
-        http.shutdown().await;
     })
     .await;
 }

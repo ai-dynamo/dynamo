@@ -572,178 +572,191 @@ def _test_frontend_kv_routing(
     ]
 
     async def run_test() -> None:
-        with managed_runtime() as runtime:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as session:
             component = "prefill" if is_disaggregated else "backend"
-            worker_ids = sorted(
-                await poll_for_worker_instances(
-                    runtime.endpoint(f"{namespace}.{component}.generate"),
-                    len(system_ports),
-                )
-            )
+            deadline = time.monotonic() + 60
+            worker_ids = []
+            decode_ids = []
+            while time.monotonic() < deadline:
+                try:
+                    async with session.get(
+                        f"http://localhost:{frontend_port}/health",
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as response:
+                        if response.status == 200:
+                            health = await response.json()
+                            instances = [
+                                instance
+                                for instance in health["instances"]
+                                if instance["namespace"] == namespace
+                                and instance["endpoint"] == "generate"
+                            ]
+                            worker_ids = sorted(
+                                {
+                                    instance["instance_id"]
+                                    for instance in instances
+                                    if instance["component"] == component
+                                }
+                            )
+                            decode_ids = sorted(
+                                {
+                                    instance["instance_id"]
+                                    for instance in instances
+                                    if instance["component"] == "backend"
+                                }
+                            )
+                            if len(worker_ids) >= len(system_ports) and (
+                                not is_disaggregated or len(decode_ids) >= 2
+                            ):
+                                break
+                except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                    pass
+                await asyncio.sleep(0.25)
             assert len(worker_ids) == len(system_ports), worker_ids
-            decode_ids = (
-                await poll_for_worker_instances(
-                    runtime.endpoint(f"{namespace}.backend.generate"), 2
-                )
-                if is_disaggregated
-                else worker_ids
-            )
             if is_disaggregated:
                 assert len(decode_ids) == 2 and set(worker_ids).isdisjoint(decode_ids)
             targets = [
                 (worker_id, rank) for worker_id in worker_ids for rank in dp_ranks
             ]
 
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as session:
-
-                async def send(
-                    prompt: str,
-                    *,
-                    is_query_only: bool = False,
-                    target: tuple[int, int] | None = None,
-                ) -> tuple[tuple[int, int], float | None]:
-                    """Send one request and return its selected target and KV hit rate."""
-                    if is_disaggregated:
-                        # Keep the cached prefix while forcing at least one fresh KV block.
-                        prompt += (
-                            f"\nRequest {uuid.uuid4()}. " + "Continue counting. " * 32
+            async def send(
+                prompt: str,
+                *,
+                is_query_only: bool = False,
+                target: tuple[int, int] | None = None,
+            ) -> tuple[tuple[int, int], float | None]:
+                """Send one request and return its selected target and KV hit rate."""
+                if is_disaggregated:
+                    # Keep the cached prefix while forcing at least one fresh KV block.
+                    prompt += f"\nRequest {uuid.uuid4()}. " + "Continue counting. " * 32
+                payload = {
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 8,
+                    "temperature": 0,
+                    "stream": True,
+                    "nvext": {
+                        "extra_fields": ["worker_id", "timing"],
+                        "annotations": ["query_instance_id:"] if is_query_only else [],
+                    },
+                }
+                headers = None
+                if target is not None:
+                    headers = (
+                        {
+                            "x-dynamo-prefill-instance-id": str(target[0]),
+                            "x-dynamo-prefill-dp-rank": str(target[1]),
+                        }
+                        if is_disaggregated
+                        else {
+                            "x-dynamo-worker-instance-id": str(target[0]),
+                            "x-dynamo-dp-rank": str(target[1]),
+                        }
+                    )
+                # Warm both prefill engines before requiring their transfer metrics.
+                check_transfer = (
+                    transfer_total is not None and target is None and not is_query_only
+                )
+                before = (
+                    await asyncio.to_thread(transfer_total) if check_transfer else None
+                )
+                nvext, has_generated_text = await send_router_chat_request(
+                    session, url, payload, headers
+                )
+                selected = require_router_worker_id({"nvext": nvext})
+                selected_target = (
+                    selected["prefill_worker_id"],
+                    selected["prefill_dp_rank"],
+                )
+                assert selected_target in targets, selected
+                if is_disaggregated:
+                    assert selected["decode_worker_id"] in decode_ids, selected
+                else:
+                    assert (
+                        selected["decode_worker_id"],
+                        selected["decode_dp_rank"],
+                    ) == selected_target, selected
+                if check_transfer:
+                    deadline = time.monotonic() + 10
+                    while await asyncio.to_thread(transfer_total) <= before:
+                        assert time.monotonic() < deadline, (
+                            "No completed KV transfer for routed request",
+                            selected,
                         )
-                    payload = {
-                        "model": model_name,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 8,
-                        "temperature": 0,
-                        "stream": True,
-                        "nvext": {
-                            "extra_fields": ["worker_id", "timing"],
-                            "annotations": ["query_instance_id:"]
-                            if is_query_only
-                            else [],
-                        },
-                    }
-                    headers = None
-                    if target is not None:
-                        headers = (
-                            {
-                                "x-dynamo-prefill-instance-id": str(target[0]),
-                                "x-dynamo-prefill-dp-rank": str(target[1]),
-                            }
-                            if is_disaggregated
-                            else {
-                                "x-dynamo-worker-instance-id": str(target[0]),
-                                "x-dynamo-dp-rank": str(target[1]),
-                            }
-                        )
-                    # Warm both prefill engines before requiring their transfer metrics.
-                    check_transfer = (
-                        transfer_total is not None
-                        and target is None
-                        and not is_query_only
-                    )
-                    before = (
-                        await asyncio.to_thread(transfer_total)
-                        if check_transfer
-                        else None
-                    )
-                    nvext, has_generated_text = await send_router_chat_request(
-                        session, url, payload, headers
-                    )
-                    selected = require_router_worker_id({"nvext": nvext})
-                    selected_target = (
-                        selected["prefill_worker_id"],
-                        selected["prefill_dp_rank"],
-                    )
-                    assert selected_target in targets, selected
-                    if is_disaggregated:
-                        assert selected["decode_worker_id"] in decode_ids, selected
-                    else:
-                        assert (
-                            selected["decode_worker_id"],
-                            selected["decode_dp_rank"],
-                        ) == selected_target, selected
-                    if check_transfer:
-                        deadline = time.monotonic() + 10
-                        while await asyncio.to_thread(transfer_total) <= before:
-                            assert time.monotonic() < deadline, (
-                                "No completed KV transfer for routed request",
-                                selected,
-                            )
-                            await asyncio.sleep(0.05)
-                    hit_rate = nvext.get("timing", {}).get("kv_hit_rate")
-                    if is_query_only:
-                        assert not has_generated_text, nvext
-                        assert len(nvext.get("token_ids", [])) >= block_size * 4, nvext
-                    else:
-                        assert (
-                            has_generated_text
-                        ), "Request completed without generating text"
-                        assert isinstance(hit_rate, (int, float)), nvext
-                        assert 0 <= hit_rate <= 1, nvext
-                    return selected_target, hit_rate
+                        await asyncio.sleep(0.05)
+                hit_rate = nvext.get("timing", {}).get("kv_hit_rate")
+                if is_query_only:
+                    assert not has_generated_text, nvext
+                    assert len(nvext.get("token_ids", [])) >= block_size * 4, nvext
+                else:
+                    assert (
+                        has_generated_text
+                    ), "Request completed without generating text"
+                    assert isinstance(hit_rate, (int, float)), nvext
+                    assert 0 <= hit_rate <= 1, nvext
+                return selected_target, hit_rate
 
-                baselines = {
+            baselines = {
+                port: await get_stored_kv_event_counts(session, port)
+                for port in system_ports
+            }
+            if not is_disaggregated:
+                for prompt in prompts:
+                    await send(prompt, is_query_only=True)
+            for prompt, target in zip(prompts, targets):
+                selected, _ = await send(prompt, target=target)
+                assert selected == target, (selected, target)
+
+            deadline = time.monotonic() + 60
+            observed = []
+            counts = {}
+            while time.monotonic() < deadline:
+                # Pinned completions expose timing without warming the other target.
+                observed = [
+                    await send(prompt, target=target)
+                    for prompt, target in zip(prompts, targets)
+                ]
+                counts = {
                     port: await get_stored_kv_event_counts(session, port)
                     for port in system_ports
                 }
-                if not is_disaggregated:
-                    for prompt in prompts:
-                        await send(prompt, is_query_only=True)
+                if all(
+                    selected == expected and hit_rate is not None and hit_rate >= 0.5
+                    for (selected, hit_rate), expected in zip(observed, targets)
+                ) and all(
+                    all(
+                        current > baseline
+                        for current, baseline in zip(counts[port], baselines[port])
+                    )
+                    for port in system_ports
+                ):
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise AssertionError(
+                    f"KV events did not converge: expected targets={targets}, "
+                    f"routing={observed}, Stored counters={counts}, baselines={baselines}"
+                )
+
+            if not is_disaggregated:
                 for prompt, target in zip(prompts, targets):
-                    selected, _ = await send(prompt, target=target)
+                    selected, _ = await send(prompt, is_query_only=True)
                     assert selected == target, (selected, target)
 
-                deadline = time.monotonic() + 60
-                observed = []
-                counts = {}
-                while time.monotonic() < deadline:
-                    # Pinned completions expose timing without warming the other target.
-                    observed = [
-                        await send(prompt, target=target)
-                        for prompt, target in zip(prompts, targets)
-                    ]
-                    counts = {
-                        port: await get_stored_kv_event_counts(session, port)
-                        for port in system_ports
-                    }
-                    if all(
-                        selected == expected
-                        and hit_rate is not None
-                        and hit_rate >= 0.5
-                        for (selected, hit_rate), expected in zip(observed, targets)
-                    ) and all(
-                        all(
-                            current > baseline
-                            for current, baseline in zip(counts[port], baselines[port])
-                        )
-                        for port in system_ports
-                    ):
-                        break
-                    await asyncio.sleep(0.1)
-                else:
-                    raise AssertionError(
-                        f"KV events did not converge: expected targets={targets}, "
-                        f"routing={observed}, Stored counters={counts}, baselines={baselines}"
-                    )
-
-                if not is_disaggregated:
-                    for prompt, target in zip(prompts, targets):
-                        selected, _ = await send(prompt, is_query_only=True)
-                        assert selected == target, (selected, target)
-
-                for prompt_index in (0, 0, 1, 0, 1, 1):
-                    selected, hit_rate = await send(prompts[prompt_index])
-                    assert selected == targets[prompt_index], (
-                        prompt_index,
-                        selected,
-                        targets,
-                    )
-                    assert hit_rate is not None and hit_rate >= 0.5, (
-                        prompt_index,
-                        selected,
-                        hit_rate,
-                    )
+            for prompt_index in (0, 0, 1, 0, 1, 1):
+                selected, hit_rate = await send(prompts[prompt_index])
+                assert selected == targets[prompt_index], (
+                    prompt_index,
+                    selected,
+                    targets,
+                )
+                assert hit_rate is not None and hit_rate >= 0.5, (
+                    prompt_index,
+                    selected,
+                    hit_rate,
+                )
 
     asyncio.run(run_test())
 

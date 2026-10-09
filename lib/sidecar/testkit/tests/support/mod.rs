@@ -13,7 +13,6 @@ use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 
 pub mod sglang;
-pub mod sglang_http;
 pub mod vllm;
 
 pub struct FixtureConfig {

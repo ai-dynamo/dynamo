@@ -55,8 +55,7 @@ lib/sidecar/
     │   └── support/
     │       ├── mod.rs         # Fixture contracts and scheduler-state waits
     │       ├── vllm.rs        # vLLM protocol, discovery, health and child-command adapter
-    │       ├── sglang.rs      # SGLang protocol, discovery, health and child-command adapter
-    │       ├── sglang_http.rs # Targeted HTTP abort ordering and request isolation
+    │       ├── sglang.rs      # SGLang gRPC/HTTP peers, discovery, health and child-command adapter
     │       └── process.rs     # Local discovery, worker processes and TCP routing
     └── README.md              # This guide
 ```
@@ -163,15 +162,15 @@ Each suite exercises a different request path:
   errors become HTTP 400, and failures after a token reaches the client become SSE
   errors without a successful finish. Both paths verify subsequent recovery.
 
-The SGLang HTTP cancellation regression uses a local HTTP peer and the production
-sidecar engine. It holds an admitted request before headers or during streaming,
-then checks targeted abort before disconnect, another request's isolation and
-recovery. The existing SGLang aggregate GPU deployment sends chat and native
-`/generate` payloads through the Dynamo HTTP frontend, disconnects each active
-stream, and checks actual scheduler drain and successful recovery. Explicit
-native stop and consumer drop are exercised by the Rust CPU testkit.
-These checks do not synchronize cancellation before engine admission or during
-physical KV transfer.
+The SGLang fixture owns its optional HTTP peer, discovery metadata and shutdown.
+The HTTP cancellation regression uses that peer and the production sidecar engine.
+It holds an admitted request before headers or during streaming, then checks
+targeted abort before disconnect, another request's isolation and recovery.
+The existing SGLang aggregate GPU deployment sends chat and native `/generate`
+payloads through the Dynamo HTTP frontend, disconnects each active stream, and
+checks actual scheduler drain and successful recovery. Explicit native stop and
+consumer drop are exercised by the Rust CPU testkit. These checks do not synchronize
+cancellation before engine admission or during physical KV transfer.
 
 The controller sits at the native protocol boundary. Each request ID has its
 own plan and observations, so a test can hold or fail one request while proving
@@ -226,12 +225,16 @@ HTTP disconnection, scheduler cleanup, recovery and fresh completed KV transfers
 GPU assertions share each deployment's existing startup and teardown, and use
 the same engine-metrics adapters for cancellation and completed transfers.
 
-GPU post-validation also uses the existing Dynamo client to check explicit
-cancellation and consumer drop on the same deployment. Cancellation must release
-scheduler work and allow subsequent generation. The SGLang handoff repeats after
-cancelling an unmatched transfer wait. Exact cancelled-terminal delivery remains a
-CPU adapter assertion because the network transport can close first; GPU checks
-validate it when delivered.
+GPU requests and worker discovery use frontend HTTP, with engine metrics for
+scheduler and transfer assertions. Explicit native stop, consumer drop and exact
+cancelled-terminal delivery remain Rust CPU adapter assertions; frontend HTTP
+disconnection checks real-engine cleanup and recovery.
+
+SGLang disaggregation validates completed transfers through frontend requests.
+Cancellation of a real engine's unmatched KV-transfer wait remains deferred:
+the public frontend rejects caller-supplied bootstrap metadata, so creating that
+state requires dedicated fault injection. CPU handoff cancellation is not evidence
+that a real SGLang transfer-wait queue drains after cancellation.
 
 The legacy Python backend suite is also distributed by behavior, including
 `tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and
@@ -243,8 +246,9 @@ The legacy Python backend suite is also distributed by behavior, including
    I/O belong beside production code. Direct native RPC behavior belongs in
    `sidecar_mocker_integration.rs`; Worker/discovery or process lifetime belongs in
    `router_sidecar_mocker_integration.rs`. Assertions requiring real inference or
-   GPU state belong in `tests/serve/test_sidecar.py`, as payloads or post-validation
-   checks on an existing deployment.
+   GPU state belong in `tests/serve/test_sidecar.py`, as frontend HTTP payloads or
+   HTTP routing checks on an existing deployment, with engine-metric assertions.
+   Keep direct native-runtime clients in Rust CPU tests.
 2. For shared behavior, write a scenario accepting only its fixture type. Use
    `SidecarFixture` for the common engine lifecycle, `WireFixture` when a test
    must observe active scheduler work, and `ProcessFixture` when it launches a
