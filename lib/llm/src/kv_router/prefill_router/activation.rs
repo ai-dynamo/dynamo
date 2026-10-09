@@ -632,8 +632,8 @@ impl PrefillRouter {
         PrefillLifecycleState::from_atomic(self.lifecycle.load(Ordering::Acquire))
     }
 
-    #[cfg(test)]
-    pub(crate) fn target_endpoint_id(&self) -> Option<dynamo_runtime::protocols::EndpointId> {
+    /// The currently discovered prefill target, if any.
+    pub fn target_endpoint_id(&self) -> Option<dynamo_runtime::protocols::EndpointId> {
         self.target_tx
             .as_ref()
             .and_then(|tx| tx.borrow().as_ref().map(|target| target.endpoint().id()))

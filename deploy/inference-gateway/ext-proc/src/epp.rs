@@ -14,12 +14,14 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use anyhow::Result;
+use axum::http::StatusCode;
 use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
+use dynamo_kv_router::services::selection::{PromptRequest, SelectRequest};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
-use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
+use dynamo_llm::kv_router::{FindBestMatchOutcome, Indexer, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
@@ -38,6 +40,7 @@ use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
     ResponseUsage, resolve_cache_namespace,
 };
+use crate::probe::{Cache, Candidate, Error, Load, Pool, ProbeResponse, hit_rate};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
@@ -261,6 +264,154 @@ impl Router {
     /// router accepts without checking.
     pub fn served_model(&self) -> &str {
         &self.served_model
+    }
+
+    pub(crate) async fn probe(
+        self: &Arc<Self>,
+        body: bytes::Bytes,
+        headers: axum::http::HeaderMap,
+        permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> std::result::Result<crate::probe::ProbeResponse, crate::probe::Error> {
+        if !self.pod_store_ready.load(Ordering::Acquire) {
+            return Err(Error(StatusCode::SERVICE_UNAVAILABLE, "not_ready"));
+        }
+        if self.prefill_router.target_endpoint_id().is_some()
+            || headers.contains_key("x-gateway-destination-endpoint-subset")
+            || headers.contains_key("x-dynamo-session-id")
+        {
+            return Err(crate::probe::unsupported());
+        }
+        let headers: Vec<_> = headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.to_string(), value.to_string()))
+            })
+            .collect();
+        let policy_class =
+            requested_policy_class(&headers).map_err(|_| crate::probe::unsupported())?;
+        let router = self.clone();
+        let cpu_permit = permit.clone();
+        // A timed-out HTTP future cannot stop synchronous tokenization. Keep its
+        // permit until the CPU task exits so cancelled probes remain bounded.
+        let prepared = tokio::task::spawn_blocking(move || {
+            let _permit = cpu_permit;
+            let request = crate::probe::parse_request(&body, router.served_model())?;
+            router
+                .tokenize_chat(&request, &headers)
+                .map_err(|_| Error(StatusCode::BAD_REQUEST, "invalid_request"))
+        })
+        .await
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "preprocessing_failed"))??;
+        // Worker discovery does not advertise namespaced KV-event support yet.
+        if prepared.cache_namespace.is_some() {
+            return Err(crate::probe::unsupported());
+        }
+        let prompt_tokens = prepared.tokens.len();
+        let request = SelectRequest {
+            model_name: self.served_model.clone(),
+            routing_group: dynamo_kv_router::DEFAULT_ROUTING_GROUP.to_owned(),
+            selection_id: None,
+            prompt: PromptRequest {
+                token_ids: Some(prepared.tokens),
+                cache_namespace: prepared.cache_namespace,
+                ..Default::default()
+            },
+            router_config_override: None,
+            expected_output_tokens: None,
+            priority_jump: Some(prepared.priority_jump),
+            strict_priority: Some(prepared.strict_priority),
+            session_id: None,
+            session_context: None,
+            affinity_target: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: prepared.routing_constraints,
+            advisory: true,
+        };
+        let selected = self
+            .decode_router
+            .probe(request, policy_class)
+            .await
+            .map_err(|error| {
+                tracing::debug!(%error, "Routing probe unavailable");
+                Error(StatusCode::SERVICE_UNAVAILABLE, "selection_unavailable")
+            })?;
+        if self.resolve_worker_endpoint(selected.worker_id).is_none() {
+            return Err(Error(StatusCode::SERVICE_UNAVAILABLE, "no_ready_workers"));
+        }
+        if self
+            .decode_router
+            .unique_dp_rank_for_worker(selected.worker_id)
+            .is_none()
+        {
+            return Err(crate::probe::unsupported());
+        }
+        let config = self.decode_router.kv_router_config();
+        let load = selected.worker_load;
+        let gpu = (!matches!(self.decode_router.indexer(), Indexer::None))
+            .then_some(selected.overlap.gpu);
+        // The selector collapses missing lower tiers to the preceding count.
+        // Only an extension proves that this worker has lower-tier evidence.
+        let cpu = (config.use_kv_events && selected.overlap.cpu > selected.overlap.gpu)
+            .then_some(selected.overlap.cpu);
+        let disk = (config.use_kv_events && selected.overlap.disk > selected.overlap.cpu)
+            .then_some(selected.overlap.disk);
+        let rate =
+            |tokens: Option<u32>| hit_rate(tokens.map(u64::from), Some(prompt_tokens as u64));
+        crate::metrics::observe_predicted_reuse(rate(gpu), rate(cpu), rate(disk));
+        Ok(ProbeResponse {
+            model: self.served_model.clone(),
+            epp_instance: std::env::var("HOSTNAME").unwrap_or_default(),
+            sampled_at_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            prompt_tokens,
+            block_size: selected.block_size,
+            candidate: Candidate {
+                worker_id: selected.worker_id.to_string(),
+                dp_rank: selected.dp_rank,
+                cache: Cache {
+                    estimate_source: if gpu.is_none() {
+                        "unavailable"
+                    } else if !config.use_kv_events {
+                        "approximate"
+                    } else if config.router_predicted_ttl_secs.is_some() {
+                        "mixed"
+                    } else {
+                        "events"
+                    },
+                    gpu_prefix_tokens: gpu,
+                    cpu_prefix_tokens: cpu,
+                    disk_prefix_tokens: disk,
+                    predicted_gpu_hit_rate: rate(gpu),
+                    predicted_cpu_inclusive_hit_rate: rate(cpu),
+                    predicted_disk_inclusive_hit_rate: rate(disk),
+                    effective_prefill_tokens: selected.effective_prefill_tokens,
+                },
+                load: Load {
+                    active_prefill_tokens: config
+                        .router_track_prefill_tokens
+                        .then(|| load.as_ref().map(|l| l.active_prefill_tokens))
+                        .flatten(),
+                    prefill_token_capacity: load
+                        .as_ref()
+                        .map(|l| l.prefill_token_capacity)
+                        .filter(|n| *n > 0),
+                    potential_decode_blocks: config
+                        .router_track_active_blocks
+                        .then_some(selected.potential_decode_blocks),
+                    total_kv_blocks: load.and_then(|l| l.total_kv_blocks),
+                },
+            },
+            pool: Pool {
+                pending_requests: self.decode_router.pending_count(),
+                pending_input_tokens: self.decode_router.pending_isl_tokens(),
+            },
+        })
     }
 
     /// Tokenize a JSON request body and extract router queue priorities and
