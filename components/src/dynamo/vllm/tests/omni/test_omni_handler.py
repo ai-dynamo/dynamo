@@ -508,6 +508,62 @@ class _AsyncReturn:
 class TestI2VEngineInputs:
     """Tests for image-to-video: multi_modal_data attachment, I2V nvext params, and protocol fields."""
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reference,exception_type,status",
+        [
+            ("data:image/png;base64,bm90IGFuIGltYWdl", HttpStatusError, 415),
+            ("data:image/png;base64,NOT_VALID!!!", ValueError, None),
+            (None, ValueError, None),
+        ],
+    )
+    async def test_invalid_reference_preserves_loader_error(
+        self, tmp_path, reference, exception_type, status
+    ):
+        """Let the binding map loader errors to HTTP, before engine admission."""
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        handler._image_loader = ImageLoader()
+        request = {
+            "model": "test-model",
+            "prompt": "a car",
+            "input_reference": reference or (tmp_path / "reference.png").as_uri(),
+        }
+
+        with pytest.raises(exception_type) as excinfo:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pytest.fail("Invalid reference must not yield a video response")
+
+        if status is not None:
+            assert excinfo.value.status == status
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            HttpConfigurationError("invalid proxy configuration"),
+            RuntimeError("image decoder failed unexpectedly"),
+            asyncio.CancelledError(),
+        ],
+    )
+    async def test_reference_server_errors_and_cancellation_are_preserved(self, error):
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        handler._image_loader = SimpleNamespace(load_image=AsyncMock(side_effect=error))
+        request = {
+            "model": "test-model",
+            "prompt": "a car",
+            "input_reference": "https://example.com/reference.png",
+        }
+
+        with pytest.raises(type(error)) as excinfo:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pytest.fail("Reference loading errors must not yield a video response")
+
+        assert excinfo.value is error
+        handler.engine_client.generate.assert_not_called()
+
     @pytest.mark.parametrize(
         "negative_prompt,with_image",
         [

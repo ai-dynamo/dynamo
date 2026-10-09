@@ -4,21 +4,25 @@
 """Tests for output_formatter.py — modality-specific formatters."""
 
 import base64
+import io
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from PIL import Image
 
 try:
     import torch
 
+    from dynamo.common.utils.output_modalities import RequestType
     from dynamo.vllm.omni.output_formatter import (
         AudioAggregateState,
         AudioFormatter,
         AudioStreamState,
         DiffusionFormatter,
+        OutputFormatter,
         TextFormatter,
         _build_completion_usage,
         _error_chunk,
@@ -1210,6 +1214,34 @@ class TestOutputFormatter:
 
     # Full ctx matching _generate_openai_mode's call signature
     _FULL_CTX = dict(fps=16, response_format=None, previous_text="", speed=1.0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("final_output_type", ["image", "video"])
+    @pytest.mark.parametrize("count", [1, 2])
+    async def test_image_request_preserves_pil_outputs(self, final_output_type, count):
+        # Cosmos3 can retain its model-level "video" label for T2I output.
+        # The public image request must still receive lossless PNGs, not MP4.
+        images = [
+            Image.new("RGB", (32, 48), (index * 80, 90, 150)) for index in range(count)
+        ]
+        stage = SimpleNamespace(final_output_type=final_output_type, images=images)
+        formatter = OutputFormatter(model_name="test-model")
+
+        response = await formatter.format(
+            stage,
+            "cosmos-image",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+        )
+
+        assert len(response["data"]) == count
+        for expected, item in zip(images, response["data"], strict=True):
+            with Image.open(
+                io.BytesIO(base64.b64decode(item["b64_json"], validate=True))
+            ) as decoded:
+                assert decoded.format == "PNG"
+                assert decoded.size == expected.size
+                assert decoded.tobytes() == expected.tobytes()
 
     @pytest.mark.asyncio
     async def test_routes_text(self):

@@ -205,6 +205,69 @@ def test_diffusion_bool_environment_option_is_parsed(monkeypatch):
     assert args.vae_use_tiling is False
 
 
+@pytest.mark.parametrize(
+    ("env_value", "options", "expected"),
+    [
+        (None, [], None),
+        (None, ["--no-guardrails"], {"guardrails": False}),
+        ("true", [], {"guardrails": False}),
+        ("false", [], None),
+        ("false", ["--no-guardrails"], {"guardrails": False}),
+    ],
+)
+def test_guardrail_option_builds_native_model_config(
+    monkeypatch, tmp_path, env_value, options, expected
+):
+    monkeypatch.delenv("DYN_OMNI_NO_GUARDRAILS", raising=False)
+    if env_value is not None:
+        monkeypatch.setenv("DYN_OMNI_NO_GUARDRAILS", env_value)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["dynamo.vllm.omni", "--model", str(tmp_path), *options],
+    )
+
+    config = parse_omni_args()
+
+    assert config.diffusion.model_config == expected
+
+
+def test_invalid_guardrail_environment_value_rejected(monkeypatch):
+    monkeypatch.setenv("DYN_OMNI_NO_GUARDRAILS", "maybe")
+
+    with pytest.raises(argparse.ArgumentTypeError, match="expected one of"):
+        OmniArgGroup().add_arguments(argparse.ArgumentParser())
+
+
+def test_guardrail_option_preserves_other_model_settings(monkeypatch):
+    monkeypatch.delenv("DYN_OMNI_NO_GUARDRAILS", raising=False)
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+    args = parser.parse_args(["--no-guardrails"])
+    original = {"guardrails": True, "offload_guardrail_models": True}
+    args.model_config = original
+
+    config = OmniConfig.from_cli_args(args)
+
+    assert config.diffusion.model_config == {
+        "guardrails": False,
+        "offload_guardrail_models": True,
+    }
+    assert original == {"guardrails": True, "offload_guardrail_models": True}
+
+
+@pytest.mark.parametrize("mode", ["stage_id", "omni_router", "realtime"])
+def test_guardrail_option_rejected_for_other_worker_modes(tmp_path, mode):
+    config = _make_omni_config(
+        no_guardrails=True,
+        stage_configs_path=str(tmp_path / "stages.yaml"),
+        **{mode: 0 if mode == "stage_id" else True},
+    )
+
+    with pytest.raises(ValueError, match="only supported by aggregated Omni workers"):
+        config.validate()
+
+
 @pytest.mark.parametrize("fps", [0, -1, -100])
 def test_omni_config_invalid_video_fps(fps):
     config = _make_omni_config(default_video_fps=fps)
