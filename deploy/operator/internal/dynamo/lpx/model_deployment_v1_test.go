@@ -272,17 +272,27 @@ func TestDeploymentContractAcquisitionAndRuntimePath(t *testing.T) {
 }
 
 func TestDeploymentContractCorruptionNeverUsesLegacy(t *testing.T) {
-	t.Log("Publish a corrupt split contract beside an otherwise valid legacy contract")
-	root := t.TempDir()
-	writeManifestV2Payload(t, root, manifestV2Payload(t))
-	require.NoError(t, os.WriteFile(filepath.Join(root, gbuildDeploymentV1CapnpFile), []byte("corrupt"), 0o600))
-	registry, err := NewModelRegistry("", nil)
-	require.NoError(t, err)
+	for _, entry := range []string{"corrupt file", "directory"} {
+		t.Run(entry, func(t *testing.T) {
+			t.Log("Publish an invalid split entry beside an otherwise valid legacy contract")
+			root := t.TempDir()
+			writeManifestV2Payload(t, root, manifestV2Payload(t))
+			path := filepath.Join(root, gbuildDeploymentV1CapnpFile)
+			switch entry {
+			case "corrupt file":
+				require.NoError(t, os.WriteFile(path, []byte("corrupt"), 0o600))
+			case "directory":
+				require.NoError(t, os.Mkdir(path, 0o700))
+			}
+			registry, err := NewModelRegistry("", nil)
+			require.NoError(t, err)
 
-	t.Log("Reject ambiguous publication before any legacy decoder can accept it")
-	_, err = registry.AcquireBuildSnapshot(t.Context(), root)
-	require.ErrorIs(t, err, ErrBuildSnapshotInconsistent)
-	require.ErrorContains(t, err, "ambiguous")
+			t.Log("Reject ambiguous publication before any legacy decoder can accept it")
+			_, err = registry.AcquireBuildSnapshot(t.Context(), root)
+			require.ErrorIs(t, err, ErrBuildSnapshotInconsistent)
+			require.ErrorContains(t, err, "ambiguous")
+		})
+	}
 }
 
 func TestDeploymentContractFencesRemoteBytes(t *testing.T) {
