@@ -128,6 +128,12 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Environment variable: `DYN_VLLM_HEADLESS`
 </ParamField>
 
+<ParamField path="--freeze-gc-after-init" type="boolean" default="false">
+  Collect and freeze tracked objects in the Dynamo worker process once the engine is initialized, before the model is registered. Later full (gen2) collections then skip the static heap (engine client, tokenizer, config), which otherwise causes multi-hundred-millisecond request stalls under load. vLLM already freezes its EngineCore, GPU-worker and API-server heaps; this covers the Dynamo process that replaces the API server. Objects alive at freeze time are never reclaimed, so validate memory usage before enabling it. Not supported with `--headless` or `--disaggregation-mode=encode`.
+
+  Environment variable: `DYN_VLLM_FREEZE_GC_AFTER_INIT`
+</ParamField>
+
 ## Tokenizer and multimodal
 
 <ParamField path="--use-vllm-tokenizer" type="boolean" default="false">

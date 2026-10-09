@@ -280,6 +280,21 @@ class DynamoVllmArgGroup(ArgGroup):
             "See vLLM multi-node data parallel documentation for more details.",
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--freeze-gc-after-init",
+            env_var="DYN_VLLM_FREEZE_GC_AFTER_INIT",
+            default=False,
+            help=(
+                "Collect and freeze tracked objects in the Dynamo worker process once "
+                "the engine is initialized, before the model is registered, so later "
+                "full (gen2) collections stop re-walking the static heap. vLLM already "
+                "does this in its EngineCore, GPU workers and API server; this covers "
+                "the Dynamo process that replaces the API server. Opt in only after "
+                "validating memory usage for the workload."
+            ),
+        )
+
         # ModelExpress P2P
         add_argument(
             g,
@@ -587,6 +602,9 @@ class DynamoVllmConfig(ConfigBase):
     # Headless mode for multi-node TP/PP
     headless: bool = False
 
+    # Freeze the Dynamo worker process's GC heap before registration.
+    freeze_gc_after_init: bool = False
+
     # ModelExpress P2P
     model_express_url: Optional[str] = None
 
@@ -643,6 +661,7 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_realtime_worker_exclusivity()
         self._validate_classify_worker_exclusivity()
         self._validate_custom_encoder()
+        self._validate_freeze_gc_after_init()
         self._load_explicit_benchmark_points()
         self._resolve_legacy_benchmark_sampling()
         self._validate_benchmark_sampling()
@@ -969,6 +988,21 @@ class DynamoVllmConfig(ConfigBase):
                     f"{left_name} reserves {left_ports}, while {right_name} "
                     f"reserves {right_ports}. Configure non-overlapping ports."
                 )
+
+    def _validate_freeze_gc_after_init(self) -> None:
+        """The freeze runs in register_vllm_model, so reject roles that never call it."""
+        if not self.freeze_gc_after_init:
+            return
+        if self.headless:
+            raise ValueError(
+                "--freeze-gc-after-init cannot be combined with --headless: headless "
+                "nodes register no Dynamo endpoint, so the freeze would never run."
+            )
+        if self.disaggregation_mode == DisaggregationMode.ENCODE:
+            raise ValueError(
+                "--freeze-gc-after-init is not supported with "
+                "--disaggregation-mode=encode."
+            )
 
     def _validate_realtime_worker_exclusivity(self) -> None:
         """Realtime serving uses a dedicated aggregated bidirectional worker."""

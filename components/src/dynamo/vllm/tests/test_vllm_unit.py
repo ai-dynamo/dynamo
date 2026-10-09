@@ -2240,3 +2240,83 @@ async def test_generate_text_mode_notifies_for_empty_decoded_token():
 
     assert chunks[0]["choices"][0]["delta"]["content"] == ""
     assert context.notifications == 1
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_maybe_freeze_gc_after_init_runs_once(monkeypatch, enabled):
+    vllm_main = _load_vllm_main()
+    freeze = Mock()
+    monkeypatch.setattr(vllm_main, "freeze_gc_heap", freeze)
+    monkeypatch.setattr(vllm_main, "_gc_frozen_after_init", False)
+
+    vllm_main.maybe_freeze_gc_after_init(enabled)
+    vllm_main.maybe_freeze_gc_after_init(enabled)
+
+    assert freeze.call_count == (1 if enabled else 0)
+
+
+@pytest.mark.asyncio
+async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch):
+    vllm_main = _load_vllm_main()
+    order: list[str] = []
+    monkeypatch.setattr(
+        vllm_main, "freeze_gc_heap", lambda: order.append("freeze_gc_heap")
+    )
+    monkeypatch.setattr(vllm_main, "_gc_frozen_after_init", False)
+
+    async def fake_register_model(*_args, **_kwargs):
+        order.append("register_model")
+
+    monkeypatch.setattr(vllm_main, "register_model", fake_register_model)
+    # Stub everything register_vllm_model calls before register_model; this
+    # test covers only the freeze ordering.
+    for name in (
+        "ModelRuntimeConfig",
+        "publish_vllm_structural_tag_reasoning_policy",
+        "publish_vllm_qwen_video_processor_contract",
+        "publish_vllm_nemotron_video_processor_contract",
+        "apply_data_parallel_runtime_config",
+        "publish_kv_hint_capabilities",
+        "publish_vllm_token_budget",
+        "apply_topology_config",
+        "_register_model_source_path",
+        "build_router_config",
+        "should_register_model_ignore_weights",
+        "_base_model_lora_capacity",
+    ):
+        monkeypatch.setattr(vllm_main, name, Mock())
+    monkeypatch.setattr(vllm_main, "get_dp_range_for_worker", lambda _: (0, 1))
+    monkeypatch.setattr(vllm_main, "state_agent_settings", lambda _: None)
+    monkeypatch.setattr(
+        vllm_main, "publish_engine_generate_capability", lambda *_: False
+    )
+    monkeypatch.setattr(vllm_main, "per_rank_kv_blocks", lambda blocks, _: blocks)
+    monkeypatch.setattr(vllm_main, "get_spec_decode_runtime_data", lambda *_: None)
+    monkeypatch.setattr(
+        vllm_main, "create_frontend_media_config", lambda _: (None, None)
+    )
+    monkeypatch.setattr(
+        vllm_main,
+        "get_engine_cache_info",
+        lambda _: {
+            "num_gpu_blocks": 16,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 512,
+            "kv_event_block_size": 16,
+        },
+    )
+
+    config = Mock(freeze_gc_after_init=True, dyn_default_thinking_mode=None)
+    vllm_config = Mock(lora_config=None)
+
+    await vllm_main.register_vllm_model(
+        dynamo_llm.ModelInput.Tokens,
+        dynamo_llm.ModelType.Chat,
+        Mock(),
+        config,
+        Mock(),
+        vllm_config,
+        worker_type=dynamo_llm.WorkerType.Aggregated,
+    )
+
+    assert order == ["freeze_gc_heap", "register_model"]
