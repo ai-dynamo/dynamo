@@ -171,6 +171,7 @@ impl ConcurrentRadixTreeCompressed {
                             self.repair_lookup_for_resolved_node(
                                 lookup,
                                 block_hash,
+                                &cur_node,
                                 &resolved,
                                 LookupRepairDirection::TowardHead,
                             );

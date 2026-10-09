@@ -1630,3 +1630,64 @@ fn successful_repair_does_not_restore_scrubbed_other_worker_entries() {
         );
     }
 }
+
+mod lookup_redirect_tests {
+    use super::*;
+
+    /// Workers 0 and 1 both hold [1] -> [2, 20, 21]. Evicting [1] from both unlinks
+    /// [2, 20, 21] while their lookup entries still name it. Worker 0 then stores
+    /// [1] and [2, 20] again, on a new live node. Worker 1 stores behind 2 through
+    /// its stale entry, splitting the unlinked node into [2] and [20, 21], and
+    /// worker 0 evicts 21 and 20. Neither the split nor the lookup repair for 21
+    /// may repoint worker 0's entry for 20, which names the live node.
+    fn split_of_unlinked_node_keeps_live_entries(grouped: bool, same_lane: bool) {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lanes = [direct_lookup(), direct_lookup()];
+        let tail = remove_hashes_with_parent(&[1, 2], &[20, 21]);
+        let mut events = vec![
+            make_store_event(0, &[1, 30]),
+            make_store_event_with_parent(0, &[1], &[2, 20, 21]),
+            make_store_event(1, &[1]),
+            make_store_event_with_parent(1, &[1], &[2, 20, 21]),
+            make_remove_event_with_parent(0, &[], &[1]),
+            make_remove_event_with_parent(1, &[], &[1]),
+            make_store_event(0, &[1]),
+            make_store_event_with_parent(0, &[1], &[2, 20]),
+            make_store_event_with_parent(1, &[1, 2], &[26]),
+        ];
+        if grouped {
+            events.push(remove_event(0, 0, 0, vec![tail[1], tail[0]]));
+        } else {
+            events.push(remove_event(0, 0, 0, vec![tail[1]]));
+            events.push(remove_event(0, 1, 0, vec![tail[0]]));
+        }
+        for event in events {
+            let lane = if same_lane {
+                0
+            } else {
+                event.worker_id as usize
+            };
+            apply_direct(&index, &mut lanes[lane], event);
+        }
+
+        assert_direct_score(&index, &[1, 2, 20], worker(0), 2);
+    }
+
+    /// The splitting lane also holds worker 0, so the split's own lookup update
+    /// must leave worker 0's live entry alone.
+    #[test]
+    fn same_lane_split_of_unlinked_node_keeps_live_entries() {
+        for grouped in [true, false] {
+            split_of_unlinked_node_keeps_live_entries(grouped, true);
+        }
+    }
+
+    /// Worker 0's lane repairs its stale entry for 21 lazily, so the repair must
+    /// leave worker 0's live entry for 20 alone.
+    #[test]
+    fn cross_lane_repair_into_unlinked_suffix_keeps_live_entries() {
+        for grouped in [true, false] {
+            split_of_unlinked_node_keeps_live_entries(grouped, false);
+        }
+    }
+}

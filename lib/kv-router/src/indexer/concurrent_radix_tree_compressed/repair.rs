@@ -46,7 +46,7 @@ impl ConcurrentRadixTreeCompressed {
         self.bench_metrics
             .lookup_repair_scans
             .fetch_add(1, Ordering::Relaxed);
-        self.repair_lookup_for_resolved_node(lookup, hash, &resolved, direction);
+        self.repair_lookup_for_resolved_node(lookup, hash, &node, &resolved, direction);
         Some(resolved)
     }
 
@@ -54,6 +54,7 @@ impl ConcurrentRadixTreeCompressed {
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         hash: ExternalSequenceBlockHash,
+        stale: &SharedNode,
         resolved: &SharedNode,
         direction: LookupRepairDirection,
     ) {
@@ -61,9 +62,10 @@ impl ConcurrentRadixTreeCompressed {
         let mut changed_entries_total = 0u64;
 
         for (&worker, worker_lookup) in lookup.iter_mut() {
-            let _changed_entries = update_existing_arc_lookup_for_keys(
+            let _changed_entries = redirect_arc_lookup_for_keys(
                 worker_lookup,
                 resolved.lookup_hashes_for_worker_repair(worker, hash, direction),
+                stale,
                 resolved,
             );
             #[cfg(feature = "bench")]

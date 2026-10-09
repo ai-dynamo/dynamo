@@ -39,27 +39,34 @@ where
     changed
 }
 
-/// Update existing `Arc` lookup entries for keys that should point at `node`.
+/// Repoint existing `Arc` lookup entries for `keys` that still name `from` at `to`.
 ///
-/// Unlike [`update_arc_lookup_for_keys`], this does not insert missing keys.
-/// Lookup repair uses absence as meaningful state: a remove can scrub an entry
-/// before another worker on the same event thread repairs a stale lookup.
-/// Returns the number of existing entries that changed.
-pub(crate) fn update_existing_arc_lookup_for_keys<K, T>(
+/// Unlike [`update_arc_lookup_for_keys`], this neither inserts missing keys nor
+/// touches entries naming any other node. Absence is meaningful: a remove can
+/// scrub an entry before another worker on the same event thread repairs a
+/// stale lookup. An entry naming another node holds that worker's coverage of
+/// the key there, for example after the worker stored the key again on a live
+/// node while an unlinked node still contains it. Returns the number of
+/// entries changed.
+pub(crate) fn redirect_arc_lookup_for_keys<K, T>(
     lookup: &mut FxHashMap<K, Arc<T>>,
     keys: impl IntoIterator<Item = K>,
-    node: &Arc<T>,
+    from: &Arc<T>,
+    to: &Arc<T>,
 ) -> usize
 where
     K: Eq + Hash,
 {
+    if Arc::ptr_eq(from, to) {
+        return 0;
+    }
     let mut changed = 0;
 
     for key in keys {
         if let Some(entry) = lookup.get_mut(&key)
-            && !Arc::ptr_eq(entry, node)
+            && Arc::ptr_eq(entry, from)
         {
-            *entry = Arc::clone(node);
+            *entry = Arc::clone(to);
             changed += 1;
         }
     }
