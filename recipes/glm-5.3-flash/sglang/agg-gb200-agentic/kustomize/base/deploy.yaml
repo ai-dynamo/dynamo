@@ -79,7 +79,7 @@ spec:
                 - --enable-multimodal
                 - --frontend-decoding
                 - --model-path
-                - /shared-model-cache/hub/models--RadixArk--GLM-5.3-Flash-NVFP4/snapshots/f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
+                - RadixArk/GLM-5.3-Flash-NVFP4
                 - --revision
                 - f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
                 - --served-model-name
