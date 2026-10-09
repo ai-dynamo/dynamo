@@ -34,6 +34,8 @@ Write your own policy when no shipped policy expresses the rule you need. The re
 
 ## Choose the Policy Stage
 
+To defer or reject requests before they enter the scheduling queue, use a [request classifier](custom-admission-control.md). It can be combined with a worker-selection policy.
+
 | Stage | Input | Output | Use this stage for |
 |---|---|---|---|
 | `WorkerFilter` | Request context and one host-eligible worker | Keep or reject | The rule is a hard requirement, not a ranking preference |

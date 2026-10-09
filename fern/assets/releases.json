@@ -2224,6 +2224,15 @@
   "nightliesNote": "ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026); kvbm joined the nightly train on Aug 2, 2026. Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus a rolling `latest` tag. A night is listed once both its `ai-dynamo` and `ai-dynamo-runtime` wheels published; a night with an incomplete wheel train is omitted.",
   "nightlyBuilds": [
     {
+      "version": "1.6.0.dev20261009",
+      "date": "Oct 9, 2026",
+      "packages": [
+        "ai-dynamo",
+        "ai-dynamo-runtime"
+      ],
+      "dateIso": "2026-10-09"
+    },
+    {
       "version": "1.6.0.dev20261008",
       "date": "Oct 8, 2026",
       "packages": [
@@ -2242,16 +2251,6 @@
         "kvbm"
       ],
       "dateIso": "2026-10-07"
-    },
-    {
-      "version": "1.6.0.dev20261006",
-      "date": "Oct 6, 2026",
-      "packages": [
-        "ai-dynamo",
-        "ai-dynamo-runtime",
-        "kvbm"
-      ],
-      "dateIso": "2026-10-06"
     }
   ]
 }
