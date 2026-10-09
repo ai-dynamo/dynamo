@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Frontend protocol tooling
+
+on:
+  pull_request:
+    paths:
+      - 'container/context.yaml'
+      - 'Cargo.lock'
+      - 'lib/llm/src/protocols/**'
+      - 'lib/llm/src/http/service/openapi_docs.rs'
+      - 'lib/llm/src/bin/generate_frontend_openapi.rs'
+      - 'lib/llm/tests/openapi_request*.rs'
+      - 'scripts/protocol_compatibility/**'
+      - 'lib/llm/tests/fixtures/openapi/**'
+      - '.github/workflows/protocol-assessment.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protocol-tooling-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tooling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Install pinned comparator and Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -r scripts/protocol_compatibility/requirements.txt
+          curl --fail --location --output "$RUNNER_TEMP/oasdiff.tar.gz" \
+            https://github.com/oasdiff/oasdiff/releases/download/v1.33.0/oasdiff_1.33.0_linux_amd64.tar.gz
+          echo "43a4e328e2d13ba1552d760aa68d2485c75c5621f309f6ff64ae895188345247  $RUNNER_TEMP/oasdiff.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/oasdiff.tar.gz" -C "$RUNNER_TEMP" oasdiff
+          echo "OASDIFF_BIN=$RUNNER_TEMP/oasdiff" >> "$GITHUB_ENV"
+      - name: Test composition, request projection, reporting and real comparator
+        run: python -m unittest discover -s scripts/protocol_compatibility/tests -t . -v
+      - name: State assessment boundary
+        shell: bash
+        run: |
+          echo '## Protocol tooling checks' >> "$GITHUB_STEP_SUMMARY"
+          echo 'These tests do not acquire server images or establish Dynamo/framework compatibility.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Use revision-pinned generated/published specs for comparison. Deployment recapture and runtime fidelity are separate caller-owned checks; see scripts/protocol_compatibility/README.md.' >> "$GITHUB_STEP_SUMMARY"
