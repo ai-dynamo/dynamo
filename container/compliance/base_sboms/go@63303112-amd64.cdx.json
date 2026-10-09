@@ -18,17 +18,17 @@
       "type": "file"
     },
     {
-      "bom-ref": "5a771302f1cf2d06",
+      "bom-ref": "31a414cc03b5693a",
       "name": "/usr/lib/x86_64-linux-gnu/engines-3/afalg.so",
       "type": "file"
     },
     {
-      "bom-ref": "0c904506139e7fe5",
+      "bom-ref": "7a7295942f12939d",
       "name": "/usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so",
       "type": "file"
     },
     {
-      "bom-ref": "7a538b857cad36bc",
+      "bom-ref": "93e9a34041fc3c98",
       "name": "/usr/lib/x86_64-linux-gnu/engines-3/padlock.so",
       "type": "file"
     },
@@ -1338,7 +1338,7 @@
       "type": "file"
     },
     {
-      "bom-ref": "e5acafd73df4589f",
+      "bom-ref": "37b605d6539c0c8b",
       "name": "/usr/lib/x86_64-linux-gnu/libcrypto.so.3",
       "type": "file"
     },
@@ -1408,7 +1408,7 @@
       "type": "file"
     },
     {
-      "bom-ref": "ee7cd0febe45112c",
+      "bom-ref": "caf249127a4dd940",
       "name": "/usr/lib/x86_64-linux-gnu/libssl.so.3",
       "type": "file"
     },
@@ -1433,7 +1433,7 @@
       "type": "file"
     },
     {
-      "bom-ref": "c578b38458dc3e2a",
+      "bom-ref": "0ada548a07314fa6",
       "name": "/usr/lib/x86_64-linux-gnu/ossl-modules/fips.so",
       "type": "file"
     },
@@ -1663,22 +1663,22 @@
       "type": "file"
     },
     {
-      "bom-ref": "87e678f09bea788c",
+      "bom-ref": "c06c5d868fc7eb50",
       "name": "/usr/share/doc/libssl3t64/NEWS.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "956a3de383d8d1a4",
+      "bom-ref": "230ecfe12922d224",
       "name": "/usr/share/doc/libssl3t64/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "8014522dc806e6bd",
+      "bom-ref": "dd6e05c649b52cb5",
       "name": "/usr/share/doc/libssl3t64/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "96c68744f15b1ec2",
+      "bom-ref": "e2e3861d40652ff6",
       "name": "/usr/share/doc/libssl3t64/copyright",
       "type": "file"
     },
@@ -1733,17 +1733,17 @@
       "type": "file"
     },
     {
-      "bom-ref": "f43a9bdc623eb7ca",
+      "bom-ref": "3a829ebad9ca5cd2",
       "name": "/usr/share/doc/openssl-provider-fips/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "5a81f4345e2bc73a",
+      "bom-ref": "f302c9bb4159310e",
       "name": "/usr/share/doc/openssl-provider-fips/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "ad39b0d0b6c03e9a",
+      "bom-ref": "825ef6c5555b8fc6",
       "name": "/usr/share/doc/openssl-provider-fips/copyright",
       "type": "file"
     },
@@ -1823,7 +1823,7 @@
       "type": "file"
     },
     {
-      "bom-ref": "5395bf0dca134ebe",
+      "bom-ref": "4ff9e855e13bb01a",
       "name": "/usr/share/lintian/overrides/libssl3t64",
       "type": "file"
     },
@@ -6258,12 +6258,12 @@
       "type": "file"
     },
     {
-      "bom-ref": "6d00348c39d2f206",
+      "bom-ref": "37210ce9cc67563a",
       "name": "/var/lib/dpkg/status.d/libssl3t64",
       "type": "file"
     },
     {
-      "bom-ref": "c4a9afd62234aff5",
+      "bom-ref": "221a62cddb5c590d",
       "name": "/var/lib/dpkg/status.d/libssl3t64.md5sums",
       "type": "file"
     },
@@ -6308,12 +6308,12 @@
       "type": "file"
     },
     {
-      "bom-ref": "0d990720741c9d78",
+      "bom-ref": "e572ba2b8697ea50",
       "name": "/var/lib/dpkg/status.d/openssl-provider-fips",
       "type": "file"
     },
     {
-      "bom-ref": "c7bc792979558df4",
+      "bom-ref": "8922f51d20f93258",
       "name": "/var/lib/dpkg/status.d/openssl-provider-fips.md5sums",
       "type": "file"
     },
@@ -6598,8 +6598,8 @@
       "version": "2.41-12+deb13u4"
     },
     {
-      "bom-ref": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u2?arch=amd64&distro=debian-13&package-id=36b0b2f615d7105d&upstream=openssl",
-      "cpe": "cpe:2.3:a:libssl3t64:libssl3t64:3.5.7-1\\~deb13u2:*:*:*:*:*:*:*",
+      "bom-ref": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3?arch=amd64&distro=debian-13&package-id=1aa0edd3366adca1&upstream=openssl",
+      "cpe": "cpe:2.3:a:libssl3t64:libssl3t64:3.5.7-1\\~deb13u3:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
@@ -6624,9 +6624,9 @@
       ],
       "name": "libssl3t64",
       "publisher": "Debian OpenSSL Team <pkg-openssl-devel@alioth-lists.debian.net>",
-      "purl": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u2?arch=amd64&distro=debian-13&upstream=openssl",
+      "purl": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3?arch=amd64&distro=debian-13&upstream=openssl",
       "type": "library",
-      "version": "3.5.7-1~deb13u2"
+      "version": "3.5.7-1~deb13u3"
     },
     {
       "bom-ref": "pkg:deb/debian/libzstd1@1.5.7%2Bdfsg-1?arch=amd64&distro=debian-13&package-id=4227c89854f9eaa4&upstream=libzstd",
@@ -6713,8 +6713,8 @@
       "version": "1.0.5"
     },
     {
-      "bom-ref": "pkg:deb/debian/openssl-provider-fips@3.5.7-1~deb13u2?arch=amd64&distro=debian-13&package-id=67e19f80cd60922d&upstream=openssl",
-      "cpe": "cpe:2.3:a:openssl-provider-fips:openssl-provider-fips:3.5.7-1\\~deb13u2:*:*:*:*:*:*:*",
+      "bom-ref": "pkg:deb/debian/openssl-provider-fips@3.5.7-1~deb13u3?arch=amd64&distro=debian-13&package-id=9dcc955b30e86a73&upstream=openssl",
+      "cpe": "cpe:2.3:a:openssl-provider-fips:openssl-provider-fips:3.5.7-1\\~deb13u3:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
@@ -6739,9 +6739,9 @@
       ],
       "name": "openssl-provider-fips",
       "publisher": "Debian OpenSSL Team <pkg-openssl-devel@alioth-lists.debian.net>",
-      "purl": "pkg:deb/debian/openssl-provider-fips@3.5.7-1~deb13u2?arch=amd64&distro=debian-13&upstream=openssl",
+      "purl": "pkg:deb/debian/openssl-provider-fips@3.5.7-1~deb13u3?arch=amd64&distro=debian-13&upstream=openssl",
       "type": "library",
-      "version": "3.5.7-1~deb13u2"
+      "version": "3.5.7-1~deb13u3"
     },
     {
       "bom-ref": "pkg:golang/shelless_ulimit@v0.0.0-20260806200008-600d56a7c50b?package-id=db2f4e06457784c6",
@@ -6838,15 +6838,15 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "edd15aa1b26166a8",
+      "bom-ref": "9f6fd930c0492cf5",
       "name": "nvcr.io/nvidia/distroless/go",
       "type": "container",
-      "version": "v4.1.4"
+      "version": "v4.1.5"
     },
     "properties": [
       {
         "name": "syft:image:labels:org.opencontainers.image.created",
-        "value": "2026-09-14T17:50:45Z"
+        "value": "2026-10-01T19:21:24Z"
       },
       {
         "name": "syft:image:labels:org.opencontainers.image.documentation",
@@ -6854,7 +6854,7 @@
       },
       {
         "name": "syft:image:labels:org.opencontainers.image.revision",
-        "value": "39ce19fc3aa66a6ee147cdcafe543ebce82b43bd"
+        "value": "34ce58097aab49d89ffc9e6e7964cbc30d990866"
       },
       {
         "name": "syft:image:labels:org.opencontainers.image.title",
@@ -6866,7 +6866,7 @@
       },
       {
         "name": "syft:image:labels:org.opencontainers.image.version",
-        "value": "v4.1.4"
+        "value": "v4.1.5"
       }
     ],
     "tools": {
@@ -6880,7 +6880,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:b5b20408-c4bd-5241-87f0-ed064413466f",
+  "serialNumber": "urn:uuid:b6b05e94-76bd-5146-b33c-ddc7ba3b4316",
   "specVersion": "1.6",
   "version": 1
 }
