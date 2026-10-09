@@ -71,9 +71,17 @@ controllerManager:
   # Set to [] to omit the field and restore the scheduler's system-default
   # spreading.
   #
-  # matchLabelKeys scopes the constraint to the incoming pod's revision so
-  # rolling updates spread the new ReplicaSet generation correctly
-  # (requires k8s >= 1.28; the chart already requires >= 1.30).
+  # matchLabelKeys is deliberately NOT set. The canonical pattern
+  # (matchLabelKeys: [pod-template-hash], requires k8s >= 1.28) scopes the
+  # constraint to the incoming pod's ReplicaSet generation, but the API
+  # rejects a constraint whose matchLabelKeys entry also appears in the
+  # labelSelector — and pod-spec rewriters that inject pod-template-hash
+  # into the labelSelector (e.g. vcluster's syncer when translating pods to
+  # the host cluster) hit that validation and fail pod creation entirely.
+  # Omitting it keeps the chart compatible with those environments; the only
+  # cost is that during a rolling update the spread also counts the previous
+  # ReplicaSet's pods, which biases placement of new pods toward the new
+  # generation — the desirable direction.
   topologySpreadConstraints:
     - maxSkew: 1
       topologyKey: kubernetes.io/hostname
@@ -81,8 +89,6 @@ controllerManager:
       labelSelector:
         matchLabels:
           control-plane: controller-manager
-      matchLabelKeys:
-        - pod-template-hash
 
   # -- Extra labels to add to the controller-manager pod template.
   # Useful for unified service tagging conventions
