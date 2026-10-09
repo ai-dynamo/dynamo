@@ -2267,7 +2267,7 @@ data:
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Total in-flight requests on each worker and DP rank, prefill plus decode, from the frontend KV router's bookkeeping. Compare the ranks of one worker to spot uneven DP load. Populated in KV routing mode only. Series from several frontends are collapsed with max before the phases are summed: exact when router replica sync is on, and the busiest frontend's share when it is off.",
+          "description": "Total in-flight requests on each worker and DP rank, prefill plus decode, from the frontend KV router's bookkeeping. Compare the ranks of one worker to spot uneven DP load. Populated in KV routing mode only. Each frontend's prefill and decode are summed first, then series from several frontends are collapsed with max: exact when router replica sync is on, and the busiest frontend's total when it is off. With replica sync off this can be less than the Prefill panel plus the Decode panel, because those two can come from different frontends.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -2353,7 +2353,7 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (worker_id, dp_rank, worker_type) (max by (worker_id, dp_rank, worker_type, request_phase) (dynamo_frontend_worker_active_requests))",
+              "expr": "max by (worker_id, dp_rank, worker_type) (sum without (request_phase) (dynamo_frontend_worker_active_requests))",
               "legendFormat": "worker={{worker_id}} | dp={{dp_rank}} | type={{worker_type}}",
               "range": true,
               "refId": "A"
