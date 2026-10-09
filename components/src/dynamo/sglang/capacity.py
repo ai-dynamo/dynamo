@@ -38,14 +38,23 @@ def sglang_dp_layout(server_args: Any) -> tuple[int, bool]:
     replicas only, and SGLang has ``num_dp_ranks = dp_size * attn_dp_size``.
     Reading only the old fields makes an attention-DP worker look like one rank,
     so the router subscribes to rank 0's KV events and sends it every request.
+
+    ``attn_dp_size`` is checked first, as SGLang's
+    ``handle_deprecated_dp_attention`` does: the legacy flag decides the layout
+    only while ``attn_dp_size`` is 1. ``ServerArgs.resolved_dict()`` reports
+    ``enable_dp_attention = attn_dp_size > 1`` for older ``/server_info``
+    clients, so a resolved dump carries both fields. An elastic EP scale joiner
+    (``ep_join_mode == "scale"``) runs attention-DP paths with a group one rank
+    wide, as in SGLang's ``attn_dp_enabled_of``; the rank count does not follow
+    later scale-ups.
     """
     dp_size = _positive_int(getattr(server_args, "dp_size", 1))
-    if getattr(server_args, "enable_dp_attention", False):
-        return dp_size, True
     attn_dp_size = _positive_int(getattr(server_args, "attn_dp_size", 1))
     if attn_dp_size > 1:
         return dp_size * attn_dp_size, True
-    return dp_size, False
+    if getattr(server_args, "enable_dp_attention", False):
+        return dp_size, True
+    return dp_size, getattr(server_args, "ep_join_mode", None) == "scale"
 
 
 def local_dp_rank_bounds(server_args: Any) -> tuple[int, int]:

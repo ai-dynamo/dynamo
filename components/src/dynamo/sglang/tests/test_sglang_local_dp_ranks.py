@@ -111,11 +111,30 @@ def _attn_dp_args(attn_dp_size: int, **kwargs) -> SimpleNamespace:
         # Pre-#41818 SGLang declares attn_dp_size as a derived-field descriptor.
         (_args(dp_size=4, enable_dp_attention=True, attn_dp_size=object()), (4, True)),
         (_args(dp_size=2, attn_dp_size=object()), (2, False)),
+        # ServerArgs.resolved_dict() keeps the legacy flag for older /server_info clients.
+        (_attn_dp_args(8, enable_dp_attention=True), (8, True)),
+        # An elastic EP scale joiner runs attention-DP paths with a one-rank group.
+        (_args(ep_join_mode="scale"), (1, True)),
+        (_args(ep_join_mode="recover"), (1, False)),
         (SimpleNamespace(), (1, False)),
     ],
 )
 def test_sglang_dp_layout(server_args, expected):
     assert sglang_dp_layout(server_args) == expected
+
+
+def test_resolved_dump_with_legacy_flag_slices_every_attn_dp_rank():
+    server_args = _attn_dp_args(
+        8,
+        enable_dp_attention=True,
+        nnodes=2,
+        node_rank=1,
+        max_running_requests=256,
+    )
+
+    assert local_dp_rank_bounds(server_args) == (4, 8)
+    assert model_card_dp_rank_bounds(server_args) == (0, 8)
+    assert per_rank_max_running_requests(server_args) == 32
 
 
 def test_attn_dp_size_exposes_every_local_rank():
