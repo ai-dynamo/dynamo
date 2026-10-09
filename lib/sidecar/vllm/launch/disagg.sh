@@ -32,6 +32,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to both managed vLLM engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                           Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  DYN_HTTP_PORT                   Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1                Decode sidecar system port (default: 8081)"
@@ -56,6 +57,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar vllm SIDECAR_CMD
 
 trap dynamo_exit_trap EXIT
 
@@ -123,13 +126,13 @@ vllm-rs serve "$MODEL" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_DECODE_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 # Register prefill separately so the frontend routes each disaggregated stage.
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_PREFILL_GRPC_PORT}" \
     --component prefill \
     --disaggregation-mode prefill &
