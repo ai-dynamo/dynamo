@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Keep Dynamo on one published AISimulate release."""
+"""Keep Dynamo on matching published AISimulate release families."""
 
 from __future__ import annotations
 
@@ -133,7 +133,12 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
     ), "aisimulate-core must use one exact crates.io version"
     cargo_version = Version(cargo_requirement.removeprefix("="))
 
-    assert cargo_version == python_version
+    # Python wheels and Rust crates can be published with independent dev
+    # versions, but must target the same release.
+    if cargo_version.is_devrelease and python_version.is_devrelease:
+        assert cargo_version.release == python_version.release
+    else:
+        assert cargo_version == python_version
     assert all(_locked_cargo_version(path) == cargo_version for path in LOCKFILES)
 
 
