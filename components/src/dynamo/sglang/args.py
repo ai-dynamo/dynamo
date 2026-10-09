@@ -50,13 +50,8 @@ PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 # path. `aiter` is here because SGLang itself allows dcp_size > 1 on ROCm.
 DCP_CAPABLE_ATTENTION_BACKENDS = frozenset({"triton", "aiter"})
 
-# MLA attention backends whose decode path returns no log-sum-exp, so SGLang's
-# DCP decode (`attn_mqa_for_dcp_decode` in forward_mla.py) cannot merge the
-# per-rank partial outputs. `fa3` and `fa4` share flashattention_backend.py,
-# which has no DCP code; `flashmla` returns its LSE only on a path the MLA
-# absorb branch never selects. Upstream SGLang #35384 (fa3) and #37735
-# (flashmla) add the same rejection inside SGLang; drop entries once the pin
-# contains them or SGLang #33325 adds an fa3 DCP decode path.
+# MLA backends whose decode returns no log-sum-exp, which SGLang's DCP decode needs.
+# Drop entries once the SGLang pin has #35384/#37735, or #33325 adds fa3 DCP decode.
 MLA_DCP_UNSUPPORTED_DECODE_BACKENDS = frozenset({"fa3", "fa4", "flashmla"})
 
 ATTENTION_BACKEND_CLI_FIELDS = (
@@ -342,9 +337,8 @@ def _validate_mla_dcp_decode_backend(
     )
     automatic = backend is None
     if automatic:
-        # At CLI time SGLang has not chosen yet; predict its choice (fa3 for
-        # MLA on Hopper) so the worker fails here, before sgl.Engine captures
-        # CUDA graphs and before the post-engine check can run.
+        # SGLang has not chosen yet; predict its choice (fa3 for MLA on Hopper)
+        # so the worker fails here, before sgl.Engine captures CUDA graphs.
         backend = sglang_default_mla_attention_backend(server_args)
     if backend not in MLA_DCP_UNSUPPORTED_DECODE_BACKENDS:
         return
