@@ -99,10 +99,6 @@ spec:
         # starts before `main`, stops after.
         initContainers:
         - name: trtllm-engine
-          # Layer the OpenEngine Python bindings onto this release and push the
-          # result: the release ships the servicer, but both it and the probes
-          # below import `openengine.v1`, which it does not install. The pinned
-          # versions are in launch/common.sh (TRTLLM_OPENENGINE_*_VERSION).
           image: <your-registry>/tensorrt-llm-openengine:1.3.0rc27.dev202609170000
           restartPolicy: Always
           # Readiness via the OpenEngine Control.Health RPC, which reports the
