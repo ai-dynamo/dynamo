@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_mocker::common::protocols::EngineType;
+use dynamo_sidecar_common::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
 use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 use dynamo_sidecar_testkit::server::TestServer;
@@ -105,7 +106,11 @@ impl SidecarFixture for Fixture {
         });
         let server = TestServer::start(move |listener, shutdown| async move {
             tonic::transport::Server::builder()
-                .add_service(InferenceServer::new(controlled))
+                .add_service(
+                    InferenceServer::new(controlled)
+                        .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+                        .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE),
+                )
                 .add_service(ControlServer::new(control_service))
                 .add_service(health_service)
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {

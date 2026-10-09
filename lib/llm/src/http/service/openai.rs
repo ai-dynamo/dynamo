@@ -56,7 +56,10 @@ use super::{
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
-use crate::preprocessor::{PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, decode_base64_to_floats};
+use crate::preprocessor::{
+    PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
+    decode_base64_to_floats,
+};
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
@@ -68,7 +71,7 @@ use crate::protocols::common::input_trigger::{
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
     ParsingOptions,
-    audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
+    audios::{AudioDataSource, NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
@@ -3577,6 +3580,7 @@ async fn chat_completions(
         );
     let parsing_options = parsing_options
         .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+    request.insert(REQUEST_PARSING_OPTIONS_CONTEXT_KEY, parsing_options.clone());
 
     // Computed before `request` moves into `generate`. Only a stream that can
     // withhold every data frame needs forced keep-alive frames.
@@ -3945,16 +3949,18 @@ pub fn validate_chat_completion_stream_options(
     Ok(())
 }
 
-/// Validates a chat completion request and returns an error response if validation fails.
+/// Validates a request and maps a failure to an OpenAI-compatible error response.
 ///
-/// This function calls the `validate` method implemented for `NvCreateChatCompletionRequest`.
-/// If validation fails, it maps the error into an OpenAI-compatible error response.
-pub fn validate_chat_completion_fields_generic(
-    request: &NvCreateChatCompletionRequest,
+/// `request_kind` names the request kind in the message of a backend
+/// `InvalidArgument` error, for example "chat completion". Every other validation failure
+/// becomes a 400 with the [`VALIDATION_PREFIX`] message.
+fn validate_request_fields_generic<R: ValidateRequest>(
+    request: &R,
+    request_kind: &str,
 ) -> Result<(), ErrorResponse> {
     request.validate().map_err(|e| {
         if find_invalid_argument_in_chain(e.as_ref()).is_some() {
-            return ErrorMessage::from_anyhow(e, "Invalid chat completion request");
+            return ErrorMessage::from_anyhow(e, &format!("Invalid {request_kind} request"));
         }
         ErrorMessage::from_http_error(
             ErrorClass::InvalidRequest,
@@ -3964,6 +3970,13 @@ pub fn validate_chat_completion_fields_generic(
             },
         )
     })
+}
+
+/// Validates a chat completion request and returns an error response if validation fails.
+pub fn validate_chat_completion_fields_generic(
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    validate_request_fields_generic(request, "chat completion")
 }
 
 /// Validates that stream_options is only used when stream=true for completions (NVBug 5662680)
@@ -3986,24 +3999,10 @@ pub fn validate_completion_stream_options(
 }
 
 /// Validates a completion request and returns an error response if validation fails.
-///
-/// This function calls the `validate` method implemented for `NvCreateCompletionRequest`.
-/// If validation fails, it maps the error into an OpenAI-compatible error response.
 pub fn validate_completion_fields_generic(
     request: &NvCreateCompletionRequest,
 ) -> Result<(), ErrorResponse> {
-    request.validate().map_err(|e| {
-        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
-            return ErrorMessage::from_anyhow(e, "Invalid completion request");
-        }
-        ErrorMessage::from_http_error(
-            ErrorClass::InvalidRequest,
-            HttpError {
-                code: 400,
-                message: VALIDATION_PREFIX.to_string() + &e.to_string(),
-            },
-        )
-    })
+    validate_request_fields_generic(request, "completion")
 }
 
 /// OpenAI Responses input-token counting handler.
@@ -4303,6 +4302,7 @@ async fn responses(
         );
     let parsing_options = parsing_options
         .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+    request.insert(REQUEST_PARSING_OPTIONS_CONTEXT_KEY, parsing_options.clone());
 
     // Computed before `request` moves into `generate`. Responses streams use
     // the same force-nonempty deferral as chat completions and therefore need
@@ -5588,7 +5588,9 @@ async fn handler_audio_speech(
     // Option<String> model field; see below)
     check_ready(&state)?;
 
-    let returns_audio_bytes = request.data_source.as_deref() != Some("url");
+    validate_request_fields_generic(&request, "audio speech")?;
+
+    let returns_audio_bytes = request.data_source != Some(AudioDataSource::Url);
     let streams_audio_chunks = returns_audio_bytes
         && matches!(
             request.response_format.as_deref().unwrap_or("wav"),
@@ -8852,6 +8854,7 @@ mod tests {
                 nvext: None,
                 prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -9503,6 +9506,7 @@ mod tests {
                 nvext: None,
                 prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -9594,6 +9598,7 @@ mod tests {
                 nvext: None,
                 prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -10006,6 +10011,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
         Annotated {
             id: Some("test-id".to_string()),
@@ -10641,6 +10647,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 

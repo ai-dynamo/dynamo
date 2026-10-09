@@ -104,6 +104,19 @@ dynamo/
 
 Prefer API responses, structured response fields, metrics, or direct test helper APIs for functional and semantic assertions. If a router-internal fact is only exposed as a structured tracing event, keep parsing in a shared helper rather than duplicating ad hoc log scraping in tests.
 
+### AISimulate dependency regression coverage
+
+- `tests/dependencies/test_aisimulate_consistency.py` checks exact, matching
+  AISimulate pins in Python manifests, container requirements, and Cargo files.
+  Missing declarations and unbounded requirements fail these checks. Current
+  containers stage AISimulate through `requirements.aisimulate.txt`; the former
+  AIC cap in the `mocker` extra and planner requirements is obsolete.
+- `components/src/dynamo/profiler/tests/unit/test_replay_bench_imports.py` executes
+  the replay benchmark module with AISimulate imports blocked. It checks that
+  importing the module succeeds and that an AIC comparison requires AISimulate
+  only when called. Sibling replay modules are stubbed, so this unit test needs
+  neither native Dynamo bindings nor an installed AISimulate package.
+
 ---
 
 ## Test Marking: How to Mark Tests

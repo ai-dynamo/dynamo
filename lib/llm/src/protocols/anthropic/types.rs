@@ -597,7 +597,15 @@ pub(super) fn tool_use_input(
     }
 
     let error = match serde_json::from_str::<serde_json::Value>(arguments) {
-        Ok(value) => return Some(value),
+        Ok(value) if value.is_object() => return Some(value),
+        Ok(_) => {
+            tracing::warn!(
+                tool_name = %tool_name,
+                argument_bytes = arguments.len(),
+                "suppressing tool_use block with non-object arguments"
+            );
+            return None;
+        }
         Err(error) => error,
     };
 
@@ -2625,6 +2633,33 @@ mod anthropic_types_tests {
             "the malformed call must not be emitted"
         );
         assert_eq!(response.stop_reason, Some(AnthropicStopReason::EndTurn));
+    }
+
+    #[test]
+    fn conversion_suppresses_non_object_inputs() {
+        for arguments in ["[]", "null", "42", "true", r#""hello""#] {
+            for reason in [
+                dynamo_protocols::types::FinishReason::ToolCalls,
+                dynamo_protocols::types::FinishReason::Length,
+            ] {
+                let response = converted_tool_use_response_for(reason, &[arguments]);
+                assert!(
+                    response.content.iter().all(|block| !matches!(
+                        block,
+                        AnthropicResponseContentBlock::ToolUse { .. }
+                    )),
+                    "{arguments} with {reason:?}"
+                );
+                assert_eq!(
+                    response.stop_reason,
+                    Some(if reason == dynamo_protocols::types::FinishReason::Length {
+                        AnthropicStopReason::MaxTokens
+                    } else {
+                        AnthropicStopReason::EndTurn
+                    })
+                );
+            }
+        }
     }
 
     #[test]

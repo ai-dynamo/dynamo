@@ -206,6 +206,17 @@ These are injected into all components when the corresponding infrastructure ser
 | `DYNAMO_PORT` | HTTP port the frontend listens on | `8000` | `int` |
 | `DYN_HTTP_PORT` | HTTP port for the frontend service (alias) | `8000` | `int` |
 | `DYN_NAMESPACE_PREFIX` | Namespace prefix used for frontend request routing | Same as `DYN_NAMESPACE` | `string` |
+| `DYN_NAMESPACE_PREFIX_STRICT` | Limits prefix discovery to the base namespace, eight-character lowercase hexadecimal worker generations, and the `legacy` migration generation | `true` for supported runtimes; otherwise unset | `string` (boolean) |
+
+DGDs named `foo` and `foo-bar` in the same Kubernetes namespace can cross-discover workers: the frontend in `foo` can route requests to workers in `foo-bar`. Strict matching excludes the other deployment for ordinary overlapping names. This issue affects deployments sharing a name prefix in the same Kubernetes namespace.
+
+Runtime image 1.6.0 introduces `DYN_NAMESPACE_PREFIX_STRICT`. Upgrade both the operator and affected frontend and native Rust EPP images to 1.6.0 or later; the operator enables strict matching for supported images. An operator-only upgrade leaves older runtime images affected. With a compatible older operator, set `DYN_NAMESPACE_PREFIX_STRICT=true` explicitly on those containers after upgrading their images. For custom images, set `runtimeVersionOverride` to the image's Dynamo runtime version when the tag does not identify it.
+
+For frontend sidecars, support is determined from the sidecar's own image tag. The component's `runtimeVersionOverride` applies only to its runtime container. If a sidecar image tag does not identify the runtime version, set `DYN_NAMESPACE_PREFIX_STRICT=true` in that sidecar's environment when its image contains this fix.
+
+Manual namespace prefixes retain literal matching unless strict mode is enabled. Exact frontend `DYN_NAMESPACE` selection and global frontend discovery are unchanged. EPP uses exact `DYN_NAMESPACE` selection when no prefix is provided, except that `dynamo` selects global discovery.
+
+This filter follows the operator's namespace naming contract. A separate deployment whose name ends in an accepted worker-generation suffix can still produce an indistinguishable namespace, so do not use this filter as an authorization boundary.
 
 ### Worker Components
 
@@ -232,6 +243,8 @@ These are injected into all components when the corresponding infrastructure ser
 | --- | --- | --- | --- |
 | `USE_STREAMING` | Enables streaming mode for inference request proxying | `true` | `string` (boolean) |
 | `RUST_LOG` | Rust log level and filter configuration | `info` | `string` |
+| `DYN_NAMESPACE_PREFIX` | Namespace prefix used for EPP request routing | Same as `DYN_NAMESPACE` | `string` |
+| `DYN_NAMESPACE_PREFIX_STRICT` | Limits prefix discovery to operator worker-generation namespaces; does not modify exact `DYN_NAMESPACE` selection | `true` for supported runtimes; otherwise unset | `string` (boolean) |
 
 ### VLLM Backend
 
