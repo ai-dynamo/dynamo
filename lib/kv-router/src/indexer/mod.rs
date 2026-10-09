@@ -83,6 +83,9 @@ pub mod radix_tree;
 mod tests;
 
 #[cfg(test)]
+mod harness;
+
+#[cfg(test)]
 mod delegate_tests;
 
 // Re-export everything that was public in the old single-file module.
