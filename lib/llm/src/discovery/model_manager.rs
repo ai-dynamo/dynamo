@@ -1502,10 +1502,6 @@ impl ModelManager {
     }
 
     /// Resolve an alias and select all System One execution inputs from one catalog snapshot.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Consumed by decision execution integration")
-    )]
     pub(crate) fn get_systemone_execution_selection(
         &self,
         requested_model: &str,

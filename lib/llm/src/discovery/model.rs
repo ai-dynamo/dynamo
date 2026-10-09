@@ -91,10 +91,6 @@ pub(crate) struct GenerateEngineSelection {
 
 /// Aggregate SGLang engine and model assets selected from one WorkerSet snapshot.
 #[derive(Clone)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Consumed by decision execution integration")
-)]
 pub(crate) struct SystemOneExecutionSelection {
     pub(crate) canonical_model: String,
     pub(crate) engine: GenerateStreamingEngine,
@@ -104,10 +100,6 @@ pub(crate) struct SystemOneExecutionSelection {
 }
 
 impl SystemOneExecutionSelection {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Consumed by decision execution integration")
-    )]
     pub(crate) fn validate_dispatch(
         &self,
         pinned_worker: Option<u64>,
@@ -125,7 +117,6 @@ impl SystemOneExecutionSelection {
         Ok(())
     }
 
-    #[expect(dead_code, reason = "Consumed by decision execution integration")]
     pub(crate) fn decision_capabilities(&self) -> dynamo_decisions::Capabilities {
         // The serialized SGLang capability pins the zero-decode requested-ID
         // contract, including vocabulary logprobs and meta_info.cached_tokens.

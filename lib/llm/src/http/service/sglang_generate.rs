@@ -191,7 +191,7 @@ fn deadline_exceeded_response() -> Response {
     )
 }
 
-fn preprocessed_request(
+pub(super) fn preprocessed_request(
     request: SglangGenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,

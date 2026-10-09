@@ -2950,10 +2950,6 @@ impl OpenAIPreprocessor {
     /// Render a System One question through the model's normal chat template and resolve
     /// candidate labels that each add exactly one distinct token at the answer position.
     /// Reject over-budget prompts before repeating tokenization for candidate labels.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Consumed by decision execution integration")
-    )]
     pub(crate) fn render_systemone_question(
         &self,
         model: &str,

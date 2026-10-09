@@ -12,10 +12,6 @@ pub(crate) enum AdmissionError {
     CapacityExhausted,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Consumed by decision execution integration")
-)]
 pub(crate) fn acquire_admission(
     admission: Arc<Semaphore>,
     branches: u32,
@@ -29,10 +25,6 @@ pub(crate) fn acquire_admission(
         .map_err(|_| AdmissionError::CapacityExhausted)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Consumed by decision execution integration")
-)]
 pub(crate) async fn run_until_killed<T>(
     context: &dyn AsyncEngineContext,
     operation: impl std::future::Future<Output = T>,
@@ -45,10 +37,6 @@ pub(crate) async fn run_until_killed<T>(
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Consumed by decision execution integration")
-)]
 pub(crate) async fn spawn_blocking_with_permit<T, E, F>(
     permit: OwnedSemaphorePermit,
     task: F,
@@ -63,18 +51,10 @@ where
 
 #[derive(Debug)]
 pub(crate) enum DispatchWaitError {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Inspected by the decision response adapter")
-    )]
     Task(tokio::task::JoinError),
     Deadline,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Consumed by decision execution integration")
-)]
 pub(crate) async fn dispatch_with_deadline<T>(
     mut task: tokio::task::JoinHandle<T>,
     deadline: tokio::time::Instant,
