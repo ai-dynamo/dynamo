@@ -45,7 +45,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
       <p>Filter by provider, runtime, and hardware. Each card notes its serving technique and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
-      <strong>125</strong>
+      <strong>128</strong>
       <span>Deployable configurations</span>
       <button className="dynamo-filter-reset" type="reset">Reset filters</button>
     </div>
@@ -119,13 +119,13 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>SGLang</span><span>8x GB200</span><span>Day-0 · up to 1M context</span></div>
   <a className="dynamo-card-link" href="deepseek-v4-1-flash.mdx" aria-label="Open the DeepSeek-V4.1-Flash recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="zai" data-runtime="vllm sglang" data-hardware="h200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
+  <div className="dynamo-model-card" data-recipe-card data-provider="zai" data-runtime="vllm sglang" data-hardware="h200 gb200 b200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/zai-org.svg" alt="" />
       <div><h3>GLM-5.3-Flash</h3><p>Z.AI</p></div>
     </div>
-    <p className="dynamo-model-summary">SGLang NVFP4 recipes on GB200 with TP4 aggregated serving or 2P1D Mooncake NVLink disaggregation, plus vLLM FP8 recipes on GB200 and H200.</p>
-    <div className="dynamo-model-tags"><span>vLLM · SGLang</span><span>8x/16x H200 · 4x/8x/12x GB200</span><span>Agentic</span></div>
+    <p className="dynamo-model-summary">SGLang NVFP4 recipes with TP4 aggregated serving on B200/GB200 or GB200 2P1D Mooncake NVLink disaggregation with KV events, plus vLLM FP8 recipes on GB200 and H200.</p>
+    <div className="dynamo-model-tags"><span>vLLM · SGLang</span><span>4x B200 · 8x/16x H200 · 4x/8x/12x GB200</span><span>Agentic</span></div>
   <a className="dynamo-card-link" href="glm-5-3-flash.mdx" aria-label="Open the GLM-5.3-Flash recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="skt" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="chat">

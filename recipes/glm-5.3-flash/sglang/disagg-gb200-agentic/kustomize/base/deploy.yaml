@@ -240,9 +240,9 @@ spec:
                 - --speculative-num-draft-tokens
                 - '4'
                 - --mem-fraction-static
-                - '0.78'
+                - '0.82'
                 - --cuda-graph-max-bs-decode
-                - '256'
+                - '128'
                 - --host
                 - 0.0.0.0
                 - --port
@@ -271,7 +271,7 @@ spec:
                 - --weight-loader-prefetch-checkpoints
                 - --enable-nccl-nvls
                 - --max-running-requests
-                - '256'
+                - '128'
                 - --enable-linear-replayssm-spec
                 - --disaggregation-transfer-backend
                 - mooncake

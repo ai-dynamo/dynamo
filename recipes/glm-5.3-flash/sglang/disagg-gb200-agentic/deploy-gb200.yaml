@@ -44,7 +44,7 @@ spec:
           - --http-port
           - "8000"
           - --trust-remote-code
-          - --no-router-kv-events
+          - --router-kv-events
           - --kv-cache-block-size
           - "64"
           command:
@@ -96,7 +96,7 @@ spec:
           - --enable-multimodal
           - --frontend-decoding
           - --model-path
-          - /shared-model-cache/hub/models--RadixArk--GLM-5.3-Flash-NVFP4/snapshots/f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
+          - RadixArk/GLM-5.3-Flash-NVFP4
           - --revision
           - f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
           - --served-model-name
@@ -157,6 +157,8 @@ spec:
           - "100"
           - --disaggregation-mode
           - prefill
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
           command:
           - python3
           env:
@@ -257,7 +259,7 @@ spec:
           - --enable-multimodal
           - --frontend-decoding
           - --model-path
-          - /shared-model-cache/hub/models--RadixArk--GLM-5.3-Flash-NVFP4/snapshots/f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
+          - RadixArk/GLM-5.3-Flash-NVFP4
           - --revision
           - f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
           - --served-model-name
@@ -283,9 +285,9 @@ spec:
           - --speculative-num-draft-tokens
           - "4"
           - --mem-fraction-static
-          - "0.78"
+          - "0.82"
           - --cuda-graph-max-bs-decode
-          - "256"
+          - "128"
           - --host
           - 0.0.0.0
           - --port
@@ -314,7 +316,7 @@ spec:
           - --weight-loader-prefetch-checkpoints
           - --enable-nccl-nvls
           - --max-running-requests
-          - "256"
+          - "128"
           - --enable-linear-replayssm-spec
           - --disaggregation-transfer-backend
           - mooncake
@@ -322,6 +324,8 @@ spec:
           - "30001"
           - --disaggregation-mode
           - decode
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
           command:
           - python3
           env:
