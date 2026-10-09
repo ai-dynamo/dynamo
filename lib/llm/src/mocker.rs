@@ -824,7 +824,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let dp_rank = self.resolve_dp_rank(&request);
 
-        // Validate dp_rank. A client can pick it with `x-dynamo-dp-rank` plus an explicit worker.
+        // A client can pick dp_rank with `x-dynamo-dp-rank` plus an explicit worker.
         if dp_rank >= self.engine_args.dp_size {
             let message = format!(
                 "dp_rank {} is out of bounds for dp_size {}",
