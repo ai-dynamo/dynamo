@@ -34,6 +34,7 @@
 //! 2. Access Swagger UI: Open `http://localhost:8000/docs` in a web browser
 
 use axum::Router;
+use dynamo_decisions::protocols::{openai as decisions_oai, systemone as decisions_jev};
 use utoipa::OpenApi;
 use utoipa::openapi::{PathItem, Paths, RefOr};
 
@@ -60,7 +61,11 @@ use crate::http::service::RouteDoc;
             crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest,
             crate::protocols::openai::completions::NvCreateCompletionRequest,
             crate::protocols::openai::embeddings::NvCreateEmbeddingRequest,
-            crate::protocols::openai::responses::NvCreateResponse
+            crate::protocols::openai::responses::NvCreateResponse,
+            decisions_jev::Request,
+            decisions_jev::Response,
+            decisions_oai::Request,
+            decisions_oai::Response
         )
     )
 )]
@@ -156,6 +161,44 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
             .build(),
     );
 
+    if matches!(
+        path,
+        super::systemone::DEFAULT_PATH | super::systemone::DECISIONS_PATH
+    ) {
+        use utoipa::openapi::ContentBuilder;
+        let schema = if path == super::systemone::DEFAULT_PATH {
+            <decisions_jev::Response as utoipa::PartialSchema>::schema()
+        } else {
+            <decisions_oai::Response as utoipa::PartialSchema>::schema()
+        };
+        operation = operation.response(
+            "200",
+            ResponseBuilder::new()
+                .description("Ordered typed answers with uncalibrated label probabilities")
+                .content(
+                    "application/json",
+                    ContentBuilder::new().schema(Some(schema)).build(),
+                )
+                .build(),
+        );
+        for (status, description) in [
+            ("413", "Request body exceeds 4 MiB"),
+            ("429", "Decision scoring admission capacity is exhausted"),
+            (
+                "422",
+                "Invalid question, unsupported control, or prompt/token budget",
+            ),
+            ("499", "Request cancelled"),
+            ("500", "Malformed or incomplete native scoring response"),
+            ("504", "Decision preflight or execution deadline exceeded"),
+        ] {
+            operation = operation.response(
+                status,
+                ResponseBuilder::new().description(description).build(),
+            );
+        }
+    }
+
     operation = operation.response(
         "400",
         ResponseBuilder::new()
@@ -196,6 +239,27 @@ fn add_request_body_for_path(
     use utoipa::openapi::request_body::RequestBodyBuilder;
 
     let (description, schema, example) = match path {
+        "/v1/systemone" => (
+            "Jev text evaluation; unsupported fields and controls are rejected",
+            <decisions_jev::Request as utoipa::PartialSchema>::schema(),
+            serde_json::json!({
+                "model": "Qwen/Qwen3.8-27B", "state": "The payment failed.",
+                "questions": {"route": {"type": "choice", "criteria": {
+                    "billing": "Payment issues", "technical": "Integration failures"
+                }}}
+            }),
+        ),
+        "/v1/decisions" => (
+            "OpenAI Decisions text evaluation; unsupported fields and controls are rejected",
+            <decisions_oai::Request as utoipa::PartialSchema>::schema(),
+            serde_json::json!({
+                "model":"Qwen/Qwen3.8-27B", "input":"The payment failed.",
+                "questions":[{"type":"choice", "name":"route", "instructions":"Choose a team", "choices":[
+                    {"value":"billing","description":"Payment issues"},
+                    {"value":"technical","description":"Integration failures"}
+                ]}]
+            }),
+        ),
         "/v1/chat/completions" => (
             "Chat completion request with model, messages, and optional parameters",
             create_chat_completion_schema(),
@@ -313,6 +377,8 @@ fn create_response_example() -> serde_json::Value {
 /// Generate a human-readable summary for a path
 fn generate_summary_for_path(path: &str) -> String {
     match path {
+        "/v1/systemone" => "Score System One questions".to_string(),
+        "/v1/decisions" => "Evaluate bounded decision questions".to_string(),
         "/v1/chat/completions" => "Create chat completion".to_string(),
         "/v1/completions" => "Create text completion".to_string(),
         "/v1/embeddings" => "Create embeddings".to_string(),
@@ -330,6 +396,8 @@ fn generate_summary_for_path(path: &str) -> String {
 /// Generate a detailed description for a path
 fn generate_description_for_path(path: &str) -> String {
     match path {
+        "/v1/systemone" => "Experimental Jev text evaluation over a qualified SGLang worker. Each question is scored in one prefill-only operation; answers contain probabilities normalized over the permitted labels, not calibrated probabilities of correctness.".to_string(),
+        "/v1/decisions" => "Experimental text decisions over a qualified SGLang worker. Only the OpenAI Decisions contract is supported; extension envelopes and native decision schemas are rejected. No streaming or image inputs are supported.".to_string(),
         "/v1/chat/completions" => {
             "Creates a completion for a chat conversation. Supports both streaming and non-streaming modes. \
             Compatible with OpenAI's chat completions API."
@@ -406,6 +474,70 @@ pub fn openapi_router(route_docs: Vec<RouteDoc>, _path: Option<String>) -> (Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn systemone_openapi_describes_typed_requests_answers_and_errors() {
+        let spec =
+            generate_openapi_spec(&[RouteDoc::new(axum::http::Method::POST, "/v1/systemone")]);
+        let value = serde_json::to_value(spec).unwrap();
+        let operation = &value["paths"]["/v1/systemone"]["post"];
+        assert_eq!(operation["summary"], "Score System One questions");
+        assert!(operation["requestBody"]["content"]["application/json"]["schema"].is_object());
+        assert!(operation["responses"]["200"]["content"]["application/json"]["schema"].is_object());
+        for status in ["400", "404", "413", "422", "499", "500", "503", "529"] {
+            assert!(
+                operation["responses"].get(status).is_some(),
+                "missing {status}"
+            );
+        }
+        let schemas = &value["components"]["schemas"];
+        assert!(schemas["DecisionSystemOneQuestion"]["oneOf"].is_array());
+        assert!(schemas["DecisionSystemOneAnswer"]["oneOf"].is_array());
+    }
+
+    #[test]
+    fn decisions_openapi_documents_only_openai_contract() {
+        let spec =
+            generate_openapi_spec(&[RouteDoc::new(axum::http::Method::POST, "/v1/decisions")]);
+        let value = serde_json::to_value(spec).unwrap();
+        let operation = &value["paths"]["/v1/decisions"]["post"];
+        let request = &operation["requestBody"]["content"]["application/json"]["schema"];
+        assert!(request.get("oneOf").is_none());
+        assert!(request["properties"].get("nvext").is_none());
+        assert_eq!(
+            request,
+            &serde_json::to_value(<decisions_oai::Request as utoipa::PartialSchema>::schema())
+                .unwrap()
+        );
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"],
+            serde_json::to_value(<decisions_oai::Response as utoipa::PartialSchema>::schema())
+                .unwrap()
+        );
+        assert!(
+            value["components"]["schemas"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|name| !name.starts_with("DecisionSglang"))
+        );
+        assert!(operation["responses"].get("429").is_some());
+    }
+
+    #[test]
+    fn systemone_custom_path_preserves_its_schema() {
+        let spec = generate_openapi_spec(&[RouteDoc::new(
+            axum::http::Method::POST,
+            "/experimental/score",
+        )
+        .with_documentation_path(super::super::systemone::DEFAULT_PATH)]);
+        let value = serde_json::to_value(spec).unwrap();
+        assert_eq!(
+            value["paths"]["/experimental/score"]["post"]["summary"],
+            "Score System One questions"
+        );
+        assert!(value["paths"].get("/v1/systemone").is_none());
+    }
 
     #[test]
     fn test_generate_openapi_spec() {
