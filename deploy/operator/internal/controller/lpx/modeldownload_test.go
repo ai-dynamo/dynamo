@@ -310,6 +310,7 @@ type fakeModelDownloadRegistry struct {
 	ready                     map[string]bool
 	err                       map[string]error
 	calls                     []string
+	checkpointCalls           []string
 	deadlines                 []time.Time
 	acquireBuildSnapshotCalls int
 }

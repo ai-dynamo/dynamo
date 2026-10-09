@@ -87,6 +87,14 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     </ParamField>
   </Indent>
 
+  <ParamField path="checkpoint" type="LPXCheckpoint">
+    Selects the model checkpoint that the Cyborg conductor of a hybrid build reads when it runs partitions on its GPU. Set `provider: HuggingFace`, `model` to the Hugging Face repository ID, and `revision` to the full 40-character commit SHA. Branch and tag names are rejected. `model` follows the Hub's repository-ID rules: the namespace and name each start and end with a letter, digit, or underscore and have at most 96 characters, and `--`, `..`, and a `.git` suffix are rejected. LPU-only and speculative builds reject this field when the operator resolves the build, before any checkpoint download starts. Omitting `checkpoint` leaves checkpoint selection to the conductor template.
+
+    After it resolves the build and before it creates or updates the workload, the operator asks Model Express to download the checkpoint at that revision. The deployment stays Pending, with the checkpoint named in its `Ready` message, until the download completes. The operator fails the deployment when Model Express reports an error, does not confirm the requested revision, or is not configured through `infrastructure.modelExpressURL`. Checkpoint downloads require Model Express 0.6.0 or later. Model Express uses its own credentials; the operator and pods do not receive Hugging Face tokens.
+
+    The operator sets `CYBORG_WEIGHTS_PATH` in the Cyborg `main` container to the snapshot directory `<mount>/models--<org>--<name>/snapshots/<revision>`, where `<mount>` is the container's `model-storage` mount path. This assumes that Model Express caches into the root of the `model-storage` volume. The variable precedes authored variables, so container arguments can use `$(CYBORG_WEIGHTS_PATH)`, and it replaces any authored value. Changing the checkpoint does not change the workload digest; Grove rolls the conductor.
+  </ParamField>
+
   <ParamField path="experimental" type="LPXExperimentalSpec">
     Groups opt-in LPX options whose shape may change incompatibly between v1beta1 releases. These fields are not covered by the v1beta1 deprecation policy.
   </ParamField>

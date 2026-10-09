@@ -77,6 +77,8 @@ _Appears in:_
 | `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Retained automatic<br />checkpoints are not valid checkpointRef targets.<br /> |
 
 
+
+
 #### CheckpointMode
 
 _Underlying type:_ _string_
@@ -2494,6 +2496,41 @@ _Appears in:_
 | `preferredWeight` _float_ | preferredWeight is required and used only when enforcement is<br />"preferred". Higher values create a stronger same-domain routing<br />preference, but do not guarantee same-domain selection. The value is not<br />a probability; worker selection still depends on load and other routing<br />inputs. A value of 0 disables the topology preference; 1 is the strongest<br />supported preference. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
 
+#### LPXCheckpoint
+
+
+
+LPXCheckpoint identifies one immutable model checkpoint.
+
+
+
+_Appears in:_
+- [LPXConfig](#lpxconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `provider` _[LPXCheckpointProvider](#lpxcheckpointprovider)_ | provider selects the checkpoint source. Only `HuggingFace` is supported. |  | Enum: [HuggingFace] <br />Required: \{\} <br /> |
+| `model` _string_ | model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.<br />It follows the Hub's repository-ID rules: an optional namespace and a<br />name, each at most 96 characters and starting and ending with a letter,<br />digit, or underscore. |  | MaxLength: 193 <br />MinLength: 1 <br />Pattern: `^([A-Za-z0-9_]([A-Za-z0-9_.-]\{0,94\}[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]\{0,94\}[A-Za-z0-9_])?$` <br />Required: \{\} <br /> |
+| `revision` _string_ | revision is the full 40-character commit SHA of the repository snapshot.<br />Branches and tags are not accepted because they can move. |  | Pattern: `^[0-9a-f]\{40\}$` <br />Required: \{\} <br /> |
+
+
+#### LPXCheckpointProvider
+
+_Underlying type:_ _string_
+
+LPXCheckpointProvider identifies the source of an LPX checkpoint.
+
+_Validation:_
+- Enum: [HuggingFace]
+
+_Appears in:_
+- [LPXCheckpoint](#lpxcheckpoint)
+
+| Field | Description |
+| --- | --- |
+| `HuggingFace` | LPXCheckpointProviderHuggingFace downloads a Hugging Face Hub model repository.<br /> |
+
+
 #### LPXConfig
 
 
@@ -2510,6 +2547,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `buildId` _string_ | buildId references the immutable model build. |  | MinLength: 1 <br /> |
 | `scheduling` _[SchedulingSpec](#schedulingspec)_ | scheduling configures this component's LPX scheduling attempts.<br />Omission means no deadline. |  | Optional: \{\} <br /> |
+| `checkpoint` _[LPXCheckpoint](#lpxcheckpoint)_ | checkpoint selects the model checkpoint that the Cyborg conductor reads<br />when it runs partitions on its GPU. Model Express downloads it to model<br />storage before the workload starts, and the operator sets<br />`CYBORG_WEIGHTS_PATH` in the Cyborg container to its snapshot directory.<br />Requires a hybrid build and a configured Model Express URL. Omission<br />leaves checkpoint selection to the Cyborg container. |  | Optional: \{\} <br /> |
 | `experimental` _[LPXExperimentalSpec](#lpxexperimentalspec)_ | experimental groups opt-in LPX options whose API shape may change in<br />breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
 
 

@@ -11525,6 +11525,46 @@ spec:
                             description: buildId references the immutable model build.
                             minLength: 1
                             type: string
+                          checkpoint:
+                            description: |-
+                              checkpoint selects the model checkpoint that the Cyborg conductor reads
+                              when it runs partitions on its GPU. Model Express downloads it to model
+                              storage before the workload starts, and the operator sets
+                              `CYBORG_WEIGHTS_PATH` in the Cyborg container to its snapshot directory.
+                              Requires a hybrid build and a configured Model Express URL. Omission
+                              leaves checkpoint selection to the Cyborg container.
+                            properties:
+                              model:
+                                description: |-
+                                  model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.
+                                  It follows the Hub's repository-ID rules: an optional namespace and a
+                                  name, each at most 96 characters and starting and ending with a letter,
+                                  digit, or underscore.
+                                maxLength: 193
+                                minLength: 1
+                                pattern: ^([A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$
+                                type: string
+                                x-kubernetes-validations:
+                                  - message: model must not contain '--' or '..'
+                                    rule: '!self.contains(''--'') && !self.contains(''..'')'
+                                  - message: model must not end with '.git'
+                                    rule: '!self.endsWith(''.git'')'
+                              provider:
+                                description: provider selects the checkpoint source. Only `HuggingFace` is supported.
+                                enum:
+                                  - HuggingFace
+                                type: string
+                              revision:
+                                description: |-
+                                  revision is the full 40-character commit SHA of the repository snapshot.
+                                  Branches and tags are not accepted because they can move.
+                                pattern: ^[0-9a-f]{40}$
+                                type: string
+                            required:
+                              - model
+                              - provider
+                              - revision
+                            type: object
                           experimental:
                             description: |-
                               experimental groups opt-in LPX options whose API shape may change in
@@ -21105,6 +21145,46 @@ spec:
                             description: buildId references the immutable model build.
                             minLength: 1
                             type: string
+                          checkpoint:
+                            description: |-
+                              checkpoint selects the model checkpoint that the Cyborg conductor reads
+                              when it runs partitions on its GPU. Model Express downloads it to model
+                              storage before the workload starts, and the operator sets
+                              `CYBORG_WEIGHTS_PATH` in the Cyborg container to its snapshot directory.
+                              Requires a hybrid build and a configured Model Express URL. Omission
+                              leaves checkpoint selection to the Cyborg container.
+                            properties:
+                              model:
+                                description: |-
+                                  model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.
+                                  It follows the Hub's repository-ID rules: an optional namespace and a
+                                  name, each at most 96 characters and starting and ending with a letter,
+                                  digit, or underscore.
+                                maxLength: 193
+                                minLength: 1
+                                pattern: ^([A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$
+                                type: string
+                                x-kubernetes-validations:
+                                  - message: model must not contain '--' or '..'
+                                    rule: '!self.contains(''--'') && !self.contains(''..'')'
+                                  - message: model must not end with '.git'
+                                    rule: '!self.endsWith(''.git'')'
+                              provider:
+                                description: provider selects the checkpoint source. Only `HuggingFace` is supported.
+                                enum:
+                                  - HuggingFace
+                                type: string
+                              revision:
+                                description: |-
+                                  revision is the full 40-character commit SHA of the repository snapshot.
+                                  Branches and tags are not accepted because they can move.
+                                pattern: ^[0-9a-f]{40}$
+                                type: string
+                            required:
+                              - model
+                              - provider
+                              - revision
+                            type: object
                           experimental:
                             description: |-
                               experimental groups opt-in LPX options whose API shape may change in

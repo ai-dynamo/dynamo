@@ -4,6 +4,8 @@
 package validation_test
 
 import (
+	"strings"
+
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -170,6 +172,93 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				dgd.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(9223372037))}
 			}),
 			wantSchemaErr: "spec.components[0].lpx.scheduling.attemptDeadlineSeconds: Invalid value: 9223372037: spec.components[0].lpx.scheduling.attemptDeadlineSeconds in body should be less than or equal to 9223372036",
+		},
+		{
+			name: "LPX checkpoint admits a pinned Hugging Face snapshot",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].LPX.Checkpoint = &nvidiacomv1beta1.LPXCheckpoint{
+					Provider: nvidiacomv1beta1.LPXCheckpointProviderHuggingFace,
+					Model:    "openai/gpt-oss-20b",
+					Revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+				}
+			}),
+		},
+		{
+			name: "LPX checkpoint rejects a branch revision",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].LPX.Checkpoint = &nvidiacomv1beta1.LPXCheckpoint{
+					Provider: nvidiacomv1beta1.LPXCheckpointProviderHuggingFace,
+					Model:    "openai/gpt-oss-20b",
+					Revision: "main",
+				}
+			}),
+			wantSchemaErr: `spec.components[0].lpx.checkpoint.revision: Invalid value: "main": spec.components[0].lpx.checkpoint.revision in body should match '^[0-9a-f]{40}$'`,
+		},
+		{
+			name: "LPX checkpoint rejects a nested model path",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].LPX.Checkpoint = &nvidiacomv1beta1.LPXCheckpoint{
+					Provider: nvidiacomv1beta1.LPXCheckpointProviderHuggingFace,
+					Model:    "openai/gpt-oss-20b/original",
+					Revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+				}
+			}),
+			wantSchemaErr: `spec.components[0].lpx.checkpoint.model: Invalid value: "openai/gpt-oss-20b/original": spec.components[0].lpx.checkpoint.model in body should match '^([A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$'`,
+		},
+		{
+			name: "LPX checkpoint rejects a model name that aliases the cache layout",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].LPX.Checkpoint = &nvidiacomv1beta1.LPXCheckpoint{
+					Provider: nvidiacomv1beta1.LPXCheckpointProviderHuggingFace,
+					Model:    "openai/gpt--oss",
+					Revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+				}
+			}),
+			wantCELErr: "spec.components[0].lpx.checkpoint.model: Invalid value: \"string\": model must not contain '--' or '..'",
+		},
+		{
+			name: "LPX checkpoint rejects a model name ending in a hyphen",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].LPX.Checkpoint = &nvidiacomv1beta1.LPXCheckpoint{
+					Provider: nvidiacomv1beta1.LPXCheckpointProviderHuggingFace,
+					Model:    "openai/gpt-oss-",
+					Revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+				}
+			}),
+			wantSchemaErr: `spec.components[0].lpx.checkpoint.model: Invalid value: "openai/gpt-oss-": spec.components[0].lpx.checkpoint.model in body should match '^([A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$'`,
+		},
+		{
+			name: "LPX checkpoint rejects a namespace longer than 96 characters",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].LPX.Checkpoint = &nvidiacomv1beta1.LPXCheckpoint{
+					Provider: nvidiacomv1beta1.LPXCheckpointProviderHuggingFace,
+					Model:    strings.Repeat("a", 97) + "/gpt-oss-20b",
+					Revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+				}
+			}),
+			wantSchemaErr: `spec.components[0].lpx.checkpoint.model: Invalid value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/gpt-oss-20b": spec.components[0].lpx.checkpoint.model in body should match '^([A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$'`,
+		},
+		{
+			name: "LPX checkpoint rejects a model name ending in .git",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].LPX.Checkpoint = &nvidiacomv1beta1.LPXCheckpoint{
+					Provider: nvidiacomv1beta1.LPXCheckpointProviderHuggingFace,
+					Model:    "openai/gpt-oss.git",
+					Revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+				}
+			}),
+			wantCELErr: "spec.components[0].lpx.checkpoint.model: Invalid value: \"string\": model must not end with '.git'",
+		},
+		{
+			name: "LPX checkpoint rejects an unsupported provider",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].LPX.Checkpoint = &nvidiacomv1beta1.LPXCheckpoint{
+					Provider: "NGC",
+					Model:    "openai/gpt-oss-20b",
+					Revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+				}
+			}),
+			wantSchemaErr: `spec.components[0].lpx.checkpoint.provider: Unsupported value: "NGC": supported values: "HuggingFace"`,
 		},
 		{
 			name: "LPX autoscaling is rejected by the schema",
