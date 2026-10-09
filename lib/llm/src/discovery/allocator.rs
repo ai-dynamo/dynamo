@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::OnceLock;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 use std::sync::{Arc, LazyLock, mpsc};
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -52,10 +53,22 @@ static ALLOCATOR_TRIM_SCHEDULER: LazyLock<Arc<AllocatorTrimScheduler>> = LazyLoc
         Arc::new(|| {
             // SAFETY: malloc_trim is process-wide and internally synchronizes glibc arenas.
             let released_pages = unsafe { libc::malloc_trim(0) != 0 };
+            if let Some(trim) = ALLOCATOR_TRIM_HOOK.get() {
+                trim();
+            }
             tracing::debug!(released_pages, "Trimmed allocator after model teardown");
         }),
     ))
 });
+
+static ALLOCATOR_TRIM_HOOK: OnceLock<fn()> = OnceLock::new();
+
+/// Registers a release step to run alongside `malloc_trim` after model teardown, for a
+/// process whose Rust allocations go through another global allocator. Only the first
+/// registration takes effect.
+pub fn register_allocator_trim_hook(trim: fn()) {
+    let _ = ALLOCATOR_TRIM_HOOK.set(trim);
+}
 
 /// Schedules allocator trimming after the last WorkerSet, active request, and teardown task exits.
 pub(crate) struct AllocatorTrimOnDrop {

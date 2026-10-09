@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "jemalloc.rs"]
+mod jemalloc;
+
 #[path = "active_sequences_open_loop.rs"]
 mod active_sequences_open_loop;
 #[path = "active_sequences_shared.rs"]

@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "jemalloc.rs"]
+mod jemalloc;
+
 #[path = "mooncake_open_loop.rs"]
 mod mooncake_open_loop;
 #[path = "mooncake_shared.rs"]
@@ -306,6 +309,7 @@ fn quiesce_prepared_heap() {
     unsafe {
         libc::malloc_trim(0);
     }
+    jemalloc::purge();
     std::thread::sleep(std::time::Duration::from_millis(PRE_RUN_QUIESCENCE_MS));
 }
 

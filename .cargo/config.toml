@@ -19,3 +19,9 @@ rustflags = ["-C", "target-cpu=neoverse-n1", "-C", "force-frame-pointers=yes", "
 [env]
 PCRE2_SYS_STATIC = "1"
 
+# jemalloc (the Python extension's and the router benches' Rust allocator) fixes its page
+# size at build time and fails to initialize on a kernel with larger pages. A 64 KiB page size
+# works on both 4 KiB and 64 KiB aarch64 kernels (for example, 64K-page kernels on Grace).
+# jemalloc 5.3.1's configure already defaults to it for aarch64 Linux; this pins it so that a
+# jemalloc update that drops that default cannot make arm64 wheels depend on the build host.
+AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE = "16"

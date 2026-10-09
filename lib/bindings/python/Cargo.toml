@@ -22,7 +22,18 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["custom-policy"]
+default = ["custom-policy", "jemalloc"]
+# Serve the extension's Rust allocations from a jemalloc linked into it. glibc's arena
+# locks serialize the KV router's multi-threaded event workers. The jemalloc symbols
+# are prefixed and stay local to the extension, so Python and C/C++ libraries in the
+# process keep their own allocator.
+# - On Linux with glibc, `background_threads` builds in `background_thread:true`, so
+#   background threads purge unused pages instead of the allocating threads;
+#   `_RJEM_MALLOC_CONF` overrides it at run time.
+# - `disable_initial_exec_tls` (global-dynamic TLS) keeps the extension loadable
+#   through `dlopen` without consuming the static TLS reserve.
+# - `.cargo/config.toml` pins the jemalloc page size at 64 KiB on aarch64 Linux.
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys"]
 # Links the router plugins Dynamo ships plus the replaceable catalog selected by the
 # dependency alias below. Enabled by default so a deployment can select a shipped policy through
 # router-policy YAML without rebuilding. A private image replaces only the catalog dependency, so
@@ -83,6 +94,8 @@ serde = { version = "1" }
 serde_json = { version = "1.0.138" }
 serde-transcode = "1.1"
 thiserror = { version = "2.0" }
+tikv-jemalloc-sys = { version = "0.7.1", optional = true }
+tikv-jemallocator = { version = "0.7.0", features = ["disable_initial_exec_tls"], optional = true }
 tokio = { version = "1.46.0", features = ["full"] }
 tokio-stream = { version = "0" }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -125,6 +138,11 @@ pythonize = "0.23"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dynamo-llm = { path = "../../llm" }
+
+# jemalloc fails to initialize with `background_thread:true` where it has no background
+# threads (macOS), and tikv-jemalloc-sys does not support them on musl.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+tikv-jemallocator = { version = "0.7.0", features = ["background_threads"], optional = true }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 dynamo-llm = { path = "../../llm", default-features = false }

@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "jemalloc.rs"]
+mod jemalloc;
+
 use std::collections::{HashMap, HashSet};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -1150,6 +1153,7 @@ async fn quiesce(milliseconds: u64) {
     unsafe {
         libc::malloc_trim(0);
     }
+    jemalloc::purge();
     if milliseconds > 0 {
         tokio::time::sleep(Duration::from_millis(milliseconds)).await;
     }
