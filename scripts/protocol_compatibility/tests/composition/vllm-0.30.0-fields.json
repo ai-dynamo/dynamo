@@ -1,0 +1,81 @@
+{
+  "_generated": "Do not edit; regenerate with tests.composition.vllm_fixture",
+  "capture_sha256": "b459a7137b8e9e54326935977ceff229b06502681dda07fa3593b6d76945e204",
+  "fields": {
+    "chat_template_kwargs": {
+      "pointer": "/components/schemas/ChatCompletionRequest/properties/chat_template_kwargs",
+      "schema": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Additional keyword args to pass to the template renderer. Will be accessible by the chat template.",
+        "title": "Chat Template Kwargs"
+      }
+    },
+    "chat_user": {
+      "pointer": "/components/schemas/ChatCompletionRequest/properties/user",
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "User"
+      }
+    },
+    "completion_user": {
+      "pointer": "/components/schemas/CompletionRequest/properties/user",
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "User"
+      }
+    },
+    "reasoning": {
+      "pointer": "/components/schemas/CustomChatCompletionMessageParam/properties/reasoning",
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reasoning"
+      }
+    },
+    "suffix": {
+      "pointer": "/components/schemas/CompletionRequest/properties/suffix",
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Suffix"
+      }
+    }
+  },
+  "image": "vllm/vllm-openai@sha256:439c19d48db36401abc914b9842d060fe610a54bc3ac29bb02505f0b69af1baf",
+  "scope": "Selected field schemas only; not a complete request contract",
+  "source_revision": "ced6857afa0ea7b2e3f0846a62e1394e90f15607"
+}
