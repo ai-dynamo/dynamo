@@ -29,8 +29,7 @@ See [`lib/sidecar/trtllm/launch/`](https://github.com/ai-dynamo/dynamo/tree/main
 for all topologies. For example, aggregated serving on one GPU:
 
 ```bash
-cargo build --release -p dynamo-trtllm-sidecar
-export PATH="$PWD/target/release:$PATH" DYN_DISCOVERY_BACKEND=file
+export DYN_DISCOVERY_BACKEND=file
 ./lib/sidecar/trtllm/launch/agg.sh
 ```
 
