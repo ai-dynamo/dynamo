@@ -25,15 +25,12 @@ canvas table.
 
 ## Establish the Release Request
 
-Identify the target `release/X.Y.Z` branch, the merged main PR and commit, and
-the matching Linear issue before changing the release branch.
-
 - The normal path starts with a fix merged to `main`. Use a release-only fix
   only for changes that cannot sensibly land on `main`, such as a release
   version bump or code that `main` has already replaced.
 - If the fix is not merged, stop release-branch work and complete the main PR
-  first using the `issue-first` skill. A closing reference such as
-  `Fixes DYN-123` belongs to the main PR only.
+  first. A closing reference such as `Fixes DYN-123` belongs to the main PR
+  only.
 - For an internal fix, use a DYN issue. Set its Releases field to the target
   release and add `cherry-pick:requested`. QA bugs may already have this label
   from NVBugs synchronization.
@@ -45,11 +42,10 @@ the matching Linear issue before changing the release branch.
 
 ## Prepare the Release Branch
 
-Start from the current target release branch using the local Git strategy
-appropriate to the task. Keep the Linear issue ID out of both the release
-branch name and the PR title because the Linear integration can otherwise
-close the issue before QA verifies it. A suitable branch shape is
-`<user>/cherrypick-<short-name>`.
+Start from the current target release branch. Keep the Linear issue ID out of
+both the release branch name and the PR title because the Linear integration
+can otherwise close the issue before QA verifies it. A suitable branch shape
+is `<user>/cherrypick-<short-name>`.
 
 For a normal cherry-pick:
 
