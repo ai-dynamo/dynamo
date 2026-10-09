@@ -539,9 +539,17 @@ jobs:
           # are untouched.
           SHARED_PAGE="enterprise/supported-artifacts.mdx"
           if [ ! -e "docs-checkout/fern/pages-dev/$SHARED_PAGE" ]; then
-            # Previews of older maintained branches may predate the page.
+            # Previews of older maintained branches may predate the page, while
+            # released versions already render the published pages-dev copy.
+            # Restore that copy so their nav still resolves in the preview.
             if [ "${{ steps.ctx.outputs.is_main }}" != "true" ]; then
-              echo "::notice::Source tree has no $SHARED_PAGE; released versions keep their own copy in this preview"
+              if git -C docs-checkout cat-file -e "HEAD:fern/pages-dev/$SHARED_PAGE" 2>/dev/null; then
+                mkdir -p "docs-checkout/fern/pages-dev/$(dirname "$SHARED_PAGE")"
+                git -C docs-checkout show "HEAD:fern/pages-dev/$SHARED_PAGE" > "docs-checkout/fern/pages-dev/$SHARED_PAGE"
+                echo "::notice::Source tree has no $SHARED_PAGE; the preview keeps the published shared copy"
+              else
+                echo "::notice::Source tree has no $SHARED_PAGE; released versions keep their own copy in this preview"
+              fi
               exit 0
             fi
             echo "::error::pages-dev/$SHARED_PAGE not found; released versions would keep stale supported artifacts. Update SHARED_PAGE here, in the release job, and in docs/fern/scripts/simulate_docs_website.sh."
