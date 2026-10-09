@@ -43,6 +43,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to the TensorRT-LLM engine."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                   Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  TRTLLM_PYTHON           Python with TensorRT-LLM installed (default: python3)"
             echo "  CUDA_VISIBLE_DEVICES    GPU assignment (default: 0)"
@@ -59,6 +60,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar trtllm SIDECAR_CMD
 
 TRTLLM_EXTRA_CONFIG=""
 trtllm_exit_trap() {
@@ -119,7 +122,7 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
-    dynamo-trtllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${TRTLLM_GRPC_PORT}" \
     --model-path "$MODEL" \
     "${TRTLLM_CONTEXT_LENGTH_ARGS[@]}" &
