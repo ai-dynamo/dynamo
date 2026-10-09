@@ -2728,6 +2728,8 @@ dependencies = [
  "insta",
  "ipnet",
  "json-five",
+ "k8s-openapi",
+ "kube",
  "lazy_static",
  "libc",
  "libloading 0.8.9",
