@@ -99,7 +99,7 @@ spec:
         # starts before `main`, stops after.
         initContainers:
         - name: trtllm-engine
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc0.dev202610090112
           restartPolicy: Always
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state rather than just a connectable socket.
@@ -227,7 +227,7 @@ spec:
             sizeLimit: 10Gi
         initContainers:
         - name: trtllm-engine
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc0.dev202610090112
           restartPolicy: Always
           startupProbe:
             exec:
