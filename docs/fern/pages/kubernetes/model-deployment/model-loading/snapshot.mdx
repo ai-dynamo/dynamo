@@ -60,6 +60,7 @@ export MODEL=Qwen/Qwen3-0.6B
 export DGD=qwen3-0-6b-trtllm-snapshot-restore
 export SNAPSHOT_STORAGE_SIZE=1Ti
 export CAPTURE_TIMEOUT=20m
+export RESTORE_TIMEOUT=5m
 ```
 
 For the eight-GPU example, replace those recipe settings:
@@ -70,6 +71,7 @@ export MODEL=RadixArk/GLM-5.3-NVFP4
 export DGD=glm-5-3-trtllm-snapshot-restore
 export SNAPSHOT_STORAGE_SIZE=4Ti
 export CAPTURE_TIMEOUT=60m
+export RESTORE_TIMEOUT=30m
 ```
 
 Provision `model-cache` in `NAMESPACE` before deploying. The GLM example mounts
@@ -166,15 +168,15 @@ export SNAPSHOT_NAME=$(kubectl get "dgd/$DGD" -n "$NAMESPACE" \
   -o jsonpath='{.status.checkpoints.TRTLLMWorker.checkpointName}')
 kubectl get "podsnapshot/$SNAPSHOT_NAME" -n "$NAMESPACE"
 kubectl wait "dgd/$DGD" -n "$NAMESPACE" \
-  --for=condition=Ready --timeout=5m
+  --for=condition=Ready --timeout="$RESTORE_TIMEOUT"
 
 export WORKER_SELECTOR="nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component=TRTLLMWorker,"'!nvidia.com/snapshot-job'
 kubectl wait pod -n "$NAMESPACE" -l "$WORKER_SELECTOR" \
-  --for=condition=Ready --timeout=5m
+  --for=condition=Ready --timeout="$RESTORE_TIMEOUT"
 export WORKER_POD=$(kubectl get pod -n "$NAMESPACE" -l "$WORKER_SELECTOR" \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl wait "pod/$WORKER_POD" -n "$NAMESPACE" \
-  --for=condition=nvidia.com/Restored --timeout=5m
+  --for=condition=nvidia.com/Restored --timeout="$RESTORE_TIMEOUT"
 test "$(kubectl get "pod/$WORKER_POD" -n "$NAMESPACE" \
   -o jsonpath='{.metadata.annotations.nvidia\.com/restore-from}')" = "$SNAPSHOT_NAME"
 ```
