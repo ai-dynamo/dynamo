@@ -96,10 +96,8 @@ GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
 # Per-worker DYN_SYSTEM_PORT{i} and DYN_VLLM_KV_EVENT_PORT{i} come from the test
 # harness for parallel runs; standalone runs fall back to the script's port bases.
-# Under the harness (DYN_MANAGED_PORTS set), worker i also takes the spare reserved
-# DYN_SYSTEM_PORT{NUM_WORKERS+i} as --nccl-port. Otherwise SGLang probes a free
-# ephemeral port and closes it before torch.distributed binds it, so another
-# process can take it first (sporadic EADDRINUSE). 0 or unset keeps SGLang's default.
+# Under DYN_MANAGED_PORTS, worker i uses spare DYN_SYSTEM_PORT{NUM_WORKERS+i} as --nccl-port;
+# SGLang's own free-port probe races torch.distributed's bind (sporadic EADDRINUSE).
 WORKER_PORTS=()
 KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
