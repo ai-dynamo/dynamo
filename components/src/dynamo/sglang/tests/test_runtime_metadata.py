@@ -413,7 +413,7 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
 
 
 # Expected values follow SGLang MooncakeStore's `config_prefix`: backend tag (when
-# not None) then served model name with "/" -> "-", joined with "_" (DYN-4827).
+# not None) then served model name with "/" -> "-", joined with "_".
 @pytest.mark.parametrize(
     "extra_config, served_model_name, expected",
     [

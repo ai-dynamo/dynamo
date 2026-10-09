@@ -986,7 +986,7 @@ mod tests {
     }
 
     // Key names as stored by an SGLang worker serving `Qwen/Qwen3-0.6B` with no
-    // `extra_backend_tag` (DYN-4827).
+    // `extra_backend_tag`.
     #[tokio::test]
     async fn test_check_blocks_matches_sglang_model_prefixed_keys() {
         let hash = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72";
