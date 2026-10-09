@@ -3,1677 +3,117 @@
   "bomFormat": "CycloneDX",
   "components": [
     {
-      "bom-ref": "64ba45a1ca221024",
+      "bom-ref": "7a66405c87149f1b",
       "name": "/usr/bin/getconf",
       "type": "file"
     },
     {
-      "bom-ref": "d785725f1256b413",
+      "bom-ref": "d8b17743626be114",
       "name": "/usr/bin/getent",
       "type": "file"
     },
     {
-      "bom-ref": "8f5a20d3e89ac468",
+      "bom-ref": "85274cb3c36572af",
       "name": "/usr/bin/iconv",
       "type": "file"
     },
     {
-      "bom-ref": "88538433fc350a10",
+      "bom-ref": "a9e7fea954860f23",
       "name": "/usr/bin/ldd",
       "type": "file"
     },
     {
-      "bom-ref": "8c8666e674e9f26d",
+      "bom-ref": "55f4773f1ad7bb46",
       "name": "/usr/bin/locale",
       "type": "file"
     },
     {
-      "bom-ref": "ba2888734a6a5b0b",
+      "bom-ref": "4e2bccc910c8c5a4",
       "name": "/usr/bin/localedef",
       "type": "file"
     },
     {
-      "bom-ref": "5b84877de563befe",
+      "bom-ref": "a5414fd4d574ee59",
       "name": "/usr/bin/pldd",
       "type": "file"
     },
     {
-      "bom-ref": "6ec90e6b80b45cc3",
+      "bom-ref": "38ef877057d3e901",
       "name": "/usr/bin/shelless_ulimit",
       "type": "file"
     },
     {
-      "bom-ref": "0e226d609f9df395",
+      "bom-ref": "e07c12ffdba9be47",
       "name": "/usr/bin/sleep",
       "type": "file"
     },
     {
-      "bom-ref": "71c14e294c0d2371",
+      "bom-ref": "af9b6a4989d0fa56",
       "name": "/usr/bin/tzselect",
       "type": "file"
     },
     {
-      "bom-ref": "25c20fb8b57a2b13",
+      "bom-ref": "29b0d0437fbd36bc",
       "name": "/usr/bin/zdump",
       "type": "file"
     },
     {
-      "bom-ref": "abd31a92a8ef30f1",
-      "name": "/usr/lib/aarch64-linux-gnu/engines-3/afalg.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "309104e148a02896",
-      "name": "/usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "63a54811da2a0eb6",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "09a08b6673004cf5",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ARMSCII-8.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b04b016cec3c0e36",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ASMO_449.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "45c0b62518c372ba",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/BIG5.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "27fb6b8be1b4b642",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/BIG5HKSCS.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "e6e433233db09e3a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/BRF.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "5a97e15cfb59ebd7",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP10007.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "dd5a684de5670cc0",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1125.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "720b302a5892007e",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1250.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "fae696470af10b00",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1251.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "6c78672ebfbb2e5a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1252.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "414dc665edd8d337",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1253.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "a5ab78caa78af7e0",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1254.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "57c722abcd8d2ba8",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1255.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "7864da31484abf01",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1256.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "84801ca7e3267d73",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1257.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d66c2845c290cf59",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1258.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "0c5331415e81dcae",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP737.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "876378dab16b3191",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP770.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b19f698e6b454f90",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP771.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "8d71cca19d7204ec",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP772.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "a15dedd5cf51f6a5",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP773.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "85c27915b9a4fd5c",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP774.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "985829e79ddb5062",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP775.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "56575d65d15f74ac",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP932.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "e31eb09e740fcb85",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CSN_369103.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "85ab233f6a7e9a38",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/CWI.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "45284fb8e4453628",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/DEC-MCS.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b0c7a43f41d7b944",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-AT-DE-A.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "a1ac52fe6efc289e",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-AT-DE.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "5004cd8667726b3f",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-CA-FR.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "2ed8a22d4aca7d0e",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-DK-NO-A.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "c4b8d868aa90c79a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-DK-NO.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "a508f3d43a48e814",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-ES-A.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "4606dfb99ddaeae1",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-ES-S.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "018e29aa0be67f31",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-ES.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "3ace0e2a48250e85",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-FI-SE-A.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "4567348960806773",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-FI-SE.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "0ece8ef1bff778b0",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-FR.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "946d5df4bda6c5d0",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-IS-FRISS.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "03aca82770b8574b",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-IT.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "0ddd8273f0d7a184",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-PT.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d039524de7ef1790",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-UK.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "794037164450b5b7",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-US.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "a96c32b595012829",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ECMA-CYRILLIC.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "77c3092fc3a9d7c7",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EUC-CN.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b1bb6bb943feffa2",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EUC-JISX0213.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "e888b97d4043dd7a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EUC-JP-MS.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "a613c5defc0be354",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EUC-JP.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "dd58ab066c1995a0",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EUC-KR.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "1a4394346a6bc9c1",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/EUC-TW.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "91d74d9594887c40",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/GB18030.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "2d26270e6d585e6a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/GBBIG5.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "9526119a50edf029",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/GBGBK.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "77fb6e078b636184",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/GBK.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "023f388a539ce0df",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/GEORGIAN-ACADEMY.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "82dd9fafd45b1e3e",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/GEORGIAN-PS.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "0e2ae8ab3b798257",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/GOST_19768-74.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "92b30f139ee4bf66",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/GREEK-CCITT.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "8176a07e6715e976",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/GREEK7-OLD.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "648a2e38cf15a4c6",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/GREEK7.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "9dcf1a494c03ebed",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/HP-GREEK8.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "ed06d70809279338",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/HP-ROMAN8.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "70021486be2cac78",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/HP-ROMAN9.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "192a1d65670e14fd",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/HP-THAI8.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d81ede1e919e470d",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/HP-TURKISH8.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "3958a8dd1e1ae364",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM037.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "e873a15b2370e141",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM038.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b455a4833ebec054",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1004.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "807bb86ae3a6eeb9",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1008.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "377c8b889c43859b",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1008_420.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b8742abfe4e82951",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1025.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "8ff8fb1d125b1fbf",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1026.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "ec550343f8983f98",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1046.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b112fb03293dab65",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1047.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b4ca031b62f0123a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1097.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "4fa2b95b851b7a03",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1112.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "46e6e1edc1f0ed52",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1122.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "4bfb468407a9127a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1123.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "c56b74cdb66103a1",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1124.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "30b41cf589cf49ee",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1129.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "11206946f1f388a8",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1130.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "62de14a72e6f828c",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1132.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d84e3e57512c313f",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1133.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "3a1ee2b11ae0e277",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1137.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "c09f8f43e14fbe54",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1140.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "31f60520cf8d066c",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1141.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "240b1acd9e751d70",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1142.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "634ed1b0053b35bb",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1143.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b51f82beb85b55ff",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1144.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "536c832ec315ee98",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1145.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "112675a7b7092a66",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1146.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "19312963c42b07b5",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1147.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "c7802afc093d3e74",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1148.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "a55c5ea728731092",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1149.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "6564231f2bb3e785",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1153.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "021921ae13b4d995",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1154.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "7583c2843436dbba",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1155.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "ded4dd90c28d6dfb",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1156.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "04bb76cab3307f64",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1157.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "69ab89f63efbbdbd",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1158.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "59034746c5dbfae8",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1160.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "427d5c225274d7e4",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1161.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "2ab82bb69451f7fc",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1162.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "50cb196a1fc48536",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1163.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "dc0def6d9a62999c",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1164.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "778cee6fda1f6b0b",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1166.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "fe8b0ad2db2911b1",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1167.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d3219bc35ec279e0",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM12712.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b25945a4b9ec9b32",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1364.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d2e6a9182005aaf7",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1371.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "beee17a9c0e9291b",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1388.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "a49f2f821f8afa03",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1390.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "1499b0bbb42dcaf8",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1399.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "871a66f9faec9b70",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM16804.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "f6ab59c80c5722a3",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM256.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d4576a2adf344c77",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM273.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "4fed4b0b30d6bbe9",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM274.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "e6eaa29b8e16e651",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM275.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "71003a7766ff0322",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM277.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "0264062c7e48d5e7",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM278.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "5274b9f9d11c841a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM280.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "6932ca13519b439a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM281.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "008d1d983aa94b77",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM284.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "e1df6498a468fdd8",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM285.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "8a94f9cd6874cdd9",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM290.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "3e27374d1f198314",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM297.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "ef45c35ee1344e9c",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM420.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "03a4d138787107b6",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM423.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "7c33ab331a1a46f2",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM424.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "f5b1e99fb423bbd3",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM437.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "17639ea5157bde48",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM4517.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "7c637ab7616d9d74",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM4899.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "4112bbdcbb3db469",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM4909.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "7c7d985bca485f6a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM4971.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "bf0642fab9473087",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM500.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b79883a9f47c18eb",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM5347.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "4aec22e51e2b5645",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM803.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "1de5abd73eaf0c45",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM850.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d1918613d2f269e8",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM851.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "e9c52ce493a3d506",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM852.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "2ab4f0aad7435ec7",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM855.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "3ad73b7e2d4d8256",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM856.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "3df5b92b6dacf5f7",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM857.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b7da10c250fea01e",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM858.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "cfe9e89add5616c5",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM860.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "97eb713cd99ebad3",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM861.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "191d3d611c37226a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM862.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "04f5e9c8583d35fb",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM863.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "838a643c114b7e4d",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM864.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "120a1e4fc1df1383",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM865.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "7a97467312a21a8e",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM866.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "cdd6402c152ea107",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM866NAV.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d2645f9241867bd0",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM868.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d5ab353ff2fcec21",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM869.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "c742351d1be0b593",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM870.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "92485bc884b8d22d",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM871.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "71c3c1eff6af5ac4",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM874.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "19a0748c2b8b478c",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM875.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "96131f827a64e1c8",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM880.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "cfdc8cb008525ced",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM891.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "af8cb36215b2137c",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM901.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "aaee57b352e4f6b1",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM902.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "cb8b89f91dbbcda9",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM903.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "147fc71a4523def7",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM9030.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "6625446f10ae62fe",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM904.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "0e484684efffc046",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM905.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "f7b58bb6e01964bf",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM9066.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d135321aeba4ed80",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM918.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "c47b1981d689bdfe",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM921.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "2d61a5d8f6202d9d",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM922.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "41788ca501d4b0d8",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM930.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "f0bfc4e516642def",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM932.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "084818fac0bcbd11",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM933.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "c6e203c117f832cc",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM935.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "6a695986705324b8",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM937.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "866e35fb125d1911",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM939.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "59e6f18946b917e6",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM943.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "7e61589ea0d37cd7",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM9448.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "ad98b3638b4b5e67",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/IEC_P27-1.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "4abd4533a29f3e17",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/INIS-8.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "fe3fe0335fbdd77b",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/INIS-CYRILLIC.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "bdbadd938725477b",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/INIS.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "cf39e895178f66b3",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISIRI-3342.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "708c381dd9d610dc",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-2022-CN-EXT.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "7beffb07de58efa1",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-2022-CN.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b62ad23ea6d15781",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-2022-JP-3.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "c47cf5720275af1c",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-2022-JP.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "29fb08acc5f5a10f",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-2022-KR.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "1e00b0f664e6d494",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-IR-197.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "82df3b474c829dde",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-IR-209.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "da859dc94dd4b89f",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO646.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "5c0fd2f843fea62f",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-1.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "4f01cb36f9ead546",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-10.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "89ba926847ea15d0",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-11.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "0877861c6170aec9",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-13.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "ff7dc31baa238872",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-14.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "2478173465e8d617",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-15.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "31eb184bd0b63597",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-16.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "bec837fe833c270b",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-2.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b491ff4caaf20d77",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-3.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "2a9f27e3d2284c7f",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-4.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "5740ad3c4e3d5757",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-5.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "1ecafc62d553d8fa",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-6.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "41aabe9985a07dab",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-7.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "732ed85200e256bd",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-8.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "8b8e76cafb808838",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-9.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b7e209c0fa3a97eb",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-9E.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d24662b8e7a4d277",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_10367-BOX.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "1ee7214e94f88e26",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_11548-1.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "0d673f347667c0dd",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_2033.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "ff26eb99930f776e",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_5427-EXT.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "3c63e320d74f0be3",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_5427.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "1a1eb3f7da07757c",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_5428.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "0abfee380021d267",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_6937-2.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "2d7fb67111d0da13",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_6937.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "ee9497f421291423",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/JOHAB.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "91c23ea3139e9112",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/KOI-8.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "5ec8f1b61a0c7a84",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/KOI8-R.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "ae9e019b7f7804ec",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/KOI8-RU.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "f820e7b3c8aea634",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/KOI8-T.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "5d9c5bdec4874ed5",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/KOI8-U.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "60140aa0aea1448b",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/LATIN-GREEK-1.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "9796e2e958c74159",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/LATIN-GREEK.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "671b7f5c0104cb0e",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/MAC-CENTRALEUROPE.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "fa2487410d64f0db",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/MAC-IS.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "c3cbdc00ca98a390",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/MAC-SAMI.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "65cb258c0e9706df",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/MAC-UK.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "9803ee2506cdde7e",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/MACINTOSH.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "69d7f7a2ee575cc0",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/MIK.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "3d28561b99fde66e",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/NATS-DANO.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "5b25cd7fac25867f",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/NATS-SEFI.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "4258ef524da36547",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/PT154.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "eff83b7c48579a9c",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/RK1048.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "dcf55deedfc83ce2",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/SAMI-WS2.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "6cb81e7d97ccd565",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/SHIFT_JISX0213.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "20098ae7fd510dff",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/SJIS.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "fc6abdb1d134e446",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/T.61.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "df5e3a59259cba25",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/TCVN5712-1.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "e2aecbcdb54ab261",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/TIS-620.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "314e7769766a55cc",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/TSCII.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "f57cf11bf5781e84",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/UHC.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "f770dff38d9bdf6a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/UNICODE.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b80aa88054d2008a",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/UTF-16.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "96fe74e9543a2310",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/UTF-32.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "3597550792e3e5f6",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/UTF-7.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "2d8fb53ff90d66d3",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/VISCII.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "95a5a6f314fe7f08",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/gconv-modules",
-      "type": "file"
-    },
-    {
-      "bom-ref": "7cb6eccb1c7ba0f5",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/gconv-modules.cache",
-      "type": "file"
-    },
-    {
-      "bom-ref": "21291e2d19a261b4",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/gconv-modules.d/gconv-modules-extra.conf",
-      "type": "file"
-    },
-    {
-      "bom-ref": "1c7d8d6fee47f7be",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/libCNS.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "59a985f5b4954fd8",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/libGB.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "22712d4fbca3ecc6",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/libISOIR165.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "faa542edffd46f33",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/libJIS.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "211d21ef6cce4bf8",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/libJISX0213.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "9e1d2b7c7115088c",
-      "name": "/usr/lib/aarch64-linux-gnu/gconv/libKSC.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "332f1f240309d562",
-      "name": "/usr/lib/aarch64-linux-gnu/krb5/plugins/preauth/spake.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "52a1ad0fd0e42200",
-      "name": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "2881f31a1de7aa24",
-      "name": "/usr/lib/aarch64-linux-gnu/libBrokenLocale.so.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d740c65119c57506",
-      "name": "/usr/lib/aarch64-linux-gnu/libanl.so.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "763ce4a06cfdf941",
-      "name": "/usr/lib/aarch64-linux-gnu/libbz2.so.1.0.4",
-      "type": "file"
-    },
-    {
-      "bom-ref": "c26e1eaae2119b4e",
-      "name": "/usr/lib/aarch64-linux-gnu/libc.so.6",
-      "type": "file"
-    },
-    {
-      "bom-ref": "98e59cc7f137a3bb",
-      "name": "/usr/lib/aarch64-linux-gnu/libc_malloc_debug.so.0",
-      "type": "file"
-    },
-    {
-      "bom-ref": "e9c28a912e7a9d88",
-      "name": "/usr/lib/aarch64-linux-gnu/libcom_err.so.2.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "ce125aa3b15a5df4",
-      "name": "/usr/lib/aarch64-linux-gnu/libcrypt.so.1.1.0",
-      "type": "file"
-    },
-    {
-      "bom-ref": "11e5d8dd2ba87ce7",
-      "name": "/usr/lib/aarch64-linux-gnu/libcrypto.so.3",
-      "type": "file"
-    },
-    {
-      "bom-ref": "aa7b5b665263b9db",
-      "name": "/usr/lib/aarch64-linux-gnu/libdb-5.3.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "53d4ec22f3187db4",
-      "name": "/usr/lib/aarch64-linux-gnu/libdl.so.2",
-      "type": "file"
-    },
-    {
-      "bom-ref": "ba55cb7bd7266e49",
-      "name": "/usr/lib/aarch64-linux-gnu/libexpat.so.1.12.3",
-      "type": "file"
-    },
-    {
-      "bom-ref": "c260955c617cd6a3",
-      "name": "/usr/lib/aarch64-linux-gnu/libexpatw.so.1.12.3",
-      "type": "file"
-    },
-    {
-      "bom-ref": "8e1959ffe4aa169d",
-      "name": "/usr/lib/aarch64-linux-gnu/libffi.so.8.1.4",
-      "type": "file"
-    },
-    {
-      "bom-ref": "a33eea1173d99742",
-      "name": "/usr/lib/aarch64-linux-gnu/libformw.so.6.5",
-      "type": "file"
-    },
-    {
-      "bom-ref": "3cc39bd1e5ee0258",
-      "name": "/usr/lib/aarch64-linux-gnu/libgcc_s.so.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "bedc2454f8343082",
-      "name": "/usr/lib/aarch64-linux-gnu/libgomp.so.1.0.0",
-      "type": "file"
-    },
-    {
-      "bom-ref": "1fa2f0dd287d4ed4",
-      "name": "/usr/lib/aarch64-linux-gnu/libgssapi_krb5.so.2.2",
-      "type": "file"
-    },
-    {
-      "bom-ref": "6754ee21ef4a9513",
-      "name": "/usr/lib/aarch64-linux-gnu/libhistory.so.8.2",
-      "type": "file"
-    },
-    {
-      "bom-ref": "bd15a2adc255bf75",
-      "name": "/usr/lib/aarch64-linux-gnu/libk5crypto.so.3.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b6daf5a97324be7c",
-      "name": "/usr/lib/aarch64-linux-gnu/libkeyutils.so.1.10",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d91a77cd39ff9f9a",
-      "name": "/usr/lib/aarch64-linux-gnu/libkrb5.so.3.3",
-      "type": "file"
-    },
-    {
-      "bom-ref": "5f18225e56c86b32",
-      "name": "/usr/lib/aarch64-linux-gnu/libkrb5support.so.0.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d86d56af6eff179e",
-      "name": "/usr/lib/aarch64-linux-gnu/liblzma.so.5.8.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "6a0e0d00498a84ff",
-      "name": "/usr/lib/aarch64-linux-gnu/libm.so.6",
-      "type": "file"
-    },
-    {
-      "bom-ref": "4a1b696875357bcc",
-      "name": "/usr/lib/aarch64-linux-gnu/libmemusage.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "2ce6ad0b864f9ee2",
-      "name": "/usr/lib/aarch64-linux-gnu/libmenuw.so.6.5",
-      "type": "file"
-    },
-    {
-      "bom-ref": "98c80ccd06e13818",
-      "name": "/usr/lib/aarch64-linux-gnu/libmvec.so.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d729fd605d2691af",
-      "name": "/usr/lib/aarch64-linux-gnu/libncursesw.so.6.5",
-      "type": "file"
-    },
-    {
-      "bom-ref": "32b32fe95bcc6e0b",
-      "name": "/usr/lib/aarch64-linux-gnu/libnsl.so.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "f27381f655ffb7bf",
-      "name": "/usr/lib/aarch64-linux-gnu/libnsl.so.2.0.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "01ad3641ee76b522",
-      "name": "/usr/lib/aarch64-linux-gnu/libnss_compat.so.2",
-      "type": "file"
-    },
-    {
-      "bom-ref": "892d52450d05f2d9",
-      "name": "/usr/lib/aarch64-linux-gnu/libnss_dns.so.2",
-      "type": "file"
-    },
-    {
-      "bom-ref": "1654c780d966da97",
-      "name": "/usr/lib/aarch64-linux-gnu/libnss_files.so.2",
-      "type": "file"
-    },
-    {
-      "bom-ref": "143f82ac83ece524",
-      "name": "/usr/lib/aarch64-linux-gnu/libnss_hesiod.so.2",
-      "type": "file"
-    },
-    {
-      "bom-ref": "b02ac3b443f0dd98",
-      "name": "/usr/lib/aarch64-linux-gnu/libpanelw.so.6.5",
-      "type": "file"
-    },
-    {
-      "bom-ref": "d5e90fed62ccf531",
-      "name": "/usr/lib/aarch64-linux-gnu/libpcprofile.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "685f85056f9867af",
-      "name": "/usr/lib/aarch64-linux-gnu/libpthread.so.0",
-      "type": "file"
-    },
-    {
-      "bom-ref": "457d593004a8482d",
-      "name": "/usr/lib/aarch64-linux-gnu/libreadline.so.8.2",
-      "type": "file"
-    },
-    {
-      "bom-ref": "bf934d05580e3dd9",
-      "name": "/usr/lib/aarch64-linux-gnu/libresolv.so.2",
-      "type": "file"
-    },
-    {
-      "bom-ref": "fb82a3c6ba40eae2",
-      "name": "/usr/lib/aarch64-linux-gnu/librt.so.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "414ce61067305bb6",
-      "name": "/usr/lib/aarch64-linux-gnu/libsqlite3.so.0.8.6",
-      "type": "file"
-    },
-    {
-      "bom-ref": "186a426d3d3c447c",
-      "name": "/usr/lib/aarch64-linux-gnu/libssl.so.3",
-      "type": "file"
-    },
-    {
-      "bom-ref": "9866e937b1fba9f2",
-      "name": "/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33",
-      "type": "file"
-    },
-    {
-      "bom-ref": "11dce7498a360c9a",
-      "name": "/usr/lib/aarch64-linux-gnu/libthread_db.so.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "2851be033ba740b7",
-      "name": "/usr/lib/aarch64-linux-gnu/libtic.so.6.5",
-      "type": "file"
-    },
-    {
-      "bom-ref": "7d721b44166a7b24",
-      "name": "/usr/lib/aarch64-linux-gnu/libtinfo.so.6.5",
-      "type": "file"
-    },
-    {
-      "bom-ref": "e992c8e480965172",
-      "name": "/usr/lib/aarch64-linux-gnu/libtirpc.so.3.0.0",
-      "type": "file"
-    },
-    {
-      "bom-ref": "66c09da27ba4e19c",
-      "name": "/usr/lib/aarch64-linux-gnu/libutil.so.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "047665471536dfea",
-      "name": "/usr/lib/aarch64-linux-gnu/libuuid.so.1.3.0",
-      "type": "file"
-    },
-    {
-      "bom-ref": "0f8a401d5c8388c3",
-      "name": "/usr/lib/aarch64-linux-gnu/libz.so.1.3.1",
-      "type": "file"
-    },
-    {
-      "bom-ref": "be31a8964d558904",
-      "name": "/usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7",
-      "type": "file"
-    },
-    {
-      "bom-ref": "f62c7aa461ee8fb8",
-      "name": "/usr/lib/aarch64-linux-gnu/ossl-modules/fips.so",
-      "type": "file"
-    },
-    {
-      "bom-ref": "cfa7d520830caf1c",
+      "bom-ref": "32924e8ad1ae256b",
       "name": "/usr/lib/locale/C.utf8/LC_ADDRESS",
       "type": "file"
     },
     {
-      "bom-ref": "4f061067740ee919",
+      "bom-ref": "3a725ac317da57ea",
       "name": "/usr/lib/locale/C.utf8/LC_COLLATE",
       "type": "file"
     },
     {
-      "bom-ref": "75d4e3e0100cacf3",
+      "bom-ref": "97f6d5236d562bc4",
       "name": "/usr/lib/locale/C.utf8/LC_CTYPE",
       "type": "file"
     },
     {
-      "bom-ref": "8ade5543f497550c",
+      "bom-ref": "6bafc3f34f43284b",
       "name": "/usr/lib/locale/C.utf8/LC_IDENTIFICATION",
       "type": "file"
     },
     {
-      "bom-ref": "9088ab6240afdc9e",
+      "bom-ref": "1573076af4438681",
       "name": "/usr/lib/locale/C.utf8/LC_MEASUREMENT",
       "type": "file"
     },
     {
-      "bom-ref": "b990fc991b6a0955",
+      "bom-ref": "8cf51c0bde09cad6",
       "name": "/usr/lib/locale/C.utf8/LC_MESSAGES/SYS_LC_MESSAGES",
       "type": "file"
     },
     {
-      "bom-ref": "d7d18976eff1ee6f",
+      "bom-ref": "e7b3d21b0f6b3b18",
       "name": "/usr/lib/locale/C.utf8/LC_MONETARY",
       "type": "file"
     },
     {
-      "bom-ref": "d8711a56962543c4",
+      "bom-ref": "f8db29a6db75e3e3",
       "name": "/usr/lib/locale/C.utf8/LC_NAME",
       "type": "file"
     },
     {
-      "bom-ref": "518ecaeb243dc0bb",
+      "bom-ref": "65611b3452e766a0",
       "name": "/usr/lib/locale/C.utf8/LC_NUMERIC",
       "type": "file"
     },
     {
-      "bom-ref": "940720fc769f50f3",
+      "bom-ref": "a5576bcbecd41040",
       "name": "/usr/lib/locale/C.utf8/LC_PAPER",
       "type": "file"
     },
     {
-      "bom-ref": "fec165e73ce8abce",
+      "bom-ref": "52505dd8c361c76d",
       "name": "/usr/lib/locale/C.utf8/LC_TELEPHONE",
       "type": "file"
     },
     {
-      "bom-ref": "c728e109ff124478",
+      "bom-ref": "38cbc68e3639b48f",
       "name": "/usr/lib/locale/C.utf8/LC_TIME",
       "type": "file"
     },
@@ -1683,82 +123,1647 @@
       "type": "file"
     },
     {
-      "bom-ref": "fb8bb56aa97b62e8",
+      "bom-ref": "31a414cc03b5693a",
+      "name": "/usr/lib/x86_64-linux-gnu/engines-3/afalg.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7a7295942f12939d",
+      "name": "/usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "93e9a34041fc3c98",
+      "name": "/usr/lib/x86_64-linux-gnu/engines-3/padlock.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c6b75ac1a4204552",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ANSI_X3.110.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "93a667bdd9d2c873",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ARMSCII-8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fef12e61059a5abf",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ASMO_449.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "33779486d90db957",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/BIG5.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dcf880989263f72b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/BIG5HKSCS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bc622fd90a75fa52",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/BRF.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3c57a828e4cbbc22",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP10007.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "aafa6c131dbcbd82",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP1125.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0735e73a5bcf29ea",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP1250.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dcc88a725eb7d424",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP1251.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6eb71c7985e05349",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP1252.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3a4d846957764183",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP1253.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "21400fda3b01daa6",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP1254.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5c21b868cb8df670",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP1255.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "545ae51b8be26f54",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP1256.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a621a81d6f187f27",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP1257.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e29f03826524c792",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP1258.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0845047edae6d80f",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP737.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bff321c8ad129967",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP770.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "76a598d36236bcb9",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP771.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "04617cd87c8b891d",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP772.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "32dd0819db2029e0",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP773.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "279f4b61ad31c292",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP774.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "517d74031074880b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP775.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bf0e0f4c4ac427d7",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CP932.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "516f6ac89fad5c9b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CSN_369103.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9e55d9f11ca2768a",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/CWI.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0fbf1fca91c61d62",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/DEC-MCS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e91339c40b070a84",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-AT-DE-A.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3f53c0c0ffecd10e",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-AT-DE.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6ba32dd286e62fdd",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-CA-FR.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dd2b291da313b003",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-DK-NO-A.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "787750b1971b0f88",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-DK-NO.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dd0e6acafed3c46e",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-ES-A.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c9bd2e73eba530bc",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-ES-S.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dc82f46289472782",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-ES.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "703100fd25305308",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-FI-SE-A.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d60eb10828dd90a4",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-FI-SE.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "248d65c0e57f852c",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-FR.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "10a0afe5676ede81",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-IS-FRISS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cdd3dda2b4a14c96",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-IT.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a6c8868d12305b8a",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-PT.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "559f135ea4cf6d5d",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-UK.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cdf6ec4b40a63326",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EBCDIC-US.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e08ac604225b5ffe",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ECMA-CYRILLIC.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6270f4a0fd07b799",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EUC-CN.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cf48789bf649b9bd",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EUC-JISX0213.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "900a80fe2f111b92",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EUC-JP-MS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "37c02b284b357f0f",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EUC-JP.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9d67c6c50812da8c",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EUC-KR.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f49c32def0383590",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/EUC-TW.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5065dae171d34bb4",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/GB18030.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d1f9266820844a58",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/GBBIG5.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ac625d81d344bf5e",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/GBGBK.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b666e736e526ec48",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/GBK.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5059478e49e569df",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/GEORGIAN-ACADEMY.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "01736d5773cda6ad",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/GEORGIAN-PS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8c5378d6f9ef5555",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/GOST_19768-74.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "031779b73ec637b6",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/GREEK-CCITT.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "48f021e6c4aa99a5",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/GREEK7-OLD.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f4fcf695708d1c1e",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/GREEK7.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6fb75dbb26ca21a3",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/HP-GREEK8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "86b07373ceb1d145",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/HP-ROMAN8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "56938d6b2d9a1cfe",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/HP-ROMAN9.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "72d1e2c46b13129e",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/HP-THAI8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "119774707cbdc894",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/HP-TURKISH8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8e2ba82b2d274daf",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM037.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "df47114a337842f0",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM038.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "29f423cf8eac96e3",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1004.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "197ccefd7b563363",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1008.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dc3002c3e8f71326",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1008_420.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9856838b799b13e8",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1025.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e6e0ead33fd38c5b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1026.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5adae7e7a39d6a2b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1046.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "89a8e0df4c2b17ea",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1047.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9bf5117a25cf7570",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1097.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0bc3d58547d15088",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1112.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "42f8c825e32a94ef",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1122.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "481bedb9057675a6",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1123.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "04984601cea53d45",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1124.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "64b64d890bd69395",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1129.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8c68fd29b30315e1",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1130.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9a0247acd15e6825",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1132.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bd4474a797825365",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1133.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8976dfc4ffe34cee",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1137.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "143f7ce0413ebcdd",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1140.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "eb5732d165f27e66",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1141.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "18b1c94a87ae6fc1",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1142.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7919a845a1b15ada",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1143.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "84c6556a3f867505",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1144.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a2d0096b3a2368d7",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1145.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "397c7e7eb5e2b93c",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1146.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8a3d9cc4aa5016c6",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1147.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d966e1ec904aa06b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1148.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "159aec7f15f58ff3",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1149.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c74d6005f9edc015",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1153.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b5fa517d3fa12de3",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1154.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "af05a9ecb5e7e8d4",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1155.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "eb954d72e2a1fd8a",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1156.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ee439cf6ca84c652",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1157.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6c0fcca040572edd",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1158.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f13f7a4b4af34f1d",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1160.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "329e8bcc3d190b7b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1161.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0b8da71c3ac2e0d6",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1162.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2810a4aa4821f60c",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1163.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f6b4d8d5bd766676",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1164.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "812d12140efc20e7",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1166.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "78fb51f756446e3e",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1167.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d2889d36d4cea597",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM12712.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "acf3adaac97fa455",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1364.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "59cda3e838b22fbf",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1371.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2a092af9365a6123",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1388.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9d55843ea7c39fee",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1390.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9adf23946d5cfe6e",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM1399.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "122376fc094fac6c",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM16804.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e252b26990c43cf3",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM256.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6396c57920564334",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM273.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4cb1947033a598d4",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM274.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e6f78ccd324d3a99",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM275.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3e62696e8962af00",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM277.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b0fed3ba982424af",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM278.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "850a6a0eae765adf",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM280.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7130601cc372fd8b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM281.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8531db11f64dc6da",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM284.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8ec2021421cb7b78",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM285.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "eefa0ba65ee185ad",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM290.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0189bc4553292692",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM297.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4735a1ab6e1d82f2",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM420.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "521beac23a773b59",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM423.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a246b7108e6dc42b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM424.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0b0305cce38186ab",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM437.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9d7e769f31e21401",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM4517.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d8186ca3ed0866c9",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM4899.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "600122a1e5e131ec",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM4909.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "78a64faf2c5d1a67",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM4971.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f6f7f1e5a78b870e",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM500.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8c7d91a7c592eea2",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM5347.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4febd7a8c2beb3fd",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM803.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5a05b543b37e8c2f",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM850.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "16e5569dfe99f97c",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM851.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4b8ab6d87f980227",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM852.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8cce4796f1aa2914",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM855.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "751295b3a2bae7f0",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM856.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c629f4df171129de",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM857.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9eff90550e1d81d1",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM858.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4f11ae0ecdbd5881",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM860.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "80e61d634520d5ae",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM861.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e40034053de288eb",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM862.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a3dc053df74023f2",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM863.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "58e3a298857856f4",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM864.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cde5fecdfd9115ef",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM865.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bf50f29bca8848b5",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM866.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "14793e710d2efd64",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM866NAV.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f8e8b5487791a8cc",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM868.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dff595644135c386",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM869.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "25006e45b8d4878b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM870.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cdf4d66659d60c2c",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM871.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e669a41de3a40927",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM874.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1633ca147dcc3510",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM875.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d99ec6b315e1fa39",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM880.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f6e6b22312e9b162",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM891.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8dc508d337233050",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM901.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0651573992d9631d",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM902.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6098b702868b28ea",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM903.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "279e0d78dabaf34b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM9030.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "676432513ed8e272",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM904.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bcaf4670d378394b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM905.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d2b753b181d6d50f",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM9066.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fbc211d4570ac917",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM918.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6de7974423f8e97a",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM921.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6965a52bcbb8cc8c",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM922.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3cf51e5ad5591467",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM930.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "28b0061506bc73b4",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM932.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0c672cdf3d427011",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM933.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "29faeb03404774ef",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM935.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0f5f99fad1c66132",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM937.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "376b3f98a128c091",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM939.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c9276fb304f23e1b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM943.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ed3a3cbfe304db0d",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IBM9448.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e5df2a51f974da6a",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/IEC_P27-1.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9a98f2709f302cce",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/INIS-8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0feb2328629b45ca",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/INIS-CYRILLIC.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "12385331f331b33a",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/INIS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f4f28deb6b6fc112",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISIRI-3342.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e322a4cf7abbc8dd",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO-2022-CN-EXT.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "77f4e9f01ccff0cd",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO-2022-CN.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4e3a11d96155a01d",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO-2022-JP-3.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "862f53a1258f9b29",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO-2022-JP.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "04aa7c617a9d2e48",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO-2022-KR.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ad14f21993b43c92",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO-IR-197.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "86295e89bc91a858",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO-IR-209.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dd817d4e2815fd00",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO646.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4f8c888aa6491835",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-1.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7dd65a85ad71e0e9",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-10.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "49e617fa127fae49",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-11.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "387e6c13da61fd8a",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-13.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bdcf68a79965f789",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-14.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0c337692d6830491",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-15.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7e96b98f7556cbca",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-16.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c97786a23a783d05",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-2.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fe67a1030ee835c3",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-3.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b4bd147f5f2ea2e0",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-4.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bbd720ffaecf2921",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-5.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "20cf07c2234367ab",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-6.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1e240f01314f5c13",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-7.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "aff38e1d2f9a0575",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f9792bc3de5b3f26",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-9.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bd4d3a0b4976545f",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO8859-9E.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "190164653ac4379b",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO_10367-BOX.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "df57e533b0c79323",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO_11548-1.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fe2682222b008600",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO_2033.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5f1aa620a54c344f",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO_5427-EXT.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2624154aca71d0a6",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO_5427.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1070c627159744d1",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO_5428.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d3f6b855c1327974",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO_6937-2.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "04d8e730ba4d6d02",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/ISO_6937.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6ab625a1cfb6659c",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/JOHAB.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cdb8ccd8b16fa5c2",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/KOI-8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b59e2d6ce2af0cdb",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/KOI8-R.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3a6c815de2d462f7",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/KOI8-RU.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f7dc4797902184cf",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/KOI8-T.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "82a60985c4dad349",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/KOI8-U.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ac9b15bf7f80a344",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/LATIN-GREEK-1.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d2ffc0dbd43e8c6f",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/LATIN-GREEK.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "030af07ebb3e989d",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/MAC-CENTRALEUROPE.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "39a718dc424f8b04",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/MAC-IS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c24841ee751f3e8f",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/MAC-SAMI.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "07e5749717503500",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/MAC-UK.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "df8848bdb4bbbbd5",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/MACINTOSH.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ea9fa032cb5836d8",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/MIK.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2c86809e8b9c5602",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/NATS-DANO.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "aa433fe2678f0502",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/NATS-SEFI.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5db5909fca42a298",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/PT154.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c8038017d1c2c357",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/RK1048.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "79145e1ffba1a3b4",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/SAMI-WS2.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0885968c15532dc3",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/SHIFT_JISX0213.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a611bc01a4f60e09",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/SJIS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a21d8128b52d8793",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/T.61.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "51508f3f65e1dc6c",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/TCVN5712-1.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "da4a914fd24c8a03",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/TIS-620.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fef9313ad1bdae59",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/TSCII.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b63759017ba4cd5e",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/UHC.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5fa1c37a5c909d4a",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/UNICODE.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "27eab5a4eb399747",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/UTF-16.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a2126f2a9a716ef8",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/UTF-32.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fa80d933bb7fe4cb",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/UTF-7.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8f2a614c5260617c",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/VISCII.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5e5236ac768bd5e8",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/gconv-modules",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c88557101dc7b367",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d540d24a0f69b326",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.d/gconv-modules-extra.conf",
+      "type": "file"
+    },
+    {
+      "bom-ref": "06d02291cb6b372e",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/libCNS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "733e7ea3972c7554",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/libGB.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "652a9c4e6078960f",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/libISOIR165.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "65334a1a628cc01e",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/libJIS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ff18dd670ca9c4bd",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/libJISX0213.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "93530521dd39f827",
+      "name": "/usr/lib/x86_64-linux-gnu/gconv/libKSC.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "de45e95b2c6240ba",
+      "name": "/usr/lib/x86_64-linux-gnu/krb5/plugins/preauth/spake.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "103fd763ea6da05d",
+      "name": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "82676746fdf6b93d",
+      "name": "/usr/lib/x86_64-linux-gnu/libBrokenLocale.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f4787dd9e3417839",
+      "name": "/usr/lib/x86_64-linux-gnu/libanl.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "30afd6ff4c23e5d7",
+      "name": "/usr/lib/x86_64-linux-gnu/libbz2.so.1.0.4",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bc65cd3e6f874460",
+      "name": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "426ac3143a1163f7",
+      "name": "/usr/lib/x86_64-linux-gnu/libc_malloc_debug.so.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2216144718ee2b7a",
+      "name": "/usr/lib/x86_64-linux-gnu/libcom_err.so.2.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "273e0445443e3468",
+      "name": "/usr/lib/x86_64-linux-gnu/libcrypt.so.1.1.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "37b605d6539c0c8b",
+      "name": "/usr/lib/x86_64-linux-gnu/libcrypto.so.3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "77b7303412c6c468",
+      "name": "/usr/lib/x86_64-linux-gnu/libdb-5.3.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b01a77732944eef8",
+      "name": "/usr/lib/x86_64-linux-gnu/libdl.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e29ef363b20fe2db",
+      "name": "/usr/lib/x86_64-linux-gnu/libexpat.so.1.12.3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3444e935026a841e",
+      "name": "/usr/lib/x86_64-linux-gnu/libexpatw.so.1.12.3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ad881cba4d73501e",
+      "name": "/usr/lib/x86_64-linux-gnu/libffi.so.8.1.4",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5ae17a911e7811f6",
+      "name": "/usr/lib/x86_64-linux-gnu/libformw.so.6.5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b51bdb4b2bc8d0d9",
+      "name": "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d01e94193726fb35",
+      "name": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f6af38e684b0b426",
+      "name": "/usr/lib/x86_64-linux-gnu/libgssapi_krb5.so.2.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2c1690618a29a6c3",
+      "name": "/usr/lib/x86_64-linux-gnu/libhistory.so.8.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e8e39b30c1ed1738",
+      "name": "/usr/lib/x86_64-linux-gnu/libk5crypto.so.3.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e0793034813caaa9",
+      "name": "/usr/lib/x86_64-linux-gnu/libkeyutils.so.1.10",
+      "type": "file"
+    },
+    {
+      "bom-ref": "814b17b403cf9248",
+      "name": "/usr/lib/x86_64-linux-gnu/libkrb5.so.3.3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4afb3c3d8bcab358",
+      "name": "/usr/lib/x86_64-linux-gnu/libkrb5support.so.0.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e3327663ba8b9a97",
+      "name": "/usr/lib/x86_64-linux-gnu/liblzma.so.5.8.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "171fee884d2fd44f",
+      "name": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "79b59ff2c4ff767d",
+      "name": "/usr/lib/x86_64-linux-gnu/libmemusage.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "256464628b77f7b7",
+      "name": "/usr/lib/x86_64-linux-gnu/libmenuw.so.6.5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3aebc95edf78cc52",
+      "name": "/usr/lib/x86_64-linux-gnu/libmvec.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c38e75d210e6b8d9",
+      "name": "/usr/lib/x86_64-linux-gnu/libncursesw.so.6.5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0c1fa1bed82f1898",
+      "name": "/usr/lib/x86_64-linux-gnu/libnsl.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c300a3f32946753f",
+      "name": "/usr/lib/x86_64-linux-gnu/libnsl.so.2.0.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3334bd5058ab8271",
+      "name": "/usr/lib/x86_64-linux-gnu/libnss_compat.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3ab1652cfb358884",
+      "name": "/usr/lib/x86_64-linux-gnu/libnss_dns.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "812ff2c7306c6742",
+      "name": "/usr/lib/x86_64-linux-gnu/libnss_files.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "184fe5e4666fbad8",
+      "name": "/usr/lib/x86_64-linux-gnu/libnss_hesiod.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "222157e697be8f16",
+      "name": "/usr/lib/x86_64-linux-gnu/libpanelw.so.6.5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "708a016a45ab8e46",
+      "name": "/usr/lib/x86_64-linux-gnu/libpcprofile.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "441f4e8e142e0403",
+      "name": "/usr/lib/x86_64-linux-gnu/libpthread.so.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5621161839744e10",
+      "name": "/usr/lib/x86_64-linux-gnu/libreadline.so.8.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "790167ece86917e1",
+      "name": "/usr/lib/x86_64-linux-gnu/libresolv.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "91d6b133af59566c",
+      "name": "/usr/lib/x86_64-linux-gnu/librt.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "660d9d87d23df1d6",
+      "name": "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "caf249127a4dd940",
+      "name": "/usr/lib/x86_64-linux-gnu/libssl.so.3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7053847ecd312129",
+      "name": "/usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e7a01a4d7b38599c",
+      "name": "/usr/lib/x86_64-linux-gnu/libthread_db.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "59d74e6eb48f576b",
+      "name": "/usr/lib/x86_64-linux-gnu/libtic.so.6.5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "97353c51da571e11",
+      "name": "/usr/lib/x86_64-linux-gnu/libtinfo.so.6.5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "527dbc26b477c5ad",
+      "name": "/usr/lib/x86_64-linux-gnu/libtirpc.so.3.0.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "32917486e05c6bb2",
+      "name": "/usr/lib/x86_64-linux-gnu/libutil.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8e1f6ad26a55626e",
+      "name": "/usr/lib/x86_64-linux-gnu/libuuid.so.1.3.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "220d30601c04a4a7",
+      "name": "/usr/lib/x86_64-linux-gnu/libz.so.1.3.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5b03f10f79cdaabb",
+      "name": "/usr/lib/x86_64-linux-gnu/libzstd.so.1.5.7",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0ada548a07314fa6",
+      "name": "/usr/lib/x86_64-linux-gnu/ossl-modules/fips.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d239fc62cf7ed858",
       "name": "/usr/local/bin/python",
       "type": "file"
     },
     {
-      "bom-ref": "2f5e0b9713940de2",
+      "bom-ref": "78136b4e68e10aca",
       "name": "/usr/local/bin/python3",
       "type": "file"
     },
     {
-      "bom-ref": "8393c35ed5093a28",
+      "bom-ref": "a8c2e7b50ed3e20c",
       "name": "/usr/local/bin/python3.13",
       "type": "file"
     },
     {
-      "bom-ref": "6ecdf2270983ebaa",
+      "bom-ref": "2306bd9f1becb192",
       "name": "/usr/local/lib/libpython3.13.so",
       "type": "file"
     },
     {
-      "bom-ref": "9eae94c355f1e5ca",
+      "bom-ref": "f2ff1121a70d1526",
       "name": "/usr/local/lib/libpython3.13.so.1.0",
       "type": "file"
     },
     {
-      "bom-ref": "51947044e042f116",
+      "bom-ref": "dae032693a84e929",
       "name": "/usr/sbin/iconvconfig",
       "type": "file"
     },
     {
-      "bom-ref": "47e8eb982daea56c",
+      "bom-ref": "350bd691a7bd3357",
       "name": "/usr/sbin/ldconfig",
       "type": "file"
     },
     {
-      "bom-ref": "0d10ca584d95bc52",
+      "bom-ref": "0accbcac34ee3b69",
       "name": "/usr/sbin/zic",
       "type": "file"
     },
     {
-      "bom-ref": "35452bb15e7a9f31",
+      "bom-ref": "0e9de350c6d6e5ca",
       "name": "/usr/share/base-files/dot.bashrc",
       "type": "file"
     },
     {
-      "bom-ref": "5cdb3476650957f7",
+      "bom-ref": "82e5dad48ab5d120",
       "name": "/usr/share/base-files/dot.profile",
       "type": "file"
     },
     {
-      "bom-ref": "9694c3f1ec765e8a",
+      "bom-ref": "4047d5cd718a7bad",
       "name": "/usr/share/base-files/dot.profile.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "2c007baf3483fbe7",
+      "bom-ref": "f7fad4f3444b5bb8",
       "name": "/usr/share/base-files/info.dir",
       "type": "file"
     },
     {
-      "bom-ref": "4aad9dac545e7fb7",
+      "bom-ref": "75cbc0f94db9daec",
       "name": "/usr/share/base-files/motd",
       "type": "file"
     },
     {
-      "bom-ref": "1c6a493269843474",
+      "bom-ref": "fe3bd31a9bdf4013",
       "name": "/usr/share/base-files/profile",
       "type": "file"
     },
     {
-      "bom-ref": "5c07b0e96dd730c4",
+      "bom-ref": "ff189aa218a7c323",
       "name": "/usr/share/base-files/profile.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "4ae050916de972b7",
+      "bom-ref": "75c82f3b228b9a00",
       "name": "/usr/share/base-files/staff-group-for-usr-local",
       "type": "file"
     },
@@ -1768,142 +1773,142 @@
       "type": "file"
     },
     {
-      "bom-ref": "3eba7a6b357a079b",
+      "bom-ref": "c70a52696de35fd8",
       "name": "/usr/share/common-licenses/AGPL-3.0",
       "type": "file"
     },
     {
-      "bom-ref": "f689a639661b907c",
+      "bom-ref": "b21f1fbfc879034f",
       "name": "/usr/share/common-licenses/Apache-2.0",
       "type": "file"
     },
     {
-      "bom-ref": "b0a45600404684e8",
+      "bom-ref": "553f298a342c1893",
       "name": "/usr/share/common-licenses/Artistic",
       "type": "file"
     },
     {
-      "bom-ref": "36ea198460a8d4f3",
+      "bom-ref": "7b964f00367a2a38",
       "name": "/usr/share/common-licenses/Artistic-2.0",
       "type": "file"
     },
     {
-      "bom-ref": "4508527d8688cb89",
+      "bom-ref": "fc0b6420752eb582",
       "name": "/usr/share/common-licenses/BSD",
       "type": "file"
     },
     {
-      "bom-ref": "297b8dc561b01af8",
+      "bom-ref": "86494746912e5e47",
       "name": "/usr/share/common-licenses/BSL-1.0",
       "type": "file"
     },
     {
-      "bom-ref": "a12c1265f50732b9",
+      "bom-ref": "4bab4f5839f317d2",
       "name": "/usr/share/common-licenses/CC-BY-3.0",
       "type": "file"
     },
     {
-      "bom-ref": "97cca95ca255bfb5",
+      "bom-ref": "c1b493dbee7a8382",
       "name": "/usr/share/common-licenses/CC-BY-4.0",
       "type": "file"
     },
     {
-      "bom-ref": "a470696cabb39305",
+      "bom-ref": "6422a5bc863e009a",
       "name": "/usr/share/common-licenses/CC-BY-SA-3.0",
       "type": "file"
     },
     {
-      "bom-ref": "40bb64d24fc9ff67",
+      "bom-ref": "85a4362b2542f154",
       "name": "/usr/share/common-licenses/CC-BY-SA-4.0",
       "type": "file"
     },
     {
-      "bom-ref": "c68421642001c939",
+      "bom-ref": "62fb76dd03fb07ca",
       "name": "/usr/share/common-licenses/CC0-1.0",
       "type": "file"
     },
     {
-      "bom-ref": "c2051c4b7dd11cb5",
+      "bom-ref": "079fce20089072f6",
       "name": "/usr/share/common-licenses/GFDL-1.1",
       "type": "file"
     },
     {
-      "bom-ref": "0be6b43cb36cc3ae",
+      "bom-ref": "0765a8a7bde6d3d9",
       "name": "/usr/share/common-licenses/GFDL-1.2",
       "type": "file"
     },
     {
-      "bom-ref": "87499338f10c4288",
+      "bom-ref": "76989065c17be677",
       "name": "/usr/share/common-licenses/GFDL-1.3",
       "type": "file"
     },
     {
-      "bom-ref": "e4bbf13471ca5c5c",
+      "bom-ref": "219f5c86d149268f",
       "name": "/usr/share/common-licenses/GPL-1",
       "type": "file"
     },
     {
-      "bom-ref": "9b077be87f2ae4a0",
+      "bom-ref": "95a1ae3be6cf4e7f",
       "name": "/usr/share/common-licenses/GPL-2",
       "type": "file"
     },
     {
-      "bom-ref": "f332a2c76c56b068",
+      "bom-ref": "b0e1f7e468ee34e3",
       "name": "/usr/share/common-licenses/GPL-3",
       "type": "file"
     },
     {
-      "bom-ref": "b0a0cba8165cca52",
+      "bom-ref": "5b39292ac0f80251",
       "name": "/usr/share/common-licenses/LGPL-2",
       "type": "file"
     },
     {
-      "bom-ref": "13f5ba8882dd9745",
+      "bom-ref": "597c736f79b8a162",
       "name": "/usr/share/common-licenses/LGPL-2.1",
       "type": "file"
     },
     {
-      "bom-ref": "0f6002838224848f",
+      "bom-ref": "6c9600b098f29114",
       "name": "/usr/share/common-licenses/LGPL-3",
       "type": "file"
     },
     {
-      "bom-ref": "e3521a818665fff4",
+      "bom-ref": "2ab6b948a02c833b",
       "name": "/usr/share/common-licenses/MPL-1.1",
       "type": "file"
     },
     {
-      "bom-ref": "1384d037ee0ebe3f",
+      "bom-ref": "a708fd69dd350f10",
       "name": "/usr/share/common-licenses/MPL-2.0",
       "type": "file"
     },
     {
-      "bom-ref": "0d4bee5e78718d1a",
+      "bom-ref": "18d1101e57dbfb61",
       "name": "/usr/share/common-licenses/OFL-1.1",
       "type": "file"
     },
     {
-      "bom-ref": "cc13f72a49dde428",
+      "bom-ref": "6fb2843732517793",
       "name": "/usr/share/doc/base-files/NEWS.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "2803b385572802ce",
+      "bom-ref": "d2cdc08dbb07c071",
       "name": "/usr/share/doc/base-files/README",
       "type": "file"
     },
     {
-      "bom-ref": "9ceba3aaf13b9bc9",
+      "bom-ref": "8944d898a8bf4212",
       "name": "/usr/share/doc/base-files/README.FHS",
       "type": "file"
     },
     {
-      "bom-ref": "e2355a2b613a111d",
+      "bom-ref": "dfde7dbd9dfb26f2",
       "name": "/usr/share/doc/base-files/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "d5d610e7cddc58b3",
+      "bom-ref": "ca8a208718a33050",
       "name": "/usr/share/doc/base-files/copyright",
       "type": "file"
     },
@@ -1913,422 +1918,422 @@
       "type": "file"
     },
     {
-      "bom-ref": "17d27299c79cbf94",
-      "name": "/usr/share/doc/gcc-14-base/README.Debian.arm64.gz",
+      "bom-ref": "156ea223470c903f",
+      "name": "/usr/share/doc/gcc-14-base/README.Debian.amd64.gz",
       "type": "file"
     },
     {
-      "bom-ref": "08ec27df460862db",
+      "bom-ref": "f0227dbb7bc5c283",
       "name": "/usr/share/doc/gcc-14-base/TODO.Debian",
       "type": "file"
     },
     {
-      "bom-ref": "799de7ec0f9ec4be",
+      "bom-ref": "82b297c6d61087fe",
       "name": "/usr/share/doc/gcc-14-base/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "51635ffd453907dc",
+      "bom-ref": "5eae69a10bd92b68",
       "name": "/usr/share/doc/gcc-14-base/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "87da2d766e7b1f6f",
+      "bom-ref": "2debca2db33984fc",
       "name": "/usr/share/doc/libbz2-1.0/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "e19651f101198c39",
+      "bom-ref": "1f4b83d8c9e14dbe",
       "name": "/usr/share/doc/libbz2-1.0/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "2f76f9875f7bb629",
+      "bom-ref": "b01c108b61a3a50a",
       "name": "/usr/share/doc/libbz2-1.0/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "2f98168a629ba040",
+      "bom-ref": "e3e633c59dea4467",
       "name": "/usr/share/doc/libc-bin/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "a42cabfa8e6eafaa",
+      "bom-ref": "87d815c3bd9117b1",
       "name": "/usr/share/doc/libc-bin/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "3d2f39f8255ae908",
+      "bom-ref": "2af1071cd70118cf",
       "name": "/usr/share/doc/libc-bin/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "fc5b5196efaa10c3",
+      "bom-ref": "d9ee7ab39240f0ec",
       "name": "/usr/share/doc/libc6/NEWS.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "67c77bed0fca9121",
+      "bom-ref": "9a141fe37558c9aa",
       "name": "/usr/share/doc/libc6/NEWS.gz",
       "type": "file"
     },
     {
-      "bom-ref": "d3b6b1c75dddfb4a",
+      "bom-ref": "8f5780ea4340c821",
       "name": "/usr/share/doc/libc6/README.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "8f47e9c700cd349c",
+      "bom-ref": "873c6f8aa5e4363f",
       "name": "/usr/share/doc/libc6/README.hesiod.gz",
       "type": "file"
     },
     {
-      "bom-ref": "126581bf08d8fae6",
+      "bom-ref": "ed68d08a5642c979",
       "name": "/usr/share/doc/libc6/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "4c1a44ed441edc9a",
+      "bom-ref": "00acd66c64041135",
       "name": "/usr/share/doc/libc6/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "68cc89d41e51abfd",
+      "bom-ref": "c00215545e33ae6e",
       "name": "/usr/share/doc/libc6/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "d500707af422c276",
-      "name": "/usr/share/doc/libcom-err2/changelog.Debian.arm64.gz",
+      "bom-ref": "9ea0a11f23d5a782",
+      "name": "/usr/share/doc/libcom-err2/changelog.Debian.amd64.gz",
       "type": "file"
     },
     {
-      "bom-ref": "a401a525f6f9418d",
+      "bom-ref": "8dd983baf8282afd",
       "name": "/usr/share/doc/libcom-err2/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "30dbb7203c72f9c4",
+      "bom-ref": "9b86546cb35c4578",
       "name": "/usr/share/doc/libcom-err2/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "4bf9e6486672acbb",
+      "bom-ref": "9febc52e6f209e2a",
       "name": "/usr/share/doc/libcrypt1/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "b3b2ce90c842fe71",
+      "bom-ref": "19da3516ad1585ac",
       "name": "/usr/share/doc/libcrypt1/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "f968e63977af696f",
+      "bom-ref": "dc44257ed379229a",
       "name": "/usr/share/doc/libcrypt1/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "12c6ee224c57a364",
-      "name": "/usr/share/doc/libdb5.3t64/build_signature_arm64.txt",
+      "bom-ref": "218a621dfc334f66",
+      "name": "/usr/share/doc/libdb5.3t64/build_signature_amd64.txt",
       "type": "file"
     },
     {
-      "bom-ref": "544a3bb57fe1bf6a",
+      "bom-ref": "37fc3e7c443b6d7e",
       "name": "/usr/share/doc/libdb5.3t64/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "befc296ad985e1ed",
+      "bom-ref": "fdcbb9ad003f1b75",
       "name": "/usr/share/doc/libdb5.3t64/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "287c26f64d0bc8dd",
+      "bom-ref": "9501f1d01b1fca0b",
       "name": "/usr/share/doc/libexpat1/AUTHORS",
       "type": "file"
     },
     {
-      "bom-ref": "16ee814ec2d24829",
+      "bom-ref": "84a20d66415c9f1f",
       "name": "/usr/share/doc/libexpat1/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "7eb9a63537e51a4b",
+      "bom-ref": "eba02d6ef976b139",
       "name": "/usr/share/doc/libexpat1/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "065df1b3db018c98",
+      "bom-ref": "3eeefb39b0d22302",
       "name": "/usr/share/doc/libexpat1/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "eef4434c3eba7a8c",
+      "bom-ref": "e485e97d05d46c0e",
       "name": "/usr/share/doc/libffi8/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "1d7b14914415399b",
+      "bom-ref": "56a8e3b09da744b9",
       "name": "/usr/share/doc/libffi8/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "0f2cd26cca8b8884",
+      "bom-ref": "4e55aa183bd5ecbc",
       "name": "/usr/share/doc/libgssapi-krb5-2/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "728bf8bf81140374",
+      "bom-ref": "4d6eac51a50f9b30",
       "name": "/usr/share/doc/libgssapi-krb5-2/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "5c32eed85cda6f50",
+      "bom-ref": "7589a1198c6ac80d",
       "name": "/usr/share/doc/libk5crypto3/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "76531266e2a9fa6d",
+      "bom-ref": "6fce831d682d2984",
       "name": "/usr/share/doc/libk5crypto3/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "bb5601ad509c0d45",
+      "bom-ref": "1ff817aa9473bcb4",
       "name": "/usr/share/doc/libkeyutils1/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "7acc45cc6817b53e",
+      "bom-ref": "de314d4317319a9f",
       "name": "/usr/share/doc/libkeyutils1/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "d95e18fb44c5fe05",
+      "bom-ref": "5a967f43e9d78ae4",
       "name": "/usr/share/doc/libkrb5-3/README.Debian",
       "type": "file"
     },
     {
-      "bom-ref": "f475ee8cfb04f299",
+      "bom-ref": "af6c0b452d550e18",
       "name": "/usr/share/doc/libkrb5-3/README.gz",
       "type": "file"
     },
     {
-      "bom-ref": "cc61cf5ace4d4e91",
+      "bom-ref": "63b8739b6415852c",
       "name": "/usr/share/doc/libkrb5-3/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "d1c19dc9d4a7604f",
+      "bom-ref": "b20d39a99a618332",
       "name": "/usr/share/doc/libkrb5-3/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "66a817f25a292dcb",
+      "bom-ref": "6a8a910aaf316de0",
       "name": "/usr/share/doc/libkrb5support0/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "8979a4d854862c63",
+      "bom-ref": "f3a35ead42430380",
       "name": "/usr/share/doc/libkrb5support0/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "79d85c0f310d81ab",
+      "bom-ref": "428b7c301dbdf1c3",
       "name": "/usr/share/doc/liblzma5/AUTHORS",
       "type": "file"
     },
     {
-      "bom-ref": "a5963c83a309f248",
+      "bom-ref": "ba5ab937ff9d0728",
       "name": "/usr/share/doc/liblzma5/NEWS.gz",
       "type": "file"
     },
     {
-      "bom-ref": "2685f3cf310b6a33",
+      "bom-ref": "3441a3e86ed39253",
       "name": "/usr/share/doc/liblzma5/THANKS.gz",
       "type": "file"
     },
     {
-      "bom-ref": "60e707950e78f221",
+      "bom-ref": "e036bfdeeca728c5",
       "name": "/usr/share/doc/liblzma5/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "f254039d7ae96675",
+      "bom-ref": "7e9a7b69ec550ced",
       "name": "/usr/share/doc/liblzma5/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "097993ca9d169420",
+      "bom-ref": "964baf393f3c93ec",
       "name": "/usr/share/doc/liblzma5/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "56e3fecc685b28fe",
-      "name": "/usr/share/doc/libnsl2/changelog.Debian.arm64.gz",
+      "bom-ref": "4f931d28dd95fba1",
+      "name": "/usr/share/doc/libnsl2/changelog.Debian.amd64.gz",
       "type": "file"
     },
     {
-      "bom-ref": "d95443dc0b85a5ae",
+      "bom-ref": "8a5f1a5f3aaed65f",
       "name": "/usr/share/doc/libnsl2/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "e4c05cbd616e18b5",
+      "bom-ref": "00f2ef56356ad50c",
       "name": "/usr/share/doc/libnsl2/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "2a38ef8c46fbf5f1",
+      "bom-ref": "44734434d33e843c",
       "name": "/usr/share/doc/libnsl2/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "f03a49de665635cc",
+      "bom-ref": "d887725a29c38177",
       "name": "/usr/share/doc/libreadline8t64/README.Debian",
       "type": "file"
     },
     {
-      "bom-ref": "9abcbf7c2f765b54",
+      "bom-ref": "edcd257cade7c2db",
       "name": "/usr/share/doc/libreadline8t64/USAGE",
       "type": "file"
     },
     {
-      "bom-ref": "f8b8b454c7691b95",
+      "bom-ref": "c401acab889d671e",
       "name": "/usr/share/doc/libreadline8t64/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "225240d44cfff7d9",
+      "bom-ref": "4018b13b71cbc7ea",
       "name": "/usr/share/doc/libreadline8t64/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "4b24ea3759fd66d6",
+      "bom-ref": "eb232e511f645f21",
       "name": "/usr/share/doc/libreadline8t64/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "bee7d46862c79649",
+      "bom-ref": "3a708ce1e89f2146",
       "name": "/usr/share/doc/libreadline8t64/examples/Inputrc",
       "type": "file"
     },
     {
-      "bom-ref": "76df5528a25e5d6e",
+      "bom-ref": "70e773e5bc18288d",
       "name": "/usr/share/doc/libreadline8t64/inputrc.arrows",
       "type": "file"
     },
     {
-      "bom-ref": "b337e5193db99ab0",
+      "bom-ref": "be0300536064d5c5",
       "name": "/usr/share/doc/libsqlite3-0/README.Debian",
       "type": "file"
     },
     {
-      "bom-ref": "fe678503690de4a2",
+      "bom-ref": "179c89c5d05c792f",
       "name": "/usr/share/doc/libsqlite3-0/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "955530fa1e774847",
+      "bom-ref": "22113a7622e3e356",
       "name": "/usr/share/doc/libsqlite3-0/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "a280a433e822651b",
+      "bom-ref": "020fee90b29c4382",
       "name": "/usr/share/doc/libsqlite3-0/changelog.html.gz",
       "type": "file"
     },
     {
-      "bom-ref": "958ee8cb1ce46687",
+      "bom-ref": "ade13c1d98431072",
       "name": "/usr/share/doc/libsqlite3-0/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "cfa31fd20919e645",
+      "bom-ref": "c06c5d868fc7eb50",
       "name": "/usr/share/doc/libssl3t64/NEWS.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "850c431bd8c8e495",
+      "bom-ref": "230ecfe12922d224",
       "name": "/usr/share/doc/libssl3t64/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "345495b010eb0d64",
+      "bom-ref": "dd6e05c649b52cb5",
       "name": "/usr/share/doc/libssl3t64/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "435e5e2cc3800a47",
+      "bom-ref": "e2e3861d40652ff6",
       "name": "/usr/share/doc/libssl3t64/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "62ca57413dd68888",
+      "bom-ref": "8a86921b6aab4986",
       "name": "/usr/share/doc/libtinfo6/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "96972ea33f8cec05",
+      "bom-ref": "6ac248518008f2ef",
       "name": "/usr/share/doc/libtinfo6/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "dd9e05bf76637bda",
+      "bom-ref": "addf7428e2451550",
       "name": "/usr/share/doc/libtinfo6/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "7ec1469bc6fce003",
+      "bom-ref": "5400c10bc1e9d162",
       "name": "/usr/share/doc/libtirpc3t64/NEWS.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "be52989bb70c6fc4",
+      "bom-ref": "b3e0066d2bb25bbd",
       "name": "/usr/share/doc/libtirpc3t64/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "a1633f2798ff0009",
+      "bom-ref": "050294587a66b818",
       "name": "/usr/share/doc/libtirpc3t64/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "910b7b121791eb45",
+      "bom-ref": "2819c4068803fe1c",
       "name": "/usr/share/doc/libtirpc3t64/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "746793e774f09e7f",
+      "bom-ref": "a022b37435ee6072",
       "name": "/usr/share/doc/libuuid1/NEWS.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "809503d7b7f1939d",
+      "bom-ref": "7488262e9b552290",
       "name": "/usr/share/doc/libuuid1/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "60815e0291dd5fb7",
+      "bom-ref": "9b6b26aeddabe8ca",
       "name": "/usr/share/doc/libuuid1/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "829e505ffd327e4d",
+      "bom-ref": "7e628768a9b4ed08",
       "name": "/usr/share/doc/libuuid1/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "7b4834f384973e53",
+      "bom-ref": "f885cc1a472b25f3",
       "name": "/usr/share/doc/libzstd1/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "bbb23c59205efbef",
+      "bom-ref": "b9baacdb12adf617",
       "name": "/usr/share/doc/libzstd1/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "047c23c6b57e419f",
+      "bom-ref": "c4cb0224a9599fff",
       "name": "/usr/share/doc/libzstd1/copyright",
       "type": "file"
     },
@@ -2353,32 +2358,32 @@
       "type": "file"
     },
     {
-      "bom-ref": "b9eea3eb153734f1",
+      "bom-ref": "c49bac1fa4e91fe3",
       "name": "/usr/share/doc/nvidia-shell-utils/README.gz",
       "type": "file"
     },
     {
-      "bom-ref": "d71199037da85f9a",
+      "bom-ref": "544d8f3b8918040c",
       "name": "/usr/share/doc/nvidia-shell-utils/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "5434b8e8ed5ccc89",
+      "bom-ref": "d8b400bb358b7753",
       "name": "/usr/share/doc/nvidia-shell-utils/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "0b45f4fe72447043",
+      "bom-ref": "3a829ebad9ca5cd2",
       "name": "/usr/share/doc/openssl-provider-fips/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "58b151f088a24feb",
+      "bom-ref": "f302c9bb4159310e",
       "name": "/usr/share/doc/openssl-provider-fips/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "006c222849a35b33",
+      "bom-ref": "825ef6c5555b8fc6",
       "name": "/usr/share/doc/openssl-provider-fips/copyright",
       "type": "file"
     },
@@ -2428,102 +2433,102 @@
       "type": "file"
     },
     {
-      "bom-ref": "5e8b1122b2f23ef0",
-      "name": "/usr/share/doc/zlib1g/changelog.Debian.arm64.gz",
+      "bom-ref": "23b4fad141040f97",
+      "name": "/usr/share/doc/zlib1g/changelog.Debian.amd64.gz",
       "type": "file"
     },
     {
-      "bom-ref": "e9b9a96372e6db80",
+      "bom-ref": "1b762eb33f21ceed",
       "name": "/usr/share/doc/zlib1g/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "4c30dec3f7559dc3",
+      "bom-ref": "648677991b99d7f6",
       "name": "/usr/share/doc/zlib1g/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "c9fa127244f02e15",
+      "bom-ref": "99a5e436209b17ec",
       "name": "/usr/share/doc/zlib1g/copyright",
       "type": "file"
     },
     {
-      "bom-ref": "f9bb8e895255e611",
+      "bom-ref": "8c474afbbb6a23ab",
       "name": "/usr/share/gcc/python/libstdcxx/__init__.py",
       "type": "file"
     },
     {
-      "bom-ref": "919a1bdd6661b7d2",
+      "bom-ref": "619bc6ead4968e98",
       "name": "/usr/share/gcc/python/libstdcxx/v6/__init__.py",
       "type": "file"
     },
     {
-      "bom-ref": "c2ca252db3e88c62",
+      "bom-ref": "4e888efd5bb8d240",
       "name": "/usr/share/gcc/python/libstdcxx/v6/printers.py",
       "type": "file"
     },
     {
-      "bom-ref": "ddb2356f920f1e49",
+      "bom-ref": "cdde13afc9e577ef",
       "name": "/usr/share/gcc/python/libstdcxx/v6/xmethods.py",
       "type": "file"
     },
     {
-      "bom-ref": "4fd6b83f9e6443d5",
-      "name": "/usr/share/gdb/auto-load/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33-gdb.py",
+      "bom-ref": "f331631455475c84",
+      "name": "/usr/share/gdb/auto-load/usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33-gdb.py",
       "type": "file"
     },
     {
-      "bom-ref": "bda0eb5fd3966ff9",
+      "bom-ref": "8d8f02e8f50320be",
       "name": "/usr/share/libc-bin/nsswitch.conf",
       "type": "file"
     },
     {
-      "bom-ref": "831431c792224b70",
+      "bom-ref": "a3eacfe980cb16bb",
       "name": "/usr/share/lintian/overrides/base-files",
       "type": "file"
     },
     {
-      "bom-ref": "6a7c6103d73a10f0",
+      "bom-ref": "5e7800364b19ee17",
       "name": "/usr/share/lintian/overrides/libc-bin",
       "type": "file"
     },
     {
-      "bom-ref": "8288944000ca430a",
+      "bom-ref": "bc77482306f595f5",
       "name": "/usr/share/lintian/overrides/libc6",
       "type": "file"
     },
     {
-      "bom-ref": "216d1d6324a1ac54",
+      "bom-ref": "4f1d56bc44e2dddc",
       "name": "/usr/share/lintian/overrides/libdb5.3t64",
       "type": "file"
     },
     {
-      "bom-ref": "344badc429bb7895",
+      "bom-ref": "77182b2bbeab5dda",
       "name": "/usr/share/lintian/overrides/libgcc-s1",
       "type": "file"
     },
     {
-      "bom-ref": "ae7e42ce25a7c95c",
+      "bom-ref": "8ef07e7648fa9008",
       "name": "/usr/share/lintian/overrides/libgssapi-krb5-2",
       "type": "file"
     },
     {
-      "bom-ref": "dff9d61c74df540d",
+      "bom-ref": "ab240b655cbc8188",
       "name": "/usr/share/lintian/overrides/libkrb5-3",
       "type": "file"
     },
     {
-      "bom-ref": "24a6c4a14c7eb40f",
+      "bom-ref": "2836db4a4b4d8268",
       "name": "/usr/share/lintian/overrides/libkrb5support0",
       "type": "file"
     },
     {
-      "bom-ref": "c87f34ab43930243",
+      "bom-ref": "4ff9e855e13bb01a",
       "name": "/usr/share/lintian/overrides/libssl3t64",
       "type": "file"
     },
     {
-      "bom-ref": "b2f992a036b748c9",
+      "bom-ref": "60ee1ab313f36118",
       "name": "/usr/share/lintian/overrides/libtirpc3t64",
       "type": "file"
     },
@@ -2533,12 +2538,12 @@
       "type": "file"
     },
     {
-      "bom-ref": "b925f4a406b6e7fd",
+      "bom-ref": "1e7a797e0370269e",
       "name": "/usr/share/man/man1/getconf.1.gz",
       "type": "file"
     },
     {
-      "bom-ref": "bf937dc721db5e1c",
+      "bom-ref": "4dd840b0a7c1531f",
       "name": "/usr/share/man/man1/tzselect.1.gz",
       "type": "file"
     },
@@ -6938,12 +6943,12 @@
       "type": "file"
     },
     {
-      "bom-ref": "04f9d6220468b910",
+      "bom-ref": "36b97698e6de4ff3",
       "name": "/var/lib/dpkg/status.d/base-files",
       "type": "file"
     },
     {
-      "bom-ref": "442e023fb6c3d226",
+      "bom-ref": "55cfdc56527e84f9",
       "name": "/var/lib/dpkg/status.d/base-files.md5sums",
       "type": "file"
     },
@@ -6958,272 +6963,272 @@
       "type": "file"
     },
     {
-      "bom-ref": "e2b0f68ce753b089",
+      "bom-ref": "8743c8be682d83bd",
       "name": "/var/lib/dpkg/status.d/gcc-14-base",
       "type": "file"
     },
     {
-      "bom-ref": "37d59165441372d5",
+      "bom-ref": "246400381c825fcd",
       "name": "/var/lib/dpkg/status.d/gcc-14-base.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "cd156049a0afe9c7",
+      "bom-ref": "8cf381eccf28a12c",
       "name": "/var/lib/dpkg/status.d/libbz2-1.0",
       "type": "file"
     },
     {
-      "bom-ref": "5b6fadc8f5d0fa3e",
+      "bom-ref": "e2d6503ccdc08c3d",
       "name": "/var/lib/dpkg/status.d/libbz2-1.0.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "6f88b8f80b22ff04",
+      "bom-ref": "443251fccb0c582f",
       "name": "/var/lib/dpkg/status.d/libc-bin",
       "type": "file"
     },
     {
-      "bom-ref": "101f2abaddf836df",
+      "bom-ref": "680b36209ca71954",
       "name": "/var/lib/dpkg/status.d/libc-bin.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "6a136bd48ff6e179",
+      "bom-ref": "169ba846f16506de",
       "name": "/var/lib/dpkg/status.d/libc6",
       "type": "file"
     },
     {
-      "bom-ref": "e4fa7ad12825b8ed",
+      "bom-ref": "c1adc1d787891d22",
       "name": "/var/lib/dpkg/status.d/libc6.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "847613558aa0e7fb",
+      "bom-ref": "1134b3d4d7ac861b",
       "name": "/var/lib/dpkg/status.d/libcom-err2",
       "type": "file"
     },
     {
-      "bom-ref": "fcf48bfb348e01be",
+      "bom-ref": "d25e04a77cab12c2",
       "name": "/var/lib/dpkg/status.d/libcom-err2.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "42a722cb455ef71d",
+      "bom-ref": "a9bcfdc5838e8a64",
       "name": "/var/lib/dpkg/status.d/libcrypt1",
       "type": "file"
     },
     {
-      "bom-ref": "c59af422efc151a3",
+      "bom-ref": "af1ae445ec909026",
       "name": "/var/lib/dpkg/status.d/libcrypt1.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "18e71509ca911390",
+      "bom-ref": "e4bb8f3e3d5d0f44",
       "name": "/var/lib/dpkg/status.d/libdb5.3t64",
       "type": "file"
     },
     {
-      "bom-ref": "6d56642fb932879a",
+      "bom-ref": "4e229dbe721e7696",
       "name": "/var/lib/dpkg/status.d/libdb5.3t64.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "9b1ccc65e9a1a3ce",
+      "bom-ref": "85cde5fa0583a620",
       "name": "/var/lib/dpkg/status.d/libexpat1",
       "type": "file"
     },
     {
-      "bom-ref": "e0089ac5aaaaf883",
+      "bom-ref": "0aba4be2351da295",
       "name": "/var/lib/dpkg/status.d/libexpat1.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "ad7a39798ac0d803",
+      "bom-ref": "dc6f8ca63478c5c5",
       "name": "/var/lib/dpkg/status.d/libffi8",
       "type": "file"
     },
     {
-      "bom-ref": "a3d21d2aa4ef0b8b",
+      "bom-ref": "4c5417f4da5fd371",
       "name": "/var/lib/dpkg/status.d/libffi8.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "7994cb3f4d47e6fb",
+      "bom-ref": "7fa74609fb7d8a7c",
       "name": "/var/lib/dpkg/status.d/libgcc-s1",
       "type": "file"
     },
     {
-      "bom-ref": "b3b9154501c96f88",
+      "bom-ref": "da9946901a80793f",
       "name": "/var/lib/dpkg/status.d/libgcc-s1.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "ed3d6ad3e22afc26",
+      "bom-ref": "4f14662d148b0c6b",
       "name": "/var/lib/dpkg/status.d/libgomp1",
       "type": "file"
     },
     {
-      "bom-ref": "1c2118839e0404af",
+      "bom-ref": "bf9a08c972628e1a",
       "name": "/var/lib/dpkg/status.d/libgomp1.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "9b89496d46982a3e",
+      "bom-ref": "1204e1da46f75482",
       "name": "/var/lib/dpkg/status.d/libgssapi-krb5-2",
       "type": "file"
     },
     {
-      "bom-ref": "6f112e14886888ba",
+      "bom-ref": "221d2bd04da00c3a",
       "name": "/var/lib/dpkg/status.d/libgssapi-krb5-2.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "62c5ba0f7ac0882e",
+      "bom-ref": "ad2752b90f31ad57",
       "name": "/var/lib/dpkg/status.d/libk5crypto3",
       "type": "file"
     },
     {
-      "bom-ref": "4cc034ab090eee8b",
+      "bom-ref": "e07221cfead31c26",
       "name": "/var/lib/dpkg/status.d/libk5crypto3.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "afd88e40de691aba",
+      "bom-ref": "6692408813ecdbc3",
       "name": "/var/lib/dpkg/status.d/libkeyutils1",
       "type": "file"
     },
     {
-      "bom-ref": "298739788e193290",
+      "bom-ref": "080fc2ad81450d75",
       "name": "/var/lib/dpkg/status.d/libkeyutils1.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "bf2a4871b04b42d9",
+      "bom-ref": "44ac5ba75ef512c4",
       "name": "/var/lib/dpkg/status.d/libkrb5-3",
       "type": "file"
     },
     {
-      "bom-ref": "9c20f401cb3f102a",
+      "bom-ref": "39bc4f3cf0dcf16b",
       "name": "/var/lib/dpkg/status.d/libkrb5-3.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "5e30f43cea15d3de",
+      "bom-ref": "806726094391e911",
       "name": "/var/lib/dpkg/status.d/libkrb5support0",
       "type": "file"
     },
     {
-      "bom-ref": "2c959e338bfabb41",
+      "bom-ref": "51fb3f9f211211ca",
       "name": "/var/lib/dpkg/status.d/libkrb5support0.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "408bf1dd471fca58",
+      "bom-ref": "1d18f4d71fe9bd3c",
       "name": "/var/lib/dpkg/status.d/liblzma5",
       "type": "file"
     },
     {
-      "bom-ref": "2c3c855a7fd5dde7",
+      "bom-ref": "6ddf6ad773637bef",
       "name": "/var/lib/dpkg/status.d/liblzma5.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "38feb5566360da36",
+      "bom-ref": "63d4c57010c92827",
       "name": "/var/lib/dpkg/status.d/libncursesw6",
       "type": "file"
     },
     {
-      "bom-ref": "3cd66e45cf43dedc",
+      "bom-ref": "066dc3fa48242f75",
       "name": "/var/lib/dpkg/status.d/libncursesw6.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "963f5d71dc524b8c",
+      "bom-ref": "2c6a633fa6de5af5",
       "name": "/var/lib/dpkg/status.d/libnsl2",
       "type": "file"
     },
     {
-      "bom-ref": "130696090840c09d",
+      "bom-ref": "e2bad214c62ca9ec",
       "name": "/var/lib/dpkg/status.d/libnsl2.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "37773fb150b776e8",
+      "bom-ref": "807a3fd0b7d3a99b",
       "name": "/var/lib/dpkg/status.d/libreadline8t64",
       "type": "file"
     },
     {
-      "bom-ref": "d457937d999fdc69",
+      "bom-ref": "f0e1fa83f81f941e",
       "name": "/var/lib/dpkg/status.d/libreadline8t64.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "ce2c28d1559e5476",
+      "bom-ref": "7894487996cb54b7",
       "name": "/var/lib/dpkg/status.d/libsqlite3-0",
       "type": "file"
     },
     {
-      "bom-ref": "5403a2c487d0b9ae",
+      "bom-ref": "74dad98183a8f1ef",
       "name": "/var/lib/dpkg/status.d/libsqlite3-0.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "5038a743507e8b5f",
+      "bom-ref": "37210ce9cc67563a",
       "name": "/var/lib/dpkg/status.d/libssl3t64",
       "type": "file"
     },
     {
-      "bom-ref": "5872ab0bf6c0665c",
+      "bom-ref": "221a62cddb5c590d",
       "name": "/var/lib/dpkg/status.d/libssl3t64.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "a3bc4ee825abd176",
+      "bom-ref": "7304cb9a8d4ac304",
       "name": "/var/lib/dpkg/status.d/libstdc++6",
       "type": "file"
     },
     {
-      "bom-ref": "7da8cda7d719817f",
+      "bom-ref": "e40051bc4e7f31c5",
       "name": "/var/lib/dpkg/status.d/libstdc++6.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "a92deb0b851bde93",
+      "bom-ref": "9ae5eff794500b0d",
       "name": "/var/lib/dpkg/status.d/libtinfo6",
       "type": "file"
     },
     {
-      "bom-ref": "c3654ed5640540c4",
+      "bom-ref": "563664cfa8ed338e",
       "name": "/var/lib/dpkg/status.d/libtinfo6.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "efc4ff7187c65aa2",
+      "bom-ref": "e8edfe29bba83087",
       "name": "/var/lib/dpkg/status.d/libtirpc3t64",
       "type": "file"
     },
     {
-      "bom-ref": "8a03adbc86e206d3",
+      "bom-ref": "8264e2d776bbe32e",
       "name": "/var/lib/dpkg/status.d/libtirpc3t64.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "80330c8a34ac72ec",
+      "bom-ref": "272eac79644e6419",
       "name": "/var/lib/dpkg/status.d/libuuid1",
       "type": "file"
     },
     {
-      "bom-ref": "2cdad9f968203521",
+      "bom-ref": "a30307f14e5dc82c",
       "name": "/var/lib/dpkg/status.d/libuuid1.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "747169d76f8aff7e",
+      "bom-ref": "3244d79e1a901da6",
       "name": "/var/lib/dpkg/status.d/libzstd1",
       "type": "file"
     },
     {
-      "bom-ref": "4446d836a626fa28",
+      "bom-ref": "a5a1dab39771a050",
       "name": "/var/lib/dpkg/status.d/libzstd1.md5sums",
       "type": "file"
     },
@@ -7248,22 +7253,22 @@
       "type": "file"
     },
     {
-      "bom-ref": "e420070e360e4d6c",
+      "bom-ref": "18e0a7fdfce4285e",
       "name": "/var/lib/dpkg/status.d/nvidia-shell-utils",
       "type": "file"
     },
     {
-      "bom-ref": "d5894f5b2613f02c",
+      "bom-ref": "02d8ab336d813392",
       "name": "/var/lib/dpkg/status.d/nvidia-shell-utils.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "9790993595cdf1f5",
+      "bom-ref": "e572ba2b8697ea50",
       "name": "/var/lib/dpkg/status.d/openssl-provider-fips",
       "type": "file"
     },
     {
-      "bom-ref": "83601d70fe4a86b9",
+      "bom-ref": "8922f51d20f93258",
       "name": "/var/lib/dpkg/status.d/openssl-provider-fips.md5sums",
       "type": "file"
     },
@@ -7288,17 +7293,17 @@
       "type": "file"
     },
     {
-      "bom-ref": "71f0489bfff4d181",
+      "bom-ref": "678aff371f30fdd8",
       "name": "/var/lib/dpkg/status.d/zlib1g",
       "type": "file"
     },
     {
-      "bom-ref": "6534cac23e59297f",
+      "bom-ref": "ea2e99f1fe63e8c2",
       "name": "/var/lib/dpkg/status.d/zlib1g.md5sums",
       "type": "file"
     },
     {
-      "bom-ref": "pkg:deb/debian/base-files@13.8%2Bdeb13u7?arch=arm64&distro=debian-13&package-id=8cfbc9163d2d5c79",
+      "bom-ref": "pkg:deb/debian/base-files@13.8%2Bdeb13u7?arch=amd64&distro=debian-13&package-id=df2661979f9bc8c5",
       "cpe": "cpe:2.3:a:base-files:base-files:13.8\\+deb13u7:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7319,7 +7324,7 @@
       ],
       "name": "base-files",
       "publisher": "Santiago Vila <sanvila@debian.org>",
-      "purl": "pkg:deb/debian/base-files@13.8%2Bdeb13u7?arch=arm64&distro=debian-13",
+      "purl": "pkg:deb/debian/base-files@13.8%2Bdeb13u7?arch=amd64&distro=debian-13",
       "type": "library",
       "version": "13.8+deb13u7"
     },
@@ -7377,7 +7382,7 @@
       "version": "13"
     },
     {
-      "bom-ref": "pkg:deb/debian/gcc-14-base@14.2.0-19?arch=arm64&distro=debian-13&package-id=b8be56abcd0b29ca&upstream=gcc-14",
+      "bom-ref": "pkg:deb/debian/gcc-14-base@14.2.0-19?arch=amd64&distro=debian-13&package-id=cf018a81635f3130&upstream=gcc-14",
       "cpe": "cpe:2.3:a:gcc-14-base:gcc-14-base:14.2.0-19:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7408,12 +7413,12 @@
       ],
       "name": "gcc-14-base",
       "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
-      "purl": "pkg:deb/debian/gcc-14-base@14.2.0-19?arch=arm64&distro=debian-13&upstream=gcc-14",
+      "purl": "pkg:deb/debian/gcc-14-base@14.2.0-19?arch=amd64&distro=debian-13&upstream=gcc-14",
       "type": "library",
       "version": "14.2.0-19"
     },
     {
-      "bom-ref": "pkg:deb/debian/libbz2-1.0@1.0.8-6?arch=arm64&distro=debian-13&package-id=4194e49c36fcd20d&upstream=bzip2",
+      "bom-ref": "pkg:deb/debian/libbz2-1.0@1.0.8-6?arch=amd64&distro=debian-13&package-id=ed2ee9c4af382a99&upstream=bzip2",
       "cpe": "cpe:2.3:a:libbz2-1.0:libbz2-1.0:1.0.8-6:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7429,12 +7434,12 @@
       ],
       "name": "libbz2-1.0",
       "publisher": "Anibal Monsalve Salazar <anibal@debian.org>",
-      "purl": "pkg:deb/debian/libbz2-1.0@1.0.8-6?arch=arm64&distro=debian-13&upstream=bzip2",
+      "purl": "pkg:deb/debian/libbz2-1.0@1.0.8-6?arch=amd64&distro=debian-13&upstream=bzip2",
       "type": "library",
       "version": "1.0.8-6"
     },
     {
-      "bom-ref": "pkg:deb/debian/libc-bin@2.41-12%2Bdeb13u4?arch=arm64&distro=debian-13&package-id=a1339e9158cb8c4f&upstream=glibc",
+      "bom-ref": "pkg:deb/debian/libc-bin@2.41-12%2Bdeb13u4?arch=amd64&distro=debian-13&package-id=0316fb42fb78b1a5&upstream=glibc",
       "cpe": "cpe:2.3:a:libc-bin:libc-bin:2.41-12\\+deb13u4:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7600,12 +7605,12 @@
       ],
       "name": "libc-bin",
       "publisher": "GNU Libc Maintainers <debian-glibc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libc-bin@2.41-12%2Bdeb13u4?arch=arm64&distro=debian-13&upstream=glibc",
+      "purl": "pkg:deb/debian/libc-bin@2.41-12%2Bdeb13u4?arch=amd64&distro=debian-13&upstream=glibc",
       "type": "library",
       "version": "2.41-12+deb13u4"
     },
     {
-      "bom-ref": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u4?arch=arm64&distro=debian-13&package-id=d8b192025c2fc943&upstream=glibc",
+      "bom-ref": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u4?arch=amd64&distro=debian-13&package-id=27e0524b85198251&upstream=glibc",
       "cpe": "cpe:2.3:a:libc6:libc6:2.41-12\\+deb13u4:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7771,12 +7776,12 @@
       ],
       "name": "libc6",
       "publisher": "GNU Libc Maintainers <debian-glibc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u4?arch=arm64&distro=debian-13&upstream=glibc",
+      "purl": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u4?arch=amd64&distro=debian-13&upstream=glibc",
       "type": "library",
       "version": "2.41-12+deb13u4"
     },
     {
-      "bom-ref": "pkg:deb/debian/libcom-err2@1.47.2-3%2Bb12?arch=arm64&distro=debian-13&package-id=a277d696df614116&upstream=e2fsprogs%401.47.2-3",
+      "bom-ref": "pkg:deb/debian/libcom-err2@1.47.2-3%2Bb12?arch=amd64&distro=debian-13&package-id=1ed86423cac06926&upstream=e2fsprogs%401.47.2-3",
       "cpe": "cpe:2.3:a:libcom-err2:libcom-err2:1.47.2-3\\+b12:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7847,12 +7852,12 @@
       ],
       "name": "libcom-err2",
       "publisher": "Theodore Y. Ts'o <tytso@mit.edu>",
-      "purl": "pkg:deb/debian/libcom-err2@1.47.2-3%2Bb12?arch=arm64&distro=debian-13&upstream=e2fsprogs%401.47.2-3",
+      "purl": "pkg:deb/debian/libcom-err2@1.47.2-3%2Bb12?arch=amd64&distro=debian-13&upstream=e2fsprogs%401.47.2-3",
       "type": "library",
       "version": "1.47.2-3+b12"
     },
     {
-      "bom-ref": "pkg:deb/debian/libcrypt1@1%3A4.4.38-1?arch=arm64&distro=debian-13&package-id=28d40e5d20f8dcc3&upstream=libxcrypt",
+      "bom-ref": "pkg:deb/debian/libcrypt1@1%3A4.4.38-1?arch=amd64&distro=debian-13&package-id=d52d4a379e38f1fe&upstream=libxcrypt",
       "cpe": "cpe:2.3:a:libcrypt1:libcrypt1:1\\:4.4.38-1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7863,12 +7868,12 @@
       ],
       "name": "libcrypt1",
       "publisher": "Marco d'Itri <md@linux.it>",
-      "purl": "pkg:deb/debian/libcrypt1@1%3A4.4.38-1?arch=arm64&distro=debian-13&upstream=libxcrypt",
+      "purl": "pkg:deb/debian/libcrypt1@1%3A4.4.38-1?arch=amd64&distro=debian-13&upstream=libxcrypt",
       "type": "library",
       "version": "1:4.4.38-1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libdb5.3t64@5.3.28%2Bdfsg2-9?arch=arm64&distro=debian-13&package-id=1812d120ef181a7b&upstream=db5.3",
+      "bom-ref": "pkg:deb/debian/libdb5.3t64@5.3.28%2Bdfsg2-9?arch=amd64&distro=debian-13&package-id=b7c62dc74d5542dc&upstream=db5.3",
       "cpe": "cpe:2.3:a:libdb5.3t64:libdb5.3t64:5.3.28\\+dfsg2-9:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7929,12 +7934,12 @@
       ],
       "name": "libdb5.3t64",
       "publisher": "Debian QA Group <packages@qa.debian.org>",
-      "purl": "pkg:deb/debian/libdb5.3t64@5.3.28%2Bdfsg2-9?arch=arm64&distro=debian-13&upstream=db5.3",
+      "purl": "pkg:deb/debian/libdb5.3t64@5.3.28%2Bdfsg2-9?arch=amd64&distro=debian-13&upstream=db5.3",
       "type": "library",
       "version": "5.3.28+dfsg2-9"
     },
     {
-      "bom-ref": "pkg:deb/debian/libexpat1@2.8.3-1~deb13u1?arch=arm64&distro=debian-13&package-id=7b50dd6b21dec4bc&upstream=expat",
+      "bom-ref": "pkg:deb/debian/libexpat1@2.8.3-1~deb13u1?arch=amd64&distro=debian-13&package-id=e9ca31b19634378b&upstream=expat",
       "cpe": "cpe:2.3:a:libexpat1:libexpat1:2.8.3-1\\~deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7945,12 +7950,12 @@
       ],
       "name": "libexpat1",
       "publisher": "Laszlo Boszormenyi (GCS) <gcs@debian.org>",
-      "purl": "pkg:deb/debian/libexpat1@2.8.3-1~deb13u1?arch=arm64&distro=debian-13&upstream=expat",
+      "purl": "pkg:deb/debian/libexpat1@2.8.3-1~deb13u1?arch=amd64&distro=debian-13&upstream=expat",
       "type": "library",
       "version": "2.8.3-1~deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libffi8@3.4.8-2?arch=arm64&distro=debian-13&package-id=1af099503fa5fd03&upstream=libffi",
+      "bom-ref": "pkg:deb/debian/libffi8@3.4.8-2?arch=amd64&distro=debian-13&package-id=67bc00e8efae1f4d&upstream=libffi",
       "cpe": "cpe:2.3:a:libffi8:libffi8:3.4.8-2:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7991,12 +7996,12 @@
       ],
       "name": "libffi8",
       "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libffi8@3.4.8-2?arch=arm64&distro=debian-13&upstream=libffi",
+      "purl": "pkg:deb/debian/libffi8@3.4.8-2?arch=amd64&distro=debian-13&upstream=libffi",
       "type": "library",
       "version": "3.4.8-2"
     },
     {
-      "bom-ref": "pkg:deb/debian/libgcc-s1@14.2.0-19?arch=arm64&distro=debian-13&package-id=0ce625bd52243fc1&upstream=gcc-14",
+      "bom-ref": "pkg:deb/debian/libgcc-s1@14.2.0-19?arch=amd64&distro=debian-13&package-id=1fdbab05f00996f4&upstream=gcc-14",
       "cpe": "cpe:2.3:a:libgcc-s1:libgcc-s1:14.2.0-19:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8027,12 +8032,12 @@
       ],
       "name": "libgcc-s1",
       "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libgcc-s1@14.2.0-19?arch=arm64&distro=debian-13&upstream=gcc-14",
+      "purl": "pkg:deb/debian/libgcc-s1@14.2.0-19?arch=amd64&distro=debian-13&upstream=gcc-14",
       "type": "library",
       "version": "14.2.0-19"
     },
     {
-      "bom-ref": "pkg:deb/debian/libgomp1@14.2.0-19?arch=arm64&distro=debian-13&package-id=74c2593a11e462ae&upstream=gcc-14",
+      "bom-ref": "pkg:deb/debian/libgomp1@14.2.0-19?arch=amd64&distro=debian-13&package-id=5c48bcfc4c39d1fd&upstream=gcc-14",
       "cpe": "cpe:2.3:a:libgomp1:libgomp1:14.2.0-19:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8063,12 +8068,12 @@
       ],
       "name": "libgomp1",
       "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libgomp1@14.2.0-19?arch=arm64&distro=debian-13&upstream=gcc-14",
+      "purl": "pkg:deb/debian/libgomp1@14.2.0-19?arch=amd64&distro=debian-13&upstream=gcc-14",
       "type": "library",
       "version": "14.2.0-19"
     },
     {
-      "bom-ref": "pkg:deb/debian/libgssapi-krb5-2@1.21.3-5%2Bdeb13u1?arch=arm64&distro=debian-13&package-id=160297c6ed575b25&upstream=krb5",
+      "bom-ref": "pkg:deb/debian/libgssapi-krb5-2@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&package-id=127d2c7541f1b166&upstream=krb5",
       "cpe": "cpe:2.3:a:libgssapi-krb5-2:libgssapi-krb5-2:1.21.3-5\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8079,12 +8084,12 @@
       ],
       "name": "libgssapi-krb5-2",
       "publisher": "Sam Hartman <hartmans@debian.org>",
-      "purl": "pkg:deb/debian/libgssapi-krb5-2@1.21.3-5%2Bdeb13u1?arch=arm64&distro=debian-13&upstream=krb5",
+      "purl": "pkg:deb/debian/libgssapi-krb5-2@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&upstream=krb5",
       "type": "library",
       "version": "1.21.3-5+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libk5crypto3@1.21.3-5%2Bdeb13u1?arch=arm64&distro=debian-13&package-id=b3af6c8085d5e65a&upstream=krb5",
+      "bom-ref": "pkg:deb/debian/libk5crypto3@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&package-id=d1a08b9311327a62&upstream=krb5",
       "cpe": "cpe:2.3:a:libk5crypto3:libk5crypto3:1.21.3-5\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8095,12 +8100,12 @@
       ],
       "name": "libk5crypto3",
       "publisher": "Sam Hartman <hartmans@debian.org>",
-      "purl": "pkg:deb/debian/libk5crypto3@1.21.3-5%2Bdeb13u1?arch=arm64&distro=debian-13&upstream=krb5",
+      "purl": "pkg:deb/debian/libk5crypto3@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&upstream=krb5",
       "type": "library",
       "version": "1.21.3-5+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libkeyutils1@1.6.3-6?arch=arm64&distro=debian-13&package-id=41d500e3e8394f96&upstream=keyutils",
+      "bom-ref": "pkg:deb/debian/libkeyutils1@1.6.3-6?arch=amd64&distro=debian-13&package-id=1087556cc266430b&upstream=keyutils",
       "cpe": "cpe:2.3:a:libkeyutils1:libkeyutils1:1.6.3-6:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8126,12 +8131,12 @@
       ],
       "name": "libkeyutils1",
       "publisher": "Christian Kastner <ckk@debian.org>",
-      "purl": "pkg:deb/debian/libkeyutils1@1.6.3-6?arch=arm64&distro=debian-13&upstream=keyutils",
+      "purl": "pkg:deb/debian/libkeyutils1@1.6.3-6?arch=amd64&distro=debian-13&upstream=keyutils",
       "type": "library",
       "version": "1.6.3-6"
     },
     {
-      "bom-ref": "pkg:deb/debian/libkrb5-3@1.21.3-5%2Bdeb13u1?arch=arm64&distro=debian-13&package-id=09fd5b262f44ad44&upstream=krb5",
+      "bom-ref": "pkg:deb/debian/libkrb5-3@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&package-id=23063980570247bb&upstream=krb5",
       "cpe": "cpe:2.3:a:libkrb5-3:libkrb5-3:1.21.3-5\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8142,12 +8147,12 @@
       ],
       "name": "libkrb5-3",
       "publisher": "Sam Hartman <hartmans@debian.org>",
-      "purl": "pkg:deb/debian/libkrb5-3@1.21.3-5%2Bdeb13u1?arch=arm64&distro=debian-13&upstream=krb5",
+      "purl": "pkg:deb/debian/libkrb5-3@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&upstream=krb5",
       "type": "library",
       "version": "1.21.3-5+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libkrb5support0@1.21.3-5%2Bdeb13u1?arch=arm64&distro=debian-13&package-id=d6473bfeca9b2039&upstream=krb5",
+      "bom-ref": "pkg:deb/debian/libkrb5support0@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&package-id=9f60fcbff9b88d56&upstream=krb5",
       "cpe": "cpe:2.3:a:libkrb5support0:libkrb5support0:1.21.3-5\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8158,12 +8163,12 @@
       ],
       "name": "libkrb5support0",
       "publisher": "Sam Hartman <hartmans@debian.org>",
-      "purl": "pkg:deb/debian/libkrb5support0@1.21.3-5%2Bdeb13u1?arch=arm64&distro=debian-13&upstream=krb5",
+      "purl": "pkg:deb/debian/libkrb5support0@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&upstream=krb5",
       "type": "library",
       "version": "1.21.3-5+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/liblzma5@5.8.1-1%2Bdeb13u1?arch=arm64&distro=debian-13&package-id=d37f5e7814f582a9&upstream=xz-utils",
+      "bom-ref": "pkg:deb/debian/liblzma5@5.8.1-1%2Bdeb13u1?arch=amd64&distro=debian-13&package-id=ff8368a61ac37760&upstream=xz-utils",
       "cpe": "cpe:2.3:a:liblzma5:liblzma5:5.8.1-1\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8234,12 +8239,12 @@
       ],
       "name": "liblzma5",
       "publisher": "Sebastian Andrzej Siewior <sebastian@breakpoint.cc>",
-      "purl": "pkg:deb/debian/liblzma5@5.8.1-1%2Bdeb13u1?arch=arm64&distro=debian-13&upstream=xz-utils",
+      "purl": "pkg:deb/debian/liblzma5@5.8.1-1%2Bdeb13u1?arch=amd64&distro=debian-13&upstream=xz-utils",
       "type": "library",
       "version": "5.8.1-1+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libncursesw6@6.5%2B20250216-2?arch=arm64&distro=debian-13&package-id=940430c899f17ed4&upstream=ncurses",
+      "bom-ref": "pkg:deb/debian/libncursesw6@6.5%2B20250216-2?arch=amd64&distro=debian-13&package-id=b10ad0335ad13aec&upstream=ncurses",
       "cpe": "cpe:2.3:a:libncursesw6:libncursesw6:6.5\\+20250216-2:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8260,12 +8265,12 @@
       ],
       "name": "libncursesw6",
       "publisher": "Ncurses Maintainers <ncurses@packages.debian.org>",
-      "purl": "pkg:deb/debian/libncursesw6@6.5%2B20250216-2?arch=arm64&distro=debian-13&upstream=ncurses",
+      "purl": "pkg:deb/debian/libncursesw6@6.5%2B20250216-2?arch=amd64&distro=debian-13&upstream=ncurses",
       "type": "library",
       "version": "6.5+20250216-2"
     },
     {
-      "bom-ref": "pkg:deb/debian/libnsl2@1.3.0-3%2Bb3?arch=arm64&distro=debian-13&package-id=af8c9e7323d453e0&upstream=libnsl%401.3.0-3",
+      "bom-ref": "pkg:deb/debian/libnsl2@1.3.0-3%2Bb3?arch=amd64&distro=debian-13&package-id=45bd52f52d5fc66a&upstream=libnsl%401.3.0-3",
       "cpe": "cpe:2.3:a:libnsl2:libnsl2:1.3.0-3\\+b3:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8341,12 +8346,12 @@
       ],
       "name": "libnsl2",
       "publisher": "GNU Libc Maintainers <debian-glibc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libnsl2@1.3.0-3%2Bb3?arch=arm64&distro=debian-13&upstream=libnsl%401.3.0-3",
+      "purl": "pkg:deb/debian/libnsl2@1.3.0-3%2Bb3?arch=amd64&distro=debian-13&upstream=libnsl%401.3.0-3",
       "type": "library",
       "version": "1.3.0-3+b3"
     },
     {
-      "bom-ref": "pkg:deb/debian/libreadline8t64@8.2-6?arch=arm64&distro=debian-13&package-id=e03071545f9c4af8&upstream=readline",
+      "bom-ref": "pkg:deb/debian/libreadline8t64@8.2-6?arch=amd64&distro=debian-13&package-id=d37f9d5a479cce9b&upstream=readline",
       "cpe": "cpe:2.3:a:libreadline8t64:libreadline8t64:8.2-6:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8387,12 +8392,12 @@
       ],
       "name": "libreadline8t64",
       "publisher": "Matthias Klose <doko@debian.org>",
-      "purl": "pkg:deb/debian/libreadline8t64@8.2-6?arch=arm64&distro=debian-13&upstream=readline",
+      "purl": "pkg:deb/debian/libreadline8t64@8.2-6?arch=amd64&distro=debian-13&upstream=readline",
       "type": "library",
       "version": "8.2-6"
     },
     {
-      "bom-ref": "pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2?arch=arm64&distro=debian-13&package-id=1c41542b190584df&upstream=sqlite3",
+      "bom-ref": "pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2?arch=amd64&distro=debian-13&package-id=07aeb7ddf1f40112&upstream=sqlite3",
       "cpe": "cpe:2.3:a:libsqlite3-0:libsqlite3-0:3.46.1-7\\+deb13u2:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8413,13 +8418,13 @@
       ],
       "name": "libsqlite3-0",
       "publisher": "Laszlo Boszormenyi (GCS) <gcs@debian.org>",
-      "purl": "pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2?arch=arm64&distro=debian-13&upstream=sqlite3",
+      "purl": "pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2?arch=amd64&distro=debian-13&upstream=sqlite3",
       "type": "library",
       "version": "3.46.1-7+deb13u2"
     },
     {
-      "bom-ref": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u2?arch=arm64&distro=debian-13&package-id=b3f8bcf6e091215f&upstream=openssl",
-      "cpe": "cpe:2.3:a:libssl3t64:libssl3t64:3.5.7-1\\~deb13u2:*:*:*:*:*:*:*",
+      "bom-ref": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3?arch=amd64&distro=debian-13&package-id=1aa0edd3366adca1&upstream=openssl",
+      "cpe": "cpe:2.3:a:libssl3t64:libssl3t64:3.5.7-1\\~deb13u3:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
@@ -8444,12 +8449,12 @@
       ],
       "name": "libssl3t64",
       "publisher": "Debian OpenSSL Team <pkg-openssl-devel@alioth-lists.debian.net>",
-      "purl": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u2?arch=arm64&distro=debian-13&upstream=openssl",
+      "purl": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3?arch=amd64&distro=debian-13&upstream=openssl",
       "type": "library",
-      "version": "3.5.7-1~deb13u2"
+      "version": "3.5.7-1~deb13u3"
     },
     {
-      "bom-ref": "pkg:deb/debian/libstdc%2B%2B6@14.2.0-19?arch=arm64&distro=debian-13&package-id=be1ff9cca316f1de&upstream=gcc-14",
+      "bom-ref": "pkg:deb/debian/libstdc%2B%2B6@14.2.0-19?arch=amd64&distro=debian-13&package-id=563847bf1116e309&upstream=gcc-14",
       "cpe": "cpe:2.3:a:libstdc\\+\\+6:libstdc\\+\\+6:14.2.0-19:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8480,12 +8485,12 @@
       ],
       "name": "libstdc++6",
       "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libstdc%2B%2B6@14.2.0-19?arch=arm64&distro=debian-13&upstream=gcc-14",
+      "purl": "pkg:deb/debian/libstdc%2B%2B6@14.2.0-19?arch=amd64&distro=debian-13&upstream=gcc-14",
       "type": "library",
       "version": "14.2.0-19"
     },
     {
-      "bom-ref": "pkg:deb/debian/libtinfo6@6.5%2B20250216-2?arch=arm64&distro=debian-13&package-id=40b68c5de6b1f2f2&upstream=ncurses",
+      "bom-ref": "pkg:deb/debian/libtinfo6@6.5%2B20250216-2?arch=amd64&distro=debian-13&package-id=ace5468b0f8f32a9&upstream=ncurses",
       "cpe": "cpe:2.3:a:libtinfo6:libtinfo6:6.5\\+20250216-2:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8506,12 +8511,12 @@
       ],
       "name": "libtinfo6",
       "publisher": "Ncurses Maintainers <ncurses@packages.debian.org>",
-      "purl": "pkg:deb/debian/libtinfo6@6.5%2B20250216-2?arch=arm64&distro=debian-13&upstream=ncurses",
+      "purl": "pkg:deb/debian/libtinfo6@6.5%2B20250216-2?arch=amd64&distro=debian-13&upstream=ncurses",
       "type": "library",
       "version": "6.5+20250216-2"
     },
     {
-      "bom-ref": "pkg:deb/debian/libtirpc3t64@1.3.6%2Bds-1?arch=arm64&distro=debian-13&package-id=789de3b44b5e439c&upstream=libtirpc",
+      "bom-ref": "pkg:deb/debian/libtirpc3t64@1.3.6%2Bds-1?arch=amd64&distro=debian-13&package-id=8be6ea5517af1182&upstream=libtirpc",
       "cpe": "cpe:2.3:a:libtirpc3t64:libtirpc3t64:1.3.6\\+ds-1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8532,12 +8537,12 @@
       ],
       "name": "libtirpc3t64",
       "publisher": "Josue Ortega <josue@debian.org>",
-      "purl": "pkg:deb/debian/libtirpc3t64@1.3.6%2Bds-1?arch=arm64&distro=debian-13&upstream=libtirpc",
+      "purl": "pkg:deb/debian/libtirpc3t64@1.3.6%2Bds-1?arch=amd64&distro=debian-13&upstream=libtirpc",
       "type": "library",
       "version": "1.3.6+ds-1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libuuid1@2.41.5-0%2Bdeb13u1?arch=arm64&distro=debian-13&package-id=f168064c4d5ee4cc&upstream=util-linux",
+      "bom-ref": "pkg:deb/debian/libuuid1@2.41.5-0%2Bdeb13u1?arch=amd64&distro=debian-13&package-id=48eced0d504c8aaf&upstream=util-linux",
       "cpe": "cpe:2.3:a:libuuid1:libuuid1:2.41.5-0\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8633,12 +8638,12 @@
       ],
       "name": "libuuid1",
       "publisher": "Chris Hofstaedtler <zeha@debian.org>",
-      "purl": "pkg:deb/debian/libuuid1@2.41.5-0%2Bdeb13u1?arch=arm64&distro=debian-13&upstream=util-linux",
+      "purl": "pkg:deb/debian/libuuid1@2.41.5-0%2Bdeb13u1?arch=amd64&distro=debian-13&upstream=util-linux",
       "type": "library",
       "version": "2.41.5-0+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libzstd1@1.5.7%2Bdfsg-1?arch=arm64&distro=debian-13&package-id=02b5bf6dd9ecb243&upstream=libzstd",
+      "bom-ref": "pkg:deb/debian/libzstd1@1.5.7%2Bdfsg-1?arch=amd64&distro=debian-13&package-id=4227c89854f9eaa4&upstream=libzstd",
       "cpe": "cpe:2.3:a:libzstd1:libzstd1:1.5.7\\+dfsg-1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8664,7 +8669,7 @@
       ],
       "name": "libzstd1",
       "publisher": "RPM packaging team <team+pkg-rpm@tracker.debian.org>",
-      "purl": "pkg:deb/debian/libzstd1@1.5.7%2Bdfsg-1?arch=arm64&distro=debian-13&upstream=libzstd",
+      "purl": "pkg:deb/debian/libzstd1@1.5.7%2Bdfsg-1?arch=amd64&distro=debian-13&upstream=libzstd",
       "type": "library",
       "version": "1.5.7+dfsg-1"
     },
@@ -8701,7 +8706,7 @@
       "version": "6.5"
     },
     {
-      "bom-ref": "pkg:deb/debian/nvidia-shell-utils@1.0.5?arch=arm64&distro=debian-13&package-id=3976ae360bc0febd",
+      "bom-ref": "pkg:deb/debian/nvidia-shell-utils@1.0.5?arch=amd64&distro=debian-13&package-id=0607cb5885a0d4bb",
       "cpe": "cpe:2.3:a:nvidia-shell-utils:nvidia-shell-utils:1.0.5:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8717,13 +8722,13 @@
       ],
       "name": "nvidia-shell-utils",
       "publisher": "NVIDIA GFN Security <nv-shell-utils-release-bot@nvidia.com>",
-      "purl": "pkg:deb/debian/nvidia-shell-utils@1.0.5?arch=arm64&distro=debian-13",
+      "purl": "pkg:deb/debian/nvidia-shell-utils@1.0.5?arch=amd64&distro=debian-13",
       "type": "library",
       "version": "1.0.5"
     },
     {
-      "bom-ref": "pkg:deb/debian/openssl-provider-fips@3.5.7-1~deb13u2?arch=arm64&distro=debian-13&package-id=f0e8a9ff15a61b24&upstream=openssl",
-      "cpe": "cpe:2.3:a:openssl-provider-fips:openssl-provider-fips:3.5.7-1\\~deb13u2:*:*:*:*:*:*:*",
+      "bom-ref": "pkg:deb/debian/openssl-provider-fips@3.5.7-1~deb13u3?arch=amd64&distro=debian-13&package-id=9dcc955b30e86a73&upstream=openssl",
+      "cpe": "cpe:2.3:a:openssl-provider-fips:openssl-provider-fips:3.5.7-1\\~deb13u3:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
@@ -8748,27 +8753,27 @@
       ],
       "name": "openssl-provider-fips",
       "publisher": "Debian OpenSSL Team <pkg-openssl-devel@alioth-lists.debian.net>",
-      "purl": "pkg:deb/debian/openssl-provider-fips@3.5.7-1~deb13u2?arch=arm64&distro=debian-13&upstream=openssl",
+      "purl": "pkg:deb/debian/openssl-provider-fips@3.5.7-1~deb13u3?arch=amd64&distro=debian-13&upstream=openssl",
       "type": "library",
-      "version": "3.5.7-1~deb13u2"
+      "version": "3.5.7-1~deb13u3"
     },
     {
-      "bom-ref": "pkg:generic/python@3.13.15?package-id=14008a152190846d",
-      "cpe": "cpe:2.3:a:python_software_foundation:python:3.13.15:*:*:*:*:*:*:*",
+      "bom-ref": "pkg:generic/python@3.13.16?package-id=58118d5357914418",
+      "cpe": "cpe:2.3:a:python_software_foundation:python:3.13.16:*:*:*:*:*:*:*",
       "name": "python",
-      "purl": "pkg:generic/python@3.13.15",
+      "purl": "pkg:generic/python@3.13.16",
       "type": "application",
-      "version": "3.13.15"
+      "version": "3.13.16"
     },
     {
-      "bom-ref": "pkg:golang/shelless_ulimit@v0.0.0-20260806200008-600d56a7c50b?package-id=6bc718d8450c86f3",
+      "bom-ref": "pkg:golang/shelless_ulimit@v0.0.0-20260806200008-600d56a7c50b?package-id=db2f4e06457784c6",
       "name": "shelless_ulimit",
       "purl": "pkg:golang/shelless_ulimit@v0.0.0-20260806200008-600d56a7c50b",
       "type": "library",
       "version": "v0.0.0-20260806200008-600d56a7c50b"
     },
     {
-      "bom-ref": "pkg:golang/sleep@v0.0.0-20260806200008-600d56a7c50b?package-id=55be848437381591",
+      "bom-ref": "pkg:golang/sleep@v0.0.0-20260806200008-600d56a7c50b?package-id=d98e3d7663684c3f",
       "name": "sleep",
       "purl": "pkg:golang/sleep@v0.0.0-20260806200008-600d56a7c50b",
       "type": "library",
@@ -8837,7 +8842,7 @@
       "version": "2026c-0+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/zlib1g@1%3A1.3.dfsg%2Breally1.3.1-1%2Bb1?arch=arm64&distro=debian-13&package-id=90e7d5b74b631f9d&upstream=zlib%401%3A1.3.dfsg%2Breally1.3.1-1",
+      "bom-ref": "pkg:deb/debian/zlib1g@1%3A1.3.dfsg%2Breally1.3.1-1%2Bb1?arch=amd64&distro=debian-13&package-id=9624b8abfaf8a472&upstream=zlib%401%3A1.3.dfsg%2Breally1.3.1-1",
       "cpe": "cpe:2.3:a:zlib1g:zlib1g:1\\:1.3.dfsg\\+really1.3.1-1\\+b1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8848,22 +8853,22 @@
       ],
       "name": "zlib1g",
       "publisher": "Mark Brown <broonie@debian.org>",
-      "purl": "pkg:deb/debian/zlib1g@1%3A1.3.dfsg%2Breally1.3.1-1%2Bb1?arch=arm64&distro=debian-13&upstream=zlib%401%3A1.3.dfsg%2Breally1.3.1-1",
+      "purl": "pkg:deb/debian/zlib1g@1%3A1.3.dfsg%2Breally1.3.1-1%2Bb1?arch=amd64&distro=debian-13&upstream=zlib%401%3A1.3.dfsg%2Breally1.3.1-1",
       "type": "library",
       "version": "1:1.3.dfsg+really1.3.1-1+b1"
     }
   ],
   "metadata": {
     "component": {
-      "bom-ref": "01fe9b3664e68678",
+      "bom-ref": "1625aa550171ea21",
       "name": "nvcr.io/nvidia/distroless/python",
       "type": "container",
-      "version": "3.13-v4.1.4"
+      "version": "3.13-v4.1.6"
     },
     "properties": [
       {
         "name": "syft:image:labels:org.opencontainers.image.created",
-        "value": "2026-09-14T17:50:45Z"
+        "value": "2026-10-06T18:50:08Z"
       },
       {
         "name": "syft:image:labels:org.opencontainers.image.documentation",
@@ -8871,7 +8876,7 @@
       },
       {
         "name": "syft:image:labels:org.opencontainers.image.revision",
-        "value": "39ce19fc3aa66a6ee147cdcafe543ebce82b43bd"
+        "value": "d9ce6fe1842f74a848ada894119391f9a011012c"
       },
       {
         "name": "syft:image:labels:org.opencontainers.image.title",
@@ -8883,7 +8888,7 @@
       },
       {
         "name": "syft:image:labels:org.opencontainers.image.version",
-        "value": "v4.1.4"
+        "value": "v4.1.6"
       }
     ],
     "tools": {
@@ -8897,7 +8902,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:28e828b5-6f9f-5961-8ec9-bad1903face1",
+  "serialNumber": "urn:uuid:9f9c1f09-820d-5e37-8bbf-c330ca831562",
   "specVersion": "1.6",
   "version": 1
 }

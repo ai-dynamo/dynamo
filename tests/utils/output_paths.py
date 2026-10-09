@@ -27,7 +27,8 @@ def resolve_test_output_path(path: Union[str, Path]) -> str:
     Returns:
         An absolute path. If the input is already absolute, it's returned
         unchanged. If relative, it's resolved under the test output root
-        directory.
+        directory. Characters in relative paths that GitHub artifact
+        uploads reject (e.g. `*`) are percent-encoded.
 
     Environment Variables:
         DYN_TEST_OUTPUT_PATH: Override the default test output root.
@@ -38,11 +39,20 @@ def resolve_test_output_path(path: Union[str, Path]) -> str:
         '/absolute/path'
         >>> resolve_test_output_path("test_foo")  # doctest: +SKIP
         '/tmp/dynamo_tests/test_foo'
+        >>> resolve_test_output_path("test_foo[*]")  # doctest: +SKIP
+        '/tmp/dynamo_tests/test_foo[%2A]'
     """
     path_str = str(path)
 
     if os.path.isabs(path_str):
         return path_str
+
+    # encode special characters so GitHub accepts test log uploads
+    path_str = "".join(
+        # escape `%` too so encoded names cannot collide with literal escapes
+        f"%{ord(char):02X}" if char in '"<>:|*?\r\n%' else char
+        for char in path_str
+    )
 
     log_root = os.environ.get(
         "DYN_TEST_OUTPUT_PATH",
