@@ -632,6 +632,7 @@ async def test_prepare_snapshot_engine_rejects_dcp_before_warmup(monkeypatch):
 async def test_parse_args_accepts_supported_dcp_configurations(
     monkeypatch, mock_sglang_cli, tmp_path, overrides
 ):
+    """Accept supported backends, disabled DCP, and MLA prefill-only workers."""
     server_args = _dcp_server_args_stub(**overrides)
     monkeypatch.setattr(
         "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
@@ -735,6 +736,7 @@ async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
 
 
 def _raise_runtime_error(*_):
+    """Simulate a model-config lookup failure during backend prediction."""
     raise RuntimeError("model config unavailable")
 
 
@@ -747,6 +749,7 @@ def _raise_runtime_error(*_):
 async def test_parse_args_accepts_mla_dcp_when_default_backend_is_not_known_bad(
     monkeypatch, mock_sglang_cli, tmp_path, default_backend, caplog
 ):
+    """Keep valid or unknown MLA defaults usable, warning if prediction fails."""
     helper = (
         default_backend if callable(default_backend) else lambda *_: default_backend
     )
