@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, anyhow};
@@ -25,6 +26,7 @@ const UNSUPPORTED_KEYWORDS: &[&str] = &[
     "unevaluatedItems",
 ];
 const MAX_OBJECT_DEPTH: usize = 10;
+const MAX_DIAGNOSTIC_IDENTIFIER_CHARS: usize = 256;
 const TYPES: &[&str] = &[
     "null", "boolean", "object", "array", "number", "integer", "string",
 ];
@@ -39,24 +41,22 @@ pub(super) fn validate_strict_function(function: &FunctionObject) -> Result<()> 
     validate_schema(schema).map_err(|error| {
         anyhow!(
             "Invalid schema for function '{}': {error}",
-            bounded_name(&function.name)
+            bounded_text(&function.name, super::validate::MAX_FUNCTION_NAME_LENGTH)
         )
     })
 }
 
-// Responses validates strict schemas before the Chat name-length check, so an oversized
-// name must not be echoed whole into the error body and logs.
-fn bounded_name(name: &str) -> String {
-    const MAX: usize = super::validate::MAX_FUNCTION_NAME_LENGTH;
-    if name.chars().count() <= MAX {
-        return name.to_owned();
+// Responses validates before the Chat name-length check, and malformed schemas can fail
+// before budget checks. Bound user-controlled identifiers in error bodies and logs.
+fn bounded_text(text: &str, max_chars: usize) -> Cow<'_, str> {
+    match text.char_indices().nth(max_chars) {
+        Some((end, _)) => Cow::Owned(format!("{}...", &text[..end])),
+        None => Cow::Borrowed(text),
     }
-    let mut bounded: String = name.chars().take(MAX).collect();
-    bounded.push_str("...");
-    bounded
 }
 
 fn invalid(path: &str, detail: impl std::fmt::Display) -> anyhow::Error {
+    let path = bounded_text(path, MAX_DIAGNOSTIC_IDENTIFIER_CHARS);
     anyhow!("In context=#{path}, {detail}")
 }
 
@@ -407,7 +407,10 @@ fn validate_object(schema: &Map<String, Value>, path: &str) -> Result<()> {
             if !required.contains(name.as_str()) {
                 return Err(invalid(
                     &child_path(path, "required"),
-                    format!("must include property '{name}'"),
+                    format!(
+                        "must include property '{}'",
+                        bounded_text(name, MAX_DIAGNOSTIC_IDENTIFIER_CHARS)
+                    ),
                 ));
             }
         }
@@ -421,7 +424,10 @@ fn validate_object(schema: &Map<String, Value>, path: &str) -> Result<()> {
         if let Some(name) = extra.first() {
             return Err(invalid(
                 &child_path(path, "required"),
-                format!("unknown property '{name}' in a closed object"),
+                format!(
+                    "unknown property '{}' in a closed object",
+                    bounded_text(name, MAX_DIAGNOSTIC_IDENTIFIER_CHARS)
+                ),
             ));
         }
     }
@@ -494,6 +500,8 @@ fn validate_reference_closure(
     nodes: &[(String, &Value, usize)],
     targets: &[Option<usize>],
 ) -> Result<()> {
+    let mut closed = vec![None; nodes.len()];
+    let mut chain = Vec::new();
     for (index, (path, value, _)) in nodes.iter().enumerate() {
         let Some(schema) = value.as_object() else {
             continue;
@@ -502,17 +510,24 @@ fn validate_reference_closure(
             continue;
         }
         let mut current = index;
-        while let Some(target) = targets[current] {
-            current = target;
-            if nodes[current]
-                .1
-                .as_object()
-                .is_some_and(has_local_constraints)
-            {
-                break;
+        let is_closed = loop {
+            if let Some(result) = closed[current] {
+                break result;
             }
+            chain.push(current);
+            let schema = nodes[current].1;
+            if schema.as_object().is_some_and(has_local_constraints) {
+                break schema.get("additionalProperties") == Some(&Value::Bool(false));
+            }
+            let Some(target) = targets[current] else {
+                break false;
+            };
+            current = target;
+        };
+        for index in chain.drain(..) {
+            closed[index] = Some(is_closed);
         }
-        if nodes[current].1.get("additionalProperties") != Some(&Value::Bool(false)) {
+        if !is_closed {
             return Err(invalid(
                 path,
                 "reference target must close the object with additionalProperties: false",
@@ -627,6 +642,35 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains(&format!("'{short}':")));
+    }
+
+    #[test]
+    fn schema_identifier_diagnostics_are_bounded() {
+        for name in [
+            "x".repeat(1 << 20),
+            format!("{}{}", "a".repeat(255), "雪/~".repeat(100_000)),
+        ] {
+            for (schema, detail) in [
+                (
+                    json!({"type": "object", "additionalProperties": false, "properties": {name.clone(): true}}),
+                    "must include property",
+                ),
+                (
+                    json!({"type": "object", "additionalProperties": false, "required": [name.clone()]}),
+                    "unknown property",
+                ),
+                (
+                    json!({"type": "object", "additionalProperties": false, "patternProperties": {name.clone(): {"type": "object"}}}),
+                    "object schemas require additionalProperties: false",
+                ),
+            ] {
+                let error = check(schema).unwrap_err().to_string();
+                assert!(error.len() <= 4096, "diagnostic is {} bytes", error.len());
+                assert!(error.contains("In context=#"));
+                assert!(error.contains(detail));
+                assert!(error.contains("..."));
+            }
+        }
     }
 
     #[test]
@@ -856,6 +900,23 @@ mod tests {
             "$defs": {"base": object()}
         }))
         .unwrap();
+    }
+
+    #[test]
+    fn reference_closure_shared_suffixes() {
+        for (alias, target) in [("a", "z"), ("z", "a")] {
+            let mut schema = object();
+            schema["$defs"] = json!({
+                alias: {"type": "object", "$ref": "#/$defs/middle"},
+                "nullable": {"type": ["object", "null"], "$ref": "#/$defs/middle"},
+                "middle": {"$ref": format!("#/$defs/{target}")},
+                target: {"type": "object", "additionalProperties": false, "$ref": "#/$defs/open"},
+                "open": true
+            });
+            check(schema.clone()).unwrap();
+            schema["$defs"][target] = json!(true);
+            rejects(schema, "reference target must close the object");
+        }
     }
 
     #[test]

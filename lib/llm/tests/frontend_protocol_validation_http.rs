@@ -4,7 +4,7 @@
 //! HTTP regressions for validation performed by protocol adapters.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dynamo_llm::{
     discovery::UNKNOWN_METRIC_MODEL,
@@ -396,6 +396,88 @@ async fn strict_tool_schema_rejected_before_dispatch() {
                 &[(ErrorType::Validation, 6), (ErrorType::Internal, 0)],
             );
         }
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_diagnostics_are_bounded() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+        let name = "x".repeat(1 << 20);
+        for (path, body) in strict_tool_requests(json!({
+            "name": "search", "strict": true, "parameters": {
+                "type": "object", "additionalProperties": false, "properties": {name: true}
+            }
+        })) {
+            for stream in [false, true] {
+                let mut body = body.clone();
+                body["stream"] = json!(stream);
+                let response = post_json(&svc, path, body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                let bytes = bounded(response.bytes()).await.unwrap();
+                assert!(bytes.len() <= 4096, "error body is {} bytes", bytes.len());
+                let error: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(error["code"], 400);
+                let message = error["message"].as_str().unwrap();
+                assert!(message.contains("In context=#/required"));
+                assert!(message.contains("must include property"));
+                assert!(message.contains("..."));
+                assert!(svc.engine.take_requests().await.is_empty());
+            }
+        }
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_reference_chain_completes() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let count = 16_000;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..count {
+            definitions.insert(
+                format!("n{i:05}"),
+                json!({"type": "object", "$ref": format!("#/$defs/n{:05}", i + 1)}),
+            );
+        }
+        definitions.insert(
+            format!("n{count:05}"),
+            json!({"type": "object", "additionalProperties": false}),
+        );
+        let parameters = json!({"$ref": "#/$defs/n00000", "$defs": definitions});
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script]).await;
+        let started = Instant::now();
+        let response = post_json(
+            &svc,
+            "/v1/responses",
+            json!({
+                "model": MODEL, "input": "ping", "tools": [{
+                    "type": "function", "name": "search", "strict": true, "parameters": parameters
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        bounded(response.bytes()).await.unwrap();
+        assert!(
+            started.elapsed() < HTTP_TIMEOUT,
+            "reference-chain request exceeded HTTP_TIMEOUT"
+        );
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].inner.tools.as_ref().unwrap()[0]
+                .function
+                .parameters
+                .as_ref()
+                == Some(&parameters)
+        );
         svc.shutdown().await;
     })
     .await;
