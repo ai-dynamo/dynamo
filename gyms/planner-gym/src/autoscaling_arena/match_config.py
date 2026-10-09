@@ -255,6 +255,17 @@ class EngineConfig:
     extra_args: dict[str, Any]
     runtime: EngineRuntimeConfig = field(default_factory=EngineRuntimeConfig)
 
+    def __post_init__(self) -> None:
+        canonical = self.extra_args.get("aic_nextn")
+        legacy = self.extra_args.get("ais_nextn")
+        if canonical is not None and legacy is not None and canonical != legacy:
+            raise MatchConfigError("extra_args.aic_nextn conflicts with ais_nextn")
+
+    @property
+    def nextn(self) -> Optional[int]:
+        canonical = self.extra_args.get("aic_nextn")
+        return canonical if canonical is not None else self.extra_args.get("ais_nextn")
+
 
 @dataclass(frozen=True)
 class SimEnginesConfig:

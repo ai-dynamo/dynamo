@@ -1344,7 +1344,8 @@ def _render_engine_args(engine: EngineConfig, ais_model_path: str) -> str:
             launch[key] = rank.pop(key)
     for alias in _RESERVED_RENDER_ALIASES:
         rank.pop(alias, None)
-    nextn = rank.pop("ais_nextn", rank.get("aic_nextn"))
+    nextn = engine.nextn
+    rank.pop("ais_nextn", None)
     if nextn is not None:
         rank["aic_nextn"] = nextn
     perf_config = {
@@ -1458,7 +1459,7 @@ def _sim_performance_model_metadata(
             "moe_tp_size": engine.moe_tp_size,
             "moe_ep_size": engine.moe_ep_size,
             "attention_dp_size": engine.attention_dp_size,
-            "nextn": engine.extra_args.get("ais_nextn"),
+            "nextn": engine.nextn,
         }
         metadata["aggregated" if role == "aggregate" else role] = {
             "provider": "ais",

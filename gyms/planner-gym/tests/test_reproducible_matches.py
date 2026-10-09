@@ -209,6 +209,37 @@ def test_external_timing_cannot_override_owned_identity(raw_match, tmp_path):
     assert metadata["aggregated"]["provider"] == "fixed"
 
 
+@pytest.mark.parametrize(
+    "aliases",
+    [
+        {"aic_nextn": 1},
+        {"ais_nextn": 1},
+        {"aic_nextn": 1, "ais_nextn": 1},
+        {"aic_nextn": None, "ais_nextn": 1},
+    ],
+)
+def test_nextn_identity_matches_native_and_planner(raw_match, tmp_path, aliases):
+    extra = raw_match["backend"]["engines"]["common"]["extra_args"]
+    extra.pop("timing_model")
+    extra.update(aliases)
+    config = _parse(raw_match, tmp_path)
+    engine = config.backend.engines.aggregate
+    rendered = json.loads(match_runner._render_engine_args(engine, "synthetic-model"))
+    native = rendered["engine"]
+    metadata = match_runner._sim_performance_model_metadata(config.backend)
+    assert native["aic_nextn"] == native["timing_model"]["config"]["nextn"] == 1
+    assert metadata["aggregated"]["config"]["nextn"] == 1
+    assert "ais_nextn" not in native
+
+
+def test_conflicting_nextn_aliases_fail_before_replay(raw_match, tmp_path):
+    raw_match["backend"]["engines"]["common"]["extra_args"].update(
+        aic_nextn=1, ais_nextn=2
+    )
+    with pytest.raises(MatchConfigError, match="aic_nextn conflicts with ais_nextn"):
+        _parse(raw_match, tmp_path)
+
+
 def test_warmup_references_are_case_specific(raw_match, tmp_path, monkeypatch):
     raw_match["backend"]["autoscalers"] = [
         {"name": "planner", "type": "planner", "start": {"decode": 1}},
