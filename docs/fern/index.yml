@@ -156,6 +156,8 @@ navigation:
             contents:
               - page: Fast Model Loading
                 path: pages/kubernetes/model-deployment/model-loading/fast-model-loading.mdx
+              - page: Dynamo Snapshot (Experimental)
+                path: pages/kubernetes/model-deployment/model-loading/snapshot.mdx
               - page: MatrixHub
                 path: pages/kubernetes/model-deployment/model-loading/matrixhub.md
 
@@ -416,6 +418,8 @@ navigation:
                 contents:
                   - page: Overview
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/overview.md
+                  - page: Protocol Field Handling
+                    path: pages/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md
                   - page: KServe gRPC Frontend
                     slug: kserve-grpc-frontend
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/frontend-guide.md
@@ -486,6 +490,8 @@ navigation:
                       - page: Write Custom Routing Strategies
                         slug: write-custom-routing-strategies
                         path: pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx
+                      - page: Write an Admission Control Plugin
+                        path: pages/developer-guide/knowledge-base/modular-components/router/custom-admission-control.md
                       - page: Router Examples
                         path: pages/developer-guide/knowledge-base/modular-components/router/router-examples.md
                       - page: Router Testing
@@ -659,6 +665,8 @@ navigation:
                 path: pages/developer-guide/additional-resources/speculative-decoding/overview.md
               - page: Speculative Decoding with vLLM
                 path: pages/developer-guide/additional-resources/speculative-decoding/speculative-decoding-with-vllm.md
+              - page: Speculative Decoding with SGLang
+                path: pages/developer-guide/additional-resources/speculative-decoding/speculative-decoding-with-sglang.md
 
   - tab: use-cases
     layout:
@@ -714,6 +722,8 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/multimodal-serving/overview.md
+          - page: Voice Pipelines
+            path: pages/use-cases/multimodal-serving/voice.md
           - page: Parallel Media Decoding
             path: pages/use-cases/multimodal-serving/parallel-media-decoding.md
           - page: Custom Vision Encoders
@@ -775,6 +785,23 @@ navigation:
             path: pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.md
           - page: Troubleshooting Tool Calls
             path: pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
+      - section: Many-Model Serving
+        collapsed: true
+        icon: layer-group
+        slug: many-model-serving
+        contents:
+          - page: Interpreting GPU Sharing Results
+            path: pages/use-cases/gpu-sharing/gpu-sharing-results.mdx
+          - page: Deploy the Baseline Experiment
+            path: pages/use-cases/gpu-sharing/deploy-baseline.md
+          - page: Deploy the KAI + HAMi Experiment
+            path: pages/use-cases/gpu-sharing/deploy-kai-hami.md
+          - page: Build the KAI-Scheduler and GPU Fractioning Forks
+            path: pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md
+          - page: Deploy the KAI + GPU Fractions Experiment
+            path: pages/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md
+          - page: Per-GPU Compute and Memory Limits with MPS
+            path: pages/use-cases/gpu-sharing/mps-per-gpu-limits.md
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================
@@ -785,6 +812,13 @@ navigation:
           - page: Overview
             path: pages/recipes/model-recipes/overview.mdx
             slug: browse
+          - section: Motif Technologies
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Motif-3 NVFP4
+                path: pages/recipes/model-recipes/motif-3.mdx
+                slug: motif-3
           # Grouped by model provider. Each group uses skip-slug so page URLs
           # stay /recipes/<slug>; within a group, newest models come first.
           - section: Z.ai
@@ -810,6 +844,13 @@ navigation:
               - page: Kimi-K2.6
                 path: pages/recipes/model-recipes/kimi-k2-6.mdx
                 slug: kimi-k2-6
+          - section: MiniMax
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: MiniMax M3
+                path: pages/recipes/model-recipes/minimax-m3.mdx
+                slug: minimax-m3
           - section: DeepSeek
             skip-slug: true
             collapsed: true
@@ -1297,6 +1338,12 @@ navigation:
         contents:
           # Keep this archive in reverse chronological order. Publication dates are
           # rendered in each article header and on the custom landing page.
+          - page: "AIPerf Benchmarking"
+            path: pages/blog/2026/aiperf-benchmarking.mdx
+            slug: aiperf-benchmarking
+          - page: "When to use EPD Disaggregation for Multimodal Serving"
+            path: pages/blog/2026/epd-disaggregation-multimodal.mdx
+            slug: epd-disaggregation-multimodal
           - page: "Dynamo Agent Optimization Skills"
             path: pages/blog/2026/agent-optimization-skills.mdx
             slug: agent-optimization-skills

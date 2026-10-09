@@ -50,12 +50,14 @@ from tests.utils.payload_builder import (
     router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
+    CachedTokensChatPayload,
     ChatPayload,
     HttpErrorPayload,
     ImageGenerationPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
     SGLangDisaggRouterMetricsPayload,
+    SGLangSpecDecodeMetricsPayload,
     VideoGenerationPayload,
 )
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
@@ -152,6 +154,50 @@ sglang_configs = {
             _disable_responses_reasoning(responses_stream_payload_default()),
             guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
+        ],
+    ),
+    # Speculative decoding: Qwen3-8B main model with an EAGLE3 draft model
+    # (see launch/agg_spec_decoding.sh). Both repos are ungated.
+    # Nightly-only: the 8B base plus EAGLE3 draft model is intentionally outside pre-merge CI.
+    "aggregated_spec_decoding": SGLangConfig(
+        name="aggregated_spec_decoding",
+        directory=sglang_dir,
+        script_name="agg_spec_decoding.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            # Also predownload the EAGLE3 draft: CI workers run HF_HUB_OFFLINE=True
+            # and only the base cfg.model is auto-registered, so the draft repo
+            # can't be resolved offline without this.
+            pytest.mark.model("Tengyunw/qwen3_8b_eagle3"),
+            # Measured peak ~20.6 GiB on H200 (8B weights + EAGLE3 draft +
+            # capped KV + CUDA graphs).
+            pytest.mark.profiled_vram_gib(21.0),
+            pytest.mark.requested_sglang_kv_tokens(4096),
+            pytest.mark.timeout(300),  # ~3x ~65s (H200, models pre-cached)
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen3-8B",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            # 3 x up to 1000 tokens: enough decode steps for a stable tokens/verify ratio.
+            chat_payload_default(),
+            chat_payload(
+                "What is the capital of France? Answer in one word.",
+                repeat_count=1,
+                expected_response=["Paris"],
+                temperature=0.0,
+                max_tokens=16,
+                extra_body={"chat_template_args": {"enable_thinking": False}},
+            ),
+            SGLangSpecDecodeMetricsPayload(
+                body={},
+                repeat_count=1,
+                expected_log=[],
+                expected_response=[],
+                min_num_requests=4,
+            ),
         ],
     ),
     "disaggregated": SGLangConfig(
@@ -683,44 +729,63 @@ sglang_configs = {
     "video_agg_fd_qwen": SGLangConfig(
         name="video_agg_fd_qwen",
         directory=sglang_dir,
-        script_name="agg_vision.sh",
+        script_name="agg_multimodal_router.sh",
         marks=[
             pytest.mark.multimodal,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(10.0),
+            pytest.mark.profiled_vram_gib(18.7),
             pytest.mark.requested_sglang_kv_tokens(8736),
-            pytest.mark.timeout(390),
+            pytest.mark.timeout(500),
             pytest.mark.pre_merge,
-            # TODO: Enable media-ffmpeg in the SGLang container build, then
-            # remove this skip. Frontend video decoding requires the Dynamo
-            # binding to be built with media-ffmpeg support.
-            pytest.mark.skip(reason="SGLang container lacks media-ffmpeg support"),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=[
-            "--model-path",
+            "--model",
             "Qwen/Qwen3-VL-2B-Instruct",
-            "--frontend-decoding",
+            "--num-workers",
+            "2",
+            "--single-gpu",
         ],
         env={
             "DYN_MM_ALLOW_INTERNAL": "1",
-            "DYN_MM_VIDEO_NUM_FRAMES": "4",
+            # Decode all 10 frames in the fixture so the routing sequence is
+            # materially larger than the shared text prefix.
+            "DYN_MM_VIDEO_NUM_FRAMES": "10",
         },
-        timeout=360,
+        timeout=450,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "Describe the video in detail"},
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": MULTIMODAL_VIDEO_URL},
-                    },
-                ],
-                repeat_count=1,
+            CachedTokensChatPayload(
+                body={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Describe the video in detail",
+                                },
+                                {
+                                    "type": "video_url",
+                                    "video_url": {"url": MULTIMODAL_VIDEO_URL},
+                                },
+                            ],
+                        }
+                    ],
+                    "max_tokens": 100,
+                    "temperature": 0.0,
+                    "stream": False,
+                },
+                repeat_count=3,
                 expected_response=MULTIMODAL_VIDEO_EXPECTED,
-                temperature=0.0,
-                max_tokens=100,
+                min_cached_tokens=128,
+                require_rust_processor_init=True,
+                min_routing_total_blocks=10,
+                # A text-only hit is at most a small fraction of this video
+                # request. Requiring high router-side overlap proves the media
+                # hashes matched the worker KV events instead of accepting a
+                # cached text prefix as a false positive.
+                min_avg_kv_hit_rate=0.9,
             )
         ],
     ),

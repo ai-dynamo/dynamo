@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -30,6 +31,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -40,12 +42,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -54,6 +58,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme {
@@ -67,6 +72,7 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 		v1alpha1.AddToScheme,
 		v1beta1.AddToScheme,
 		grovev1alpha1.AddToScheme,
+		apiextensionsv1.AddToScheme,
 		snapshotv1alpha1.AddToScheme,
 	} {
 		if err := addToScheme(s); err != nil {
@@ -89,9 +95,11 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 			Generation: 7,
 		},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName: "prefill",
+					ComponentType: v1beta1.ComponentTypeWorker,
 					Experimental: &v1beta1.ExperimentalSpec{
 						Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
 						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
@@ -100,6 +108,7 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 				},
 				{
 					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeWorker,
 					Experimental: &v1beta1.ExperimentalSpec{
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
 						Failover:   &v1beta1.FailoverSpec{},
@@ -139,11 +148,88 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 	require.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
 	require.Equal(t,
 		"component \"prefill\": Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
-			"component \"prefill\": Snapshot with active/passive failover is temporarily unsupported\n"+
-			"component \"decode\": Snapshot with active/passive failover is temporarily unsupported",
+			"spec.components[1].experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture",
 		ready.Message,
 	)
 	require.Zero(t, stored.Status.ObservedGeneration)
+}
+
+func TestDynamoGraphDeploymentReconcileWithLPXDisabled(t *testing.T) {
+	t.Log("Store a mixed graph without Grove or LPX API types")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "mixed", Namespace: "default", Generation: 4},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+			{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+			{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeLPX},
+		}},
+		Status: v1beta1.DynamoGraphDeploymentStatus{ObservedGeneration: 3},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: kubeClient, Config: &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Grove: true}},
+	}
+
+	t.Log("Reconcile before provider selection or workload effects")
+	result, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dgd)})
+	require.NoError(t, err)
+	require.Zero(t, result)
+
+	t.Log("Persist only the disabled diagnosis and preserve prior generation acknowledgement")
+	stored := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dgd), stored))
+	require.Empty(t, stored.Annotations)
+	require.Empty(t, stored.Finalizers)
+	require.Equal(t, dgd.Spec, stored.Spec)
+	require.Equal(t, dgd.Status.ObservedGeneration, stored.Status.ObservedGeneration)
+	require.Equal(t, v1beta1.DGDStateFailed, stored.Status.State)
+	ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, dgd.Generation, ready.ObservedGeneration)
+	require.Equal(t, "lpx_disabled", ready.Reason)
+	require.Equal(t, "LPX integration is disabled", ready.Message)
+}
+
+func TestDynamoGraphDeploymentReconcilePersistsComponentProgramLPXRejection(t *testing.T) {
+	t.Log("Create a finalized DGD durably assigned to the component provider with an LPX component")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-dgd",
+			Namespace:  "default",
+			Generation: 4,
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationWorkloadProvider: commonconsts.WorkloadProviderComponent,
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "serving",
+				ComponentType: v1beta1.ComponentTypeLPX,
+			}},
+		},
+	}
+	controller_common.AddFinalizer(dgd)
+	reconciler := createTestDGDReconcilerWithStatus(dgd)
+	reconciler.RuntimeConfig.Gate.LPX = true
+
+	t.Log("Reconcile through the outer controller")
+	_, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dgd)})
+	require.ErrorIs(t, err, reconcile.TerminalError(nil))
+
+	t.Log("Verify the outer controller persisted the complete program-owned failure status")
+	stored := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, reconciler.Client.Get(t.Context(), client.ObjectKeyFromObject(dgd), stored))
+	require.Equal(t, commonconsts.WorkloadProviderComponent, stored.Annotations[commonconsts.KubeAnnotationWorkloadProvider])
+	require.Equal(t, v1beta1.DGDStateFailed, stored.Status.State)
+	ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, "UnsupportedComponent", ready.Reason)
+	require.Equal(t, `component "serving" of type "lpx" requires the Grove workload provider`, ready.Message)
 }
 
 func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompatibility(t *testing.T) {
@@ -170,11 +256,14 @@ func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompat
 		WithObjects(dgd).
 		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
 		Build()
+	recorder := events.NewFakeRecorder(10)
+	config := &configv1alpha1.OperatorConfiguration{}
+	runtimeConfig := &controller_common.RuntimeConfig{}
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
-		Recorder:      events.NewFakeRecorder(10),
-		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		Recorder:      recorder,
+		Config:        config,
+		RuntimeConfig: runtimeConfig,
 	}
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
@@ -191,13 +280,16 @@ func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompat
 	}
 }
 
-func TestDynamoGraphDeploymentReconcileFinalizesWithoutSnapshotTypes(t *testing.T) {
-	t.Log("Create a deleting DGD in a scheme without the optional Snapshot API types")
+func TestDynamoGraphDeploymentReconcileFinalizesWithoutOptionalAPITypes(t *testing.T) {
+	t.Log("Create a deleting LPX DGD without optional API types and with LPX disabled")
 	now := metav1.Now()
 	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
 		Name:              "test-dgd",
 		Namespace:         "default",
 		DeletionTimestamp: &now,
+	}}
+	dgd.Spec.Components = []v1beta1.DynamoComponentDeploymentSharedSpec{{
+		ComponentName: "worker", ComponentType: v1beta1.ComponentTypeLPX,
 	}}
 	controller_common.AddFinalizer(dgd)
 	testScheme := runtime.NewScheme()
@@ -207,14 +299,16 @@ func TestDynamoGraphDeploymentReconcileFinalizesWithoutSnapshotTypes(t *testing.
 		WithObjects(dgd).
 		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
 		Build()
+	recorder := events.NewFakeRecorder(10)
+	runtimeConfig := &controller_common.RuntimeConfig{}
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
-		Recorder:      events.NewFakeRecorder(10),
+		Recorder:      recorder,
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: runtimeConfig,
 	}
 
-	t.Log("Finalize while treating unregistered Snapshot resources as unavailable")
+	t.Log("Finalize before the LPX gate check, treating unregistered Snapshot resources as unavailable")
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: client.ObjectKeyFromObject(dgd),
 	})
@@ -414,6 +508,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 								Kind:       "DynamoGraphDeployment",
 								Name:       "test-dgd",
 								UID:        "test-uid",
+								Controller: ptr.To(true),
 							},
 						},
 					},
@@ -438,6 +533,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 								Kind:       "DynamoGraphDeployment",
 								Name:       "test-dgd",
 								UID:        "test-uid",
+								Controller: ptr.To(true),
 							},
 						},
 					},
@@ -487,6 +583,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 								Kind:       "DynamoGraphDeployment",
 								Name:       "test-dgd",
 								UID:        "test-uid",
+								Controller: ptr.To(true),
 							},
 						},
 					},
@@ -602,79 +699,123 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 	}
 }
 
-func TestDGDScalingAdaptersReconciler_EmitsDeleteEventOnlyAfterSuccessfulDelete(t *testing.T) {
-	notFound := apierrors.NewNotFound(
-		schema.GroupResource{
-			Group:    v1alpha1.GroupVersion.Group,
-			Resource: "dynamographdeploymentscalingadapters",
-		},
-		"test-dgd-removed",
-	)
+func TestGenerateAdapterName(t *testing.T) {
+	t.Run("preserves valid existing name format", func(t *testing.T) {
+		assert.Equal(t, "my-dgd-myservice", generateAdapterName("my-dgd", "MyService"))
+
+		dgdName := strings.Repeat("a", 60)
+		assert.Equal(t, dgdName+"-runtime", generateAdapterName(dgdName, "runtime"))
+	})
+
+	t.Run("hashes overlong names deterministically", func(t *testing.T) {
+		dgdName := strings.Repeat("a", 250)
+		require.Empty(t, k8svalidation.IsDNS1123Subdomain(dgdName))
+		got := generateAdapterName(dgdName, "runtime")
+
+		assert.Empty(t, k8svalidation.IsDNS1123Subdomain(got))
+		assert.LessOrEqual(t, len(got), k8svalidation.DNS1123SubdomainMaxLength)
+		assert.Equal(t, got, generateAdapterName(dgdName, "runtime"))
+		assert.NotEqual(t, got, generateAdapterName(dgdName, "another-runtime"))
+	})
+}
+
+func TestDGDScalingAdaptersReconciler_DeletesOnlyObservedOwnedAdapters(t *testing.T) {
 	tests := []struct {
-		name      string
-		deleteErr error
-		wantEvent bool
+		name        string
+		ownerUID    types.UID
+		deleteErr   error
+		changeOwner bool
+		wantDelete  bool
+		wantEvent   bool
 	}{
+		{name: "owned adapter", ownerUID: "test-uid", wantDelete: true, wantEvent: true},
+		{name: "unowned adapter"},
+		{name: "another graph owns the adapter", ownerUID: "other-uid"},
 		{
-			name:      "successful delete emits event",
-			wantEvent: true,
+			name: "adapter disappeared before delete", ownerUID: "test-uid", wantDelete: true,
+			deleteErr: apierrors.NewNotFound(schema.GroupResource{
+				Group: v1alpha1.GroupVersion.Group, Resource: "dynamographdeploymentscalingadapters",
+			}, "test-dgd-worker"),
 		},
-		{
-			name:      "already absent adapter emits no event",
-			deleteErr: notFound,
-		},
+		{name: "ownership changed before delete", ownerUID: "test-uid", changeOwner: true, wantDelete: true},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
-			}
-			adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd-removed",
-					Namespace: "default",
-					Labels: map[string]string{
-						commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+	for _, disabled := range []bool{false, true} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("disabled=%t/%s", disabled, tt.name), func(t *testing.T) {
+				t.Log("Store an adapter selected either by component name or by graph label")
+				dgd := &v1beta1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: "test-uid"},
+				}
+				if disabled {
+					dgd.Spec.Components = []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "worker"}}
+				}
+				adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-dgd-worker", Namespace: dgd.Namespace, UID: "adapter-uid",
+						Labels: map[string]string{commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name},
 					},
-				},
-				Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
-					DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{
-						Name:        dgd.Name,
-						ServiceName: "removed",
+					Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+						DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{Name: dgd.Name, ServiceName: "worker"},
 					},
-				},
-			}
-			kubeClient := fake.NewClientBuilder().
-				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
-				WithObjects(dgd, adapter).
-				WithInterceptorFuncs(interceptor.Funcs{
-					Delete: func(
-						ctx context.Context,
-						writer client.WithWatch,
-						obj client.Object,
-						opts ...client.DeleteOption,
-					) error {
-						if tt.deleteErr != nil {
-							return tt.deleteErr
-						}
-						return writer.Delete(ctx, obj, opts...)
-					},
-				}).
-				Build()
-			recorder := events.NewFakeRecorder(10)
-			reconciler := &DynamoGraphDeploymentReconciler{
-				Client:   kubeClient,
-				Recorder: recorder,
-			}
+				}
+				if tt.ownerUID != "" {
+					adapter.OwnerReferences = []metav1.OwnerReference{{
+						APIVersion: v1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment",
+						Name: dgd.Name, UID: tt.ownerUID, Controller: ptr.To(true),
+					}}
+				}
 
-			require.NoError(t, newDGDScalingAdaptersReconciler(reconciler.Client, reconciler.Recorder).Reconcile(context.Background(), dgd))
-			if tt.wantEvent {
-				assert.Len(t, recorder.Events, 1)
-				return
-			}
-			assert.Empty(t, recorder.Events)
-		})
+				t.Log("Observe delete preconditions and simulate changes after the ownership read")
+				deleteCalled := false
+				kubeClient := fake.NewClientBuilder().
+					WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+					WithObjects(dgd, adapter).
+					WithInterceptorFuncs(interceptor.Funcs{
+						Delete: func(ctx context.Context, writer client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+							deleteCalled = true
+							options := (&client.DeleteOptions{}).ApplyOptions(opts)
+							require.NotNil(t, options.Preconditions)
+							require.Equal(t, ptr.To(obj.GetUID()), options.Preconditions.UID)
+							require.NotEmpty(t, obj.GetResourceVersion())
+							require.Equal(t, ptr.To(obj.GetResourceVersion()), options.Preconditions.ResourceVersion)
+							if tt.deleteErr != nil {
+								return tt.deleteErr
+							}
+							if tt.changeOwner {
+								replacement := obj.DeepCopyObject().(client.Object)
+								replacement.SetOwnerReferences(nil)
+								require.NoError(t, writer.Update(ctx, replacement))
+							}
+							return writer.Delete(ctx, obj, opts...)
+						},
+					}).Build()
+				recorder := events.NewFakeRecorder(10)
+
+				t.Log("Reconcile and publish an event only for a successful owned deletion")
+				err := newDGDScalingAdaptersReconciler(kubeClient, recorder).Reconcile(t.Context(), dgd)
+				if tt.changeOwner {
+					require.True(t, apierrors.IsConflict(err), "expected conflict, got %v", err)
+				} else {
+					require.NoError(t, err)
+				}
+				require.Equal(t, tt.wantDelete, deleteCalled)
+				if tt.wantEvent {
+					require.Len(t, recorder.Events, 1)
+					require.Contains(t, <-recorder.Events, "AdapterDeleted")
+				} else {
+					require.Empty(t, recorder.Events)
+				}
+
+				t.Log("Preserve unrelated adapters and objects whose ownership changed concurrently")
+				err = kubeClient.Get(t.Context(), client.ObjectKeyFromObject(adapter), adapter)
+				if tt.wantEvent {
+					require.True(t, apierrors.IsNotFound(err), "expected deletion, got %v", err)
+				} else {
+					require.NoError(t, err)
+				}
+			})
+		}
 	}
 }
 
@@ -701,6 +842,31 @@ func TestDynamoGraphDeploymentReconciler_mapAutoSnapshotJobToDGDRequestsAllowsRe
 
 func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 	ctx := context.Background()
+	newPCSGPodClique := func(pcsg, component string, replica int32) *grovev1alpha1.PodClique {
+		return &grovev1alpha1.PodClique{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("%s-%d-%s", pcsg, replica, component),
+				Namespace: "default",
+				Labels: map[string]string{
+					grovecommon.LabelPodCliqueScalingGroup:             pcsg,
+					grovecommon.LabelPodCliqueScalingGroupReplicaIndex: fmt.Sprint(replica),
+					commonconsts.KubeLabelDynamoComponent:              component,
+				},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "PodCliqueScalingGroup",
+					Name: pcsg, UID: types.UID(pcsg), Controller: ptr.To(true),
+				}},
+			},
+			Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+			Status: grovev1alpha1.PodCliqueStatus{
+				Replicas:           1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+				ScheduledReplicas:  1,
+				ObservedGeneration: ptr.To(int64(1)),
+			},
+		}
+	}
 
 	tests := []struct {
 		name                   string
@@ -851,7 +1017,6 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
-						RuntimeNamespace:  "default-test-dgd",
 						ScheduledReplicas: ptr.To(int32(2)),
 					},
 				},
@@ -889,11 +1054,12 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 						Replicas: 1,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:           1,
-						UpdatedReplicas:    1,
-						AvailableReplicas:  1,
-						ScheduledReplicas:  1,
-						ObservedGeneration: ptr.To(int64(1)),
+						Replicas:                          1,
+						UpdatedReplicas:                   1,
+						AvailableReplicas:                 1,
+						ScheduledReplicas:                 1,
+						ObservedGeneration:                ptr.To(int64(1)),
+						CurrentPodCliqueSetGenerationHash: ptr.To("current"),
 					},
 				},
 				&grovev1alpha1.PodCliqueScalingGroup{
@@ -905,13 +1071,16 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 						Replicas: 1,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:           1,
-						UpdatedReplicas:    1,
-						AvailableReplicas:  1,
-						ScheduledReplicas:  1,
-						ObservedGeneration: ptr.To(int64(1)),
+						Replicas:                          1,
+						UpdatedReplicas:                   1,
+						AvailableReplicas:                 1,
+						ScheduledReplicas:                 1,
+						ObservedGeneration:                ptr.To(int64(1)),
+						CurrentPodCliqueSetGenerationHash: ptr.To("current"),
 					},
 				},
+				newPCSGPodClique("test-dgd-0-decode", "decode", 0),
+				newPCSGPodClique("test-dgd-0-prefill", "prefill", 0),
 			},
 			wantReconcileResult: ReconcileResult{
 				State:   v1beta1.DGDStateSuccessful,
@@ -984,13 +1153,16 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:           2,
-						UpdatedReplicas:    2,
-						AvailableReplicas:  1, // Only 1 available, but 2 desired
-						ScheduledReplicas:  2, // both scheduled; availability (not scheduling) is the shortfall
-						ObservedGeneration: ptr.To(int64(1)),
+						Replicas:                          2,
+						UpdatedReplicas:                   2,
+						AvailableReplicas:                 1, // Only 1 available, but 2 desired
+						ScheduledReplicas:                 2, // both scheduled; availability (not scheduling) is the shortfall
+						ObservedGeneration:                ptr.To(int64(1)),
+						CurrentPodCliqueSetGenerationHash: ptr.To("current"),
 					},
 				},
+				newPCSGPodClique("test-dgd-0-aggregated", "aggregated", 0),
+				newPCSGPodClique("test-dgd-0-aggregated", "aggregated", 1),
 			},
 			wantReconcileResult: ReconcileResult{
 				State:   v1beta1.DGDStatePending,
@@ -1061,7 +1233,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 
 			result, err := reconciler.newGroveProgram().workloads.Reconcile(
 				ctx,
-				dgd,
+				groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController},
 				nil,
 				nil,
 			)
@@ -1073,24 +1245,68 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			t.Log("Expect workers to withhold their runtime namespace until a PCS revision is accepted")
-			want := tt.wantReconcileResult
-			want.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus, len(tt.wantReconcileResult.ComponentStatus))
-			for componentName, componentStatus := range tt.wantReconcileResult.ComponentStatus {
-				componentStatus.GPUsPerEngine = ptr.To(int64(0))
-				componentStatus.GPUsPerReplica = ptr.To(int64(0))
-				want.ComponentStatus[componentName] = componentStatus
-			}
 			for i := range dgd.Spec.Components {
 				component := &dgd.Spec.Components[i]
 				if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
 					continue
 				}
-				componentStatus := want.ComponentStatus[component.ComponentName]
-				componentStatus.RuntimeNamespace = ""
-				want.ComponentStatus[component.ComponentName] = componentStatus
+				componentStatus, exists := result.ComponentStatus[component.ComponentName]
+				g.Expect(exists).To(gomega.BeTrue())
+				g.Expect(componentStatus.RuntimeNamespace).To(gomega.BeEmpty())
 			}
 
-			g.Expect(result).To(gomega.Equal(want))
+			pcs := &grovev1alpha1.PodCliqueSet{}
+			g.Expect(fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-dgd", Namespace: "default"}, pcs)).To(gomega.Succeed())
+			pcs.UID = "current-pcs"
+			pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+			pcs.Status.CurrentGenerationHash = ptr.To("current")
+			g.Expect(fakeKubeClient.Update(ctx, pcs)).To(gomega.Succeed())
+
+			t.Log("Record the current PCS controller identity on Grove's scaling groups")
+			for _, object := range tt.existingGroveResources {
+				if group, ok := object.(*grovev1alpha1.PodCliqueScalingGroup); ok {
+					g.Expect(fakeKubeClient.Get(ctx, client.ObjectKeyFromObject(group), group)).To(gomega.Succeed())
+					group.UID = types.UID(group.Name)
+					group.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}
+					g.Expect(fakeKubeClient.Update(ctx, group)).To(gomega.Succeed())
+				}
+			}
+
+			result, err = reconciler.newGroveProgram().workloads.Reconcile(
+				ctx,
+				groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController},
+				nil,
+				nil,
+			)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			t.Log("Expect accepted, completed workers to publish the rendered hash-suffixed namespace")
+			wantFinal := tt.wantReconcileResult
+			wantFinal.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus, len(tt.wantReconcileResult.ComponentStatus))
+			for componentName, componentStatus := range tt.wantReconcileResult.ComponentStatus {
+				componentStatus.GPUsPerEngine = ptr.To(int64(0))
+				componentStatus.GPUsPerReplica = ptr.To(int64(0))
+				wantFinal.ComponentStatus[componentName] = componentStatus
+			}
+			workerHash, hashErr := dynamo.ComputeDGDWorkersSpecHash(dgd)
+			g.Expect(hashErr).NotTo(gomega.HaveOccurred())
+			for i := range dgd.Spec.Components {
+				component := &dgd.Spec.Components[i]
+				if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+					continue
+				}
+				componentStatus := wantFinal.ComponentStatus[component.ComponentName]
+				if componentStatus.RuntimeNamespace == "" {
+					continue
+				}
+				componentStatus.RuntimeNamespace = dynamo.ComponentRuntimeNamespace(
+					dgd.GetDynamoNamespaceForComponent(component),
+					string(component.ComponentType),
+					workerHash,
+				)
+				wantFinal.ComponentStatus[component.ComponentName] = componentStatus
+			}
+			g.Expect(result.ReconcileResult).To(gomega.Equal(wantFinal))
 		})
 	}
 }
@@ -1154,7 +1370,7 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 
 	_, err := reconciler.newGroveProgram().workloads.Reconcile(
 		ctx,
-		dgd,
+		groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController},
 		nil,
 		nil,
 	)
@@ -1241,25 +1457,10 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 		nil,
 	)
 
-	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	generatedPCS := renderedPCS.desired
-	renderDGD := renderedPCS.renderDeployment
 	g.Expect(dgd.GetComponentByName("VllmDecodeWorker").ComponentType).To(gomega.Equal(v1beta1.ComponentTypeDecode))
-
-	prefill := renderDGD.GetComponentByName("VllmPrefillWorker")
-	if prefill == nil {
-		t.Fatal("expected rendered prefill component")
-	}
-	g.Expect(prefill.ComponentType).To(gomega.Equal(v1beta1.ComponentTypeWorker))
-	g.Expect(prefill.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
-
-	decode := renderDGD.GetComponentByName("VllmDecodeWorker")
-	if decode == nil {
-		t.Fatal("expected rendered decode component")
-	}
-	g.Expect(decode.ComponentType).To(gomega.Equal(v1beta1.ComponentTypeWorker))
-	g.Expect(decode.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypeDecode))
 
 	g.Expect(generatedPCS.Spec.Template.Cliques[0].Name).To(gomega.Equal("vllmprefillworker"))
 
@@ -1277,16 +1478,23 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 	g.Expect(prefillClique.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
 	g.Expect(prefillClique.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]).To(gomega.Equal("1.1.0"))
 
-	decodeService, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-		ServiceName:     dynamo.GetDCDResourceName(renderDGD, "VllmDecodeWorker", ""),
-		Namespace:       renderDGD.Namespace,
-		ComponentType:   string(decode.ComponentType),
-		DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decode),
-		ComponentName:   "VllmDecodeWorker",
-		Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decode),
-		Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDGD, "VllmDecodeWorker", decode),
-		IsK8sDiscovery:  true,
-	})
+	decodeClique := podCliqueSetCliqueForComponent(generatedPCS, "VllmDecodeWorker")
+	g.Expect(decodeClique).NotTo(gomega.BeNil())
+	g.Expect(decodeClique.Labels[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypeWorker))
+	g.Expect(decodeClique.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypeDecode))
+
+	stableResources := newGroveStableResourcesReconciler(
+		fakeKubeClient,
+		events.NewFakeRecorder(10),
+		&configv1alpha1.OperatorConfiguration{Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes}},
+	)
+	_, err = stableResources.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, generatedPCS)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	decodeService := &corev1.Service{}
+	err = fakeKubeClient.Get(ctx, types.NamespacedName{
+		Name:      dynamo.GetDCDResourceName(dgd, "VllmDecodeWorker", ""),
+		Namespace: dgd.Namespace,
+	}, decodeService)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(decodeService.Spec.Selector[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypeWorker))
 }
@@ -1361,6 +1569,7 @@ func TestPrepareGroveTopologyConstraintUpgrade(t *testing.T) {
 func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
+	t.Log("Build desired and live replica counts for ordinary and grouped cliques")
 	desired := &grovev1alpha1.PodCliqueSet{
 		Spec: grovev1alpha1.PodCliqueSetSpec{
 			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
@@ -1368,11 +1577,18 @@ func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 					{Name: "frontend", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
 					{Name: "prefill", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
 					{Name: "new-worker", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 5}},
+					{Name: "leader", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
+					{Name: "worker", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
+					{Name: "grouped", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
+					{Name: "router", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
+					{Name: "decoder", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
 				},
 				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
 					{Name: "decode-group", CliqueNames: []string{"decode"}, Replicas: ptr.To(int32(1))},
 					{Name: "prefill-group", CliqueNames: []string{"prefill"}, Replicas: ptr.To(int32(1))},
 					{Name: "new-group", Replicas: ptr.To(int32(7))},
+					{Name: "compound", CliqueNames: []string{"leader", "worker", "decoder"}, Replicas: ptr.To(int32(1))},
+					{Name: "grouped", CliqueNames: []string{"grouped"}, Replicas: ptr.To(int32(1))},
 				},
 			},
 		},
@@ -1383,17 +1599,26 @@ func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 					{Name: "frontend", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 2}},
 					{Name: "prefill", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 4}},
+					{Name: "leader", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 9}},
+					{Name: "worker", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 9}},
+					{Name: "grouped", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 4}},
+					{Name: "router", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 3}},
+					{Name: "decoder", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 9}},
 				},
 				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
 					{Name: "decode-group", CliqueNames: []string{"decode"}},
 					{Name: "prefill-group", CliqueNames: []string{"prefill"}, Replicas: ptr.To(int32(6))},
+					{Name: "compound", CliqueNames: []string{"leader", "worker", "decoder"}, Replicas: ptr.To(int32(9))},
+					{Name: "grouped", CliqueNames: []string{"grouped"}, Replicas: ptr.To(int32(4))},
 				},
 			},
 		},
 	}
 
-	preserveGrovePodCliqueSetReplicas(desired, existing)
+	t.Log("Preserve live horizontal scale while keeping grouped role cardinalities")
+	preserveGrovePodCliqueSetReplicas(desired, existing, nil)
 
+	t.Log("Verify existing scale, grouped cardinalities and new-resource defaults")
 	replicasByClique := map[string]int32{}
 	for _, clique := range desired.Spec.Template.Cliques {
 		replicasByClique[clique.Name] = clique.Spec.Replicas
@@ -1402,11 +1627,18 @@ func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 		"frontend":   2,
 		"prefill":    1,
 		"new-worker": 5,
+		"leader":     1,
+		"worker":     1,
+		"grouped":    1,
+		"router":     3,
+		"decoder":    1,
 	}))
 	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.BeNil())
 	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[1].Replicas).NotTo(gomega.BeNil())
 	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[1].Replicas).To(gomega.Equal(int32(6)))
 	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[2].Replicas).To(gomega.Equal(int32(7)))
+	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[3].Replicas).To(gomega.Equal(int32(9)))
+	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[4].Replicas).To(gomega.Equal(int32(4)))
 }
 
 func TestPreserveGrovePodCliqueSetReplicasSkipsCheckpointGatedComponents(t *testing.T) {
@@ -1515,14 +1747,11 @@ func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	renderDGD := renderedPCS.renderDeployment
-	prefill := renderDGD.GetComponentByName("prefill")
-	if prefill == nil {
-		t.Fatal("expected rendered prefill component")
-	}
-	g.Expect(prefill.ComponentType).To(gomega.Equal(v1beta1.ComponentTypePrefill))
+	prefill := podCliqueSetCliqueForComponent(renderedPCS.desired, "prefill")
+	g.Expect(prefill).NotTo(gomega.BeNil())
+	g.Expect(prefill.Labels[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
 }
 
 func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
@@ -2040,6 +2269,63 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 			},
 		},
 		{
+			name: "Grove pathway - ready child remains in progress until PCS observes restart generation",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type: v1alpha1.RestartStrategyTypeParallel,
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"frontend"},
+				},
+			},
+			existingResources: []client.Object{
+				&grovev1alpha1.PodCliqueSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: grovev1alpha1.PodCliqueSetStatus{
+						ObservedGeneration: ptr.To(int64(1)),
+					},
+				},
+				&grovev1alpha1.PodClique{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-0-frontend",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Spec: grovev1alpha1.PodCliqueSpec{
+						Replicas: 1,
+					},
+					Status: grovev1alpha1.PodCliqueStatus{
+						Replicas:           1,
+						UpdatedReplicas:    1,
+						ReadyReplicas:      1,
+						ObservedGeneration: ptr.To(int64(1)),
+					},
+				},
+			},
+			groveEnabled: true,
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"},
+			},
+		},
+		{
 			name: "Grove pathway - sequential restart in progress",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
@@ -2076,6 +2362,51 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 						Replicas:           2,
 						UpdatedReplicas:    1, // Not fully updated
 						ReadyReplicas:      1,
+						ObservedGeneration: ptr.To(int64(1)),
+					},
+				},
+			},
+			groveEnabled: true,
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"},
+			},
+		},
+		{
+			name: "Grove pathway - removed in-progress component resets sequential restart",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type:  v1alpha1.RestartStrategyTypeSequential,
+						Order: []string{"frontend", "decode"},
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"decode": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"removed"},
+				},
+			},
+			existingResources: []client.Object{
+				&grovev1alpha1.PodCliqueSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Status: grovev1alpha1.PodCliqueSetStatus{
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -2391,7 +2722,10 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 			restartReconciler := newDGDRestartReconciler()
 			var resolveProgress restartProgressResolver = newComponentRestartProgressResolver(reconciler.Client).Resolve
 			if tt.groveEnabled {
-				resolveProgress = newGroveRestartProgressResolver(reconciler.Client).Resolve
+				resolver := newGroveRestartProgressResolver(reconciler.Client)
+				resolveProgress = func(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, inProgress []string) []string {
+					return resolver.Resolve(ctx, groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, inProgress)
+				}
 			}
 			result := restartReconciler.computeRestartStatusWithProgressResolver(ctx, dgd, resolveProgress)
 
@@ -3278,7 +3612,7 @@ func TestDGDGroveTopologyConditionReconciler_Reconcile(t *testing.T) {
 			programResult := newWorkloadProgramResult(tt.dgd)
 			if tt.groveEnabled {
 				newDGDGroveTopologyConditionReconciler(reconciler.Client).
-					Reconcile(ctx, tt.dgd, &programResult)
+					Reconcile(ctx, groveReconcileRequest{DGD: tt.dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, &programResult)
 			}
 			g.Expect(tt.dgd.Status).To(gomega.Equal(originalStatus), "status projection must not mutate request.DGD.Status")
 
@@ -3305,39 +3639,6 @@ func TestDGDGroveTopologyConditionReconciler_Reconcile(t *testing.T) {
 	}
 }
 
-func TestGroveWatchSetup_MapPodCliqueToRequests(t *testing.T) {
-	setup := newGroveWatchSetup(nil)
-
-	t.Run("labeled PodClique maps directly to its DGD", func(t *testing.T) {
-		requests := setup.mapPodCliqueToRequests(
-			context.Background(),
-			&grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "graph-0-worker",
-					Namespace: "default",
-					Labels: map[string]string{
-						commonconsts.KubeLabelDynamoGraphDeploymentName: "graph",
-					},
-				},
-			},
-		)
-
-		require.Len(t, requests, 1)
-		assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "graph"}, requests[0].NamespacedName)
-	})
-
-	t.Run("unlabeled or unrelated objects are ignored", func(t *testing.T) {
-		assert.Empty(t, setup.mapPodCliqueToRequests(
-			context.Background(),
-			&grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "orphan", Namespace: "default"}},
-		))
-		assert.Empty(t, setup.mapPodCliqueToRequests(
-			context.Background(),
-			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "not-a-podclique", Namespace: "default"}},
-		))
-	})
-}
-
 func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 	// Register Grove types with the scheme so fake client can handle them
 	if err := grovev1alpha1.AddToScheme(scheme.Scheme); err != nil {
@@ -3358,11 +3659,13 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "dynamo-recipe-0-worker",
 					Namespace: "mwieczorek-dsv32-trtllm-agg",
+					UID:       "pcsg-uid",
 					OwnerReferences: []metav1.OwnerReference{
 						{
 							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
 							Kind:       "PodCliqueSet",
 							Name:       "dynamo-recipe",
+							UID:        "pcs-uid",
 							Controller: ptr.To(true),
 						},
 					},
@@ -3372,14 +3675,16 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "dynamo-recipe",
 					Namespace: "mwieczorek-dsv32-trtllm-agg",
+					UID:       "pcs-uid",
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "dynamo-recipe",
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: v1alpha1.GroupVersion.String(),
+							APIVersion: v1beta1.GroupVersion.String(),
 							Kind:       "DynamoGraphDeployment",
 							Name:       "dynamo-recipe",
+							UID:        "dgd-uid",
 							Controller: ptr.To(true),
 						},
 					},
@@ -3395,11 +3700,13 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "truncated-pcs-0-worker",
 					Namespace: "default",
+					UID:       "pcsg-uid",
 					OwnerReferences: []metav1.OwnerReference{
 						{
 							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
 							Kind:       "PodCliqueSet",
 							Name:       "truncated-pcs",
+							UID:        "pcs-uid",
 							Controller: ptr.To(true),
 						},
 					},
@@ -3409,14 +3716,16 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "truncated-pcs",
 					Namespace: "default",
+					UID:       "pcs-uid",
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "my-very-long-original-dgd-name",
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: v1alpha1.GroupVersion.String(),
+							APIVersion: v1beta1.GroupVersion.String(),
 							Kind:       "DynamoGraphDeployment",
 							Name:       "my-very-long-original-dgd-name",
+							UID:        "dgd-uid",
 							Controller: ptr.To(true),
 						},
 					},
@@ -3488,7 +3797,9 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				builder = builder.WithObjects(tt.existingPCS)
 			}
 			r := &DynamoGraphDeploymentReconciler{
-				Client: builder.Build(),
+				Client:        builder.Build(),
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
 			reqs := newGroveWatchSetup(r.Client).
 				mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
@@ -3502,7 +3813,7 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 	}
 }
 
-func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
+func TestPodCliqueEventStatusChanges(t *testing.T) {
 	base := func() *grovev1alpha1.PodClique {
 		return &grovev1alpha1.PodClique{
 			Spec: grovev1alpha1.PodCliqueSpec{Replicas: 3},
@@ -3514,6 +3825,7 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 				ScheduleGatedReplicas:             0,
 				ObservedGeneration:                ptr.To(int64(1)),
 				CurrentPodCliqueSetGenerationHash: ptr.To("previous-revision"),
+				CurrentPodTemplateHash:            ptr.To("previous-template"),
 			},
 		}
 	}
@@ -3573,6 +3885,13 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "LPX-only Pod template hash change is filtered",
+			mutate: func(pc *grovev1alpha1.PodClique) {
+				pc.Status.CurrentPodTemplateHash = ptr.To("target-template")
+			},
+			want: false,
+		},
+		{
 			name: "update completion change is significant",
 			mutate: func(pc *grovev1alpha1.PodClique) {
 				updateEndedAt := metav1.Now()
@@ -3601,13 +3920,15 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Wake native reconciliation for readiness and namespace cutover")
 			oldPC := base()
 			newPC := base()
 			tt.mutate(newPC)
-			assert.Equal(t, tt.want, podCliqueStatusChangeIsSignificant(oldPC, newPC))
+			assert.Equal(t, tt.want, podCliqueEventPredicates().Update(event.UpdateEvent{ObjectOld: oldPC, ObjectNew: newPC}))
 		})
 	}
 
+	t.Log("Wake reconciliation when only the PodClique scheduling message changes")
 	oldPodClique := base()
 	oldPodClique.Status.Conditions = []metav1.Condition{{
 		Type:    groveconstants.ConditionTypePodCliqueScheduled,
@@ -3617,10 +3938,10 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 	}}
 	newPodClique := oldPodClique.DeepCopy()
 	newPodClique.Status.Conditions[0].Message = "two nodes unavailable"
-	assert.False(t, podCliqueStatusChangeIsSignificant(oldPodClique, newPodClique))
+	assert.True(t, podCliqueEventPredicates().Update(event.UpdateEvent{ObjectOld: oldPodClique, ObjectNew: newPodClique}))
 }
 
-func TestPCSGStatusChangeIsSignificant(t *testing.T) {
+func TestPCSGEventStatusChanges(t *testing.T) {
 	base := func() *grovev1alpha1.PodCliqueScalingGroup {
 		return &grovev1alpha1.PodCliqueScalingGroup{
 			Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 3},
@@ -3711,13 +4032,15 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Wake native reconciliation for readiness and namespace cutover")
 			oldPCSG := base()
 			newPCSG := base()
 			tt.mutate(newPCSG)
-			assert.Equal(t, tt.want, pcsgStatusChangeIsSignificant(oldPCSG, newPCSG))
+			assert.Equal(t, tt.want, pcsgEventPredicates().Update(event.UpdateEvent{ObjectOld: oldPCSG, ObjectNew: newPCSG}))
 		})
 	}
 
+	t.Log("Wake reconciliation when only the scaling group scheduling message changes")
 	oldScalingGroup := base()
 	oldScalingGroup.Status.Conditions = []metav1.Condition{{
 		Type:    groveconstants.ConditionTypeMinAvailableBreached,
@@ -3727,7 +4050,7 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 	}}
 	newScalingGroup := oldScalingGroup.DeepCopy()
 	newScalingGroup.Status.Conditions[0].Message = "two replicas unavailable"
-	assert.False(t, pcsgStatusChangeIsSignificant(oldScalingGroup, newScalingGroup))
+	assert.True(t, pcsgEventPredicates().Update(event.UpdateEvent{ObjectOld: oldScalingGroup, ObjectNew: newScalingGroup}))
 }
 
 func TestGroveChildEventPredicates(t *testing.T) {
@@ -3736,10 +4059,4 @@ func TestGroveChildEventPredicates(t *testing.T) {
 	assert.False(t, podCliquePredicates.Create(event.CreateEvent{Object: podClique}))
 	assert.False(t, podCliquePredicates.Delete(event.DeleteEvent{Object: podClique}))
 	assert.False(t, podCliquePredicates.Generic(event.GenericEvent{Object: podClique}))
-
-	scalingGroup := &grovev1alpha1.PodCliqueScalingGroup{}
-	scalingGroupPredicates := pcsgEventPredicates()
-	assert.False(t, scalingGroupPredicates.Create(event.CreateEvent{Object: scalingGroup}))
-	assert.False(t, scalingGroupPredicates.Delete(event.DeleteEvent{Object: scalingGroup}))
-	assert.False(t, scalingGroupPredicates.Generic(event.GenericEvent{Object: scalingGroup}))
 }

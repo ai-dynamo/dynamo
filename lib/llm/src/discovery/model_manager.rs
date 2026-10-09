@@ -2252,7 +2252,7 @@ impl ModelManager {
         client: Client,
         kv_cache_block_size: u32,
         policy: SelectionPolicySource,
-        kv_router_config: Option<KvRouterConfig>,
+        mut kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
@@ -2261,6 +2261,9 @@ impl ModelManager {
         scheduler_load: crate::kv_router::SchedulerLoadSender,
         cancellation_token: CancellationToken,
     ) -> anyhow::Result<Arc<KvRouter>> {
+        if let Some(config) = &mut kv_router_config {
+            config.apply_policy_config().map_err(anyhow::Error::msg)?;
+        }
         let endpoint = client.endpoint.clone();
         let lora_domain = self.lora_domain(&endpoint.id());
 
@@ -2323,19 +2326,12 @@ impl ModelManager {
             None
         };
 
-        let kv_event_source_requirement =
-            KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
-        let cache_required = wants_cache
-            || effective_kv_router_config.serve_indexer
-            || effective_kv_router_config.enable_session_prefix_index
-            || matches!(
-                kv_event_source_requirement,
-                KvEventSourceRequirement::ConditionalDisaggDecodeCache
-                    | KvEventSourceRequirement::Unknown
-            );
-        let kv_source_membership = if cache_required
-            && kv_event_source_requirement.should_subscribe(&effective_kv_router_config)
-        {
+        let kv_event_source_requirement = KvEventSourceRequirement::derive(
+            worker_role,
+            &effective_kv_router_config,
+            policy.inputs(),
+        );
+        let kv_source_membership = if kv_event_source_requirement.should_subscribe() {
             Some(
                 self.get_or_create_kv_source_membership_watch(&endpoint)
                     .await?,

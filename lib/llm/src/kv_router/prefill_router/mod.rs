@@ -95,6 +95,10 @@ enum PrefillOutcome {
     Bootstrap {
         bootstrap_info: BootstrapInfo,
         worker_id: u64,
+        /// The decode engine's KV receiver needs the prefill DP rank up front;
+        /// without it SGLang parks the request and asks the prefill bootstrap
+        /// server over HTTP, and the prefill forward waits on that round trip.
+        prefill_dp_rank: Option<u32>,
     },
     Completed {
         result: PrefillResult,
@@ -120,9 +124,12 @@ fn into_decode_request(
         PrefillOutcome::Bootstrap {
             bootstrap_info,
             worker_id,
+            prefill_dp_rank,
         } => {
             req.bootstrap_info = Some(bootstrap_info);
-            req.routing_mut().prefill_worker_id = Some(worker_id);
+            let routing = req.routing_mut();
+            routing.prefill_worker_id = Some(worker_id);
+            routing.prefill_dp_rank = prefill_dp_rank;
         }
         PrefillOutcome::Completed {
             result,
@@ -155,6 +162,7 @@ fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
 
 struct PreparedPrefill {
     worker_id: u64,
+    prefill_dp_rank: Option<u32>,
     bootstrap_info: Option<BootstrapInfo>,
     topology_constraints: Option<RoutingConstraints>,
 }
@@ -447,6 +455,7 @@ impl
                 PrefillOutcome::Bootstrap {
                     bootstrap_info,
                     worker_id: prepared.worker_id,
+                    prefill_dp_rank: prepared.prefill_dp_rank,
                 }
             } else {
                 drop(prefill_phase_barrier);
@@ -467,6 +476,7 @@ impl
                             PrefillOutcome::Bootstrap {
                                 bootstrap_info,
                                 worker_id: prepared.worker_id,
+                                prefill_dp_rank: prepared.prefill_dp_rank,
                             }
                         } else {
                             PrefillOutcome::Completed {
@@ -633,6 +643,7 @@ impl PrefillRouter {
 
         Ok(PreparedPrefill {
             worker_id,
+            prefill_dp_rank: dp_rank,
             bootstrap_info,
             topology_constraints,
         })
@@ -862,6 +873,7 @@ mod tests {
                 handoff_id: None,
             },
             worker_id: 11,
+            prefill_dp_rank: Some(3),
         };
         let completed = PrefillOutcome::Completed {
             result: PrefillResult {
@@ -872,10 +884,16 @@ mod tests {
             worker_link: None,
         };
 
-        for (label, outcome, expected_worker) in
-            [("bootstrap", bootstrap, 11), ("completed", completed, 12)]
-        {
+        for (label, outcome, expected_worker, expected_dp_rank) in [
+            ("bootstrap", bootstrap, 11, Some(3)),
+            ("completed", completed, 12, None),
+        ] {
             let decode = into_decode_request(query_only_request(), outcome);
+            assert_eq!(
+                decode.routing.as_ref().and_then(|r| r.prefill_dp_rank),
+                expected_dp_rank,
+                "{label}: the bootstrap leg must tell decode which prefill DP rank owns the KV"
+            );
             assert!(
                 decode.staged_kv_cleanup,
                 "{label}: prefill staged KV for one decode worker, so the leg must be marked for cleanup dispatch"
