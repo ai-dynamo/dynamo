@@ -20,11 +20,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -178,19 +181,37 @@ func (p *groveProgram) Reconcile(
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 
-	result, err := p.workloads.Reconcile(
+	groveResult, err := p.workloads.Reconcile(
 		ctx,
 		req,
 		restart.State,
 		checkpoints.Infos,
 	)
 
+	result := groveResult.ReconcileResult
+
 	if err != nil {
 		// Preserve newly observed component status while leaving the generation unobserved.
-		if result.ComponentStatus != nil {
+		if programResult.Status.Components == nil {
 			programResult.Status.Components = result.ComponentStatus
+		} else {
+			maps.Copy(programResult.Status.Components, result.ComponentStatus)
 		}
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
+	}
+
+	// Publish scaling deferral without discarding observed component status or readiness.
+	condition := metav1.Condition{Type: "ScalingDeferred", Status: metav1.ConditionFalse, ObservedGeneration: req.DGD.Generation, Reason: "ScalingAllowed", Message: "No Grove replica changes are deferred"}
+	if groveResult.ScalingDeferred {
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = "GroveUpdatePending"
+		condition.Message = "Replica changes are deferred until Grove observes the desired PodCliqueSet and any coherent update completes"
+		result.State = nvidiacomv1beta1.DGDStatePending
+		result.Reason = "scaling_deferred"
+		result.Message = Message(condition.Message)
+	}
+	if groveResult.ScalingDeferred || meta.FindStatusCondition(programResult.Status.Conditions, "ScalingDeferred") != nil {
+		meta.SetStatusCondition(&programResult.Status.Conditions, condition)
 	}
 
 	if req.DGD.HasLPXComponent() && !apiequality.Semantic.DeepEqual(req.DGD.Status.Restart, restart.Status) {
@@ -206,6 +227,15 @@ func (p *groveProgram) Reconcile(
 			return programResult, fmt.Errorf("reconcile LPX child: %w", err)
 		}
 		result = mergeLPXChildStatus(req.DGD, child, result)
+		// A current LPX capacity wait contributes to the graph-level scaling diagnostic.
+		if child != nil && child.Status.ObservedGeneration == child.Generation {
+			if deferred := meta.FindStatusCondition(child.Status.Conditions, "ScalingDeferred"); deferred != nil && deferred.Status == metav1.ConditionTrue && deferred.ObservedGeneration == child.Generation {
+				condition.Status = metav1.ConditionTrue
+				condition.Reason = deferred.Reason
+				condition.Message = deferred.Message
+				meta.SetStatusCondition(&programResult.Status.Conditions, condition)
+			}
+		}
 	}
 
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)

@@ -49,6 +49,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -141,9 +142,15 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, err
 	}
 
-	if compatibilityErr := stderrors.Join(checkpoint.ValidateCheckpointCompatibility(
-		dynamoComponentDeployment.Spec.Experimental,
-	)...); compatibilityErr != nil {
+	// Reject unsupported stored snapshot topologies before rendering workloads.
+	compatibilityErrors := checkpoint.ValidateCheckpointCompatibility(dynamoComponentDeployment.Spec.Experimental)
+	if snapshotFailoverErr := dynamo.ValidateSnapshotFailover(
+		&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec, field.NewPath("spec"),
+		dynamoComponentDeployment.Spec.BackendFramework,
+	).ToAggregate(); snapshotFailoverErr != nil {
+		compatibilityErrors = append(compatibilityErrors, snapshotFailoverErr)
+	}
+	if compatibilityErr := stderrors.Join(compatibilityErrors...); compatibilityErr != nil {
 		if clearErr := r.clearDCDComponentProjections(ctx, req); clearErr != nil {
 			return ctrl.Result{}, fmt.Errorf("clear component projections for invalid checkpoint configuration: %w", clearErr)
 		}

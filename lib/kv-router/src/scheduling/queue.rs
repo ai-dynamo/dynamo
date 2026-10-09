@@ -2111,7 +2111,13 @@ mod tests {
             self.response_rx.lock().unwrap().take();
         }
 
-        fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+        fn observe_load(
+            &self,
+            _: &WorkerWithDpRank,
+            _: &str,
+            _: crate::sequences::LocalWorkerLoad,
+        ) {
+        }
     }
 
     #[derive(Default)]

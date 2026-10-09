@@ -40,10 +40,10 @@ dynamo:
   planner_build_image: python
   planner_build_image_tag: 3.13-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.13-v4.1.4
+  planner_runtime_image_tag: 3.13-v4.1.6
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@eb5be985
+  planner_baseline_sbom: python@5be5c1f0
   # Planner-scoped interpreter. The planner uses a separate, newer CPython line
   # from the global python_version below because it is the only stage whose
   # interpreter is decoupled from the framework/runtime bases: the build stage
@@ -92,8 +92,8 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.30.0-ubuntu2404
-    vllm_omni_ref: "v0.30.0rc1"
+    runtime_image_tag: v0.31.0-ubuntu2404
+    vllm_omni_ref: "v0.31.0rc1"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM

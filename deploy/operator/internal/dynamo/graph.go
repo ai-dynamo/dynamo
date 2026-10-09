@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -1947,6 +1949,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	// generateGrovePodCliqueSet → gmsWeightServerPodSpec); re-applying the
 	// claim and injecting a sidecar here would produce a double-wired engine
 	// pod (stray GMS sidecar, conflicting claim).
+	snapshotEnabled := GetCheckpoint(component) != nil
 	gmsSpec := GetGPUMemoryService(component)
 	if gmsSpec != nil && !component.IsInterPodGMSEnabled() {
 		// Recheck rendered containers to protect direct or legacy DCDs that bypass admission.
@@ -1958,10 +1961,8 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
-		// Snapshot + intra-pod GMS uses V1 for every backend. GMS or
-		// failover without checkpoint stays on the V0 sidecar.
-		useV1 := GetCheckpoint(component) != nil
-		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0], useV1)
+		// Snapshot workers use GMS V1; snapshot-less workers retain GMS V0.
+		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0], snapshotEnabled)
 		for _, name := range gmsSpec.ExtraClientContainers {
 			var container *corev1.Container
 			for i := range podSpec.Containers {
@@ -1974,16 +1975,22 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 				return nil, fmt.Errorf("gpuMemoryService extra client container %q disappeared while rendering the pod", name)
 			}
 			gms.EnsureClient(&podSpec, container)
-			if useV1 {
+			if snapshotEnabled {
 				gms.EnableV1(container)
 			}
 		}
 	}
 
-	// Clone main container into two engine containers (active + standby) for failover.
-	// Runs after GMS so the main container already has DRA claims and shared volume.
+	// Select the failover path once, after GMS has attached the shared resources.
+	// Snapshot: vLLM/SGLang restored election. No snapshot: cold-start failover, vLLM with GMS V0 shadow mode.
 	if IsIntraPodFailoverEnabled(component) {
-		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
+		var err error
+		if snapshotEnabled {
+			err = buildSnapshotFailoverPod(&podSpec, numberOfNodes, backendFramework)
+		} else {
+			err = buildColdStartFailoverPod(&podSpec, numberOfNodes, backendFramework)
+		}
+		if err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
 	}
@@ -2160,6 +2167,12 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			continue
 		}
 
+		// Resolve the frontend image independently of the component runtime.
+		var resolvedRuntimeVersion *runtimeversion.Version
+		if version, err := runtimeversion.ParseImageVersion(podSpec.Containers[i].Image); err == nil {
+			resolvedRuntimeVersion = &version
+		}
+
 		// Co-located frontend discovery uses its own identity in both worker layouts.
 		frontendContext := ComponentContext{
 			numberOfNodes:                  1,
@@ -2170,6 +2183,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			Discovery:                      parentContext.Discovery,
 			Infrastructure:                 parentContext.Infrastructure,
 			DynamoNamespace:                parentContext.DynamoNamespace,
+			RuntimeVersion:                 resolvedRuntimeVersion,
 		}
 
 		frontendDefaults := NewFrontendDefaults()
@@ -2681,8 +2695,8 @@ func buildCliqueFromTemplate(p cliqueParams, template corev1.PodTemplateSpec) (*
 	// in termination of the PodGang that it belongs to.
 	minAvailable := int32(1)
 	// A component without a scaling group owns the availability threshold on its PCLQ.
-	if !p.usesPCSG && p.component.MinAvailable != nil {
-		minAvailable = *p.component.MinAvailable
+	if !p.usesPCSG {
+		minAvailable = provideroverride.EffectiveGroveMinAvailable(p.component)
 	}
 	// pclqs that are part of a multi-node component set minAvailable to their
 	// replica count. Plain multi-node needs every leader/worker rank ready for
@@ -2856,7 +2870,7 @@ func GenerateGrovePodCliqueSet(
 	checkpointInfoByComponent map[string]*checkpoint.CheckpointInfo,
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	// Construct the common PCS envelope before rendering ordinary components.
-	gangSet, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig)
+	gangSet, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig, existingPodCliqueSet)
 	if err != nil {
 		return nil, err
 	}
@@ -3049,11 +3063,13 @@ func groveRestartAnnotations(pcs *grovev1alpha1.PodCliqueSet) map[string]string 
 }
 
 // newGrovePodCliqueSet constructs the shared Grove envelope. The caller assigns
-// the workload identity and fills its cliques. Inputs must be non-nil and are not mutated.
+// the workload identity and fills its cliques. Inputs are not mutated.
+// existingPCS may be nil on creation; other pointer inputs must be non-nil.
 func newGrovePodCliqueSet(
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
+	existingPCS *grovev1alpha1.PodCliqueSet,
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	// Build the shared Grove object before rendering its component cliques.
 	gangSet := &grovev1alpha1.PodCliqueSet{}
@@ -3068,7 +3084,7 @@ func newGrovePodCliqueSet(
 	// KAI-Scheduler is injected later on each clique via schedulerName and queue label.
 	injectVolcanoQueueAnnotation(gangSet, dynamoDeployment.Annotations, runtimeConfig)
 	gangSet.Spec.Replicas = 1
-	updateStrategy, err := groveUpdateStrategyFromAnnotations(dynamoDeployment.Annotations)
+	updateStrategy, err := ResolveGroveUpdateStrategy(dynamoDeployment, existingPCS)
 	if err != nil {
 		return nil, err
 	}
@@ -3100,10 +3116,7 @@ func buildGroveScalingGroupConfig(
 	isInterPodGMS bool,
 ) grovev1alpha1.PodCliqueScalingGroupConfig {
 	replicas := component.Replicas
-	minAvailable := ptr.To(int32(1))
-	if component.MinAvailable != nil {
-		minAvailable = ptr.To(*component.MinAvailable)
-	}
+	minAvailable := ptr.To(provideroverride.EffectiveGroveMinAvailable(component))
 	if shouldGateGroveScalingGroupReplicas(checkpointInfo) {
 		replicas = ptr.To(int32(0))
 	}
@@ -3125,30 +3138,6 @@ func shouldGateGroveScalingGroupReplicas(checkpointInfo *checkpoint.CheckpointIn
 		checkpointInfo.Enabled &&
 		checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 		!checkpointInfo.Ready
-}
-
-func groveUpdateStrategyFromAnnotations(annotations map[string]string) (*grovev1alpha1.UpdateStrategyType, error) {
-	value, ok := annotations[commonconsts.KubeAnnotationGroveUpdateStrategy]
-	if !ok {
-		return nil, nil
-	}
-
-	var strategy grovev1alpha1.UpdateStrategyType
-	switch value {
-	case string(grovev1alpha1.RollingRecreateStrategy):
-		strategy = grovev1alpha1.RollingRecreateStrategy
-	case string(grovev1alpha1.OnDeleteStrategy):
-		strategy = grovev1alpha1.OnDeleteStrategy
-	default:
-		return nil, fmt.Errorf(
-			"unsupported Grove update strategy annotation %q=%q: supported values are %q and %q",
-			commonconsts.KubeAnnotationGroveUpdateStrategy,
-			value,
-			grovev1alpha1.RollingRecreateStrategy,
-			grovev1alpha1.OnDeleteStrategy,
-		)
-	}
-	return &strategy, nil
 }
 
 // generatePodSpecForRole builds the pod spec for a single role, handling GMS
