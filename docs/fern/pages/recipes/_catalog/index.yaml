@@ -32,6 +32,7 @@ recipes:
 - qwen3-235b-a22b-fp8
 - qwen3-32b-fp8
 - qwen3-6-35b-a3b
+- minimax-m3
 deferred_recipes:
 - qwen3-6-35b
 - kimi-k2-5
