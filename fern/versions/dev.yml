@@ -139,8 +139,6 @@ navigation:
         contents:
           - page: Introduction
             path: ../pages-dev/kubernetes/model-deployment/introduction.mdx
-          - page: Sidecar Backends (Experimental)
-            path: ../pages-dev/kubernetes/model-deployment/sidecar-backends.md
           - page: Deploy with DGD
             path: ../pages-dev/kubernetes/model-deployment/deploy-with-dgd.md
           - page: Expose the Frontend
