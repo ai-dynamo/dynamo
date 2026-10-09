@@ -821,8 +821,8 @@ impl GenerateMetricCollector {
         let cached_tokens = output
             .completion_usage
             .as_ref()
-            // A migrated attempt includes already-delivered output tokens in
-            // its prompt. Ignore that attempt-local usage for this logical
+            // RetryManager rebases a migrated attempt's usage onto the client's
+            // prompt. Ignore any usage that still doesn't match this logical
             // request and let the RequestTracker fallback run on drop.
             .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
             .and_then(|usage| usage.prompt_tokens_details.as_ref())
@@ -850,7 +850,7 @@ impl Drop for GenerateMetricCollector {
     fn drop(&mut self) {
         // Matching backend usage is authoritative when present. The response
         // collector latches it during streaming; this logical-request router
-        // estimate fills missing or migration-expanded attempt usage.
+        // estimate fills missing or mismatched usage.
         self.response
             .observe_cached_tokens(self.tracker.cached_tokens());
     }
@@ -3339,8 +3339,10 @@ pub(crate) mod tests {
         );
         let cached_tokens =
             metric_value(&families, "dynamo_frontend_cached_tokens", &model_labels).get_histogram();
+        // The retry's cache hit covers the 3 token prompt, so the rebased backend count wins
+        // over the router's estimate of 1.
         assert_eq!(cached_tokens.get_sample_count(), 1);
-        assert_eq!(cached_tokens.get_sample_sum(), 1.0);
+        assert_eq!(cached_tokens.get_sample_sum(), 3.0);
     }
 
     #[test]
