@@ -32,7 +32,7 @@ use dynamo_kv_router::protocols::{
     KvCacheStoredBlockData, OverlapScores, StorageTier, TokensWithHashes, WorkerWithDpRank,
 };
 use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
-use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
+use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
 use dynamo_mocker::loadgen::{ReplayRequestHashes, SessionTrace, Trace, TurnTrace};
 use dynamo_mocker::replay::{
     ReplayTimedKvEvent, ReplayTimedRequest, ReplayWorkerArtifacts, native_g1_parent_chain_artifact,
@@ -107,26 +107,25 @@ impl MockEngineParityKind {
         }
     }
 
-    fn mock_engine_args(self) -> anyhow::Result<MockEngineArgs> {
-        let mut builder = MockEngineArgs::builder()
-            .engine_type(self.engine_type())
-            .num_gpu_blocks(PARITY_NUM_GPU_BLOCKS)
-            .block_size(BLOCK_SIZE as usize)
-            .speedup_ratio(10.0)
-            .enable_prefix_caching(true)
-            .max_num_batched_tokens(None)
-            .max_num_seqs(None);
-
+    fn mock_engine_args(self) -> anyhow::Result<MockerConfig> {
+        let mut config = serde_json::json!({
+            "engine": {
+                "backend": self.engine_type(),
+                "num_gpu_blocks": PARITY_NUM_GPU_BLOCKS,
+                "block_size": BLOCK_SIZE as usize,
+                "speedup_ratio": 10.0,
+                "enable_prefix_caching": true,
+                "max_num_batched_tokens": usize::MAX,
+                "max_num_seqs": usize::MAX
+            }
+        });
         if matches!(self, Self::Sglang) {
-            builder = builder.sglang(Some(SglangArgs {
-                page_size: Some(BLOCK_SIZE as usize),
-                max_prefill_tokens: Some(SGLANG_PARITY_PREFILL_TOKENS),
-                chunked_prefill_size: Some(SGLANG_PARITY_PREFILL_TOKENS),
-                ..Default::default()
-            }));
+            config["engine"]["sglang"] = serde_json::json!({
+                "max_prefill_tokens":SGLANG_PARITY_PREFILL_TOKENS,
+                "chunked_prefill_size":SGLANG_PARITY_PREFILL_TOKENS
+            });
         }
-
-        builder.build()?.normalized()
+        MockerConfig::from_value(config)
     }
 }
 

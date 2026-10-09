@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+source: recipes/qwen3-32b-fp8/vllm/disagg/deploy.yaml
+requirements:
+  a100-sxm-8gpu:
+    gpus: 8

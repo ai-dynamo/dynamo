@@ -29,7 +29,7 @@ backend:
       moe_ep_size: 1
       attention_dp_size: 1
       runtime:
-        cold_start_delay_s: 30
+        cold_start_delay_s: 60
       extra_args: {}
     prefill:
       runtime:

@@ -58,6 +58,7 @@ class SearchStrategy(str, Enum):
 
 
 class GPUSKUType(str, Enum):
+    VRNVL72 = "vr_nvl72"
     GB200 = "gb200"
     GB200SXM = "gb200_sxm"
     GB10 = "gb10"

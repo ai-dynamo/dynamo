@@ -258,7 +258,7 @@ impl AnthropicStreamConverter {
                 // the name. Keep the terminal rule aligned with the unary converter.
                 !(truncated && Some(call_index) == last_call)
             } else {
-                serde_json::from_str::<serde_json::Value>(&raw).is_ok()
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw).is_ok()
             };
             let repair =
                 is_final && truncated && Some(call_index) == last_call && !arguments_are_valid;
@@ -1096,6 +1096,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 
@@ -1140,6 +1141,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 
@@ -1567,6 +1569,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 
@@ -2059,6 +2062,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_stream_suppresses_non_object_inputs() {
+        for arguments in ["[]", "null", "42", "true", r#""hello""#] {
+            for reason in [FinishReason::ToolCalls, FinishReason::Length] {
+                let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+                let mut events = conv.process_chunk_tagged(&tool_call_chunk(
+                    0,
+                    Some("call-1"),
+                    Some("record_literal"),
+                    Some(arguments),
+                ));
+                events.extend(conv.process_chunk_tagged(&finish_chunk(reason)));
+                events.extend(conv.emit_end_events_tagged());
+                assert!(
+                    events.iter().all(|event| !matches!(
+                        &event.data,
+                        AnthropicStreamEvent::ContentBlockStart {
+                            content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                            ..
+                        } | AnthropicStreamEvent::ContentBlockDelta {
+                            delta: AnthropicDelta::InputJsonDelta { .. },
+                            ..
+                        }
+                    )),
+                    "{arguments} with {reason:?}"
+                );
+                let expected = if reason == FinishReason::Length {
+                    AnthropicStopReason::MaxTokens
+                } else {
+                    AnthropicStopReason::EndTurn
+                };
+                assert!(events.iter().any(|event| matches!(
+                    &event.data,
+                    AnthropicStreamEvent::MessageDelta { delta, .. }
+                        if delta.stop_reason.as_ref() == Some(&expected)
+                )));
+            }
+        }
+    }
+
     /// `tool_use` is an instruction to run a tool. With every call suppressed the
     /// client has nothing to run, and Anthropic rejects the turn when it is sent back.
     #[test]
@@ -2264,6 +2307,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 
