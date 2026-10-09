@@ -247,7 +247,11 @@ async def test_deployment(
             )
 
             def send_with_retry(url, payload, *, timeout, method, stream):
-                return deployment.send_request_with_port_forward_retry(
+                nonlocal port_forward
+                (
+                    response,
+                    port_forward,
+                ) = deployment.send_request_with_port_forward_retry(
                     pod=frontend_pod,
                     remote_port=port,
                     endpoint=endpoint,
@@ -256,6 +260,7 @@ async def test_deployment(
                     port_forward=port_forward,
                     request_sender=partial(send_request, stream=stream),
                 )
+                return response
 
             await asyncio.to_thread(
                 check_api,

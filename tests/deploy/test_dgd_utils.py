@@ -150,11 +150,11 @@ def test_request_rebuilds_port_forward_after_transport_failure(
     replacement_port_forward = MagicMock(local_port=31002)
     deployment.port_forward = MagicMock(return_value=replacement_port_forward)
     response = MagicMock(spec=requests.Response)
-    request_sender = MagicMock(side_effect=[transport_error, response])
+    request_sender = MagicMock(side_effect=[transport_error, response, response])
     sleep = MagicMock()
     monkeypatch.setattr("tests.deploy.dgd_utils.time.sleep", sleep)
 
-    result = deployment.send_request_with_port_forward_retry(
+    result, active_port_forward = deployment.send_request_with_port_forward_retry(
         pod=MagicMock(),
         remote_port=8000,
         endpoint="/v1/chat/completions",
@@ -170,6 +170,22 @@ def test_request_rebuilds_port_forward_after_transport_failure(
     )
     assert (
         request_sender.call_args_list[1].args[0].startswith("http://localhost:31002/")
+    )
+    assert active_port_forward is replacement_port_forward
+    next_result, next_port_forward = deployment.send_request_with_port_forward_retry(
+        pod=MagicMock(),
+        remote_port=8000,
+        endpoint="/v1/chat/completions",
+        payload={"model": "test"},
+        timeout=120,
+        port_forward=active_port_forward,
+        request_sender=request_sender,
+    )
+    assert next_result is response
+    assert next_port_forward is replacement_port_forward
+    assert request_sender.call_count == 3
+    assert (
+        request_sender.call_args_list[2].args[0].startswith("http://localhost:31002/")
     )
     original_port_forward.stop.assert_called_once_with()
     deployment.port_forward.assert_called_once()
@@ -192,7 +208,7 @@ def test_request_rebuilds_port_forward_after_stream_body_failure(
     request_sender = MagicMock(side_effect=[dropped_response, response])
     monkeypatch.setattr("tests.deploy.dgd_utils.time.sleep", MagicMock())
 
-    result = deployment.send_request_with_port_forward_retry(
+    result, active_port_forward = deployment.send_request_with_port_forward_retry(
         pod=MagicMock(),
         remote_port=8000,
         endpoint="/v1/chat/completions",
@@ -203,6 +219,7 @@ def test_request_rebuilds_port_forward_after_stream_body_failure(
     )
 
     assert result is response
+    assert active_port_forward is replacement_port_forward
     dropped_response.close.assert_called_once_with()
     original_port_forward.stop.assert_called_once_with()
     deployment.port_forward.assert_called_once()
