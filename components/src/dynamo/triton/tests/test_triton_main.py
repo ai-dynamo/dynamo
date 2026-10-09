@@ -47,6 +47,8 @@ def _make_config(task: str = "tensor") -> MagicMock:
     config.task = task
     config.classify_input_name = None
     config.classify_output_name = None
+    config.embed_input_name = None
+    config.embed_output_name = None
     return config
 
 
@@ -160,6 +162,57 @@ def test_register_and_serve_classify_task_wires_classify_handler(monkeypatch, tm
     assert served.__self__._output_name == "probs"
 
 
+def test_register_and_serve_embed_task_wires_embedding_handler(monkeypatch, tmp_path):
+    from dynamo.triton.pooling_handlers import EmbeddingWorkerHandler
+
+    register_model = AsyncMock(name="register_model")
+    monkeypatch.setattr(main, "register_model", register_model)
+
+    model_name = "emb"
+    (tmp_path / model_name).mkdir()
+    (tmp_path / model_name / "config.pbtxt").write_text(
+        'name: "emb"\n'
+        "max_batch_size: 4\n"
+        'input [{ name: "TEXT" data_type: TYPE_STRING dims: [-1] }]\n'
+        'output [{ name: "embedding" data_type: TYPE_FP32 dims: [-1] }]\n'
+    )
+
+    endpoint = MagicMock(name="endpoint")
+    endpoint.serve_endpoint = AsyncMock()
+    runtime = MagicMock(name="runtime")
+    runtime.endpoint.return_value = endpoint
+    config = _make_config(task="embed")
+
+    loaded_model = MagicMock(name="model")
+    # Empty runtime config forces _read_model_config to the disk-pbtxt path.
+    loaded_model.config.return_value = {}
+    loaded_model.name = model_name
+    server = MagicMock(name="server")
+    server.model.return_value = loaded_model
+
+    asyncio.run(
+        main._register_and_serve(runtime, config, server, str(tmp_path), model_name)
+    )
+
+    register_model.assert_awaited_once()
+    reg_args, reg_kwargs = register_model.call_args
+    assert reg_args[0] == main.ModelInput.Text
+    assert reg_args[1] == main.ModelType.Embedding
+    assert reg_args[3] == model_name
+    assert reg_kwargs["worker_type"] == main.WorkerType.Aggregated
+    # Embed takes the same asset-skip fast path as classify (no HF resolve)
+    # and does not attach the Triton protocol layout.
+    assert reg_kwargs["skip_model_assets"] is True
+    assert "tensor_model_config" not in reg_kwargs
+
+    endpoint.serve_endpoint.assert_awaited_once()
+    served = endpoint.serve_endpoint.call_args.args[0]
+    assert served.__name__ == "generate"
+    assert isinstance(served.__self__, EmbeddingWorkerHandler)
+    assert served.__self__._input_name == "TEXT"
+    assert served.__self__._output_name == "embedding"
+
+
 def test_register_and_serve_missing_model_error(patched_worker, tmp_path):
     """A missing config.pbtxt surfaces as FileNotFoundError before registration."""
     runtime = MagicMock(name="runtime")
@@ -185,7 +238,7 @@ def _write_classify_ensemble_repo(
     numeric_name: str = "numeric",
 ) -> None:
     """Write a minimal on-disk Triton repo with one ensemble and two
-    dependency models, enough for ``_collect_classify_dependency_models``
+    dependency models, enough for ``_collect_ensemble_dependency_models``
     to walk.
 
     Shape mirrors a typical Triton classify ensemble: the ensemble is the
@@ -281,7 +334,7 @@ def _make_server_with_models(server_cls: MagicMock, model_names: list[str]):
     """Wire the patched ``TritonServer`` to report ``model_names`` as ready.
 
     An empty runtime config on every looked-up model makes
-    ``_collect_classify_dependency_models``'s primary (runtime) scan a
+    ``_collect_ensemble_dependency_models``'s primary (runtime) scan a
     no-op, so it falls back to the ``config.pbtxt`` files written under
     ``tmp_path``.
     """
@@ -303,7 +356,11 @@ def _make_init_worker_config(
     return config
 
 
-def test_init_worker_classify_filters_ensemble_dependencies(init_worker_env, tmp_path):
+# Classify and embed share the ensemble-dependency filter, so the three
+# init_worker tests below are parameterized over both task endpoints to
+# prevent one branch from silently losing coverage.
+@pytest.mark.parametrize("task", ["classify", "embed"])
+def test_init_worker_filters_ensemble_dependencies(init_worker_env, tmp_path, task):
     """Dependencies are filtered before the TaskGroup fans out so a
     failing-to-construct handler for a dep cannot cancel the valid
     ensemble sibling task."""
@@ -311,7 +368,7 @@ def test_init_worker_classify_filters_ensemble_dependencies(init_worker_env, tmp
     _make_server_with_models(
         init_worker_env.server_cls, ["classifier", "numeric", "tokenizer"]
     )
-    config = _make_init_worker_config(tmp_path, task="classify")
+    config = _make_init_worker_config(tmp_path, task=task)
 
     asyncio.run(main.init_worker(MagicMock(name="runtime"), config))
 
@@ -322,9 +379,12 @@ def test_init_worker_classify_filters_ensemble_dependencies(init_worker_env, tmp
     assert registered == ["classifier"]
 
 
-def test_init_worker_classify_registers_standalone_model(init_worker_env, tmp_path):
+def test_init_worker_registers_standalone_model(init_worker_env, tmp_path):
     """Pin the no-op path: a future filter change must not silently
-    strip the only user-facing model when no ensembles are present."""
+    strip the only user-facing model when no ensembles are present.
+    One task is enough: ``_register_and_serve`` is mocked, so classify
+    and embed share an observable contract in the no-dependency case;
+    the task-branched behavior is pinned by the ensemble-filter tests."""
     _write_standalone_classifier_repo(tmp_path, model_name="clf")
     _make_server_with_models(init_worker_env.server_cls, ["clf"])
     config = _make_init_worker_config(tmp_path, task="classify")
@@ -337,8 +397,9 @@ def test_init_worker_classify_registers_standalone_model(init_worker_env, tmp_pa
     assert registered == ["clf"]
 
 
-def test_init_worker_classify_raises_when_only_dependencies_present(
-    init_worker_env, tmp_path
+@pytest.mark.parametrize("task", ["classify", "embed"])
+def test_init_worker_raises_when_only_dependencies_present(
+    init_worker_env, tmp_path, task
 ):
     """When every ready model is an ensemble dependency, the worker
     must raise rather than start with zero endpoints and report healthy
@@ -347,9 +408,9 @@ def test_init_worker_classify_raises_when_only_dependencies_present(
     # Ensemble loaded but not-ready, so only the two deps appear in
     # server.models() and the exposed set collapses to empty.
     _make_server_with_models(init_worker_env.server_cls, ["numeric", "tokenizer"])
-    config = _make_init_worker_config(tmp_path, task="classify")
+    config = _make_init_worker_config(tmp_path, task=task)
 
-    with pytest.raises(RuntimeError, match="No user-facing classify"):
+    with pytest.raises(RuntimeError, match=f"No user-facing {task}"):
         asyncio.run(main.init_worker(MagicMock(name="runtime"), config))
 
     init_worker_env.register_and_serve.assert_not_awaited()
@@ -358,18 +419,18 @@ def test_init_worker_classify_raises_when_only_dependencies_present(
 def test_init_worker_tensor_task_registers_every_model_in_ensemble_repo(
     init_worker_env, tmp_path, monkeypatch
 ):
-    """``--task tensor`` must not invoke the classify-only filter. A
-    dependency model may still be useful to call directly over KServe
-    gRPC for debugging, so the tensor path registers every ready model
-    unchanged."""
+    """``--task tensor`` must not invoke the classify/embed dependency
+    filter. A dependency model may still be useful to call directly
+    over KServe gRPC for debugging, so the tensor path registers every
+    ready model unchanged."""
     _write_classify_ensemble_repo(tmp_path)
     _make_server_with_models(
         init_worker_env.server_cls, ["classifier", "numeric", "tokenizer"]
     )
     config = _make_init_worker_config(tmp_path, task="tensor")
 
-    collect_spy = MagicMock(wraps=main._collect_classify_dependency_models)
-    monkeypatch.setattr(main, "_collect_classify_dependency_models", collect_spy)
+    collect_spy = MagicMock(wraps=main._collect_ensemble_dependency_models)
+    monkeypatch.setattr(main, "_collect_ensemble_dependency_models", collect_spy)
 
     asyncio.run(main.init_worker(MagicMock(name="runtime"), config))
 

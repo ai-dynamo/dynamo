@@ -397,6 +397,8 @@ def test_task_defaults_to_tensor(mock_triton_cli):
     assert config.task == "tensor"
     assert config.classify_input_name is None
     assert config.classify_output_name is None
+    assert config.embed_input_name is None
+    assert config.embed_output_name is None
 
 
 def test_task_classify_parses(mock_triton_cli):
@@ -417,11 +419,22 @@ def test_task_classify_parses(mock_triton_cli):
     assert config.classify_output_name == "probs"
 
 
-def test_task_rejects_unknown_value(mock_triton_cli):
-    mock_triton_cli("--model-repository", "/models", "--task", "embed")
+def test_task_embed_parses(mock_triton_cli):
+    mock_triton_cli(
+        "--model-repository",
+        "/models",
+        "--task",
+        "embed",
+        "--embed-input-name",
+        "TEXT",
+        "--embed-output-name",
+        "embedding",
+    )
+    config = backend_args.parse_args()
 
-    with pytest.raises(SystemExit):
-        backend_args.parse_args()
+    assert config.task == "embed"
+    assert config.embed_input_name == "TEXT"
+    assert config.embed_output_name == "embedding"
 
 
 def test_classify_name_overrides_require_classify_task(mock_triton_cli):
@@ -433,6 +446,18 @@ def test_classify_name_overrides_require_classify_task(mock_triton_cli):
     )
 
     with pytest.raises(ValueError, match="only valid with --task classify"):
+        backend_args.parse_args()
+
+
+def test_embed_name_overrides_require_embed_task(mock_triton_cli):
+    mock_triton_cli(
+        "--model-repository",
+        "/models",
+        "--embed-input-name",
+        "TEXT",
+    )
+
+    with pytest.raises(ValueError, match="only valid with --task embed"):
         backend_args.parse_args()
 
 
@@ -452,6 +477,27 @@ def test_endpoint_selection_fields_are_not_server_options(mock_triton_cli):
     options = backend_args.parse_args().to_server_options()
 
     for leaked in ("task", "classify_input_name", "classify_output_name"):
+        assert (
+            leaked not in options
+        ), f"{leaked} must be filtered out of to_server_options()"
+
+
+def test_embed_overrides_are_not_server_options(mock_triton_cli):
+    """Embed overrides must land in _NON_TRITON_SERVER_FIELDS, not fall out of
+    options purely because to_server_options strips unset None values."""
+    mock_triton_cli(
+        "--model-repository",
+        "/models",
+        "--task",
+        "embed",
+        "--embed-input-name",
+        "TEXT",
+        "--embed-output-name",
+        "embedding",
+    )
+    options = backend_args.parse_args().to_server_options()
+
+    for leaked in ("task", "embed_input_name", "embed_output_name"):
         assert (
             leaked not in options
         ), f"{leaked} must be filtered out of to_server_options()"
