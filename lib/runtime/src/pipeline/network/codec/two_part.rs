@@ -25,35 +25,30 @@ impl TwoPartCodec {
         Ok(buf.freeze())
     }
 
-    /// Decodes a `TwoPartMessage` from `Bytes`, enforcing `max_message_size`.
-    pub fn decode_message(&self, data: Bytes) -> Result<TwoPartMessage, TwoPartCodecError> {
-        let mut buf = BytesMut::from(&data[..]);
-        let mut codec = self.clone();
-        match codec.decode(&mut buf)? {
-            Some(msg) => Ok(msg),
-            None => Err(TwoPartCodecError::InvalidMessage(
-                "No message decoded".to_string(),
-            )),
-        }
+    /// Decodes a `TwoPartMessage` into slices of `data`, retaining its backing storage.
+    pub fn decode_message(&self, mut data: Bytes) -> Result<TwoPartMessage, TwoPartCodecError> {
+        let (header_len, body_len, checksum) = self
+            .decode_header(&data)?
+            .ok_or_else(|| TwoPartCodecError::InvalidMessage("No message decoded".to_string()))?;
+        data.advance(24);
+        check_checksum(&data[..header_len + body_len], checksum)?;
+        let header = data.split_to(header_len);
+        let data = data.split_to(body_len);
+        Ok(TwoPartMessage { header, data })
     }
-}
 
-impl Decoder for TwoPartCodec {
-    type Item = TwoPartMessage;
-    type Error = TwoPartCodecError;
-
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+    fn decode_header(&self, src: &[u8]) -> Result<Option<(usize, usize, u64)>, TwoPartCodecError> {
         // Need at least 24 bytes (header_len, body_len, checksum)
         if src.len() < 24 {
             return Ok(None);
         }
 
         // Use a cursor to read lengths and checksum without modifying the buffer
-        let mut cursor = &src[..];
+        let mut cursor = src;
 
         let header_len = cursor.get_u64() as usize;
         let body_len = cursor.get_u64() as usize;
-        let _checksum = cursor.get_u64();
+        let checksum = cursor.get_u64();
 
         let total_len = 24usize
             .checked_add(header_len)
@@ -75,30 +70,27 @@ impl Decoder for TwoPartCodec {
             return Ok(None);
         }
 
-        // Advance the buffer past the lengths and checksum
+        Ok(Some((header_len, body_len, checksum)))
+    }
+}
+
+fn check_checksum(data: &[u8], checksum: u64) -> Result<(), TwoPartCodecError> {
+    if cfg!(debug_assertions) && checksum != 0 && checksum != xxh3_64(data) {
+        return Err(TwoPartCodecError::ChecksumMismatch);
+    }
+    Ok(())
+}
+
+impl Decoder for TwoPartCodec {
+    type Item = TwoPartMessage;
+    type Error = TwoPartCodecError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        let Some((header_len, body_len, checksum)) = self.decode_header(src)? else {
+            return Ok(None);
+        };
         src.advance(24);
-
-        #[cfg(debug_assertions)]
-        {
-            // If the server sent a dummy checksum, skip it.
-            if _checksum != 0 {
-                let bytes_to_hash =
-                    header_len
-                        .checked_add(body_len)
-                        .ok_or(TwoPartCodecError::InvalidMessage(
-                            "Message exceeds max allowed length.".to_string(),
-                        ))?;
-
-                let data_to_hash = &src[..bytes_to_hash];
-
-                let computed_checksum = xxh3_64(data_to_hash);
-
-                // Compare checksums
-                if _checksum != computed_checksum {
-                    return Err(TwoPartCodecError::ChecksumMismatch);
-                }
-            }
-        }
+        check_checksum(&src[..header_len + body_len], checksum)?;
 
         // Read header and body data
         let header = src.split_to(header_len).freeze();
@@ -239,6 +231,7 @@ impl TwoPartMessage {
 mod tests {
     use std::io::Cursor;
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::task::{Context, Poll};
 
     use bytes::{Bytes, BytesMut};
@@ -268,6 +261,37 @@ mod tests {
         // Verify the decoded message.
         assert_eq!(decoded.header, header_data);
         assert_eq!(decoded.data, data);
+    }
+
+    #[test]
+    fn decoded_parts_share_and_release_the_outer_buffer() {
+        let codec = TwoPartCodec::default();
+        let encoded = codec
+            .encode_message(TwoPartMessage::from_parts(
+                Bytes::from_static(b"header"),
+                Bytes::from_static(b"body"),
+            ))
+            .unwrap();
+        let offset = 32;
+        let mut outer = vec![0x55; 256 * 1024];
+        outer[offset..offset + encoded.len()].copy_from_slice(&encoded);
+        let owner: Arc<[u8]> = outer.into();
+        let weak = Arc::downgrade(&owner);
+        let header_ptr = owner.as_ptr().wrapping_add(offset + 24);
+        let data_ptr = header_ptr.wrapping_add(6);
+        let input = Bytes::from_owner(owner).slice(offset..offset + encoded.len());
+
+        let TwoPartMessage { header, data } = codec.decode_message(input).unwrap();
+        assert_eq!(header.as_ptr(), header_ptr);
+        assert_eq!(data.as_ptr(), data_ptr);
+        assert_eq!(header, "header");
+        assert!(weak.upgrade().is_some());
+        drop(header);
+        assert!(weak.upgrade().is_some());
+        std::thread::spawn(move || assert_eq!(data, "body"))
+            .join()
+            .unwrap();
+        assert!(weak.upgrade().is_none());
     }
 
     /// Test encoding and decoding of a message with only header.
@@ -453,37 +477,61 @@ mod tests {
         }
     }
 
-    /// Test decoding of a message with checksum mismatch.
     #[test]
-    // Checksum only computed in debug mode, so only test in debug mode.
-    #[cfg(debug_assertions)]
-    fn test_checksum_mismatch() {
-        // Create a message
+    fn test_decoders_preserve_checksum_mode() {
         let header_data = Bytes::from("header data");
         let data = Bytes::from("body data");
         let message = TwoPartMessage::from_parts(header_data.clone(), data.clone());
-
         let codec = TwoPartCodec::new(None);
-
-        // Encode the message
         let encoded = codec.encode_message(message).unwrap();
+        let invalid_checksum = xxh3_64(&encoded[24..]).wrapping_add(1).max(1);
 
-        // Corrupt the data to cause checksum mismatch
-        let mut encoded = BytesMut::from(encoded);
-        let len = encoded.len();
-        encoded[len - 1] ^= 0xFF; // Flip the last byte
+        for checksum in [0, invalid_checksum] {
+            let mut wire = BytesMut::from(encoded.as_ref());
+            wire[16..24].copy_from_slice(&checksum.to_be_bytes());
+            let mut incremental = wire.clone();
+            let result = codec.clone().decode(&mut incremental);
+            let complete = codec.decode_message(wire.clone().freeze());
 
-        // Attempt to decode
-        let result = codec.decode_message(encoded.into());
+            if cfg!(debug_assertions) && checksum != 0 {
+                assert!(matches!(result, Err(TwoPartCodecError::ChecksumMismatch)));
+                assert!(matches!(complete, Err(TwoPartCodecError::ChecksumMismatch)));
+                assert_eq!(incremental.as_ref(), &wire[24..]);
+            } else {
+                let incremental_message = result.unwrap().unwrap();
+                let complete_message = complete.unwrap();
+                assert_eq!(incremental_message.header, header_data);
+                assert_eq!(incremental_message.data, data);
+                assert_eq!(complete_message.header, header_data);
+                assert_eq!(complete_message.data, data);
+                assert!(incremental.is_empty());
+            }
+        }
+    }
 
-        // Expect an error
-        assert!(result.is_err());
-
-        // Verify the error is ChecksumMismatch
-        if let Err(TwoPartCodecError::ChecksumMismatch) = result {
-            // Test passed
-        } else {
-            panic!("Expected ChecksumMismatch error");
+    #[test]
+    fn invalid_lengths_fail_before_waiting_for_payload() {
+        let codec = TwoPartCodec::new(Some(40));
+        for (header_len, body_len, expected_size) in [
+            (u64::MAX, 0, usize::MAX),
+            (0, u64::MAX, usize::MAX),
+            (8, 12, 44),
+        ] {
+            let mut wire = BytesMut::new();
+            wire.put_u64(header_len);
+            wire.put_u64(body_len);
+            wire.put_u64(0);
+            let mut incremental = wire.clone();
+            for error in [
+                codec.clone().decode(&mut incremental).unwrap_err(),
+                codec.decode_message(wire.clone().freeze()).unwrap_err(),
+            ] {
+                assert!(matches!(
+                    error,
+                    TwoPartCodecError::MessageTooLarge(size, 40) if size == expected_size
+                ));
+            }
+            assert_eq!(incremental, wire);
         }
     }
 
@@ -499,20 +547,15 @@ mod tests {
         // Encode the message
         let encoded = codec.encode_message(message).unwrap();
 
-        // Simulate partial data arrival
-        let partial_len = encoded.len() - 5;
-        let partial_encoded = encoded.slice(0..partial_len);
-
-        // Attempt to decode
-        let result = codec.decode_message(partial_encoded);
-
-        // Should return InvalidMessage error
-        assert!(result.is_err());
-
-        if let Err(TwoPartCodecError::InvalidMessage(_)) = result {
-            // Test passed
-        } else {
-            panic!("Expected InvalidMessage error");
+        for partial_len in [0, 1, 23, 24, encoded.len() - 1] {
+            let partial_encoded = encoded.slice(0..partial_len);
+            let mut incremental = BytesMut::from(partial_encoded.as_ref());
+            assert!(codec.clone().decode(&mut incremental).unwrap().is_none());
+            assert_eq!(incremental.as_ref(), partial_encoded.as_ref());
+            assert!(matches!(
+                codec.decode_message(partial_encoded),
+                Err(TwoPartCodecError::InvalidMessage(message)) if message == "No message decoded"
+            ));
         }
     }
 
@@ -537,6 +580,10 @@ mod tests {
         let mut combined = BytesMut::new();
         combined.extend_from_slice(&encoded1);
         combined.extend_from_slice(&encoded2);
+
+        let first = codec.decode_message(combined.clone().freeze()).unwrap();
+        assert_eq!(first.header, header_data1);
+        assert_eq!(first.data, data1);
 
         // Decode messages
         let mut decode_buf = combined;
