@@ -108,6 +108,11 @@ conflicts = [
 [tool.uv.dependency-groups]
 docs = { requires-python = ">=3.11" }
 
+[project.scripts]
+dynamo-sglang-sidecar = "dynamo.sglang.sidecar:main"
+dynamo-trtllm-sidecar = "dynamo.trtllm.sidecar:main"
+dynamo-vllm-sidecar = "dynamo.vllm.sidecar:main"
+
 [project.entry-points.pytest11]
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
