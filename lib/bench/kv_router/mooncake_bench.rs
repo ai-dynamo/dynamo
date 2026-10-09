@@ -1,15 +1,25 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(feature = "router-bench")]
 #[path = "jemalloc.rs"]
 mod jemalloc;
 
+/// The global allocator: jemalloc with `router-bench`, else the system allocator.
+#[cfg(feature = "router-bench")]
+const ALLOCATOR: &str = "jemalloc";
+#[cfg(not(feature = "router-bench"))]
+const ALLOCATOR: &str = "system";
+
+#[path = "crtc_reclaim_args.rs"]
+mod crtc_reclaim_args;
 #[path = "mooncake_open_loop.rs"]
 mod mooncake_open_loop;
 #[path = "mooncake_shared.rs"]
 mod mooncake_shared;
 
 use clap::{Parser, Subcommand};
+use crtc_reclaim_args::CrtcReclaimArgs;
 use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::issuer::pin_current_thread_to_cpus;
 use dynamo_bench::kv_router_common::replay::generate_replay_artifacts;
@@ -73,6 +83,9 @@ impl IndexerArgs {
 struct Args {
     #[clap(flatten)]
     common: CommonArgs,
+
+    #[clap(flatten)]
+    crtc_reclaim: CrtcReclaimArgs,
 
     /// Number of persistent logical query lanes.
     #[clap(long, default_value = "128")]
@@ -286,7 +299,7 @@ async fn run_open_loop_for_config(
         }
         MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
             let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
-                ConcurrentRadixTreeCompressed::new(),
+                ConcurrentRadixTreeCompressed::with_reclaim_config(args.crtc_reclaim.config()),
                 config.num_event_workers,
                 args.common.block_size,
                 metrics(),
@@ -309,6 +322,7 @@ fn quiesce_prepared_heap() {
     unsafe {
         libc::malloc_trim(0);
     }
+    #[cfg(feature = "router-bench")]
     jemalloc::purge();
     std::thread::sleep(std::time::Duration::from_millis(PRE_RUN_QUIESCENCE_MS));
 }
@@ -390,8 +404,15 @@ fn run_provenance(args: &Args, config: &MooncakeIndexerConfig) -> anyhow::Result
         .transpose()?;
     let binary = std::env::current_exe().ok();
     let binary_sha256 = binary.as_deref().map(file_sha256).transpose()?;
+    let backend_config = matches!(
+        config.kind,
+        MooncakeIndexerKind::ConcurrentRadixTreeCompressed
+    )
+    .then(|| format!("{:?}", args.crtc_reclaim.config()));
     Ok(RunProvenance {
         argv: std::env::args().collect(),
+        allocator: ALLOCATOR,
+        backend_config,
         binary: binary.map(|path| path.display().to_string()),
         binary_sha256,
         trace_path: common.mooncake_trace_path.clone(),
@@ -519,6 +540,10 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     validate_args(&args)?;
     let config = open_loop_config(&args)?;
+    println!(
+        "allocator={ALLOCATOR} crtc_reclaim={:?}",
+        args.crtc_reclaim.config()
+    );
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();

@@ -826,6 +826,10 @@ pub struct Distribution {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct RunProvenance {
     pub argv: Vec<String>,
+    /// Global allocator the binary was built with.
+    pub allocator: &'static str,
+    /// Effective backend settings not visible in `argv` defaults, if any.
+    pub backend_config: Option<String>,
     pub binary: Option<String>,
     pub binary_sha256: Option<String>,
     pub trace_path: Option<String>,

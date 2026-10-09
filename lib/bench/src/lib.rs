@@ -10,7 +10,7 @@ pub mod common;
     feature = "active-sequences",
     feature = "dc-ckf-consumer",
     feature = "dc-ckf-relay",
-    feature = "mooncake",
+    feature = "mooncake-core",
     feature = "router-test-support"
 ))]
 #[path = "../kv_router/common/mod.rs"]

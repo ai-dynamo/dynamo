@@ -36,6 +36,9 @@
 //! Build with `--features mooncake,indexer-memory-system-alloc` to count over the system
 //! allocator instead of jemalloc. Counted bytes do not depend on the allocator; RSS does.
 
+#[path = "crtc_reclaim_args.rs"]
+mod crtc_reclaim_args;
+
 use std::alloc::{GlobalAlloc, Layout};
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -43,6 +46,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
+use crtc_reclaim_args::CrtcReclaimArgs;
 use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::replay::{WorkerReplayArtifacts, generate_replay_artifacts};
 use dynamo_kv_router::indexer::SyncIndexer;
@@ -191,6 +195,9 @@ struct Args {
     /// JSON output path.
     #[clap(long, default_value = "indexer_memory.json")]
     result_json_output: String,
+
+    #[clap(flatten)]
+    crtc_reclaim: CrtcReclaimArgs,
 }
 
 enum Entry {
@@ -379,6 +386,10 @@ struct Report {
     replay_secs: f64,
     samples: Vec<Sample>,
     after_sweep: Sample,
+    /// Backend settings and its structural and memory probes after the final sweep.
+    backend_config: Option<String>,
+    backend_probe: Option<String>,
+    backend_timing_report: String,
 }
 
 fn ratio(bytes: i64, count: u64) -> f64 {
@@ -393,6 +404,7 @@ fn replay<T: SyncIndexer>(
     args: &Args,
     corpus: Corpus,
     make: impl FnOnce() -> T,
+    probe: impl FnOnce(&T) -> String,
 ) -> anyhow::Result<Report> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -466,6 +478,8 @@ fn replay<T: SyncIndexer>(
     indexer.backend().run_cleanup_task();
     runtime.block_on(indexer.flush());
     let after_sweep = sample(1.0, events, queries, *held.last().unwrap_or(&(0, 0)));
+    let backend_probe = probe(indexer.backend());
+    let backend_timing_report = indexer.backend().timing_report();
     let peak_backend_bytes = (PEAK_BYTES.load(Ordering::Relaxed) - baseline) as i64;
 
     let measured: Vec<&Sample> = samples.iter().filter(|s| s.memberships > 0).collect();
@@ -503,6 +517,9 @@ fn replay<T: SyncIndexer>(
         replay_secs,
         samples,
         after_sweep,
+        backend_config: None,
+        backend_probe: Some(backend_probe),
+        backend_timing_report,
     };
     drop(indexer);
     drop(entries);
@@ -512,7 +529,22 @@ fn replay<T: SyncIndexer>(
 fn run_backend(args: &Args, corpus: Corpus) -> anyhow::Result<Report> {
     match args.backend.as_str() {
         "crtc" | "concurrent-radix-tree-compressed" => {
-            replay(args, corpus, ConcurrentRadixTreeCompressed::new)
+            let config = args.crtc_reclaim.config();
+            let mut report = replay(
+                args,
+                corpus,
+                || ConcurrentRadixTreeCompressed::with_reclaim_config(config),
+                |tree| {
+                    let memory = tree.probe_memory();
+                    format!(
+                        "edge_slack={:.3} {memory:?} {:?}",
+                        memory.edge_slack(),
+                        tree.probe_shape()
+                    )
+                },
+            )?;
+            report.backend_config = Some(format!("{config:?}"));
+            Ok(report)
         }
         other => anyhow::bail!("unknown backend {other:?}; add an arm to run_backend"),
     }
@@ -580,6 +612,15 @@ fn main() -> anyhow::Result<()> {
         &args.result_json_output,
         serde_json::to_string_pretty(&report)?,
     )?;
+    if let Some(config) = &report.backend_config {
+        println!("backend_config: {config}");
+    }
+    if let Some(probe) = &report.backend_probe {
+        println!("backend_probe: {probe}");
+    }
+    if !report.backend_timing_report.is_empty() {
+        println!("{}", report.backend_timing_report);
+    }
     println!("Memory result written to {}", args.result_json_output);
     Ok(())
 }

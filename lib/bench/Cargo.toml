@@ -44,8 +44,11 @@ dc-ckf-relay = [
   "dep:sha2",
 ]
 kv-router-stress-support = ["dep:reqwest"]
-mooncake = [
-  "router-bench",
+mooncake = ["mooncake-core", "router-bench"]
+# `mooncake_bench` without a global allocator, so it runs on the system (glibc) malloc:
+#   --no-default-features --features mooncake-core
+mooncake-core = [
+  "router-bench-core",
   "dep:dynamo-mocker",
   "dep:indicatif",
   "dep:libc",
@@ -64,7 +67,9 @@ multiturn = [
 offline-replay = ["dep:blake3", "dep:dynamo-mocker", "dep:libc"]
 # Router benches link jemalloc as the global allocator, matching the Python
 # extension that runs the router in production (`lib/bindings/python`).
-router-bench = ["dynamo-kv-router/bench", "dep:tikv-jemallocator", "dep:tikv-jemalloc-sys"]
+router-bench = ["router-bench-core", "dep:tikv-jemallocator", "dep:tikv-jemalloc-sys"]
+# Router bench support without jemalloc; see `mooncake-core`.
+router-bench-core = ["dynamo-kv-router/bench"]
 router-metrics = ["dynamo-kv-router/metrics"]
 router-test-support = [
   "router-bench",
@@ -126,7 +131,7 @@ required-features = ["offline-replay"]
 name = "mooncake_bench"
 path = "kv_router/mooncake_bench.rs"
 harness = false
-required-features = ["mooncake"]
+required-features = ["mooncake-core"]
 
 [[bench]]
 name = "indexer_memory"

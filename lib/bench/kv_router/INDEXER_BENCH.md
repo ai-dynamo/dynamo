@@ -102,6 +102,26 @@ workers serialize on arena locks: write capacity stops rising after about 16
 event workers and falls beyond that. Compare allocators or event-worker counts
 only between builds and runs that differ in that one variable.
 
+To build `mooncake_bench` on the system allocator instead (no global allocator, so
+glibc malloc on Linux), use the `mooncake-core` feature, which leaves out jemalloc:
+
+```bash
+cargo bench --package dynamo-bench --bench mooncake_bench \
+  --no-default-features --features mooncake-core --no-run
+```
+
+Each run prints `allocator=jemalloc` or `allocator=system`, and the result JSON
+records it under `provenance.allocator`.
+
+CRTC reclamation and edge-capacity settings are flags on the same binary, recorded
+under `provenance.backend_config`: `--crtc-reclaim default|legacy` picks a preset
+(volume-triggered stale-leaf sweeps, capped leaf slack and exact split prefixes, or
+timer-only sweeps with `Vec` growth), and `--crtc-volume-sweep`, `--crtc-dead-floor`,
+`--crtc-min-gap-ms`, `--crtc-leaf-slack-divisor`, `--crtc-leaf-min-slack` and
+`--crtc-exact-split-prefix` override single settings, for example
+`--crtc-leaf-slack-divisor 4` for the quarter-slack row. `indexer_memory` takes the
+same flags.
+
 ### Single CRTC trial
 
 Select one logical CPU per physical core from the process's actual affinity
