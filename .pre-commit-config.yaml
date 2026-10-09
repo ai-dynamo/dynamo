@@ -209,6 +209,7 @@ repos:
       additional_dependencies:
         - pytest
         - pytest-asyncio
+        - ijson>=3.4.0,<4.0
         - tomli
         - pydantic
         - redis>=6.2.0,<9.0.0

@@ -20,7 +20,12 @@ from dynamo.profiling import errors
 from dynamo.profiling.collectors import CollectionError, PerfCollector, TorchCollector
 from dynamo.profiling.models import Config, Plan, RuntimeSnapshot, Target, Worker
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(20),
+]
 
 
 @pytest.fixture
@@ -279,6 +284,18 @@ async def test_backend_text_plain_json_start_and_stop(tmp_path):
         await adapter.start()
         await adapter.stop()
         assert adapter.evidence["coverage"] == "export_unverified"
+        assert (
+            adapter.evidence["timestamp_scope"]
+            == "control_responses_not_native_recording_bounds"
+        )
+        assert (
+            adapter.evidence["start_requested_at_ns"]
+            <= adapter.evidence["started_at_ns"]
+        )
+        assert (
+            adapter.evidence["stop_requested_at_ns"]
+            <= adapter.evidence["stopped_at_ns"]
+        )
     assert calls == [
         ("/engine/control/start_profile", {}),
         ("/engine/control/stop_profile", {}),
@@ -401,3 +418,22 @@ async def test_manifest_write_failure_cannot_prevent_collector_cleanup(
     assert session.collectors[0].evidence["stopped"]
     assert controller.active is None
     assert any("disk full" in error for error in session.errors)
+
+
+def test_process_epochs_distinguish_same_tick_replicas_and_pid_reuse(monkeypatch):
+    starts = iter((42, 42, 43))
+
+    def read_proc(path):
+        if path.name == "boot_id":
+            return "host-boot\n"
+        # The comm field may itself contain spaces and parentheses.
+        return "123 (worker (replica)) " + " ".join(
+            ["S", *(["0"] * 18), str(next(starts))]
+        )
+
+    monkeypatch.setattr(Path, "read_text", read_proc)
+    first = collectors.process_epoch(123)
+    sibling = collectors.process_epoch(124)
+    replacement = collectors.process_epoch(123)
+    assert first != sibling
+    assert first != replacement

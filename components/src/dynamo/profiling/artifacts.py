@@ -8,8 +8,11 @@ import gzip
 import hashlib
 import re
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Protocol
+
+import ijson
 
 from .models import Config
 
@@ -38,12 +41,38 @@ class BoundedReader:
         return data
 
 
-def inspect_trace(path: Path, config: Config, deadline: float) -> dict:
-    import ijson
+def recording_bounds(base_time_ns: int | None, markers: list[dict]) -> dict:
+    """Report native recorder bounds without claiming synchronized clocks."""
+    if base_time_ns is None or len(markers) != 1:
+        return {
+            "status": "unknown",
+            "reason": "missing_or_ambiguous_native_profiler_bounds",
+        }
+    marker = markers[0]
+    values = (marker.get("ts"), marker.get("dur"))
+    if any(type(value) not in (int, Decimal) for value in values):
+        return {"status": "unknown", "reason": "invalid_native_profiler_bounds"}
+    timestamp, duration = (Decimal(value) for value in values)
+    if not timestamp.is_finite() or not duration.is_finite() or duration < 0:
+        return {"status": "unknown", "reason": "invalid_native_profiler_bounds"}
+    start = base_time_ns + round(timestamp * 1000)
+    duration_ns = round(duration * 1000)
+    return {
+        "status": "observed",
+        "clock": "worker_trace_unix_ns_unattested",
+        "start_unix_ns": start,
+        "end_unix_ns": start + duration_ns,
+        "duration_ns": duration_ns,
+    }
 
+
+def inspect_trace(path: Path, config: Config, deadline: float) -> dict:
     before = path.stat()
     events = kernels = 0
     has_events = False
+    base_time_ns = None
+    markers = []
+    current = {}
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rb") as stream:
         reader = BoundedReader(stream, config.max_trace_bytes, deadline)
@@ -52,12 +81,32 @@ def inspect_trace(path: Path, config: Config, deadline: float) -> dict:
                 has_events = True
             elif (prefix, event) == ("traceEvents.item", "start_map"):
                 events += 1
+                current = {}
+            elif prefix == "traceEvents.item" and event == "end_map":
+                if (
+                    current.get("cat") == "Trace"
+                    and current.get("ph") == "X"
+                    and isinstance(current.get("name"), str)
+                    and current["name"].startswith("PyTorch Profiler")
+                    and len(markers) < 2
+                ):
+                    markers.append(current)
+            elif prefix in (
+                "traceEvents.item.name",
+                "traceEvents.item.cat",
+                "traceEvents.item.ph",
+                "traceEvents.item.ts",
+                "traceEvents.item.dur",
+            ) and event in ("string", "number"):
+                current[prefix.rsplit(".", 1)[1]] = value
+                if prefix == "traceEvents.item.cat" and value == "kernel":
+                    kernels += 1
             elif (
-                prefix == "traceEvents.item.cat"
-                and event == "string"
-                and value == "kernel"
+                prefix == "baseTimeNanoseconds"
+                and event == "number"
+                and type(value) is int
             ):
-                kernels += 1
+                base_time_ns = value
         # Consuming the whole stream also verifies the gzip trailer and CRC.
         after = path.stat()
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
@@ -72,6 +121,7 @@ def inspect_trace(path: Path, config: Config, deadline: float) -> dict:
             "events": events,
             "cuda_kernels": kernels,
             "validation": "valid",
+            "recording_bounds": recording_bounds(base_time_ns, markers),
         }
 
 
@@ -98,8 +148,6 @@ class SharedFilesystemValidator:
                 "reason": "artifact_store_not_mounted",
                 "location": location,
             }
-        import ijson
-
         pattern = re.compile(
             rf"^{re.escape(prefix)}_(.+)\.\d+\.pt\.trace\.json(?:\.gz)?$"
         )

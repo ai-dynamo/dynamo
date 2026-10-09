@@ -39,16 +39,25 @@ routes. No public POST route or remote authentication layer is added by this PoC
   "lifecycle_evidence_location": "https://existing-otel-backend.example/traces",
   "workers": [
     {
-      "target_id": "decode",
-      "process_epoch": "<worker control-process boot-id:starttime>",
+      "target_id": "decode-0",
+      "process_epoch": "<worker control-process boot-id:pid:starttime>",
       "backend": "vllm",
-      "control_url": "http://worker-admin:9091",
+      "control_url": "http://decode-0-admin:9090",
       "verify_runtime": true,
-      "artifact_location": "/shared/native-profiles",
+      "artifact_location": "/shared/native-profiles/decode-0",
       "expected_rank_ids": [
-        "dp0_pp0_tp0_dcp0_ep0_rank0",
-        "dp1_pp0_tp0_dcp0_ep1_rank0"
+        "dp0_pp0_tp0_dcp0_ep0_rank0"
       ],
+      "start_options": {}
+    },
+    {
+      "target_id": "decode-1",
+      "process_epoch": "<decode-1 epoch from profiling_info>",
+      "backend": "vllm",
+      "control_url": "http://decode-1-admin:9090",
+      "verify_runtime": true,
+      "artifact_location": "/shared/native-profiles/decode-1",
+      "expected_rank_ids": ["dp0_pp0_tp0_dcp0_ep0_rank0"],
       "start_options": {}
     }
   ]
@@ -68,6 +77,9 @@ The callback reports the worker control process, backend, PID, hostname, and
 clock timestamps; it does not attest the individual engine-rank processes.
 When enabled, a failed probe or changed epoch prevents profiling start. A second
 measurement after stop checks identity and records offset change.
+Epochs include boot ID, PID, and process start tick, so replicas starting in the
+same tick remain distinct. Obtain the opaque epoch from the callback; refresh
+inventory after restarting a worker or upgrading from the earlier epoch format.
 
 The vLLM engine must be launched with torch profiling enabled and its output
 path configured, for example:
@@ -88,7 +100,7 @@ curl --unix-socket /private/profiling/admin.sock \
 
 curl --unix-socket /private/profiling/admin.sock \
   -H 'Content-Type: application/json' \
-  -d '{"schema_version":1,"client_request_id":"investigation-42","mode":"torch_profile","targets":[{"target_id":"decode","process_epoch":"<epoch from inventory>"}],"duration_ms":10000,"trace_ids":["<otel trace id>"],"request_ids":["<request id>"]}' \
+  -d '{"schema_version":1,"client_request_id":"investigation-42","mode":"torch_profile","targets":[{"target_id":"decode-0","process_epoch":"<epoch from inventory>"}],"duration_ms":10000,"trace_ids":["<otel trace id>"],"request_ids":["<request id>"]}' \
   http://localhost/admin/profiling/v1/sessions
 ```
 
@@ -116,6 +128,32 @@ coordinator timeout; failed or timed-out cleanup blocks new captures. Reconcile
 the worker profiler before restarting the coordinator; restart alone is not
 cleanup proof.
 
+The example selects only decode-0; decode-1 stays in inventory and receives no
+clock probes or profiling start/stop calls for this session. To capture only the
+selected worker, also set the operator's `frontend_perf_enabled` to false.
+Selection is at the Dynamo worker endpoint boundary. One endpoint backed by a
+multi-rank vLLM engine group still profiles its internal ranks together. Separate
+DP1 endpoints avoid the shared-group collective coupling observed in validation.
+
+## Duration and completion
+
+`duration_ms` requests a **best-effort lease from acceptance**. Clock probes and
+collector startup consume part of that lease. There is no synchronized start or
+exact recording-duration guarantee. Early stop shortens the lease; retries retain
+the original deadline. Embedded event-loop stalls can delay stop dispatch.
+
+Startup, stop/export, and artifact validation use separate operator timeouts:
+`start_timeout_s`, `finalize_timeout_s`, and `artifact_validation_timeout_s`.
+Export can continue after native recording ends; the session remains finalizing
+and holds the lease until cleanup and validation finish. The manifest's
+`timing_contract` describes these semantics and limits.
+
+Torch profile `started_at_ns` and `stopped_at_ns` are **control-response receipt
+times**, with `timestamp_scope` recording that distinction. In particular,
+`stopped_at_ns` can include a long synchronous trace export. The separate
+`start_requested_at_ns` and `stop_requested_at_ns` describe coordinator dispatch.
+Neither pair is a substitute for native recorder bounds.
+
 ## Evidence and clock alignment
 
 Every session writes an atomic `manifest.json`. Control completion and artifact
@@ -129,6 +167,11 @@ counts events and CUDA kernels, hashes uncompressed bytes, checks for files
 changing during validation, and compares rank identities with
 `expected_rank_ids`. Old files and duplicate rank files cannot establish complete
 coverage. Validation runs in a thread with byte and cooperative time limits.
+When a unique native PyTorch Profiler marker and `baseTimeNanoseconds` are
+present, each artifact also reports `recording_bounds`: observed start, end, and
+duration in integer nanoseconds. Missing or ambiguous bounds remain unknown
+without invalidating an otherwise valid trace. These are raw worker trace clock
+values; host offset estimates do not attest GPU-rank clock synchronization.
 
 Without configured rank membership, individually valid files still have unknown
 coverage. Unmounted/external stores, SGLang artifacts, and Linux perf data remain
@@ -162,6 +205,11 @@ coordinator.stop(session.session_id)
 await coordinator.close()
 ```
 
+The coordinator copies supplied configuration and runtime containers. Each
+accepted session owns its runtime snapshot, and manifest/inventory responses
+return detached containers. Changing a caller's options, labels, or response
+does not change the accepted capture.
+
 `CollectorRegistry` registers trusted mode factories returning collectors with
 `start()`, `stop()`, and evidence. Collectors own bounded finalization and must
 attempt cleanup after uncertain starts. `ClockSampler` and `ArtifactValidator`
@@ -186,3 +234,19 @@ controls prepared agents and collections, and its OTLP proxy can mirror traces.
 The deployed API, agent scope, and stop behavior must be validated before adding
 that adapter. See the [Nsight Operator architecture](https://docs.nvidia.com/nsight-operator/Architecture/index.html)
 and [user guide](https://docs.nvidia.com/nsight-operator/UserGuide/index.html).
+
+## Validation status
+
+The embedded implementation was exercised with the real GH200 AgentX workload
+on Dynamo/runtime `1.6.0.dev20261007` and vLLM `0.30.0`. Independent DP1/TP1
+replicas produced both selected GPU traces in one session, and a second run
+selected only decode-0 while decode-1 continued serving. The latter produced a
+9.800296-second native GPU trace with 90,480 CUDA kernels, no profiling traces on
+unselected workers, and 69 observed lifecycle OTel spans across three probes.
+All four workload jobs and their recorded steps completed successfully.
+
+These live runs validate checkpoint `fa32249977`. Subsequent metadata/snapshot
+refinements passed 39 CPU tests; the bounds parser also verifies the saved real
+GPU artifact against its original event count and SHA-256. Frontend perf remained
+disabled in live runs. Actual Nsight collection and SGLang export validation are
+pending. These are functional validations, not overhead comparisons.

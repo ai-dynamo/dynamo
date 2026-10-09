@@ -58,6 +58,8 @@ class RuntimeSnapshot(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
 class Plan(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
     client_request_id: str
     targets: list[Target]
+    # Best-effort lease from acceptance, including clock probes and startup.
+    # Native recording duration and export/validation timeouts are separate.
     duration_ms: int
     mode: Literal["torch_profile", "nsys"] = "torch_profile"
     schema_version: Literal[1] = 1

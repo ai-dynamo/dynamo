@@ -57,6 +57,18 @@ can complete control work while artifact status remains unverified. Accessible
 missing/corrupt/duplicate rank files fail the capture instead of reporting full
 coverage. Configured membership is required to claim complete engine-rank files.
 
+`duration_ms` is a best-effort lease from acceptance, including startup and clock
+probes. Export and validation have separate timeouts and may finish later. The
+manifest states this contract; worker control-response timestamps are labeled
+separately from native recording bounds. Accessible Kineto artifacts report
+integer-nanosecond recorder bounds when a unique native marker is available.
+The interface does not promise exact duration or synchronized collection.
+
+The plan's `targets` list selects Dynamo worker endpoints independently. A worker
+backed by a shared multi-rank engine group still profiles that internal group.
+Only selected workers receive clock probes and start/stop calls. The implicit
+frontend perf collector follows the operator's separate enable/disable setting.
+
 The manifest carries lifecycle OTel trace IDs, request IDs, and an existing
 telemetry backend reference. OTel coverage stays unknown. Runtime changes to
 instrumentation detail, trace fetching, and local OTLP storage are deferred.
@@ -94,16 +106,29 @@ are in [the administration README](components/src/dynamo/frontend/profiling/READ
 
 ## Validation record
 
-The saved pre-refactor checkpoint (`3a0a3b6d9319de567305100f64ecfb0475c37d1f`)
-was exercised with a real vLLM TP1/DP2 workload and produced both native rank
-traces when CUDA summary processing was disabled. Frontend perf was disabled on
-that allocated environment. That run does not validate this new hosting path.
+Checkpoint `fa32249977` preserves the modular implementation exercised in three
+real GH200 AgentX runs with Dynamo/runtime `1.6.0.dev20261007`, vLLM `0.30.0`,
+Qwen3.6-35B-A3B FP8, and frontend perf disabled:
 
-The refactor's 33 CPU tests exercise the module and real local HTTP endpoints,
-unique prefixes, stale epochs, clock uncertainty and clock steps, valid/missing/
-corrupt/duplicate rank files, validation limits, legacy unknown coverage,
-registered providers, embedded Unix-socket hosting, shutdown draining, plan
-copying, blocked admission after uncertain cleanup, and cleanup despite failed
-manifest writes. The validator also parsed
-both real traces from the saved workload: 4,644,687 events and 74,453 CUDA kernels.
-A new GPU workload run and actual Nsight collection remain separate validation.
+| Run | Capture selection | Observed result |
+| --- | --- | --- |
+| `on_demand_modular_validation_20261008_215609` | One TP1/DP2 endpoint | Both rank artifacts verified; shared-group stop skew exposed |
+| `on_demand_independent_replicas_20261009_072400` | Two independent DP1 decode endpoints | Both artifacts verified; 9.864609/9.258399-second recordings |
+| `on_demand_single_worker_20261009_180200` | Only decode-0, both decode endpoints registered | One 9.800296-second GPU trace, 90,480 CUDA kernels; no profiling traces on other workers |
+
+The selected-worker trial retained 69 observed lifecycle OTel spans, successful
+before/during/after inference probes, and successful final accounting for all
+four jobs and their steps. The unselected decode replica continued serving.
+Synchronous export stalls remain expected; this does not establish overhead or
+exact requested-duration coverage.
+
+Subsequent refinements identify processes by boot ID/PID/start tick, detach
+callable API snapshots, and report native recorder bounds separately from
+control-response times. All 39 CPU tests pass, covering selected-only real HTTP
+dispatch, same-tick process identities, clock uncertainty/steps, artifact
+integrity and membership, precise/unknown native bounds, embedded hosting,
+idempotency, cleanup failures, and caller mutation isolation. The revised
+validator also rechecks the original selected GPU trace's hash/event count and
+extracts its exact 9,800,295,631-nanosecond duration. These refinements have not
+been run in a new GPU workload. Actual frontend perf, Nsight collection, and
+SGLang export validation remain pending.

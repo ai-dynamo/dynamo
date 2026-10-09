@@ -32,9 +32,14 @@ from dynamo.profiling.clock import estimate_offset
 from dynamo.profiling.collectors import CollectionError
 from dynamo.profiling.errors import Unavailable
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(20),
+]
 
-RANKS = ["dp0_pp0_tp0_dcp0_ep0_rank0", "dp1_pp0_tp0_dcp0_ep1_rank0"]
+RANKS = ("dp0_pp0_tp0_dcp0_ep0_rank0", "dp1_pp0_tp0_dcp0_ep1_rank0")
 
 
 @pytest.fixture
@@ -79,6 +84,7 @@ async def test_worker_capture_identity_clock_and_rank_validation(
     worker_agent = agent.ProfilingAgent("vllm")
     started = asyncio.Event()
     calls = []
+    unselected_calls = []
     options = {}
     outputs = tmp_path / "native"
     outputs.mkdir()
@@ -103,10 +109,15 @@ async def test_worker_capture_identity_clock_and_rank_validation(
     async def info(request):
         return web.json_response(await worker_agent.info(await request.json()))
 
+    async def unselected(request):
+        unselected_calls.append(request.path)
+        return web.json_response({"status": "ok"})
+
     app = web.Application()
     app.router.add_post("/engine/control/start_profile", start)
     app.router.add_post("/engine/control/stop_profile", stop)
     app.router.add_post("/engine/control/profiling_info", info)
+    app.router.add_post("/unselected/engine/control/{action}", unselected)
     async with TestServer(app) as server:
         worker = Worker(
             "decode",
@@ -115,7 +126,7 @@ async def test_worker_capture_identity_clock_and_rank_validation(
             str(server.make_url("/")),
             artifact_location=str(outputs),
             verify_runtime=True,
-            expected_rank_ids=[] if case == "unknown_membership" else RANKS,
+            expected_rank_ids=[] if case == "unknown_membership" else list(RANKS),
         )
         config = Config(
             str(tmp_path / "admin.sock"),
@@ -124,7 +135,21 @@ async def test_worker_capture_identity_clock_and_rank_validation(
             lifecycle_evidence_location="otel-backend://existing",
         )
         controller = Coordinator(
-            config, RuntimeSnapshot(123, "frontend-epoch", "frontend-host", [worker])
+            config,
+            RuntimeSnapshot(
+                123,
+                "frontend-epoch",
+                "frontend-host",
+                [
+                    worker,
+                    Worker(
+                        "unselected",
+                        "other-epoch",
+                        "vllm",
+                        str(server.make_url("/unselected")),
+                    ),
+                ],
+            ),
         )
         session = controller.submit(
             Plan(
@@ -141,6 +166,7 @@ async def test_worker_capture_identity_clock_and_rank_validation(
         await asyncio.wait_for(session.task, 5)
     manifest = controller.manifest(session)
     assert controller.active is None
+    assert unselected_calls == []
     assert manifest["lifecycle_otel"]["trace_ids"] == ["trigger-trace"]
     assert manifest["lifecycle_otel"]["coverage"] == "unknown"
     if case == "stale_epoch":
@@ -153,6 +179,8 @@ async def test_worker_capture_identity_clock_and_rank_validation(
     clocks = manifest["clock"]["workers"]["decode"]
     assert clocks["start"]["alignment"] == clocks["end"]["alignment"] == "estimated"
     assert clocks["start"]["uncertainty_ns"] >= 0
+    assert set(manifest["clock"]["workers"]) == {"decode"}
+    assert [item["target_id"] for item in manifest["profiles"]] == ["decode"]
     assert manifest["profiles"][0]["identity_verification"] == "control_process_epoch"
     validation = manifest["artifact_validation"][0]
     assert all("old_" not in item["location"] for item in validation["artifacts"])
@@ -356,3 +384,101 @@ async def test_finalization_timeout_blocks_new_capture_and_plan_is_copied(tmp_pa
     assert session.plan.trace_ids == ["original"]
     assert "TimeoutError" in session.errors
     assert controller.cleanup_uncertain
+
+
+@pytest.mark.asyncio
+async def test_callable_api_owns_runtime_and_manifest_snapshots(tmp_path):
+    started = asyncio.Event()
+
+    class Provider:
+        def __init__(self):
+            self.evidence = {"target_id": "frontend", "collector": "test_provider"}
+
+        async def start(self):
+            started.set()
+
+        async def stop(self):
+            pass
+
+    registry = CollectorRegistry()
+    registry.register("nsys", lambda config, runtime, plan, directory: [Provider()])
+    config = Config("unused", str(tmp_path))
+    worker = Worker(
+        "decode",
+        "epoch",
+        "vllm",
+        "http://configured",
+        {"option": [1]},
+        expected_rank_ids=[RANKS[0]],
+    )
+    runtime = RuntimeSnapshot(123, "epoch", "host", [worker], {"labels": ["accepted"]})
+    controller = Coordinator(config, runtime, registry=registry)
+    runtime.workers.clear()
+    runtime.context["labels"].append("caller-mutated")
+    worker.start_options["option"].append(2)
+    inventory = controller.targets()
+    inventory[1]["expected_rank_ids"].clear()
+    assert controller.workers["decode"].expected_rank_ids == [RANKS[0]]
+    assert controller.workers["decode"].start_options == {"option": [1]}
+    session = controller.submit(
+        Plan(
+            "snapshot",
+            [Target("frontend", "epoch")],
+            5000,
+            mode="nsys",
+            trace_ids=["trace"],
+        )
+    )
+    controller.runtime.context["labels"].append("later-context")
+    await asyncio.wait_for(started.wait(), 1)
+    manifest = controller.manifest(session)
+    manifest["profiles"][0]["target_id"] = "caller-mutated"
+    manifest["runtime"]["context"]["labels"].clear()
+    manifest["lifecycle_otel"]["trace_ids"].clear()
+    await controller.close()
+    final = controller.manifest(session)
+    assert final["profiles"][0]["target_id"] == "frontend"
+    assert final["runtime"]["context"] == {"labels": ["accepted"]}
+    assert final["lifecycle_otel"]["trace_ids"] == ["trace"]
+    assert (
+        final["timing_contract"]["duration_semantics"]
+        == "best_effort_lease_from_acceptance"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["observed", "no_marker", "duplicate_marker", "no_base"]
+)
+async def test_native_recording_bounds_preserve_nanosecond_precision(tmp_path, case):
+    marker = '{"ph":"X","cat":"Trace","name":"PyTorch Profiler (0)","ts":714173694365.002,"dur":9800295.631}'
+    events = ['{"ph":"X","cat":"kernel","name":"test_kernel","ts":1,"dur":2}']
+    if case != "no_marker":
+        events.append(marker)
+    if case == "duplicate_marker":
+        events.append(marker)
+    base = '"baseTimeNanoseconds":1790857026000000000,' if case != "no_base" else ""
+    (tmp_path / f"capture_{RANKS[0]}.1.pt.trace.json").write_text(
+        "{" + base + '"traceEvents":[' + ",".join(events) + "]}"
+    )
+    result = await SharedFilesystemValidator().validate(
+        {
+            "collector": "torch_profiler",
+            "artifact_prefix": "capture",
+            "artifact_location": str(tmp_path),
+            "expected_rank_ids": [RANKS[0]],
+        },
+        Config("unused", str(tmp_path)),
+    )
+    assert result["status"] == "verified"
+    bounds = result["artifacts"][0]["recording_bounds"]
+    if case == "observed":
+        assert bounds == {
+            "status": "observed",
+            "clock": "worker_trace_unix_ns_unattested",
+            "start_unix_ns": 1791571199694365002,
+            "end_unix_ns": 1791571209494660633,
+            "duration_ns": 9800295631,
+        }
+    else:
+        assert bounds["status"] == "unknown"

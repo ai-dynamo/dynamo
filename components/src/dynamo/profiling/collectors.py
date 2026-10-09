@@ -24,7 +24,8 @@ def process_epoch(pid: int) -> str:
     # comm may contain spaces and parentheses. Fields after its final ')' start
     # at field 3; starttime is field 22.
     fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-    return f"{boot}:{fields[19]}"
+    # Start ticks alone can collide when independent replicas start together.
+    return f"{boot}:{pid}:{fields[19]}"
 
 
 class PerfCollector:
@@ -152,13 +153,17 @@ class TorchCollector:
             if worker.backend == "vllm"
             else None,
             "expected_rank_ids": worker.expected_rank_ids,
+            "timestamp_scope": "control_responses_not_native_recording_bounds",
         }
 
     async def _request(self, action: str, body: dict, timeout: float) -> None:
         url = f"{self.worker.control_url.rstrip('/')}/engine/control/{action}_profile"
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=timeout)
-        ) as client, client.post(url, json=body) as response:
+        async with (
+            aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as client,
+            client.post(url, json=body) as response,
+        ):
             response.raise_for_status()
             # Dynamo's engine routes serialize JSON with a text/plain header.
             # Validate the JSON body and engine status independently of MIME.
@@ -168,11 +173,13 @@ class TorchCollector:
                 raise CollectionError(f"{self.worker.target_id}: {result}")
 
     async def start(self) -> None:
+        self.evidence["start_requested_at_ns"] = time.time_ns()
         await self._request(
             "start", self.worker.start_options, self.config.start_timeout_s
         )
         self.evidence.update(started_at_ns=time.time_ns(), coverage="recording")
 
     async def stop(self) -> None:
+        self.evidence["stop_requested_at_ns"] = time.time_ns()
         await self._request("stop", {}, self.config.finalize_timeout_s)
         self.evidence.update(stopped_at_ns=time.time_ns(), coverage="export_unverified")

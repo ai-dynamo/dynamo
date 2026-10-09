@@ -8,6 +8,7 @@ import json
 import logging
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -60,6 +61,10 @@ class Coordinator:
         clock_sampler: ClockSampler | None = None,
         artifact_validator: ArtifactValidator | None = None,
     ):
+        # Frozen structs can still contain mutable inventory/options/context.
+        # The callable API owns snapshots rather than caller-owned containers.
+        config = deepcopy(config)
+        runtime = deepcopy(runtime)
         if config.max_duration_ms <= 0 or config.max_sessions <= 0:
             raise ValueError("Profiling limits must be positive")
         if config.start_timeout_s <= 0 or config.finalize_timeout_s <= 0:
@@ -117,7 +122,7 @@ class Coordinator:
                     "identity_verification": "control_process_epoch_required_at_start"
                     if worker.verify_runtime
                     else "operator_config_only",
-                    "expected_rank_ids": worker.expected_rank_ids,
+                    "expected_rank_ids": list(worker.expected_rank_ids),
                 }
                 for worker in self.workers.values()
             ],
@@ -177,8 +182,8 @@ class Coordinator:
         directory = Path(self.config.output_dir) / session_id
         directory.mkdir(parents=True, mode=0o700)
         session = Session(session_id, plan, directory)
-        session.runtime = msgspec.structs.replace(
-            self.runtime, workers=list(self.workers.values())
+        session.runtime = deepcopy(
+            msgspec.structs.replace(self.runtime, workers=list(self.workers.values()))
         )
         session.deadline_monotonic = (
             asyncio.get_running_loop().time() + plan.duration_ms / 1000
@@ -192,13 +197,22 @@ class Coordinator:
 
     def manifest(self, session: Session) -> dict:
         stop_due = session.accepted_at_ns + session.plan.duration_ms * 1000000
-        return {
+        manifest = {
             "schema_version": 1,
             "session_id": session.session_id,
             "state": session.state,
             "plan": msgspec.to_builtins(session.plan),
             "accepted_at_ns": session.accepted_at_ns,
             "stop_due_at_ns": stop_due,
+            "timing_contract": {
+                "duration_semantics": "best_effort_lease_from_acceptance",
+                "startup_counts_toward_duration": True,
+                "synchronized_start": False,
+                "native_recording_bounds": "artifact_validation.artifacts.recording_bounds",
+                "start_timeout_s": self.config.start_timeout_s,
+                "finalize_timeout_s": self.config.finalize_timeout_s,
+                "artifact_validation_timeout_s": self.config.artifact_validation_timeout_s,
+            },
             "frontend": {
                 "pid": self.frontend_pid,
                 "process_epoch": self.frontend_epoch,
@@ -242,6 +256,7 @@ class Coordinator:
             else "unverified",
             "errors": session.errors,
         }
+        return deepcopy(manifest)
 
     def persist(self, session: Session) -> None:
         pending = session.directory / "manifest.json.tmp"
