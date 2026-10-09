@@ -30,13 +30,10 @@ native gRPC API.
 
 ```mermaid
 flowchart LR
-  F[Dynamo Frontend]
+  F[Dynamo Frontend] <-->|Request, discovery, and event planes| S
   subgraph W[Same host or Kubernetes pod]
-    direction TB
     S[Dynamo Sidecar] <-->|Native gRPC| E[Inference Engine]
   end
-  F -->|Request plane| S
-  S -->|Discovery and Event planes| F
 ```
 
 The frontend and router discover sidecars and send requests to them over the

@@ -53,7 +53,8 @@ kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 
 ## Topologies
 
-Solid arrows carry inference requests; dotted arrows carry KV cache events.
+Arrows carry requests and responses, and KV cache events flow back to the
+frontend for routing. Dotted arrows carry KV cache events only.
 
 ### Single-node TP
 
@@ -61,13 +62,10 @@ One engine on one node, with one sidecar.
 
 ```mermaid
 flowchart LR
-  F[Dynamo frontend]
+  F[Dynamo frontend] <-->|Requests, KV events| S
   subgraph P[Worker pod, node 0]
-    S[Dynamo sidecar] -->|Native gRPC| E[SGLang: TP ranks]
-    E -.->|KV events| S
+    S[Dynamo sidecar] <-->|Native gRPC| E[SGLang: TP ranks]
   end
-  F -->|Requests| S
-  S -.->|KV events| F
 ```
 
 ### Multi-node TP
@@ -77,41 +75,30 @@ pod holds the remaining TP ranks.
 
 ```mermaid
 flowchart LR
-  F[Dynamo frontend]
+  F[Dynamo frontend] <-->|Requests, KV events| S
   subgraph L[Leader pod, node 0]
-    S[Dynamo sidecar] -->|Native gRPC| E0[SGLang: local TP ranks]
-    E0 -.->|KV events| S
+    S[Dynamo sidecar] <-->|Native gRPC| E0[SGLang: local TP ranks]
   end
   subgraph W[Follower pod, node 1]
     E1[SGLang: remote TP ranks]
   end
-  F -->|Requests| S
-  S -.->|KV events| F
   E0 <-->|TP collectives| E1
 ```
 
 ### Multi-node DP
 
 The leader sidecar registers every DP rank and serves all requests; SGLang
-dispatches each one to the right scheduler. The follower sidecar accepts no
-requests and relays its node's KV events directly to the frontend.
+dispatches each one to the right scheduler across nodes. The follower sidecar
+accepts no requests and relays its node's KV events directly to the frontend.
 
 ```mermaid
 flowchart LR
-  F[Dynamo frontend]
+  F[Dynamo frontend] <-->|Requests, KV events| SL
+  F <-.->|KV events| SW
   subgraph L[Leader pod, node 0]
-    SL[Dynamo sidecar: DP 0-1] -->|Native gRPC| EL[SGLang]
-    EL -.->|KV events| SL
+    SL[Dynamo sidecar: DP 0-1] <-->|Native gRPC| EL[SGLang]
   end
   subgraph W[Follower pod, node 1]
-    SW[Dynamo sidecar: KV events only, DP 2-3] ~~~ EW[SGLang]
-    EW -.->|KV events| SW
+    SW[Dynamo sidecar: KV events only, DP 2-3] <-.->|KV events| EW[SGLang]
   end
-  C{{Dispatch + collectives}}
-  F -->|Requests| SL
-  F ~~~ SW
-  SL -.->|KV events| F
-  SW -.->|KV events| F
-  EL <--> C
-  EW <--> C
 ```
