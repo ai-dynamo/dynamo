@@ -35,7 +35,7 @@ It also emits three machine-readable outputs from the same parse:
   * assets/releases.json — a stable-schema JSON serialization of the parsed
     data (current, mainTot, releases, cudaHistory, features, artifacts,
     modelEaBuilds, platform, releaseStats, ...). Human dates gain ISO-8601
-    ``dateIso`` twins.
+    ``dateIso`` twins (``enterpriseIso`` for a release's ``enterprise`` date).
   * assets/releases-atom.xml — an Atom 1.0 feed, one entry per RELEASES item,
     newest first. Entry links resolve notesHref against the canonical prod
     base (https://docs.nvidia.com/dynamo), falling back to the GitHub release
@@ -1131,6 +1131,8 @@ def build_json(data: dict) -> str:
         out = dict(rel)
         if rel.get("date"):
             out["dateIso"] = iso_date(rel["date"])
+        if rel.get("enterprise"):
+            out["enterpriseIso"] = iso_date(rel["enterprise"])
         link = release_link(rel)
         if link:
             out["notesUrl"] = link

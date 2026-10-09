@@ -9,6 +9,7 @@ pytest config ignores docs/, so the standalone pytest.ini beside this file
 supplies the marker registrations.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -215,6 +216,14 @@ class TestEnterpriseArtifacts:
         body = gen.render_enterprise_artifacts(real)
         assert body.count("-enterprise") == len(real["ENTERPRISE_ARTIFACTS"])
         assert "{tag}" not in body
+
+    def test_json_gives_enterprise_dates_an_iso_twin(self):
+        real = gen.parse_data_module(gen.DATA_TS)
+        releases = json.loads(gen.build_json(real))["releases"]
+        dated = [r for r in releases if "enterprise" in r]
+        assert dated
+        for rel in dated:
+            assert rel["enterpriseIso"] == gen.iso_date(rel["enterprise"])
 
 
 class TestGeneratedNightlyLedger:
