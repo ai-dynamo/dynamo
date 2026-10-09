@@ -47,6 +47,13 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
 
 
+def _freeze_gc_after_init(enabled: bool) -> None:
+    if enabled:
+        collected = gc.collect()
+        gc.freeze()
+        logging.info("Froze SGLang worker GC objects after collecting %d", collected)
+
+
 async def init_decode(
     runtime: DistributedRuntime,
     config: Config,
@@ -95,6 +102,7 @@ async def init_decode(
         # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
         # serve requests; gateway children do, this process keeps the engine alive.
         try:
+            _freeze_gc_after_init(dynamo_args.freeze_gc_after_init)
             await serve_via_gateway_children(
                 engine, gateway_count, shutdown_event, load_time=load_time
             )
@@ -168,12 +176,7 @@ async def init_decode(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
         ).to_dict()
 
-    if dynamo_args.freeze_gc_after_init:
-        collected = gc.collect()
-        gc.freeze()
-        logging.info(
-            "Froze SGLang decode worker GC objects after collecting %d", collected
-        )
+    _freeze_gc_after_init(dynamo_args.freeze_gc_after_init)
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
