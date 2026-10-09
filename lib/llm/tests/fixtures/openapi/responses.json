@@ -1,0 +1,46 @@
+{
+  "cases": [
+    {
+      "name": "unary nullable fields and omitted optional envelope",
+      "kind": "chat",
+      "input": {"id": "chat-1", "created": 0, "model": "test", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": null}}]},
+      "output": {"id": "chat-1", "created": 0, "model": "test", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": null, "refusal": null}, "finish_reason": null, "logprobs": null}]}
+    },
+    {
+      "name": "stream delta and internal metrics omitted",
+      "kind": "stream",
+      "input": {"id": "chat-1", "created": 0, "model": "test", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"reasoning_content": "think"}}], "llm_metrics": null},
+      "output": {"id": "chat-1", "created": 0, "model": "test", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"reasoning_content": "think"}, "finish_reason": null, "logprobs": null}]}
+    },
+    {
+      "name": "chat custom usage omits absent detail members",
+      "kind": "chat",
+      "input": {"id": "chat-1", "created": 0, "model": "test", "object": "chat.completion", "choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3, "prompt_tokens_details": {}, "completion_tokens_details": {"reasoning_tokens": 1}}},
+      "output": {"id": "chat-1", "created": 0, "model": "test", "object": "chat.completion", "choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3, "prompt_tokens_details": {}, "completion_tokens_details": {"reasoning_tokens": 1}}}
+    },
+    {
+      "name": "usage-only final chunk allows empty choices",
+      "kind": "stream",
+      "input": {"id": "chat-1", "created": 0, "model": "test", "object": "chat.completion.chunk", "choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}},
+      "output": {"id": "chat-1", "created": 0, "model": "test", "object": "chat.completion.chunk", "choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}}
+    },
+    {
+      "name": "legacy completion always emits usage and fingerprint",
+      "kind": "completion",
+      "input": {"id": "cmpl-1", "created": 0, "model": "test", "object": "text_completion", "choices": [{"index": 0, "text": "hello"}]},
+      "output": {"id": "cmpl-1", "created": 0, "model": "test", "object": "text_completion", "choices": [{"index": 0, "text": "hello"}], "usage": null, "system_fingerprint": null}
+    },
+    {
+      "name": "legacy usage details retain null members",
+      "kind": "completion",
+      "input": {"id": "cmpl-1", "created": 0, "model": "test", "object": "text_completion", "choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3, "prompt_tokens_details": {}, "completion_tokens_details": {}}},
+      "output": {"id": "cmpl-1", "created": 0, "model": "test", "object": "text_completion", "choices": [], "system_fingerprint": null, "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3, "prompt_tokens_details": {"audio_tokens": null, "cached_tokens": null}, "completion_tokens_details": {"accepted_prediction_tokens": null, "audio_tokens": null, "reasoning_tokens": null, "rejected_prediction_tokens": null}}}
+    },
+    {
+      "name": "legacy logprobs nullable values and arbitrary JSON",
+      "kind": "completion",
+      "input": {"id": "cmpl-1", "created": 0, "model": "test", "object": "text_completion", "choices": [{"index": 0, "text": "hello", "finish_reason": "stop", "logprobs": {"text_offset": [0], "tokens": ["hello"], "token_logprobs": [null], "top_logprobs": [null, {"hello": -1}]}}]},
+      "output": {"id": "cmpl-1", "created": 0, "model": "test", "object": "text_completion", "system_fingerprint": null, "usage": null, "choices": [{"index": 0, "text": "hello", "finish_reason": "stop", "logprobs": {"text_offset": [0], "tokens": ["hello"], "token_logprobs": [null], "top_logprobs": [null, {"hello": -1}]}}]}
+    }
+  ]
+}

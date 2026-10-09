@@ -1464,7 +1464,10 @@ impl HttpServiceConfigBuilder {
 
         // OpenAPI documentation routes (system)
         let (openapi_docs, openapi_route) =
-            super::openapi_docs::openapi_router(all_docs.clone(), None);
+            super::openapi_docs::openapi_router_with_reasoning_field(
+                all_docs.clone(),
+                state.reasoning_field(),
+            );
         append_route_docs(&mut all_docs, &mut seen_route_docs, openapi_docs)?;
         system_router = system_router.merge(openapi_route);
 
