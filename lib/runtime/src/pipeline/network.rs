@@ -626,7 +626,14 @@ mod registered_stream_tests {
 pub struct StreamSender {
     tx: tokio::sync::mpsc::Sender<TwoPartMessage>,
     prologue: Option<ResponseStreamPrologue>,
+    /// Resolves when the upstream accepts the response callback. Older peers
+    /// leave this unset and retain the original fire-and-forget behavior.
+    response_ack: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
 }
+
+/// The server bounds its ACK write to one second. This longer client bound also
+/// covers scheduling and delivery without letting a misbehaving peer hang admission.
+const RESPONSE_ACCEPTANCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl StreamSender {
     pub async fn send(&self, data: Bytes) -> Result<()> {
@@ -654,6 +661,7 @@ impl StreamSender {
         &mut self,
         error: Option<StreamPrologueError>,
     ) -> Result<(), String> {
+        let successful = error.is_none();
         // leaving the original logic in place for now
         if let Some(_prologue) = self.prologue.take() {
             let (error, typed_error) = match error {
@@ -678,7 +686,21 @@ impl StreamSender {
         } else {
             panic!("Prologue already sent; or not set; logic error");
         }
+
+        if successful && let Some(response_ack) = self.response_ack.as_mut() {
+            match tokio::time::timeout(RESPONSE_ACCEPTANCE_TIMEOUT, response_ack).await {
+                Ok(Ok(result)) => result?,
+                Ok(Err(_)) => {
+                    return Err("Response acceptance channel closed before acknowledgment".into());
+                }
+                Err(_) => return Err("Timed out waiting for response acceptance".into()),
+            }
+        }
         Ok(())
+    }
+
+    pub(crate) fn requires_response_ack(&self) -> bool {
+        self.response_ack.is_some()
     }
 }
 

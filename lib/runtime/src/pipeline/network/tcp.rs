@@ -236,6 +236,12 @@ struct CallHomeHandshake {
     response_ack: bool,
 }
 
+/// Confirms that a response callback survived discovery-removal arbitration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ResponseStreamAck {
+    accepted: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::engine::AsyncEngineContextProvider;
@@ -374,6 +380,7 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(send_stream.requires_response_ack());
 
         // the client can now setup it's end of the stream and if it errors, it can send a message
         // to the server to stop the stream

@@ -19,7 +19,7 @@ type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 use prometheus::IntCounter;
 use tracing::Instrument;
 
-use super::{CallHomeHandshake, ControlMessage, TcpStreamConnectionInfo};
+use super::{CallHomeHandshake, ControlMessage, ResponseStreamAck, TcpStreamConnectionInfo};
 use crate::engine::AsyncEngineContext;
 use crate::pipeline::network::{
     ConnectionInfo, ResponseStreamPrologue, StreamReceiver, StreamSender,
@@ -148,14 +148,21 @@ impl TcpClient {
         // so the holder of the alive_tx half will be notified that the stream is closed; the alive_tx channel will be
         // captured by the monitor task
         let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let (response_ack_tx, response_ack_rx) = if info.response_ack {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
 
         let reader_span = tracing::Span::current();
         let reader_task = tokio::spawn(
-            handle_reader(
+            handle_reader_with_ack(
                 framed_reader,
                 context.clone(),
                 alive_tx,
                 cancellation_counter,
+                response_ack_tx,
             )
             .instrument(reader_span),
         );
@@ -164,7 +171,7 @@ impl TcpClient {
         let handshake = CallHomeHandshake {
             subject: info.subject.clone(),
             stream_type: StreamType::Response,
-            response_ack: false,
+            response_ack: info.response_ack,
         };
 
         let handshake_bytes = match serde_json::to_vec(&handshake) {
@@ -216,6 +223,7 @@ impl TcpClient {
         let stream_sender = StreamSender {
             tx: bytes_tx,
             prologue,
+            response_ack: response_ack_rx,
         };
 
         Ok(stream_sender)
@@ -601,8 +609,19 @@ async fn handle_reader(
     alive_tx: tokio::sync::oneshot::Sender<()>,
     cancellation_counter: Option<IntCounter>,
 ) -> FramedRead<BoxRead, TwoPartCodec> {
+    handle_reader_with_ack(framed_reader, context, alive_tx, cancellation_counter, None).await
+}
+
+async fn handle_reader_with_ack(
+    framed_reader: FramedRead<BoxRead, TwoPartCodec>,
+    context: Arc<dyn AsyncEngineContext>,
+    alive_tx: tokio::sync::oneshot::Sender<()>,
+    cancellation_counter: Option<IntCounter>,
+    response_ack_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+) -> FramedRead<BoxRead, TwoPartCodec> {
     let mut framed_reader = framed_reader;
     let mut alive_tx = alive_tx;
+    let mut response_ack_tx = response_ack_tx;
     // Set on every cancellation arm; counted once after the loop.
     let mut cancellation_seen = false;
     loop {
@@ -612,9 +631,29 @@ async fn handle_reader(
                     Some(Ok(two_part_msg)) => {
                         match two_part_msg.optional_parts() {
                            (Some(bytes), None) => {
+                                if let Ok(ack) = serde_json::from_slice::<ResponseStreamAck>(bytes)
+                                    && let Some(tx) = response_ack_tx.take()
+                                {
+                                    if ack.accepted {
+                                        let _ = tx.send(Ok(()));
+                                        continue;
+                                    }
+                                    let _ = tx.send(Err(
+                                        "Response stream was not accepted".to_string(),
+                                    ));
+                                    cancellation_seen = true;
+                                    context.kill();
+                                    break;
+                                }
+
                                 let msg = match serde_json::from_slice::<ControlMessage>(bytes) {
                                     Ok(msg) => msg,
                                     Err(e) => {
+                                        if let Some(tx) = response_ack_tx.take() {
+                                            let _ = tx.send(Err(format!(
+                                                "Invalid response acceptance message: {e}"
+                                            )));
+                                        }
                                         tracing::warn!(
                                             err = ?e,
                                             "invalid control message, closing connection"
@@ -624,6 +663,12 @@ async fn handle_reader(
                                         break;
                                     }
                                 };
+
+                                if let Some(tx) = response_ack_tx.take() {
+                                    let _ = tx.send(Err(format!(
+                                        "Response stream closed before acceptance: {msg:?}"
+                                    )));
+                                }
 
                                 // Stop/Kill intentionally do not `break`: the
                                 // reader keeps running so a later Kill can
@@ -653,6 +698,11 @@ async fn handle_reader(
                                 }
                            }
                            _ => {
+                                if let Some(tx) = response_ack_tx.take() {
+                                    let _ = tx.send(Err(
+                                        "Received data before response stream acceptance".to_string(),
+                                    ));
+                                }
                                 tracing::warn!(
                                     "unexpected non-control message on client reader, closing connection"
                                 );
@@ -663,6 +713,11 @@ async fn handle_reader(
                         }
                     }
                     Some(Err(e)) => {
+                        if let Some(tx) = response_ack_tx.take() {
+                            let _ = tx.send(Err(format!(
+                                "Response stream failed before acceptance: {e}"
+                            )));
+                        }
                         // Kill the engine context so the producer stops
                         // generating responses that can no longer be delivered.
                         tracing::warn!(err = ?e, "tcp stream read error, closing connection");
@@ -671,12 +726,22 @@ async fn handle_reader(
                         break;
                     }
                     None => {
+                        if let Some(tx) = response_ack_tx.take() {
+                            let _ = tx.send(Err(
+                                "Response stream closed before acceptance".to_string(),
+                            ));
+                        }
                         tracing::debug!("tcp stream closed by server");
                         break;
                     }
                 }
             }
             _ = alive_tx.closed() => {
+                if let Some(tx) = response_ack_tx.take() {
+                    let _ = tx.send(Err(
+                        "Response writer closed before acceptance".to_string(),
+                    ));
+                }
                 break;
             }
         }

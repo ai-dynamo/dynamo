@@ -239,6 +239,10 @@ impl ResponsePublisher for StreamSender {
     async fn abort(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
+
+    fn strict_prologue(&self) -> bool {
+        self.requires_response_ack()
+    }
 }
 
 impl<Req, Resp, Adapter> Ingress<Req, Resp, Adapter>
@@ -1378,7 +1382,11 @@ mod tests {
         // Capacity covers every content frame, so a send only fails once the
         // receiver is gone — never merely because the channel is full.
         let (tx, mut rx) = tokio::sync::mpsc::channel(content_frames + 8);
-        let publisher = StreamSender { tx, prologue: None };
+        let publisher = StreamSender {
+            tx,
+            prologue: None,
+            response_ack: None,
+        };
 
         let ctx = Context::new(serde_json::json!({}));
         let engine_ctx = ctx.context();
@@ -1510,7 +1518,11 @@ mod tests {
 
         let content_frames = 3;
         let (tx, mut rx) = tokio::sync::mpsc::channel(content_frames + 8);
-        let publisher = StreamSender { tx, prologue: None };
+        let publisher = StreamSender {
+            tx,
+            prologue: None,
+            response_ack: None,
+        };
 
         let ctx = Context::new(serde_json::json!({}));
         let content: Vec<TestResponse> = (0..content_frames)

@@ -1041,6 +1041,7 @@ async fn tcp_listener(
                 // Request streams don't carry a downstream-prologue today; the
                 // upstream may begin sending immediately.
                 prologue: None,
+                response_ack: None,
             }))
             .is_err()
         {
@@ -1261,9 +1262,9 @@ async fn tcp_listener(
             // owns the receiver. A worker may safely admit work after this ACK.
             time::timeout(
                 Duration::from_secs(1),
-                writer.send(TwoPartMessage::from_header(Bytes::from_static(
-                    br#"{"accepted":true}"#,
-                ))),
+                writer.send(TwoPartMessage::from_header(
+                    serde_json::to_vec(&super::ResponseStreamAck { accepted: true })?.into(),
+                )),
             )
             .await
             .map_err(|_| error!("Timed out acknowledging response acceptance"))??;
@@ -2705,6 +2706,66 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn response_callback_client_waits_for_acceptance_ack() {
+        let server = test_server().await;
+        let frontend_context = Context::new(());
+        let pending = server
+            .register(
+                StreamOptions::builder()
+                    .context(frontend_context.context())
+                    .enable_request_stream(false)
+                    .enable_response_stream(true)
+                    .build()
+                    .unwrap(),
+            )
+            .await;
+        let response = pending.recv_stream.unwrap();
+        let info = response.connection_info.clone();
+        let tcp_info: TcpStreamConnectionInfo = info.clone().try_into().unwrap();
+        let instance = make_eid("ns", "comp", "generate", 45);
+        assert!(
+            server
+                .associate_instance(&tcp_info.subject, None, &instance)
+                .await
+        );
+
+        let worker_context = Context::with_id_and_metadata(
+            (),
+            frontend_context.id().to_string(),
+            Default::default(),
+        );
+        let mut sender = crate::pipeline::network::tcp::client::TcpClient::create_response_stream(
+            worker_context.context(),
+            info,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(sender.requires_response_ack());
+
+        time::timeout(Duration::from_secs(1), async {
+            while server
+                .state
+                .lock()
+                .rx_subjects
+                .contains_key(&tcp_info.subject)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("server did not accept response call-home");
+
+        assert_eq!(server.cancel_instance_streams(&instance).await, 1);
+        let error = sender.send_prologue(None).await.unwrap_err();
+        assert!(
+            error.contains("before acceptance") || error.contains("before acknowledgment"),
+            "unexpected rejection error: {error}"
+        );
+        assert!(response.stream_provider.await.is_err());
     }
 
     /// Delay delivery of the callback while the worker has successfully flushed
