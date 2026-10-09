@@ -4,11 +4,16 @@
 //! Example post-selection session policy that emits block-addressed KV actions.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
+    sync::Mutex,
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 
-use dynamo_kv_router::kv_hints::{KvHint, KvHintAction};
+use dynamo_kv_router::{
+    indexer::successful_block_removals,
+    kv_hints::{KvHint, KvHintAction},
+};
 use dynamo_llm::{
     entrypoint::HttpFrontend,
     kv_router::{KvHintPolicy, KvHintPolicyContext, KvHintPolicyError},
@@ -20,6 +25,15 @@ const ACTION_VERSION: &str = "1.0";
 pub struct RetentionConfig {
     pub priority: u64,
     pub trigger: RetentionTrigger,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OnlineRetentionConfig {
+    pub priority: u64,
+    pub fixed_ttl_seconds: f64,
+    pub min_missing_blocks: usize,
+    pub min_removal_pressure_per_second: f64,
+    pub removal_pressure_window: Duration,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -46,8 +60,41 @@ impl RetentionTrigger {
 /// Applies sparse lifecycle actions to session-addressed KV.
 pub struct SessionKvHintPolicy {
     retention: Option<RetentionConfig>,
+    online_retention: Option<OnlineRetentionConfig>,
     evict_final_roots: bool,
     next_message_id: AtomicU64,
+    removal_pressure: Mutex<RemovalPressureWindow>,
+}
+
+#[derive(Debug, Default)]
+struct RemovalPressureWindow {
+    samples: VecDeque<(Instant, u64)>,
+}
+
+impl RemovalPressureWindow {
+    fn observe(&mut self, now: Instant, count: u64, window: Duration) -> f64 {
+        if self
+            .samples
+            .back()
+            .is_some_and(|(_, previous)| count < *previous)
+        {
+            self.samples.clear();
+        }
+        self.samples.push_back((now, count));
+
+        while self.samples.len() > 1 && self.samples[1].0 + window <= now {
+            self.samples.pop_front();
+        }
+
+        let Some((start, start_count)) = self.samples.front().copied() else {
+            return 0.0;
+        };
+        let elapsed = now.saturating_duration_since(start).as_secs_f64();
+        if elapsed < 1.0 {
+            return 0.0;
+        }
+        count.saturating_sub(start_count) as f64 / elapsed
+    }
 }
 
 impl SessionKvHintPolicy {
@@ -57,8 +104,37 @@ impl SessionKvHintPolicy {
     ) -> Result<Self, KvHintPolicyError> {
         Ok(Self {
             retention,
+            online_retention: None,
             evict_final_roots,
             next_message_id: AtomicU64::new(0),
+            removal_pressure: Mutex::new(RemovalPressureWindow::default()),
+        })
+    }
+
+    pub fn new_online(config: OnlineRetentionConfig) -> Result<Self, KvHintPolicyError> {
+        if !config.fixed_ttl_seconds.is_finite() || config.fixed_ttl_seconds <= 0.0 {
+            return Err(KvHintPolicyError::new(
+                "online retention fixed TTL must be finite and positive",
+            ));
+        }
+        if !config.min_removal_pressure_per_second.is_finite()
+            || config.min_removal_pressure_per_second < 0.0
+        {
+            return Err(KvHintPolicyError::new(
+                "online retention pressure threshold must be finite and non-negative",
+            ));
+        }
+        if config.removal_pressure_window.is_zero() {
+            return Err(KvHintPolicyError::new(
+                "online retention pressure window must be positive",
+            ));
+        }
+        Ok(Self {
+            retention: None,
+            online_retention: Some(config),
+            evict_final_roots: false,
+            next_message_id: AtomicU64::new(0),
+            removal_pressure: Mutex::new(RemovalPressureWindow::default()),
         })
     }
 
@@ -144,6 +220,58 @@ impl KvHintPolicy for SessionKvHintPolicy {
             )));
         }
 
+        if let Some(online) = self.online_retention {
+            let missing_blocks = context
+                .prefix_blocks
+                .saturating_sub(context.cached_prefix_blocks);
+            let removal_pressure_per_second = self
+                .removal_pressure
+                .lock()
+                .map_err(|_| KvHintPolicyError::new("removal-pressure sampler poisoned"))?
+                .observe(
+                    Instant::now(),
+                    successful_block_removals(),
+                    online.removal_pressure_window,
+                );
+            let continuation_expected = agent.session_final == Some(false);
+            if !continuation_expected
+                || missing_blocks < online.min_missing_blocks
+                || removal_pressure_per_second < online.min_removal_pressure_per_second
+            {
+                return Ok(None);
+            }
+
+            tracing::info!(
+                target: "continuum_kv_hints",
+                session_id = %agent.session_id,
+                worker_id = context.selected_worker.worker_id,
+                prefix_blocks = context.prefix_blocks,
+                cached_prefix_blocks = context.cached_prefix_blocks,
+                missing_blocks,
+                removal_pressure_per_second,
+                removal_pressure_window_seconds = online.removal_pressure_window.as_secs_f64(),
+                min_missing_blocks = online.min_missing_blocks,
+                min_removal_pressure_per_second = online.min_removal_pressure_per_second,
+                action_type = "kv.retain",
+                priority = online.priority,
+                ttl_seconds = online.fixed_ttl_seconds,
+                ttl_source = "fixed",
+                retention_reason = "online_missing_depth_and_eviction_pressure",
+                "Emitting request-completion KV hint"
+            );
+            return Ok(Some(self.hint(
+                &agent.session_id,
+                context.selected_worker.worker_id,
+                "kv.retain",
+                BTreeMap::from([
+                    ("priority".into(), online.priority.into()),
+                    ("ttl_seconds".into(), online.fixed_ttl_seconds.into()),
+                ]),
+                block_hashes,
+                true,
+            )));
+        }
+
         let Some((retain, retention_reason, ttl_ms)) = self.retention.and_then(|retain| {
             retain
                 .trigger
@@ -217,6 +345,8 @@ mod tests {
             agent_context: Some(agent_context),
             selected_worker: WorkerWithDpRank::new(9, 0),
             session_lineage: lineage,
+            prefix_blocks: 4,
+            cached_prefix_blocks: 2,
         }
     }
 
@@ -319,6 +449,76 @@ mod tests {
             .unwrap();
 
         assert!(policy.evaluate(&context(&agent, None)).unwrap().is_none());
+    }
+
+    #[test]
+    fn online_retention_uses_causal_signals_and_fixed_ttl() {
+        let policy = SessionKvHintPolicy::new_online(OnlineRetentionConfig {
+            priority: 7,
+            fixed_ttl_seconds: 10.0,
+            min_missing_blocks: 2,
+            min_removal_pressure_per_second: 0.0,
+            removal_pressure_window: Duration::from_secs(5),
+        })
+        .unwrap();
+        let agent = AgentContext::builder()
+            .session_id("session-1".to_string())
+            .session_final(false)
+            .retention_ttl_ms(123_456)
+            .build()
+            .unwrap();
+        let lineage = SessionLineageView::new(vec![vec![
+            ExternalSequenceBlockHash(11),
+            ExternalSequenceBlockHash(12),
+        ]]);
+
+        let hint = policy
+            .evaluate(&context(&agent, Some(&lineage)))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(hint.actions[0].action_type, "kv.retain");
+        assert_eq!(hint.actions[0].payload["priority"], 7);
+        assert_eq!(hint.actions[0].payload["ttl_seconds"], 10.0);
+        assert_eq!(hint.actions[0].payload["include_current_request"], true);
+        assert_eq!(
+            hint.actions[0].payload["block_hashes"],
+            serde_json::json!(["11", "12"])
+        );
+    }
+
+    #[test]
+    fn online_retention_requires_expected_continuation() {
+        let policy = SessionKvHintPolicy::new_online(OnlineRetentionConfig {
+            priority: 7,
+            fixed_ttl_seconds: 10.0,
+            min_missing_blocks: 2,
+            min_removal_pressure_per_second: 0.0,
+            removal_pressure_window: Duration::from_secs(5),
+        })
+        .unwrap();
+        let agent = AgentContext::builder()
+            .session_id("session-1".to_string())
+            .session_final(true)
+            .build()
+            .unwrap();
+
+        assert!(policy.evaluate(&context(&agent, None)).unwrap().is_none());
+    }
+
+    #[test]
+    fn trailing_removal_pressure_uses_only_the_configured_window() {
+        let start = Instant::now();
+        let mut window = RemovalPressureWindow::default();
+        assert_eq!(window.observe(start, 100, Duration::from_secs(5)), 0.0);
+        assert_eq!(
+            window.observe(start + Duration::from_secs(2), 110, Duration::from_secs(5)),
+            5.0
+        );
+        assert_eq!(
+            window.observe(start + Duration::from_secs(7), 130, Duration::from_secs(5)),
+            4.0
+        );
     }
 
     #[test]

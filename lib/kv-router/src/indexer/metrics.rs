@@ -233,6 +233,31 @@ const CKF_MUTATION_LABELS: &[&str] = &["outcome"];
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
 
+/// Return the process-wide count of successfully applied block removals.
+///
+/// The online retention experiment samples this monotonic counter to derive a
+/// causal trailing eviction-pressure signal. Production indexers created from
+/// a component share the process-wide metrics instance above.
+pub fn successful_block_removals() -> u64 {
+    #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
+    {
+        KV_INDEXER_METRICS
+            .get()
+            .map(|metrics| {
+                metrics
+                    .kv_cache_events_applied
+                    .with_label_values(&[METRIC_EVENT_REMOVED, METRIC_STATUS_OK])
+                    .get()
+            })
+            .unwrap_or(0)
+    }
+
+    #[cfg(not(all(feature = "metrics", feature = "runtime-protocols")))]
+    {
+        0
+    }
+}
+
 impl KvIndexerMetrics {
     #[cfg(feature = "metrics")]
     fn new(

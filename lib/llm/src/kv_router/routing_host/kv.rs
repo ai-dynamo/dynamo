@@ -11,9 +11,10 @@ where
     pub(super) fn evaluate_kv_hint_policy(
         &self,
         request: &SingleIn<PreprocessedRequest>,
-        selected_worker: WorkerWithDpRank,
+        selection: &WorkerSelection,
     ) -> Option<dynamo_kv_router::kv_hints::KvHint> {
         let policy = self.kv_hint_policy.as_ref()?;
+        let selected_worker = selection.worker;
         let session_lineage = request
             .agent_context
             .as_ref()
@@ -44,6 +45,11 @@ where
             agent_context: request.agent_context.as_ref(),
             selected_worker,
             session_lineage: session_lineage.as_ref(),
+            prefix_blocks: request
+                .token_ids
+                .len()
+                .div_ceil(self.kv_router().block_size() as usize),
+            cached_prefix_blocks: selection.overlap_amount as usize,
         };
         match policy.evaluate(&context) {
             Ok(hint) => hint,
@@ -518,7 +524,7 @@ where
         guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
-        let planned_kv_hint = self.evaluate_kv_hint_policy(&request, selection.worker);
+        let planned_kv_hint = self.evaluate_kv_hint_policy(&request, &selection);
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
         backend_input.kv_hint = match planned_kv_hint {

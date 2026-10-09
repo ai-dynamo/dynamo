@@ -44,7 +44,7 @@ use dynamo_runtime::protocols::EndpointId;
 
 #[cfg(target_os = "linux")]
 use dynamo_kv_hint_policy_example::{
-    RetentionConfig, RetentionTrigger, SessionKvHintPolicy,
+    OnlineRetentionConfig, RetentionConfig, RetentionTrigger, SessionKvHintPolicy,
 };
 
 use super::local_model::ModelRuntimeConfig;
@@ -1094,12 +1094,59 @@ fn experimental_session_kv_hint_policy() -> PyResult<Option<SessionKvHintPolicy>
     const ENABLED: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_POLICY";
     const MODE: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_POLICY_MODE";
     const PRIORITY: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_RETENTION_PRIORITY";
+    const FIXED_TTL_SECONDS: &str =
+        "DYN_EXPERIMENTAL_SESSION_KV_HINT_FIXED_TTL_SECONDS";
+    const MIN_MISSING_BLOCKS: &str =
+        "DYN_EXPERIMENTAL_SESSION_KV_HINT_MIN_MISSING_BLOCKS";
+    const MIN_REMOVAL_PRESSURE: &str =
+        "DYN_EXPERIMENTAL_SESSION_KV_HINT_MIN_REMOVAL_PRESSURE_PER_SECOND";
+    const REMOVAL_PRESSURE_WINDOW_SECONDS: &str =
+        "DYN_EXPERIMENTAL_SESSION_KV_HINT_REMOVAL_PRESSURE_WINDOW_SECONDS";
 
     if std::env::var_os(ENABLED).is_none() {
         return Ok(None);
     }
 
     let mode = std::env::var(MODE).unwrap_or_else(|_| "combined".to_string());
+    let priority = || {
+        std::env::var(PRIORITY)
+            .unwrap_or_else(|_| "10".to_string())
+            .parse::<u64>()
+            .map_err(|error| PyValueError::new_err(format!("invalid {PRIORITY} value: {error}")))
+    };
+    if mode == "online-retain" {
+        let parse = |name: &str, default: &str| -> PyResult<f64> {
+            std::env::var(name)
+                .unwrap_or_else(|_| default.to_string())
+                .parse::<f64>()
+                .map_err(|error| PyValueError::new_err(format!("invalid {name} value: {error}")))
+        };
+        let min_missing_blocks = std::env::var(MIN_MISSING_BLOCKS)
+            .unwrap_or_else(|_| "24".to_string())
+            .parse::<usize>()
+            .map_err(|error| {
+                PyValueError::new_err(format!("invalid {MIN_MISSING_BLOCKS} value: {error}"))
+            })?;
+        let removal_pressure_window_seconds = parse(REMOVAL_PRESSURE_WINDOW_SECONDS, "5")?;
+        if !removal_pressure_window_seconds.is_finite()
+            || removal_pressure_window_seconds <= 0.0
+        {
+            return Err(PyValueError::new_err(format!(
+                "invalid {REMOVAL_PRESSURE_WINDOW_SECONDS} value: expected a finite positive number"
+            )));
+        }
+        return SessionKvHintPolicy::new_online(OnlineRetentionConfig {
+            priority: priority()?,
+            fixed_ttl_seconds: parse(FIXED_TTL_SECONDS, "10")?,
+            min_missing_blocks,
+            min_removal_pressure_per_second: parse(MIN_REMOVAL_PRESSURE, "4")?,
+            removal_pressure_window: std::time::Duration::from_secs_f64(
+                removal_pressure_window_seconds,
+            ),
+        })
+        .map(Some)
+        .map_err(|error| PyValueError::new_err(error.to_string()));
+    }
     let (retention_trigger, evict_final_roots) = match mode.as_str() {
         "retain" => (Some(RetentionTrigger::SubagentSpawn), false),
         "inferred-tool-retain" => (Some(RetentionTrigger::InferredToolCall), false),
@@ -1115,17 +1162,16 @@ fn experimental_session_kv_hint_policy() -> PyResult<Option<SessionKvHintPolicy>
         ),
         _ => {
             return Err(PyValueError::new_err(format!(
-                "invalid {MODE} value {mode:?}; expected retain, inferred-tool-retain, all-retain, evict, combined, or all-retain-and-evict"
+                "invalid {MODE} value {mode:?}; expected retain, inferred-tool-retain, all-retain, online-retain, evict, combined, or all-retain-and-evict"
             )));
         }
     };
 
     let retention = if let Some(trigger) = retention_trigger {
-        let priority = std::env::var(PRIORITY)
-            .unwrap_or_else(|_| "10".to_string())
-            .parse::<u64>()
-            .map_err(|error| PyValueError::new_err(format!("invalid {PRIORITY} value: {error}")))?;
-        Some(RetentionConfig { priority, trigger })
+        Some(RetentionConfig {
+            priority: priority()?,
+            trigger,
+        })
     } else {
         None
     };

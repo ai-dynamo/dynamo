@@ -48,6 +48,10 @@ pub struct KvHintPolicyContext<'a> {
     pub agent_context: Option<&'a AgentContext>,
     pub selected_worker: WorkerWithDpRank,
     pub session_lineage: Option<&'a SessionLineageView>,
+    /// Number of complete-or-partial KV blocks in the current request prefix.
+    pub prefix_blocks: usize,
+    /// Number of full prefix blocks found on the selected worker.
+    pub cached_prefix_blocks: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
