@@ -2492,6 +2492,149 @@ async fn test_disconnect_during_pre_commit_wait_is_recorded_once_when_backend_fa
 
 const BATCH_FAILING_PROMPT: &str = "fail-before-first-event";
 
+struct BatchEchoEngine {
+    requests: tokio::sync::mpsc::Sender<SingleIn<NvCreateCompletionRequest>>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for BatchEchoEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let generator = request.response_generator(request.id().to_string());
+        let prompt = serde_json::to_string(&request.inner.prompt)?;
+        let responses: Vec<_> = (0..u32::from(request.inner.n.unwrap_or(1)))
+            .map(|index| {
+                Annotated::from_data(generator.create_choice(
+                    index,
+                    Some(format!("{prompt}:{index}")),
+                    Some(dynamo_protocols::types::CompletionFinishReason::Stop),
+                    None,
+                ))
+            })
+            .collect();
+        let context = request.context();
+        self.requests.try_send(request).unwrap();
+        Ok(ResponseStream::new(
+            Box::pin(futures::stream::iter(responses)),
+            context,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn test_batch_completions_preserve_child_requests_and_choice_indices() {
+    const MODEL: &str = "batch-echo-model";
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_cmpl_endpoints(true)
+        .build()
+        .unwrap();
+    let (requests, mut captured) = tokio::sync::mpsc::channel(2);
+    let card = ModelDeploymentCard::with_name_only(MODEL);
+    service
+        .model_manager()
+        .add_completions_model(MODEL, card.mdcsum(), Arc::new(BatchEchoEngine { requests }))
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let task = service.spawn_with_listener(cancel.clone(), listener).await;
+    wait_for_service_ready(port).await;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    for prompt in [
+        serde_json::json!(["first", "second prompt"]),
+        serde_json::json!([[11, 12], [21, 22, 23]]),
+    ] {
+        for streaming in [false, true] {
+            let body = serde_json::json!({
+                "model": MODEL,
+                "prompt": prompt,
+                "n": 2,
+                "stream": streaming,
+                "stream_options": streaming.then(|| serde_json::json!({"include_usage": true})),
+                "temperature": 0.7,
+                "max_tokens": 3,
+                "stop": ["END"],
+                "top_k": 8,
+                "metadata": {"nested": {"label": "preserved"}},
+                "nvext": {"use_raw_prompt": true}
+            });
+            let response = client
+                .post(format!("http://127.0.0.1:{port}/v1/completions"))
+                .header("x-dynamo-meta-batch", "retained")
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let text = response.text().await.unwrap();
+            let children: Vec<_> = (0..2).map(|_| captured.try_recv().unwrap()).collect();
+            let parent_id = children[0].id().strip_suffix("-0").unwrap();
+            let mut expected: NvCreateCompletionRequest =
+                serde_json::from_value(body.clone()).unwrap();
+            for (index, child) in children.iter().enumerate() {
+                expected.inner.prompt = serde_json::from_value(prompt[index].clone()).unwrap();
+                assert_eq!(child.id(), format!("{parent_id}-{index}"));
+                assert_eq!(
+                    child.metadata().get("batch").map(String::as_str),
+                    Some("retained")
+                );
+                assert_eq!(
+                    serde_json::to_value(child.content()).unwrap(),
+                    serde_json::to_value(&expected).unwrap()
+                );
+            }
+
+            let responses = if streaming {
+                http_harness::parse_json_sse(&text)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|event| event.data)
+                    .filter(serde_json::Value::is_object)
+                    .collect::<Vec<_>>()
+            } else {
+                vec![serde_json::from_str(&text).unwrap()]
+            };
+            let mut choices = Vec::new();
+            for response in responses {
+                for choice in response["choices"].as_array().unwrap() {
+                    let index = choice["index"].as_u64().unwrap() as usize;
+                    assert_eq!(choice["finish_reason"], "stop");
+                    assert_eq!(
+                        choice["text"],
+                        format!("{}:{}", prompt[index / 2], index % 2)
+                    );
+                    if streaming {
+                        assert_eq!(response["id"], format!("cmpl-{}", children[index / 2].id()));
+                    }
+                    choices.push(index);
+                }
+            }
+            choices.sort_unstable();
+            assert_eq!(choices, [0, 1, 2, 3]);
+        }
+    }
+    cancel.cancel();
+    timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
 /// Completions engine for batch preflight coverage: the prompt that reads
 /// [`BATCH_FAILING_PROMPT`] fails its own check immediately, and every other
 /// prompt runs until its context is killed, recording that it was.

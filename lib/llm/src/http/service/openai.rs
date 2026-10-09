@@ -1614,10 +1614,14 @@ async fn completions_batch(
     // of them rather than only the prompt that happened to be first.
     let mut all_streams = Vec::new();
     let parent_ctx = request.context();
+    let batch_prompt = std::mem::replace(
+        &mut request.inner.prompt,
+        dynamo_protocols::types::Prompt::String(String::new()),
+    );
 
     for prompt_idx in 0..batch_size {
         // Extract single prompt at this index
-        let single_prompt = extract_single_prompt(&request.inner.prompt, prompt_idx);
+        let single_prompt = extract_single_prompt(&batch_prompt, prompt_idx);
 
         // Create a new request with this single prompt
         let mut single_request = request.content().clone();
