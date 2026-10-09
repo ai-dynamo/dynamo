@@ -595,6 +595,10 @@ COPY components/ /opt/dynamo/components/
 ARG USE_SCCACHE
 ARG TARGETARCH
 ARG ENABLE_MEDIA_FFMPEG
+# Keep Cargo network settings from the docker build command in this stage.
+ARG CARGO_HTTP_MULTIPLEXING=true
+ARG CARGO_NET_RETRY=3
+ARG CARGO_HTTP_TIMEOUT=30
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
@@ -868,6 +872,9 @@ COPY components/ /opt/dynamo/components/
 
 # Build kvbm wheel (with nixl linkage via auditwheel repair)
 ARG ENABLE_KVBM
+ARG CARGO_HTTP_MULTIPLEXING=true
+ARG CARGO_NET_RETRY=3
+ARG CARGO_HTTP_TIMEOUT=30
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \

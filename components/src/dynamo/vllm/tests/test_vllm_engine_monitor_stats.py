@@ -217,3 +217,23 @@ async def test_health_failure_during_worker_shutdown_stops_monitor(
     monitor._shutdown_engine.assert_not_called()
     monitor.runtime.shutdown.assert_not_called()
     exit_process.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_health_failure_during_grace_period_stops_monitor(mock_engine):
+    mock_engine.check_health.side_effect = EngineDeadError()
+    monitor = _make_monitor(mock_engine, asyncio.Event())
+    monitor._shutdown_engine = MagicMock()
+
+    with (
+        patch(
+            "dynamo.vllm.engine_monitor.shutdown_in_progress",
+            side_effect=[False, True],
+        ),
+        patch("dynamo.vllm.engine_monitor.os._exit") as exit_process,
+    ):
+        await monitor._check_engine_health()
+
+    monitor._shutdown_engine.assert_not_called()
+    monitor.runtime.shutdown.assert_not_called()
+    exit_process.assert_not_called()

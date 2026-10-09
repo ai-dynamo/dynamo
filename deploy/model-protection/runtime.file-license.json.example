@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "profile": "encrypted-file-license",
+  "layers": {
+    "package_verification": true,
+    "license_verification": true,
+    "tpm_binding": false,
+    "secure_materialization": true
+  },
+  "package_trust": {
+    "key_id": "package-signing-v1",
+    "public_key_file": "/runtime/trust/package-public.key"
+  },
+  "license_root": "/runtime/license",
+  "license_trust": {
+    "key_id": "license-signing-v1",
+    "public_key_file": "/runtime/trust/license-public.key"
+  },
+  "key_provider": {"type": "file", "key_file": "/runtime/model-dek.bin"},
+  "process_memory_margin_bytes": 8589934592
+}

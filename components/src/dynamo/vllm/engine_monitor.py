@@ -12,6 +12,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo.common.engine_monitor import EngineHealthMonitorConfig
+from dynamo.common.utils.graceful_shutdown import shutdown_in_progress
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -88,7 +89,7 @@ class VllmEngineMonitor:
         while True:
             try:
                 # Check if shutdown event was triggered - stop monitoring
-                if self.shutdown_event and self.shutdown_event.is_set():
+                if self._worker_shutdown_in_progress():
                     logger.info(
                         f"{self.__class__.__name__}: Shutdown event detected, stopping engine health monitoring."
                     )
@@ -116,7 +117,7 @@ class VllmEngineMonitor:
                     await asyncio.sleep(self.health_config.interval)
 
             except (EngineDeadError, asyncio.TimeoutError) as e:
-                if self.shutdown_event and self.shutdown_event.is_set():
+                if self._worker_shutdown_in_progress():
                     logger.warning(
                         "%s: %s while worker shutdown is in progress; "
                         "stopping health monitoring.",
@@ -133,6 +134,12 @@ class VllmEngineMonitor:
             except asyncio.CancelledError:
                 logger.debug(f"{self.__class__.__name__}: Health check task cancelled.")
                 break
+
+    def _worker_shutdown_in_progress(self) -> bool:
+        return bool(
+            (self.shutdown_event and self.shutdown_event.is_set())
+            or shutdown_in_progress()
+        )
 
     async def _run_health_check(self):
         health_check = self.engine_client.check_health()

@@ -34,6 +34,7 @@ runs:
           --target tester \
           --progress=plain \
           --build-context operator-chart=../helm/charts/platform/components/operator \
+          --build-context model-protection=../model-protection \
           .
 
     - name: Set up Go

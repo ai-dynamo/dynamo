@@ -19,6 +19,10 @@ _GRACE_PERIOD_ENV = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"
 _shutdown_started = asyncio.Event()
 
 
+def shutdown_in_progress() -> bool:
+    return _shutdown_started.is_set()
+
+
 def get_grace_period_seconds() -> float:
     value = os.getenv(_GRACE_PERIOD_ENV)
     if value is None or value == "":

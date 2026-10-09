@@ -45,6 +45,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends make && apt-get
 COPY --from=operator-chart . /helm/charts/platform/components/operator/
 ENV OPERATOR_CHART_DIR=/helm/charts/platform/components/operator
 
+# The protected-model regression test reads the checked-in DGD profile.
+COPY --from=model-protection . /model-protection/
+
 # Run tests using Makefile
 RUN make test
 

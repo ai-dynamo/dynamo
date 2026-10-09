@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "profile": "encrypted-tpm",
+  "layers": {
+    "package_verification": true,
+    "license_verification": true,
+    "tpm_binding": true,
+    "secure_materialization": true
+  },
+  "key_provider": {"type": "tpm"},
+  "license_root": "/runtime/license",
+  "package_trust": {
+    "key_id": "package-signing-v1",
+    "public_key_file": "/runtime/trust/package-public.key"
+  },
+  "license_trust": {
+    "key_id": "license-signing-v1",
+    "public_key_file": "/runtime/trust/license-public.key"
+  },
+  "tpm": {
+    "device_key_handle": "0x81012003",
+    "policy_authority_public_file": "/runtime/trust/tpm-policy-v1.tpmt-public",
+    "policy_authority_key_id": "tpm-policy-v1"
+  },
+  "process_memory_margin_bytes": 8589934592
+}

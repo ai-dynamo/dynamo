@@ -105,6 +105,17 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_argument(
             g,
+            flag_name="--model-protection-config",
+            env_var="DYN_MODEL_PROTECTION_CONFIG",
+            default=None,
+            help=(
+                "Inline JSON layer configuration or absolute runtime JSON path. It is "
+                "read only when --model contains protected-package markers."
+            ),
+        )
+
+        add_argument(
+            g,
             flag_name="--disaggregation-mode",
             env_var="DYN_VLLM_DISAGGREGATION_MODE",
             default=None,
@@ -564,6 +575,7 @@ class DynamoVllmConfig(ConfigBase):
         None, str, DisaggregationMode
     ]  # None when not provided; resolved to enum in validate()
     use_vllm_tokenizer: bool
+    model_protection_config: Optional[str] = None
 
     # Multimodal
     route_to_encoder: bool
