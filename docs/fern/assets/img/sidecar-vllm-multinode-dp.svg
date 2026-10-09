@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 512" width="760" height="512" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 480" width="760" height="480" role="img" aria-labelledby="title desc">
   <title id="title">vllm-multinode-dp</title>
-  <desc id="desc">vLLM hybrid data parallelism across two nodes. The Dynamo Frontend router picks a DP rank and sends requests over the request plane to the Dynamo Sidecar on the node that owns that rank: node 0 serves DP ranks 0-1 and node 1 serves DP ranks 2-3. Each sidecar calls its local vLLM over native gRPC with a data-parallel rank header and streams results back. Each vLLM publishes KV events over ZMQ to its local sidecar, which forwards them to the frontend router. The two vLLM engines run DP/EP collectives with each other. Setup is manual and no launch script ships; the Kubernetes operator rejects multinode in sidecar mode.</desc>
+  <desc id="desc">vLLM hybrid data parallelism across two nodes. The Dynamo Frontend router picks a DP rank and sends requests over the request plane to the Dynamo Sidecar on the node that owns that rank: node 0 serves DP ranks 0-1 and node 1 serves DP ranks 2-3. Each sidecar calls its local vLLM over native gRPC with a data-parallel rank header and streams results back. Each vLLM publishes KV events over ZMQ to its local sidecar, which forwards them to the frontend router. The two vLLM engines run DP/EP collectives with each other.</desc>
 
   <defs>
     <linearGradient id="green-fill" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -250,28 +250,26 @@
   <text x="636.0" y="368.5" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">vLLM</text>
   <text x="636.0" y="385.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">DP ranks 2-3</text>
 
-  <path d="M620,176 L620,326" fill="none" stroke="var(--connector)" stroke-width="1" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
-  <rect x="511.5118" y="242.0" width="92.48820000000002" height="20.0" rx="10" class="pill-info"/>
-  <text x="557.7559" y="252.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">DP/EP collectives</text>
+  <path d="M636,176 L636,326" fill="none" stroke="var(--connector)" stroke-width="1" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
+  <rect x="527.5118" y="242.0" width="92.48820000000002" height="20.0" rx="10" class="pill-info"/>
+  <text x="573.7559" y="252.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">DP/EP collectives</text>
 
   <path d="M568,160 L394,160" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
   <rect x="434.6076" y="124.0" width="90.7848" height="20.0" rx="10" class="pill-info"/>
   <text x="480.0" y="134.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">KV events (ZMQ)</text>
   <path d="M568,408 L394,408" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
-  <path d="M264,160 L112,160 L112,206" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
-  <rect x="158.7542" y="124.0" width="58.4916" height="20.0" rx="10" class="pill-info"/>
-  <text x="188.0" y="134.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">KV events</text>
-  <path d="M264,344 L112,344 L112,274" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
+  <path d="M264,160 L128,160 L128,206" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
+  <rect x="162.7542" y="124.0" width="58.4916" height="20.0" rx="10" class="pill-info"/>
+  <text x="192.0" y="134.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">KV events</text>
+  <path d="M264,344 L128,344 L128,274" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
 
-  <path d="M56,208 L56,96 L262,96" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
-  <rect x="121.11519999999999" y="60.0" width="77.76960000000003" height="20.0" rx="10" class="pill-info"/>
-  <text x="160.0" y="70.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">Request plane</text>
-  <path d="M56,272 L56,408 L262,408" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
+  <path d="M72,208 L72,96 L262,96" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
+  <rect x="129.1152" y="60.0" width="77.76960000000003" height="20.0" rx="10" class="pill-info"/>
+  <text x="168.0" y="70.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">Request plane</text>
+  <path d="M72,272 L72,408 L262,408" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
   <path d="M392,96 L566,96" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
   <rect x="414.4779" y="60.0" width="131.04420000000005" height="20.0" rx="10" class="pill-info"/>
   <text x="480.0" y="70.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">Native gRPC, rank header</text>
   <path d="M392,344 L566,344" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
-
-  <text x="40" y="484" class="box-label-center" style="font-size:11px;text-anchor:start;fill:var(--text-muted)">Manual setup; no launch script ships. The Kubernetes operator rejects multinode in sidecar mode.</text>
 
 </svg>

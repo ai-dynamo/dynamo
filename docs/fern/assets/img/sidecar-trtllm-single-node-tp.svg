@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 296" width="760" height="296" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 256" width="760" height="256" role="img" aria-labelledby="title desc">
   <title id="title">single-node-tp-trtllm</title>
-  <desc id="desc">On one node, a request reaches the TensorRT-LLM tensor-parallel ranks through the Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar. The sidecar calls TensorRT-LLM over native gRPC and streams results back. TensorRT-LLM and the sidecar run in one worker, on the same host or in one Kubernetes pod. TensorRT-LLM does not publish KV events.</desc>
+  <desc id="desc">On one node, a request reaches the TensorRT-LLM tensor-parallel ranks through the Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar. The sidecar calls TensorRT-LLM over native gRPC and streams results back. TensorRT-LLM and the sidecar run in one worker, on the same host or in one Kubernetes pod.</desc>
 
   <defs>
     <linearGradient id="green-fill" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -247,7 +247,5 @@
   <path d="M440,120 L574,120" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
   <rect x="472.5271" y="84.0" width="70.94579999999999" height="20.0" rx="10" class="pill-info"/>
   <text x="508.0" y="94.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">Native gRPC</text>
-
-  <text x="24" y="264" class="box-label-center" style="font-size:11px;text-anchor:start;fill:var(--text-muted)">TensorRT-LLM does not publish KV events.</text>
 
 </svg>
