@@ -50,6 +50,14 @@ The `graceful_shutdown()` function:
 7. Calls `runtime.shutdown()` to initiate runtime shutdown
 8. Returns while the runtime waits for request handlers to finish, including with an error (based on `graceful_shutdown` per endpoint)
 
+> **Rust backend workers follow a stricter order.** Workers built on
+> `dynamo-backend-common` run: unregister from discovery -> router grace ->
+> stop admission -> wait for in-flight requests to finish -> wait for prefill
+> KV-transfer quiescence -> engine cleanup -> transport teardown. The in-flight
+> barrier deliberately precedes engine cleanup, so a request can never be
+> executing against memory that cleanup has released. Every stage draws from a
+> single budget rather than its own independent timeout.
+
 The aggregate wait in `runtime.shutdown()` is bounded by
 `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`, which defaults to 900 seconds
 (15 minutes). If endpoint draining exceeds this timeout, Dynamo logs the

@@ -53,6 +53,10 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         // The addressed server has no handler for this instance: discovery is
         // stale or the worker is shutting down. Same reasoning as above.
         ErrorType::WorkerUnavailable,
+        // The worker closed admission for shutdown. It will not reopen, so
+        // inhibit it rather than let a retry reselect it before the discovery
+        // unregister propagates.
+        ErrorType::WorkerDraining,
     ];
     match_error_chain(err, INHIBITED, &[])
 }
