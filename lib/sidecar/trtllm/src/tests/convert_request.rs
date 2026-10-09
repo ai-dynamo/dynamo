@@ -191,6 +191,7 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
         Some(ModelLimits {
             context_length: Some(4096),
             max_output_tokens: Some(256),
+            ..Default::default()
         }),
         AGG,
     )
@@ -254,4 +255,191 @@ fn a_minimum_within_the_derived_budget_is_served() {
     let stopping = proto.stopping.expect("stopping options");
     assert_eq!(stopping.min_tokens, Some(8));
     assert_eq!(stopping.max_tokens, Some(64));
+}
+
+const IMAGE: &str = "data:image/jpeg;base64,aW1hZ2UtYQ==";
+
+fn build_image_request(req: &PreprocessedRequest) -> Result<pb::GenerateRequest, DynamoError> {
+    build_generate_request(req, "req", "model", multimodal_limits(4096), AGG)
+}
+
+#[test]
+fn images_are_forwarded_as_media_in_request_order() {
+    let mut req = with_images(request(), &[IMAGE, "https://example.com/cat.jpg"]);
+    // Routing data that the frontend attaches to image requests.
+    req.mm_routing_info = Some(
+        serde_json::from_value(json!({
+            "routing_token_ids": vec![7; 40],
+            "block_mm_infos": [],
+            "expanded_prompt_len": 40,
+        }))
+        .expect("routing info"),
+    );
+    let proto = build_image_request(&req).expect("image request must build");
+    let media: Vec<_> = proto
+        .media
+        .into_iter()
+        .map(|item| (item.modality, item.source, item.uuid))
+        .collect();
+    assert_eq!(
+        media,
+        [
+            (
+                pb::Modality::Image as i32,
+                Some(pb::media_item::Source::DataUri(IMAGE.to_string())),
+                String::new(),
+            ),
+            (
+                pb::Modality::Image as i32,
+                Some(pb::media_item::Source::Url(
+                    "https://example.com/cat.jpg".to_string()
+                )),
+                String::new(),
+            ),
+        ]
+    );
+    // The engine expands the image placeholders itself.
+    match proto.input.expect("input") {
+        pb::generate_request::Input::TokenIds(tokens) => assert_eq!(tokens.ids, [11, 22, 33]),
+        other => panic!("expected token IDs input, got {other:?}"),
+    }
+}
+
+#[test]
+fn images_need_an_engine_that_advertises_multimodal_support() {
+    let req = with_images(request(), &[IMAGE]);
+    for limits in [None, limits(4096)] {
+        let error =
+            build_generate_request(&req, "req", "model", limits, AGG).expect_err("must reject");
+        assert_eq!(
+            error.public_message(),
+            Some("the TensorRT-LLM engine does not advertise multimodal support")
+        );
+    }
+    let text = build_generate_request(&request(), "req", "model", None, AGG)
+        .expect("text request must build");
+    assert!(text.media.is_empty());
+}
+
+#[test]
+fn images_are_refused_in_disaggregated_modes() {
+    let req = with_images(request(), &[IMAGE]);
+    for mode in [PREFILL, DisaggregationMode::Decode] {
+        let error = build_generate_request(&req, "req", "model", multimodal_limits(4096), mode)
+            .expect_err("must reject");
+        assert_eq!(
+            error.public_message(),
+            Some("the TensorRT-LLM sidecar supports multimodal requests only in aggregated mode")
+        );
+    }
+}
+
+#[test]
+fn omitted_max_tokens_for_an_image_is_an_upper_bound() {
+    let mut req = with_images(request(), &[IMAGE]);
+    req.stop_conditions.max_tokens = None;
+    // Sized from the three unexpanded prompt tokens; TensorRT-LLM clamps it to
+    // what its expanded prompt leaves of the context.
+    let proto = build_generate_request(&req, "req", "model", multimodal_limits(100), AGG)
+        .expect("build with fallback");
+    assert_eq!(proto.stopping.expect("stopping").max_tokens, Some(97));
+}
+
+#[test]
+fn unsupported_image_inputs_carry_a_public_message() {
+    let refused = |req: PreprocessedRequest| build_image_request(&req).expect_err("must reject");
+    let with_image = |mutate: fn(&mut PreprocessedRequest)| {
+        let mut req = with_images(request(), &[IMAGE]);
+        mutate(&mut req);
+        refused(req)
+    };
+    for (error, public) in [
+        (
+            refused(with_images(request(), &["ftp://example.com/cat.jpg"])),
+            "TensorRT-LLM image input must use an http://, https://, or data: URI",
+        ),
+        (
+            with_image(|r| {
+                r.multi_modal_data = Some(HashMap::from([(
+                    "image_url".to_string(),
+                    vec![MultimodalData::UuidOnly("cached".to_string())],
+                )]))
+            }),
+            "the TensorRT-LLM sidecar cannot resolve UUID-only media",
+        ),
+        (
+            with_image(|r| r.mm_processor_kwargs = Some(json!({"do_resize": false}))),
+            "mm_processor_kwargs is not supported by the TensorRT-LLM sidecar",
+        ),
+        (
+            with_image(|r| r.media_io_kwargs = Some(json!({"image": {"max_width": 64}}))),
+            "media_io_kwargs.image is not supported by the TensorRT-LLM sidecar",
+        ),
+    ] {
+        assert_eq!(error.public_message(), Some(public));
+    }
+}
+
+#[test]
+fn other_media_and_encoder_results_are_rejected() {
+    let mut video = request();
+    video.multi_modal_data = Some(HashMap::from([(
+        "video_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:video/mp4;base64,AA==".to_string(),
+        )],
+    )]));
+    let error = build_image_request(&video).expect_err("must reject");
+    assert!(
+        error
+            .to_string()
+            .contains("`video_url` input is not supported")
+    );
+    assert_rejected(|r| r.encoder_result = Some(json!({})), "encoder results");
+}
+
+#[test]
+fn image_processing_options_are_rejected() {
+    let with_options = |mm_processor_kwargs, media_io_kwargs| {
+        let mut req = with_images(request(), &[IMAGE]);
+        req.mm_processor_kwargs = mm_processor_kwargs;
+        req.media_io_kwargs = media_io_kwargs;
+        build_image_request(&req)
+    };
+    // The engine cannot apply processor or image decoder options, so the
+    // sidecar must not drop them without notice.
+    let error = with_options(None, Some(json!("max_width=64"))).expect_err("must reject");
+    assert!(error.to_string().contains("media_io_kwargs.image"));
+    // Null, `{}`, and options for other media set no image option.
+    with_options(
+        Some(json!({})),
+        Some(json!({"image": {}, "video": {"num_frames": 8}})),
+    )
+    .expect("no image options must build");
+    with_options(Some(serde_json::Value::Null), None).expect("null options must build");
+
+    // Without images there is nothing for the options to change.
+    let mut text = request();
+    text.mm_processor_kwargs = Some(json!({"do_resize": false}));
+    build_generate_request(&text, "req", "model", None, AGG).expect("text request must build");
+}
+
+#[test]
+fn multimodal_cache_uuids_are_rejected() {
+    let with_uuids = |mut req: PreprocessedRequest, uuids: [Option<&str>; 2]| {
+        req.multi_modal_uuids = Some(HashMap::from([(
+            "image_url".to_string(),
+            uuids.map(|uuid| uuid.map(str::to_string)).to_vec(),
+        )]));
+        build_image_request(&req)
+    };
+    let images = || with_images(request(), &[IMAGE, IMAGE]);
+    for req in [images(), request()] {
+        let error = with_uuids(req, [None, Some("cat")]).expect_err("must reject");
+        assert_eq!(
+            error.public_message(),
+            Some("multimodal cache UUIDs are not supported by the TensorRT-LLM sidecar")
+        );
+    }
+    with_uuids(images(), [None, Some("")]).expect("empty UUID entries must build");
 }

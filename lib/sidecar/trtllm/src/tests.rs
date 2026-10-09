@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{
-    DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
-    PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
+    DisaggregationMode, DynamoError, ErrorType, FinishReason, GenerateContext, LLMEngine,
+    MultimodalData, OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions,
+    StopReason,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -61,6 +62,8 @@ struct FakeTrtllm {
     /// Answers `UNAVAILABLE`, the shape of an engine that is not serving yet.
     unavailable_model_info: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
+    /// Advertises `supports_multimodal` in GetModelInfo.
+    multimodal: Arc<AtomicBool>,
 }
 
 fn prompt_len(request: &pb::GenerateRequest) -> u32 {
@@ -256,6 +259,7 @@ impl pb::control_server::Control for FakeTrtllm {
             } else {
                 Some(4096)
             },
+            supports_multimodal: Some(self.multimodal.load(Ordering::SeqCst)),
             ..Default::default()
         }))
     }
@@ -440,8 +444,27 @@ fn impatient_transport() -> GrpcTransportConfig {
 fn limits(context_length: u32) -> Option<ModelLimits> {
     Some(ModelLimits {
         context_length: Some(context_length),
-        max_output_tokens: None,
+        ..Default::default()
     })
+}
+
+/// Engine limits from an engine that advertises multimodal support.
+fn multimodal_limits(context_length: u32) -> Option<ModelLimits> {
+    Some(ModelLimits {
+        context_length: Some(context_length),
+        supports_multimodal: true,
+        ..Default::default()
+    })
+}
+
+/// Adds `sources` as `image_url` items in the form the Rust frontend sends.
+fn with_images(mut req: PreprocessedRequest, sources: &[&str]) -> PreprocessedRequest {
+    let items = sources
+        .iter()
+        .map(|source| serde_json::from_value(json!({ "Url": source })).expect("media URL"))
+        .collect();
+    req.multi_modal_data = Some(HashMap::from([("image_url".to_string(), items)]));
+    req
 }
 
 fn engine(endpoint: &str, connections: usize) -> TrtllmSidecarEngine {

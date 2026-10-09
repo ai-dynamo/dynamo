@@ -42,6 +42,30 @@ async fn aggregated_generation_streams_delta_then_terminal() {
 }
 
 #[tokio::test]
+async fn images_reach_the_engine_only_when_it_advertises_multimodal_support() {
+    let image = || with_images(request(), &["data:image/jpeg;base64,aW1hZ2UtYQ=="]);
+
+    let text_only = FakeServer::start(FakeTrtllm::default()).await;
+    let refusing = engine(&text_only.endpoint, 1);
+    refusing.start(0).await.expect("start");
+    let context = dynamo_backend_common::testing::mock_context();
+    let refused = refusing
+        .generate(image(), GenerateContext::new(context, None))
+        .await;
+    assert!(refused.is_err(), "the engine does not advertise support");
+    assert!(text_only.service.requests.lock().await.is_empty());
+
+    let service = FakeTrtllm::default();
+    service.multimodal.store(true, Ordering::SeqCst);
+    let multimodal = FakeServer::start(service).await;
+    let serving = engine(&multimodal.endpoint, 1);
+    serving.start(0).await.expect("start");
+    collect(&serving, image()).await;
+    let requests = multimodal.service.requests.lock().await;
+    assert_eq!(requests.first().expect("recorded request").media.len(), 1);
+}
+
+#[tokio::test]
 async fn grpc_request_errors_are_propagated() {
     let service = FakeTrtllm::default();
     service.reject.store(true, Ordering::SeqCst);
