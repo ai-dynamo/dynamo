@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated LoRA serving (1 GPU).
-# Requires vLLM #52840; see ../README.md for runtime requirements.
 
 set -e
 
@@ -35,6 +34,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to the managed vLLM engine."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                   Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  LORA_NAME               Example adapter (default: codelion/Qwen3-0.6B-accuracy-recovery-lora)"
             echo "  MAX_LORAS               GPU-resident adapter capacity (default: 4)"
@@ -56,6 +56,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar vllm SIDECAR_CMD
 
 trap dynamo_exit_trap EXIT
 
@@ -125,6 +127,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_RS_HTTP_PORT" \
     --grpc-port "$VLLM_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
@@ -135,7 +138,7 @@ vllm-rs serve "$MODEL" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_GRPC_PORT}" &
 
 wait_any_exit

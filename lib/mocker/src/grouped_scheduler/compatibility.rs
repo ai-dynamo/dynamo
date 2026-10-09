@@ -14,7 +14,9 @@ use parking_lot::Mutex;
 use uuid::Uuid;
 
 use crate::common::handoff::{HandoffId as DynamoHandoffId, HandoffTransferTiming};
-use crate::common::protocols::{DirectRequest, KvTransferTimingMode, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{
+    DirectRequest, EngineType, KvTransferTimingMode, MockerConfig, OutputSignal,
+};
 use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::scheduler::SchedulerLifecycleEvent;
 
@@ -26,25 +28,35 @@ pub(super) enum Cleanup {
 }
 
 pub(super) struct CompatibilityState {
-    args: MockEngineArgs,
-    request_prompt_lengths: Mutex<HashMap<Uuid, usize>>,
+    args: MockerConfig,
+    requests: Mutex<HashMap<Uuid, RequestObservation>>,
     handoffs: Mutex<HandoffMap>,
 }
 
+#[derive(Clone, Copy)]
+struct RequestObservation {
+    prompt_len: usize,
+    destination_cached_tokens: Option<usize>,
+}
+
 impl CompatibilityState {
-    pub(super) fn new(args: MockEngineArgs) -> Self {
+    pub(super) fn new(args: MockerConfig) -> Self {
         Self {
             args,
-            request_prompt_lengths: Mutex::new(HashMap::new()),
+            requests: Mutex::new(HashMap::new()),
             handoffs: Mutex::new(HandoffMap::default()),
         }
     }
 
     pub(super) fn native_request(&self, request: DirectRequest) -> Request {
         let request_id = request.uuid.unwrap_or_else(Uuid::new_v4);
-        self.request_prompt_lengths
-            .lock()
-            .insert(request_id, request.tokens.len());
+        self.requests.lock().insert(
+            request_id,
+            RequestObservation {
+                prompt_len: request.tokens.len(),
+                destination_cached_tokens: None,
+            },
+        );
         Request {
             request_id,
             tokens: request.tokens,
@@ -74,7 +86,7 @@ impl CompatibilityState {
     pub(super) fn apply_cleanup(&self, cleanup: Cleanup) {
         match cleanup {
             Cleanup::Request(request_id) => {
-                self.request_prompt_lengths.lock().remove(&request_id);
+                self.requests.lock().remove(&request_id);
                 self.handoffs.lock().cancel_request(request_id);
             }
             Cleanup::SourceHandoff(handoff_id) => self.handoffs.lock().finish_source(handoff_id),
@@ -85,11 +97,16 @@ impl CompatibilityState {
     }
 
     pub(super) fn output_signal(&self, output: Output) -> OutputSignal {
-        let prompt_len = output.completed.then(|| {
-            self.request_prompt_lengths
-                .lock()
-                .remove(&output.request_id)
-        });
+        let request = if output.cached_tokens.is_some() || output.completed {
+            let mut requests = self.requests.lock();
+            if output.completed {
+                requests.remove(&output.request_id)
+            } else {
+                requests.get(&output.request_id).copied()
+            }
+        } else {
+            None
+        };
         if output.completed {
             self.handoffs
                 .lock()
@@ -100,16 +117,20 @@ impl CompatibilityState {
             token_id: output.token_id,
             completed: output.completed,
             rejected: output.rejected,
-            handoff_delay_ms: prompt_len.flatten().and_then(|prompt_len| {
+            handoff_delay_ms: request.and_then(|request| {
                 compute_prefill_handoff_delay_ms(
                     self.args.worker_type,
                     output.completed,
-                    prompt_len,
+                    request.prompt_len,
                     self.args.kv_transfer_bandwidth,
-                    self.args.kv_bytes_per_token,
+                    self.args.kv_transfer_bytes_per_token,
                 )
             }),
-            cached_tokens: output.cached_tokens,
+            cached_tokens: output.cached_tokens.map(|cached| {
+                request
+                    .and_then(|request| request.destination_cached_tokens)
+                    .unwrap_or(cached)
+            }),
         }
     }
 
@@ -138,11 +159,32 @@ impl CompatibilityState {
                 handoff_id,
                 request_id,
                 transferable_prompt_tokens,
-            } => SchedulerLifecycleEvent::DestinationReserved {
-                handoff_id: self.dynamo_handoff(handoff_id)?,
-                request_id,
-                transferable_prompt_tokens,
-            },
+            } => {
+                let handoff_id = self.dynamo_handoff(handoff_id)?;
+                // AISimulate 0.13.0-dev.202610060000000067 loses local hits at
+                // destination activation. Remove this scalar vLLM normalization
+                // when Output::cached_tokens preserves the reservation's hits.
+                if self.args.backend == EngineType::Vllm
+                    && self.args.enable_prefix_caching
+                    && self.args.kv_cache_groups.is_empty()
+                    && let Some(request) = self.requests.lock().get_mut(&request_id)
+                {
+                    let reserved_tokens = request
+                        .prompt_len
+                        .div_ceil(self.args.block_size)
+                        .saturating_mul(self.args.block_size);
+                    request.destination_cached_tokens = Some(
+                        reserved_tokens
+                            .saturating_sub(transferable_prompt_tokens)
+                            .min(request.prompt_len),
+                    );
+                }
+                SchedulerLifecycleEvent::DestinationReserved {
+                    handoff_id,
+                    request_id,
+                    transferable_prompt_tokens,
+                }
+            }
         })
     }
 }

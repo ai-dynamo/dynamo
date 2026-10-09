@@ -18,6 +18,9 @@
  * published somewhere other than the author's own site (Doubleword on
  * TelecomTV, Deloitte on LinkedIn), and keying on the host credited the wrong
  * company. A partner absent from PUBLISHER_LOGOS falls back to its initials.
+ *
+ * To feature an entry, give it `pinned` and a `summary`. Keep the row to three:
+ * the cards are sized for one row of three on desktop.
  */
 
 export interface Publication {
@@ -31,9 +34,151 @@ export interface Publication {
   iso: string | null;
   /** The publisher has since revised the article; shown next to the date. */
   updated?: boolean;
+  /**
+   * Pins the entry to the featured row above the list; lower numbers come
+   * first. A pinned entry is shown only there, not repeated in the list.
+   */
+  pinned?: number;
+  /**
+   * Our own one-line note on what the piece covers, shown only on pinned
+   * cards. Paraphrase; do not quote the article.
+   */
+  summary?: string;
 }
 
 export const PUBLICATIONS: Publication[] = [
+  {
+    title: "Prime Inference: Fast, Reliable Serving for Frontier Open Models",
+    url: "https://www.primeintellect.ai/blog/prime-inference",
+    partner: "Prime Intellect",
+    date: "Oct 2, 2026",
+    iso: "2026-10-02",
+    pinned: 3,
+    summary:
+      "How Prime Intellect serves frontier open models in production, with Dynamo routing and orchestrating disaggregated prefill and decode on top of vLLM.",
+  },
+  {
+    title: "CoreWeave Forge: Turn AI Iteration Into Compounding Improvement",
+    url: "https://www.coreweave.com/blog/coreweave-forge-turn-ai-iteration-into-compounding-improvement",
+    partner: "CoreWeave",
+    date: "Sep 30, 2026",
+    iso: "2026-09-30",
+    pinned: 1,
+    summary:
+      "CoreWeave's platform for turning model iteration into compounding gains, with RL rollouts built on the same Dynamo foundation as CoreWeave Inference.",
+  },
+  {
+    title: "FastVideo UniServe: Production Serving for FastH3 on NVIDIA Blackwell GPUs at 1.8x Lower Latency and 1.45x Higher Throughput",
+    url: "https://haoailab.com/blogs/uniserve-fasth3/",
+    partner: "Hao AI Lab / UCSD",
+    date: "Sep 29, 2026",
+    iso: "2026-09-29",
+  },
+  {
+    title: "Taking vLLM Apart: A Practical Guide to Disaggregated Serving",
+    url: "https://vllm.ai/blog/2026-09-29-disaggregated-serving-guide",
+    partner: "vLLM",
+    date: "Sep 29, 2026",
+    iso: "2026-09-29",
+  },
+  {
+    title: "Red Hat Delivers Peak Performance on Kubernetes and CPUs in MLPerf Inference v6.1",
+    url: "https://www.redhat.com/en/blog/red-hat-delivers-peak-performance-kubernetes-cpus-mlperf-inference-v61",
+    partner: "Red Hat",
+    date: "Sep 29, 2026",
+    iso: "2026-09-29",
+  },
+  {
+    title: "Crusoe's MLPerf Inference v6.1 Results on NVIDIA GB200 NVL72",
+    url: "https://www.crusoe.ai/resources/blog/crusoes-mlperf-inference-v6-1-results-on-nvidia-gb200-nvl72",
+    partner: "Crusoe",
+    date: "Sep 16, 2026",
+    iso: "2026-09-16",
+  },
+  {
+    title: "One Model, Two GPU Vendors: Disaggregated Inference from H100 to MI300X",
+    url: "https://www.neureality.ai/one-model-two-gpu-vendors-disaggregated-inference-from-h100-to-mi300x/",
+    partner: "NeuReality",
+    date: "Sep 15, 2026",
+    iso: "2026-09-15",
+  },
+  {
+    title: "Pinterest Builds a New Foundation for Multimodal AI With NVIDIA",
+    url: "https://newsroom.pinterest.com/news/newsroom-pinterest-x-nvidia/",
+    partner: "Pinterest",
+    date: "Sep 14, 2026",
+    iso: "2026-09-14",
+  },
+  {
+    title: "Building Pinterest's VLM Serving Stack on NVIDIA Dynamo",
+    url: "https://medium.com/pinterest-engineering/building-pinterests-vlm-serving-stack-on-nvidia-dynamo-0dce6e93d0f3",
+    partner: "Pinterest",
+    date: "Sep 11, 2026",
+    iso: "2026-09-11",
+  },
+  {
+    title: "DeepSeek-V4.1-Flash: More Efficient Prefill for Coding Agents",
+    url: "https://www.baseten.co/blog/deepseek-v41-flash-more-efficient-prefill-for-coding-agents/",
+    partner: "Baseten",
+    date: "Sep 11, 2026",
+    iso: "2026-09-11",
+  },
+  {
+    title: "Reproducing (and Beating) a Published Inference Benchmark: A DeepSeek V4 Pro Debugging Story",
+    url: "https://www.neureality.ai/reproducing-and-beating-a-published-inference-benchmark-a-deepseek-v4-pro-debugging-story/",
+    partner: "NeuReality",
+    date: "Sep 6, 2026",
+    iso: "2026-09-06",
+  },
+  {
+    title: "Get Started with Kimi K3 on CoreWeave Dedicated Inference",
+    url: "https://www.coreweave.com/blog/get-started-with-kimi-k3-dedicated-inference",
+    partner: "CoreWeave",
+    date: "Aug 26, 2026",
+    iso: "2026-08-26",
+  },
+  {
+    title: "Optimizing LLM Serving Efficiency: Moving Beyond KV Cache Reuse to Token-Load Awareness with Ray Serve LLM",
+    url: "https://www.anyscale.com/blog/llm-kv-token-aware-routing",
+    partner: "Anyscale",
+    date: "Aug 25, 2026",
+    iso: "2026-08-25",
+  },
+  {
+    title: "AgentX - InferenceXv3: Does the CUDA Moat Hold Up in Agentic Inferencing?",
+    url: "https://inferencex.semianalysis.com/blog/agentx-inferencexv3-does-cuda-moat",
+    partner: "SemiAnalysis / InferenceX",
+    date: "Aug 24, 2026",
+    iso: "2026-08-24",
+  },
+  {
+    title: "Accelerate Inference on AKS with Azure Blob Storage and NVIDIA Dynamo",
+    url: "https://techcommunity.microsoft.com/blog/azurestorageblog/accelerate-inference-on-aks-with-azure-blob-storage-and-nvidia-dynamo/4543408",
+    partner: "Microsoft Azure",
+    date: "Aug 11, 2026",
+    iso: "2026-08-11",
+  },
+  {
+    title: "The Case for Disaggregated LLM Serving",
+    url: "https://blog.doubleword.ai/when-to-disaggregate",
+    partner: "Doubleword",
+    date: "Aug 11, 2026",
+    iso: "2026-08-11",
+  },
+  {
+    title: "Faster at Every Context Length: How KV Cache Offloading to Object Storage Transforms AI Inference",
+    url: "https://cloudian.com/blog/how-kv-cache-offloading-to-object-storage-transforms-ai-inference/",
+    partner: "Cloudian",
+    date: "Jul 28, 2026",
+    iso: "2026-07-28",
+  },
+  {
+    title: "How to Build a Day-0 API for Kimi K3",
+    url: "https://www.baseten.co/blog/how-to-build-a-day-zero-api-for-kimi-k3/",
+    partner: "Baseten",
+    date: "Jul 27, 2026",
+    iso: "2026-07-27",
+  },
   {
     title: "How We Cut Inference Cold Start to Seconds With NVIDIA Dynamo",
     url: "https://www.photoroom.com/inside-photoroom/how-we-cut-gpu-cold-starts-from-minutes-to-seconds-with-memory-checkpointing",
@@ -61,6 +206,9 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Cognition",
     date: "Jul 8, 2026",
     iso: "2026-07-08",
+    pinned: 2,
+    summary:
+      "How Cognition trained SWE-1.7 with RL across clusters on three continents, using Dynamo to manage inference engine lifecycles and reroute work when a replica fails.",
   },
   {
     title: "Booting Fast and Slow",

@@ -159,6 +159,10 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
   Active prefill tokens queued per worker.
 </ParamField>
 
+<ParamField path="dynamo_frontend_worker_active_requests" type="gauge">
+  Active requests booked per worker, split by an additional [`request_phase`](metric-labels.mdx#metric-specific-labels) label. A request counts as `prefill` from booking until its worker returns the first output token, then as `decode` until it completes. Sum both phases for the worker's total concurrency. The count is the router's view, including requests booked by peer routers when router replica sync is enabled.
+</ParamField>
+
 <ParamField path="dynamo_frontend_worker_last_time_to_first_token_seconds" type="gauge">
   Last observed time to first token per worker, in seconds.
 </ParamField>
@@ -282,7 +286,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_input_sequence_tokens" type="histogram">
-  Input sequence length in tokens.
+  Input sequence length per routing attempt, excluding query-only lookups. Labeled by `phase` and `model`.
 </ParamField>
 
 <ParamField path="dynamo_component_router_output_sequence_tokens" type="histogram">
@@ -300,6 +304,32 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
   Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
 </ParamField>
+
+### KV-cache reuse telemetry
+
+The cache reuse funnel shows how much of the incoming prompt could be reused, and how much the worker reports reusing. Each step counts tokens, not requests.
+
+All metric names below start with `dynamo_component_router_`.
+
+| Step | Meaning | Metric suffix |
+| --- | --- | --- |
+| **F0 — Incoming tokens** | Tokens received by the router. | `input_sequence_tokens_sum` |
+| **F2 — Best available match** | Prefix the router estimates is cached on the best-matching eligible worker. | `kv_best_eligible_cached_prefix_tokens_total` |
+| **F3 — Selected worker's match** | Prefix the router estimates is cached on the worker it chooses. | `kv_selected_cached_prefix_tokens_total` |
+| **F4 — Reported reuse** | Tokens the worker reports reusing. Missing reports count as zero. | `kv_worker_reused_tokens_total` |
+
+These counters need no enable flag.
+
+Compare token increases over the same time window and matching KV-routing traffic. Use a long enough window: the steps are recorded at different times, and F4 depends on worker reports arriving after routing. Short windows may therefore compare different requests. Divide each step by F0 to express it as a percentage of incoming tokens.
+
+vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of each aggregated or prefill attempt, as `engine_data.kv_cache_hit` with `prompt_tokens` and `reused_tokens`. `reused_tokens` is the engine's per-request cached-token count, so it includes hits on host and storage tiers and KV connectors, the same tiers F2 and F3 count.
+
+- Disaggregated decode attempts do not report, because each engine counts the KV transferred from the prefill worker as cached; read worker reuse from the `prefill` phase. The exception is a decode attempt that prefills locally under conditional disaggregation, which reports under `phase="decode"`.
+- Attempts take their `phase` from the frontend's request tracker. A standalone router (`python -m dynamo.router`) does not set one, so all of its attempts are labeled `aggregated`.
+- The router counts a report only when its `prompt_tokens` equals the routed prompt length. Engines count multimodal prompts after placeholder expansion, so a multimodal report counts only when the router also routed on expanded tokens; TensorRT-LLM does not report multimodal requests. F2 and F3 count expanded routing tokens while F0 counts the unexpanded prompt, so multimodal ratios to F0 can exceed 100%.
+- With `n > 1`, vLLM and SGLang do not report. Later samples reuse the prompt blocks earlier samples just cached, vLLM keeps the first buffered sample's count when it merges outputs, and SGLang caches the prompt before running the samples.
+- Engines recompute the last prompt token, so a full-prefix hit reports at least one token less than F3, and up to one block less for vLLM.
+- Preemption, partial-block reuse in TensorRT-LLM, and KV loads that fail under a recompute policy can also make F4 differ from F3 when the router's estimate is accurate.
 
 ### Per-request routing overhead
 
@@ -351,6 +381,10 @@ The frontend registers these metrics when queueing is enabled by `--router-queue
   KV cache events applied to the router's radix-tree index. Includes events applied to the device tier and lower tiers such as host-pinned memory and disk. Appears when the worker-selection policy requests `WorkerInputs::CACHE`, the router consumes KV events, and workers publish them. Labeled by `status` and `event_type` — see [Metric-specific labels](metric-labels.mdx#metric-specific-labels).
 </ParamField>
 
+<ParamField path="dynamo_component_ckf_mutation_total" type="counter">
+  CKF block-level mutation outcomes recorded by the router indexer, labeled by `outcome` — see [Metric-specific labels](metric-labels.mdx#metric-specific-labels). **Registered, always zero.** The series is created and exported, but no code path currently increments it, so it reads 0 in every deployment. Do not build alerts or dashboard panels on it. The standalone indexer exports the same counter as `dynamo_kvrouter_ckf_mutation_total`, with the same caveat.
+</ParamField>
+
 The standalone indexer exposes the device-tier-only counter `dynamo_kvrouter_kv_cache_events_applied`; see [Standalone KV Indexer](../../developer-guide/knowledge-base/modular-components/router/standalone-indexer.md).
 
 ### Availability by configuration
@@ -363,6 +397,7 @@ Not all router metrics appear in every deployment. This matrix shows which group
 | `dynamo_router_overhead_*` | Registered and populated | Registered and populated | **Not registered** | **Not created** |
 | `dynamo_frontend_router_queue_*` | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
 | `dynamo_component_kv_cache_events_applied` | Populated when KV events received | Populated when KV events received | **Not registered** | Populated when KV events received |
+| `dynamo_component_ckf_mutation_total` | Registered, **always zero** | Registered, **always zero** | **Not registered** | Registered, **always zero** |
 | `dynamo_frontend_worker_*` | Registered and populated | Registered and populated (`worker_type` = `prefill`/`decode`) | Registered and populated (`worker_type` = `decode`) | **Not created** |
 
 **Key:**

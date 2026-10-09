@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Prefill/decode LoRA serving with NIXL (2 GPUs).
-# Requires vLLM #52840 and #54814; load adapters on both workers.
+# Load adapters on both workers.
 
 set -e
 
@@ -35,6 +35,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to both managed vLLM engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                           Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  LORA_NAME                       Example adapter (default: codelion/Qwen3-0.6B-accuracy-recovery-lora)"
             echo "  MAX_LORAS                       GPU-resident adapter capacity (default: 4)"
@@ -63,6 +64,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar vllm SIDECAR_CMD
 
 KV_EVENT_DIR=""
 if [[ -z "${VLLM_PREFILL_KV_EVENT_ENDPOINT:-}" ]]; then
@@ -139,13 +142,14 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_DECODE_HTTP_PORT" \
     --grpc-port "$VLLM_DECODE_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --enable-lora \
     --max-loras "$MAX_LORAS" \
     --max-lora-rank "$MAX_LORA_RANK" \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
@@ -157,24 +161,25 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_PREFILL_HTTP_PORT" \
     --grpc-port "$VLLM_PREFILL_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --enable-lora \
     --max-loras "$MAX_LORAS" \
     --max-lora-rank "$MAX_LORA_RANK" \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
     --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"${VLLM_PREFILL_KV_EVENT_ENDPOINT}\",\"enable_kv_cache_events\":true}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_DECODE_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_PREFILL_GRPC_PORT}" \
     --component prefill \
     --disaggregation-mode prefill &

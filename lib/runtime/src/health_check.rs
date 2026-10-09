@@ -120,8 +120,9 @@ impl HealthCheckManager {
 
                     _ = notifier.notified() => {
                         // Activity detected - reset timer for this endpoint only.
-                        // A notification means push_handler successfully streamed
-                        // a non-error response chunk, proving the engine is healthy.
+                        // A notification marks a non-error response chunk or clean
+                        // stream completion, even for an empty stream. Neither path
+                        // requires a successful publish.
                         debug!("Activity detected for {}, resetting health check timer", endpoint_subject);
                         manager.drt.system_health().lock().set_endpoint_health_status(
                             &endpoint_subject,

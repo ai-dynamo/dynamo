@@ -27,7 +27,7 @@ use anyhow::{Context, Result, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, RawKvEventSink,
+    DirectRequest, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEventSink,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, RequestOutputBuffering};
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
@@ -38,8 +38,10 @@ use dynamo_mocker::services::bootstrap::{
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails};
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_runtime::protocols::maybe_error::MaybeError;
 use dynamo_runtime::{
     component::Endpoint,
     engine::{AsyncEngineContext, AsyncEngineContextProvider},
@@ -260,7 +262,7 @@ struct MockerExecutionContext {
     engines: OnceCell<Vec<LiveEngine>>,
     handoff_session_permits: OnceCell<Vec<Arc<Semaphore>>>,
     startup_state: watch::Sender<StartupState>,
-    engine_args: MockEngineArgs,
+    engine_args: MockerConfig,
     response_replay_table: Option<ResponseReplayTable>,
     unset_dp_rank_counter: AtomicU32,
     /// Bootstrap server for prefill workers in disaggregated mode
@@ -308,11 +310,12 @@ enum StartupState {
 }
 
 impl MockerExecutionContext {
-    fn new(engine_args: MockEngineArgs) -> Self {
+    fn new(engine_args: MockerConfig) -> Self {
         let (startup_state, _) = watch::channel(StartupState::Starting);
-        let native_metrics = NativeMockerMetrics::new(engine_args.engine_type, engine_args.dp_size)
+        let native_metrics = NativeMockerMetrics::new(engine_args.backend, engine_args.dp_size)
             .expect("mocker native metrics collectors should be valid");
         let response_replay_table = engine_args
+            .runtime
             .response_replay_trace_path
             .as_deref()
             .map(|path| {
@@ -360,7 +363,7 @@ impl MockerExecutionContext {
         if !self.engine_args.is_prefill() {
             return Ok(None);
         }
-        let Some(port) = self.engine_args.bootstrap_port else {
+        let Some(port) = self.engine_args.runtime.bootstrap_port else {
             return Ok(None);
         };
         let max_sessions = self
@@ -396,7 +399,7 @@ impl MockerExecutionContext {
         let manager = SourceHandoffManager::start(
             incoming_rx,
             max_sessions,
-            Duration::from_millis(self.engine_args.handoff_session_timeout_ms),
+            Duration::from_millis(self.engine_args.runtime.handoff_session_timeout_ms),
             self.handoff_shutdown.clone(),
         );
         assert!(
@@ -450,7 +453,7 @@ impl MockerExecutionContext {
             tracing::info!(
                 "Initializing KV event publisher with block_size {}, enable_local_indexer={}",
                 self.engine_args.block_size,
-                self.engine_args.enable_local_indexer
+                self.engine_args.runtime.enable_local_indexer
             );
             Some(&endpoint)
         } else {
@@ -630,9 +633,9 @@ impl MockerExecutionContext {
                 KvEventPublishers,
                 Option<KvEventPublisher>,
             ) = match endpoint {
-                Some(endpoint) if args.zmq_kv_events_port.is_some() => {
-                    let zmq_port = args.zmq_kv_events_port.unwrap() + dp_rank as u16;
-                    let replay_port = args.zmq_replay_port.map(|p| p + dp_rank as u16);
+                Some(endpoint) if args.runtime.zmq_kv_events_port.is_some() => {
+                    let zmq_port = args.runtime.zmq_kv_events_port.unwrap() + dp_rank as u16;
+                    let replay_port = args.runtime.zmq_replay_port.map(|p| p + dp_rank as u16);
                     match ZmqKvEventSink::new(
                         zmq_port,
                         replay_port,
@@ -652,7 +655,7 @@ impl MockerExecutionContext {
                                 endpoint.clone(),
                                 args.block_size as u32,
                                 source_config,
-                                args.enable_local_indexer,
+                                args.runtime.enable_local_indexer,
                                 dp_rank,
                                 None,
                             ) {
@@ -684,7 +687,7 @@ impl MockerExecutionContext {
                         endpoint.clone(),
                         args.block_size as u32,
                         None,
-                        args.enable_local_indexer,
+                        args.runtime.enable_local_indexer,
                         dp_rank,
                         None,
                     ) {
@@ -784,6 +787,23 @@ impl MockerExecutionContext {
     }
 }
 
+fn invalid_argument(message: impl Into<String>, public_message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message)
+        .public_message(public_message)
+        .build()
+}
+
+/// A stream whose only item is `error`, so the request fails without marking the worker down.
+fn error_stream(
+    ctx: &impl AsyncEngineContextProvider,
+    error: DynamoError,
+) -> ManyOut<Annotated<LLMEngineOutput>> {
+    let stream = futures::stream::iter([Annotated::from_err(error)]);
+    ResponseStream::new(Box::pin(stream), ctx.context())
+}
+
 #[async_trait]
 impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for MockerExecutionContext
@@ -794,34 +814,48 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, ctx) = input.into_parts();
         let request_start = Instant::now();
-        let native_sglang = sglang::response_metadata(&request, ctx.id()).map_err(Error::from)?;
+        // Client-input errors go into the stream, not `Err`: the egress treats every pre-stream
+        // failure as `CannotConnect` and takes the worker out of routing.
+        let native_sglang = match sglang::response_metadata(&request, ctx.id()) {
+            Ok(metadata) => metadata,
+            Err(error) => return Ok(error_stream(&ctx, error)),
+        };
         let native_sglang_terminal = native_sglang.is_some();
 
         let dp_rank = self.resolve_dp_rank(&request);
 
-        // Validate dp_rank
+        // A client can pick dp_rank with `x-dynamo-dp-rank` plus an explicit worker.
         if dp_rank >= self.engine_args.dp_size {
-            return Err(Error::msg(format!(
+            let message = format!(
                 "dp_rank {} is out of bounds for dp_size {}",
                 dp_rank, self.engine_args.dp_size
-            )));
+            );
+            return Ok(error_stream(
+                &ctx,
+                invalid_argument(message.clone(), message),
+            ));
         }
+        let is_prefill = self.engine_args.is_prefill();
+        let requested_max_output_tokens = if is_prefill {
+            1
+        } else {
+            let Some(max_tokens) = request.stop_conditions.max_tokens else {
+                return Ok(error_stream(
+                    &ctx,
+                    invalid_argument(
+                        "max_output_tokens must be specified for mocker",
+                        "`max_output_tokens` (or `max_tokens`) is required by the mocker worker",
+                    ),
+                ));
+            };
+            max_tokens as usize
+        };
         let engine = self
             .engine(dp_rank as usize)
             .await
             .map_err(|error| Error::msg(error.to_string()))?;
 
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
-        let is_prefill = self.engine_args.is_prefill();
-        let requested_max_output_tokens = if is_prefill {
-            1
-        } else {
-            request
-                .stop_conditions
-                .max_tokens
-                .ok_or_else(|| Error::msg("max_output_tokens must be specified for mocker"))?
-                as usize
-        };
         let replay_key = request
             .get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY)
             .or_else(|| {
@@ -913,7 +947,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 bootstrap_room: bootstrap_info.bootstrap_room,
                 request_id: request_uuid,
             };
-            let order = match order_for_engine(self.engine_args.engine_type) {
+            let order = match order_for_engine(self.engine_args.backend) {
                 Ok(order) => order,
                 Err(error) => {
                     return Err(Error::msg(error.to_string()));
@@ -952,7 +986,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 if let Err(error) = manager.try_register(SourceRegistration {
                     identity,
                     order,
-                    engine_type: self.engine_args.engine_type,
+                    engine_type: self.engine_args.backend,
                     control,
                     lifecycle,
                     completion_tx,
@@ -968,7 +1002,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     role: BootstrapParticipantRole::Destination,
                     dp_rank,
                     order,
-                    engine_type: self.engine_args.engine_type,
+                    engine_type: self.engine_args.backend,
                 };
                 let connection = match connect_to_prefill(
                     &bootstrap_info.bootstrap_host,
@@ -987,7 +1021,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 let session_control = control.clone();
                 let session_cancel = handoff_cancel.clone();
                 let session_timeout =
-                    Duration::from_millis(self.engine_args.handoff_session_timeout_ms);
+                    Duration::from_millis(self.engine_args.runtime.handoff_session_timeout_ms);
                 let global_shutdown = self.handoff_shutdown.clone();
                 self.handoff_tasks.spawn(async move {
                     let _session_permit = session_permit;
@@ -1019,10 +1053,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let async_context = ctx.context();
-        let reasoning = self.engine_args.reasoning.clone();
+        let reasoning = self.engine_args.runtime.reasoning.clone();
         let enable_prefix_caching = self.engine_args.enable_prefix_caching;
         let handoff_session_timeout =
-            Duration::from_millis(self.engine_args.handoff_session_timeout_ms);
+            Duration::from_millis(self.engine_args.runtime.handoff_session_timeout_ms);
         let mut native_timing = native_timing;
         let response_task_tracker = (source_completion_rx.is_some()
             || destination_cleanup.is_some())
@@ -1316,7 +1350,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 pub async fn make_mocker_engine(
     distributed_runtime: DistributedRuntime,
     endpoint_id: dynamo_runtime::protocols::EndpointId,
-    args: MockEngineArgs,
+    args: MockerConfig,
 ) -> Result<ExecutionContext, Error> {
     tracing::info!("Creating mocker engine with config: {args:?}");
     let engine = Arc::new(MockerExecutionContext::new(args));
@@ -1360,7 +1394,7 @@ mod tests {
     use super::*;
     use crate::protocols::common::llm_backend::PreprocessedRequest;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-    use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, WorkerType};
+    use dynamo_mocker::common::protocols::{EngineType, MockerConfig, WorkerType};
     use dynamo_runtime::pipeline::context::Controller;
     use dynamo_runtime::pipeline::{AsyncEngine, SingleIn};
     use futures::StreamExt;
@@ -1431,18 +1465,81 @@ mod tests {
             .unwrap()
     }
 
+    #[tokio::test]
+    async fn prefix_cache_counters_follow_enabled_lookups() {
+        for enable_prefix_caching in [false, true] {
+            let args = MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "enable_prefix_caching": enable_prefix_caching,
+                    "block_size": 4,
+                    "num_gpu_blocks": 64,
+                    "max_num_batched_tokens": 64,
+                    "speedup_ratio": 1000.0
+                }
+            }))
+            .unwrap();
+            let live = LiveEngine::start(args.clone(), 0).unwrap();
+            let engine = MockerExecutionContext::new(args);
+            assert!(engine.engines.set(vec![live.clone()]).is_ok());
+            let registry = dynamo_runtime::MetricsRegistry::new();
+            engine.native_metrics.register(&registry).unwrap();
+
+            let mut observed_hits = 0;
+            for attempt in 0..2 {
+                let mut stream = engine
+                    .generate(SingleIn::new(decode_request(5, 1)))
+                    .await
+                    .unwrap();
+                let first = stream.next().await.unwrap().data.unwrap();
+                let cached = first
+                    .completion_usage
+                    .unwrap()
+                    .prompt_tokens_details
+                    .unwrap()
+                    .cached_tokens
+                    .unwrap();
+                assert_eq!(cached, u32::from(enable_prefix_caching && attempt == 1) * 4);
+                observed_hits += cached;
+                while stream.next().await.is_some() {}
+            }
+
+            let families = registry.get_prometheus_registry().gather();
+            for (name, expected) in [
+                (
+                    "vllm:prefix_cache_queries_total",
+                    if enable_prefix_caching { 10 } else { 0 },
+                ),
+                ("vllm:prefix_cache_hits_total", observed_hits),
+            ] {
+                let family = families
+                    .iter()
+                    .find(|family| family.name() == name)
+                    .unwrap();
+                let value: f64 = family
+                    .get_metric()
+                    .iter()
+                    .map(|metric| metric.counter.as_ref().unwrap().value())
+                    .sum();
+                assert_eq!(value, f64::from(expected), "{name}");
+            }
+            live.shutdown().await.unwrap();
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn no_bootstrap_prefill_delays_terminal_finish_once() {
-        let args = MockEngineArgs::builder()
-            .worker_type(WorkerType::Prefill)
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(1000.0)
-            .kv_transfer_bandwidth(Some(1.0))
-            .kv_bytes_per_token(Some(25_000_000))
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "worker_type": WorkerType::Prefill,
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0,
+                "kv_transfer_bandwidth": Some(1.0),
+                "kv_transfer_bytes_per_token": Some(25_000_000)
+            }
+        }))
+        .unwrap();
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live]).is_ok());
@@ -1468,14 +1565,16 @@ mod tests {
 
     #[tokio::test]
     async fn context_capped_completion_maps_to_length() {
-        let args = MockEngineArgs::builder()
-            .max_model_len(Some(4))
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(1000.0)
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "max_model_len": Some(4),
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live]).is_ok());
@@ -1507,14 +1606,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_input_errors_fail_in_stream_without_marking_worker_down() {
+        use crate::protocols::common::preprocessor::RoutingHints;
+        use dynamo_runtime::error::ErrorClass;
+
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+
+        let mut missing_max_tokens = decode_request(3, 1);
+        missing_max_tokens.stop_conditions.max_tokens = None;
+        let mut bad_dp_rank = decode_request(3, 1);
+        bad_dp_rank.routing = Some(RoutingHints {
+            dp_rank: Some(7),
+            ..Default::default()
+        });
+        let mut bad_sglang = decode_request(3, 1);
+        bad_sglang.extra_args = Some(serde_json::json!({"sglang_tito": 7}));
+
+        for (request, expected, public) in [
+            (missing_max_tokens, "max_output_tokens", true),
+            (bad_dp_rank, "dp_rank 7", true),
+            (bad_sglang, "sglang_tito", false),
+        ] {
+            // An `Err` here is what the egress turns into `CannotConnect` and an evicted worker.
+            let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+            let item = stream.next().await.unwrap();
+            assert!(item.data.is_none());
+            let error = item.err().unwrap();
+            assert_eq!(error.class(), ErrorClass::InvalidRequest, "{expected}");
+            assert!(error.to_string().contains(expected), "{error}");
+            if public {
+                assert!(error.public_message().unwrap().contains(expected));
+            }
+            assert!(!crate::migration::is_migratable(&error), "{expected}");
+            assert!(stream.next().await.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn native_sglang_completion_attaches_length_to_final_token() {
-        let args = MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(1000.0)
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live]).is_ok());
@@ -1541,14 +1690,16 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_response_cancels_live_request_and_allows_id_reuse() {
-        let args = MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_seqs(Some(1))
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(0.1)
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_seqs": 1,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 0.1
+            }
+        }))
+        .unwrap();
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live.clone()]).is_ok());
@@ -1598,13 +1749,15 @@ mod tests {
 
     #[tokio::test]
     async fn unread_response_completes_without_overflow_cancellation() {
-        let args = MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(1000.0)
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
         let engines = LiveEngine::start_grouped_with_configs_and_request_output_buffering(
             args.clone(),
             vec![LiveEngineConfig::default()],
@@ -1649,13 +1802,15 @@ mod tests {
 
     #[test]
     fn unbounded_sequence_limit_uses_finite_multi_handoff_capacity() {
-        let args = MockEngineArgs::builder()
-            .num_gpu_blocks(3)
-            .max_num_seqs(None)
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "num_gpu_blocks": 3,
+                "max_num_seqs": usize::MAX
+            }
+        }))
+        .unwrap()
+        .normalized()
+        .unwrap();
 
         assert_eq!(args.effective_handoff_capacity(), 3);
         let permits = tokio::sync::Semaphore::new(args.effective_handoff_capacity());
@@ -1669,7 +1824,7 @@ mod tests {
     #[tokio::test]
     async fn startup_failure_wakes_engine_waiters() {
         let engine = Arc::new(MockerExecutionContext::new(
-            MockEngineArgs::builder().build().unwrap(),
+            MockerConfig::from_value(serde_json::json!({})).unwrap(),
         ));
         let waiting_engine = Arc::clone(&engine);
         let waiter = tokio::spawn(async move { waiting_engine.engine(0).await });
@@ -1690,13 +1845,17 @@ mod tests {
     async fn prepared_bootstrap_shutdown_releases_the_listener() {
         let occupied = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
         let port = occupied.local_addr().unwrap().port();
-        let args = MockEngineArgs::builder()
-            .worker_type(WorkerType::Prefill)
-            .bootstrap_port(Some(port))
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "worker_type": WorkerType::Prefill
+            },
+            "dynamo": {
+                "bootstrap_port": Some(port)
+            }
+        }))
+        .unwrap()
+        .normalized()
+        .unwrap();
         let engine = MockerExecutionContext::new(args);
 
         assert!(engine.prepare_bootstrap().await.is_err());
@@ -1737,16 +1896,20 @@ mod tests {
                 (WorkerType::Prefill, &[7][..]),
                 (WorkerType::Decode, &[7, 8][..]),
             ] {
-                let args = MockEngineArgs::builder()
-                    .engine_type(engine_type)
-                    .worker_type(worker_type)
-                    .block_size(4)
-                    .num_gpu_blocks(64)
-                    .max_num_batched_tokens(Some(64))
-                    .speedup_ratio(1000.0)
-                    .response_replay_trace_path(Some(file.path().to_path_buf()))
-                    .build()
-                    .unwrap();
+                let args = MockerConfig::from_value(serde_json::json!({
+                    "engine": {
+                        "backend": engine_type,
+                        "worker_type": worker_type,
+                        "block_size": 4,
+                        "num_gpu_blocks": 64,
+                        "max_num_batched_tokens": 64,
+                        "speedup_ratio": 1000.0
+                    },
+                    "dynamo": {
+                        "response_replay_trace_path": Some(file.path().to_path_buf())
+                    }
+                }))
+                .unwrap();
                 let live = LiveEngine::start(args.clone(), 0).unwrap();
                 let engine = MockerExecutionContext::new(args);
                 assert!(engine.engines.set(vec![live]).is_ok());
