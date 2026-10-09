@@ -204,6 +204,12 @@ bash examples/backends/sglang/launch/agg_agent.sh
 </Step>
 </Steps>
 
+## Experimental Pi decision-guided compaction
+
+The [Pi compaction POC](https://github.com/ai-dynamo/dynamo/tree/main/examples/agents/decision_compaction) uses Dynamo's OpenAI-compatible `/v1/decisions` for evidence selection and generation for summarization and verification. A thin Pi extension validates the candidate before returning it through Pi's compaction hook; Pi owns adoption, retained history and persistence. This is an optional client of the Decision API stack, not another public endpoint or a change to KV-cache policy.
+
+The standalone example pins Pi and the OpenAI client separately and tests native adoption, restart and rejection using synthetic CPU fixtures. These tests do not establish live model quality, cost savings or compatibility with arbitrary installed extensions. Existing Pi provider setup above remains separate. Follow the example's supported-history limits and exact-token-counting requirements before attempting model-backed compaction; OpenCode and other harnesses require their own adoption qualification.
+
 ## Drive a Harness from Another Agent
 
 Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts while Dynamo serves the model. The skill uses Agent Client Protocol (ACP) and injects the provider configuration through the child process environment instead of adding harness configuration files to the delegated worktree.

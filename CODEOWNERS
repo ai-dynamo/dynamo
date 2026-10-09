@@ -69,6 +69,7 @@
 
 # === agents  (@ai-dynamo/dynamo-agents-codeowners) ===
 /components/src/dynamo/compaction/                                                                      @ai-dynamo/dynamo-agents-codeowners
+/examples/agents/decision_compaction/                                                                   @ai-dynamo/dynamo-agents-codeowners
 /examples/agents/decision_compaction/pi/                                                                @ai-dynamo/dynamo-agents-codeowners
 
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
