@@ -67,6 +67,9 @@
 /components/src/dynamo/frontend/                                                                        @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/tests/                                                                  @ai-dynamo/dynamo-frontend-codeowners
 
+# === agents  (@ai-dynamo/dynamo-agents-codeowners) ===
+/components/src/dynamo/compaction/                                                                      @ai-dynamo/dynamo-agents-codeowners
+
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
 /lib/kv-router/                                                                                         @ai-dynamo/dynamo-router-codeowners
 /lib/router-plugins/                                                                                    @ai-dynamo/dynamo-router-codeowners
@@ -479,6 +482,7 @@ requirements.txt                                                                
 /lib/llm/src/protocols/                                                                                 @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/telemetry/                                                                                 @ai-dynamo/dynamo-observability-codeowners
 /tests/fault_tolerance/                                                                                 @ai-dynamo/dynamo-fault-tolerance-codeowners
+/tests/unit/compaction/                                                                                 @ai-dynamo/dynamo-agents-codeowners
 /lib/llm/src/entrypoint/                                                                                @ai-dynamo/dynamo-frontend-codeowners
 /tests/kvbm_integration/                                                                                @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/grpc/protos/                                                                               @ai-dynamo/dynamo-frontend-codeowners
