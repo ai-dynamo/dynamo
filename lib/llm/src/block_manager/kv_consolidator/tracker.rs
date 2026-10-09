@@ -15,7 +15,7 @@
 //! - Emit Store: Only when a block is first stored from ANY source
 //! - Emit Remove: Only when a block is removed from ALL sources
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use dynamo_kv_router::protocols::{StorageTier as RouterStorageTier, XXH3_SEED};
 
@@ -230,10 +230,16 @@ pub trait CacheStatusTracker: std::fmt::Debug + Send + Sync {
     fn num_blocks(&self) -> usize;
 }
 
+#[derive(Debug)]
+struct DedupBlock {
+    metadata: BlockMetadata,
+    extra_aliases: Vec<String>,
+}
+
 /// Deduplicating cache-status tracker.
 #[derive(Debug, Default)]
 pub struct DedupCacheStatusTracker {
-    blocks: HashMap<SequenceHash, BlockMetadata>,
+    blocks: HashMap<SequenceHash, DedupBlock>,
     hash_mapping: HashMap<String, SequenceHash>,
     event_queue: Vec<ConsolidatedEvent>,
 }
@@ -288,7 +294,7 @@ impl DedupCacheStatusTracker {
 
     pub fn get_block_sources(&self, external_block_hash: &str) -> Option<&HashSet<EventSource>> {
         let local_hash = self.hash_mapping.get(external_block_hash)?;
-        self.blocks.get(local_hash).map(|m| &m.sources)
+        self.blocks.get(local_hash).map(|m| &m.metadata.sources)
     }
 
     #[deprecated(note = "Use get_block_sources instead")]
@@ -323,9 +329,23 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
             sequence_hash
         );
 
-        if let Some(metadata) = self.blocks.get_mut(&sequence_hash) {
+        let previous = self.hash_mapping.insert(block_hash.clone(), sequence_hash);
+        if let Some(previous) = previous.filter(|&previous| previous != sequence_hash)
+            && let Some(block) = self.blocks.get_mut(&previous)
+        {
+            block.extra_aliases.retain(|alias| alias != &block_hash);
+        }
+
+        if let Some(block) = self.blocks.get_mut(&sequence_hash) {
+            let metadata = &mut block.metadata;
             let is_new_source = metadata.add_source(source);
-            self.hash_mapping.insert(block_hash.clone(), sequence_hash);
+            if metadata.first_block_hash != block_hash && !block.extra_aliases.contains(&block_hash)
+            {
+                if block.extra_aliases.is_empty() {
+                    block.extra_aliases.reserve_exact(1);
+                }
+                block.extra_aliases.push(block_hash.clone());
+            }
 
             if is_new_source {
                 tracing::debug!(
@@ -369,14 +389,19 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
                 &token_ids
             );
 
-            self.blocks.insert(sequence_hash, metadata);
-            self.hash_mapping.insert(block_hash.clone(), sequence_hash);
+            self.blocks.insert(
+                sequence_hash,
+                DedupBlock {
+                    metadata,
+                    extra_aliases: Vec::new(),
+                },
+            );
 
             let resolved_parent_hash = parent_hash.and_then(|ph| {
                 self.hash_mapping.get(&ph).and_then(|&parent_seq_hash| {
                     self.blocks
                         .get(&parent_seq_hash)
-                        .map(|parent_metadata| parent_metadata.first_block_hash.clone())
+                        .map(|parent_metadata| parent_metadata.metadata.first_block_hash.clone())
                 })
             });
 
@@ -427,7 +452,8 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
             }
         };
 
-        if let Some(metadata) = self.blocks.get_mut(&sequence_hash) {
+        if let Entry::Occupied(mut entry) = self.blocks.entry(sequence_hash) {
+            let metadata = &mut entry.get_mut().metadata;
             let was_removed = metadata.remove_source(source);
             if !was_removed {
                 tracing::warn!(
@@ -441,15 +467,17 @@ impl CacheStatusTracker for DedupCacheStatusTracker {
             // Don't drop hash_mapping[block_hash] on per-source removes: when
             // sources share the same external block_hash (e.g. KVBM publishing
             // TRT-LLM's hash chain), removing it now would orphan the next
-            // source's REMOVE lookup. The retain() below cleans every entry
-            // pointing at this sequence_hash once the last source releases.
+            // source's REMOVE lookup. Remove its aliases only when the last
+            // source releases, preserving any that now belong to another block.
 
             if !metadata.exists_in_any_source() {
-                let first_block_hash = metadata.first_block_hash.clone();
-                self.blocks.remove(&sequence_hash);
-
-                self.hash_mapping
-                    .retain(|_ext_hash, seq_hash| *seq_hash != sequence_hash);
+                let block = entry.remove();
+                let first_block_hash = block.metadata.first_block_hash;
+                for alias in std::iter::once(&first_block_hash).chain(block.extra_aliases.iter()) {
+                    if self.hash_mapping.get(alias) == Some(&sequence_hash) {
+                        self.hash_mapping.remove(alias);
+                    }
+                }
 
                 // Mirror the dedup STORE: tag the unified REMOVE as Device so
                 // it routes to the same indexer the STORE landed in. Otherwise
@@ -903,6 +931,16 @@ mod tests {
             Some(StorageTier::HostPinned),
             None,
         );
+        tracker.handle_store(
+            "vllm_alias".to_string(),
+            EventSource::Vllm,
+            vec![1, 2, 3],
+            None,
+            3,
+            None,
+            Some(StorageTier::Device),
+            None,
+        );
         tracker.drain_events();
 
         // Remove from vLLM - should not publish (still in KVBM)
@@ -912,6 +950,9 @@ mod tests {
         assert!(!should_publish);
         assert_eq!(tracker.num_blocks(), 1);
         assert_eq!(tracker.drain_events().len(), 0);
+        for hash in ["vllm_hash1", "kvbm_hash1", "vllm_alias"] {
+            assert!(tracker.get_block_sources(hash).is_some());
+        }
 
         // Remove from KVBM (last source) - should publish REMOVE event
         let should_publish = tracker.handle_remove(
@@ -922,6 +963,75 @@ mod tests {
 
         assert!(should_publish);
         assert_eq!(tracker.num_blocks(), 0);
+        for hash in ["vllm_hash1", "kvbm_hash1", "vllm_alias"] {
+            assert!(tracker.get_block_sources(hash).is_none());
+        }
+        assert!(matches!(
+            tracker.drain_events().as_slice(),
+            [ConsolidatedEvent::Remove { block_hash, .. }] if block_hash == "vllm_hash1"
+        ));
+        assert!(tracker.handle_store(
+            "child".to_string(),
+            EventSource::Vllm,
+            vec![4],
+            Some("vllm_alias".to_string()),
+            1,
+            None,
+            None,
+            None,
+        ));
+        assert!(!tracker.handle_store(
+            "root_alias".to_string(),
+            EventSource::Vllm,
+            vec![4],
+            None,
+            1,
+            None,
+            None,
+            None,
+        ));
+        assert_eq!(tracker.num_blocks(), 1);
+    }
+
+    #[test]
+    fn test_reassigned_alias_survives_old_sequence_release() {
+        for reassigned in ["original", "alias"] {
+            let mut tracker = TestTracker::new();
+            for (hash, source, tokens) in [
+                ("original", EventSource::Vllm, vec![1]),
+                ("alias", EventSource::Kvbm, vec![1]),
+                (reassigned, EventSource::Vllm, vec![2]),
+            ] {
+                tracker.handle_store(hash.to_string(), source, tokens, None, 1, None, None, None);
+            }
+            tracker.drain_events();
+
+            let old_alias = if reassigned == "original" {
+                "alias"
+            } else {
+                "original"
+            };
+            assert!(!tracker.handle_remove(old_alias, EventSource::Vllm, None));
+            assert!(tracker.drain_events().is_empty());
+            assert!(tracker.handle_remove(old_alias, EventSource::Kvbm, None));
+            assert!(matches!(
+                tracker.drain_events().as_slice(),
+                [ConsolidatedEvent::Remove { block_hash, .. }] if block_hash == "original"
+            ));
+            assert!(tracker.get_block_sources(old_alias).is_none());
+            assert!(
+                tracker.get_block_sources(reassigned).is_some_and(
+                    |sources| sources.len() == 1 && sources.contains(&EventSource::Vllm)
+                )
+            );
+
+            assert!(tracker.handle_remove(reassigned, EventSource::Vllm, None));
+            assert_eq!(tracker.num_blocks(), 0);
+            assert!(matches!(
+                tracker.drain_events().as_slice(),
+                [ConsolidatedEvent::Remove { block_hash, .. }] if block_hash == reassigned
+            ));
+        }
     }
 
     #[test]
@@ -1043,11 +1153,22 @@ mod tests {
         );
 
         assert_eq!(tracker.num_blocks(), 2);
+        tracker.handle_store(
+            "block1_alias".to_string(),
+            EventSource::Vllm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            None,
+            Some(StorageTier::Device),
+            None,
+        );
 
         // Clear all
         tracker.handle_clear_all();
 
         assert_eq!(tracker.num_blocks(), 0);
+        assert!(tracker.get_block_sources("block1_alias").is_none());
 
         // Verify hash_mapping is also cleared
         let should_publish =
