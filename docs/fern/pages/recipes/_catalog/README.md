@@ -26,14 +26,20 @@ CSS-coupled vocabulary. For the machine-readable catalog contract, see the
    `docs/fern/pages/recipes/feature-benchmarks/_catalog/benchmarks/<id>.yaml`) and add its `<id>` to the
    matching `index.yaml`. Each file holds exactly one object that validates
    against `schema.json`; every deploy/perf asset path must resolve in the repo.
-   See [the machine-readable catalog](#the-machine-readable-catalog) below, then
-   run `python3 docs/fern/pages/recipes/_catalog/validate.py`.
-3. **Wire navigation** in `docs/fern/index.yml` (add the `- page:` under the Recipes
-   tab or the Feature Benchmarks section).
+   A recipe's `provider:` must be a key in `providers.yaml`; add a new model
+   maker there first. See [the machine-readable catalog](#the-machine-readable-catalog)
+   below, then run `python3 docs/fern/pages/recipes/_catalog/validate.py`.
+3. **Generate the Model Recipes navigation**: run
+   `python3 docs/fern/scripts/gen_recipe_nav.py` (the `gen-recipe-nav` pre-commit
+   hook runs it for you). Do not edit the Model Recipes sidebar, the overview's
+   provider filter, its counts, or the provider CSS by hand; see
+   [Provider order](#provider-order). Feature Benchmark pages are still wired
+   by hand under the Feature Benchmarks section of `docs/fern/index.yml`.
 4. **Patch `docs/fern/main.css` only if** the page introduces a picker axis value not
    already supported (see below).
-5. Add the landing-page card (`docs/fern/pages/recipes/model-recipes/overview.mdx`) and update the model /
-   target counts.
+5. Add the landing-page card (`docs/fern/pages/recipes/model-recipes/overview.mdx`).
+   Its `data-provider` must be the recipe's `provider:` key; the generator fails
+   if a provider has recipes but no card, or a card names a provider without one.
 6. Run `fern check` and `fern docs broken-links`; preview with `fern docs dev`.
 
 ## The machine-readable catalog
@@ -50,6 +56,7 @@ conflicts and gave a cleaner per-entry ownership/validation path):
 ```
 docs/fern/pages/recipes/_catalog/
   index.yaml            # ordering + inclusion only (recipes + deferred_recipes)
+  providers.yaml        # model providers: display names and popularity rank
   schema.json           # JSON Schema (draft 2020-12) for ONE recipe object
   recipes/<id>.yaml     # one recipe object per file (active AND deferred)
   validate.py           # catalog validator (covers BOTH catalogs)
@@ -59,18 +66,41 @@ docs/fern/pages/recipes/feature-benchmarks/_catalog/
   benchmarks/<id>.yaml  # one benchmark object per file
 ```
 
-- **`index.yaml`** controls sidebar/landing order. The `recipes:` list is the
-  active (customer-visible) recipes in nav order; `deferred_recipes:` lists
-  recipes held back from the rendered surface (no rendered page). Active order
-  matches the Recipes tab in `docs/fern/index.yml`; benchmark order matches the
-  Feature Benchmarks section. Every id must have a matching `<id>.yaml` file and
-  vice-versa.
+- **`index.yaml`** controls inclusion and the order of recipes within a
+  provider. The `recipes:` list is the active (customer-visible) recipes;
+  `deferred_recipes:` lists recipes held back from the rendered surface (no
+  rendered page). `gen_recipe_nav.py` re-sorts `recipes:` by provider so it
+  reads in sidebar order; benchmark order matches the Feature Benchmarks
+  section. Every id must have a matching `<id>.yaml` file and vice-versa.
+- **`providers.yaml`** lists every model provider a recipe may name, with its
+  sidebar name, optional filter-chip label, and popularity rank. See
+  [Provider order](#provider-order).
 - **`<id>.yaml`** holds exactly one entry object as a top-level document, with
   an SPDX header. The internal `id:` must equal the filename. Deferred recipes
   carry a `deferred_reason` and omit `page`; active recipes carry `page`.
 - **`schema.json`** is the JSON Schema (draft 2020-12) for a single entry
   object. It does structural validation (required fields, enums, types) and is
   intentionally permissive on nested target/arm values.
+
+### Provider order
+
+The Model Recipes sidebar and the overview's provider filter are generated
+from the catalog by `docs/fern/scripts/gen_recipe_nav.py`, so they always list
+the same providers in the same order:
+
+1. Providers in `providers.yaml` `ranked:` come first, in that order (by
+   model-maker popularity).
+2. Every other provider follows, alphabetically by name.
+3. A provider with no active recipe does not appear.
+
+Within a provider, recipes follow their order in `index.yaml`, newest model
+first. The generator also writes the overview's model-family and
+configuration counts, the provider CSS rules in `components/RecipeStyles.tsx`,
+and the order of `index.yaml`. Each generated span sits between
+`<name>:begin` and `<name>:end` markers. The `gen-recipe-nav` pre-commit hook
+regenerates them on every commit that touches the catalog, and CI fails if
+they are stale. A page's URL slug defaults to its file name; set `slug:` on the
+entry only to keep an existing URL.
 
 ### Validating the catalog
 
@@ -180,7 +210,9 @@ A new value renders but filters nothing until CSS is added.
 Landing-page filter chips (`docs/fern/pages/recipes/model-recipes/overview.mdx`) are a separate
 vocabulary — `provider`, `runtime`, `hardware`, `technique`, `workload` — also
 hardcoded in CSS; a chip that matches no card is a dead end, so only add a chip
-when a card carries the matching `data-*` token.
+when a card carries the matching `data-*` token. Provider chips and their CSS
+are generated (see [Provider order](#provider-order)); the other chips are
+edited by hand.
 
 ## Adding a new axis value
 

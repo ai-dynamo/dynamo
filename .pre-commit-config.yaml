@@ -165,6 +165,26 @@ repos:
       # the reproducibility claim is only as good as the harness asserting it.
       files: ^docs/fern/(scripts/(gen_llms_tables|check_llms_tables_determinism)\.(py|sh)|components/releases\.data\.ts|pages/reference/general/.*\.mdx)$
       pass_filenames: false
+    - id: gen-recipe-nav
+      name: Regenerate the Recipes sidebar and provider filter from the catalog
+      # Write mode, not --check: a catalog edit regenerates the sidebar, the
+      # overview's provider filter and counts, and the provider CSS, and the
+      # hook fails only so the regenerated files get staged.
+      entry: python docs/fern/scripts/gen_recipe_nav.py
+      language: python
+      files: ^docs/fern/(index\.yml|components/RecipeStyles\.tsx|pages/recipes/(_catalog/.*|model-recipes/overview\.mdx)|scripts/gen_recipe_nav\.py)$
+      pass_filenames: false
+      additional_dependencies:
+        - pyyaml
+    - id: gen-recipe-nav-tests
+      name: Test the Recipes sidebar generator (gen_recipe_nav.py)
+      entry: pytest -c docs/fern/scripts/pytest.ini -p no:cacheprovider docs/fern/scripts/test_gen_recipe_nav.py
+      language: python
+      files: ^docs/fern/(scripts/(gen_recipe_nav|test_gen_recipe_nav)\.py|scripts/pytest\.ini)$
+      pass_filenames: false
+      additional_dependencies:
+        - pytest
+        - pyyaml
 
     - id: check-component-imports
       name: Check Fern components trigger no rolldown bundling
