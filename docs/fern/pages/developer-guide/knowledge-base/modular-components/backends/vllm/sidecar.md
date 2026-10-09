@@ -29,7 +29,7 @@ See [`lib/sidecar/vllm/launch/`](https://github.com/ai-dynamo/dynamo/tree/main/l
 for all topologies. For example, aggregated serving on one GPU:
 
 ```bash
-export DYN_DISCOVERY_BACKEND=file
+export DYN_DISCOVERY_BACKEND=file   # single host: no etcd or NATS needed
 ./lib/sidecar/vllm/launch/agg.sh
 ```
 
