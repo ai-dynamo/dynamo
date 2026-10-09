@@ -21,7 +21,6 @@ from tests.serve.common import (
 )
 from tests.serve.sidecar_checks import (
     NativeCancellationPayload,
-    SGLangHttpCancellationPayload,
     SGLangTransferRecoveryPayload,
     assert_native_cancellation_and_recovery,
 )
@@ -38,6 +37,7 @@ from tests.utils.payload_builder import (
     disaggregated_chat_payload,
     disaggregated_token_count_payload,
     http_cancellation_payloads,
+    sglang_generate_cancellation_payloads,
     sidecar_compatibility_payloads,
 )
 from tests.utils.payloads import ChatPayload, KvTransferPayload
@@ -403,7 +403,12 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
             payloads = _aggregated_payloads(metrics)
             native_payloads = [NativeCancellationPayload(config.model)]
             if backend == "sglang":
-                native_payloads.append(SGLangHttpCancellationPayload(config.model))
+                engine_env["DYN_SGLANG_ENABLE_GENERATE"] = "1"
+                payloads.extend(
+                    sglang_generate_cancellation_payloads(
+                        metrics, max_tokens=CANCELLATION_MAX_TOKENS
+                    )
+                )
             post_validation = partial(
                 assert_native_cancellation_and_recovery,
                 metrics=metrics,

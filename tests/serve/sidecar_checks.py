@@ -54,46 +54,6 @@ class NativeCancellationPayload:
             assert output.get("finish_reason") in (None, "cancelled"), output
 
 
-class SGLangHttpCancellationPayload(NativeCancellationPayload):
-    def request(self, max_tokens: int) -> dict:
-        return {
-            **super().request(max_tokens),
-            "extra_args": {
-                "sglang_tito": {
-                    "sampling_params": {
-                        "max_new_tokens": max_tokens,
-                        "ignore_eos": True,
-                        "temperature": 0.0,
-                    },
-                }
-            },
-        }
-
-    def tokens(self, output: dict) -> list[int]:
-        return output["engine_data"]["sglang_response"]["output_ids"]
-
-    def validate_recovery(self, outputs: list[dict]) -> None:
-        assert outputs, "Sidecar produced no native HTTP response"
-        assert all(not output["token_ids"] for output in outputs), outputs
-        raw = [output["engine_data"]["sglang_response"] for output in outputs]
-        assert sum(len(item["output_ids"]) for item in raw) == 4, raw
-        assert all(
-            output.get("finish_reason") is None for output in outputs[:-1]
-        ), outputs
-        assert outputs[-1]["finish_reason"] == "stop", outputs[-1]
-        usage = raw[-1]["meta_info"]
-        assert usage["finish_reason"]["type"] == "length", usage
-        assert usage["prompt_tokens"] == 128, usage
-        assert usage["completion_tokens"] == 4, usage
-
-    async def drain_cancelled(self, stream) -> None:
-        try:
-            await super().drain_cancelled(stream)
-        except ValueError as error:
-            if not str(error).startswith("Cancelled:"):
-                raise
-
-
 def assert_native_cancellation_and_recovery(
     *,
     metrics: EngineMetrics,

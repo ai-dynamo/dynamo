@@ -40,6 +40,7 @@ from tests.utils.router_nvext import (
     require_router_worker_id,
     validate_router_nvext,
 )
+from tests.utils.sglang_generate import assert_native_stream
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +155,7 @@ class HttpErrorPayload(BasePayload):
 
 @dataclass
 class HttpCancellationPayload(BasePayload):
-    """Disconnect an active chat stream and require early engine cleanup.
+    """Disconnect an active HTTP stream and require early engine cleanup.
 
     Follow this with a normal chat payload to verify recovery on the same
     deployment. The supplied checker owns engine-specific metric semantics.
@@ -167,12 +168,28 @@ class HttpCancellationPayload(BasePayload):
     _before: float | None = field(default=None, init=False, repr=False)
     _completion_progress: float = field(default=0, init=False, repr=False)
 
+    def _sampling_params(self) -> dict:
+        return self.body
+
+    def _generated_content(self, chunk: dict) -> str:
+        for choice in chunk.get("choices", []):
+            assert choice.get("finish_reason") is None, (
+                "Generation finished before cancellation",
+                choice,
+            )
+            delta = choice.get("delta") or {}
+            content = delta.get("content") or delta.get("reasoning_content") or ""
+            if content:
+                return content
+        return ""
+
     def before_request(self) -> None:
+        params = self._sampling_params()
         if not self.http_stream or self.body.get("stream") is not True:
             raise ValueError("Cancellation requires a streaming request")
-        if self.body.get("ignore_eos") is not True or self.body.get("n", 1) != 1:
+        if params.get("ignore_eos") is not True or params.get("n", 1) != 1:
             raise ValueError("Cancellation requires ignore_eos=True and n=1")
-        max_tokens = self.body.get("max_tokens")
+        max_tokens = params.get("max_tokens")
         if type(max_tokens) is not int or max_tokens <= 1:
             raise ValueError("Cancellation requires max_tokens > 1")
         if self.max_attempts != 1:
@@ -198,17 +215,7 @@ class HttpCancellationPayload(BasePayload):
                 assert data != b"[DONE]", "Generation finished before cancellation"
                 chunk = json.loads(data)
                 assert "error" not in chunk, chunk
-                for choice in chunk.get("choices", []):
-                    assert choice.get("finish_reason") is None, (
-                        "Generation finished before cancellation",
-                        choice,
-                    )
-                    delta = choice.get("delta") or {}
-                    content = (
-                        delta.get("content") or delta.get("reasoning_content") or ""
-                    )
-                    if content:
-                        break
+                content = self._generated_content(chunk)
                 if content:
                     break
             assert content, "Stream ended without generated content"
@@ -219,6 +226,71 @@ class HttpCancellationPayload(BasePayload):
             before=self._before, completion_progress=self._completion_progress
         )
         return content
+
+
+@dataclass
+class SGLangGenerateCancellationPayload(HttpCancellationPayload):
+    """Cancel native SGLang generation through the Dynamo HTTP frontend."""
+
+    endpoint: str = "/generate"
+
+    def with_model(self, model):
+        return deepcopy(self)
+
+    def _sampling_params(self) -> dict:
+        params = self.body["sampling_params"]
+        return {**params, "max_tokens": params["max_new_tokens"]}
+
+    def _generated_content(self, chunk: dict) -> str:
+        assert chunk["meta_info"].get("finish_reason") is None, chunk
+        output_ids = chunk["output_ids"]
+        return json.dumps(output_ids) if output_ids else ""
+
+
+@dataclass
+class SGLangGenerateRecoveryPayload(BasePayload):
+    """Validate native streaming output and engine progress after cancellation."""
+
+    metrics: EngineMetrics = field(kw_only=True)
+    endpoint: str = "/generate"
+    http_stream: bool = True
+    _before: float | None = field(default=None, init=False, repr=False)
+
+    def with_model(self, model):
+        return deepcopy(self)
+
+    def before_request(self) -> None:
+        self.metrics.wait_for_scheduler()
+        self._before = self.metrics.progress()
+
+    def response_handler(self, response: requests.Response) -> str:
+        assert self._before is not None, "before_request must run before recovery"
+        events = []
+        is_finished = False
+        for line in response.iter_lines():
+            if not line.startswith(b"data:"):
+                continue
+            data = line[5:].strip()
+            assert not is_finished, "Response continued after [DONE]"
+            if data == b"[DONE]":
+                is_finished = True
+                continue
+            event = json.loads(data)
+            assert not event.get("error"), event
+            events.append(event)
+        assert is_finished, "Native stream ended without [DONE]"
+        output_ids = assert_native_stream(
+            events, prompt_tokens=len(self.body["input_ids"])
+        )
+        max_tokens = self.body["sampling_params"]["max_new_tokens"]
+        assert len(output_ids) == max_tokens, events
+        assert all(
+            event["meta_info"].get("finish_reason") is None for event in events[:-1]
+        ), events
+        assert events[-1]["meta_info"]["finish_reason"]["type"] == "length", events[-1]
+        self.metrics.wait_for_scheduler()
+        self.metrics.assert_recovered(before=self._before, max_tokens=max_tokens)
+        return json.dumps(events)
 
 
 @dataclass

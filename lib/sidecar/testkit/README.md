@@ -166,8 +166,10 @@ Each suite exercises a different request path:
 The SGLang HTTP cancellation regression uses a local HTTP peer and the production
 sidecar engine. It holds an admitted request before headers or during streaming,
 then checks targeted abort before disconnect, another request's isolation and
-recovery. The existing SGLang aggregate GPU deployment checks actual scheduler
-drain and recovery for both native gRPC and HTTP cancellation and consumer drop.
+recovery. The existing SGLang aggregate GPU deployment sends chat and native
+`/generate` payloads through the Dynamo HTTP frontend, disconnects each active
+stream, and checks actual scheduler drain and successful recovery. Explicit
+native stop and consumer drop are exercised by the Rust CPU testkit.
 These checks do not synchronize cancellation before engine admission or during
 physical KV transfer.
 

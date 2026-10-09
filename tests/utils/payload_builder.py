@@ -32,6 +32,8 @@ from tests.utils.payloads import (
     ResponsesPayload,
     ResponsesStreamPayload,
     RouterNvextChatPayload,
+    SGLangGenerateCancellationPayload,
+    SGLangGenerateRecoveryPayload,
     SGLangMetricsPayload,
     StreamingChatPayload,
     TRTLLMMetricsPayload,
@@ -953,6 +955,35 @@ def http_cancellation_payloads(
             expected_log=[],
             expected_finish_reason="length",
             expected_completion_tokens=4,
+        ),
+    ]
+
+
+def sglang_generate_cancellation_payloads(
+    metrics: EngineMetrics, *, max_tokens: int
+) -> list[BasePayload]:
+    body = {
+        "input_ids": [11] * 128,
+        "sampling_params": {
+            "max_new_tokens": max_tokens,
+            "ignore_eos": True,
+            "temperature": 0,
+        },
+        "stream": True,
+        "return_logprob": True,
+    }
+    return [
+        SGLangGenerateCancellationPayload(
+            body=body, expected_response=[], expected_log=[], metrics=metrics
+        ),
+        SGLangGenerateRecoveryPayload(
+            body={
+                **body,
+                "sampling_params": {**body["sampling_params"], "max_new_tokens": 4},
+            },
+            expected_response=[],
+            expected_log=[],
+            metrics=metrics,
         ),
     ]
 
