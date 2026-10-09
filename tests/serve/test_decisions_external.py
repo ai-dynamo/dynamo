@@ -65,7 +65,7 @@ def _sdk(module_name):
     return importlib.import_module(module_name)
 
 
-@pytest.mark.parametrize("dialect", ("oai", "sglang_native", "systemone"))
+@pytest.mark.parametrize("dialect", ("oai", "systemone"))
 def test_external_decision_wire_contract(external_decision_server, dialect):
     base_url, model = external_decision_server
     route = "systemone" if dialect == "systemone" else "decisions"
@@ -101,7 +101,7 @@ def test_external_openai_sdk_evaluation(external_decision_server):
         assert result._request_id == response.headers["x-request-id"]
         with pytest.raises(sdk.BadRequestError) as error:
             client.decisions.create(
-                **decision_payload(model), extra_body={"nvext": {"format": "invalid"}}
+                **decision_payload(model), extra_body={"nvext": {"format": "oai"}}
             )
         assert error.value.status_code == 400
         assert error.value.request_id
@@ -155,8 +155,8 @@ def test_external_native_sglang_numeric_parity(external_decision_server):
         pytest.skip(
             "Set DYNAMO_DECISION_NATIVE_URL to an independently provisioned native SGLang server"
         )
-    assert (
-        native_url.rstrip("/") != base_url
-    ), "Native parity requires an independent server, not Dynamo /generate"
+    assert native_url.rstrip("/") != base_url, (
+        "Native parity requires an independent server, not Dynamo /generate"
+    )
     tokenizer_path = os.environ.get("DYNAMO_DECISION_TOKENIZER_PATH")
     assert_native_sglang_parity(base_url, native_url.rstrip("/"), model, tokenizer_path)

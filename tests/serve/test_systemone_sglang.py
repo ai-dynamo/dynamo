@@ -55,9 +55,9 @@ def systemone_sglang_server(
     dynamo_dynamic_ports,
     predownload_models,
 ):
-    assert (
-        version("sglang").split("+")[0] == "0.5.19"
-    ), "Parity is pinned to SGLang 0.5.19"
+    assert version("sglang").split("+")[0] == "0.5.19", (
+        "Parity is pinned to SGLang 0.5.19"
+    )
     ports = dynamo_dynamic_ports
     base_url = f"http://localhost:{ports.frontend_port}"
     env = {**os.environ, "DYN_SYSTEM_PORT": str(ports.system_ports[0])}
@@ -230,14 +230,6 @@ def assert_native_sglang_parity(base_url, native_url, model, tokenizer_path=None
     assert response.headers["x-dynamo-systemone-version"] == "1"
     body = response.json()
     assert list(body["answers"]) == ["route", "urgent", "severity"]
-    native_response = requests.post(
-        f"{base_url}/v1/decisions",
-        json=decision_payload(model, "sglang_native"),
-        timeout=60,
-    )
-    assert native_response.status_code == 200, native_response.text
-    native_body = native_response.json()
-    assert_decision_body(native_body, model, "sglang_native")
     oai_response = requests.post(
         f"{base_url}/v1/decisions", json=decision_payload(model), timeout=60
     )
@@ -272,13 +264,6 @@ def assert_native_sglang_parity(base_url, native_url, model, tokenizer_path=None
             assert answer["x_label_mass"] == pytest.approx(
                 label_mass, abs=5e-4, rel=1e-3
             )
-        native_answer = native_body["answers"][question_id]
-        assert native_answer["label_mass"] == pytest.approx(
-            label_mass, abs=5e-4, rel=1e-3
-        )
-        assert list(native_answer["probabilities"].values()) == pytest.approx(
-            probabilities, abs=5e-4, rel=1e-3
-        )
         oai_answer = oai_body["answers"][ordinal]
         if question_id == "urgent":
             assert oai_answer["probability"] == pytest.approx(

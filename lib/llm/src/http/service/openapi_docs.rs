@@ -34,9 +34,7 @@
 //! 2. Access Swagger UI: Open `http://localhost:8000/docs` in a web browser
 
 use axum::Router;
-use dynamo_decisions::protocols::{
-    openai as decisions_oai, sglang as decisions_native, systemone as decisions_jev,
-};
+use dynamo_decisions::protocols::{openai as decisions_oai, systemone as decisions_jev};
 use utoipa::OpenApi;
 use utoipa::openapi::{PathItem, Paths, RefOr};
 
@@ -67,9 +65,7 @@ use crate::http::service::RouteDoc;
             decisions_jev::Request,
             decisions_jev::Response,
             decisions_oai::Request,
-            decisions_oai::Response,
-            decisions_native::Request,
-            decisions_native::Response
+            decisions_oai::Response
         )
     )
 )]
@@ -173,13 +169,7 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
         let schema = if path == super::systemone::DEFAULT_PATH {
             <decisions_jev::Response as utoipa::PartialSchema>::schema()
         } else {
-            utoipa::openapi::Schema::OneOf(
-                utoipa::openapi::schema::OneOfBuilder::new()
-                    .item(<decisions_oai::Response as utoipa::PartialSchema>::schema())
-                    .item(<decisions_native::Response as utoipa::PartialSchema>::schema())
-                    .build(),
-            )
-            .into()
+            <decisions_oai::Response as utoipa::PartialSchema>::schema()
         };
         operation = operation.response(
             "200",
@@ -240,48 +230,6 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
     operation.build()
 }
 
-fn decisions_request_schema() -> RefOr<utoipa::openapi::schema::Schema> {
-    use utoipa::openapi::schema::{
-        AdditionalProperties, ObjectBuilder, OneOfBuilder, Schema, Type,
-    };
-    let variants = [
-        (
-            <decisions_oai::Request as utoipa::PartialSchema>::schema(),
-            "oai",
-            false,
-        ),
-        (
-            <decisions_native::Request as utoipa::PartialSchema>::schema(),
-            "sglang_native",
-            true,
-        ),
-    ];
-    let mut combined = OneOfBuilder::new();
-    for (mut schema, format, required) in variants {
-        let mut extension = ObjectBuilder::new()
-            .additional_properties(Some(AdditionalProperties::FreeForm(false)))
-            .property(
-                "format",
-                ObjectBuilder::new()
-                    .schema_type(Type::String)
-                    .enum_values(Some([format])),
-            );
-        if required {
-            extension = extension.required("format");
-        }
-        if let RefOr::T(Schema::Object(object)) = &mut schema {
-            object
-                .properties
-                .insert("nvext".into(), extension.build().into());
-            if required {
-                object.required.push("nvext".into());
-            }
-        }
-        combined = combined.item(schema);
-    }
-    utoipa::openapi::Schema::OneOf(combined.build()).into()
-}
-
 /// Add request body schema for POST endpoints
 fn add_request_body_for_path(
     operation: utoipa::openapi::path::OperationBuilder,
@@ -302,8 +250,8 @@ fn add_request_body_for_path(
             }),
         ),
         "/v1/decisions" => (
-            "OpenAI Decisions by default; nvext.format=sglang_native selects SGLang request and response schemas",
-            decisions_request_schema(),
+            "OpenAI Decisions text evaluation; unsupported fields and controls are rejected",
+            <decisions_oai::Request as utoipa::PartialSchema>::schema(),
             serde_json::json!({
                 "model":"Qwen/Qwen3.8-27B", "input":"The payment failed.",
                 "questions":[{"type":"choice", "name":"route", "instructions":"Choose a team", "choices":[
@@ -448,8 +396,8 @@ fn generate_summary_for_path(path: &str) -> String {
 /// Generate a detailed description for a path
 fn generate_description_for_path(path: &str) -> String {
     match path {
-        "/v1/systemone" => "Experimental aggregate SGLang API. Each question is scored in one prefill-only operation; answers contain probabilities normalized over the permitted labels, not calibrated probabilities of correctness.".to_string(),
-        "/v1/decisions" => "Experimental text decisions over a qualified SGLang worker. OpenAI format is the default; nvext.format=sglang_native selects native validation and serialization. No streaming or image inputs are supported.".to_string(),
+        "/v1/systemone" => "Experimental Jev text evaluation over a qualified SGLang worker. Each question is scored in one prefill-only operation; answers contain probabilities normalized over the permitted labels, not calibrated probabilities of correctness.".to_string(),
+        "/v1/decisions" => "Experimental text decisions over a qualified SGLang worker. Only the OpenAI Decisions contract is supported; extension envelopes and native decision schemas are rejected. No streaming or image inputs are supported.".to_string(),
         "/v1/chat/completions" => {
             "Creates a completion for a chat conversation. Supports both streaming and non-streaming modes. \
             Compatible with OpenAI's chat completions API."
@@ -548,28 +496,30 @@ mod tests {
     }
 
     #[test]
-    fn decisions_openapi_documents_selector_and_both_contracts() {
+    fn decisions_openapi_documents_only_openai_contract() {
         let spec =
             generate_openapi_spec(&[RouteDoc::new(axum::http::Method::POST, "/v1/decisions")]);
         let value = serde_json::to_value(spec).unwrap();
         let operation = &value["paths"]["/v1/decisions"]["post"];
-        let variants = operation["requestBody"]["content"]["application/json"]["schema"]["oneOf"]
-            .as_array()
-            .unwrap();
-        assert_eq!(variants.len(), 2);
+        let request = &operation["requestBody"]["content"]["application/json"]["schema"];
+        assert!(request.get("oneOf").is_none());
+        assert!(request["properties"].get("nvext").is_none());
         assert_eq!(
-            variants[0]["properties"]["nvext"]["properties"]["format"]["enum"],
-            serde_json::json!(["oai"])
+            request,
+            &serde_json::to_value(<decisions_oai::Request as utoipa::PartialSchema>::schema())
+                .unwrap()
         );
         assert_eq!(
-            variants[1]["properties"]["nvext"]["properties"]["format"]["enum"],
-            serde_json::json!(["sglang_native"])
+            operation["responses"]["200"]["content"]["application/json"]["schema"],
+            serde_json::to_value(<decisions_oai::Response as utoipa::PartialSchema>::schema())
+                .unwrap()
         );
         assert!(
-            variants[1]["required"]
-                .as_array()
+            value["components"]["schemas"]
+                .as_object()
                 .unwrap()
-                .contains(&serde_json::json!("nvext"))
+                .keys()
+                .all(|name| !name.starts_with("DecisionSglang"))
         );
         assert!(operation["responses"].get("429").is_some());
     }
