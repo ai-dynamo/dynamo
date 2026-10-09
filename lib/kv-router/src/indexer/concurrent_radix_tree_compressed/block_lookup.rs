@@ -286,28 +286,22 @@ mod tests {
     #[test]
     fn matches_hash_map_under_random_operations() {
         for seed in 0..16u64 {
-            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-            let mut next = move || {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state
-            };
+            let mut rng = fastrand::Rng::with_seed(seed);
             let mut lookup = BlockLookup::default();
             let mut model = HashMap::new();
             let key_space = 8 + seed * 17;
 
             for step in 0..20_000u64 {
-                let k = key(next() % key_space);
-                match next() % 10 {
+                let k = key(rng.u64(..key_space));
+                match rng.u32(..10) {
                     0..=3 => assert_eq!(lookup.insert(k, step), model.insert(k, step)),
                     4..=6 => assert_eq!(lookup.remove(&k), model.remove(&k)),
                     7 => {
-                        let keys: Vec<_> = (0..(next() % 12))
-                            .map(|_| key(next() % key_space))
+                        let keys: Vec<_> = (0..rng.usize(..12))
+                            .map(|_| key(rng.u64(..key_space)))
                             .collect();
                         // Reuse a recent value so some entries already hold it.
-                        let value = step.saturating_sub(next() % 4);
+                        let value = step.saturating_sub(rng.u64(..4));
                         let mut replaced = Vec::new();
                         let changed =
                             lookup.upsert_all(keys.iter().copied(), value, |v| replaced.push(v));
@@ -327,8 +321,8 @@ mod tests {
                         assert_eq!(replaced, expected_replaced);
                     }
                     8 => {
-                        let keys: Vec<_> = (0..(next() % 12))
-                            .map(|_| key(next() % key_space))
+                        let keys: Vec<_> = (0..rng.usize(..12))
+                            .map(|_| key(rng.u64(..key_space)))
                             .collect();
                         let mut seen = Vec::new();
                         lookup.remove_all(keys.iter().copied(), |k, v| seen.push((k, v)));
@@ -337,11 +331,11 @@ mod tests {
                         assert_eq!(seen, expected);
                     }
                     _ => {
-                        let keys: Vec<_> = (0..(next() % 12))
-                            .map(|_| key(next() % key_space))
+                        let keys: Vec<_> = (0..rng.usize(..12))
+                            .map(|_| key(rng.u64(..key_space)))
                             .collect();
                         // Redirect from a recent value so some entries match it.
-                        let from = step.saturating_sub(next() % 4);
+                        let from = step.saturating_sub(rng.u64(..4));
                         let changed = lookup.redirect(keys.iter().copied(), from, step);
                         let mut expected = 0;
                         for k in &keys {

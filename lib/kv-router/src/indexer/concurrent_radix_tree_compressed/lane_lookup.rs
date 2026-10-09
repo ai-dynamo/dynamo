@@ -368,13 +368,7 @@ mod tests {
     #[test]
     fn matches_model_and_holds_one_arc_per_named_node() {
         for seed in 0..8u64 {
-            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-            let mut next = move || {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state
-            };
+            let mut rng = fastrand::Rng::with_seed(seed);
             let workers: Vec<_> = (0..3).map(|id| WorkerWithDpRank::new(id, 0)).collect();
             let mut pool: Vec<SharedNode> = (0..6).map(|_| Arc::new(Node::new())).collect();
             let mut lane = LaneLookup::default();
@@ -383,12 +377,12 @@ mod tests {
             let key_space = 4 + seed * 5;
 
             for _ in 0..5_000 {
-                let worker = workers[(next() % workers.len() as u64) as usize];
-                let node = (next() % pool.len() as u64) as usize;
-                let hashes: Vec<_> = (0..(next() % 8))
-                    .map(|_| hash(next() % key_space))
+                let worker = workers[rng.usize(..workers.len())];
+                let node = rng.usize(..pool.len());
+                let hashes: Vec<_> = (0..rng.usize(..8))
+                    .map(|_| hash(rng.u64(..key_space)))
                     .collect();
-                match next() % 12 {
+                match rng.u32(..12) {
                     0..=3 => {
                         let changed = lane.upsert_all(worker, hashes.iter().copied(), &pool[node]);
                         let expected = hashes
@@ -398,12 +392,12 @@ mod tests {
                         assert_eq!(changed, expected);
                     }
                     4 => {
-                        let h = hash(next() % key_space);
+                        let h = hash(rng.u64(..key_space));
                         lane.insert(worker, h, &pool[node]);
                         model.insert((worker, h), node);
                     }
                     5 => {
-                        let h = hash(next() % key_space);
+                        let h = hash(rng.u64(..key_space));
                         lane.remove(worker, h);
                         model.remove(&(worker, h));
                     }
@@ -418,7 +412,7 @@ mod tests {
                         }
                     }
                     9 | 10 => {
-                        let from = (next() % pool.len() as u64) as usize;
+                        let from = rng.usize(..pool.len());
                         let changed = lane.redirect(&pool[from], &pool[node], |_| hashes.clone());
                         let mut expected = 0;
                         if from != node {
@@ -467,7 +461,7 @@ mod tests {
                     assert_eq!(lane.names(node), named);
                 }
 
-                let replace = (next() % pool.len() as u64) as usize;
+                let replace = rng.usize(..pool.len());
                 if !model.values().any(|&m| m == replace) {
                     pool[replace] = Arc::new(Node::new());
                 }
