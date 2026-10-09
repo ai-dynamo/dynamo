@@ -258,6 +258,7 @@ fn replay_timing(timing: HandoffTransferTiming) -> aisimulate_core::replay::Hand
         },
         full_prompt_tokens: timing.full_prompt_tokens,
         kv_bytes_per_token: timing.kv_bytes_per_token,
+        state_bytes: 0,
         bandwidth_gb_s: timing.bandwidth_gb_s,
     }
 }

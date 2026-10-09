@@ -3,6 +3,7 @@
 
 //! Dynamo integration options around AISimulate's canonical engine configuration.
 
+use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +19,106 @@ use crate::common::perf_model::PerfModel;
 use crate::common::protocols::ReasoningConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayAdaptiveOpportunityCostConfig {
+    /// Half-life for the selected worker's recent cache-demand observations.
+    pub half_life_ms: u64,
+    /// Expected reusable value of one displaced block.
+    pub reuse_value_scale: f64,
+}
+
+impl ReplayAdaptiveOpportunityCostConfig {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.half_life_ms > 0,
+            "adaptive retention half_life_ms must be positive"
+        );
+        ensure!(
+            self.reuse_value_scale.is_finite() && self.reuse_value_scale >= 0.0,
+            "adaptive retention reuse_value_scale must be finite and non-negative"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayRetentionPolicyConfig {
+    /// Fixed lease duration used when no policy-class table is configured.
+    pub ttl_ms: u64,
+    /// Optional per-policy-class lease durations. When non-empty, only requests
+    /// with a matching class are eligible for retention.
+    #[serde(default)]
+    pub ttl_ms_by_policy_class: BTreeMap<String, u64>,
+    /// Maximum fraction of one worker's G1 blocks protected by leases.
+    pub max_fraction: f64,
+    /// Estimated blocks displaced per retained block-second.
+    pub opportunity_cost_per_block_second: f64,
+    /// Optional worker-adaptive opportunity cost based on recent G1 demand.
+    #[serde(default)]
+    pub adaptive_opportunity_cost: Option<ReplayAdaptiveOpportunityCostConfig>,
+}
+
+impl ReplayRetentionPolicyConfig {
+    fn validate(&self) -> Result<()> {
+        ensure!(self.ttl_ms > 0, "retention ttl_ms must be positive");
+        for (policy_class, ttl_ms) in &self.ttl_ms_by_policy_class {
+            ensure!(
+                !policy_class.trim().is_empty(),
+                "retention policy classes must not be empty"
+            );
+            ensure!(
+                *ttl_ms > 0,
+                "retention ttl_ms for policy class {policy_class:?} must be positive"
+            );
+        }
+        ensure!(
+            self.max_fraction.is_finite() && self.max_fraction > 0.0 && self.max_fraction <= 1.0,
+            "retention max_fraction must be in (0, 1]"
+        );
+        ensure!(
+            self.opportunity_cost_per_block_second.is_finite()
+                && self.opportunity_cost_per_block_second >= 0.0,
+            "retention opportunity_cost_per_block_second must be finite and non-negative"
+        );
+        if let Some(adaptive) = &self.adaptive_opportunity_cost {
+            adaptive.validate()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn max_blocks(&self, capacity: usize) -> usize {
+        ((capacity as f64 * self.max_fraction).floor() as usize).max(1)
+    }
+
+    pub(crate) fn hint_with_opportunity_cost(
+        &self,
+        continuation_expected: bool,
+        policy_class: Option<&str>,
+        prefix_blocks: u32,
+        recoverable_blocks: u32,
+        capacity: usize,
+        opportunity_cost_per_block_second: f64,
+    ) -> Option<aisimulate_core::engine::RetentionHint> {
+        if !continuation_expected || prefix_blocks == 0 || recoverable_blocks == 0 {
+            return None;
+        }
+        let ttl_ms = if self.ttl_ms_by_policy_class.is_empty() {
+            self.ttl_ms
+        } else {
+            *self.ttl_ms_by_policy_class.get(policy_class?)?
+        };
+        let ttl_seconds = ttl_ms as f64 / 1_000.0;
+        let value = f64::from(recoverable_blocks)
+            - opportunity_cost_per_block_second * f64::from(prefix_blocks) * ttl_seconds;
+        (value > 0.0).then(|| aisimulate_core::engine::RetentionHint {
+            ttl_ms,
+            max_blocks: self.max_blocks(capacity),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MockerRuntimeOptions {
     pub enable_local_indexer: bool,
@@ -28,6 +129,10 @@ pub struct MockerRuntimeOptions {
     pub zmq_kv_events_port: Option<u16>,
     pub zmq_replay_port: Option<u16>,
     pub router_queue_policy: Option<RouterQueuePolicy>,
+    /// Group queued agentic turns by program start time instead of request arrival time.
+    pub program_fcfs: bool,
+    /// Optional causal, value-gated completion-time G1 retention policy.
+    pub retention_policy: Option<ReplayRetentionPolicyConfig>,
 }
 
 impl Default for MockerRuntimeOptions {
@@ -41,6 +146,8 @@ impl Default for MockerRuntimeOptions {
             zmq_kv_events_port: None,
             zmq_replay_port: None,
             router_queue_policy: None,
+            program_fcfs: false,
+            retention_policy: None,
         }
     }
 }
@@ -140,6 +247,13 @@ impl MockerConfig {
         );
         if let Some(reasoning) = &self.runtime.reasoning {
             reasoning.validate()?;
+        }
+        if let Some(retention) = &self.runtime.retention_policy {
+            retention.validate()?;
+            ensure!(
+                !self.is_prefill() && !self.is_decode(),
+                "replay retention currently supports aggregated workers only"
+            );
         }
         Ok(self)
     }
@@ -243,5 +357,66 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(args.effective_handoff_capacity(), 32);
+    }
+
+    #[test]
+    fn replay_retention_uses_value_gate_and_worker_cap() {
+        let policy = ReplayRetentionPolicyConfig {
+            ttl_ms: 2_000,
+            ttl_ms_by_policy_class: BTreeMap::new(),
+            max_fraction: 0.25,
+            opportunity_cost_per_block_second: 0.1,
+            adaptive_opportunity_cost: None,
+        };
+
+        let accepted = policy
+            .hint_with_opportunity_cost(true, None, 100, 30, 1_024, 0.1)
+            .unwrap();
+        assert_eq!(accepted.ttl_ms, 2_000);
+        assert_eq!(accepted.max_blocks, 256);
+        assert!(
+            policy
+                .hint_with_opportunity_cost(true, None, 100, 20, 1_024, 0.1)
+                .is_none()
+        );
+        assert!(
+            policy
+                .hint_with_opportunity_cost(false, None, 100, 30, 1_024, 0.1)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn replay_retention_policy_class_table_is_an_allowlist() {
+        let policy = ReplayRetentionPolicyConfig {
+            ttl_ms: 2_000,
+            ttl_ms_by_policy_class: BTreeMap::from([("shell".to_string(), 8_000)]),
+            max_fraction: 0.25,
+            opportunity_cost_per_block_second: 0.05,
+            adaptive_opportunity_cost: None,
+        };
+
+        assert!(
+            policy
+                .hint_with_opportunity_cost(true, None, 100, 30, 1_024, 0.05)
+                .is_none()
+        );
+        assert!(
+            policy
+                .hint_with_opportunity_cost(true, Some("read"), 100, 30, 1_024, 0.05)
+                .is_none()
+        );
+        assert!(
+            policy
+                .hint_with_opportunity_cost(true, Some("shell"), 100, 30, 1_024, 0.05)
+                .is_none()
+        );
+        assert_eq!(
+            policy
+                .hint_with_opportunity_cost(true, Some("shell"), 100, 50, 1_024, 0.05)
+                .unwrap()
+                .ttl_ms,
+            8_000
+        );
     }
 }

@@ -791,6 +791,7 @@ mod tests {
             tokens: (0..prompt_len as u32).collect(),
             max_output_tokens: output_len,
             output_token_ids: Some((0..output_len as u32).map(|token| token + 10_000).collect()),
+            retention: None,
         }
     }
 

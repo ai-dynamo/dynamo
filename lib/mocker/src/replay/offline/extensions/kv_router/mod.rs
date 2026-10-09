@@ -8,7 +8,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use dynamo_kv_router::LocalBlockHash;
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
@@ -40,6 +40,7 @@ use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockerConfig;
+use crate::config::{ReplayAdaptiveOpportunityCostConfig, ReplayRetentionPolicyConfig};
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
@@ -190,6 +191,7 @@ pub(crate) struct WorkerAdmission {
     overlap_blocks: u32,
     best_available_overlap_blocks: u32,
     isl_blocks: u32,
+    retention: Option<aisimulate_core::engine::RetentionHint>,
 }
 
 #[derive(Debug, Default)]
@@ -206,6 +208,7 @@ struct AdmitOutcome {
     overlap_blocks: u32,
     best_available_overlap_blocks: u32,
     isl_blocks: u32,
+    retention: Option<aisimulate_core::engine::RetentionHint>,
 }
 
 #[cfg(test)]
@@ -363,6 +366,86 @@ struct PendingRequest {
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
+    continuation_expected: bool,
+}
+
+#[derive(Debug, Default)]
+struct RetentionPressureTracker {
+    workers: FxHashMap<WorkerWithDpRank, RetentionPressureState>,
+}
+
+#[derive(Debug)]
+struct RetentionPressureState {
+    last_observed: Instant,
+    decayed_missing_blocks: f64,
+    decayed_reused_blocks: f64,
+    decayed_total_blocks: f64,
+}
+
+impl RetentionPressureTracker {
+    fn opportunity_cost(
+        &mut self,
+        worker: WorkerWithDpRank,
+        now: Instant,
+        config: &ReplayAdaptiveOpportunityCostConfig,
+        capacity_blocks: usize,
+    ) -> f64 {
+        let Some(state) = self.workers.get_mut(&worker) else {
+            return 0.0;
+        };
+        Self::decay(state, now, config);
+        let tau_seconds = Self::tau_seconds(config);
+        let missing_blocks_per_second = state.decayed_missing_blocks / tau_seconds;
+        let reused_fraction = if state.decayed_total_blocks > 0.0 {
+            state.decayed_reused_blocks / state.decayed_total_blocks
+        } else {
+            0.0
+        };
+        config.reuse_value_scale * missing_blocks_per_second / capacity_blocks.max(1) as f64
+            * reused_fraction
+    }
+
+    fn observe(
+        &mut self,
+        worker: WorkerWithDpRank,
+        now: Instant,
+        config: &ReplayAdaptiveOpportunityCostConfig,
+        prefix_blocks: u32,
+        reused_blocks: u32,
+    ) {
+        let state = self
+            .workers
+            .entry(worker)
+            .or_insert(RetentionPressureState {
+                last_observed: now,
+                decayed_missing_blocks: 0.0,
+                decayed_reused_blocks: 0.0,
+                decayed_total_blocks: 0.0,
+            });
+        Self::decay(state, now, config);
+        state.decayed_missing_blocks += f64::from(prefix_blocks.saturating_sub(reused_blocks));
+        state.decayed_reused_blocks += f64::from(reused_blocks);
+        state.decayed_total_blocks += f64::from(prefix_blocks);
+    }
+
+    fn decay(
+        state: &mut RetentionPressureState,
+        now: Instant,
+        config: &ReplayAdaptiveOpportunityCostConfig,
+    ) {
+        let elapsed_seconds = now
+            .saturating_duration_since(state.last_observed)
+            .as_secs_f64();
+        let factor = (-elapsed_seconds / Self::tau_seconds(config)).exp();
+        state.decayed_missing_blocks *= factor;
+        state.decayed_reused_blocks *= factor;
+        state.decayed_total_blocks *= factor;
+        state.last_observed = now;
+    }
+
+    fn tau_seconds(config: &ReplayAdaptiveOpportunityCostConfig) -> f64 {
+        Duration::from_millis(config.half_life_ms).as_secs_f64() / std::f64::consts::LN_2
+    }
 }
 
 impl PendingRequest {
@@ -426,6 +509,12 @@ pub(crate) struct OfflineReplayRouter {
     kv_event_lag_ms: f64,
     /// Lagged KV event batches in arrival order, keyed by the replay time they become visible.
     lagged_kv_events: VecDeque<(f64, Vec<RouterEvent>)>,
+    /// Optional Continuum-style ordering: queued turns inherit their program's first arrival.
+    program_fcfs: bool,
+    program_first_arrival_ms: FxHashMap<String, f64>,
+    retention_policy: Option<ReplayRetentionPolicyConfig>,
+    retention_capacity_blocks: usize,
+    retention_pressure: RetentionPressureTracker,
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
@@ -472,6 +561,7 @@ impl KvRouterPlacement {
                 best_available_overlap_blocks: admission.best_available_overlap_blocks,
                 isl_blocks: admission.isl_blocks,
             }),
+            retention: admission.retention,
         }
     }
 
@@ -642,6 +732,11 @@ impl OfflineReplayRouter {
         selector_seed: Option<u64>,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
+        ensure!(
+            !args.runtime.program_fcfs
+                || config.router_queue_policy == dynamo_kv_router::config::RouterQueuePolicy::Fcfs,
+            "program_fcfs requires the FCFS router queue policy"
+        );
         let tracking_hash = TrackingHashContext::from_config(&config)?;
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
@@ -670,6 +765,11 @@ impl OfflineReplayRouter {
             tracking_hash,
             kv_event_lag_ms: 0.0,
             lagged_kv_events: VecDeque::new(),
+            program_fcfs: args.runtime.program_fcfs,
+            program_first_arrival_ms: FxHashMap::default(),
+            retention_policy: args.runtime.retention_policy.clone(),
+            retention_capacity_blocks: args.num_gpu_blocks,
+            retention_pressure: RetentionPressureTracker::default(),
         })
     }
 
@@ -731,8 +831,9 @@ impl OfflineReplayRouter {
         now_ms: f64,
     ) -> Result<RouterEffects> {
         self.apply_due_kv_events(now_ms)?;
-        let pending =
+        let mut pending =
             self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
+        self.apply_program_fcfs(request.metadata(), now_ms, &mut pending)?;
         let decay_now = self.decay_now(now_ms);
         let (class_index, snapshot) = match self
             .profile
@@ -787,8 +888,43 @@ impl OfflineReplayRouter {
                 overlap_blocks: outcome.overlap_blocks,
                 best_available_overlap_blocks: outcome.best_available_overlap_blocks,
                 isl_blocks: outcome.isl_blocks,
+                retention: outcome.retention,
             }],
         })
+    }
+
+    fn apply_program_fcfs(
+        &mut self,
+        request: &DirectRequest,
+        now_ms: f64,
+        pending: &mut PendingRequest,
+    ) -> Result<()> {
+        if !self.program_fcfs {
+            return Ok(());
+        }
+        ensure!(
+            now_ms.is_finite() && now_ms >= 0.0,
+            "program_fcfs requires a finite non-negative arrival time, got {now_ms}"
+        );
+        let program_id = request
+            .replay_context
+            .as_ref()
+            .and_then(|context| context.agentic.as_ref())
+            .map(|agentic| agentic.play_id.as_str())
+            .or(pending.session_id.as_deref())
+            .ok_or_else(|| {
+                anyhow!("program_fcfs requires replay agentic play_id or a request session_id")
+            })?;
+        let first_arrival_ms = *self
+            .program_first_arrival_ms
+            .entry(program_id.to_owned())
+            .or_insert(now_ms);
+        ensure!(
+            now_ms >= first_arrival_ms,
+            "program {program_id:?} arrived at {now_ms}ms before its first arrival at {first_arrival_ms}ms"
+        );
+        pending.priority_jump += (now_ms - first_arrival_ms) / 1_000.0;
+        Ok(())
     }
 
     pub(crate) fn on_kv_events_at(
@@ -1045,6 +1181,10 @@ impl OfflineReplayRouter {
             strict_priority,
             policy_class: request.policy_class.clone(),
             session_id,
+            continuation_expected: request
+                .replay_context
+                .as_ref()
+                .is_some_and(|context| context.continuation_expected),
         })
     }
 
@@ -1106,6 +1246,39 @@ impl OfflineReplayRouter {
         let isl_blocks = u32::try_from(request.isl_tokens.div_ceil(self.block_size as usize))
             .unwrap_or(u32::MAX);
         let overlap_blocks = selection.effective_overlap_blocks.round() as u32;
+        let retention = self.retention_policy.as_ref().and_then(|policy| {
+            let opportunity_cost = policy.opportunity_cost_per_block_second
+                + policy
+                    .adaptive_opportunity_cost
+                    .as_ref()
+                    .map(|config| {
+                        self.retention_pressure.opportunity_cost(
+                            selection.worker,
+                            decay_now,
+                            config,
+                            self.retention_capacity_blocks,
+                        )
+                    })
+                    .unwrap_or(0.0);
+            let hint = policy.hint_with_opportunity_cost(
+                request.continuation_expected,
+                request.policy_class.as_deref(),
+                isl_blocks,
+                isl_blocks.saturating_sub(overlap_blocks),
+                self.retention_capacity_blocks,
+                opportunity_cost,
+            );
+            if let Some(config) = &policy.adaptive_opportunity_cost {
+                self.retention_pressure.observe(
+                    selection.worker,
+                    decay_now,
+                    config,
+                    isl_blocks,
+                    overlap_blocks.min(isl_blocks),
+                );
+            }
+            hint
+        });
 
         self.slots
             .add_request(
@@ -1127,6 +1300,7 @@ impl OfflineReplayRouter {
             overlap_blocks,
             best_available_overlap_blocks,
             isl_blocks,
+            retention,
         })
     }
 
@@ -1154,6 +1328,7 @@ impl OfflineReplayRouter {
                 overlap_blocks: outcome.overlap_blocks,
                 best_available_overlap_blocks: outcome.best_available_overlap_blocks,
                 isl_blocks: outcome.isl_blocks,
+                retention: outcome.retention,
             });
         }
 
@@ -1252,10 +1427,16 @@ mod tests {
     use tempfile::NamedTempFile;
     use uuid::Uuid;
 
-    use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
+    use super::{
+        OfflineReplayRouter, ReplayRequestHashes, RetentionPressureTracker, SyncReplayIndexer,
+        WorkerAdmission,
+    };
     use crate::common::protocols::{DirectRequest, MockerConfig};
+    use crate::config::ReplayAdaptiveOpportunityCostConfig;
     use crate::replay::ReplayPrefillLoadEstimator;
-    use aisimulate_core::replay::{ReplayPromptTokenSource, ReplayRequestContext};
+    use aisimulate_core::replay::{
+        AgenticRuntimeIdentity, ReplayPromptTokenSource, ReplayRequestContext,
+    };
 
     struct FixedPrefillLoadEstimator {
         duration: Duration,
@@ -1343,6 +1524,29 @@ mod tests {
         }
     }
 
+    fn request_with_program(uuid: u128, token: u32, program_id: &str) -> DirectRequest {
+        let mut request = request(uuid, token);
+        request.replay_context = Some(ReplayRequestContext {
+            agentic: Some(AgenticRuntimeIdentity {
+                request_id: uuid.to_string(),
+                play_id: program_id.to_string(),
+                conversation_id: program_id.to_string(),
+                lane_id: None,
+                root_id: None,
+                parent_id: None,
+                cache_id: None,
+            }),
+            authored_id: uuid.to_string(),
+            session_id: Some(program_id.to_string()),
+            turn_index: None,
+            metadata: Value::Null,
+            prompt_token_source: ReplayPromptTokenSource::Materialized,
+            continuation_expected: true,
+            retention: None,
+        });
+        request
+    }
+
     #[test]
     fn length_only_execution_tokens_are_rejected_without_replay_hashes() {
         let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
@@ -1354,6 +1558,8 @@ mod tests {
             turn_index: None,
             metadata: Value::Null,
             prompt_token_source: ReplayPromptTokenSource::LengthOnlySynthetic,
+            continuation_expected: false,
+            retention: None,
         });
 
         let error =
@@ -1571,6 +1777,7 @@ mod tests {
                 overlap_blocks: 3,
                 best_available_overlap_blocks: 3,
                 isl_blocks: 4,
+                retention: None,
             }]
         );
     }
@@ -1605,6 +1812,7 @@ mod tests {
                 overlap_blocks: 3,
                 best_available_overlap_blocks: 3,
                 isl_blocks: 4,
+                retention: None,
             }]
         );
     }
@@ -1665,6 +1873,105 @@ mod tests {
     }
 
     #[test]
+    fn program_fcfs_orders_later_turn_by_program_first_arrival() {
+        let mut args = queueing_args();
+        args.runtime.program_fcfs = true;
+        let mut router =
+            OfflineReplayRouter::new(&args, Some(queueing_router_config()), None, 1).unwrap();
+
+        router
+            .on_request_arrival(&request_with_program(1, 1, "older"), None, 0.0)
+            .unwrap();
+        router
+            .on_request_completed(Uuid::from_u128(1), 10.0)
+            .unwrap();
+        router
+            .on_request_arrival(&request_with_program(2, 2, "occupier"), None, 20.0)
+            .unwrap();
+        router
+            .on_request_arrival(&request_with_program(3, 3, "younger"), None, 30.0)
+            .unwrap();
+        router
+            .on_request_arrival(&request_with_program(4, 4, "older"), None, 40.0)
+            .unwrap();
+
+        let pending = router
+            .debug_snapshot(40.0)
+            .pending
+            .into_iter()
+            .map(|request| request.uuid)
+            .collect::<Vec<_>>();
+        assert_eq!(pending, vec![Uuid::from_u128(4), Uuid::from_u128(3)]);
+    }
+
+    #[test]
+    fn retention_policy_uses_selected_worker_overlap() {
+        let mut args = replay_args();
+        args.runtime.retention_policy = Some(crate::config::ReplayRetentionPolicyConfig {
+            ttl_ms: 2_000,
+            ttl_ms_by_policy_class: Default::default(),
+            max_fraction: 0.25,
+            opportunity_cost_per_block_second: 0.1,
+            adaptive_opportunity_cost: None,
+        });
+        let mut router = OfflineReplayRouter::new(&args, None, None, 1).unwrap();
+
+        let effects = router
+            .on_request_arrival(&request_with_program(1, 7, "program"), None, 0.0)
+            .unwrap();
+        let retention = effects.admissions[0].retention.unwrap();
+
+        assert_eq!(retention.ttl_ms, 2_000);
+        assert_eq!(
+            retention.max_blocks,
+            (args.num_gpu_blocks as f64 * 0.25).floor() as usize
+        );
+    }
+
+    #[test]
+    fn retention_policy_uses_request_policy_class_ttl() {
+        let mut args = replay_args();
+        args.runtime.retention_policy = Some(crate::config::ReplayRetentionPolicyConfig {
+            ttl_ms: 2_000,
+            ttl_ms_by_policy_class: [("shell".to_string(), 8_000)].into(),
+            max_fraction: 0.25,
+            opportunity_cost_per_block_second: 0.0,
+            adaptive_opportunity_cost: None,
+        });
+        let mut router = OfflineReplayRouter::new(&args, None, None, 1).unwrap();
+        let mut request = request_with_program(1, 7, "program");
+        request.policy_class = Some("shell".to_string());
+
+        let effects = router.on_request_arrival(&request, None, 0.0).unwrap();
+
+        assert_eq!(effects.admissions[0].retention.unwrap().ttl_ms, 8_000);
+    }
+
+    #[test]
+    fn adaptive_retention_price_tracks_worker_local_cache_churn() {
+        let config = ReplayAdaptiveOpportunityCostConfig {
+            half_life_ms: 1_000,
+            reuse_value_scale: 1.0,
+        };
+        let worker = WorkerWithDpRank::new(0, 0);
+        let other_worker = WorkerWithDpRank::new(1, 0);
+        let now = tokio::time::Instant::now();
+        let mut pressure = RetentionPressureTracker::default();
+
+        assert_eq!(pressure.opportunity_cost(worker, now, &config, 100), 0.0);
+        pressure.observe(worker, now, &config, 100, 80);
+
+        let one_half_life_later = now + Duration::from_secs(1);
+        let actual = pressure.opportunity_cost(worker, one_half_life_later, &config, 100);
+        let expected = 10.0 / (1.0 / std::f64::consts::LN_2) / 100.0 * 0.8;
+        assert!((actual - expected).abs() < 1e-12);
+        assert_eq!(
+            pressure.opportunity_cost(other_worker, one_half_life_later, &config, 100),
+            0.0
+        );
+    }
+
+    #[test]
     fn attention_dp_routes_one_mocker_worker_across_rank_targets() {
         let mut args = queueing_args();
         args.dp_size = 2;
@@ -1718,6 +2025,7 @@ mod tests {
                 overlap_blocks: 1,
                 best_available_overlap_blocks: 1,
                 isl_blocks: 1,
+                retention: None,
             }]
         );
     }
@@ -1750,6 +2058,7 @@ mod tests {
                 overlap_blocks: 1,
                 best_available_overlap_blocks: 1,
                 isl_blocks: 1,
+                retention: None,
             }]
         );
     }
@@ -2136,6 +2445,7 @@ policy_classes:
                 overlap_blocks: 0,
                 best_available_overlap_blocks: 0,
                 isl_blocks: 1,
+                retention: None,
             }]
         );
     }
@@ -2259,6 +2569,7 @@ policy_classes:
                 overlap_blocks: 0,
                 best_available_overlap_blocks: 0,
                 isl_blocks: 1,
+                retention: None,
             }]
         );
         assert_eq!(router.pending_count(), 0);
