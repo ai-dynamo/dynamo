@@ -339,6 +339,8 @@ def _validate_mla_dcp_decode_backend(
     if automatic:
         # SGLang has not chosen yet; predict its choice (fa3 for MLA on Hopper)
         # so the worker fails here, before sgl.Engine captures CUDA graphs.
+        # The prediction skips SGLang's model-specific overrides (for example
+        # dsa for DSA-family models), so it can name the wrong backend there.
         backend = sglang_default_mla_attention_backend(server_args)
     if backend not in MLA_DCP_UNSUPPORTED_DECODE_BACKENDS:
         return

@@ -651,7 +651,7 @@ async def test_parse_args_accepts_supported_dcp_configurations(
         ({"attention_backend": "fa3"}, None, "fa3", False),
         ({"decode_attention_backend": "fa4"}, None, "fa4", False),
         ({"attention_backend": "flashmla"}, None, "flashmla", False),
-        # No backend passed: SGLang picks fa3 for MLA on Hopper (DYN-4826).
+        # No backend passed: SGLang picks fa3 for MLA on Hopper.
         ({}, "fa3", "fa3", True),
     ],
     ids=["explicit-fa3", "decode-fa4", "explicit-flashmla", "hopper-default-fa3"],
@@ -704,7 +704,7 @@ def _raise_runtime_error(*_):
     ids=["dcp-capable-default", "unknown-default", "default-lookup-fails"],
 )
 async def test_parse_args_accepts_mla_dcp_when_default_backend_is_not_known_bad(
-    monkeypatch, mock_sglang_cli, tmp_path, default_backend
+    monkeypatch, mock_sglang_cli, tmp_path, default_backend, caplog
 ):
     helper = (
         default_backend if callable(default_backend) else lambda *_: default_backend
@@ -716,9 +716,12 @@ async def test_parse_args_accepts_mla_dcp_when_default_backend_is_not_known_bad(
     )
     mock_sglang_cli(model=str(tmp_path))
 
-    config = await parse_args(sys.argv[1:])
+    with caplog.at_level(logging.WARNING):
+        config = await parse_args(sys.argv[1:])
 
     assert config.server_args is server_args
+    lookup_failed = default_backend is _raise_runtime_error
+    assert ("Could not predict SGLang's default" in caplog.text) is lookup_failed
 
 
 @pytest.mark.asyncio

@@ -138,7 +138,11 @@ def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
             server_args, True, get_sglang_model_config(server_args)
         )
     except Exception as exc:
-        logger.debug("Could not predict SGLang's default MLA backend: %s", exc)
+        logger.warning(
+            "Could not predict SGLang's default MLA attention backend; skipping "
+            "the decode context parallel backend check: %s",
+            exc,
+        )
         return None
     return backend if isinstance(backend, str) else None
 
