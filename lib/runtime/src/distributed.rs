@@ -877,17 +877,24 @@ mod parser_env_tests {
             return;
         }
         let mut cases = vec![
-            ("invalid", "127.0.0.1", "DYN_VELO_RESPONSE_TRANSPORT"),
-            ("tcp", "invalid host", "invalid host"),
-            ("tcp", "192.0.2.1", "Failed to pre-bind TCP listener"), // Valid address, but not assigned to this host.
+            ("invalid", "127.0.0.1", None, "DYN_VELO_RESPONSE_TRANSPORT"),
+            (
+                "tcp",
+                "127.0.0.1",
+                Some("invalid"),
+                "DYN_VELO_RESPONSE_BATCH_MS",
+            ),
+            ("tcp", "invalid host", None, "invalid host"),
+            ("tcp", "192.0.2.1", None, "Failed to pre-bind TCP listener"), // Valid address, but not assigned to this host.
         ];
         if !cfg!(all(target_os = "linux", feature = "velo-ucx")) {
-            cases.push(("ucx", "127.0.0.1", "velo-ucx"));
+            cases.push(("ucx", "127.0.0.1", None, "velo-ucx"));
         }
-        for (transport, host, message) in cases {
+        for (transport, host, batch_ms, message) in cases {
             temp_env::async_with_vars(
                 [
                     ("DYN_VELO_RESPONSE_TRANSPORT", Some(transport)),
+                    ("DYN_VELO_RESPONSE_BATCH_MS", batch_ms),
                     ("DYN_TCP_RESPONSE_STREAM_HOST", Some(host)),
                 ],
                 async {
