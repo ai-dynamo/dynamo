@@ -49,7 +49,7 @@ The DCD spec is `backendFramework` plus the [shared component spec](#shared-comp
 These fields are shared between a standalone DCD and each entry of a DGD `spec.components` list, except where a field is marked DGD-only. In a DGD, prefix them with `spec.components[*]`. Container paths below use the standalone DCD layout; replace the leading `spec.podTemplate` with `spec.components[*].podTemplate` for DGD components.
 
 <ParamField path="providerOverride" type="ProviderOverride">
-  Customizes the primary Grove unit for a component embedded in a DGD. Standalone DCD OpenAPI omits this field. Use `apiVersion: grove.io/v1alpha1`; the target is `PodCliqueTemplateSpec` for a component backed by a PodClique or `PodCliqueScalingGroupConfig` for one backed by a scaling group. The `value` may set only `topologyConstraint`. See [ProviderOverride](dynamo-graph-deployment.mdx#provideroverride).
+  Customizes the primary Grove unit for a component embedded in a DGD. Standalone DCD OpenAPI omits this field. Use `apiVersion: grove.io/v1alpha1`; the target is `PodCliqueTemplateSpec` for a component backed by a PodClique or `PodCliqueScalingGroupConfig` for one backed by a scaling group. The `value` accepts `topologyConstraint` and, at component scope, native `spec.minAvailable` for a standalone clique or `minAvailable` for a scaling group. LPX conductor components support the native minimum but not topology overrides. See [ProviderOverride](dynamo-graph-deployment.mdx#provideroverride).
 </ParamField>
 
 <ParamField path="name" type="string" required={true}>
@@ -112,8 +112,10 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   For a single `type: lpx` component in a DGD, this counts complete engine replicas, not individual role Pods. Hybrid and LPU-only engines allow up to `2496` replicas; generated Pod hostname limits may lower that maximum. In a speculative pair, draft replicas count model instances (`1–8`), and target replicas must be `1`. LPX does not support scaling adapters or scale-to-zero.
 </ParamField>
 
-<ParamField path="minAvailable" type="integer">
-  Minimum complete component replicas guaranteed to be gang-scheduled before a shortfall triggers gang termination. Supported only for Grove-backed DGD components, where it defaults to `1`; rejected for non-Grove deployments. Minimum `1` and immutable after creation. Positive `replicas` must be at least this value. Scaling to `0` is allowed and retains `minAvailable` for the next scale-up.
+<ParamField path="minAvailable" type="integer" deprecated={true}>
+  Minimum complete component replicas guaranteed to be gang-scheduled before a shortfall triggers gang termination. Deprecated: use the native minimum through the component `providerOverride`. Supported only for Grove-backed DGD components; rejected for non-Grove deployments. Existing legacy deployments retain this field and its default of `1`. New Grove DGDs without any legacy minimum resolve an omitted native minimum to `1` during rendering, without creating a provider override. Minimum `1`; the effective value is immutable after creation, including when migrating to the native form. Positive `replicas` must be at least this value. Scaling to `0` is allowed and retains `minAvailable` for the next scale-up.
+
+  Under Coherent updates, this value also defines the component's minimum viable replacement unit. With no surge capacity, replacing that unit can make this many replicas unavailable together. Both minimum forms use RollingRecreate unless the DGD strategy annotation explicitly selects Coherent. Migrating component minima to provider overrides leaves the update strategy unchanged. See [Configure native minimum availability](dynamo-graph-deployment.mdx#configure-native-minimum-availability) and [Coherent capacity and disruption](dynamo-graph-deployment.mdx#coherent-capacity-and-disruption).
 
   For LPX components with omitted `replicas`, `minAvailable` sets the initial Grove scaling-group size; subsequent capacity is externally managed.
 </ParamField>

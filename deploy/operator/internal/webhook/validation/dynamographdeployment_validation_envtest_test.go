@@ -636,7 +636,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantAdmissionErrs: []string{
 				"spec.components[1].replicas: Invalid value: -1: spec.components[1].replicas in body should be greater than or equal to 0",
-				"spec.components[1]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 			},
 		},
 		{
@@ -921,6 +920,237 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 
+		// Deprecated minima warn even when RollingRecreate or OnDelete is selected.
+		{
+			name: "deprecated standalone minimum warns with implicit RollingRecreate",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
+			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+		},
+		{
+			name: "deprecated scaling group minimum warns with OnDelete",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.MinAvailable = k8sptr.To(int32(1))
+			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`},
+		},
+
+		{
+			name:          "legacy minima do not repeat warnings on an unrelated label edit",
+			oldDeployment: legacyMinimumDGDForAdmission(1),
+			deployment:    dgdAdmissionWithLabel(t, legacyMinimumDGDForAdmission(1)),
+		},
+		{
+			name:          "legacy minima do not repeat warnings on a replica-only update",
+			oldDeployment: legacyMinimumDGDForAdmission(1),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.MinAvailable = k8sptr.To(int32(1))
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+		},
+		{
+			name: "legacy alpha minima do not repeat warnings on a replica-only update",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].MinAvailable = k8sptr.To(int32(1))
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.MinAvailable = k8sptr.To(int32(1))
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+		},
+		{
+			name:          "migrating back to legacy minima warns about their introduction",
+			oldDeployment: nativeMinimumDGDForAdmission(2),
+			deployment:    legacyMinimumDGDForAdmission(2),
+			wantWarnings:  []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+		},
+
+		// Native availability and migration use the same production schema/conversion/webhook chain.
+		{
+			name: "native standalone minimum is accepted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":1}}`)
+			}),
+		},
+		{
+			name: "native multinode minimum is accepted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.ProviderOverride = groveProviderOverride("", `{"minAvailable":1}`)
+			}),
+		},
+		{
+			name: "native alpha minimum is accepted through conversion",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].ProviderOverride = alphaGroveProviderOverride(provideroverride.TargetPodCliqueTemplateSpec, `{"spec":{"minAvailable":1}}`)
+			}),
+		},
+		{
+			name: "native minimum must fit positive replicas",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":2}}`)
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.spec.minAvailable: Invalid value: 2: minAvailable must be less than or equal to replicas unless replicas is 0`},
+		},
+		{
+			name: "native minimum allows scale to zero",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(0))
+				worker.ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":2}}`)
+			}),
+		},
+		{
+			name: "native zero minimum is not hidden by defaulting",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":0}}`)
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.spec.minAvailable: Invalid value: null: must be a positive 32-bit integer`},
+		},
+		{
+			name: "native null minimum is not hidden by defaulting",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":null}}`)
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.spec.minAvailable: Invalid value: null: is required`},
+		},
+		{
+			name: "P and D cannot mix legacy and native minima",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].MinAvailable = k8sptr.To(int32(1))
+				betaWorkerComponent(dgd).ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":1}}`)
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value: Forbidden: cannot mix provider-native minAvailable with deprecated component minAvailable; migrate all components together`},
+			wantWarnings:    []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+		},
+		{
+			name:          "all legacy minima migrate without changing their immutable values",
+			oldDeployment: legacyMinimumDGDForAdmission(2),
+			deployment:    nativeMinimumDGDForAdmission(2),
+		},
+		{
+			name:            "migration cannot change effective minimum",
+			oldDeployment:   legacyMinimumDGDForAdmission(2),
+			deployment:      nativeMinimumDGDForAdmission(3),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.spec.minAvailable: Invalid value: 3: minAvailable is immutable after creation`},
+		},
+		{
+			name:            "native minimum cannot change after creation",
+			oldDeployment:   nativeMinimumDGDForAdmission(2),
+			deployment:      nativeMinimumDGDForAdmission(3),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.spec.minAvailable: Invalid value: 3: minAvailable is immutable after creation`},
+		},
+		{
+			name:          "removing native minimum cannot bypass immutability",
+			oldDeployment: nativeMinimumDGDForAdmission(2),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				for i := range dgd.Spec.Components {
+					dgd.Spec.Components[i].ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":1}}`)
+				}
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = nil
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.spec.minAvailable: Invalid value: 1: minAvailable is immutable after creation`},
+		},
+		{
+			name: "member role cannot set an independent minimum",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{{Name: nvidiacomv1beta1.ComponentRoleLeader, ProviderOverride: groveProviderOverride("", `{"spec":{"minAvailable":1}}`)}, {Name: nvidiacomv1beta1.ComponentRoleWorker}}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles[0].providerOverride.value.spec.minAvailable: Forbidden: minAvailable (1) belongs to the owning component`},
+		},
+
+		// Only explicit Coherent intent emits warnings about full component disruption.
+		{
+			name:         "explicit Coherent native minimum can take the entire worker down",
+			deployment:   minimumAvailabilityDGDForAdmission(2, 2, "Coherent"),
+			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=2, minAvailable=2, maxUnavailable=2); provision spare serving capacity before updating`},
+		},
+		{
+			name:         "explicit Coherent default minimum warns for a single worker",
+			deployment:   minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+		},
+		{
+			name:       "native minimum alone does not warn or enable Coherent",
+			deployment: minimumAvailabilityDGDForAdmission(2, 2, ""),
+		},
+		{
+			name:       "Coherent partial minimum leaves serving capacity",
+			deployment: minimumAvailabilityDGDForAdmission(1, 4, "Coherent"),
+		},
+		{
+			name:       "Coherent scaled-to-zero component does not warn",
+			deployment: minimumAvailabilityDGDForAdmission(2, 0, "Coherent"),
+		},
+		{
+			name:          "Coherent warning is not repeated on an unrelated label edit",
+			oldDeployment: minimumAvailabilityDGDForAdmission(2, 2, "Coherent"),
+			deployment:    dgdAdmissionWithLabel(t, minimumAvailabilityDGDForAdmission(2, 2, "Coherent")),
+		},
+		{
+			name:          "Coherent replica reduction introduces full component disruption risk",
+			oldDeployment: minimumAvailabilityDGDForAdmission(1, 2, "Coherent"),
+			deployment:    minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "Coherent scale from zero introduces full component disruption risk",
+			oldDeployment: minimumAvailabilityDGDForAdmission(1, 0, "Coherent"),
+			deployment:    minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "Coherent scale up leaves serving capacity without warning",
+			oldDeployment: minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			deployment:    minimumAvailabilityDGDForAdmission(1, 2, "Coherent"),
+		},
+		{
+			name: "Coherent explicit default replica count does not repeat the warning",
+			oldDeployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := minimumAvailabilityDGDForAdmission(1, 1, "Coherent")
+				betaWorkerComponent(dgd).Replicas = nil
+				return dgd
+			}(),
+			deployment: minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+		},
+		{
+			name:          "Coherent omitted default replica count does not repeat the warning",
+			oldDeployment: minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			deployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := minimumAvailabilityDGDForAdmission(1, 1, "Coherent")
+				betaWorkerComponent(dgd).Replicas = nil
+				return dgd
+			}(),
+		},
+		{
+			name:          "Coherent pod template edit still warns about existing full component disruption risk",
+			oldDeployment: minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			deployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := minimumAvailabilityDGDForAdmission(1, 1, "Coherent")
+				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Image += "-coherent-update"
+				return dgd
+			}(),
+			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "removing the Coherent annotation restores RollingRecreate without warning",
+			oldDeployment: minimumAvailabilityDGDForAdmission(2, 2, "Coherent"),
+			deployment:    minimumAvailabilityDGDForAdmission(2, 2, ""),
+		},
+
 		// Replica availability rules.
 		{
 			name: "v1beta1 replicas below minAvailable are rejected by CEL",
@@ -938,6 +1168,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.Replicas = k8sptr.To(int32(2))
 				worker.MinAvailable = k8sptr.To(int32(1))
 			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "v1beta1 unchanged minAvailable update reaches the webhook",
@@ -949,14 +1180,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 changed minAvailable update is rejected by CEL",
+			name: "v1beta1 changed effective minAvailable is rejected by admission",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(2))
 			}),
-			wantCELErr: "spec.components[1]: Invalid value: minAvailable is immutable after creation",
+			wantWebhookErrs: []string{"spec.components[1].minAvailable: Invalid value: 2: minAvailable is immutable after creation"},
 		},
 		{
 			name:          "v1alpha1 componentType change is rejected by CEL",
@@ -2237,6 +2468,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.Replicas = k8sptr.To(int32(0))
 				worker.MinAvailable = k8sptr.To(int32(2))
 			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "rendered Grove resource name length accepts boundary",
@@ -2653,7 +2885,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
 			}),
-			wantOriginVersion: "1.1.0",
+			wantOriginVersion: "1.6.0",
 		},
 		{
 			name:               "origin version cannot be materialized on update",
@@ -2725,6 +2957,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: Invalid value: "typo": must be "mp" or "ray"`},
 		},
 		{
+			name:         "Grove update strategy annotation accepts Coherent",
+			wantWarnings: []string{`spec.components[0] ("frontend"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+		},
+		{
 			name: "Grove update strategy annotation accepts RollingRecreate",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "RollingRecreate"}
@@ -2741,21 +2980,21 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "ondelete"}
 			}),
-			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: "ondelete": supported values: "RollingRecreate", "OnDelete"`},
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: "ondelete": supported values: "Coherent", "RollingRecreate", "OnDelete"`},
 		},
 		{
 			name: "Grove update strategy annotation rejects whitespace",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: " OnDelete "}
 			}),
-			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: " OnDelete ": supported values: "RollingRecreate", "OnDelete"`},
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: " OnDelete ": supported values: "Coherent", "RollingRecreate", "OnDelete"`},
 		},
 		{
 			name: "Grove update strategy annotation rejects unknown value",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "BlueGreen"}
 			}),
-			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: "BlueGreen": supported values: "RollingRecreate", "OnDelete"`},
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: "BlueGreen": supported values: "Coherent", "RollingRecreate", "OnDelete"`},
 		},
 		{
 			name: "discovery mode accepts pod",
@@ -3384,7 +3623,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment:      betaTerminatingDGDForAdmission(nil),
 			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				delete(dgd.Annotations, consts.KubeAnnotationWorkloadProvider)
-				dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.1.0"
+				dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.6.0"
 			}),
 			// Removal reports a null bad value, since there is no new value to name.
 			wantWebhookErrs: []string{
@@ -4074,4 +4313,38 @@ func nativeDGDForAdmission(t *testing.T, alpha bool, mutate func(*nvidiacomv1bet
 		t.Fatal(err)
 	}
 	return spoke
+}
+
+// These complete fixtures make every persisted legacy default explicit for removal on migration.
+func legacyMinimumDGDForAdmission(minimum int32) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		for i := range dgd.Spec.Components {
+			dgd.Spec.Components[i].MinAvailable = k8sptr.To(int32(1))
+		}
+		worker := betaWorkerComponent(dgd)
+		worker.Replicas = k8sptr.To(int32(4))
+		worker.MinAvailable = k8sptr.To(minimum)
+	})
+}
+
+func nativeMinimumDGDForAdmission(minimum int32) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		for i := range dgd.Spec.Components {
+			dgd.Spec.Components[i].ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":1}}`)
+		}
+		worker := betaWorkerComponent(dgd)
+		worker.Replicas = k8sptr.To(int32(4))
+		worker.ProviderOverride = groveProviderOverride("", fmt.Sprintf(`{"spec":{"minAvailable":%d}}`, minimum))
+	})
+}
+
+func minimumAvailabilityDGDForAdmission(minimum, replicas int32, strategy string) *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := nativeMinimumDGDForAdmission(minimum)
+	dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove}
+	dgd.Spec.Components[0].Replicas = k8sptr.To(int32(2))
+	betaWorkerComponent(dgd).Replicas = k8sptr.To(replicas)
+	if strategy != "" {
+		dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = strategy
+	}
+	return dgd
 }
