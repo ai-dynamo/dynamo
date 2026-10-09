@@ -1466,11 +1466,15 @@ def test_validator_accepts_root_hook_move_after_networking_prepend(
     rendered = _components(_rendered_dgd(case))
 
     assert result.returncode == 0, result.stdout + result.stderr
+    expected_values = {
+        "PrefillWorker": "cluster-prefill-kv-transfer-config",
+        "DecodeWorker": "cluster-decode-kv-transfer-config",
+    }
     for name in ("PrefillWorker", "DecodeWorker"):
         env = rendered[name]["podTemplate"]["spec"]["containers"][0]["env"]
         assert env[0] == {
             "name": "KV_TRANSFER_CONFIG",
-            "value": "cluster-kv-transfer-config",
+            "value": expected_values[name],
         }
         assert env[1]["name"] == "NCCL_SOCKET_IFNAME"
 

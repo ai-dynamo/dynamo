@@ -254,7 +254,7 @@ spec:
                     --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":true}}' \
                     --speculative-config "${SPECULATIVE_CONFIG}" \
                     --disaggregation-mode prefill \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}' \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda"}' \
                     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571","enable_kv_cache_events":true}' \
                     --no-async-scheduling \
                     --no-enable-flashinfer-autotune
@@ -438,7 +438,7 @@ spec:
                     --compilation-config '{"mode":3,"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":true}}' \
                     --speculative-config "${SPECULATIVE_CONFIG}" \
                     --disaggregation-mode decode \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda","kv_connector_extra_config":{"num_threads":8}}' \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"num_threads":8}}' \
                     --no-enable-flashinfer-autotune
               resources:
                 claims:

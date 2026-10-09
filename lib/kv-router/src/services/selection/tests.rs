@@ -176,6 +176,19 @@ async fn replica_sync_routes_are_mounted() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+
+    // The shared peer routes must be merged before the JSON fallbacks.
+    let wrong_method = app()
+        .oneshot(
+            Request::builder()
+                .uri("/replica_sync/register_peer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(response_json(wrong_method).await["error"].is_string());
 }
 
 async fn post(app: Router, uri: &str, body: &str) -> Response {
