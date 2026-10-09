@@ -42,6 +42,9 @@ use dynamo_llm::http::service::{openapi_docs, service_v2::HttpService};
 /// additional stack space due to recursive type expansion.
 const GENERATOR_STACK_SIZE: usize = 8 * 1024 * 1024;
 
+/// Parse the optional `--serve IP:PORT` mode and run the generator thread.
+/// Returns argument, spawn, export, or serving errors; generator-thread panics
+/// are converted into errors.
 fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let listen = match args.as_slice() {
@@ -60,6 +63,12 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("generator thread panicked: {:?}", e))?
 }
 
+/// Export the native document to disk, or serve the workerless frontend at `listen`.
+/// With `None`, creates parent directories and non-atomically overwrites
+/// `docs/frontends/openapi.json` under the current directory; a failed write may
+/// leave a truncated file. With `Some`, writes no file and blocks until server
+/// termination; Ctrl-C requests shutdown. Propagates service, serialization, I/O,
+/// runtime, and signal errors; compiled schema invariant violations panic.
 fn generate_openapi(listen: Option<SocketAddr>) -> anyhow::Result<()> {
     // Build an HttpService instance with all standard OpenAI-compatible
     // frontend endpoints enabled so that the generated OpenAPI document

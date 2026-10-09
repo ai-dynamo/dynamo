@@ -68,11 +68,8 @@ use crate::http::service::RouteDoc;
 )]
 struct ApiDoc;
 
-/// Generate OpenAPI specification from route documentation
-///
-/// This is the core helper used both by the embedded Swagger UI and by
-/// external tools (for example CI) which need to materialize the
-/// same frontend OpenAPI specification without running the HTTP service.
+/// Generate the native document with the default `reasoning_content` response key.
+/// See [`generate_openapi_spec_with_reasoning_field`] for document limits and panics.
 pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenApi {
     generate_openapi_spec_with_reasoning_field(
         route_docs,
@@ -81,7 +78,8 @@ pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenAp
 }
 
 /// Generate the document for the configured client-visible reasoning key.
-/// The default helper retains the canonical `reasoning_content` spelling.
+/// Dependency import slots remain unresolved. Invalid route strings and unsupported
+/// methods are skipped with a warning; no HTTP service is started.
 ///
 /// # Panics
 /// Panics if the compiled schemas no longer contain the fields required by the
@@ -156,9 +154,15 @@ pub fn generate_openapi_spec_with_reasoning_field(
     openapi
 }
 
+/// Add input-alias metadata to the two registered request fields in place.
+/// Returns an error for missing or ambiguous fields, alias collisions, or unsupported
+/// field schemas. Earlier annotations remain applied if a later check fails.
 fn annotate_request_aliases(document: &mut utoipa::openapi::OpenApi) -> Result<(), String> {
     use utoipa::openapi::schema::Schema;
 
+    /// Annotate matching inline object/allOf fields and return the number updated.
+    /// Does not follow references; zero means no match. Collisions or unsupported
+    /// field schemas return an error without rolling back earlier annotations.
     fn annotate(node: &mut RefOr<Schema>, field: &str, alias: &str) -> Result<usize, String> {
         match node {
             RefOr::T(Schema::Object(object)) => {
@@ -217,7 +221,10 @@ fn annotate_request_aliases(document: &mut utoipa::openapi::OpenApi) -> Result<(
 }
 
 /// Match the configured response spelling without changing request schemas.
-/// Required nullable fields are already annotated by dynamo-protocols.
+/// Requires both response objects to contain `reasoning_content` and no `reasoning`
+/// property; updates the property name and any matching required entry in place.
+/// Missing components or violations return an error; earlier objects may already
+/// be changed. Required nullable fields are supplied by dynamo-protocols.
 fn configure_response_schemas(
     openapi: &mut utoipa::openapi::OpenApi,
     reasoning_field: crate::reasoning_field::ReasoningField,
@@ -315,6 +322,7 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
     operation.build()
 }
 
+/// Describe success payloads for chat/completion POSTs, or omit content otherwise.
 /// The SSE schema describes one successful JSON `data` payload, not the
 /// transport framing, error events, annotations, or the literal `[DONE]` marker.
 /// `x-dynamo-sse-data-schema: true` marks this payload-only convention for consumers.
@@ -416,7 +424,7 @@ fn add_request_body_for_path(
     ))
 }
 
-/// Create schema for chat completion request
+/// Reference the registered chat request component without copying its schema.
 fn create_chat_completion_schema() -> RefOr<utoipa::openapi::schema::Schema> {
     utoipa::openapi::Ref::from_schema_name("NvCreateChatCompletionRequest").into()
 }
@@ -441,7 +449,7 @@ fn create_chat_completion_example() -> serde_json::Value {
     })
 }
 
-/// Create schema for completion request
+/// Reference the registered completion request component without copying its schema.
 fn create_completion_schema() -> RefOr<utoipa::openapi::schema::Schema> {
     utoipa::openapi::Ref::from_schema_name("NvCreateCompletionRequest").into()
 }
@@ -551,12 +559,17 @@ fn generate_description_for_path(path: &str) -> String {
     }
 }
 
-/// Create router for OpenAPI documentation endpoints
+/// Build the default-reasoning documentation routes without starting a listener.
+/// `_path` is ignored; return values and panics match [`openapi_router_with_reasoning_field`].
 pub fn openapi_router(route_docs: Vec<RouteDoc>, _path: Option<String>) -> (Vec<RouteDoc>, Router) {
     openapi_router_with_reasoning_field(route_docs, crate::reasoning_field::ReasoningField::DEFAULT)
 }
 
-/// Serve a specification whose response properties match frontend startup config.
+/// Build documentation routes whose response properties use the configured reasoning key.
+/// Returns metadata for the two documentation endpoints and an unserved router for
+/// `/openapi.json` and `/docs`; the caller must mount and serve it. The generated
+/// document covers the supplied routes, not the newly added documentation routes.
+/// Panics on the schema invariants documented by [`generate_openapi_spec_with_reasoning_field`].
 pub fn openapi_router_with_reasoning_field(
     route_docs: Vec<RouteDoc>,
     reasoning_field: crate::reasoning_field::ReasoningField,
