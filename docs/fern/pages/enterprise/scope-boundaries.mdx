@@ -14,7 +14,7 @@ Deployment recipes published in the [Dynamo recipes repository](https://github.c
 - Every model, hardware, runtime, topology, and workload combination the recipe touches.
 - A configuration derived from the recipe.
 
-In the future, we expect to add commercial support for a selected set of recipes. Once added, the list of supported recipes appears under [Supported Artifacts](supported-artifacts.mdx).
+In the future, we expect to add commercial support for a selected set of recipes. Once added, the list of supported recipes appears under [Supported Artifacts](../reference/general/enterprise-supported-artifacts.mdx).
 
 See [Recipes](../recipes/model-recipes/overview.mdx) to browse the recipe set.
 
@@ -22,4 +22,4 @@ See [Recipes](../recipes/model-recipes/overview.mdx) to browse the recipe set.
 
 NVIDIA plans to expand the Dynamo Enterprise Support scope as additional Dynamo components complete the required productization, validation, documentation, and support-readiness work.
 
-A component is in the support scope only when its exact artifact and version are listed under [Supported Artifacts](supported-artifacts.mdx). Availability in the open-source repository, publication in a stable release, inclusion in a recipe, a maturity label, or successful operation in a customer-specific configuration does not independently establish commercial support.
+A component is in the support scope only when its exact artifact and version are listed under [Supported Artifacts](../reference/general/enterprise-supported-artifacts.mdx). Availability in the open-source repository, publication in a stable release, inclusion in a recipe, a maturity label, or successful operation in a customer-specific configuration does not independently establish commercial support.

@@ -1291,8 +1291,7 @@ PAGES: dict[str, tuple[Block, ...]] = {
     "releases/release-history.mdx": (
         Block("release-stats", render_release_stats, False, False),
     ),
-    # Outside the reference tree; keys resolve against REFERENCE_DIR.
-    "../../enterprise/supported-artifacts.mdx": (
+    "enterprise-supported-artifacts.mdx": (
         Block("llms-tables", render_enterprise_artifacts, True, False),
     ),
 }
