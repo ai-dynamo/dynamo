@@ -20,12 +20,18 @@ pub struct Revision(pub u64);
 pub struct PoolRecord {
     pub key: PoolKey,
     pub location: PoolLocation,
+    // The fields below are `None` until the Relay's catalog reports them, in
+    // modes where discovery only knows the pool's name (Kubernetes / MCS).
     /// With `frontend_endpoint`, becomes `RelayPoolScope` in dynamo-llm.
-    pub runtime_namespace: String,
-    pub frontend_endpoint: String,
-    pub model: String,
+    #[builder(default)]
+    pub runtime_namespace: Option<String>,
+    #[builder(default)]
+    pub frontend_endpoint: Option<String>,
+    #[builder(default)]
+    pub model: Option<String>,
     /// The only identity allowed to register this pool and stream its state.
-    pub relay_identity: RelayIdentity,
+    #[builder(default)]
+    pub relay_identity: Option<RelayIdentity>,
     #[builder(default)]
     pub revision: Revision,
 }

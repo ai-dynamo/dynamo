@@ -26,9 +26,13 @@ pub enum PoolDiscoveryMode {
         lease: LeasePolicy,
         hub_namespace: String,
     },
+    /// SIG Multicluster: pools are MCS `ServiceExport`s. Liveness is endpoint
+    /// readiness, so there is no lease.
     Kubernetes {
-        lease_duration: Duration,
-        pool_namespace_selector: String,
+        /// Label selector on the hub's `ServiceImport`s.
+        pool_selector: String,
+        /// The Global Router's headless Service, exported to every cluster.
+        router_service: String,
     },
     File {
         path: PathBuf,

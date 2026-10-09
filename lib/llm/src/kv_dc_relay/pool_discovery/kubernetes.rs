@@ -1,15 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Full Kubernetes mode (DEP-1277). Sketch only: signatures, no bodies.
+//! Kubernetes mode, using SIG Multicluster (DEP-1277). Sketch only:
+//! signatures, no bodies.
 //!
-//! Each pool writes a `DynamoPoolExport` and a `Lease` into its own namespace
-//! on the hub. Every router replica watches them. There is no registrar.
+//! Needs a ClusterSet (hub included), About API cluster IDs, and an MCS
+//! implementation. The operator creates a `ServiceExport` for each pool's
+//! PoolRelay Service. MCS imports it into the hub, and every router replica
+//! watches the imported EndpointSlices. The hub exports the router's headless
+//! Service, so each Relay finds every router replica in its own cluster.
+//! No registrar, no announcer, no leases.
 //!
 //! Router replica in the hub:
 //!
 //! ```ignore
-//! let discovery = KubernetesPoolDiscovery { hub, lease_duration, pool_selector, audience }
+//! let discovery = McsPoolDiscovery { hub, pool_selector, router, locations }
 //!     .build()
 //!     .await?;
 //! let mut pools = discovery.pools.list_and_watch(Some(cancel.clone())).await?;
@@ -20,25 +25,19 @@
 //! Relay in a workload cluster:
 //!
 //! ```ignore
-//! let announcer = KubernetesPoolAnnouncer::new(hub, replicas, lease_duration);
-//! let announcement = announcer.announce(record.clone()).await?;
-//! let mut replicas = announcement.replicas();
-//! // For each replica in *replicas.borrow():
-//! //     dialer.dial(&replica, &record.key, publication.clone(), cancel.clone())
-//! // On shutdown:
-//! announcement.withdraw().await?;
+//! let replicas = EndpointSliceReplicaDirectory::imported(local, &router);
+//! let mut events = replicas.list_and_watch(Some(cancel.clone())).await?;
+//! // Added(replica): dialer.dial(&replica, &pool_key, publication.clone(), cancel.clone())
+//! // Removed(id): close that connection
 //! ```
 
 // Sketch: fields and parameters are unused until the bodies exist.
 #![allow(dead_code, unused_variables)]
 
-pub mod crd;
+pub mod endpoints;
 pub mod hub;
-pub mod workload;
+pub mod mcs;
 
-pub use crd::{DynamoPoolExport, DynamoPoolExportSpec};
-pub use hub::{
-    ExportAdmission, KubernetesPoolDirectory, KubernetesPoolDiscovery, RuntimeReplicaDirectory,
-    TokenReviewAuthenticator,
-};
-pub use workload::{KubernetesAnnouncement, KubernetesPoolAnnouncer};
+pub use endpoints::{EndpointSliceReplicaDirectory, RouterService};
+pub use hub::{DirectoryAdmission, McsPoolDirectory, McsPoolDiscovery, MeshAuthenticator};
+pub use mcs::{SERVICE_NAME_LABEL, SOURCE_CLUSTER_LABEL, ServiceImport, ServiceImportSpec};

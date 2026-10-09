@@ -12,7 +12,7 @@
 //! |---|---|---|
 //! | gRPC | Router memory | `RegisterPool` on the router |
 //! | Hybrid | Hub Kubernetes API, written by the router | `RegisterPool` on the router |
-//! | Kubernetes | Hub Kubernetes API, written by the pool | Hub Kubernetes API |
+//! | Kubernetes (SIG Multicluster) | Hub `ServiceImport`s, written by the MCS implementation | Nothing: the operator creates a `ServiceExport` |
 //! | File | Static file (tests, first deployments) | Nothing |
 
 pub mod admission;
