@@ -15,6 +15,16 @@ dynamo-sidecar  Convenience entrypoint mapping vllm/sglang/trtllm to the above
 
 Engine protocols and request conversion remain in each engine's crate.
 
+## Launch scripts
+
+The scripts under each backend's `launch/` directory use the native sidecar
+from `PATH` when available. Otherwise, they warn and run
+`python3 -m dynamo.<backend>.sidecar` using the installed Dynamo wheel.
+
+Set `DYNAMO_SIDECAR_BIN` to an absolute executable path to require that binary.
+A missing or non-executable path fails before launching any processes. CI uses
+this setting to select its downloaded native artifact.
+
 ## Runtime configuration
 
 All three sidecars accept the same Dynamo runtime flags through both their
