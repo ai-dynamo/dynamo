@@ -21,7 +21,7 @@ from copy import deepcopy
 from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Protocol
+from typing import Any, Dict, Literal, Optional, Protocol, cast
 from urllib.parse import parse_qsl
 
 import yaml
@@ -115,7 +115,9 @@ class AISPerfModelSpec(BaseModel):
     ) -> dict[str, dict[str, Any]]:
         # Operator schema generation imports this module without the optional
         # estimator runtime. Require AIS only when validating an AIS config.
-        from aisimulate_core import RustForwardPassPerfModel
+        # The package root loads native APIs lazily and types them as object;
+        # import the typed native module directly.
+        from aisimulate_core._native import RustForwardPassPerfModel
         from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
         result = {}
@@ -128,7 +130,10 @@ class AISPerfModelSpec(BaseModel):
                 # Use the installed SDK's fields/defaults; never duplicate its
                 # expanding schema or discard an unrecognized input field.
                 request = ForwardPassPerfModelConfig(**config)
-                RustForwardPassPerfModel.normalize_config(json.dumps(request.to_dict()))
+                # AISimulate exposes native APIs lazily through module __getattr__.
+                cast(Any, RustForwardPassPerfModel).normalize_config(
+                    json.dumps(request.to_dict())
+                )
                 # Keep authored roots portable and controls explicit; to_dict()
                 # resolves package/env roots on the machine doing validation.
                 result[role] = asdict(request)
@@ -538,9 +543,13 @@ class PlannerConfig(BaseModel):
     )
 
     # Load predictor settings
-    load_predictor: str = SLAPlannerDefaults.load_predictor
+    load_predictor: Literal[
+        "constant", "arima", "prophet", "kalman"
+    ] = SLAPlannerDefaults.load_predictor
     load_predictor_log1p: bool = SLAPlannerDefaults.load_predictor_log1p
-    prophet_window_size: int = SLAPlannerDefaults.prophet_window_size
+    prophet_window_size: int = Field(
+        default=SLAPlannerDefaults.prophet_window_size, gt=0
+    )
     load_predictor_warmup_trace: Optional[str] = None
 
     # Kalman filter settings
@@ -670,13 +679,17 @@ class PlannerConfig(BaseModel):
             "scaling decisions. Even when only throughput-based scaling is enabled, "
             "live FPM observations are fed into the perf model at this interval to "
             "keep the performance model accurate. Must be shorter than "
-            "throughput_adjustment_interval_seconds."
+            "throughput_adjustment_interval_seconds when both scaling modes are enabled."
         ),
     )
-    max_num_fpm_samples: int = SLAPlannerDefaults.max_num_fpm_samples
-    fpm_sample_bucket_size: int = SLAPlannerDefaults.fpm_sample_bucket_size
-    load_scaling_down_sensitivity: int = (
-        SLAPlannerDefaults.load_scaling_down_sensitivity
+    max_num_fpm_samples: int = Field(
+        default=SLAPlannerDefaults.max_num_fpm_samples, gt=0
+    )
+    fpm_sample_bucket_size: int = Field(
+        default=SLAPlannerDefaults.fpm_sample_bucket_size, gt=0
+    )
+    load_scaling_down_sensitivity: int = Field(
+        default=SLAPlannerDefaults.load_scaling_down_sensitivity, ge=0, le=100
     )
     prefill_scale_up_queue_tokens: Optional[int] = Field(
         default=SLAPlannerDefaults.prefill_scale_up_queue_tokens,
@@ -732,16 +745,16 @@ class PlannerConfig(BaseModel):
     # Per-GPU caps are NOT configured here. They are authored on each worker
     # component's ``podTemplate.metadata.annotations``
     # (``dynamo.nvidia.com/gpu-power-limit``), applied to Pods by the operator,
-    # and enforced by the Power Agent. The planner reads those caps from the DGD
-    # and combines them with ``total_gpu_power_limit`` to project and clamp a
+    # and enforced by the Power Agent. The operator projects those caps into
+    # component status; the Planner combines them with ``total_gpu_power_limit`` to project and clamp a
     # power budget. It never writes per-GPU caps. These inputs are
     # process-static; changing the total budget requires a Planner restart.
     enable_power_awareness: bool = Field(
         default=False,
         description=(
             "Enable power-aware budget projection and budget-gated replica "
-            "scaling. Per-GPU caps are read from DGD worker podTemplate "
-            "annotations; this planner combines them with total_gpu_power_limit "
+            "scaling. Per-GPU caps are read from operator-projected DGD component "
+            "status; this planner combines them with total_gpu_power_limit "
             "to publish power-budget gauges and clamp scale-up. Requires "
             "total_gpu_power_limit, environment='kubernetes', and "
             "mode in ('disagg', 'prefill', 'decode'). Not supported for "
@@ -915,9 +928,9 @@ class PlannerConfig(BaseModel):
                 f"got {self.fpm_sample_bucket_size}"
             )
 
-        # Power-awareness validation. Per-GPU caps come from DGD worker
-        # podTemplate annotations, not this config, so the only required knob
-        # is the total budget — and a Kubernetes connector to read the DGD.
+        # Power-awareness validation. Per-GPU caps come from operator-projected
+        # DGD component status, not this config, so the only required knob is
+        # the total budget — and a Kubernetes connector to read the DGD.
         if self.enable_power_awareness:
             if self.total_gpu_power_limit is None:
                 raise ValueError(
@@ -929,8 +942,8 @@ class PlannerConfig(BaseModel):
             if self.environment != "kubernetes":
                 raise ValueError(
                     "enable_power_awareness=True requires environment='kubernetes'. "
-                    "Per-GPU caps are read from DGD worker podTemplate annotations, "
-                    "which only the Kubernetes connector resolves; virtual/replay and "
+                    "Per-GPU caps are read from DGD component status, which only "
+                    "the Kubernetes connector resolves; virtual/replay and "
                     "global-planner modes have no DGD with authoritative caps."
                 )
             if self.mode == "agg":

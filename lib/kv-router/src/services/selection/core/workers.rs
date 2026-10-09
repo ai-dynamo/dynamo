@@ -305,9 +305,9 @@ impl SelectionCore {
                     partition: key.clone(),
                     host: self.host.replication.request_leases.clone(),
                 }));
-                let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
+                let replica_inbox = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
                     slots.start_replica_sync(subscriber, self.cancel_token.child_token());
-                    replica_tx
+                    ReplicaInbox::new(replica_tx)
                 });
                 if self.host.replication.request_leases.is_none() {
                     slots.start_periodic_force_expiry_across_all_workers(
@@ -358,7 +358,7 @@ impl SelectionCore {
                     indexer,
                     workers_tx,
                     scheduler,
-                    replica_tx,
+                    replica_inbox,
                     affinity: OnceCell::new(),
                     replica_config: self.replica_config.clone(),
                 }))

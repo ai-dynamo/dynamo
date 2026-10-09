@@ -17,6 +17,10 @@ fn executable_exposes_native_grpc_configuration() {
     );
     let stdout = String::from_utf8(output.stdout).expect("help output is UTF-8");
     for flag in [
+        "--discovery-backend",
+        "--request-plane",
+        "--response-plane",
+        "--event-plane",
         "--grpc-endpoint",
         "--grpc-connections",
         "--disaggregation-mode",
@@ -46,7 +50,7 @@ impl Drop for Sidecar {
     }
 }
 
-fn sidecar(engine: u16, logs: &std::fs::File) -> Sidecar {
+fn sidecar(engine: u16, logs: &std::fs::File, discovery: &std::path::Path) -> Sidecar {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dynamo-vllm-sidecar"));
     // Keep these subprocess tests independent of the developer's runtime settings.
     for (key, _) in std::env::vars().filter(|(key, _)| {
@@ -61,15 +65,30 @@ fn sidecar(engine: u16, logs: &std::fs::File) -> Sidecar {
                 &format!("http://127.0.0.1:{engine}"),
                 "--grpc-startup-deadline-secs",
                 "60",
+                "--discovery-backend",
+                "file",
+                "--request-plane",
+                "tcp",
+                "--response-plane",
+                "tcp",
+                "--event-plane",
+                "zmq",
+                "--dyn-tool-call-parser",
+                "hermes",
+                "--dyn-reasoning-parser",
+                "qwen3",
             ])
             .env("DYN_SYSTEM_HOST", "127.0.0.1")
             .env("DYN_SYSTEM_PORT", "0")
             .env("DYN_LOG", "info")
             .env("DYN_LOGGING_CONSOLE_FORMAT", "jsonl")
             .stderr(logs.try_clone().unwrap())
-            .env("DYN_DISCOVERY_BACKEND", "mem")
-            .env("DYN_REQUEST_PLANE", "tcp")
-            .env("DYN_EVENT_PLANE", "zmq")
+            // Every CLI override must take effect before the runtime connects.
+            .env("DYN_DISCOVERY_BACKEND", "invalid-backend")
+            .env("DYN_REQUEST_PLANE", "invalid-transport")
+            .env("DYN_RESPONSE_PLANE", "invalid-transport")
+            .env("DYN_EVENT_PLANE", "invalid-transport")
+            .env("DYN_FILE_KV", discovery)
             .env("DYN_ENABLE_OTEL", "false")
             .spawn()
             .expect("start sidecar"),
@@ -128,7 +147,8 @@ async fn probes_work_before_engine_is_available() {
         .unwrap();
 
     // No engine: runtime readiness must pass without metadata or registration.
-    let mut child = sidecar(unavailable_port, logs.as_file());
+    let discovery = tempfile::tempdir().unwrap();
+    let mut child = sidecar(unavailable_port, logs.as_file(), discovery.path());
     let (_engine_connection, _) =
         tokio::time::timeout(std::time::Duration::from_secs(15), blackhole.accept())
             .await
@@ -161,10 +181,6 @@ fn invalid_arguments_fail_before_runtime_configuration() {
     let overflowing_deadline = u64::MAX.to_string();
     for (args, message) in [
         (
-            ["--dyn-tool-call-parser", "hermes"],
-            "vLLM gRPC does not preserve",
-        ),
-        (
             ["--vllm-http-endpoint", "http://localhost:8000?invalid=true"],
             "must not include a query or fragment",
         ),
@@ -186,7 +202,7 @@ fn invalid_arguments_fail_before_runtime_configuration() {
         let output = command
             .args(["--grpc-endpoint", "http://127.0.0.1:0"])
             .args(args)
-            .env("DYN_DISCOVERY_BACKEND", "invalid-backend")
+            .env("ETCD_ENDPOINTS", "://invalid")
             .output()
             .unwrap();
         assert!(!output.status.success(), "{args:?} unexpectedly succeeded");

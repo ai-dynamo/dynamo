@@ -307,6 +307,25 @@ type ServiceReplicaStatus struct {
 	// +optional
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
 
+	// ServedModelName is the effective primary model identity exposed by this
+	// component's serving role. During rolling updates, worker status keeps the
+	// old active revision value until cutover completes.
+	// +optional
+	ServedModelName string `json:"servedModelName,omitempty"`
+
+	// RuntimeComponentName is an explicit Dynamo runtime component identity
+	// resolved from the serving role's endpoint override. Omission means the
+	// backend default applies. During rolling updates, worker status keeps the
+	// old active revision value until cutover completes.
+	// +optional
+	RuntimeComponentName string `json:"runtimeComponentName,omitempty"`
+
+	// GPUPowerLimitWatts is the effective per-GPU power limit propagated to the
+	// component's Pods. Omission means no power limit is configured.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	GPUPowerLimitWatts *int64 `json:"gpuPowerLimitWatts,omitempty"`
+
 	// GPUsPerEngine is the number of GPUs assigned to one inference engine in a
 	// service replica, across all of its nodes. Independent auxiliary GPU
 	// allocations are excluded. A present zero means the engine itself has no
