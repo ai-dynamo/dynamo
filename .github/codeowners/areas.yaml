@@ -43,6 +43,7 @@ areas:
   github_team: '@ai-dynamo/dynamo-agents-codeowners'
   path_globs:
   - components/src/dynamo/compaction/
+  - examples/agents/decision_compaction/pi/
   - tests/unit/compaction/
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
