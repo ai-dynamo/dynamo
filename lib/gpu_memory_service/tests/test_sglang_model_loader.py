@@ -34,6 +34,8 @@ if not HAS_TORCH:
 from gpu_memory_service.common import vmm as gms_vmm
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.vmm import VMMDeviceType
+from gpu_memory_service.integrations import common as gms_common
+from gpu_memory_service.integrations.sglang import patches
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -45,6 +47,15 @@ pytestmark = [
 
 MODULE = "gpu_memory_service.integrations.sglang.model_loader"
 WEIGHT_BYTES = 3 << 30
+
+# Applied at model_loader import time. They mutate global SGLang/torch state,
+# which this module's subject (the loader's byte accounting) does not need.
+_IMPORT_TIME_PATCHES = (
+    "patch_torch_memory_saver",
+    "patch_model_runner",
+    "patch_kv_cache_sizing_for_gms",
+    "patch_static_state_for_gms",
+)
 
 
 @dataclass
@@ -62,10 +73,11 @@ class _LoadConfig:
 class _StubBaseModelLoader(ABC):
     """Mirror of sglang.srt.model_loader.loader.BaseModelLoader (0.5.21).
 
-    Two upstream details are reproduced deliberately because GMSModelLoader
-    depends on both: the class-level ``preloaded_weights_bytes = 0`` default
-    that write mode falls through to, and the abstract ``download_model`` /
-    ``load_model`` that make a loader missing either one uninstantiable.
+    Only used where SGLang is absent. Two upstream details are reproduced
+    deliberately because GMSModelLoader depends on both: the class-level
+    ``preloaded_weights_bytes = 0`` default that write mode falls through to,
+    and the abstract ``download_model`` / ``load_model`` that make a loader
+    missing either one uninstantiable.
     """
 
     preloaded_weights_bytes: int = 0
@@ -92,20 +104,71 @@ class _FakeModel:
         return self
 
 
+def _real_sglang_loader_module():
+    """SGLang's real loader module, or None in images without SGLang."""
+    try:
+        from sglang.srt.model_loader import loader
+    except Exception:
+        return None
+    return loader
+
+
+def _install_sglang_stub(monkeypatch):
+    """Insert a minimal sglang tree and return its loader module.
+
+    Every stub package carries ``__path__``. A package-shaped entry in
+    sys.modules without one makes later ``import sglang.srt.<x>`` raise a bare
+    AttributeError that the integration's ``except ImportError`` guards do not
+    catch.
+    """
+    loader_mod = ModuleType("sglang.srt.model_loader.loader")
+    loader_mod.BaseModelLoader = _StubBaseModelLoader
+
+    model_loader_pkg = ModuleType("sglang.srt.model_loader")
+    model_loader_pkg.__path__ = []
+    model_loader_pkg.loader = loader_mod
+
+    srt_pkg = ModuleType("sglang.srt")
+    srt_pkg.__path__ = []
+    srt_pkg.model_loader = model_loader_pkg
+
+    sglang_pkg = ModuleType("sglang")
+    sglang_pkg.__path__ = []
+    sglang_pkg.srt = srt_pkg
+
+    for name, module in (
+        ("sglang", sglang_pkg),
+        ("sglang.srt", srt_pkg),
+        ("sglang.srt.model_loader", model_loader_pkg),
+        ("sglang.srt.model_loader.loader", loader_mod),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+
+    return loader_mod
+
+
 @pytest.fixture
 def gms(monkeypatch):
-    """Import GMSModelLoader against a minimal SGLang stub.
+    """Import GMSModelLoader with DefaultModelLoader swapped for a recorder.
 
-    SGLang is absent from the unit-test image but model_loader imports
-    BaseModelLoader at module scope. The sys.modules entries go through
-    monkeypatch so a real sglang (present in the runtime image) is never
-    shadowed past this test.
+    Where SGLang is installed (the XPU runtime image) the real
+    BaseModelLoader is used, so the loader is checked against the actual ABC.
+    Where it is absent (the CPU unit-test image) a stub tree stands in.
+    Nothing real is ever displaced: shadowing an installed sglang.srt breaks
+    submodule imports for the rest of the pytest process.
     """
+    loader_mod = _real_sglang_loader_module()
+    if loader_mod is not None:
+        base_cls = loader_mod.BaseModelLoader
+    else:
+        loader_mod = _install_sglang_stub(monkeypatch)
+        base_cls = _StubBaseModelLoader
+
     default_loaders: list = []
 
-    class StubDefaultModelLoader(_StubBaseModelLoader):
+    class RecordingDefaultModelLoader(base_cls):
         def __init__(self, load_config):
-            super().__init__(load_config)
+            self.load_config = load_config
             self.downloaded: list = []
             self.loaded: list = []
             default_loaders.append(self)
@@ -117,26 +180,13 @@ def gms(monkeypatch):
             self.loaded.append((model_config, device_config))
             return _FakeModel("from-disk")
 
-    loader_mod = ModuleType("sglang.srt.model_loader.loader")
-    loader_mod.BaseModelLoader = _StubBaseModelLoader
-    loader_mod.DefaultModelLoader = StubDefaultModelLoader
+    monkeypatch.setattr(
+        loader_mod, "DefaultModelLoader", RecordingDefaultModelLoader, raising=False
+    )
 
-    model_loader_pkg = ModuleType("sglang.srt.model_loader")
-    model_loader_pkg.loader = loader_mod
-
-    srt_pkg = ModuleType("sglang.srt")
-    srt_pkg.model_loader = model_loader_pkg
-
-    sglang_pkg = ModuleType("sglang")
-    sglang_pkg.srt = srt_pkg
-
-    for name, module in (
-        ("sglang", sglang_pkg),
-        ("sglang.srt", srt_pkg),
-        ("sglang.srt.model_loader", model_loader_pkg),
-        ("sglang.srt.model_loader.loader", loader_mod),
-    ):
-        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(gms_common, "patch_empty_cache", lambda: None)
+    for name in _IMPORT_TIME_PATCHES:
+        monkeypatch.setattr(patches, name, lambda: None)
 
     sys.modules.pop(MODULE, None)
     try:
@@ -144,6 +194,7 @@ def gms(monkeypatch):
         yield SimpleNamespace(
             module=module,
             loader_cls=module.GMSModelLoader,
+            base_cls=base_cls,
             default_loaders=default_loaders,
         )
     finally:
@@ -176,7 +227,7 @@ def test_loader_implements_base_model_loader_contract(gms):
     """
     loader = gms.loader_cls(_LoadConfig())
 
-    assert isinstance(loader, _StubBaseModelLoader)
+    assert isinstance(loader, gms.base_cls)
     assert not inspect.isabstract(gms.loader_cls)
     assert loader.preloaded_weights_bytes == 0
 
