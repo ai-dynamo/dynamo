@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// `mooncake-system-alloc` (local campaign builds) leaves glibc malloc in place.
+#[cfg(not(feature = "mooncake-system-alloc"))]
 #[path = "jemalloc.rs"]
 mod jemalloc;
 
@@ -15,6 +17,7 @@ use dynamo_bench::kv_router_common::issuer::pin_current_thread_to_cpus;
 use dynamo_bench::kv_router_common::replay::generate_replay_artifacts;
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use dynamo_kv_router::indexer::KvIndexerMetrics;
+use dynamo_kv_router::indexer::arena_c::ArenaIndexC;
 use dynamo_kv_router::{ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer};
 use mooncake_open_loop::{
     OpenLoopConfig, OpenLoopResult, RunProvenance, parse_cpu_list, prepare_mooncake_corpus,
@@ -52,6 +55,13 @@ enum IndexerArgs {
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
     },
+
+    /// Arena-backed index under CRTC's concurrency model (local campaign branch C).
+    ArenaC {
+        /// Number of OS threads that consume and apply KV cache events.
+        #[clap(long, default_value = "16")]
+        num_event_workers: usize,
+    },
 }
 
 impl IndexerArgs {
@@ -63,6 +73,9 @@ impl IndexerArgs {
             } => MooncakeIndexerConfig::nested_map(*jump_size, *num_event_workers),
             IndexerArgs::ConcurrentRadixTreeCompressed { num_event_workers } => {
                 MooncakeIndexerConfig::concurrent_radix_tree_compressed(*num_event_workers)
+            }
+            IndexerArgs::ArenaC { num_event_workers } => {
+                MooncakeIndexerConfig::arena_c(*num_event_workers)
             }
         }
     }
@@ -109,7 +122,7 @@ struct Args {
 
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
-    /// nested-map, concurrent-radix-tree-compressed.
+    /// nested-map, concurrent-radix-tree-compressed, arena-c.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
@@ -191,10 +204,12 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
         };
         if !matches!(
             config.kind,
-            MooncakeIndexerKind::NestedMap | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
+            MooncakeIndexerKind::NestedMap
+                | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
+                | MooncakeIndexerKind::ArenaC
         ) {
             anyhow::bail!(
-                "corrected Mooncake replay supports only nested-map and concurrent-radix-tree-compressed; got {name}"
+                "corrected Mooncake replay supports only nested-map, concurrent-radix-tree-compressed and arena-c; got {name}"
             );
         }
     }
@@ -293,6 +308,15 @@ async fn run_open_loop_for_config(
             ));
             run_backend(config.short_name(), indexer, trial, open_config).await
         }
+        MooncakeIndexerKind::ArenaC => {
+            let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
+                ArenaIndexC::new(),
+                config.num_event_workers,
+                args.common.block_size,
+                metrics(),
+            ));
+            run_backend(config.short_name(), indexer, trial, open_config).await
+        }
         MooncakeIndexerKind::RadixTree | MooncakeIndexerKind::BranchShardedCrtc => {
             anyhow::bail!(
                 "{} is not supported by corrected Mooncake replay",
@@ -309,6 +333,7 @@ fn quiesce_prepared_heap() {
     unsafe {
         libc::malloc_trim(0);
     }
+    #[cfg(not(feature = "mooncake-system-alloc"))]
     jemalloc::purge();
     std::thread::sleep(std::time::Duration::from_millis(PRE_RUN_QUIESCENCE_MS));
 }

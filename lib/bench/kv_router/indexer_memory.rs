@@ -162,7 +162,7 @@ struct Args {
     #[clap(flatten)]
     common: CommonArgs,
 
-    /// Backend to measure: crtc.
+    /// Backend to measure: crtc or arena-c.
     #[clap(long, default_value = "crtc")]
     backend: String,
 
@@ -514,6 +514,11 @@ fn run_backend(args: &Args, corpus: Corpus) -> anyhow::Result<Report> {
         "crtc" | "concurrent-radix-tree-compressed" => {
             replay(args, corpus, ConcurrentRadixTreeCompressed::new)
         }
+        "arena-c" => replay(
+            args,
+            corpus,
+            dynamo_kv_router::indexer::arena_c::ArenaIndexC::new,
+        ),
         other => anyhow::bail!("unknown backend {other:?}; add an arm to run_backend"),
     }
 }
