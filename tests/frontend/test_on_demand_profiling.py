@@ -13,13 +13,12 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from dynamo.frontend.profiling import collectors, service
-from dynamo.frontend.profiling.collectors import (
-    CollectionError,
-    PerfCollector,
-    TorchCollector,
-)
-from dynamo.frontend.profiling.models import Config, Plan, Target, Worker
+from dynamo.frontend.profiling.http import application
+from dynamo.profiling import adapters, collectors
+from dynamo.profiling import coordinator as service
+from dynamo.profiling import errors
+from dynamo.profiling.collectors import CollectionError, PerfCollector, TorchCollector
+from dynamo.profiling.models import Config, Plan, RuntimeSnapshot, Target, Worker
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -36,11 +35,10 @@ def controller(tmp_path, monkeypatch):
         async def stop(self):
             self.evidence["stopped"] = True
 
-    monkeypatch.setattr(service, "PerfCollector", FakePerf)
-    return service.ProfilingService(
+    monkeypatch.setattr(adapters, "PerfCollector", FakePerf)
+    return service.Coordinator(
         Config(str(tmp_path / "admin.sock"), str(tmp_path / "artifacts")),
-        123,
-        "frontend-epoch",
+        RuntimeSnapshot(123, "frontend-epoch", "test-host"),
     )
 
 
@@ -65,9 +63,9 @@ async def test_deadline_and_artifact_manifest(controller):
 async def test_retry_reuses_session_and_conflicting_plan_rejected(controller):
     session = controller.submit(plan())
     assert controller.submit(plan()) is session
-    with pytest.raises(web.HTTPConflict):
+    with pytest.raises(errors.Conflict):
         controller.submit(plan(duration_ms=100))
-    with pytest.raises(web.HTTPConflict):
+    with pytest.raises(errors.Conflict):
         controller.submit(plan("another-request"))
     await controller.close()
     assert controller.submit(plan()) is session
@@ -76,14 +74,14 @@ async def test_retry_reuses_session_and_conflicting_plan_rejected(controller):
 @pytest.mark.parametrize(
     "bad_plan,exception",
     [
-        (Plan("id", [Target("frontend", "stale")], 50), web.HTTPConflict),
-        (Plan("id", [Target("unknown", "epoch")], 50), web.HTTPBadRequest),
-        (Plan("id", [], 50), web.HTTPBadRequest),
-        (Plan("id", [Target("frontend", "frontend-epoch")], 0), web.HTTPBadRequest),
-        (Plan("id", [Target("frontend", "frontend-epoch")], 60001), web.HTTPBadRequest),
+        (Plan("id", [Target("frontend", "stale")], 50), errors.Conflict),
+        (Plan("id", [Target("unknown", "epoch")], 50), errors.BadRequest),
+        (Plan("id", [], 50), errors.BadRequest),
+        (Plan("id", [Target("frontend", "frontend-epoch")], 0), errors.BadRequest),
+        (Plan("id", [Target("frontend", "frontend-epoch")], 60001), errors.BadRequest),
         (
             Plan("id", [Target("frontend", "frontend-epoch")], 50, mode="nsys"),
-            web.HTTPUnprocessableEntity,
+            errors.Unsupported,
         ),
     ],
 )
@@ -105,7 +103,7 @@ async def test_uncertain_start_rolls_back_and_reports_failure(controller, monkey
         async def stop(self):
             self.evidence["stopped"] = True
 
-    monkeypatch.setattr(service, "PerfCollector", FailingPerf)
+    monkeypatch.setattr(adapters, "PerfCollector", FailingPerf)
     session = controller.submit(plan())
     await session.task
     assert session.state == "failed"
@@ -134,7 +132,7 @@ async def test_worker_only_plan_still_profiles_frontend_and_stop_is_concurrent(
             stop_entered.set()
             await finish_export.wait()
 
-    monkeypatch.setattr(service, "TorchCollector", SlowTorch)
+    monkeypatch.setattr(adapters, "TorchCollector", SlowTorch)
     session = controller.submit(Plan("id", [Target("worker", "worker-epoch")], 50))
     await asyncio.wait_for(stop_entered.wait(), 1)
     assert session.state == "finalizing"
@@ -146,7 +144,7 @@ async def test_worker_only_plan_still_profiles_frontend_and_stop_is_concurrent(
 
 @pytest.mark.asyncio
 async def test_rest_validation_stop_and_unknown_fields(controller):
-    async with TestClient(TestServer(controller.application())) as client:
+    async with TestClient(TestServer(application(controller))) as client:
         targets = await client.get("/admin/profiling/v1/targets")
         assert (await targets.json())["targets"][0]["target_id"] == "frontend"
         payload = msgspec.to_builtins(plan(duration_ms=5000))
@@ -194,23 +192,22 @@ async def test_explicit_worker_only_override_skips_perf_and_records_omission(
         async def stop(self):
             calls.append("stop")
 
-    monkeypatch.setattr(service, "PerfCollector", forbidden_perf)
-    monkeypatch.setattr(service, "TorchCollector", WorkerCollector)
-    controller = service.ProfilingService(
-        Config(
-            str(tmp_path / "admin.sock"),
-            str(tmp_path / "artifacts"),
-            workers=[Worker("worker", "epoch", "vllm", "http://configured")],
-            frontend_perf_enabled=False,
-        ),
-        123,
-        "frontend-epoch",
+    monkeypatch.setattr(adapters, "PerfCollector", forbidden_perf)
+    monkeypatch.setattr(adapters, "TorchCollector", WorkerCollector)
+    config = Config(
+        str(tmp_path / "admin.sock"),
+        str(tmp_path / "artifacts"),
+        workers=[Worker("worker", "epoch", "vllm", "http://configured")],
+        frontend_perf_enabled=False,
+    )
+    controller = service.Coordinator(
+        config, RuntimeSnapshot(123, "frontend-epoch", "test-host", config.workers)
     )
     assert controller.targets()[0]["collectors"] == []
-    with pytest.raises(web.HTTPUnprocessableEntity):
+    with pytest.raises(errors.Unsupported):
         controller.validate(plan())
     payload = msgspec.to_builtins(Plan("id", [Target("worker", "epoch")], 50))
-    async with TestClient(TestServer(controller.application())) as client:
+    async with TestClient(TestServer(application(controller))) as client:
         validation = await client.post(
             "/admin/profiling/v1/plans/validate", json=payload
         )
@@ -345,7 +342,7 @@ async def test_startup_timeout_is_bounded_and_cleaned_up(controller, monkeypatch
         async def stop(self):
             self.evidence["stopped"] = True
 
-    monkeypatch.setattr(service, "PerfCollector", HangingPerf)
+    monkeypatch.setattr(adapters, "PerfCollector", HangingPerf)
     session = controller.submit(plan())
     await asyncio.wait_for(session.task, 1)
     assert session.state == "failed"
@@ -365,12 +362,14 @@ async def test_finalization_failure_preserves_partial_coverage(controller, monke
         async def stop(self):
             raise CollectionError("flush failed")
 
-    monkeypatch.setattr(service, "PerfCollector", BrokenPerf)
+    monkeypatch.setattr(adapters, "PerfCollector", BrokenPerf)
     session = controller.submit(plan())
     await session.task
     assert session.state == "failed"
     assert session.collectors[0].evidence["coverage"] == "partial_or_unknown"
     assert controller.active is None
+    with pytest.raises(errors.Conflict, match="cleanup is uncertain"):
+        controller.submit(plan("retry-after-stop-failure"))
 
 
 @pytest.mark.asyncio
@@ -382,3 +381,23 @@ async def test_frontend_epoch_checked_before_perf_spawn(tmp_path, monkeypatch):
     assert adapter.process is None
     assert adapter.control == -1
     await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_manifest_write_failure_cannot_prevent_collector_cleanup(
+    controller, monkeypatch
+):
+    session = controller.submit(plan())
+    original_persist = controller.persist
+
+    def full_disk(session):
+        if session.collectors:
+            raise OSError("disk full")
+        original_persist(session)
+
+    monkeypatch.setattr(controller, "persist", full_disk)
+    await session.task
+    assert session.state == "failed"
+    assert session.collectors[0].evidence["stopped"]
+    assert controller.active is None
+    assert any("disk full" in error for error in session.errors)

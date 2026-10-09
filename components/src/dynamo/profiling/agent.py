@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Lightweight metadata/clock callback for the worker control process."""
+
+import os
+import socket
+import time
+
+from .collectors import process_epoch
+
+
+class ProfilingAgent:
+    def __init__(self, backend: str):
+        self.backend = backend
+        self.pid = os.getpid()
+        self.epoch = process_epoch(self.pid)
+        self.hostname = socket.gethostname()
+
+    async def info(self, body: dict) -> dict:
+        received_ns = time.time_ns()
+        received_monotonic_ns = time.monotonic_ns()
+        # This attests the control process, not every GPU rank in its group.
+        result = {
+            "status": "ok",
+            "schema_version": 1,
+            "backend": self.backend,
+            "pid": self.pid,
+            "hostname": self.hostname,
+            "process_epoch": self.epoch,
+            "scope": "control_process",
+            "received_at_ns": received_ns,
+        }
+        result["sent_at_ns"] = time.time_ns()
+        result["elapsed_monotonic_ns"] = time.monotonic_ns() - received_monotonic_ns
+        return result

@@ -113,6 +113,13 @@ class PerfCollector:
                     raise CollectionError(
                         "perf flush timed out; artifact is partial"
                     ) from exc
+                except asyncio.CancelledError:
+                    # A coordinator deadline may be shorter than our flush
+                    # timeout. Reap only our recorder before returning failure.
+                    if self.process.returncode is None:
+                        self.process.kill()
+                    await self.process.wait()
+                    raise
                 self.evidence["stopped_at_ns"] = time.time_ns()
                 artifact = Path(self.evidence["artifact"])
                 if code not in (0, -signal.SIGINT) or not artifact.is_file():
@@ -138,9 +145,13 @@ class TorchCollector:
             "collector": "torch_profiler",
             "artifact_location": worker.artifact_location,
             "coverage": "unknown",
-            # Existing backend hooks do not verify process epochs or enumerate
-            # exported files. These are explicit PoC integration limitations.
+            # The coordinator can verify the separate control-process agent;
+            # native start/stop hooks do not attest each engine-rank epoch.
             "identity_verification": "operator_config_only",
+            "artifact_prefix": worker.start_options.get("profile_prefix")
+            if worker.backend == "vllm"
+            else None,
+            "expected_rank_ids": worker.expected_rank_ids,
         }
 
     async def _request(self, action: str, body: dict, timeout: float) -> None:

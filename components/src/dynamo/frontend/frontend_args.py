@@ -641,7 +641,7 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--profiling-config",
             env_var="DYN_PROFILING_CONFIG",
             default=None,
-            help="Opt-in on-demand profiling helper configuration JSON (Linux PoC).",
+            help="Opt-in on-demand profiling coordinator configuration JSON (Linux PoC).",
         )
 
         add_argument(

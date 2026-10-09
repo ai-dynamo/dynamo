@@ -1,147 +1,188 @@
-# On-demand profiling interface PoC
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
-The frontend owns a helper process with a private Unix-socket administration API.
-A client or telemetry service can request an immediate, bounded capture while
-inference is serving. The helper's event loop handles capture deadlines even when
-the frontend's inference loop stalls. Enable it with `--profiling-config config.json`.
-The helper starts before the frontend input service and finalizes on frontend shutdown
-or detected parent exit. The option is off by default.
+# On-demand profiling administration (PoC)
 
-`torch_profile` combines frontend `linux_perf` with `torch_profiler` on
-explicitly selected vLLM/SGLang engine groups. Selecting only workers still includes
-the frontend. Selecting only the frontend records perf without a worker capture.
-Perf attaches to the existing frontend PID and threads with 99 Hz user-space
-CPU-clock sampling and DWARF call stacks. It starts disabled and confirms counter
-enablement through the perf control ACK before recording the start boundary.
-It does not require launching the frontend under perf. The helper runs as the same
-user; deployment must allow perf attachment. Permission/start failures fail the
-session and retain diagnostics; there is no silent worker-only fallback.
+The frontend receives client requests on a private Unix socket and passes an
+explicit runtime snapshot to `dynamo.profiling.Coordinator`. The coordinator
+manages capture leases, worker clock measurements, collector cleanup, and
+artifact validation. HTTP routing and process hosting live in this directory;
+the reusable coordinator and adapters live in `dynamo/profiling`.
 
-For temporary worker-only testing where perf is denied, set the operator config
-`"frontend_perf_enabled": false`. The default is `true`. This explicitly skips
-frontend perf; target inventory and plan validation report no frontend collector,
-and manifests record `frontend.profiling_enabled: false` with
-`omission_reason: "disabled_by_operator_config"`. Requests that explicitly select
-the frontend return 422 while disabled. Worker leases, cleanup and OTel correlation
-remain active. Re-enable frontend perf for complete frontend/worker captures.
+The default host runs inside the frontend process:
 
-## Operator configuration
+```bash
+python -m dynamo.frontend --profiling-config /private/profiling/config.json
+```
 
-Use private directories owned by the serving user with permissions `0700`.
-The socket is owner-only. This PoC API is intended for a local client or a trusted
-telemetry sidecar sharing the socket directory. Network authentication and a public
-inference-port route are deferred.
+The socket directory and output directory must be owned by the serving user and
+have mode 0700. The socket has mode 0600. The interface is separate from the
+inference port; the existing Rust frontend extension API only supports static GET
+routes. No public POST route or remote authentication layer is added by this PoC.
+
+## Configuration
 
 ```json
 {
-  "socket_path": "/run/dynamo-profiling/admin.sock",
-  "output_dir": "/var/lib/dynamo-profiling",
+  "socket_path": "/private/profiling/admin.sock",
+  "output_dir": "/private/profiling/sessions",
   "frontend_perf_enabled": true,
   "max_duration_ms": 60000,
-  "start_timeout_s": 10.0,
-  "finalize_timeout_s": 1200.0,
+  "start_timeout_s": 10,
+  "finalize_timeout_s": 1200,
+  "clock_probe_timeout_s": 1,
+  "clock_probe_samples": 3,
+  "artifact_validation_timeout_s": 120,
+  "max_trace_bytes": 8589934592,
+  "lifecycle_evidence_location": "https://existing-otel-backend.example/traces",
   "workers": [
     {
-      "target_id": "decode-0",
-      "process_epoch": "operator-verified-worker-generation",
+      "target_id": "decode",
+      "process_epoch": "<worker control-process boot-id:starttime>",
       "backend": "vllm",
-      "control_url": "http://decode-0:9090",
-      "start_options": {"profile_prefix": "incident"},
-      "artifact_location": "shared-storage://decode-0/profiles"
+      "control_url": "http://worker-admin:9091",
+      "verify_runtime": true,
+      "artifact_location": "/shared/native-profiles",
+      "expected_rank_ids": [
+        "dp0_pp0_tp0_dcp0_ep0_rank0",
+        "dp1_pp0_tp0_dcp0_ep1_rank0"
+      ],
+      "start_options": {}
     }
-  ],
-  "lifecycle_evidence_location": "telemetry-backend://deployment/traces"
+  ]
 }
 ```
 
-For SGLang, `start_options` must match its existing `ProfileReq` fields. For vLLM,
-configure its torch profiler and output directory at engine launch. Paths and URLs
-are trusted configuration, never request parameters. Worker artifact destinations
-must be readable by the investigator; the helper does not download engine files.
-Operators must reserve these hooks exclusively for this helper during the PoC.
-Existing worker hooks have no lease/ownership check or restart-safe epoch validation.
-An ambiguous start is followed by a best-effort stop; timeouts leave coverage unknown.
-A worker must be reconfigured after restart. These limitations prevent production
-use until backend lease and self-expiring capture contracts are added.
+Destinations, worker URLs, rank membership, and profiler options are trusted
+operator configuration. Clients cannot choose arbitrary PIDs, commands, imports,
+or output paths. `RuntimeSnapshot.workers` is the coordinator's authoritative
+inventory; the frontend initially obtains it from configuration. Automatic
+Dynamo discovery integration is a follow-up.
+
+`verify_runtime` defaults to false for compatibility with older runtime images.
+For a worker with the new callback, POST `{}` to
+`/engine/control/profiling_info` to obtain its startup epoch and enable the flag.
+The callback reports the worker control process, backend, PID, hostname, and
+clock timestamps; it does not attest the individual engine-rank processes.
+When enabled, a failed probe or changed epoch prevents profiling start. A second
+measurement after stop checks identity and records offset change.
+
+The vLLM engine must be launched with torch profiling enabled and its output
+path configured, for example:
+
+```bash
+--profiler-config '{"profiler":"torch","torch_profiler_dir":"/shared/native-profiles","torch_profiler_dump_cuda_time_total":false}'
+```
+
+The last flag avoids expensive native CUDA summary processing observed in the
+live PoC. Raw Kineto serialization can still pause inference. SGLang uses its
+existing start/stop controls and backend-specific operator `start_options`.
 
 ## Client requests
 
-Discover current targets and their process epochs:
-
 ```bash
-curl --unix-socket /run/dynamo-profiling/admin.sock \
+curl --unix-socket /private/profiling/admin.sock \
   http://localhost/admin/profiling/v1/targets
-```
 
-Use the returned epochs in a plan. POST to `/plans/validate` first if desired:
-
-```json
-{
-  "schema_version": 1,
-  "client_request_id": "incident-unique-id",
-  "mode": "torch_profile",
-  "duration_ms": 10000,
-  "targets": [
-    {"target_id": "decode-0", "process_epoch": "operator-verified-worker-generation"}
-  ],
-  "trace_ids": ["trigger-trace-id"],
-  "request_ids": ["trigger-request-id"],
-  "reason": "elevated decode latency"
-}
-```
-
-```bash
-curl --unix-socket /run/dynamo-profiling/admin.sock \
-  -H 'Content-Type: application/json' --data-binary @plan.json \
+curl --unix-socket /private/profiling/admin.sock \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1,"client_request_id":"investigation-42","mode":"torch_profile","targets":[{"target_id":"decode","process_epoch":"<epoch from inventory>"}],"duration_ms":10000,"trace_ids":["<otel trace id>"],"request_ids":["<request id>"]}' \
   http://localhost/admin/profiling/v1/sessions
 ```
 
-HTTP 202 returns a session ID; it acknowledges acceptance rather than collector
-startup or artifact readiness. Poll `GET /sessions/{session_id}` and retrieve the
-manifest using `GET /sessions/{session_id}/artifacts`. Stop early with
-`POST /sessions/{session_id}/stop` (202). All paths share `/admin/profiling/v1`.
-Reusing a request ID with the same plan returns the same session and never extends
-its deadline. Changing the plan or requesting a concurrent session returns 409.
-Invalid plans return 400; stale epochs return 409. Validation checks the plan and
-inventory, not perf permissions or remote backend readiness.
+| Method | Path under `/admin/profiling/v1` | Result |
+| --- | --- | --- |
+| GET | `/targets` | Configured inventory and identity requirements |
+| POST | `/plans/validate` | Validate a plan without starting capture |
+| POST | `/sessions` | HTTP 202 with capture ID and initial manifest |
+| GET | `/sessions/{id}` | State, errors, and evidence |
+| POST | `/sessions/{id}/stop` | HTTP 202; idempotent early stop |
+| GET | `/sessions/{id}/artifacts` | Current manifest and artifact validation |
 
-The capture budget starts at session acceptance and includes
-collector startup. States are `accepted`, `starting`, `recording`, `finalizing`,
-`completed` or `failed`. The lease triggers stop independently of the client.
-All collectors receive stop concurrently; backend serialization can keep the
-session finalizing without extending frontend perf recording. Only the helper's
-own perf recorder receives SIGINT. After a 30 second flush timeout it kills that
-recorder and marks the artifact partial. It never signals the inference process.
-One session, including finalization, reserves the inventory. The bounded in-memory
-idempotency index is retained until helper restart (64 sessions by default); hitting
-that limit rejects new sessions rather than forgetting request IDs.
+A request ID identifies one immutable plan. Retrying it returns the same session
+and deadline. One coordinator admits one active/finalizing session; concurrent
+captures receive 409. Default retained-session limit is 64. State is in memory;
+restart preserves on-disk manifests but does not recover leases or idempotency.
 
-## Evidence and deferred work
+`torch_profile` includes frontend Linux perf even for a worker-only request.
+Set `frontend_perf_enabled: false` temporarily when perf attachment is denied;
+the manifest records the omission. An explicit frontend target is rejected in
+that configuration. Stop calls run concurrently so slow worker export does not
+extend frontend perf capture. Remote starts that time out still receive cleanup.
+Backend HTTP 200 responses with `status:error` are failures. Finalization has a
+coordinator timeout; failed or timed-out cleanup blocks new captures. Reconcile
+the worker profiler before restarting the coordinator; restart alone is not
+cleanup proof.
 
-Each session writes `manifest.json`. When frontend perf is enabled, it also writes
-`frontend.perf.data` and `frontend.perf.log`.
-The manifest pairs collector intervals and identities with trigger trace/request
-IDs and an optional reference to the existing lifecycle OTel telemetry backend.
-OTel coverage remains `unknown` until an evidence-provider adapter queries/exports
-retained spans and confirms coverage. No local OTLP archive is assumed. A completed
-capture does not imply verified worker files or complete lifecycle trace evidence;
-these have separate explicit coverage fields. Cross-host clock alignment is unknown.
-A later artifact provider can add exported lifecycle spans, file checksums and
-retrieval locations to this same bundle contract.
+## Evidence and clock alignment
 
-This draft rejects `nsys` with 422. A future adapter must control a prepared Nsight
-session on processes launched under nsys; spawning an nsys child cannot instrument
-an already-running frontend parent. Nsight Cloud integration is a separate provider.
-Runtime lifecycle OTel verbosity changes are also deferred.
+Every session writes an atomic `manifest.json`. Control completion and artifact
+verification are separate: `state:completed` may have
+`artifact_status:unverified`. Missing or corrupt accessible rank files produce a
+failed session and partial artifact status.
 
-Other follow-ups: dynamic worker discovery, remote epoch verification, backend
-self-expiring leases, helper restart recovery, per-resource reservations, cooldowns,
-artifact storage quotas/uploads, and a network-authenticated service API. Killing
-the helper or whole container cannot be handled by this process-local watchdog.
+The built-in validator reads shared-filesystem vLLM Kineto files using a unique
+session-specific `profile_prefix`. It validates the entire JSON/gzip stream,
+counts events and CUDA kernels, hashes uncompressed bytes, checks for files
+changing during validation, and compares rank identities with
+`expected_rank_ids`. Old files and duplicate rank files cannot establish complete
+coverage. Validation runs in a thread with byte and cooperative time limits.
 
-Interface tests exercise validation, idempotency, deadline cleanup, stop during
-finalization, both engine adapters, HTTP-200 backend errors, and perf control wiring
-with fake collectors. Actual perf permissions and live engine exports need a Linux
-serving deployment smoke test.
+Without configured rank membership, individually valid files still have unknown
+coverage. Unmounted/external stores, SGLang artifacts, and Linux perf data remain
+unverified by this validator. AsyncLLM CPU traces lack vLLM's profile prefix and
+are excluded from verified engine-rank coverage; they require a separate
+association policy. Other stores/formats can implement `ArtifactValidator`.
 
-Perf command semantics: [upstream perf record manual](https://man7.org/linux/man-pages/man1/perf-record.1.html).
+Clock measurements estimate worker-minus-coordinator offset and uncertainty
+from four timestamps, choosing the lowest round-trip sample. They never change
+system clocks. Start/end estimates are metadata for analysis, not a simultaneous
+start guarantee or rewritten trace timestamps. They describe the control-process
+host; multi-host engine-rank alignment remains unknown. Clock steps invalidate a
+sample. Disabled legacy agents have explicit unknown alignment.
+
+Lifecycle OTel evidence is included through trigger trace/request IDs and a
+reference to the existing telemetry backend. Coverage stays unknown; this does
+not assume local OTLP archival or change instrumentation verbosity.
+
+## Hosting and extension points
+
+```python
+from dynamo.profiling import Coordinator, RuntimeSnapshot
+
+runtime = RuntimeSnapshot(frontend_pid, frontend_epoch, hostname, workers)
+coordinator = Coordinator(config, runtime, registry=registry,
+                          clock_sampler=clock_sampler,
+                          artifact_validator=artifact_validator)
+coordinator.validate(plan)
+session = coordinator.submit(plan)
+coordinator.stop(session.session_id)
+await coordinator.close()
+```
+
+`CollectorRegistry` registers trusted mode factories returning collectors with
+`start()`, `stop()`, and evidence. Collectors own bounded finalization and must
+attempt cleanup after uncertain starts. `ClockSampler` and `ArtifactValidator`
+are injectable protocols. The built-in registry supports `torch_profile`.
+`nsys` remains rejected until a prepared-session provider is installed; a fake
+provider test verifies the registration boundary, not Nsight execution.
+
+The optional standalone host calls the same module:
+
+```bash
+python -m dynamo.frontend.profiling --config /private/profiling/config.json \
+  --frontend-pid "$FRONTEND_PID" --frontend-epoch "$FRONTEND_EPOCH"
+```
+
+Run either the embedded host or the standalone host for a socket, not both.
+The standalone host watches the target frontend epoch and drains on shutdown.
+Embedded capture deadlines depend on the frontend event loop; a stalled loop can
+delay stop. Independent worker leases and restart recovery remain follow-ups.
+
+Nsight Cloud can be a provider behind this registry. Its documented coordinator
+controls prepared agents and collections, and its OTLP proxy can mirror traces.
+The deployed API, agent scope, and stop behavior must be validated before adding
+that adapter. See the [Nsight Operator architecture](https://docs.nvidia.com/nsight-operator/Architecture/index.html)
+and [user guide](https://docs.nvidia.com/nsight-operator/UserGuide/index.html).

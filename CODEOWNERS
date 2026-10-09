@@ -67,6 +67,8 @@
 # === frontend  (@ai-dynamo/dynamo-frontend-codeowners) ===
 /examples/chat_templates/                                                                               @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/                                                                        @ai-dynamo/dynamo-frontend-codeowners
+/ON_DEMAND_PROFILING_INTERFACE.md                                                                       @ai-dynamo/dynamo-frontend-codeowners
+/components/src/dynamo/profiling/                                                                       @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/tests/                                                                  @ai-dynamo/dynamo-frontend-codeowners
 
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===

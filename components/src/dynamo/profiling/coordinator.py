@@ -1,0 +1,417 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Callable coordinator; HTTP and process hosting are separate adapters."""
+
+import asyncio
+import json
+import logging
+import time
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import aiohttp
+import msgspec
+
+from .adapters import Collector, CollectorRegistry, default_registry
+from .artifacts import ArtifactValidator, SharedFilesystemValidator
+from .clock import ClockSampler, WorkerClockSampler
+from .collectors import CollectionError
+from .errors import BadRequest, Conflict, NotFound, Unavailable, Unsupported
+from .models import Config, Plan, RuntimeSnapshot
+
+logger = logging.getLogger(__name__)
+COLLECTION_ERRORS = (
+    CollectionError,
+    OSError,
+    asyncio.TimeoutError,
+    aiohttp.ClientError,
+    ValueError,
+)
+
+
+@dataclass
+class Session:
+    session_id: str
+    plan: Plan
+    directory: Path
+    state: str = "accepted"
+    accepted_at_ns: int = field(default_factory=time.time_ns)
+    collectors: list[Collector] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    stop_requested: asyncio.Event = field(default_factory=asyncio.Event)
+    task: asyncio.Task | None = None
+    deadline_monotonic: float = 0.0
+    runtime: RuntimeSnapshot | None = None
+    clocks: dict = field(default_factory=dict)
+    artifact_validation: list[dict] = field(default_factory=list)
+
+
+class Coordinator:
+    """Own one profiling lease; client retries never extend its deadline."""
+
+    def __init__(
+        self,
+        config: Config,
+        runtime: RuntimeSnapshot,
+        *,
+        registry: CollectorRegistry | None = None,
+        clock_sampler: ClockSampler | None = None,
+        artifact_validator: ArtifactValidator | None = None,
+    ):
+        if config.max_duration_ms <= 0 or config.max_sessions <= 0:
+            raise ValueError("Profiling limits must be positive")
+        if config.start_timeout_s <= 0 or config.finalize_timeout_s <= 0:
+            raise ValueError("Profiling timeouts must be positive")
+        if (
+            config.clock_probe_timeout_s <= 0
+            or not 1 <= config.clock_probe_samples <= 16
+        ):
+            raise ValueError(
+                "Clock sampling limits must be positive and at most 16 samples"
+            )
+        if config.artifact_validation_timeout_s <= 0 or config.max_trace_bytes <= 0:
+            raise ValueError("Artifact validation limits must be positive")
+        for worker in runtime.workers:
+            if len(set(worker.expected_rank_ids)) != len(worker.expected_rank_ids):
+                raise ValueError("Expected rank IDs must be unique")
+        self.config = config
+        self.runtime = runtime
+        self.registry = registry if registry is not None else default_registry()
+        self.clock_sampler = (
+            clock_sampler if clock_sampler is not None else WorkerClockSampler()
+        )
+        self.artifact_validator = (
+            artifact_validator
+            if artifact_validator is not None
+            else SharedFilesystemValidator()
+        )
+        self.frontend_pid = runtime.frontend_pid
+        self.frontend_epoch = runtime.frontend_epoch
+        self.workers = {worker.target_id: worker for worker in runtime.workers}
+        if len(self.workers) != len(runtime.workers) or "frontend" in self.workers:
+            raise ValueError("Worker target IDs must be unique and cannot be frontend")
+        self.sessions: dict[str, Session] = {}
+        self.requests: dict[str, Session] = {}
+        self.active: Session | None = None
+        self.closed = False
+        self.cleanup_uncertain = False
+
+    def targets(self) -> list[dict]:
+        return [
+            {
+                "target_id": "frontend",
+                "process_epoch": self.frontend_epoch,
+                "collectors": ["linux_perf"]
+                if self.config.frontend_perf_enabled
+                else [],
+                "scope": "process_and_threads",
+            },
+            *[
+                {
+                    "target_id": worker.target_id,
+                    "process_epoch": worker.process_epoch,
+                    "collectors": ["torch_profiler"],
+                    "scope": "engine_group",
+                    "identity_verification": "control_process_epoch_required_at_start"
+                    if worker.verify_runtime
+                    else "operator_config_only",
+                    "expected_rank_ids": worker.expected_rank_ids,
+                }
+                for worker in self.workers.values()
+            ],
+        ]
+
+    def validate(self, plan: Plan) -> None:
+        if not plan.client_request_id or len(plan.client_request_id) > 128:
+            raise BadRequest("client_request_id must contain 1..128 characters")
+        if not self.registry.supports(plan.mode):
+            raise Unsupported(
+                "nsys adapter is deferred; requires a prepared launch/session"
+            )
+        if not 0 < plan.duration_ms <= self.config.max_duration_ms:
+            raise BadRequest("duration_ms exceeds configured capture budget")
+        target_ids = [target.target_id for target in plan.targets]
+        if not target_ids or len(target_ids) != len(set(target_ids)):
+            raise BadRequest("targets must be nonempty and unique")
+        epochs = {item["target_id"]: item["process_epoch"] for item in self.targets()}
+        for target in plan.targets:
+            if target.target_id not in epochs:
+                raise BadRequest("Unknown target; use GET targets")
+            if epochs[target.target_id] != target.process_epoch:
+                raise Conflict("Target process epoch does not match inventory")
+        if (
+            plan.mode == "torch_profile"
+            and not self.config.frontend_perf_enabled
+            and "frontend" in target_ids
+        ):
+            raise Unsupported(
+                "Frontend profiling is disabled by operator configuration"
+            )
+        # Frontend perf is implicit unless explicitly disabled by the operator.
+
+    def submit(self, plan: Plan) -> Session:
+        # A caller of the Python API may retain mutable lists inside its plan.
+        # Copy and type-check the accepted value before using it as a retry key.
+        plan = msgspec.json.decode(msgspec.json.encode(plan), type=Plan)
+        previous = self.requests.get(plan.client_request_id)
+        if previous is not None:
+            if previous.plan != plan:
+                raise Conflict("client_request_id already has a different plan")
+            return previous
+        if self.closed:
+            raise Unavailable("Profiling coordinator is shutting down")
+        self.validate(plan)
+        if self.cleanup_uncertain:
+            raise Conflict(
+                "Collector cleanup is uncertain; reconcile worker state before restarting the coordinator"
+            )
+        if self.active is not None:
+            raise Conflict("A profiling session is already active or finalizing")
+        if len(self.sessions) >= self.config.max_sessions:
+            raise Unavailable(
+                "PoC session retention limit reached; restart coordinator"
+            )
+        session_id = uuid.uuid4().hex
+        directory = Path(self.config.output_dir) / session_id
+        directory.mkdir(parents=True, mode=0o700)
+        session = Session(session_id, plan, directory)
+        session.runtime = msgspec.structs.replace(
+            self.runtime, workers=list(self.workers.values())
+        )
+        session.deadline_monotonic = (
+            asyncio.get_running_loop().time() + plan.duration_ms / 1000
+        )
+        self.persist(session)
+        self.active = session
+        self.sessions[session_id] = session
+        self.requests[plan.client_request_id] = session
+        session.task = asyncio.create_task(self.capture(session))
+        return session
+
+    def manifest(self, session: Session) -> dict:
+        stop_due = session.accepted_at_ns + session.plan.duration_ms * 1000000
+        return {
+            "schema_version": 1,
+            "session_id": session.session_id,
+            "state": session.state,
+            "plan": msgspec.to_builtins(session.plan),
+            "accepted_at_ns": session.accepted_at_ns,
+            "stop_due_at_ns": stop_due,
+            "frontend": {
+                "pid": self.frontend_pid,
+                "process_epoch": self.frontend_epoch,
+                "profiling_enabled": self.config.frontend_perf_enabled,
+                "omission_reason": None
+                if self.config.frontend_perf_enabled
+                else "disabled_by_operator_config",
+            },
+            "profiles": [collector.evidence for collector in session.collectors],
+            "lifecycle_otel": {
+                "trace_ids": session.plan.trace_ids,
+                "request_ids": session.plan.request_ids,
+                "evidence_location": self.config.lifecycle_evidence_location,
+                "coverage": "unknown",
+                "instrumentation_mode": "unchanged",
+                "export_status": "external_reference"
+                if self.config.lifecycle_evidence_location
+                else "not_configured",
+            },
+            "runtime": {
+                "hostname": session.runtime.hostname,
+                "context": session.runtime.context,
+            },
+            "clock": {
+                "timestamps": "unix_ns",
+                "method": "four_timestamp_offset_estimate",
+                "system_clocks_modified": False,
+                "workers": session.clocks,
+            },
+            "artifact_validation": session.artifact_validation,
+            "artifact_status": "verified"
+            if session.artifact_validation
+            and all(
+                item["status"] == "verified" for item in session.artifact_validation
+            )
+            else "partial"
+            if any(
+                item["status"] in ("partial", "invalid")
+                for item in session.artifact_validation
+            )
+            else "unverified",
+            "errors": session.errors,
+        }
+
+    def persist(self, session: Session) -> None:
+        pending = session.directory / "manifest.json.tmp"
+        pending.write_text(json.dumps(self.manifest(session), indent=2) + "\n")
+        pending.replace(session.directory / "manifest.json")
+
+    def persist_progress(self, session: Session) -> None:
+        # Once a collector is owned, a full/unavailable artifact filesystem
+        # must not prevent stop and cleanup. Initial acceptance still requires
+        # a successful manifest write through persist().
+        try:
+            self.persist(session)
+        except OSError as exc:
+            error = f"Manifest persistence failed: {exc}"
+            if error not in session.errors:
+                session.errors.append(error)
+            if session.state == "completed":
+                session.state = "failed"
+            logger.warning("%s: %s", session.session_id, error)
+
+    async def capture(self, session: Session) -> None:
+        deadline = session.deadline_monotonic
+        session.state = "starting"
+        self.persist_progress(session)
+        capture_ok = False
+        try:
+            if session.errors:
+                raise CollectionError("Manifest write failed before collector startup")
+            assert session.runtime is not None
+            workers = {worker.target_id: worker for worker in session.runtime.workers}
+            for target in session.plan.targets:
+                if target.target_id == "frontend":
+                    continue
+                remaining = deadline - asyncio.get_running_loop().time()
+                if session.stop_requested.is_set():
+                    break
+                if remaining <= 0:
+                    raise CollectionError(
+                        "Capture deadline expired during runtime validation"
+                    )
+                worker = workers[target.target_id]
+                measurement = await asyncio.wait_for(
+                    self.clock_sampler.measure(worker, self.config),
+                    min(remaining, self.config.start_timeout_s),
+                )
+                session.clocks[target.target_id] = {
+                    "start": measurement,
+                    "end": {"alignment": "unknown"},
+                }
+            candidates = self.registry.create(
+                self.config, session.runtime, session.plan, session.directory
+            )
+            for collector in candidates:
+                if session.stop_requested.is_set():
+                    break
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise CollectionError("Capture deadline expired during startup")
+                # Register before starting: a timeout may have taken effect
+                # remotely, so cleanup must also attempt stop on uncertain starts.
+                session.collectors.append(collector)
+                clock = session.clocks.get(collector.evidence.get("target_id"), {}).get(
+                    "start", {}
+                )
+                if clock.get("identity_verification") == "control_process_epoch":
+                    collector.evidence[
+                        "identity_verification"
+                    ] = "control_process_epoch"
+                await asyncio.wait_for(
+                    collector.start(), min(remaining, self.config.start_timeout_s)
+                )
+                self.persist_progress(session)
+                if session.errors:
+                    raise CollectionError(
+                        "Manifest write failed after collector startup"
+                    )
+            session.state = "recording"
+            self.persist_progress(session)
+            remaining = max(0, deadline - asyncio.get_running_loop().time())
+            try:
+                await asyncio.wait_for(session.stop_requested.wait(), remaining)
+            except asyncio.TimeoutError:
+                pass  # The lease deadline is a normal stop trigger.
+            capture_ok = True
+        except COLLECTION_ERRORS as exc:
+            logger.warning(
+                "Profiling startup failed for %s: %s", session.session_id, exc
+            )
+            session.errors.append(str(exc) or type(exc).__name__)
+        finally:
+            if not capture_ok and not session.errors:
+                session.errors.append("Capture interrupted by an unexpected failure")
+            session.state = "finalizing"
+            self.persist_progress(session)
+            # Stop all collectors concurrently: slow worker trace serialization
+            # must not keep frontend perf recording beyond its lease.
+            results = await asyncio.gather(
+                *(self.stop_collector(collector) for collector in session.collectors)
+            )
+            session.errors.extend(error for error in results if error is not None)
+            if any(error is not None for error in results):
+                self.cleanup_uncertain = True
+            for target_id, measurements in session.clocks.items():
+                worker = workers[target_id]
+                if not worker.verify_runtime:
+                    continue
+                try:
+                    measurements["end"] = await asyncio.wait_for(
+                        self.clock_sampler.measure(worker, self.config),
+                        self.config.start_timeout_s,
+                    )
+                    if (
+                        measurements["start"].get("alignment")
+                        == measurements["end"].get("alignment")
+                        == "estimated"
+                    ):
+                        measurements["offset_delta_ns"] = (
+                            measurements["end"]["offset_ns"]
+                            - measurements["start"]["offset_ns"]
+                        )
+                except COLLECTION_ERRORS as exc:
+                    measurements["end"] = {"alignment": "unknown", "error": str(exc)}
+                    session.errors.append(
+                        f"{target_id}: final runtime verification failed: {exc}"
+                    )
+            for collector in session.collectors:
+                try:
+                    validation = await self.artifact_validator.validate(
+                        collector.evidence, self.config
+                    )
+                except COLLECTION_ERRORS as exc:
+                    validation = {
+                        "status": "invalid",
+                        "coverage": "partial",
+                        "error": str(exc),
+                    }
+                session.artifact_validation.append(
+                    {"target_id": collector.evidence.get("target_id"), **validation}
+                )
+                if validation["status"] in ("partial", "invalid"):
+                    session.errors.append(
+                        f"{collector.evidence.get('target_id')}: artifacts {validation['status']}"
+                    )
+            session.state = "failed" if session.errors else "completed"
+            self.persist_progress(session)
+            self.active = None
+
+    async def stop_collector(self, collector: Collector) -> str | None:
+        try:
+            await asyncio.wait_for(collector.stop(), self.config.finalize_timeout_s)
+        except COLLECTION_ERRORS as exc:
+            collector.evidence["coverage"] = "partial_or_unknown"
+            logger.warning("Profiling finalization failed: %s", exc)
+            return str(exc) or type(exc).__name__
+        return None
+
+    def lookup(self, session_id: str) -> Session:
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise NotFound("Unknown profiling session")
+        return session
+
+    def stop(self, session_id: str) -> Session:
+        session = self.lookup(session_id)
+        session.stop_requested.set()
+        return session
+
+    async def close(self) -> None:
+        self.closed = True
+        if self.active is not None:
+            self.active.stop_requested.set()
+            if self.active.task is not None:
+                await self.active.task

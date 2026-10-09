@@ -21,6 +21,10 @@ class Worker(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
     # Paths/options are operator-owned, never supplied by the requesting client.
     start_options: dict = msgspec.field(default_factory=dict)
     artifact_location: str | None = None
+    # Require the lightweight worker agent to attest the configured epoch.
+    # Off preserves compatibility with images that only expose start/stop.
+    verify_runtime: bool = False
+    expected_rank_ids: list[str] = msgspec.field(default_factory=list)
 
 
 class Config(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
@@ -35,6 +39,20 @@ class Config(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
     lifecycle_evidence_location: str | None = None
     # Temporary operator override for environments that deny perf attachment.
     frontend_perf_enabled: bool = True
+    clock_probe_timeout_s: float = 1.0
+    clock_probe_samples: int = 3
+    artifact_validation_timeout_s: float = 120.0
+    max_trace_bytes: int = 8 * 1024 * 1024 * 1024
+
+
+class RuntimeSnapshot(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
+    """Frontend-owned runtime information passed explicitly to the coordinator."""
+
+    frontend_pid: int
+    frontend_epoch: str
+    hostname: str
+    workers: list[Worker] = msgspec.field(default_factory=list)
+    context: dict = msgspec.field(default_factory=dict)
 
 
 class Plan(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
