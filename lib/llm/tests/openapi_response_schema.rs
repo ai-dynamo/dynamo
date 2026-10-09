@@ -55,6 +55,17 @@ fn successful_media_types_reference_registered_payloads_only() {
     ] {
         let success = &spec["paths"][path]["post"]["responses"]["200"];
         assert!(success["description"].as_str().unwrap().contains("[DONE]"));
+        // A machine-readable marker distinguishes a successful SSE data payload
+        // schema from a schema for the whole transport body. Unary JSON is unmarked.
+        assert_eq!(
+            success["content"]["text/event-stream"]["x-dynamo-sse-data-schema"],
+            true
+        );
+        assert!(
+            success["content"]["application/json"]
+                .get("x-dynamo-sse-data-schema")
+                .is_none()
+        );
         for (media, name) in [("application/json", unary), ("text/event-stream", stream)] {
             assert_eq!(
                 success["content"][media]["schema"]["$ref"],
@@ -123,15 +134,20 @@ fn always_serialized_nullable_response_fields_are_required() {
 fn configured_reasoning_name_matches_unary_and_stream_serialization() {
     // The export must follow the same wire-name option as the response wrapper,
     // rather than always publishing the canonical Rust field name.
-    let spec = document(ReasoningField::Reasoning);
-    for name in [
-        "ChatCompletionResponseMessage",
-        "ChatCompletionStreamResponseDelta",
+    for (field, absent) in [
+        (ReasoningField::ReasoningContent, "reasoning"),
+        (ReasoningField::Reasoning, "reasoning_content"),
     ] {
-        let properties =
-            &spec["components"]["schemas"][format!("dynamo_protocols.chat.{name}")]["properties"];
-        assert!(properties.get("reasoning").is_some());
-        assert!(properties.get("reasoning_content").is_none());
+        let spec = document(field);
+        for name in [
+            "ChatCompletionResponseMessage",
+            "ChatCompletionStreamResponseDelta",
+        ] {
+            let properties = &spec["components"]["schemas"]
+                [format!("dynamo_protocols.chat.{name}")]["properties"];
+            assert!(properties.get(field.as_str()).is_some());
+            assert!(properties.get(absent).is_none());
+        }
     }
     let raw = json!({"choices": [{"message": {"reasoning_content": "think"}, "delta": {"reasoning_content": "think"}}]});
     let routed =

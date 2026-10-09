@@ -13,10 +13,10 @@ use utoipa::ToSchema;
 #[test]
 fn http_export_describes_request_aliases() {
     use dynamo_llm::http::service::{RouteDoc, openapi_docs::generate_openapi_spec};
-    let routes = [RouteDoc::new(
-        axum::http::Method::POST,
-        "/v1/chat/completions",
-    )];
+    let routes = [
+        RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions"),
+        RouteDoc::new(axum::http::Method::POST, "/v1/completions"),
+    ];
     let spec = serde_json::to_value(generate_openapi_spec(&routes)).unwrap();
     fn assert_alias(node: &serde_json::Value, field: &str, alias: &str) -> bool {
         if let Some(schema) = node.get("properties").and_then(|p| p.get(field)) {
@@ -28,19 +28,28 @@ fn http_export_describes_request_aliases() {
             .and_then(|v| v.as_array())
             .is_some_and(|parts| parts.iter().any(|part| assert_alias(part, field, alias)))
     }
-    // Both copies are consumed by schema readers: the registered component and
-    // the currently inlined request body must advertise the same input aliases.
-    for node in [
-        &spec["components"]["schemas"]["NvCreateChatCompletionRequest"],
-        &spec["paths"]["/v1/chat/completions"]["post"]["requestBody"]["content"]["application/json"]
-            ["schema"],
+    // Request roots share their registered components, so annotations have one
+    // source of truth instead of a second inline copy that could drift.
+    for (path, name) in [
+        ("/v1/chat/completions", "NvCreateChatCompletionRequest"),
+        ("/v1/completions", "NvCreateCompletionRequest"),
     ] {
-        assert!(assert_alias(
-            node,
-            "chat_template_args",
-            "chat_template_kwargs"
-        ));
+        let schema =
+            &spec["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"];
+        assert_eq!(
+            schema,
+            &serde_json::json!({"$ref": format!("#/components/schemas/{name}")})
+        );
+        assert!(
+            spec.pointer(schema["$ref"].as_str().unwrap().strip_prefix('#').unwrap())
+                .is_some()
+        );
     }
+    assert!(assert_alias(
+        &spec["components"]["schemas"]["NvCreateChatCompletionRequest"],
+        "chat_template_args",
+        "chat_template_kwargs"
+    ));
     assert!(assert_alias(
         &spec["components"]["schemas"]["dynamo_protocols.chat.ChatCompletionRequestAssistantMessage"],
         "reasoning_content",

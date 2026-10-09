@@ -13,6 +13,15 @@
 //! ```
 //! The generated spec will be written to:
 //!   `docs/frontends/openapi.json`
+//!
+//! This is a native, partially resolved document: `x-dynamo-schema-import` marks
+//! dependency schema slots that require version-pinned offline composition. Those
+//! slots do not establish the imported fields' validation constraints.
+//! On a `text/event-stream` media type, `x-dynamo-sse-data-schema: true` means its
+//! `schema` describes each successful JSON data payload, not the entire SSE body,
+//! error/annotation events, or the literal `[DONE]` terminator. Consumers must
+//! explicitly support this convention; ordinary JSON Schema validation does not
+//! validate framing, event ordering, or termination.
 
 use std::fs;
 use std::path::PathBuf;
