@@ -530,6 +530,10 @@ def _reasoning_parser_enabled(
     )
 
 
+# Enough trailing prompt tokens to contain any reasoning opener.
+_REASONING_START_TAIL_TOKENS = 16
+
+
 def _prompt_leaves_reasoning_open(
     prompt_token_ids: Sequence[int],
     *,
@@ -538,19 +542,30 @@ def _prompt_leaves_reasoning_open(
     chat_template_kwargs: dict[str, Any],
     model_config: ModelConfig | None,
 ) -> bool:
-    """Whether generation starts inside a reasoning block the prompt opened.
+    """Whether the rendered prompt ends with an opened reasoning block.
 
-    Uses the same test as StreamingPostProcessor: a reasoning parser runs for
-    this request and does not find the end of reasoning in the prompt.
+    Mirrors ``prompt_injected_reasoning_start`` in the Rust preprocessor: the
+    prompt (trailing whitespace ignored) must end with the reasoning parser's
+    opening marker. A prompt without that marker, e.g. for models that emit
+    their own opener, does not start in reasoning.
     """
-    if not _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs):
+    if not prompt_token_ids or not _reasoning_parser_enabled(
+        reasoning_parser_class, chat_template_kwargs
+    ):
         return False
     parser = reasoning_parser_class(
         tokenizer,
         chat_template_kwargs=chat_template_kwargs,
         model_config=model_config,
     )
-    return not parser.is_reasoning_end(prompt_token_ids)
+    start = getattr(parser, "reasoning_start_str", None)
+    if not isinstance(start, str) or not start:
+        return False
+    tail = tokenizer.decode(
+        list(prompt_token_ids[-_REASONING_START_TAIL_TOKENS:]),
+        skip_special_tokens=False,
+    )
+    return tail.rstrip().endswith(start)
 
 
 def _prepare_request(

@@ -4418,16 +4418,15 @@ class _ReasoningRecordingToolParser(_FakeStructuralTagParser):
         return super().get_structural_tag(request)
 
 
-def _prompt_reasoning_parser(reasoning_ended: bool):
+def _prompt_reasoning_parser(start: str | None = "<think>"):
     class PromptReasoningParser:
+        reasoning_start_str = start
+
         def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
             del tokenizer, chat_template_kwargs, model_config
 
         def adjust_request(self, request):
             return request
-
-        def is_reasoning_end(self, prompt_token_ids):
-            return reasoning_ended
 
     return PromptReasoningParser
 
@@ -4442,14 +4441,18 @@ class TestToolCallGrammarReasoningStart:
     first token, so thinking-mode tool calls can never complete.
     """
 
-    async def _guidance(
+    @staticmethod
+    def _prompt(tokenizer, text):
+        return tokenizer.encode(text, add_special_tokens=False)
+
+    async def _reasoning_requested(
         self,
         tokenizer,
         monkeypatch,
         *,
+        prompt_text,
         reasoning_parser_class,
         structural_tag_excludes_reasoning=False,
-        structural_tag_mode="on",
     ):
         parsers = []
 
@@ -4464,59 +4467,74 @@ class TestToolCallGrammarReasoningStart:
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
                 render_messages_async=AsyncMock(
-                    return_value=(None, {"prompt_token_ids": [1, 2, 3]})
+                    return_value=(
+                        None,
+                        {"prompt_token_ids": self._prompt(tokenizer, prompt_text)},
+                    )
                 )
             ),
             tool_parser_class=make_parser,
             reasoning_parser_class=reasoning_parser_class,
             enable_auto_tool_choice=True,
-            structural_tag_mode=structural_tag_mode,
+            structural_tag_mode="on",
             structural_tag_scope="always",
             structural_tag_excludes_reasoning=structural_tag_excludes_reasoning,
         )
-        return result, [r for parser in parsers for r in parser.reasoning]
-
-    @pytest.mark.asyncio
-    async def test_prompt_open_reasoning_builds_reasoning_prefix(
-        self, tokenizer, monkeypatch
-    ):
-        result, reasoning = await self._guidance(
-            tokenizer,
-            monkeypatch,
-            reasoning_parser_class=_prompt_reasoning_parser(reasoning_ended=False),
-        )
-        assert reasoning == [True]
         assert "structural_tag" in result.guided_decoding
+        return [r for parser in parsers for r in parser.reasoning]
 
+    @pytest.mark.parametrize(
+        ("prompt_text", "parser_start", "excludes_reasoning", "expected"),
+        [
+            # The template opened reasoning: the tag starts inside it.
+            ("<|im_start|>assistant\n<think>", "<think>", False, True),
+            ("<|im_start|>assistant\n<think>\n", "<think>", False, True),
+            # The worker engine already holds the grammar until reasoning ends.
+            ("<|im_start|>assistant\n<think>", "<think>", True, False),
+            # Thinking off: the template already closed reasoning.
+            ("<|im_start|>assistant\n<think>\n\n</think>\n\n", "<think>", False, False),
+            # No reasoning marker: the model emits its own opener.
+            ("<|im_start|>assistant\n", "<think>", False, False),
+            # A parser without an opening marker never starts in reasoning.
+            ("<|im_start|>assistant\n<think>", None, False, False),
+        ],
+        ids=[
+            "prompt-opened",
+            "prompt-opened-trailing-newline",
+            "engine-gated",
+            "prompt-closed",
+            "marker-free-prompt",
+            "parser-without-start",
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_engine_gated_reasoning_keeps_post_reasoning_tag(
-        self, tokenizer, monkeypatch
+    async def test_reasoning_start(
+        self,
+        tokenizer,
+        monkeypatch,
+        prompt_text,
+        parser_start,
+        excludes_reasoning,
+        expected,
     ):
-        _, reasoning = await self._guidance(
+        reasoning = await self._reasoning_requested(
             tokenizer,
             monkeypatch,
-            reasoning_parser_class=_prompt_reasoning_parser(reasoning_ended=False),
-            structural_tag_excludes_reasoning=True,
+            prompt_text=prompt_text,
+            reasoning_parser_class=_prompt_reasoning_parser(parser_start),
+            structural_tag_excludes_reasoning=excludes_reasoning,
         )
-        assert reasoning == [False]
-
-    @pytest.mark.asyncio
-    async def test_prompt_closed_reasoning_keeps_post_reasoning_tag(
-        self, tokenizer, monkeypatch
-    ):
-        _, reasoning = await self._guidance(
-            tokenizer,
-            monkeypatch,
-            reasoning_parser_class=_prompt_reasoning_parser(reasoning_ended=True),
-        )
-        assert reasoning == [False]
+        assert reasoning == [expected]
 
     @pytest.mark.asyncio
     async def test_no_reasoning_parser_keeps_post_reasoning_tag(
         self, tokenizer, monkeypatch
     ):
-        _, reasoning = await self._guidance(
-            tokenizer, monkeypatch, reasoning_parser_class=None
+        reasoning = await self._reasoning_requested(
+            tokenizer,
+            monkeypatch,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=None,
         )
         assert reasoning == [False]
 
@@ -4539,11 +4557,18 @@ class TestToolCallGrammarReasoningStart:
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
                 render_messages_async=AsyncMock(
-                    return_value=(None, {"prompt_token_ids": [1, 2, 3]})
+                    return_value=(
+                        None,
+                        {
+                            "prompt_token_ids": self._prompt(
+                                tokenizer, "<|im_start|>assistant\n<think>"
+                            )
+                        },
+                    )
                 )
             ),
             tool_parser_class=RegistryParser,
-            reasoning_parser_class=_prompt_reasoning_parser(reasoning_ended=False),
+            reasoning_parser_class=_prompt_reasoning_parser("<think>"),
             enable_auto_tool_choice=True,
             structural_tag_mode="on",
             structural_tag_scope="always",
