@@ -6,7 +6,7 @@
 #   scripts/kustomize-matrix.py unfold recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
 #   scripts/kustomize-matrix.py render recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
 # Inspect only this Kustomize overlay (from the repository root):
-#   kustomize build recipes/motif-3/vllm/disagg-b200-chat/kustomize/overlays/generic-2p1d-kv
+#   kustomize build recipes/motif-3/vllm/disagg-b200-chat/kustomize/overlays/generic-3p1d-kv
 # You may edit a copy before applying it.
 
 #
@@ -188,7 +188,7 @@ spec:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-    replicas: 2
+    replicas: 3
     runtimeVersionOverride: 1.5.0
     sharedMemorySize: 64Gi
     type: worker

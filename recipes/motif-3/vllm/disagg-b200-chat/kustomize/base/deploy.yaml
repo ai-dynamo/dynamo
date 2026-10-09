@@ -93,7 +93,7 @@ spec:
             claimName: shared-model-cache
   - name: PrefillWorker
     type: worker
-    replicas: 2
+    replicas: 3
     runtimeVersionOverride: 1.5.0
     sharedMemorySize: 64Gi
     podTemplate:

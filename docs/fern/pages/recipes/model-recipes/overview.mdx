@@ -77,10 +77,10 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 </div>
 
 <div className="dynamo-model-grid" data-recipe-card-grid>
-  <div className="dynamo-model-card" data-recipe-card data-provider="motif" data-runtime="vllm" data-hardware="b200" data-technique="aggregated expert-parallel spec-decoding" data-workload="chat">
+  <div className="dynamo-model-card" data-recipe-card data-provider="motif" data-runtime="vllm" data-hardware="b200" data-technique="aggregated disaggregated kv-routing expert-parallel spec-decoding" data-workload="chat">
     <div className="dynamo-model-card-top"><div><h3>Motif-3 NVFP4</h3><p>Motif Technologies</p></div></div>
-    <p className="dynamo-model-summary">Experimental Motif vLLM recipe for chat traffic on two B200 GPUs, with TP2, expert parallelism, and Dynamo MTP2 speculative decoding.</p>
-    <div className="dynamo-model-tags"><span>vLLM</span><span>2x B200</span><span>Chat trace replay</span></div>
+    <p className="dynamo-model-summary">Experimental Motif vLLM recipes for aggregated chat on two B200 GPUs or 3P1D KV-aware serving on eight B200 GPUs, with TP2 and MTP2.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>2x or 8x B200</span><span>Chat trace replay</span></div>
     <a className="dynamo-card-link" href="motif-3.mdx" aria-label="Open the Motif-3 NVFP4 recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="sglang" data-hardware="h200 b200 gb200" data-technique="aggregated prefix-caching spec-decoding" data-workload="agentic">
