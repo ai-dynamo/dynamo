@@ -44,9 +44,15 @@ curl -s localhost:8000/v1/chat/completions \
 
 ## Deploy on Kubernetes
 
+Before applying, replace `<your-registry>/dynamo-sidecar` in the manifest with a
+[sidecar image](../README.md#docker) and create the `hf-token-secret`
+Secret that the manifest reads.
+
 See [`deploy/`](deploy/) for all manifests. For example, aggregated serving:
 
 ```bash
+kubectl create secret generic hf-token-secret -n <namespace> \
+  --from-literal=HF_TOKEN=<your-hf-token>
 kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
@@ -57,20 +63,20 @@ The frontend reaches each sidecar over Dynamo's request, discovery, and event
 planes; the sidecar reaches the engine over its native gRPC API. Dashed arrows
 carry KV events.
 
-### Single-node TP
+### Single-Node TP
 
 One engine on one node, with one sidecar.
 
 ![On one node, a request reaches the SGLang tensor-parallel ranks through the Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar.](../../../docs/fern/assets/img/sidecar-sglang-single-node-tp.svg)
 
-### Multi-node TP
+### Multi-Node TP
 
 One engine spans two nodes. Only the leader node has a sidecar; the follower
 node holds the remaining TP ranks.
 
 ![When one SGLang engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../docs/fern/assets/img/sidecar-sglang-multinode-tp.svg)
 
-### Multi-node DP
+### Multi-Node DP
 
 The leader sidecar registers every DP rank and serves all requests; SGLang
 dispatches each one to the right scheduler. The follower sidecar

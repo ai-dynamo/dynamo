@@ -115,6 +115,3 @@ topologies:
 [vLLM](../../modular-components/backends/vllm/sidecar.md#topologies),
 [SGLang](../../modular-components/backends/sglang/sidecar.md#topologies),
 [TensorRT-LLM](../../modular-components/backends/tensorrt-llm/sidecar.md#topologies).
-
-> [!NOTE]
-> The operator does not yet support multinode sidecar deployments.
