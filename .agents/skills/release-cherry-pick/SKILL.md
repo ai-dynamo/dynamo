@@ -50,11 +50,12 @@ is `<user>/cherrypick-<short-name>`.
 For a normal cherry-pick:
 
 ```bash
-git cherry-pick -x --signoff <main-merge-commit>
+git cherry-pick -x --signoff <main-commit>
 ```
 
-Use the exact commit that merged the main PR and preserve the `-x` provenance
-and sign-off.
+Use the exact commit that landed the main PR and preserve the `-x` provenance
+and sign-off. If it has multiple parents, select the mainline parent with
+`-m <parent-number>`.
 
 For an approved release-only fix, branch from `release/X.Y.Z`, make the
 release-specific change, and create a commit with `--signoff`. There is no main
@@ -81,8 +82,7 @@ or urgent fix, ping `@release-support`.
 The PR author owns CI failures until the PR merges. If a test fails, check with
 the release PiC whether it is flaky; only the release PiC decides whether a
 failing PR may merge. The release PiC also merges the PR and replaces
-`cherry-pick:approved` with the `cherry-pick:rcN` label for the RC containing
-the fix.
+its approval label with `cherry-pick:rcN` for the RC containing the fix.
 
 ## Approval Criteria
 
