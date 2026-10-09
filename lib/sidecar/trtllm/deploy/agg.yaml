@@ -48,7 +48,7 @@ spec:
         # starts before `main`, stops after.
         initContainers:
         - name: trtllm-engine
-          image: <your-registry>/tensorrt-llm-openengine:1.3.0rc27.dev202609170000
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000
           restartPolicy: Always
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state (grpc + model, plus kv_connector when configured)
