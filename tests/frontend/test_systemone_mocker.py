@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import requests
 
+from dynamo import prometheus_names
 from tests.frontend.conftest import MockerWorkerProcess, wait_for_http_completions_ready
 from tests.utils.constants import QWEN
 from tests.utils.decision_api import (
