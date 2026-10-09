@@ -158,7 +158,9 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 <ParamField path="DYN_TCP_WORKER_POOL_SIZE" type="integer" default="10000">
   Number of TCP request-plane requests a worker process handles at once. The pool is shared by every
   endpoint served from the process, and a request holds its slot until its response stream ends.
-  Applies only to the TCP request plane. Invalid values fall back to the default.
+  Applies only to the TCP request plane. Values that are not non-negative integers fall back to the
+  default. `0` does not fall back: the worker accepts requests but never runs them, so they wait in
+  the `DYN_TCP_WORK_QUEUE_SIZE` queue and are rejected once it is full.
 
   This is a transport limit, not engine admission. It is unrelated to engine settings such as vLLM
   `max_num_seqs`.
@@ -169,7 +171,8 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   pool and this queue are both full, the worker rejects the request with an overload reply and
   increments
   [`dynamo_work_handler_enqueue_rejected_total`](../observability/metrics-catalog.mdx#component-metrics).
-  Applies only to the TCP request plane. Invalid values fall back to the default.
+  Applies only to the TCP request plane. Values that are not non-negative integers fall back to the
+  default. `0` does not fall back: the worker panics while it creates the TCP request-plane server.
 </ParamField>
 
 <ParamField path="DYN_TCP_RPC_HOST" type="string" default="auto-detected local address">
