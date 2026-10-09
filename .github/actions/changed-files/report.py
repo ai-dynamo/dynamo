@@ -7,6 +7,46 @@ import json
 import os
 from pathlib import Path
 
+# Each class must independently contain the entire modified-file set. Do not
+# union classes: mixed changes require the existing full runtime selection.
+SGLANG_UNRELATED_CHANGE_CLASSES = (
+    {"components/src/dynamo/frontend/tests/test_vllm_processor_unit.py"},
+)
+
+
+def modified_only_files(output_dir: Path, all_files: set[str]) -> set[str]:
+    """Return verified ordinary modifications; uncertainty keeps full tests."""
+    try:
+        modified = load_files(output_dir / "all_modified_files.json")
+        complete = load_files(output_dir / "all_all_changed_and_modified_files.json")
+        other_statuses = [
+            load_files(output_dir / f"all_{status}_files.json")
+            for status in (
+                "added",
+                "copied",
+                "deleted",
+                "renamed",
+                "type_changed",
+                "unmerged",
+                "unknown",
+            )
+        ]
+    except (OSError, ValueError):
+        return set()
+    if modified != all_files or complete != all_files or any(other_statuses):
+        return set()
+    return modified
+
+
+def runtime_test_outputs(output_dir: Path, all_files: set[str]) -> dict[str, bool]:
+    modified = modified_only_files(output_dir, all_files)
+    return {
+        "sglang_runtime": not (
+            modified
+            and any(modified <= allowed for allowed in SGLANG_UNRELATED_CHANGE_CLASSES)
+        ),
+    }
+
 
 def load_files(path: Path) -> set[str]:
     """Read an unescaped JSON array written by tj-actions/changed-files."""
@@ -43,6 +83,13 @@ def report(output_dir: Path, base_sha: str = "") -> int:
             print(json.dumps(filename))
         print("Add these paths to .github/filters.yaml. See .github/FILTERS.md.")
         return 1
+    outputs = runtime_test_outputs(output_dir, all_files)
+    for name, required in outputs.items():
+        value = str(bool(required)).lower()
+        print(f"{name}={value}")
+        if os.environ.get("GITHUB_OUTPUT"):
+            with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+                output.write(f"{name}={value}\n")
     print("All modified files are covered by CI filters.")
     return 0
 

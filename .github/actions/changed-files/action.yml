@@ -46,6 +46,9 @@ outputs:
   sglang:
     description: 'Whether sglang files changed'
     value: ${{ steps.filter.outputs.sglang_any_modified }}
+  sglang_runtime:
+    description: 'Whether standalone SGLang CPU/GPU tests are needed (fail full)'
+    value: ${{ steps.report.outputs.sglang_runtime }}
   trtllm:
     description: 'Whether trtllm files changed'
     value: ${{ steps.filter.outputs.trtllm_any_modified }}
@@ -167,6 +170,7 @@ runs:
         skip_initial_fetch: ${{ steps.merge-base.outputs.base_sha != '' }}
 
     - name: Report changes and check filter coverage
+      id: report
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}

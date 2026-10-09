@@ -37,6 +37,8 @@ jobs:
       dgdr: ${{ steps.changes.outputs.dgdr }}
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
+      # Set repository variable FORCE_FULL_CI=true to bypass runtime admission.
+      sglang_runtime: ${{ vars.FORCE_FULL_CI == 'true' || steps.changes.outputs.sglang_runtime != 'false' }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
       triton: ${{ steps.changes.outputs.triton }}
       frontend: ${{ steps.changes.outputs.frontend }}
@@ -852,7 +854,11 @@ jobs:
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: |
+      needs.changed-files.outputs.sglang_runtime != 'false' &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.deploy == 'true')
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -877,6 +883,7 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
     if: |
+      needs.changed-files.outputs.sglang_runtime != 'false' &&
       needs.changed-files.outputs.run_multigpu_tests == 'true' &&
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
