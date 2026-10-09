@@ -7,7 +7,6 @@ page: pages/recipes/model-recipes/deepseek-v4-pro.mdx
 provider: deepseek
 model:
   name: DeepSeek-V4-Pro
-  generation: "4"
   hf_id: nvidia/DeepSeek-V4-Pro-NVFP4
   precision: NVFP4 (B200) / FP8 (H200)
 status: validated

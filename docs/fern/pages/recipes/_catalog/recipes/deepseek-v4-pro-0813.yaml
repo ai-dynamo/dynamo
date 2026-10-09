@@ -7,7 +7,6 @@ page: pages/recipes/model-recipes/deepseek-v4-pro-0813.mdx
 provider: deepseek
 model:
   name: DeepSeek-V4-Pro-0813
-  generation: "4"
   hf_id: deepseek-ai/DeepSeek-V4-Pro-0813
   precision: MXFP4 experts + FP8 KV
 status: experimental

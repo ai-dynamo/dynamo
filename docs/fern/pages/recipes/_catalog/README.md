@@ -27,8 +27,7 @@ CSS-coupled vocabulary. For the machine-readable catalog contract, see the
    matching `index.yaml`. Each file holds exactly one object that validates
    against `schema.json`; every deploy/perf asset path must resolve in the repo.
    A recipe's `provider:` must be a key in `providers.yaml`; add a new model
-   maker there first. Set `model.generation` to the model's quoted version
-   number (see [Provider order](#provider-order)). See [the machine-readable catalog](#the-machine-readable-catalog)
+   maker there first. See [the machine-readable catalog](#the-machine-readable-catalog)
    below, then run `python3 docs/fern/pages/recipes/_catalog/validate.py`.
 3. **Generate the Model Recipes navigation**: run
    `python3 docs/fern/scripts/gen_recipe_nav.py` (the `gen-recipe-nav` pre-commit
@@ -98,10 +97,12 @@ and recipes in the same order:
 2. Every other provider follows, alphabetically by name.
 3. A provider with no active recipe does not appear.
 
-Within a provider, recipes run newest model generation first, by the entry's
-`model.generation`: a quoted version number such as `"4.1"` for
-DeepSeek-V4.1-Flash, or `"1"` for a first, unnumbered release. Quote it, since
-YAML reads an unquoted `5.10` as `5.1`. Within a generation, a title tagged
+Within a provider, recipes run newest model generation first. The generator
+reads the generation from the title: the first version number, such as `4.1`
+in DeepSeek-V4.1-Flash, skipping parameter sizes (`120B`, `2.4T`, `A3B`) and
+precisions (`NVFP4`, `FP8`, `BF16`). A title with no version number sorts
+last. If a title would mislead the rule, set `model.generation` on the entry to
+a quoted override, such as `generation: "4.1"`. Within a generation, a title tagged
 `Pro` comes first, then `Flash`, then untagged titles (DeepSeek-V4-Pro,
 DeepSeek-V4-Flash, then a plain DeepSeek-V4). Recipes that still tie keep
 their `index.yaml` order. The generator also writes the overview's model-family and

@@ -7,7 +7,6 @@ page: pages/recipes/model-recipes/gpt-oss-120b.mdx
 provider: openai
 model:
   name: GPT-OSS-120B
-  generation: "1"
   hf_id: openai/gpt-oss-120b
   precision: MXFP4 + FP8 KV (vLLM); W4A8_MXFP4_MXFP8 (TRT-LLM disagg, via OVERRIDE_QUANT_ALGO)
 status: validated

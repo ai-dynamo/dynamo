@@ -23,9 +23,12 @@ the catalog and the provider order cannot drift between surfaces:
 Provider order comes from ``_catalog/providers.yaml``: ranked providers first,
 in their listed order, then every other provider alphabetically by name. A
 provider with no active recipe is dropped. Within a provider, recipes are
-sorted newest model generation first (the entry's ``model.generation``). Within a
-generation, a title tagged Pro comes first, then Flash, then untagged titles;
-recipes that still tie keep their ``index.yaml`` order.
+sorted newest model generation first: the first version number in the title,
+such as 4.1 in DeepSeek-V4.1-Flash, skipping parameter sizes (120B, 2.4T, A3B)
+and precisions (NVFP4, FP8, BF16). A title with no version number sorts last,
+and an optional ``model.generation`` overrides a title the rule misreads.
+Within a generation, a title tagged Pro comes first, then Flash, then untagged
+titles; recipes that still tie keep their ``index.yaml`` order.
 
 The overview's model cards stay hand-written: this script only sorts them into
 the same order. Each active recipe needs exactly one card, matched by the card's
@@ -62,6 +65,12 @@ STYLES_TSX = FERN_DIR / "components" / "RecipeStyles.tsx"
 
 PROVIDER_KEY = re.compile(r"^[a-z0-9]+$")
 GENERATION = re.compile(r"^[0-9]+(\.[0-9]+)*$")
+# A version number in a title: not a size suffix (120B, 2.4T, A3B) and not a
+# precision (NVFP4, FP8, BF16, INT4).
+TITLE_VERSION = re.compile(
+    r"(?<![0-9.])(?<!FP)(?<!BF)(?<!INT)([0-9]+(?:\.[0-9]+)*)(?![0-9])(?![BMT](?![a-z]))",
+    re.IGNORECASE,
+)
 # Variant tags in a recipe title, in display order; untagged titles follow.
 VARIANT_TAGS = tuple(
     re.compile(rf"(?<![A-Za-z]){tag}(?![A-Za-z])") for tag in ("Pro", "Flash")
@@ -90,7 +99,7 @@ class Recipe:
     page: str
     slug: str
     targets: int
-    generation: tuple[int, ...] = (1,)
+    generation: tuple[int, ...] = (0,)
 
 
 @dataclass(frozen=True)
@@ -161,13 +170,18 @@ def parse_recipe(entry: dict, providers: dict[str, Provider], source: str) -> Re
 
 
 def parse_generation(entry: dict, source: str) -> tuple[int, ...]:
-    """Return ``model.generation`` as a comparable version tuple.
+    """Return the recipe's model generation as a comparable version tuple.
 
-    The value must be a quoted string: YAML reads an unquoted ``5.10`` as the
-    float 5.1, which would sort it below 5.9.
+    It is the first version number in the title, unless the entry sets the
+    optional ``model.generation`` override. A title with no version number
+    returns ``(0,)`` so it sorts after numbered generations.
     """
     value = (entry.get("model") or {}).get("generation")
-    if not isinstance(value, str) or not GENERATION.match(value):
+    if value is None:
+        match = TITLE_VERSION.search(str(entry.get("title") or ""))
+        value = match.group(1) if match else "0"
+    elif not isinstance(value, str) or not GENERATION.match(value):
+        # YAML reads an unquoted 5.10 as the float 5.1, which sorts below 5.9.
         raise CatalogError(
             f"{source}: model.generation must be a quoted version number, such "
             f'as generation: "4.1" (got {value!r})'

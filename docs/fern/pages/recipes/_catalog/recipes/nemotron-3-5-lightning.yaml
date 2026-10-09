@@ -7,7 +7,6 @@ page: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
 provider: nvidia
 model:
   name: NVIDIA-Nemotron-3.5-Lightning-30B-A3B
-  generation: "3.5"
   hf_id: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
   precision: NVFP4
 status: experimental

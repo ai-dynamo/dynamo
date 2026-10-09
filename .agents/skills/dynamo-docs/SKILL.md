@@ -207,15 +207,13 @@ Each page is a triple — page + catalog entry + nav:
    `deploy`, `expected_performance`. Internal `id:` **must equal the filename**; active entries carry
    `page:`, deferred ones carry `deferred_reason` and omit `page:`. Add the `<id>` to the matching
    `_catalog/index.yaml` (`recipes:` for active, `deferred_recipes:` for deferred). A recipe's
-   `provider:` must be a key in `_catalog/providers.yaml`; add a new model maker there first. Set
-   `model.generation` to the model's quoted version number (`"4.1"` for DeepSeek-V4.1, `"1"` for a
-   first, unnumbered release); it sorts the recipe within its provider, newest first.
+   `provider:` must be a key in `_catalog/providers.yaml`; add a new model maker there first.
 3. **Navigation**: for a **recipe**, run `python3 docs/fern/scripts/gen_recipe_nav.py` (the
    `gen-recipe-nav` pre-commit hook does it for you). It generates the Model Recipes sidebar in
    `docs/fern/index.yml`, the overview's provider filter and counts, the order of the overview's
    model cards, and the provider CSS from the catalog; never edit those spans by hand. Provider
-   order is popularity-ranked, then alphabetical; within a provider, the newest `model.generation`
-   comes first, and within a generation a `Pro` title precedes `Flash`, which precedes untagged
+   order is popularity-ranked, then alphabetical; within a provider, the newest model generation
+   (the first version number in the title) comes first, and within a generation a `Pro` title precedes `Flash`, which precedes untagged
    titles (see the catalog README's Provider order section). For a **benchmark**, add the `- page:` under
    the **Feature Benchmarks** section of `docs/fern/index.yml` by hand; per-benchmark pages are
    usually `hidden: true` (surfaced from the landing page).
@@ -244,7 +242,6 @@ title: Llama 3.1 8B
 provider: meta                    # a key in _catalog/providers.yaml (qwen, nvidia, …)
 model:
   name: Llama 3.1 8B
-  generation: "3.1"               # quoted; sorts newest first within the provider
   hf_id: Meta-Llama/Llama-3.1-8B
   precision: BF16
 status: validated                 # enum: validated | experimental  (NOT "active")
@@ -481,7 +478,7 @@ git commit -s -m "docs: <add|update|move|remove> <page-title>"
 | Recipe page absent from the Recipes tab | Add the `<id>` to `_catalog/index.yaml`, then run `python3 docs/fern/scripts/gen_recipe_nav.py` |
 | `gen_recipe_nav.py` fails on a provider | Add the provider key to `_catalog/providers.yaml` |
 | `gen_recipe_nav.py` fails on a model card | Give each active recipe exactly one card between the overview's `recipe-cards` markers, with `data-provider` equal to the entry's `provider:` and `href` equal to its page file |
-| `gen_recipe_nav.py` fails on `model.generation` | Set it to a quoted version number, such as `generation: "4.1"`; unquoted, YAML reads `5.10` as `5.1` |
+| A recipe sorts in the wrong place within its provider | The generation comes from the first version number in the title; if the title misleads it, set a quoted `model.generation` override, such as `generation: "4.1"` |
 
 ## Key References
 

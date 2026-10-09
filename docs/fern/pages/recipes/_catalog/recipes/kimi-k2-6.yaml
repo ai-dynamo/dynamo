@@ -7,7 +7,6 @@ page: pages/recipes/model-recipes/kimi-k2-6.mdx
 provider: moonshot
 model:
   name: Kimi-K2.6
-  generation: "2.6"
   hf_id: moonshotai/Kimi-K2.6
   precision: NVFP4 + FP8 KV (B200) / native INT4 (H200)
 status: validated

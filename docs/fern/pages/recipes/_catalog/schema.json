@@ -42,12 +42,12 @@
     "model": {
       "type": "object",
       "description": "Model identity.",
-      "required": ["name", "generation"],
+      "required": ["name"],
       "properties": {
         "name": { "type": "string" },
         "generation": {
           "type": "string",
-          "description": "The model's generation as a quoted version number, e.g. \"4.1\" for DeepSeek-V4.1-Flash, or \"1\" for a first, unnumbered release. Within a provider, recipes are listed newest generation first.",
+          "description": "Optional. Overrides the model generation that docs/fern/scripts/gen_recipe_nav.py reads from the title (the first version number, e.g. 4.1 in DeepSeek-V4.1-Flash). Set it, quoted, only when the title misleads that rule. Within a provider, recipes are listed newest generation first.",
           "pattern": "^[0-9]+(\\.[0-9]+)*$"
         },
         "hf_id": { "type": "string" },

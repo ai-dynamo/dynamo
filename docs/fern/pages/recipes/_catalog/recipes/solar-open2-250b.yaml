@@ -7,7 +7,6 @@ page: pages/recipes/model-recipes/solar-open2-250b.mdx
 provider: upstage
 model:
   name: Solar-Open2-250B-Nota-NVFP4
-  generation: "2"
   hf_id: nota-ai/Solar-Open2-250B-Nota-NVFP4
   precision: NVFP4 weights with FP8 KV cache
 status: validated

@@ -6,7 +6,6 @@ title: Kimi-K2.5 NVFP4
 provider: moonshot
 model:
   name: Kimi-K2.5
-  generation: "2.5"
   hf_id: nvidia/Kimi-K2.5-NVFP4
   precision: NVFP4
 status: validated

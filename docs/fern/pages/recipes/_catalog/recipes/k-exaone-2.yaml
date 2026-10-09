@@ -7,7 +7,6 @@ page: pages/recipes/model-recipes/k-exaone-2.mdx
 provider: lg
 model:
   name: K-EXAONE 2.0 750B-A37B
-  generation: "2"
   hf_id: LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4
   precision: NVFP4 W4A4 (FP8 KV cache)
 status: experimental

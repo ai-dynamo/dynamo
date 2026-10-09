@@ -6,7 +6,6 @@ title: Qwen3.6-35B-A3B FP8
 provider: qwen
 model:
   name: Qwen3.6-35B-A3B
-  generation: "3.6"
   hf_id: Qwen/Qwen3.6-35B-A3B-FP8
   precision: FP8
 status: validated

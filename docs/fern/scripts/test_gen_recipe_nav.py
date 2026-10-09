@@ -116,16 +116,39 @@ def test_pro_then_flash_then_untagged_within_a_generation():
 
 
 @pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("DeepSeek-V4.1-Flash", (4, 1)),
+        ("DeepSeek-V4-Pro-0813", (4,)),
+        ("GLM-5.3/5.2", (5, 3)),
+        ("GLM-5 NVFP4", (5,)),
+        ("Kimi-K2.6", (2, 6)),
+        ("Qwen3.8-2.4T-A95B", (3, 8)),
+        ("Qwen3-235B-A22B FP8", (3,)),
+        ("Nemotron 3.5 Lightning", (3, 5)),
+        ("K-EXAONE 2.0", (2,)),
+        ("Solar Open2 250B", (2,)),
+        ("Qwen3.10-7B", (3, 10)),
+        ("GPT-OSS-120B", (0,)),
+        ("Inkling NVFP4", (0,)),
+        ("Llama BF16 INT4 MXFP4", (0,)),
+    ],
+)
+def test_generation_comes_from_the_title(title, expected):
+    assert gen.parse_generation({"title": title}, "x") == expected
+
+
+@pytest.mark.parametrize(
     "value, expected",
     [("4.1", (4, 1)), ("5.10", (5, 10)), ("2.0", (2,)), ("3", (3,))],
 )
-def test_generation_parses_as_a_version(value, expected):
-    entry = {"model": {"generation": value}}
+def test_generation_override_beats_the_title(value, expected):
+    entry = {"title": "Model-9", "model": {"generation": value}}
     assert gen.parse_generation(entry, "x") == expected
 
 
-@pytest.mark.parametrize("value", [5.1, 3, None, "v4", "4.1-flash"])
-def test_generation_must_be_a_quoted_version(value):
+@pytest.mark.parametrize("value", [5.1, 3, "v4", "4.1-flash"])
+def test_generation_override_must_be_a_quoted_version(value):
     # An unquoted 5.10 loads as the float 5.1 and would sort below 5.9.
     with pytest.raises(gen.CatalogError, match="quoted version number"):
         gen.parse_generation({"model": {"generation": value}}, "x")
@@ -145,7 +168,6 @@ def test_slug_defaults_to_page_stem_and_can_be_overridden():
         "title": "X",
         "provider": "zai",
         "page": "pages/x-nvfp4.mdx",
-        "model": {"generation": "1"},
     }
     assert gen.parse_recipe(entry, registry, "x").slug == "x-nvfp4"
     assert gen.parse_recipe({**entry, "slug": "x"}, registry, "x").slug == "x"
