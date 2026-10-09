@@ -4,9 +4,9 @@
 //! Concurrent Radix Tree (compressed trie) implementation for KV cache routing.
 //!
 //! See `README.md` in this module for structure, removal, split, reclamation, and
-//! concurrency notes. The volume-triggered stale-leaf reclamation is inspired by the chain
-//! index in smg-project/smg #2814 (eager reclamation of emptied storage); it shares no code
-//! with SMG.
+//! concurrency notes. The volume-triggered stale-leaf reclamation and the edge capacity
+//! discipline are inspired by the chain index in smg-project/smg #2814 (eager reclamation
+//! of emptied storage, arrays kept close to their length); they share no code with SMG.
 
 use std::sync::Arc;
 
@@ -40,7 +40,10 @@ use node::*;
 #[cfg(not(any(test, feature = "bench")))]
 use reclaim::ReclaimConfig;
 #[cfg(any(test, feature = "bench"))]
-pub use reclaim::{DEFAULT_DEAD_FLOOR, DEFAULT_MIN_GAP, ReclaimConfig};
+pub use reclaim::{
+    DEFAULT_DEAD_FLOOR, DEFAULT_LEAF_MIN_SLACK, DEFAULT_MIN_GAP, DEFAULT_SLACK_DIVISOR,
+    ReclaimConfig,
+};
 use reclaim::{ReclaimState, SweepOutcome, SweepTrigger};
 use types::*;
 

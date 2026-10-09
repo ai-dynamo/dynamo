@@ -5,6 +5,7 @@
 
 use super::coverage::{FullCoverage, Slot};
 use super::edge_index::EdgeIndex;
+use super::reclaim::EdgeCapacity;
 use crate::protocols::*;
 
 pub(super) struct RemoveOutcome {
@@ -269,12 +270,14 @@ impl CrtcNodeState {
     }
 
     /// Appends `blocks` for `slot`. Every other full rank keeps only the old edge: its
-    /// cutoff is published before its bit is cleared.
+    /// cutoff is published before its bit is cleared. Growth past the edge's capacity
+    /// follows `capacity`'s slack rule.
     pub(super) fn append_blocks_to_leaf(
         &mut self,
         full: &FullCoverage,
         slot: Slot,
         blocks: &[KvCacheStoredBlockData],
+        capacity: &EdgeCapacity,
     ) {
         debug_assert!(!blocks.is_empty());
 
@@ -287,6 +290,7 @@ impl CrtcNodeState {
         });
         self.promote_to_full(full, slot);
 
+        capacity.reserve_for_append(&mut self.edge, blocks.len());
         self.edge.extend(
             blocks
                 .iter()
@@ -298,8 +302,14 @@ impl CrtcNodeState {
     /// Splits off `edge[pos..]` for a suffix node and moves partial coverage that reaches
     /// the split point: those ranks become full on this prefix, and keep any remainder as
     /// a suffix cutoff. Returns the suffix state; its full coverage is this node's full
-    /// coverage before the split, which the caller snapshots first.
-    pub(super) fn split_off_suffix(&mut self, full: &FullCoverage, pos: usize) -> Self {
+    /// coverage before the split, which the caller snapshots first. The prefix never grows
+    /// again, so `capacity` may move it into an exact-size allocation.
+    pub(super) fn split_off_suffix(
+        &mut self,
+        full: &FullCoverage,
+        pos: usize,
+        capacity: &EdgeCapacity,
+    ) -> Self {
         debug_assert!(
             pos > 0 && pos < self.edge.len(),
             "split position {pos} out of range for edge length {}",
@@ -307,6 +317,7 @@ impl CrtcNodeState {
         );
 
         let suffix_edge = self.edge.split_off(pos);
+        capacity.trim_split_prefix(&mut self.edge);
         self.edge_index.truncate(&self.edge);
 
         let mut suffix_cutoffs = SlotCutoffs::default();
@@ -465,7 +476,7 @@ mod tests {
         let split = edge.len();
         edge.extend([200, 201]);
         let mut state = CrtcNodeState::for_blocks(&blocks(&edge));
-        let _suffix = state.split_off_suffix(&full, split);
+        let _suffix = state.split_off_suffix(&full, split, &EdgeCapacity::default());
         assert!(state.edge_index.capacity() > 0);
         assert_position_near_matches_index(&state);
     }
@@ -480,7 +491,12 @@ mod tests {
         let mut state = CrtcNodeState::for_blocks(&[block(1), block(2), block(3)]);
         state.cutoffs.insert(partial, 1);
 
-        state.append_blocks_to_leaf(&full, extender, &[block(4), block(5)]);
+        state.append_blocks_to_leaf(
+            &full,
+            extender,
+            &[block(4), block(5)],
+            &EdgeCapacity::default(),
+        );
 
         assert_eq!(state.edge.len(), 5);
         assert_eq!(state.position(ExternalSequenceBlockHash(5)), Some(4));
@@ -497,7 +513,7 @@ mod tests {
         let mut state = CrtcNodeState::for_blocks(&[block(1), block(2), block(3)]);
         state.cutoffs.insert(extender, 2);
 
-        state.append_blocks_to_leaf(&full, extender, &[block(4)]);
+        state.append_blocks_to_leaf(&full, extender, &[block(4)], &EdgeCapacity::default());
 
         assert!(full.contains(extender));
         assert!(state.cutoffs.is_empty());
@@ -511,7 +527,7 @@ mod tests {
     fn replay(chunks: &[Vec<u64>], full: &FullCoverage, slot: Slot) -> CrtcNodeState {
         let mut state = CrtcNodeState::for_blocks(&blocks(&chunks[0]));
         for chunk in &chunks[1..] {
-            state.append_blocks_to_leaf(full, slot, &blocks(chunk));
+            state.append_blocks_to_leaf(full, slot, &blocks(chunk), &EdgeCapacity::default());
         }
         state
     }
@@ -553,6 +569,22 @@ mod tests {
         }
     }
 
+    /// A leaf that appended past its capacity holds at most `max(len / 8, 4)` spare blocks
+    /// under the default slack rule, before allocator rounding.
+    fn assert_leaf_slack(state: &CrtcNodeState) {
+        let len = state.edge.len();
+        let capacity = state.edge.capacity();
+        assert!(
+            capacity <= len + (len / 8).max(4),
+            "edge of {len} blocks has capacity {capacity}"
+        );
+    }
+
+    /// Split prefixes and suffixes hold no spare capacity.
+    fn assert_exact(state: &CrtcNodeState) {
+        assert_eq!(state.edge.capacity(), state.edge.len());
+    }
+
     /// Splits `prefix`, which holds `edge[..prefix.edge.len()]`, at the decreasing points
     /// `pick` chooses until one block remains, checking both halves after every split.
     fn split_down(
@@ -565,9 +597,11 @@ mod tests {
         let mut len = prefix.edge.len();
         while len > 1 {
             let at = pick(len);
-            let inner = prefix.split_off_suffix(full, at);
+            let inner = prefix.split_off_suffix(full, at, &EdgeCapacity::default());
             assert_index_matches(&prefix, &last_positions(&edge[..at]), probes, 2);
             assert_index_matches(&inner, &last_positions(&edge[at..len]), probes, 1);
+            assert_exact(&prefix);
+            assert_exact(&inner);
             len = at;
         }
     }
@@ -616,18 +650,24 @@ mod tests {
             let mut len = 0;
             for (i, chunk) in chunks.iter().enumerate() {
                 if i > 0 {
-                    state.append_blocks_to_leaf(&full, slot, &blocks(chunk));
+                    state.append_blocks_to_leaf(
+                        &full,
+                        slot,
+                        &blocks(chunk),
+                        &EdgeCapacity::default(),
+                    );
                 }
                 for &hash in chunk {
                     model.insert(hash, len);
                     len += 1;
                 }
                 assert_index_matches(&state, &model, &probes, 1);
+                assert_leaf_slack(&state);
             }
 
             for split in 1..edge.len() {
                 let mut prefix = replay(&chunks, &full, slot);
-                let mut suffix = prefix.split_off_suffix(&full, split);
+                let mut suffix = prefix.split_off_suffix(&full, split, &EdgeCapacity::default());
 
                 let mut prefix_model = model.clone();
                 for hash in &edge[split..] {
@@ -639,18 +679,21 @@ mod tests {
                     prefix_model.entry(hash).or_insert(pos);
                 }
                 assert_index_matches(&prefix, &prefix_model, &probes, 2);
+                assert_exact(&prefix);
 
                 let mut suffix_model = last_positions(&edge[split..]);
                 assert_index_matches(&suffix, &suffix_model, &probes, 1);
+                assert_exact(&suffix);
 
                 let tail: Vec<u64> = (0..rng.u64(1..=20)).map(|_| draw(&mut rng)).collect();
                 let suffix_len = suffix.edge.len();
-                suffix.append_blocks_to_leaf(&full, slot, &blocks(&tail));
+                suffix.append_blocks_to_leaf(&full, slot, &blocks(&tail), &EdgeCapacity::default());
                 for (offset, &hash) in tail.iter().enumerate() {
                     suffix_model.insert(hash, suffix_len + offset);
                 }
                 let suffix_probes: Vec<u64> = probes.iter().chain(&tail).copied().collect();
                 assert_index_matches(&suffix, &suffix_model, &suffix_probes, 1);
+                assert_leaf_slack(&suffix);
 
                 split_down(prefix, &edge, &probes, &full, |len| rng.usize(1..len));
             }
@@ -659,6 +702,86 @@ mod tests {
             split_down(replay(&chunks, &full, slot), &edge, &probes, &full, |len| {
                 len - 1 - rng.usize(..(len - 1).min(3))
             });
+        }
+    }
+
+    /// Appending one block at a time keeps every edge within its slack bound, at about
+    /// `divisor` reallocations' worth of copying per block, and a divisor of zero keeps
+    /// `Vec`'s doubling.
+    #[test]
+    fn leaf_appends_keep_capacity_within_the_slack_bound() {
+        use super::super::reclaim::ReclaimConfig;
+        let slot = Slot::new(1);
+        let full = FullCoverage::single(slot);
+        for (divisor, min_slack) in [(8, 4), (4, 4), (8, 1), (0, 0)] {
+            let capacity = EdgeCapacity::with(ReclaimConfig {
+                leaf_slack_divisor: divisor,
+                leaf_min_slack: min_slack,
+                ..ReclaimConfig::default()
+            });
+            let mut state = CrtcNodeState::for_blocks(&[block(0)]);
+            let mut growths = 0;
+            let mut max_ratio: f64 = 1.0;
+            for hash in 1..4_000u64 {
+                let before = state.edge.capacity();
+                state.append_blocks_to_leaf(&full, slot, &[block(hash)], &capacity);
+                growths += usize::from(state.edge.capacity() != before);
+                let len = state.edge.len();
+                let cap = state.edge.capacity();
+                max_ratio = max_ratio.max(cap as f64 / len as f64);
+                if divisor > 0 {
+                    let slack = (len / divisor as usize).max(min_slack as usize);
+                    assert!(cap <= len + slack, "divisor {divisor}: {cap} for {len}");
+                }
+                assert_eq!(
+                    state.position(ExternalSequenceBlockHash(hash)),
+                    Some(len - 1)
+                );
+            }
+            match divisor {
+                0 => assert!(max_ratio > 1.9, "doubling stayed at {max_ratio}"),
+                d => {
+                    // Geometric growth by 1 + 1/d: about d * ln(4000) reallocations.
+                    let expected = (d as f64 * (4_000f64).ln()) as usize;
+                    assert!(
+                        growths <= expected + 8,
+                        "{growths} reallocations for divisor {d}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A split prefix moves into an exact allocation unless the setting is off.
+    #[test]
+    fn split_prefix_is_exact_unless_disabled() {
+        use super::super::reclaim::ReclaimConfig;
+        let slot = Slot::new(1);
+        let full = FullCoverage::single(slot);
+        for exact in [true, false] {
+            let capacity = EdgeCapacity::with(ReclaimConfig {
+                exact_split_prefix: exact,
+                leaf_slack_divisor: 0,
+                ..ReclaimConfig::default()
+            });
+            let mut state = CrtcNodeState::for_blocks(&blocks(&[1, 2]));
+            for hash in 3..=40 {
+                state.append_blocks_to_leaf(&full, slot, &[block(hash)], &capacity);
+            }
+            let grown = state.edge.capacity();
+            let suffix = state.split_off_suffix(&full, 5, &capacity);
+            assert_eq!(suffix.edge.capacity(), suffix.edge.len());
+            if exact {
+                assert_eq!(state.edge.capacity(), 5);
+            } else {
+                assert_eq!(state.edge.capacity(), grown);
+            }
+            for hash in 1..=5 {
+                assert_eq!(
+                    state.position(ExternalSequenceBlockHash(hash)),
+                    Some(hash as usize - 1)
+                );
+            }
         }
     }
 }

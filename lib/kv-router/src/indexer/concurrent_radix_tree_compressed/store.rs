@@ -114,7 +114,12 @@ impl ConcurrentRadixTreeCompressed {
             let Some(plan) = node.plan_store_parent_edge(parent_hash, &op.blocks) else {
                 continue;
             };
-            let edge_action = node.apply_store_parent_edge_plan(worker.slot, plan, &op.blocks);
+            let edge_action = node.apply_store_parent_edge_plan(
+                worker.slot,
+                plan,
+                &op.blocks,
+                &self.reclaim.capacity,
+            );
 
             match edge_action {
                 ParentEdgeAction::Stale => continue,
@@ -334,10 +339,12 @@ impl ConcurrentRadixTreeCompressed {
             // Parent hashes can point inside a compressed edge. Before attaching a
             // child, try to reuse that existing suffix or split at the parent.
             if let Some(edge_plan) = cursor.parent.plan_store_parent_edge(parent_hash, remaining) {
-                let edge_action =
-                    cursor
-                        .parent
-                        .apply_store_parent_edge_plan(worker.slot, edge_plan, remaining);
+                let edge_action = cursor.parent.apply_store_parent_edge_plan(
+                    worker.slot,
+                    edge_plan,
+                    remaining,
+                    &self.reclaim.capacity,
+                );
                 match edge_action {
                     ParentEdgeAction::Stale => {
                         return Ok(StoreInsertStep::RetryParent {
@@ -381,6 +388,7 @@ impl ConcurrentRadixTreeCompressed {
                 parent_hash,
                 remaining,
                 shape_version,
+                &self.reclaim.capacity,
             ) {
                 None => {
                     return Ok(StoreInsertStep::RetryParent {
@@ -413,6 +421,7 @@ impl ConcurrentRadixTreeCompressed {
                 parent_hash,
                 remaining,
                 shape_version,
+                &self.reclaim.capacity,
             ) {
                 None => {
                     return Ok(StoreInsertStep::RetryParent {
@@ -500,6 +509,7 @@ impl ConcurrentRadixTreeCompressed {
                     tail[0].tokens_hash,
                     tail_candidate,
                     scan.shape_version,
+                    &self.reclaim.capacity,
                 ) else {
                     continue;
                 };

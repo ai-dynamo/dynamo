@@ -61,7 +61,16 @@ repairing lookup state.
 
 Each node contains:
 
-- `edge`: the compressed sequence of local and external block hashes.
+- `edge`: the compressed sequence of local and external block hashes. Its
+  allocation stays close to its length (see `EdgeCapacity` in `reclaim.rs`; the
+  capacity discipline is credited to the chain index in smg-project/smg #2814):
+  a split copies the prefix, which never grows again, into an exact-size
+  allocation (a copy rather than `shrink_to_fit`, since an in-place shrinking
+  `realloc` can keep the whole block), and a leaf that appends past its
+  capacity reserves `need / 8` blocks of slack, at least 4, instead of doubling.
+  After any append, `capacity <= len + max(len / 8, 4)` before allocator
+  rounding, at about eight amortized copies per appended block. Store-built
+  leaves and split suffixes are already exact.
 - `edge_index`: reverse lookup from `ExternalSequenceBlockHash` to position in
   the edge. Removal uses this to find an evicted block once it has the node.
   A position never moves: edges grow only at the tail, and a split truncates

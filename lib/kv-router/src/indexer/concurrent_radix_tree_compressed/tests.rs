@@ -393,6 +393,7 @@ mod race_tests {
                 slot(&index, worker_a),
                 plan,
                 &continuation.blocks,
+                &index.reclaim.capacity,
             );
             assert!(matches!(action, ParentEdgeAction::InsertFromParent(None)));
 
@@ -3159,6 +3160,7 @@ mod reclaim_tests {
             volume_sweep: true,
             dead_floor: 1,
             min_gap: Duration::ZERO,
+            ..ReclaimConfig::default()
         }
     }
 
@@ -3531,5 +3533,67 @@ mod reclaim_tests {
                 .unwrap();
             assert_eq!(held, 0, "round {round}");
         }
+    }
+}
+
+/// Exact-size split prefixes and capped leaf slack (`reclaim.rs`, `EdgeCapacity`).
+mod edge_capacity_tests {
+    use super::*;
+
+    /// Sixty-four workers share eight 32-block prompts, then decode 256 blocks each, one
+    /// to four at a time, while siblings split each other's prompts. Returns edge capacity
+    /// over edge length.
+    fn decode_workload_slack(config: ReclaimConfig) -> f64 {
+        let index = ConcurrentRadixTreeCompressed::with_reclaim_config(config);
+        let mut lookup = direct_lookup();
+        let mut rng = fastrand::Rng::with_seed(7);
+        for worker_id in 0..64u64 {
+            let prompt: Vec<u64> = (0..32).map(|i| 1_000 * (worker_id % 8) + i).collect();
+            // Workers diverge from their prompt group at a random point.
+            let shared = rng.usize(8..=32);
+            let mut seq: Vec<u64> = prompt[..shared].to_vec();
+            seq.extend((shared..32).map(|i| 1_000_000 * (worker_id + 1) + i as u64));
+            apply_direct(&index, &mut lookup, make_store_event(worker_id, &seq));
+            let mut next = 0;
+            while next < 256 {
+                let take = rng.usize(1..=4).min(256 - next);
+                let tail: Vec<u64> = (next..next + take)
+                    .map(|i| 2_000_000 * (worker_id + 1) + i as u64)
+                    .collect();
+                apply_direct(
+                    &index,
+                    &mut lookup,
+                    make_store_event_with_parent(worker_id, &seq, &tail),
+                );
+                seq.extend(tail);
+                next += take;
+            }
+            assert_direct_score(&index, &seq, worker(worker_id), seq.len() as u32);
+        }
+        let memory = index.probe_memory();
+        assert_eq!(
+            memory.edge_len_bytes,
+            index.probe_shape().linked_blocks * 16
+        );
+        memory.edge_slack()
+    }
+
+    #[test]
+    fn decode_edges_stay_within_slack() {
+        let slack = decode_workload_slack(ReclaimConfig::default());
+        assert!(slack <= 1.15, "edge slack {slack:.3}");
+        let slack_quarter = decode_workload_slack(ReclaimConfig {
+            leaf_slack_divisor: 4,
+            ..ReclaimConfig::default()
+        });
+        assert!(
+            slack_quarter <= 1.3,
+            "edge slack {slack_quarter:.3} with divisor 4"
+        );
+        let legacy = decode_workload_slack(ReclaimConfig::legacy());
+        assert!(legacy > slack + 0.2, "legacy {legacy:.3} vs {slack:.3}");
+        eprintln!(
+            "edge slack: default {slack:.3}, divisor 4 {slack_quarter:.3}, legacy {legacy:.3}"
+        );
     }
 }

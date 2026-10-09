@@ -11,6 +11,7 @@ use rustc_hash::FxHashMap;
 
 use super::children::{ChildInsertResult, NodeChildren};
 use super::coverage::{FullCoverage, Slot, SlotSet, SlotTable};
+use super::reclaim::EdgeCapacity;
 use super::state::{CrtcNodeState, RemoveOutcome};
 use super::types::*;
 use crate::protocols::*;
@@ -284,7 +285,11 @@ impl Node {
     pub(super) fn split_for_test(&self, pos: usize) -> SharedNode {
         let version = self.shape_version.load(Ordering::Acquire);
         self.apply_edge_shape_update(version, |state, _children| {
-            (self.split_at_locked(state, pos).suffix, true)
+            (
+                self.split_at_locked(state, pos, &EdgeCapacity::default())
+                    .suffix,
+                true,
+            )
         })
         .expect("no concurrent shape change in a test")
     }
@@ -508,6 +513,7 @@ impl Node {
         slot: Slot,
         plan: ParentEdgePlan,
         blocks: &[KvCacheStoredBlockData],
+        capacity: &EdgeCapacity,
     ) -> ParentEdgeAction {
         match plan.action {
             // NOTE(perf): Removing this validation did not produce a repeatable
@@ -540,7 +546,12 @@ impl Node {
             ParentEdgePlanAction::ReuseSuffixAndExtendLeaf { append_start } => self
                 .apply_edge_shape_update(plan.shape_version, |state, _children| {
                     if !self.internal.load(Ordering::Acquire) {
-                        state.append_blocks_to_leaf(&self.full, slot, &blocks[append_start..]);
+                        state.append_blocks_to_leaf(
+                            &self.full,
+                            slot,
+                            &blocks[append_start..],
+                            capacity,
+                        );
                         (
                             ParentEdgeAction::ReuseExistingEdge {
                                 coverage_changed: true,
@@ -557,7 +568,7 @@ impl Node {
                 .apply_edge_shape_update(plan.shape_version, |state, _children| {
                     (
                         ParentEdgeAction::InsertFromParent(Some(
-                            self.split_at_locked(state, split_pos),
+                            self.split_at_locked(state, split_pos, capacity),
                         )),
                         true,
                     )
@@ -610,10 +621,11 @@ impl Node {
         tail_first_local: LocalBlockHash,
         tail_node: SharedNode,
         shape_version: u64,
+        capacity: &EdgeCapacity,
     ) -> SplitStoreOutcome {
         self.apply_edge_shape_update(shape_version, |state, children| {
             let was_dead = !state.has_any_workers(&self.full);
-            let mut split = self.split_at_locked(state, split_pos);
+            let mut split = self.split_at_locked(state, split_pos, capacity);
             state.promote_to_full(&self.full, slot);
             if was_dead {
                 // The prefix stayed holder-less through the split; the store covers it now.
@@ -631,6 +643,7 @@ impl Node {
         parent_hash: ExternalSequenceBlockHash,
         blocks: &[KvCacheStoredBlockData],
         shape_version: u64,
+        capacity: &EdgeCapacity,
     ) -> Option<bool> {
         if self.internal.load(Ordering::Acquire) {
             return Some(false);
@@ -647,7 +660,7 @@ impl Node {
                 return (false, false);
             }
 
-            state.append_blocks_to_leaf(&self.full, slot, blocks);
+            state.append_blocks_to_leaf(&self.full, slot, blocks, capacity);
             (true, true)
         })
     }
@@ -708,13 +721,18 @@ impl Node {
         }
     }
 
-    fn split_at_locked(&self, state: &mut CrtcNodeState, pos: usize) -> SplitLookupData {
+    fn split_at_locked(
+        &self,
+        state: &mut CrtcNodeState,
+        pos: usize,
+        capacity: &EdgeCapacity,
+    ) -> SplitLookupData {
         // The suffix inherits this node's full coverage as it was before the split
         // promotes partial ranks that reach the split point.
         let full_before = self.full.snapshot();
         let was_dead = full_before.is_empty() && state.cutoffs.is_empty();
         let suffix_full = FullCoverage::from_set(&full_before);
-        let suffix_state = state.split_off_suffix(&self.full, pos);
+        let suffix_state = state.split_off_suffix(&self.full, pos, capacity);
         let suffix_first_local = suffix_state.edge[0].0;
         let suffix_len = suffix_state.edge.len();
         // A live node can leave a holder-less suffix when only cutoffs short of `pos`

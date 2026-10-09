@@ -72,6 +72,7 @@ impl HarnessBackend for EagerReclaimCrtc {
                 volume_sweep: true,
                 dead_floor: 1,
                 min_gap: std::time::Duration::ZERO,
+                ..ReclaimConfig::default()
             },
         ))
     }

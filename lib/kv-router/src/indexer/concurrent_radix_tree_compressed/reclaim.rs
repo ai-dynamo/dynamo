@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Eager reclamation of stale leaves.
+//! Eager reclamation of stale leaves and capacity discipline for compressed edges.
 //!
 //! The design is inspired by the chain index in smg-project/smg #2814, which frees emptied
-//! storage as soon as enough of it accumulates. This module applies the idea to CRTC's
-//! linked nodes; it shares no code with SMG.
+//! storage as soon as enough of it accumulates and keeps its arrays close to their length.
+//! This module applies both ideas to CRTC's linked nodes; it shares no code with SMG.
 //!
 //! - **Volume trigger.** Every event lane counts, in a lane-local [`ReclaimTally`], the
 //!   blocks it links into the tree and the blocks it leaves without any holder. Tallies are
@@ -16,15 +16,19 @@
 //!   in flight and no sooner than `max(min_gap, 10 x last sweep)` after the previous one,
 //!   which caps the sweep duty cycle near 10% of one lane. The five-minute timer stays as a
 //!   backstop. A sweep recounts both values exactly and overwrites the estimates.
+//! - **Edge capacity.** A split prefix never grows again, so it is copied into an
+//!   exact-size allocation; a leaf that appends past its capacity reserves at most
+//!   `need / divisor` (at least `min_slack`) blocks of slack instead of doubling.
 
 #[cfg(any(test, feature = "bench"))]
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_utils::CachePadded;
 
 use super::trigger::VolumeTrigger;
+use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
 
 /// A lane flushes its tally once either delta reaches this many blocks.
 pub(super) const TALLY_FLUSH_BLOCKS: i64 = 1024;
@@ -32,8 +36,12 @@ pub(super) const TALLY_FLUSH_BLOCKS: i64 = 1024;
 pub const DEFAULT_DEAD_FLOOR: u64 = 65_536;
 /// Minimum time between the end of one sweep and a volume-triggered next one, by default.
 pub const DEFAULT_MIN_GAP: Duration = Duration::from_millis(100);
+/// A growing leaf reserves `need / DEFAULT_SLACK_DIVISOR` blocks of slack, by default.
+pub const DEFAULT_SLACK_DIVISOR: u32 = 8;
+/// A growing leaf reserves at least this many blocks of slack, by default.
+pub const DEFAULT_LEAF_MIN_SLACK: u32 = 4;
 
-/// Settings for stale-leaf reclamation.
+/// Settings for stale-leaf reclamation and edge capacity.
 #[derive(Clone, Copy, Debug)]
 pub struct ReclaimConfig {
     /// Schedule a sweep once dead volume calls for one; otherwise only the timer does.
@@ -42,6 +50,12 @@ pub struct ReclaimConfig {
     pub dead_floor: u64,
     /// Minimum time between a sweep's end and the next volume-triggered sweep.
     pub min_gap: Duration,
+    /// Leaf append slack divisor; `0` keeps `Vec`'s doubling growth.
+    pub leaf_slack_divisor: u32,
+    /// Minimum leaf append slack in blocks.
+    pub leaf_min_slack: u32,
+    /// Copy split prefixes into exact-size allocations.
+    pub exact_split_prefix: bool,
 }
 
 impl Default for ReclaimConfig {
@@ -50,16 +64,21 @@ impl Default for ReclaimConfig {
             volume_sweep: true,
             dead_floor: DEFAULT_DEAD_FLOOR,
             min_gap: DEFAULT_MIN_GAP,
+            leaf_slack_divisor: DEFAULT_SLACK_DIVISOR,
+            leaf_min_slack: DEFAULT_LEAF_MIN_SLACK,
+            exact_split_prefix: true,
         }
     }
 }
 
 impl ReclaimConfig {
-    /// The behavior before volume sweeps, for A/B runs.
+    /// The behavior before volume sweeps and capacity discipline, for A/B runs.
     #[cfg(any(test, feature = "bench"))]
     pub fn legacy() -> Self {
         Self {
             volume_sweep: false,
+            leaf_slack_divisor: 0,
+            exact_split_prefix: false,
             ..Self::default()
         }
     }
@@ -98,6 +117,7 @@ pub(super) struct ReclaimState {
     origin: Instant,
     /// Whether the sweep in flight was scheduled by the volume trigger.
     volume_scheduled: AtomicBool,
+    pub(super) capacity: EdgeCapacity,
     #[cfg(any(test, feature = "bench"))]
     pub(super) stats: SweepStats,
 }
@@ -116,6 +136,7 @@ impl ReclaimState {
             )),
             origin: Instant::now(),
             volume_scheduled: AtomicBool::new(false),
+            capacity: EdgeCapacity::with(config),
             #[cfg(any(test, feature = "bench"))]
             stats: SweepStats::default(),
         }
@@ -128,6 +149,7 @@ impl ReclaimState {
             config.dead_floor,
             micros(config.min_gap),
         );
+        self.capacity.configure(config);
     }
 
     fn now_us(&self) -> u64 {
@@ -239,5 +261,76 @@ impl SweepStats {
         self.last_nodes.store(outcome.nodes, Ordering::Relaxed);
         self.last_linked.store(outcome.linked, Ordering::Relaxed);
         self.last_dead.store(outcome.dead, Ordering::Relaxed);
+    }
+}
+
+type EdgeEntry = (LocalBlockHash, ExternalSequenceBlockHash);
+
+/// Capacity rules for compressed edges. Read only when an edge splits or outgrows its
+/// allocation.
+pub(super) struct EdgeCapacity {
+    slack_divisor: AtomicU32,
+    min_slack: AtomicU32,
+    exact_split_prefix: AtomicBool,
+}
+
+impl Default for EdgeCapacity {
+    fn default() -> Self {
+        let capacity = Self {
+            slack_divisor: AtomicU32::new(0),
+            min_slack: AtomicU32::new(0),
+            exact_split_prefix: AtomicBool::new(false),
+        };
+        capacity.configure(ReclaimConfig::default());
+        capacity
+    }
+}
+
+impl EdgeCapacity {
+    fn configure(&self, config: ReclaimConfig) {
+        self.slack_divisor
+            .store(config.leaf_slack_divisor, Ordering::Relaxed);
+        self.min_slack
+            .store(config.leaf_min_slack, Ordering::Relaxed);
+        self.exact_split_prefix
+            .store(config.exact_split_prefix, Ordering::Relaxed);
+    }
+
+    pub(super) fn with(config: ReclaimConfig) -> Self {
+        let capacity = Self::default();
+        capacity.configure(config);
+        capacity
+    }
+
+    /// Makes room for `additional` more blocks on a leaf edge. Past its capacity the edge
+    /// reserves `need / divisor` blocks of slack, at least `min_slack`, so after any append
+    /// `capacity <= len + max(len / divisor, min_slack)` before allocator rounding. A divisor
+    /// of zero leaves growth to `Vec`.
+    #[inline]
+    pub(super) fn reserve_for_append(&self, edge: &mut Vec<EdgeEntry>, additional: usize) {
+        let need = edge.len() + additional;
+        if edge.capacity() >= need {
+            return;
+        }
+        let divisor = self.slack_divisor.load(Ordering::Relaxed) as usize;
+        if divisor == 0 {
+            return;
+        }
+        let slack = (need / divisor).max(self.min_slack.load(Ordering::Relaxed) as usize);
+        edge.reserve_exact(need + slack - edge.len());
+    }
+
+    /// Moves a split prefix into an exact-size allocation. A split prefix is internal and
+    /// never grows again, so its leftover capacity would be slack for the node's lifetime.
+    /// Copying instead of `shrink_to_fit` frees the slack on every allocator: an in-place
+    /// shrinking `realloc` can keep the whole block.
+    #[inline]
+    pub(super) fn trim_split_prefix(&self, edge: &mut Vec<EdgeEntry>) {
+        if edge.capacity() == edge.len() || !self.exact_split_prefix.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut exact = Vec::with_capacity(edge.len());
+        exact.extend_from_slice(edge);
+        *edge = exact;
     }
 }
