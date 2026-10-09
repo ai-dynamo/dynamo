@@ -22,12 +22,12 @@ type Manifest capnp.Struct
 const Manifest_TypeID = 0xdfeff145e86a5a8f
 
 func NewManifest(s *capnp.Segment) (Manifest, error) {
-	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 4})
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 5})
 	return Manifest(st), err
 }
 
 func NewRootManifest(s *capnp.Segment) (Manifest, error) {
-	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 4})
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 5})
 	return Manifest(st), err
 }
 
@@ -149,12 +149,36 @@ func (s Manifest) SetContractRevision(v uint32) {
 	capnp.Struct(s).SetUint32(0, v)
 }
 
+func (s Manifest) Checkpoint() (CheckpointReference, error) {
+	p, err := capnp.Struct(s).Ptr(4)
+	return CheckpointReference(p.Struct()), err
+}
+
+func (s Manifest) HasCheckpoint() bool {
+	return capnp.Struct(s).HasPtr(4)
+}
+
+func (s Manifest) SetCheckpoint(v CheckpointReference) error {
+	return capnp.Struct(s).SetPtr(4, capnp.Struct(v).ToPtr())
+}
+
+// NewCheckpoint sets the checkpoint field to a newly
+// allocated CheckpointReference struct, preferring placement in s's segment.
+func (s Manifest) NewCheckpoint() (CheckpointReference, error) {
+	ss, err := NewCheckpointReference(capnp.Struct(s).Segment())
+	if err != nil {
+		return CheckpointReference{}, err
+	}
+	err = capnp.Struct(s).SetPtr(4, capnp.Struct(ss).ToPtr())
+	return ss, err
+}
+
 // Manifest_List is a list of Manifest.
 type Manifest_List = capnp.StructList[Manifest]
 
 // NewManifest creates a new list of Manifest.
 func NewManifest_List(s *capnp.Segment, sz int32) (Manifest_List, error) {
-	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 4}, sz)
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 5}, sz)
 	return capnp.StructList[Manifest](l), err
 }
 
@@ -176,6 +200,148 @@ func (p Manifest_Future) Artifacts() ArtifactInfo_Future {
 }
 func (p Manifest_Future) Reserved3() *capnp.Future {
 	return p.Future.Field(3, nil)
+}
+
+type CheckpointReference capnp.Struct
+
+// CheckpointReference_TypeID is the unique identifier for the type CheckpointReference.
+const CheckpointReference_TypeID = 0x884c48b4717617d3
+
+func NewCheckpointReference(s *capnp.Segment) (CheckpointReference, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2})
+	return CheckpointReference(st), err
+}
+
+func NewRootCheckpointReference(s *capnp.Segment) (CheckpointReference, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2})
+	return CheckpointReference(st), err
+}
+
+func ReadRootCheckpointReference(msg *capnp.Message) (CheckpointReference, error) {
+	root, err := msg.Root()
+	return CheckpointReference(root.Struct()), err
+}
+
+func (s CheckpointReference) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (CheckpointReference) DecodeFromPtr(p capnp.Ptr) CheckpointReference {
+	return CheckpointReference(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s CheckpointReference) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s CheckpointReference) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s CheckpointReference) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s CheckpointReference) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s CheckpointReference) Provider() CheckpointProvider {
+	return CheckpointProvider(capnp.Struct(s).Uint16(0))
+}
+
+func (s CheckpointReference) SetProvider(v CheckpointProvider) {
+	capnp.Struct(s).SetUint16(0, uint16(v))
+}
+
+func (s CheckpointReference) Model() (string, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return p.Text(), err
+}
+
+func (s CheckpointReference) HasModel() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s CheckpointReference) ModelBytes() ([]byte, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return p.TextBytes(), err
+}
+
+func (s CheckpointReference) SetModel(v string) error {
+	return capnp.Struct(s).SetText(0, v)
+}
+
+func (s CheckpointReference) Revision() (string, error) {
+	p, err := capnp.Struct(s).Ptr(1)
+	return p.Text(), err
+}
+
+func (s CheckpointReference) HasRevision() bool {
+	return capnp.Struct(s).HasPtr(1)
+}
+
+func (s CheckpointReference) RevisionBytes() ([]byte, error) {
+	p, err := capnp.Struct(s).Ptr(1)
+	return p.TextBytes(), err
+}
+
+func (s CheckpointReference) SetRevision(v string) error {
+	return capnp.Struct(s).SetText(1, v)
+}
+
+// CheckpointReference_List is a list of CheckpointReference.
+type CheckpointReference_List = capnp.StructList[CheckpointReference]
+
+// NewCheckpointReference creates a new list of CheckpointReference.
+func NewCheckpointReference_List(s *capnp.Segment, sz int32) (CheckpointReference_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2}, sz)
+	return capnp.StructList[CheckpointReference](l), err
+}
+
+// CheckpointReference_Future is a wrapper for a CheckpointReference promised by a client call.
+type CheckpointReference_Future struct{ *capnp.Future }
+
+func (f CheckpointReference_Future) Struct() (CheckpointReference, error) {
+	p, err := f.Future.Ptr()
+	return CheckpointReference(p.Struct()), err
+}
+
+type CheckpointProvider uint16
+
+// CheckpointProvider_TypeID is the unique identifier for the type CheckpointProvider.
+const CheckpointProvider_TypeID = 0xc6ab171ec7a589a9
+
+// Values of CheckpointProvider.
+const (
+	CheckpointProvider_huggingFace CheckpointProvider = 0
+)
+
+// String returns the enum's constant name.
+func (c CheckpointProvider) String() string {
+	switch c {
+	case CheckpointProvider_huggingFace:
+		return "huggingFace"
+
+	default:
+		return ""
+	}
+}
+
+// CheckpointProviderFromString returns the enum value with a name,
+// or the zero value if there's no such value.
+func CheckpointProviderFromString(c string) CheckpointProvider {
+	switch c {
+	case "huggingFace":
+		return CheckpointProvider_huggingFace
+
+	default:
+		return 0
+	}
+}
+
+type CheckpointProvider_List = capnp.EnumList[CheckpointProvider]
+
+func NewCheckpointProvider_List(s *capnp.Segment, sz int32) (CheckpointProvider_List, error) {
+	return capnp.NewEnumList[CheckpointProvider](s, sz)
 }
 
 type ModelInfo capnp.Struct

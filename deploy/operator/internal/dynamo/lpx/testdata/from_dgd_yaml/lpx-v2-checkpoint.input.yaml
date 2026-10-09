@@ -14,11 +14,8 @@ spec:
       type: lpx
       replicas: 1
       lpx:
-        buildId: llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
-        checkpoint:
-          provider: HuggingFace
-          model: meta-llama/Llama-3.2-1B-Instruct
-          revision: 9213176726f574b556790deb65791e0c5aa438b6
+        # The build's GBuild manifest names the Cyborg checkpoint.
+        buildId: llama3_2-1b-lpu-gpu-v2/build_checkpoint
         experimental:
           localPartitions:
             mode: All

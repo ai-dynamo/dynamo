@@ -97,11 +97,11 @@ func TestEnsureCheckpointsDownloaded(t *testing.T) {
 }
 
 func TestHybridCheckpointDownloadGatesRendering(t *testing.T) {
-	t.Log("Select a checkpoint for a hybrid workload whose download is still in progress")
+	t.Log("Override the checkpoint for a hybrid workload whose download is still in progress")
 	_, dgd, baseRegistry := newLPXTestDGD(t, lpx.PipelineLPX)
-	dgd.Spec.Components[0].LPX.Checkpoint = &v1beta1.LPXCheckpoint{
+	dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{Checkpoint: &v1beta1.LPXCheckpoint{
 		Provider: v1beta1.LPXCheckpointProviderHuggingFace, Model: checkpointTestModel, Revision: checkpointTestRevision,
-	}
+	}}
 	child := newLPXTestDeployment(t, dgd)
 	registry := &fakeModelDownloadRegistry{ModelRegistry: baseRegistry}
 	reconciler := newLPXTestReconciler(t, registry, child, dgd)
@@ -135,18 +135,18 @@ func TestHybridCheckpointDownloadGatesRendering(t *testing.T) {
 }
 
 func TestLPUOnlyCheckpointIsRejectedBeforeDownload(t *testing.T) {
-	t.Log("Select a checkpoint for an LPU-only workload, which has no Cyborg conductor")
+	t.Log("Override the checkpoint for an LPU-only workload, which has no Cyborg conductor")
 	_, dgd, baseRegistry := newLPXTestDGD(t, lpx.PipelineSingle)
-	dgd.Spec.Components[0].LPX.Checkpoint = &v1beta1.LPXCheckpoint{
+	dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{Checkpoint: &v1beta1.LPXCheckpoint{
 		Provider: v1beta1.LPXCheckpointProviderHuggingFace, Model: checkpointTestModel, Revision: checkpointTestRevision,
-	}
+	}}
 	child := newLPXTestDeployment(t, dgd)
 	registry := &fakeModelDownloadRegistry{ModelRegistry: baseRegistry, ready: map[string]bool{checkpointTestKey: true}}
 	reconciler := newLPXTestReconciler(t, registry, child, dgd)
 
 	t.Log("Reject the checkpoint during resolution without asking Model Express for it")
 	_, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
-	require.ErrorContains(t, err, "checkpoint requires a hybrid build with a Cyborg conductor")
+	require.ErrorContains(t, err, "experimental.checkpoint requires a hybrid build with a Cyborg conductor")
 	require.Empty(t, registry.checkpointCalls)
 }
 
