@@ -51,7 +51,7 @@ func newDeploymentV1ContractFixture(t *testing.T) deploymentcapnpv1.Deployment {
 	require.NoError(t, err)
 	require.NoError(t, detail.SetPath("part-0"))
 	require.NoError(t, detail.SetTopology(registryTestTopology))
-	detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_polaris)
+	detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_lp20)
 	detail.SetNumChips(8)
 	detail.SetDevicesPerNode(8)
 	execution, err := deployment.NewExecution()
@@ -326,7 +326,7 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 				runtimeIO.SetIoFpgaCount(1)
 				wantIO = 1
 			case "HX metadata", "HX legacy geometry", "HX subnode":
-				detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_polarisB0)
+				detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_lp30)
 				wantFamily = BuildFamilyHX
 				require.NoError(t, detail.SetTopology(hxTopologyFamily))
 				detail.SetNumChips(16)

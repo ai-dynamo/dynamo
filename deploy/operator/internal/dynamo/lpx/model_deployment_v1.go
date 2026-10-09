@@ -347,9 +347,9 @@ func buildPartitionFromDeploymentV1(raw deploymentcapnpv1.PartitionDeployment) (
 		return BuildPartition{}, false, fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildDeploymentV1CapnpFile, ref.PartitionId(), err)
 	}
 	switch detail.Architecture() {
-	case deploymentcapnpv1.LpuArchitecture_polaris:
+	case deploymentcapnpv1.LpuArchitecture_lp20:
 		return buildLPUArtifact(gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail, BuildFamilyXT)
-	case deploymentcapnpv1.LpuArchitecture_polarisB0:
+	case deploymentcapnpv1.LpuArchitecture_lp30:
 		return buildLPUArtifact(gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail, BuildFamilyHX)
 	default:
 		return BuildPartition{}, false, fmt.Errorf("%s LPU partition %d unsupported chip architecture %s", gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail.Architecture())
