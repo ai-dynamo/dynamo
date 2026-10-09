@@ -529,6 +529,29 @@ jobs:
             fi
           done
 
+      - name: Share Enterprise Supported Artifacts with released versions
+        run: |
+          # The supported set is current, not per-version: a new enterprise
+          # release changes it for every documentation version. Each version's
+          # nav renders the pages-dev copy, which the generator refreshes on
+          # every main push. Text substitution, never a yq assignment (see the
+          # Reference revert in the release job). Versions without the page
+          # are untouched.
+          SHARED_PAGE="enterprise/supported-artifacts.mdx"
+          if [ ! -e "docs-checkout/fern/pages-dev/$SHARED_PAGE" ]; then
+            # Previews of older maintained branches may predate the page.
+            if [ "${{ steps.ctx.outputs.is_main }}" != "true" ]; then
+              echo "::notice::Source tree has no $SHARED_PAGE; released versions keep their own copy in this preview"
+              exit 0
+            fi
+            echo "::error::pages-dev/$SHARED_PAGE not found; released versions would keep stale supported artifacts. Update SHARED_PAGE here, in the release job, and in docs/fern/scripts/simulate_docs_website.sh."
+            exit 1
+          fi
+          for vfile in docs-checkout/fern/versions/v*.yml; do
+            [ -e "$vfile" ] || continue
+            perl -pi -e "s|path: \.\./pages-v[^/]+/\Q$SHARED_PAGE\E|path: ../pages-dev/$SHARED_PAGE|g" "$vfile"
+          done
+
       - name: Convert GitHub callouts to Fern format
         run: |
           echo "Converting GitHub-style callouts to Fern format in pages/..."
@@ -928,6 +951,12 @@ jobs:
           done < <(find "$SHARED" -type f)
           find "docs-checkout/fern/pages-$TAG/reference" -type d -empty -delete 2>/dev/null || true
 
+          # Enterprise Supported Artifacts is shared the same way: the sync job
+          # points every version's nav at pages-dev.
+          if [ -e "docs-checkout/fern/pages-dev/enterprise/supported-artifacts.mdx" ]; then
+            rm -f "docs-checkout/fern/pages-$TAG/enterprise/supported-artifacts.mdx"
+          fi
+
       - name: Snapshot translation mirrors
         run: |
           TAG="${{ steps.version.outputs.tag }}"
@@ -1067,6 +1096,12 @@ jobs:
           if ! grep -q "path: \.\./pages-dev/reference/general/" "$VERSION_FILE"; then
             echo "::error::$VERSION_FILE has no shared reference/general/ paths after the revert; $TAG would freeze its own reference copy."
             exit 1
+          fi
+
+          # Enterprise Supported Artifacts renders from pages-dev too (dropped
+          # from the snapshot above).
+          if [ -e "docs-checkout/fern/pages-dev/enterprise/supported-artifacts.mdx" ]; then
+            perl -pi -e "s|path: \.\./pages-$TAG/enterprise/supported-artifacts\.mdx|path: ../pages-dev/enterprise/supported-artifacts.mdx|g" "$VERSION_FILE"
           fi
 
           # Keep cross-navigation links within the selected documentation version.

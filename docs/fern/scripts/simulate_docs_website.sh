@@ -34,6 +34,8 @@
 #      Reference tab and the old label-keyed selector no-opped for six days.
 #  10. The composed default version starts with the shared Home tab so the
 #      bare site URL renders Home instead of the release snapshot's first page.
+#  12. Enterprise Supported Artifacts is shared: released versions and the new
+#      <TAG>.yml point at ../pages-dev/, and pages-<TAG> drops its copy.
 #
 # Usage: ./scripts/simulate_docs_website.sh [TAG]
 #   TAG defaults to v9.9.9 (must not exist on docs-website yet).
@@ -158,6 +160,13 @@ propagate_shared_reference() {
 }
 propagate_shared_reference
 
+SHARED_PAGE="enterprise/supported-artifacts.mdx"
+[ -e "$WT/fern/pages-dev/$SHARED_PAGE" ] || { echo "ERROR: pages-dev/$SHARED_PAGE missing"; exit 1; }
+for vfile in "$WT"/fern/versions/v*.yml; do
+  [ -e "$vfile" ] || continue
+  perl -pi -e "s|path: \.\./pages-v[^/]+/\Q$SHARED_PAGE\E|path: ../pages-dev/$SHARED_PAGE|g" "$vfile"
+done
+
 "$PY" "$WT/fern/scripts/convert_callouts.py" --dir "$WT/fern/pages-dev" >/dev/null
 if [ -d "$WT/fern/translations" ]; then
   "$PY" "$WT/fern/scripts/convert_callouts.py" --dir "$WT/fern/translations" >/dev/null
@@ -196,6 +205,7 @@ while IFS= read -r f; do
   [ -e "fern/pages-dev/$rel" ] && rm -f "$f"
 done < <(find "fern/pages-$TAG/reference/general" -type f)
 find "fern/pages-$TAG/reference" -type d -empty -delete 2>/dev/null || true
+rm -f "fern/pages-$TAG/$SHARED_PAGE"
 
 if [ -d "$SRC/translations" ]; then
   for lang_dir in "$SRC"/translations/*/; do
@@ -234,6 +244,7 @@ while IFS= read -r f; do
   rel="${f#fern/pages-"$TAG"/}"
   perl -pi -e "s|path: \.\./pages-dev/\Q$rel\E|path: ../pages-$TAG/$rel|g" "$VERSION_FILE"
 done < <(find "fern/pages-$TAG/reference/general" -type f)
+perl -pi -e "s|path: \.\./pages-$TAG/\Q$SHARED_PAGE\E|path: ../pages-dev/$SHARED_PAGE|g" "$VERSION_FILE"
 perl -pi -e "s|href: /dynamo/dev/|href: /dynamo/$TAG/|g" "$VERSION_FILE"
 
 DEV_IDX=$(yq '.versions | to_entries | map(select(.value.display-name == "dev")) | .[0].key' fern/docs.yml)
@@ -277,6 +288,13 @@ assert "3. snapshot drops shared files, keeps versioned reference/" "$s3"
 grep -q "path: \.\./pages-$TAG/$TAG_ONLY" "$VERSION_FILE" && \
   ! grep -q "path: \.\./pages-dev/$TAG_ONLY" "$VERSION_FILE" && s12=ok || s12=FAIL
 assert "11. tag-only reference/general page stays on pages-$TAG" "$s12"
+
+ent_new=$(grep -c "path: \.\./pages-dev/$SHARED_PAGE" "$VERSION_FILE" || true)
+ent_frozen=$(cat fern/versions/v*.yml | grep -c "path: \.\./pages-v[^/]*/$SHARED_PAGE" || true)
+ent_shared=$(cat fern/versions/v*.yml | grep -c "path: \.\./pages-dev/$SHARED_PAGE" || true)
+[ "$ent_new" -eq 1 ] && [ "$ent_frozen" -eq 0 ] && [ "$ent_shared" -ge 2 ] && \
+  [ ! -e "fern/pages-$TAG/$SHARED_PAGE" ] && s13=ok || s13=FAIL
+assert "12. supported artifacts shared ($ent_shared versions on pages-dev)" "$s13"
 
 # The find target must exist, or find errors to stderr, wc counts 0 and the
 # assertion reports ok on a failure — which it did once pages-dev/components/
