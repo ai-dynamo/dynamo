@@ -18,6 +18,14 @@ from typing import Any
 import pytest
 
 
+def _canonical_engine_args(config):
+    return {
+        "engine": {
+            "timing_model": {"type": "external", "provider": "ais", "config": config}
+        }
+    }
+
+
 def _package(name: str) -> types.ModuleType:
     module = types.ModuleType(name)
     module.__path__ = []  # type: ignore[attr-defined]
@@ -36,6 +44,9 @@ def sims_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
     replay_config.load_engine_args = lambda value: value
     replay_planner = types.ModuleType("dynamo.replay.planner")
     replay_planner._engine_caps = lambda value: value
+    replay_planner.performance_config = lambda args: args["engine"]["timing_model"].get(
+        "config"
+    )
     replay_planner._generate_ais_decode_fpms = lambda *args, **kwargs: []
     replay_planner._generate_ais_prefill_fpms = lambda *args, **kwargs: []
     replay_planner._ais_performance_model_configs = lambda metadata, mode: {}
@@ -674,8 +685,8 @@ def test_run_arena_replay_ingests_only_the_persisted_telemetry_stream(
     expected_telemetry: bool,
 ) -> None:
     config = types.SimpleNamespace(mode="agg", advisory=False)
-    engine_args = types.SimpleNamespace(
-        ais_perf_config={"backend": "vllm", "backend_version": "current"}
+    engine_args = _canonical_engine_args(
+        {"backend": "vllm", "backend_version": "current"}
     )
     capabilities = types.SimpleNamespace(decode="decode-caps")
     engine = object()
@@ -974,11 +985,11 @@ def test_resolved_metadata_backfills_each_unpinned_disagg_role_independently(
         metadata,
         mode="disagg",
         extra_engine_args=None,
-        prefill_engine_args=types.SimpleNamespace(
-            ais_perf_config={"backend": "vllm", "backend_version": "prefill-current"}
+        prefill_engine_args=_canonical_engine_args(
+            {"backend": "vllm", "backend_version": "prefill-current"}
         ),
-        decode_engine_args=types.SimpleNamespace(
-            ais_perf_config={"backend": "sglang", "backend_version": "decode-current"}
+        decode_engine_args=_canonical_engine_args(
+            {"backend": "sglang", "backend_version": "decode-current"}
         ),
     )
 
@@ -1026,11 +1037,11 @@ def test_resolved_metadata_preserves_explicit_or_cross_backend_versions(
         metadata,
         mode="disagg",
         extra_engine_args=None,
-        prefill_engine_args=types.SimpleNamespace(
-            ais_perf_config={"backend": "vllm", "backend_version": "prefill-current"}
+        prefill_engine_args=_canonical_engine_args(
+            {"backend": "vllm", "backend_version": "prefill-current"}
         ),
-        decode_engine_args=types.SimpleNamespace(
-            ais_perf_config={"backend": "vllm", "backend_version": "decode-current"}
+        decode_engine_args=_canonical_engine_args(
+            {"backend": "vllm", "backend_version": "decode-current"}
         ),
     )
 
@@ -1179,3 +1190,71 @@ def test_invalid_telemetry_destination_does_not_allocate_engine_resources(
             ),
             telemetry_jsonl_path=str(trace),
         )
+
+
+@pytest.mark.parametrize("role", ["prefill", "decode", "aggregated"])
+def test_canonical_launch_role_is_nested_without_legacy_fields(sims_module, role):
+    raw = {
+        "tensor_parallel_size": 1,
+        "engine": {
+            "num_gpu_blocks": 64,
+            "timing_model": {"type": "fixed", "prefill_ms": 10.0, "decode_ms": 5.0},
+        },
+    }
+    result = json.loads(
+        sims_module._normalize_engine_args_role(
+            json.dumps(raw), expected=role, argument_name="engine_args"
+        )
+    )
+    assert result["engine"]["worker_type"] == role
+    assert "worker_type" not in result
+    assert result["engine"]["timing_model"] == raw["engine"]["timing_model"]
+    assert "worker_type" not in raw["engine"]
+
+
+@pytest.mark.parametrize(
+    "engine",
+    [
+        {"worker_type": "aggregated"},
+        {
+            "timing_model": {
+                "type": "external",
+                "provider": "ais",
+                "config": {"worker_type": "aggregated"},
+            }
+        },
+    ],
+)
+def test_canonical_launch_rejects_conflicting_role(sims_module, engine):
+    with pytest.raises(ValueError, match="worker_type must be 'prefill'"):
+        sims_module._normalize_engine_args_role(
+            json.dumps({"engine": engine}),
+            expected="prefill",
+            argument_name="prefill_engine_args",
+        )
+
+
+def test_planner_bootstrap_without_metadata_reads_canonical_engine_dicts(
+    sims_module, monkeypatch
+):
+    calls = []
+    metadata = []
+    prefill = _canonical_engine_args({"backend": "vllm", "worker_type": "prefill"})
+    decode = _canonical_engine_args({"backend": "vllm", "worker_type": "decode"})
+    monkeypatch.setattr(
+        sims_module._replay_planner,
+        "_ais_session_kwargs",
+        lambda config, args: calls.append((config, args)),
+    )
+    sims_module._bootstrap_ais_regressions(
+        types.SimpleNamespace(set_bootstrap_metadata=metadata.append),
+        types.SimpleNamespace(install_regressions_from_fpms=lambda **kwargs: None),
+        types.SimpleNamespace(mode="disagg", optimization_target="sla"),
+        extra_engine_args=None,
+        prefill_engine_args=prefill,
+        decode_engine_args=decode,
+        performance_model_metadata=None,
+        benchmark_granularity=4,
+    )
+    assert calls == [(None, prefill), (None, decode)]
+    assert metadata[-1]["status"] == "not_configured_load_only"

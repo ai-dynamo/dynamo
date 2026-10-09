@@ -893,6 +893,9 @@ def test_failed_native_trace_run_redacts_every_shard_path(
 ) -> None:
     first = tmp_path / "traces" / "recorded-00.jsonl.gz"
     second = tmp_path / "traces" / "recorded-01.jsonl.gz"
+    first.parent.mkdir(parents=True, exist_ok=True)
+    first.write_bytes(b"synthetic first shard")
+    second.write_bytes(b"synthetic second shard")
     base = _sim_config(tmp_path, autoscalers=("static",))
     config = replace(
         base,

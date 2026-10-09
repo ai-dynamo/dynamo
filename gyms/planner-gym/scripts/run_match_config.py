@@ -31,6 +31,16 @@ def main() -> int:
     )
     parser.add_argument("config", help="path to the Match Config YAML")
     parser.add_argument(
+        "--session-dir",
+        type=Path,
+        help="create a new execution session at this exact directory",
+    )
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        help="resume a compatible execution session; reuse successful cells",
+    )
+    parser.add_argument(
         "--validate-only",
         action="store_true",
         help="validate without running DynoSim or AIPerf",
@@ -168,6 +178,12 @@ def main() -> int:
             config,
             on_progress=progress,
             run_ids=selected_ids or None,
+            **(
+                {"session_dir": args.session_dir}
+                if args.session_dir is not None
+                else {}
+            ),
+            **({"resume_dir": args.resume} if args.resume is not None else {}),
         )
     except ValueError as exc:
         parser.error(str(exc))

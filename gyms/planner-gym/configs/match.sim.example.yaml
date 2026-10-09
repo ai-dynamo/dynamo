@@ -42,7 +42,7 @@ backend:
     mode: round_robin
 
   # Resolved relative to this Match Config. An inline mapping is also accepted.
-  # The Planner's scaling target is distinct from the evaluation SLAs below.
+  # Per-run TTFT/ITL targets follow the selected evaluation SLO below.
   planner_config: planner.sim.example.yaml
 
   replay:

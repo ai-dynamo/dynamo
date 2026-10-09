@@ -19,6 +19,7 @@ from typing import Any, Iterator, Mapping, Optional, Sequence
 
 import yaml
 from autoscaling_arena.substrates import SUBSTRATES
+from autoscaling_arena.trace_preparation import TracePreparationConfig
 from autoscaling_arena.workloads import WORKLOADS, validate_mooncake_trace
 
 SCHEMA_VERSION = 1
@@ -300,6 +301,7 @@ class ReplayConfig:
     ais_bootstrap: bool = True
     concurrency: Optional[int] = None
     telemetry_sample_interval_s: Optional[float] = 5.0
+    request_capture: str = "memory"
 
 
 @dataclass(frozen=True)
@@ -346,6 +348,10 @@ class EvaluationConfig:
     trace_presorted: bool = False
     trace_paths: tuple[Path, ...] = ()
     trace_format: str = "mooncake"
+    prepare: Optional[dict[str, Any]] = None
+    warmup_path: Optional[Path] = None
+    warmup_prepare: Optional[dict[str, Any]] = None
+    measurement_window: Optional[dict[str, float]] = None
 
 
 @dataclass(frozen=True)
@@ -361,6 +367,7 @@ class SLAProfileConfig:
 class MetricsConfig:
     rank_by: str
     include: tuple[str, ...]
+    short_output_itl: str = "fail"
 
 
 @dataclass(frozen=True)
@@ -368,6 +375,9 @@ class ExecutionConfig:
     repetitions: int = 1
     fail_fast: bool = False
     max_runs: Optional[int] = None
+    max_parallel_runs: int = 1
+    timeout_s: Optional[float] = None
+    max_memory_mb: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -403,6 +413,10 @@ class MatchRun:
     trace_presorted: bool = False
     trace_paths: tuple[Path, ...] = ()
     trace_format: str = "mooncake"
+    prepare: Optional[dict[str, Any]] = None
+    warmup_path: Optional[Path] = None
+    warmup_prepare: Optional[dict[str, Any]] = None
+    measurement_window: Optional[dict[str, float]] = None
 
 
 @dataclass(frozen=True)
@@ -459,6 +473,10 @@ class MatchConfig:
                             trace_format=evaluation.trace_format,
                             trace_block_size=evaluation.trace_block_size,
                             trace_presorted=evaluation.trace_presorted,
+                            prepare=evaluation.prepare,
+                            warmup_path=evaluation.warmup_path,
+                            warmup_prepare=evaluation.warmup_prepare,
+                            measurement_window=evaluation.measurement_window,
                         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -538,6 +556,53 @@ def parse_match_config(data: Any, *, source_path: str | Path) -> MatchConfig:
         )
     sla_profiles = _parse_sla_profiles(_required(root, "slo_profiles", "config"))
     metrics = _parse_metrics(root.get("metrics", {}), backend_type)
+    if isinstance(backend, SimBackendConfig):
+        if backend.replay.request_capture == "summary":
+            if any(e.measurement_window is not None for e in evaluations):
+                raise MatchConfigError(
+                    "measurement_window requires memory or jsonl request capture"
+                )
+            if metrics.short_output_itl == "fail" and any(
+                p.itl_ms is not None for p in sla_profiles
+            ):
+                raise MatchConfigError(
+                    "summary request capture with an ITL constraint requires metrics.short_output_itl: skip"
+                )
+        if any(a.type == "planner" for a in backend.autoscalers):
+            role_engines = (
+                backend.engines.prefill,
+                backend.engines.decode,
+                backend.engines.aggregate,
+            )
+            if backend.replay.ais_bootstrap and any(
+                engine is not None and engine.extra_args.get("timing_model") is not None
+                for engine in role_engines
+            ):
+                raise MatchConfigError(
+                    "custom engine timing with Planner requires backend.replay.ais_bootstrap: false"
+                )
+            for profile in sla_profiles:
+                for key, bound in (
+                    ("ttft_ms", profile.ttft_ms),
+                    ("itl_ms", profile.itl_ms),
+                ):
+                    if (
+                        bound is not None
+                        and key in backend.planner_config
+                        and backend.planner_config[key] != bound
+                    ):
+                        raise MatchConfigError(
+                            f"backend.planner_config.{key} conflicts with SLO profile {profile.name!r}; omit the duplicate target to use each profile"
+                        )
+    elif metrics.short_output_itl != "fail" or any(
+        e.measurement_window is not None
+        or e.warmup_path is not None
+        or e.prepare is not None
+        for e in evaluations
+    ):
+        raise MatchConfigError(
+            "trace preparation, short-output overrides, measurement windows and predictor warmup require the sim backend"
+        )
     execution = _parse_execution(root.get("execution", {}))
     publish = _parse_publish(
         _required(root, "publish", "config"), base_dir=source.parent
@@ -545,6 +610,8 @@ def parse_match_config(data: Any, *, source_path: str | Path) -> MatchConfig:
     protected_inputs = {source}
     for evaluation in evaluations:
         protected_inputs.update(evaluation.trace_paths)
+        if evaluation.warmup_path is not None:
+            protected_inputs.add(evaluation.warmup_path)
         if evaluation.trace_path is not None:
             protected_inputs.add(evaluation.trace_path)
     if isinstance(backend, RealBackendConfig):
@@ -665,6 +732,7 @@ def _parse_sim_backend(data: Mapping[str, Any], *, base_dir: Path) -> SimBackend
             "concurrency",
             "model_name",
             "telemetry_sample_interval_s",
+            "request_capture",
         },
         "backend.replay",
     )
@@ -672,6 +740,13 @@ def _parse_sim_backend(data: Mapping[str, Any], *, base_dir: Path) -> SimBackend
         replay_data.get("ais_bootstrap", True), "backend.replay.ais_bootstrap"
     )
     concurrency_raw = replay_data.get("concurrency")
+    request_capture = _string(
+        replay_data.get("request_capture", "memory"), "backend.replay.request_capture"
+    )
+    if request_capture not in {"memory", "jsonl", "summary"}:
+        raise MatchConfigError(
+            "backend.replay.request_capture: expected memory, jsonl, or summary"
+        )
     concurrency = (
         None
         if concurrency_raw is None
@@ -784,6 +859,7 @@ def _parse_sim_backend(data: Mapping[str, Any], *, base_dir: Path) -> SimBackend
         replay=ReplayConfig(
             ais_bootstrap=ais_bootstrap,
             concurrency=concurrency,
+            request_capture=request_capture,
             telemetry_sample_interval_s=telemetry_sample_interval_s,
         ),
         autoscalers=autoscalers,
@@ -812,7 +888,21 @@ def _parse_planner_config(
         data = _mapping(loaded, "backend.planner_config")
     else:
         data = _mapping(value, "backend.planner_config")
-    return dict(data), planner_config_path
+    config = dict(data)
+    if config.get("load_predictor_warmup_trace") is not None:
+        origin = (
+            planner_config_path.parent if planner_config_path is not None else base_dir
+        )
+        config["load_predictor_warmup_trace"] = str(
+            _resolve_path(
+                _string(
+                    config["load_predictor_warmup_trace"],
+                    "backend.planner_config.load_predictor_warmup_trace",
+                ),
+                origin,
+            )
+        )
+    return config, planner_config_path
 
 
 def _parse_model_config(value: Any) -> ModelConfig:
@@ -923,6 +1013,14 @@ def _parse_engine_layer(value: Any, path: str) -> dict[str, Any]:
         data["runtime"] = runtime
     if "extra_args" in data:
         extra_args = dict(_mapping(data["extra_args"], f"{path}.extra_args"))
+        timing = extra_args.get("timing_model")
+        if timing is not None and (
+            not isinstance(timing, dict)
+            or timing.get("type") not in {"fixed", "polynomial"}
+        ):
+            raise MatchConfigError(
+                f"{path}.extra_args.timing_model: only fixed or polynomial overrides are supported; configure AIS identity through model and engines"
+            )
         _validate_json_value(extra_args, f"{path}.extra_args")
         overlap = sorted(_RESERVED_ENGINE_ARGS.intersection(extra_args))
         if overlap:
@@ -1653,6 +1751,10 @@ def _parse_evaluations(value: Any, *, base_dir: Path) -> tuple[EvaluationConfig,
                 trace_path=None if trace is None else trace["path"],
                 trace_paths=() if trace is None else trace["paths"],
                 trace_format="mooncake" if trace is None else trace["format"],
+                prepare=None if trace is None else trace["prepare"],
+                warmup_path=None if trace is None else trace["warmup_path"],
+                warmup_prepare=None if trace is None else trace["warmup_prepare"],
+                measurement_window=options["measurement_window"],
                 trace_block_size=None if trace is None else trace["block_size"],
                 trace_presorted=False if trace is None else trace["presorted"],
             )
@@ -1668,7 +1770,16 @@ def _parse_external_traces(value: Any, *, base_dir: Path) -> dict[str, dict[str,
         data = _mapping(raw, item_path)
         _only_keys(
             data,
-            {"name", "format", "path", "paths", "block_size", "presorted"},
+            {
+                "name",
+                "format",
+                "path",
+                "paths",
+                "block_size",
+                "presorted",
+                "prepare",
+                "warmup",
+            },
             item_path,
         )
         name = _name(_required(data, "name", item_path), f"{item_path}.name")
@@ -1749,12 +1860,36 @@ def _parse_external_traces(value: Any, *, base_dir: Path) -> dict[str, dict[str,
             )
             presorted = False
 
+        prepare = _parse_trace_preparation(data.get("prepare"), f"{item_path}.prepare")
+        if prepare is not None and trace_format != "mooncake":
+            raise MatchConfigError(
+                f"{item_path}.prepare: only Mooncake traces support preparation"
+            )
+        warmup_path = None
+        warmup_prepare = None
+        if data.get("warmup") is not None:
+            warmup = _mapping(data["warmup"], f"{item_path}.warmup")
+            _only_keys(warmup, {"path", "prepare"}, f"{item_path}.warmup")
+            warmup_path = _resolve_path(
+                _string(
+                    _required(warmup, "path", f"{item_path}.warmup"),
+                    f"{item_path}.warmup.path",
+                ),
+                base_dir,
+            )
+            _require_trace_file(warmup_path, path=f"{item_path}.warmup.path")
+            warmup_prepare = _parse_trace_preparation(
+                warmup.get("prepare"), f"{item_path}.warmup.prepare"
+            )
         traces[name] = {
             "config_path": item_path,
             "format": trace_format,
             "path": legacy_path,
             "paths": paths,
             "block_size": block_size,
+            "prepare": prepare,
+            "warmup_path": warmup_path,
+            "warmup_prepare": warmup_prepare,
             "presorted": presorted,
         }
     return traces
@@ -1765,15 +1900,29 @@ def _require_trace_file(source: Path, *, path: str) -> None:
         raise MatchConfigError(f"{path}: trace file does not exist: {source}")
 
 
+def _parse_trace_preparation(value: Any, path: str) -> Optional[dict[str, Any]]:
+    if value is None:
+        return None
+    data = dict(_mapping(value, path))
+    try:
+        TracePreparationConfig.from_mapping(data)
+    except (TypeError, ValueError) as exc:
+        raise MatchConfigError(f"{path}: {exc}") from exc
+    return data
+
+
 def _parse_evaluation_options(
     value: Any, *, path: str, partial: bool = False
 ) -> dict[str, Any]:
     data = _mapping(value, path)
-    _only_keys(data, {"seed", "max_requests", "arrival_speedup"}, path)
+    _only_keys(
+        data, {"seed", "max_requests", "arrival_speedup", "measurement_window"}, path
+    )
     defaults = {
         "seed": 0,
         "max_requests": None,
         "arrival_speedup": 1.0,
+        "measurement_window": None,
     }
     out: dict[str, Any] = {} if partial else dict(defaults)
     if "seed" in data:
@@ -1791,6 +1940,27 @@ def _parse_evaluation_options(
             f"{path}.arrival_speedup",
             positive=True,
         )
+    if "measurement_window" in data:
+        if data["measurement_window"] is None:
+            out["measurement_window"] = None
+            return out
+        window = _mapping(data["measurement_window"], f"{path}.measurement_window")
+        _only_keys(window, {"start_s", "end_s"}, f"{path}.measurement_window")
+        start = _number(
+            window.get("start_s", 0.0),
+            f"{path}.measurement_window.start_s",
+            nonnegative=True,
+        )
+        end = _number(
+            _required(window, "end_s", f"{path}.measurement_window"),
+            f"{path}.measurement_window.end_s",
+            positive=True,
+        )
+        if end <= start:
+            raise MatchConfigError(
+                f"{path}.measurement_window: end_s must exceed start_s"
+            )
+        out["measurement_window"] = {"start_s": start, "end_s": end}
     return out
 
 
@@ -1870,7 +2040,12 @@ def _sla_variant_name(
 
 def _parse_metrics(value: Any, backend_type: str) -> MetricsConfig:
     data = _mapping(value, "metrics")
-    _only_keys(data, {"rank_by", "include"}, "metrics")
+    _only_keys(data, {"rank_by", "include", "short_output_itl"}, "metrics")
+    short_output_itl = _string(
+        data.get("short_output_itl", "fail"), "metrics.short_output_itl"
+    )
+    if short_output_itl not in {"fail", "skip"}:
+        raise MatchConfigError("metrics.short_output_itl: expected fail or skip")
     if backend_type == "sim":
         supported = SIM_METRICS
         default_include = DEFAULT_SIM_METRICS
@@ -1902,12 +2077,25 @@ def _parse_metrics(value: Any, backend_type: str) -> MetricsConfig:
         raise MatchConfigError(
             "metrics.rank_by: ranked metric must also appear in metrics.include"
         )
-    return MetricsConfig(rank_by=rank_by, include=include)
+    return MetricsConfig(
+        rank_by=rank_by, include=include, short_output_itl=short_output_itl
+    )
 
 
 def _parse_execution(value: Any) -> ExecutionConfig:
     data = _mapping(value, "execution")
-    _only_keys(data, {"repetitions", "fail_fast", "max_runs"}, "execution")
+    _only_keys(
+        data,
+        {
+            "repetitions",
+            "fail_fast",
+            "max_runs",
+            "max_parallel_runs",
+            "timeout_s",
+            "max_memory_mb",
+        },
+        "execution",
+    )
     repetitions = _integer(
         data.get("repetitions", 1), "execution.repetitions", positive=True
     )
@@ -1919,7 +2107,26 @@ def _parse_execution(value: Any) -> ExecutionConfig:
         else _integer(max_runs_raw, "execution.max_runs", positive=True)
     )
     return ExecutionConfig(
-        repetitions=repetitions, fail_fast=fail_fast, max_runs=max_runs
+        repetitions=repetitions,
+        fail_fast=fail_fast,
+        max_runs=max_runs,
+        max_parallel_runs=_integer(
+            data.get("max_parallel_runs", 1),
+            "execution.max_parallel_runs",
+            positive=True,
+        ),
+        timeout_s=(
+            None
+            if data.get("timeout_s") is None
+            else _number(data["timeout_s"], "execution.timeout_s", positive=True)
+        ),
+        max_memory_mb=(
+            None
+            if data.get("max_memory_mb") is None
+            else _number(
+                data["max_memory_mb"], "execution.max_memory_mb", positive=True
+            )
+        ),
     )
 
 

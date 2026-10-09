@@ -159,6 +159,7 @@ def test_run_sim_item_passes_exact_native_shards_without_materializing(
     assert result["cache"]["prefix_cache_reused_ratio"] == pytest.approx(0.25)
     assert result["cache"]["timeline_available"] is False
     assert result["runtime"]["replay"] == {
+        "request_capture": "memory",
         "telemetry_sample_interval_s": telemetry_interval,
         "telemetry_contract": (
             "dynamo.replay.telemetry.v1" if telemetry_interval is not None else None
@@ -399,20 +400,26 @@ def test_run_sim_item_wires_legacy_preset_model_engine_speedup_and_sla(
     )
 
     expected_engine_args = {
-        "engine_type": "vllm",
         "tensor_parallel_size": 1,
         "dp_size": 1,
-        "ais_perf_config": {
+        "engine": {
             "backend": "vllm",
-            "system": "h200_sxm",
-            "model": "openai/gpt-oss-120b",
-            "tp": 1,
-            "backend_version": "0.19.0",
-            "moe_tp_size": 1,
-            "moe_ep_size": 1,
-            "attention_dp": 1,
-            "estimation_mode": "auto",
-            "fallback_policy": "deny",
+            "timing_model": {
+                "type": "external",
+                "provider": "ais",
+                "config": {
+                    "backend": "vllm",
+                    "system": "h200_sxm",
+                    "model": "openai/gpt-oss-120b",
+                    "tp": 1,
+                    "backend_version": "0.19.0",
+                    "moe_tp_size": 1,
+                    "moe_ep_size": 1,
+                    "attention_dp": 1,
+                    "estimation_mode": "auto",
+                    "fallback_policy": "deny",
+                },
+            },
         },
     }
     assert json.loads(replay_kwargs["prefill_engine_args"]) == expected_engine_args
@@ -513,49 +520,61 @@ def test_run_sim_item_wires_explicit_disagg_role_engines_and_gpu_counts(
     )
 
     assert json.loads(replay_kwargs["prefill_engine_args"]) == {
-        "engine_type": "sglang",
-        "startup_time": 25.0,
-        "kv_transfer_bandwidth": 800.0,
-        "kv_bytes_per_token": 98304,
-        "block_size": 64,
-        "num_gpu_blocks": 111,
-        "max_num_seqs": 101,
         "tensor_parallel_size": 4,
         "dp_size": 1,
-        "ais_perf_config": {
-            "backend": "vllm",
-            "system": "b200_sxm",
-            "model": "weights/model-for-ais",
-            "tp": 4,
-            "backend_version": "0.19.0",
-            "moe_tp_size": 2,
-            "moe_ep_size": 2,
-            "attention_dp": 1,
-            "estimation_mode": "auto",
-            "fallback_policy": "deny",
+        "startup_time": 25.0,
+        "engine": {
+            "kv_transfer_bandwidth": 800.0,
+            "block_size": 64,
+            "num_gpu_blocks": 111,
+            "max_num_seqs": 101,
+            "kv_transfer_bytes_per_token": 98304,
+            "backend": "sglang",
+            "timing_model": {
+                "type": "external",
+                "provider": "ais",
+                "config": {
+                    "backend": "vllm",
+                    "system": "b200_sxm",
+                    "model": "weights/model-for-ais",
+                    "tp": 4,
+                    "backend_version": "0.19.0",
+                    "moe_tp_size": 2,
+                    "moe_ep_size": 2,
+                    "attention_dp": 1,
+                    "estimation_mode": "auto",
+                    "fallback_policy": "deny",
+                },
+            },
         },
     }
     assert json.loads(replay_kwargs["decode_engine_args"]) == {
-        "engine_type": "sglang",
-        "startup_time": 12.5,
-        "kv_transfer_bandwidth": 800.0,
-        "kv_bytes_per_token": 98304,
-        "block_size": 64,
-        "num_gpu_blocks": 222,
-        "max_num_seqs": 202,
         "tensor_parallel_size": 2,
         "dp_size": 1,
-        "ais_perf_config": {
-            "backend": "vllm",
-            "system": "b200_sxm",
-            "model": "weights/model-for-ais",
-            "tp": 2,
-            "backend_version": "0.19.0",
-            "moe_tp_size": 1,
-            "moe_ep_size": 2,
-            "attention_dp": 1,
-            "estimation_mode": "auto",
-            "fallback_policy": "deny",
+        "startup_time": 12.5,
+        "engine": {
+            "kv_transfer_bandwidth": 800.0,
+            "block_size": 64,
+            "num_gpu_blocks": 222,
+            "max_num_seqs": 202,
+            "kv_transfer_bytes_per_token": 98304,
+            "backend": "sglang",
+            "timing_model": {
+                "type": "external",
+                "provider": "ais",
+                "config": {
+                    "backend": "vllm",
+                    "system": "b200_sxm",
+                    "model": "weights/model-for-ais",
+                    "tp": 2,
+                    "backend_version": "0.19.0",
+                    "moe_tp_size": 1,
+                    "moe_ep_size": 2,
+                    "attention_dp": 1,
+                    "estimation_mode": "auto",
+                    "fallback_policy": "deny",
+                },
+            },
         },
     }
     assert replay_kwargs["performance_model_metadata"] == {
@@ -684,24 +703,30 @@ def test_run_sim_item_wires_explicit_agg_engine_and_gpu_counts(
     )
 
     assert json.loads(replay_kwargs["extra_engine_args"]) == {
-        "engine_type": "vllm",
-        "startup_time": 7.0,
-        "kv_transfer_bandwidth": 400.0,
-        "kv_bytes_per_token": 65536,
-        "block_size": 32,
-        "num_gpu_blocks": 333,
-        "max_num_seqs": 42,
         "tensor_parallel_size": 4,
         "dp_size": 2,
-        "ais_perf_config": {
+        "startup_time": 7.0,
+        "engine": {
+            "kv_transfer_bandwidth": 400.0,
+            "block_size": 32,
+            "num_gpu_blocks": 333,
+            "max_num_seqs": 42,
+            "kv_transfer_bytes_per_token": 65536,
             "backend": "vllm",
-            "system": "h100_sxm",
-            "model": "aggregate-request-model",
-            "tp": 4,
-            "backend_version": "0.20.0",
-            "attention_dp": 2,
-            "estimation_mode": "auto",
-            "fallback_policy": "deny",
+            "timing_model": {
+                "type": "external",
+                "provider": "ais",
+                "config": {
+                    "backend": "vllm",
+                    "system": "h100_sxm",
+                    "model": "aggregate-request-model",
+                    "tp": 4,
+                    "backend_version": "0.20.0",
+                    "attention_dp": 2,
+                    "estimation_mode": "auto",
+                    "fallback_policy": "deny",
+                },
+            },
         },
     }
     assert replay_kwargs["num_workers"] == 3
@@ -1140,3 +1165,47 @@ def test_real_match_config_preserves_mixed_trace_block_sizes(tmp_path, monkeypat
     assert [
         result["evaluation"]["trace_block_size"] for result in report["results"]
     ] == observed_sizes
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_rendered_fixed_timing_engine_is_accepted_by_native_schema(tmp_path):
+    native = pytest.importorskip(
+        "dynamo._core", reason="requires the optional native replay runtime"
+    )
+    config = _sim_config(
+        tmp_path,
+        "agg",
+        deployment={
+            "gpu_budget": 3,
+            "model": {"name": "example-model"},
+            "engines": {
+                "common": {
+                    "system": "example-system",
+                    "backend": "vllm",
+                    "backend_version": "0.24.0",
+                    "tp_size": 1,
+                    "extra_args": {
+                        "num_gpu_blocks": 64,
+                        "block_size": 16,
+                        "timing_model": {
+                            "type": "fixed",
+                            "prefill_ms": 10.0,
+                            "decode_ms": 5.0,
+                        },
+                    },
+                }
+            },
+        },
+    )
+    engine = config.backend.engines.aggregate
+    rendered = match_runner._render_engine_args(engine, "example-model")
+    normalized = native._normalize_mocker_config(rendered)
+    assert normalized["engine"]["num_gpu_blocks"] == 64
+    assert normalized["engine"]["block_size"] == 16
+    assert normalized["engine"]["timing_model"] == {
+        "type": "fixed",
+        "prefill_ms": 10.0,
+        "decode_ms": 5.0,
+    }
