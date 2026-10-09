@@ -152,7 +152,7 @@ jobs:
       # build` talks to the remote builder directly and needs no daemon.
       # Reuses the same builder and build cache as "Build and Push Image"
       # above, so the sidecar-binaries target (which only depends on the
-      # {vllm,sglang,trtllm}-builder stages) is a near-instant cache hit.
+      # sidecar-builder stage) is a near-instant cache hit.
       - name: Extract sidecar binaries (amd64)
         id: binary-artifact
         shell: bash
