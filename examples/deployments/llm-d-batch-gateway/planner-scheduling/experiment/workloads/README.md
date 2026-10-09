@@ -84,8 +84,32 @@ compare it as another repetition of the frozen campaign.
 
 ### Run All 15 Cells
 
-Load or publish one immutable Dynamo image containing the frontend, Mocker, and
-Planner source under test. The Mocker manifest defaults to an `emptyDir` model
+Build the Planner overlay from a clean checkout at the repository root. The
+source hash covers the exact committed Planner tree copied by the Dockerfile,
+and both provenance arguments are mandatory:
+
+```bash
+test -z "$(git status --short)"
+DYNAMO_SOURCE_COMMIT_SHA=$(git rev-parse HEAD)
+PLANNER_SOURCE_SHA256=$(
+  git archive --format=tar HEAD components/src/dynamo/planner |
+    shasum -a 256 | awk '{print $1}'
+)
+docker build \
+  --file examples/deployments/llm-d-batch-gateway/planner-scheduling/PlannerBatchImpact.Dockerfile \
+  --build-arg "DYNAMO_SOURCE_COMMIT_SHA=${DYNAMO_SOURCE_COMMIT_SHA}" \
+  --build-arg "PLANNER_SOURCE_SHA256=${PLANNER_SOURCE_SHA256}" \
+  --tag your-registry.example/dynamo:immutable-planner-build \
+  .
+```
+
+This Dockerfile overlays only the Planner source under test. Its frontend,
+Mocker, and runtime come from the digest-pinned dated nightly base. Use the
+built image as `PLANNER_IMAGE`; use `DYNAMO_IMAGE` for the immutable frontend
+and Mocker image being measured. `PLANNER_IMAGE` defaults to `DYNAMO_IMAGE`
+only when one image intentionally contains the complete compatible payload.
+
+The Mocker manifest defaults to an `emptyDir` model
 cache and no image pull secret. To use existing cluster resources, set
 `MODEL_CACHE_CLAIM` and `IMAGE_PULL_SECRET`; the renderer replaces the defaults
 in the generated manifest without changing the checked-in template. The
@@ -98,6 +122,7 @@ Create that secret in `NAMESPACE` before starting the driver.
 export KUBE_CONTEXT=your-kube-context
 export NAMESPACE=your-namespace
 export DYNAMO_IMAGE=your-registry.example/dynamo:immutable-campaign-build
+export PLANNER_IMAGE=your-registry.example/dynamo:immutable-planner-build
 export ASYNC_IMAGE=your-registry.example/llm-d-async:immutable-campaign-build
 export DATASET=/absolute/path/to/gsm8k-main-train.jsonl
 

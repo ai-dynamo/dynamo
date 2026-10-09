@@ -119,7 +119,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-for path in \
+for required_path in \
   $dynamo_python \
   $planner_gym_python \
   $aiperf_executable \
@@ -136,7 +136,7 @@ for path in \
   $planner_manifest_template \
   $mocker_manifest_template \
   $prometheus_manifest_template; do
-  [[ -e $path ]] || fail "required path does not exist: $path"
+  [[ -e $required_path ]] || fail "required path does not exist: $required_path"
 done
 [[ ! -e $compiled ]] || fail "compiled output already exists: $compiled"
 
@@ -189,7 +189,7 @@ mocker_render_args=(
   --dynamo-image $dynamo_image
   --dynamo-runtime-version $dynamo_runtime_version
   --mocker-max-num-seqs ${MOCKER_MAX_NUM_SEQS:-16}
-  --mocker-timing-flag ${MOCKER_TIMING_FLAG:---extra-engine-args}
+  "--mocker-timing-flag=${MOCKER_TIMING_FLAG:---extra-engine-args}"
   --mocker-timing-value ${MOCKER_TIMING_VALUE:-/etc/dynamo/mocker/engine-args.json}
 )
 if [[ -n ${MODEL_CACHE_CLAIM:-} ]]; then

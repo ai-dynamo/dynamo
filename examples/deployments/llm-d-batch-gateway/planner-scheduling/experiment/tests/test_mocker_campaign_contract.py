@@ -15,8 +15,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -230,6 +234,56 @@ def test_exact_head_mocker_uses_deterministic_fixed_timing() -> None:
         "prefill_ms": 75.0,
         "decode_ms": 12.0,
     }
+
+
+@pytest.mark.parametrize(
+    ("timing_flag", "timing_value"),
+    [
+        ("--extra-engine-args", FIXED_CONFIG_PATH),
+        ("--planner-profile-data", PROFILE_PATH),
+    ],
+)
+def test_renderer_cli_accepts_attached_option_like_timing_flags(
+    tmp_path: Path, timing_flag: str, timing_value: str
+) -> None:
+    output = tmp_path / "mocker.yaml"
+
+    assert (
+        render_mocker_campaign.main(
+            [
+                "--template",
+                str(PLANNER_ROOT / "mocker-campaign.yaml"),
+                "--output",
+                str(output),
+                "--namespace",
+                SENTINEL_NAMESPACE,
+                "--dynamo-image",
+                SENTINEL_IMAGE,
+                "--dynamo-runtime-version",
+                SENTINEL_RUNTIME_VERSION,
+                "--mocker-max-num-seqs",
+                "16",
+                f"--mocker-timing-flag={timing_flag}",
+                "--mocker-timing-value",
+                timing_value,
+            ]
+        )
+        == 0
+    )
+
+    documents = [document for document in yaml.safe_load_all(output.read_text())]
+    dgd = next(
+        document
+        for document in documents
+        if document["kind"] == "DynamoGraphDeployment"
+    )
+    worker = next(
+        component
+        for component in dgd["spec"]["components"]
+        if component["name"] == "worker"
+    )
+    args = worker["podTemplate"]["spec"]["containers"][0]["args"]
+    assert _option(args, timing_flag) == timing_value
 
 
 def test_release_pilot_profile_creates_the_configured_contention_envelope() -> None:
@@ -454,6 +508,117 @@ def test_campaign_driver_is_portable_and_runs_the_frozen_five_round_order() -> N
         ("r5-native", "planner-native"),
         ("r5-online", "online-only"),
     ]
+
+
+@pytest.mark.timeout(30)
+def test_campaign_driver_reaches_cluster_preflight_with_path_intact(
+    tmp_path: Path,
+) -> None:
+    script = (
+        PLANNER_ROOT
+        / "experiment"
+        / "workloads"
+        / "run_local_mocker_impact_campaign.zsh"
+    )
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    planner_gym = tmp_path / "planner-gym" / "gym"
+    planner_gym.mkdir(parents=True)
+    calls = tmp_path / "kubectl.calls"
+    revision = "a" * 40
+
+    def write_executable(name: str, body: str) -> None:
+        target = stub_bin / name
+        target.write_text(body, encoding="utf-8")
+        target.chmod(0o755)
+
+    write_executable(
+        "git",
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        '  *"rev-parse --show-toplevel"*) printf \'%s\\n\' "$PLANNER_GYM_ROOT" ;;\n'
+        '  *"rev-parse HEAD"*) printf \'%s\\n\' "$PLANNER_GYM_REVISION" ;;\n'
+        '  *"status --short"*) exit 0 ;;\n'
+        "  *) exit 98 ;;\n"
+        "esac\n",
+    )
+    write_executable(
+        "envsubst",
+        f"#!{sys.executable}\n"
+        "import os, re, sys\n"
+        "payload = sys.stdin.read()\n"
+        "sys.stdout.write(re.sub(r'\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}', "
+        "lambda match: os.environ.get(match.group(1), match.group(0)), payload))\n",
+    )
+    write_executable(
+        "kubectl",
+        "#!/bin/sh\n" 'printf \'%s\\n\' "$*" >> "$KUBECTL_CALLS"\n' "exit 91\n",
+    )
+    for name in ("helm", "jq"):
+        write_executable(name, "#!/bin/sh\nexit 0\n")
+
+    aiperf = tmp_path / "aiperf"
+    aiperf.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    aiperf.chmod(0o755)
+    trace = tmp_path / "trace.jsonl"
+    dataset = tmp_path / "dataset.jsonl"
+    trace.write_text('{"trace": 1}\n', encoding="utf-8")
+    dataset.write_text('{"request": 1}\n', encoding="utf-8")
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{stub_bin}{os.pathsep}{environment['PATH']}",
+            "KUBECTL_CALLS": str(calls),
+            "KUBE_CONTEXT": "contract-context",
+            "NAMESPACE": SENTINEL_NAMESPACE,
+            "DYNAMO_IMAGE": SENTINEL_IMAGE,
+            "ASYNC_IMAGE": "registry.example/async:immutable-test-build",
+            "TRACE": str(trace),
+            "DATASET": str(dataset),
+            "TRACE_SHA256": hashlib.sha256(trace.read_bytes()).hexdigest(),
+            "DATASET_SHA256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
+            "PLANNER_GYM_ROOT": str(planner_gym),
+            "PLANNER_GYM_REVISION": revision,
+            "DYNAMO_PYTHON": sys.executable,
+            "PLANNER_GYM_PYTHON": sys.executable,
+            "AIPERF_EXECUTABLE": str(aiperf),
+            "DYNAMO_REPO_ROOT": str(PLANNER_ROOT.parents[3]),
+            "CAMPAIGN_STATE_DIR": str(tmp_path / "campaign"),
+            "COMPILED_OUTPUT": str(tmp_path / "compiled"),
+        }
+    )
+
+    result = subprocess.run(
+        ["/bin/zsh", str(script)],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 91, result.stderr
+    assert "command not found: git" not in result.stderr
+    assert "apply --dry-run=client" in calls.read_text(encoding="utf-8")
+    rendered = yaml.safe_load_all(
+        (tmp_path / "campaign" / "rendered" / "mocker.yaml").read_text(encoding="utf-8")
+    )
+    dgd = next(
+        document for document in rendered if document["kind"] == "DynamoGraphDeployment"
+    )
+    worker = next(
+        component
+        for component in dgd["spec"]["components"]
+        if component["name"] == "worker"
+    )
+    assert (
+        _option(
+            worker["podTemplate"]["spec"]["containers"][0]["args"],
+            "--extra-engine-args",
+        )
+        == FIXED_CONFIG_PATH
+    )
 
 
 def test_live_async_readiness_check_matches_json_escaped_promql() -> None:

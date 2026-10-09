@@ -224,7 +224,7 @@ def _redact_image_id(run_dir: Path, pod_prefix: str) -> None:
 
 def _write_frontend_metrics(evidence_root: Path) -> None:
     payload = (
-        "process_start_time_seconds 1750000000\n"
+        "dynamo_frontend_metrics_start_time_seconds 1750000000\n"
         'dynamo_frontend_model_ready{model="Qwen/Qwen3-0.6B"} 1\n'
     )
     metrics = evidence_root / "metrics" / "frontend"
@@ -272,7 +272,7 @@ def _write_native_control_evidence(
             rate = 5.0 if prior < 60 or prior >= 120 else 8.0
             frontend_counter += rate * interval_seconds
         frontend_payload = (
-            "process_start_time_seconds 1750000000\n"
+            "dynamo_frontend_metrics_start_time_seconds 1750000000\n"
             'dynamo_frontend_model_ready{model="Qwen/Qwen3-0.6B"} 1\n'
             "dynamo_frontend_requests_started_total{"
             'model="Qwen/Qwen3-0.6B",endpoint="chat_completions",'
@@ -645,10 +645,24 @@ def _cli_args(runs: list[Path], output: Path, *extra: str) -> list[str]:
     return args
 
 
+@pytest.mark.parametrize("legacy_identity", [False, True])
 def test_compile_campaign_summarizes_arms_pairs_batch_and_provenance(
     tmp_path: Path,
+    legacy_identity: bool,
 ) -> None:
     runs = _balanced_campaign(tmp_path / "raw")
+    if legacy_identity:
+        for run in runs:
+            for path in (_run_evidence_root(run) / "metrics" / "frontend").glob(
+                "*.prom"
+            ):
+                path.write_text(
+                    path.read_text().replace(
+                        "dynamo_frontend_metrics_start_time_seconds",
+                        "process_start_time_seconds",
+                    )
+                )
+            _write_outer_manifest(run)
 
     report = compiler.compile_campaign(runs)
     output = compiler.write_campaign(report, tmp_path / "compiled" / "impact")
@@ -735,6 +749,11 @@ def test_compile_campaign_summarizes_arms_pairs_batch_and_provenance(
     }
     assert report["campaign"]["canonical_image_identities"]["serving"]
     assert stock_run["evidence"]["frontend_metric_snapshot_count"] == 2
+    assert stock_run["evidence"]["frontend_identity_metric"] == (
+        "process_start_time_seconds"
+        if legacy_identity
+        else "dynamo_frontend_metrics_start_time_seconds"
+    )
     assert any(name.endswith(".prom") for name in stock_run["source_files"])
     control = native_run["evidence"]["batch_drain_control"]
     assert control["valid"] is True

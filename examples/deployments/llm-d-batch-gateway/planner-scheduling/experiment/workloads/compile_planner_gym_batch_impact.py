@@ -1283,26 +1283,35 @@ def _extract_runtime_evidence(
     frontend_metrics = sorted((evidence_root / "metrics" / "frontend").glob("*.prom"))
     if len(frontend_metrics) < 2:
         raise CampaignCompileError("fewer than two frontend metric snapshots exist")
-    process_starts: set[float] = set()
+    exporter_identities: set[tuple[str, float]] = set()
     outer_run_directory = Path(record["run_directory"])
     for path in frontend_metrics:
         payload = path.read_text(encoding="utf-8")
-        starts = _metric_values(payload, "process_start_time_seconds")
+        identity_metric = "dynamo_frontend_metrics_start_time_seconds"
+        starts = _metric_values(payload, identity_metric)
+        if not starts:
+            # Read preserved campaigns from before the exporter metric rename.
+            # Live Planner collection requires the frontend-prefixed metric.
+            identity_metric = "process_start_time_seconds"
+            starts = _metric_values(payload, identity_metric)
         ready = _metric_values(payload, "dynamo_frontend_model_ready")
         if len(starts) != 1:
             raise CampaignCompileError(
-                f"{path} does not contain exactly one process_start_time_seconds"
+                f"{path} does not contain exactly one {identity_metric}"
             )
         if not ready or max(ready) != 1.0:
             raise CampaignCompileError(
                 f"{path} does not prove dynamo_frontend_model_ready=1"
             )
-        process_starts.add(starts[0])
+        exporter_identities.add((identity_metric, starts[0]))
         record["source_files"][
             str(path.relative_to(outer_run_directory))
         ] = _file_provenance(path)
-    if len(process_starts) != 1:
-        raise CampaignCompileError("frontend process_start_time_seconds changed in-run")
+    if len(exporter_identities) != 1:
+        raise CampaignCompileError(
+            "frontend metrics initialization identity changed in-run"
+        )
+    identity_metric, identity_timestamp = next(iter(exporter_identities))
 
     serving_signature_identity = {
         role: _signed_image_identity(identity)
@@ -1331,7 +1340,9 @@ def _extract_runtime_evidence(
     )
     record["evidence"] = {
         "frontend_metric_snapshot_count": len(frontend_metrics),
-        "frontend_process_start_time_seconds": next(iter(process_starts)),
+        # Retain the original output key for historical report consumers.
+        "frontend_process_start_time_seconds": identity_timestamp,
+        "frontend_identity_metric": identity_metric,
         "target_pods": target,
         "control_plane_pods": {
             "async": async_last,

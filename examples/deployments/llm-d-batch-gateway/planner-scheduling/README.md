@@ -55,15 +55,20 @@ concurrent online SLA protection. That requires an ingress-attempt/rejection
 signal. The preserved Async frontend-readiness queue gate and Planner's rollout
 pause still prevent batch dequeue while the serving topology is unavailable.
 
-The current public Batch Gateway list API is offset-paginated across all tenant
-history and has no nonterminal snapshot filter. Planner therefore applies an
+Planner requires Gateway v1.0.0+ or a build containing
+[ID cursor pagination](https://github.com/llm-d/llm-d-batch-gateway/pull/730).
+It pages all tenant history using the last listed ID, so inserts and garbage
+collection before the cursor do not shift subsequent pages. This is not a
+transactional snapshot: new IDs behind the cursor appear on the next tick.
+There is no nonterminal snapshot filter. Planner therefore applies an
 aggregate deadline plus page, job, and detail-concurrency bounds and rejects the
 whole observation on truncation, timeout, duplicate IDs, or detail failure. That
-is safety-correct for this bounded-history POC, but does not guarantee liveness
-or snapshot completeness as terminal history grows or changes concurrently. A
+does not guarantee liveness or snapshot completeness as terminal history grows
+or changes concurrently. A
 production follow-up needs a dedicated active-job snapshot (or server-side
-nonterminal filter backed by an active index) and stable snapshot/keyset cursor;
-old Gateway versions silently ignore unknown query parameters.
+nonterminal filter backed by an active index) with snapshot semantics. Terminal
+records are checked for valid IDs and statuses but do not undergo demand
+validation, so malformed historical demand cannot block active jobs.
 
 Planner must be the exclusive writer of the configured drain-limit control key
 and its derived `:planner-writer-fence` key. The epoch/sequence protocol fences
@@ -85,11 +90,20 @@ lease expire and pause admission; it cannot extend admission beyond the lease.
 
 ## Deploy the Planner POC
 
-First deploy the Batch Gateway example through the Async dispatch step in the
+> [!WARNING]
+> The parent recipe pins Gateway 0.3.0 and cannot run this Planner unchanged.
+> Provision a Gateway with the ID cursor API before proceeding. For the legacy
+> Redis-backed recipe, this requires a compatible backport build; upgrading to
+> v1.0.0 also requires migrating storage and deployment configuration. Merely
+> changing its image tag is not sufficient. Historical evidence below predates
+> this requirement and is not validation of that migration.
+
+Deploy the compatible Batch Gateway through the Async dispatch step in the
 [parent README](../README.md), but set `FRONTEND_IMAGE` to an image built from
 this branch before running its backend command. The parent recipe preserves a
 pre-set value. The branch frontend is required because Planner anchors counter
-reset detection on the new `process_start_time_seconds` metric. The worker may
+reset detection on `dynamo_frontend_metrics_start_time_seconds`, the timestamp
+of first metrics initialization (not OS process start). The worker may
 remain on the compatible `vllm-runtime:1.5.0` image. The stock `dynamo.yaml`
 remains independently deployable and does not create a Planner pod.
 
@@ -310,9 +324,9 @@ anchor, then render, inspect, server-dry-run, and apply the Planner template:
 ```bash
 FRONTEND_METRICS="$(kubectl get --raw \
   "/api/v1/namespaces/${NAMESPACE}/services/http:qwen3-0-6b-batch-frontend:8000/proxy/metrics")" || exit 1
-if ! grep -Eq '^process_start_time_seconds [0-9]+([.][0-9]+)?$' \
+if ! grep -Eq '^dynamo_frontend_metrics_start_time_seconds [0-9]+([.][0-9]+)?$' \
   <<<"${FRONTEND_METRICS}"; then
-  echo "frontend image does not expose process_start_time_seconds" >&2
+  echo "frontend image does not expose dynamo_frontend_metrics_start_time_seconds" >&2
   exit 1
 fi
 
