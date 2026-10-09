@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# In-cluster load generator for run-sweep.sh. On a multi-node cluster the frontend
+# ClusterIPs are not reachable from a workstation, so the sweep runs inside this pod
+# and targets each frontend by its Service DNS name (ENDPOINT_MODE=dns).
+#
+# The sweep runs one AIPerf process per model (16 at once), so give the pod enough
+# CPU that the load generator is never the bottleneck, and keep it off the GPU node
+# so it does not compete with the workers for host CPU. Replace <gpu-node> with the
+# node that runs the DGDs, or remove the affinity block on a single-node cluster.
+#
+#   kubectl apply -f common/aiperf-client-pod.yaml
+#   kubectl wait --for=condition=Ready pod/aiperf-client --timeout=300s
+apiVersion: v1
+kind: Pod
+metadata:
+  name: aiperf-client
+  namespace: default
+  labels:
+    app: aiperf-client
+spec:
+  restartPolicy: Never
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                  - <gpu-node>
+  containers:
+    - name: aiperf
+      image: python:3.12-slim
+      command: ["sleep", "infinity"]
+      workingDir: /work
+      env:
+        - name: HOME
+          value: /work
+        - name: HF_HOME
+          value: /work/hf-cache
+      resources:
+        requests:
+          cpu: "16"
+          memory: 32Gi
+        limits:
+          memory: 32Gi
+      volumeMounts:
+        - name: work
+          mountPath: /work
+  volumes:
+    - name: work
+      emptyDir: {}

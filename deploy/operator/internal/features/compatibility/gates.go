@@ -23,6 +23,13 @@ import semver "github.com/Masterminds/semver/v3"
 // first reconciled / created the DGD resource).
 
 var (
+	// GroveNativeMinAvailable enables native availability defaults for newly created Grove workloads.
+	// Existing graphs retain their persisted minimum form. This gate does not select a rollout strategy.
+	GroveNativeMinAvailable = Gate{
+		Name:             "GroveNativeMinAvailable",
+		MinOriginVersion: *semver.MustParse("1.6.0"),
+	}
+
 	// VLLMMultiprocessing gates the use of vLLM native multiprocessing (mp)
 	// instead of Ray for multi-node deployments. Enabled for DGDs originally
 	// created by operator >= 1.0.0.
