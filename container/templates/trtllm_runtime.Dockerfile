@@ -212,6 +212,12 @@ RUN --mount=type=bind,source=./container/deps/trtllm/trtllm-pr-19597-quantized-m
     pkg_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("tensorrt_llm").origin).parent.parent)')"; \
     patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/trtllm-pr-19597.patch
 
+# Guided decoding's CUDA host callbacks deadlock against the vision tower on multimodal input. Drop once an rc ships the fix.
+RUN --mount=type=bind,source=./container/deps/trtllm/trtllm-xgrammar-mm-hostfunc-deadlock.patch,target=/tmp/trtllm-xgrammar-deadlock.patch \
+    set -eu; \
+    pkg_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("tensorrt_llm").origin).parent.parent)')"; \
+    patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/trtllm-xgrammar-deadlock.patch
+
 # Install packages missing from upstream, sanity-check libnixl, register
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
 # for shells, not K8s python3 launches), swap upstream's standalone etcd
