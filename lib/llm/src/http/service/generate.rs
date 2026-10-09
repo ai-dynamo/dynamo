@@ -1444,6 +1444,9 @@ pub(crate) mod tests {
                         completion_tokens: 2,
                         total_tokens: 5,
                         prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                            text_tokens: None,
+                            image_tokens: None,
+                            cache_write_tokens: None,
                             audio_tokens: None,
                             cached_tokens: Some(2),
                         }),
@@ -1498,6 +1501,9 @@ pub(crate) mod tests {
                                 total_tokens: prompt_tokens + 1,
                                 prompt_tokens_details: Some(
                                     dynamo_protocols::types::PromptTokensDetails {
+                                        text_tokens: None,
+                                        image_tokens: None,
+                                        cache_write_tokens: None,
                                         audio_tokens: None,
                                         cached_tokens: Some(prompt_tokens),
                                     },

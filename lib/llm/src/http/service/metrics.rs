@@ -4844,6 +4844,9 @@ mod tests {
                 completion_tokens: 3,
                 total_tokens: (INPUT_TOKENS + 3) as u32,
                 prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                    text_tokens: None,
+                    image_tokens: None,
+                    cache_write_tokens: None,
                     cached_tokens: Some(TAIL_CACHED_TOKENS as u32),
                     ..Default::default()
                 }),

@@ -1559,6 +1559,9 @@ mod tests {
                     total_tokens: prompt_tokens + completion_tokens,
                     prompt_tokens_details: cached_tokens.map(|c| {
                         dynamo_protocols::types::PromptTokensDetails {
+                            text_tokens: None,
+                            image_tokens: None,
+                            cache_write_tokens: None,
                             audio_tokens: None,
                             cached_tokens: Some(c),
                         }

@@ -206,7 +206,10 @@ fn convert_user_blocks(
         match block {
             AnthropicContentBlock::Text { text, .. } => {
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
-                    ChatCompletionRequestMessageContentPartText { text: text.clone() },
+                    ChatCompletionRequestMessageContentPartText {
+                        text: text.clone(),
+                        prompt_cache_breakpoint: None,
+                    },
                 ));
             }
             AnthropicContentBlock::Image { source } => {
@@ -306,7 +309,10 @@ fn convert_tool_result_content(
         match block {
             ToolResultContentBlock::Text { text } => {
                 parts.push(ChatCompletionRequestToolMessageContentPart::Text(
-                    ChatCompletionRequestMessageContentPartText { text: text.clone() },
+                    ChatCompletionRequestMessageContentPartText {
+                        text: text.clone(),
+                        prompt_cache_breakpoint: None,
+                    },
                 ));
             }
             ToolResultContentBlock::Image { source } => {
@@ -1164,6 +1170,7 @@ mod tests {
             stream: false,
             metadata: None,
             tools: Some(vec![AnthropicTool {
+                strict: None,
                 name: "get_weather".into(),
                 tool_type: None,
                 description: Some("Get weather info".into()),
@@ -1336,6 +1343,9 @@ mod tests {
                     completion_tokens: 5,
                     total_tokens: 17,
                     prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                        text_tokens: None,
+                        image_tokens: None,
+                        cache_write_tokens: None,
                         audio_tokens: None,
                         cached_tokens: Some(11),
                     }),
@@ -1366,6 +1376,9 @@ mod tests {
             completion_tokens: 5,
             total_tokens: 17,
             prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                text_tokens: None,
+                image_tokens: None,
+                cache_write_tokens: None,
                 audio_tokens: None,
                 cached_tokens: Some(20),
             }),

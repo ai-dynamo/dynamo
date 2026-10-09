@@ -210,6 +210,9 @@ fn usage_with_cached_tokens(
         completion_tokens: to_u32(completion_tokens),
         total_tokens: to_u32(prompt_tokens.saturating_add(completion_tokens)),
         prompt_tokens_details: Some(PromptTokensDetails {
+            text_tokens: None,
+            image_tokens: None,
+            cache_write_tokens: None,
             audio_tokens: None,
             cached_tokens: Some(to_u32(cached_tokens)),
         }),
@@ -1490,6 +1493,9 @@ mod tests {
                 completion_tokens: 1,
                 total_tokens: 4,
                 prompt_tokens_details: Some(PromptTokensDetails {
+                    text_tokens: None,
+                    image_tokens: None,
+                    cache_write_tokens: None,
                     audio_tokens: None,
                     cached_tokens: Some(0),
                 }),

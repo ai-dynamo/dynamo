@@ -464,6 +464,9 @@ fn cached_prompt_tokens(
     prompt_tokens: u32,
 ) -> Option<PromptTokensDetails> {
     meta_u32(meta, "cached_tokens").map(|cached_tokens| PromptTokensDetails {
+        text_tokens: None,
+        image_tokens: None,
+        cache_write_tokens: None,
         audio_tokens: None,
         cached_tokens: Some(cached_tokens.min(prompt_tokens)),
     })

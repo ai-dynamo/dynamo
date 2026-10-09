@@ -14,7 +14,7 @@ use dynamo_protocols::types::responses::{
     InputTokenDetails, Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem,
     OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
     PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent, ReasoningTextContent,
-    Response, ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier, Status,
+    Response, ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTierResponses, Status,
     SummaryPart, TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
     ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
@@ -313,6 +313,7 @@ fn convert_input_content_to_user_content(
             InputContent::InputText(t) => {
                 chat_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
                     ChatCompletionRequestMessageContentPartText {
+                        prompt_cache_breakpoint: None,
                         text: t.text.clone(),
                     },
                 ));
@@ -392,6 +393,7 @@ fn convert_function_call_output_content(
             InputContent::InputText(text) => {
                 parts.push(ChatCompletionRequestToolMessageContentPart::Text(
                     ChatCompletionRequestMessageContentPartText {
+                        prompt_cache_breakpoint: None,
                         text: text.text.clone(),
                     },
                 ));
@@ -767,7 +769,7 @@ fn convert_tool_choice(
     names: &ToolNameMap,
 ) -> anyhow::Result<ChatCompletionToolChoiceOption> {
     Ok(match tc {
-        ToolChoiceParam::Mode(mode) => match mode {
+        ToolChoiceParam::Option(mode) => match mode {
             ToolChoiceOptions::None => ChatCompletionToolChoiceOption::None,
             ToolChoiceOptions::Auto => ChatCompletionToolChoiceOption::Auto,
             ToolChoiceOptions::Required => ChatCompletionToolChoiceOption::Required,
@@ -882,16 +884,23 @@ pub fn convert_text_format(text: &ResponseTextParam) -> Option<ResponseFormat> {
     }
 }
 
-/// Convert Responses API `ServiceTier` to Chat Completions `ServiceTier`.
-/// These are structurally identical enums in different modules.
-fn convert_service_tier(tier: &ServiceTier) -> ChatServiceTier {
-    match tier {
-        ServiceTier::Auto => ChatServiceTier::Auto,
-        ServiceTier::Default => ChatServiceTier::Default,
-        ServiceTier::Flex => ChatServiceTier::Flex,
-        ServiceTier::Scale => ChatServiceTier::Scale,
-        ServiceTier::Priority => ChatServiceTier::Priority,
-    }
+/// Convert Responses API `ServiceTierResponses` to Chat Completions `ServiceTier`.
+/// Reject Responses-only tiers that the Chat adapter cannot represent.
+fn convert_service_tier(tier: &ServiceTierResponses) -> anyhow::Result<ChatServiceTier> {
+    Ok(match tier {
+        ServiceTierResponses::Auto => ChatServiceTier::Auto,
+        ServiceTierResponses::Default => ChatServiceTier::Default,
+        ServiceTierResponses::Flex => ChatServiceTier::Flex,
+        ServiceTierResponses::Scale => ChatServiceTier::Scale,
+        ServiceTierResponses::Priority => ChatServiceTier::Priority,
+        ServiceTierResponses::Fast => ChatServiceTier::Fast,
+        ServiceTierResponses::Ultrafast => {
+            return Err(ResponsesConversionError::InvalidArgument(
+                "Responses service_tier ultrafast is not supported by the Chat adapter".to_string(),
+            )
+            .into());
+        }
+    })
 }
 
 impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
@@ -1004,7 +1013,12 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         let response_format = resp.inner.text.as_ref().and_then(convert_text_format);
 
         // Map service_tier
-        let service_tier = resp.inner.service_tier.as_ref().map(convert_service_tier);
+        let service_tier = resp
+            .inner
+            .service_tier
+            .as_ref()
+            .map(convert_service_tier)
+            .transpose()?;
 
         Ok(NvCreateChatCompletionRequest {
             inner: CreateChatCompletionRequest {
@@ -1067,7 +1081,7 @@ pub struct ResponseParams {
     pub instructions: Option<String>,
     pub reasoning: Option<Reasoning>,
     pub text: Option<ResponseTextParam>,
-    pub service_tier: Option<ServiceTier>,
+    pub service_tier: Option<ServiceTierResponses>,
     pub include: Option<Vec<IncludeEnum>>,
     pub truncation: Option<Truncation>,
     /// OpenResponses spec requires these fields on the response body. Upstream
@@ -1178,6 +1192,10 @@ fn make_text_message(id: String, text: String) -> OutputItem {
 
 /// Convert a ChatCompletion response into a Responses API response object,
 /// echoing back the actual request parameters from `params`.
+#[allow(
+    deprecated,
+    reason = "Preserve the existing prompt_cache_retention response contract."
+)]
 pub fn chat_completion_to_response(
     nv_resp: NvCreateChatCompletionResponse,
     params: &ResponseParams,
@@ -1230,6 +1248,8 @@ pub fn chat_completion_to_response(
             for tc in &tool_calls {
                 let (namespace, name) = names.decode(&tc.function.name);
                 output.push(OutputItem::FunctionCall(FunctionToolCall {
+                    caller: None,
+                    r#async: None,
                     arguments: tc.function.arguments.clone(),
                     call_id: tc.id.clone(),
                     namespace: namespace.map(str::to_owned),
@@ -1332,7 +1352,7 @@ pub fn chat_completion_to_response(
         tool_choice: params
             .tool_choice
             .clone()
-            .or(Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto))),
+            .or(Some(ToolChoiceParam::Option(ToolChoiceOptions::Auto))),
         tools: Some(
             params
                 .tools
@@ -1352,16 +1372,25 @@ pub fn chat_completion_to_response(
         instructions: params.instructions.clone().map(Instructions::Text),
         max_output_tokens: params.max_output_tokens,
         previous_response_id: api_context.and_then(|ctx| ctx.previous_response_id.clone()),
+        moderation: None,
+        prompt_cache_options: None,
+        prompt_cache_diagnostics: None,
         prompt: None,
         prompt_cache_key: params.prompt_cache_key.clone(),
         prompt_cache_retention: params.prompt_cache_retention,
         reasoning: params.reasoning.clone(),
         safety_identifier: params.safety_identifier.clone(),
-        service_tier: Some(params.service_tier.unwrap_or(ServiceTier::Auto)),
+        service_tier: Some(
+            params
+                .service_tier
+                .clone()
+                .unwrap_or(ServiceTierResponses::Auto),
+        ),
         top_logprobs: Some(0),
         usage: chat_resp.usage.map(|u| ResponseUsage {
             input_tokens: u.prompt_tokens,
             input_tokens_details: InputTokenDetails {
+                cache_write_tokens: None,
                 cached_tokens: u
                     .prompt_tokens_details
                     .map(|d| d.cached_tokens.unwrap_or(0))
@@ -1448,6 +1477,8 @@ mod tests {
 
         ResponseParams {
             reasoning: Some(Reasoning {
+                context: None,
+                mode: None,
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
             }),
@@ -1599,6 +1630,7 @@ mod tests {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "Follow safety guidelines.".into(),
                         })],
                         role: InputRole::Developer,
@@ -1606,6 +1638,7 @@ mod tests {
                     }))),
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "What is 2+2?".into(),
                         })],
                         role: InputRole::User,
@@ -1660,6 +1693,7 @@ mod tests {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "Be concise.".into(),
                         })],
                         role: InputRole::System,
@@ -1667,6 +1701,7 @@ mod tests {
                     }))),
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "What is 2+2?".into(),
                         })],
                         role: InputRole::User,
@@ -1687,6 +1722,7 @@ mod tests {
                     }))),
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "And 3+3?".into(),
                         })],
                         role: InputRole::User,
@@ -1724,6 +1760,7 @@ mod tests {
                     InputMessage {
                         content: vec![
                             InputContent::InputText(InputTextContent {
+                                prompt_cache_breakpoint: None,
                                 text: "What is in this image?".into(),
                             }),
                             InputContent::InputImage(InputImageContent {
@@ -1771,6 +1808,7 @@ mod tests {
                     role: ResponseRole::User,
                     content: EasyInputContent::ContentList(vec![
                         InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "What is in this image?".into(),
                         }),
                         InputContent::InputImage(InputImageContent {
@@ -1869,6 +1907,7 @@ mod tests {
                         role: ResponseRole::System,
                         content: EasyInputContent::ContentList(vec![InputContent::InputText(
                             InputTextContent {
+                                prompt_cache_breakpoint: None,
                                 text: "You are helpful.".into(),
                             },
                         )]),
@@ -1906,7 +1945,10 @@ mod tests {
                     InputItem::EasyMessage(EasyInputMessage {
                         role: ResponseRole::Assistant,
                         content: EasyInputContent::ContentList(vec![InputContent::InputText(
-                            InputTextContent { text: "ok".into() },
+                            InputTextContent {
+                                text: "ok".into(),
+                                prompt_cache_breakpoint: None,
+                            },
                         )]),
                         ..Default::default()
                     }),
@@ -1940,12 +1982,15 @@ mod tests {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "What's the weather?".into(),
                         })],
                         role: InputRole::User,
                         status: None,
                     }))),
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        caller: None,
+                        r#async: None,
                         arguments: r#"{"location":"SF"}"#.into(),
                         call_id: "call_123".into(),
                         namespace: None,
@@ -1957,9 +2002,11 @@ mod tests {
                         call_id: "call_123".into(),
                         output: FunctionCallOutput::Content(vec![
                             InputContent::InputText(InputTextContent {
+                                prompt_cache_breakpoint: None,
                                 text: "{\"temp\":\"".into(),
                             }),
                             InputContent::InputText(InputTextContent {
+                                prompt_cache_breakpoint: None,
                                 text: "72F\"}".into(),
                             }),
                         ]),
@@ -2000,9 +2047,11 @@ mod tests {
     fn test_function_call_output_text_content_is_preserved() {
         let output = FunctionCallOutput::Content(vec![
             InputContent::InputText(InputTextContent {
+                prompt_cache_breakpoint: None,
                 text: "first".into(),
             }),
             InputContent::InputText(InputTextContent {
+                prompt_cache_breakpoint: None,
                 text: " second".into(),
             }),
         ]);
@@ -2095,12 +2144,15 @@ mod tests {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "What's the weather?".into(),
                         })],
                         role: InputRole::User,
                         status: None,
                     }))),
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        caller: None,
+                        r#async: None,
                         arguments: r#"{"location":"SF"}"#.into(),
                         call_id: "call_123".into(),
                         namespace: None,
@@ -2183,6 +2235,8 @@ mod tests {
                         ..Default::default()
                     }),
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        caller: None,
+                        r#async: None,
                         arguments: "{}".into(),
                         call_id: "c".into(),
                         namespace: None,
@@ -2235,6 +2289,7 @@ mod tests {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "first question".into(),
                         })],
                         role: InputRole::User,
@@ -2255,6 +2310,7 @@ mod tests {
                     }))),
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "second question".into(),
                         })],
                         role: InputRole::User,
@@ -2347,12 +2403,15 @@ mod tests {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "hi".into(),
                         })],
                         role: InputRole::User,
                         status: None,
                     }))),
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        caller: None,
+                        r#async: None,
                         arguments: "{}".into(),
                         call_id: "c".into(),
                         namespace: None,
@@ -2465,6 +2524,8 @@ mod tests {
         };
         let tool_call = |call_id: &str, name: &str| {
             InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                caller: None,
+                r#async: None,
                 arguments: "{}".into(),
                 call_id: call_id.into(),
                 namespace: None,
@@ -2519,12 +2580,15 @@ mod tests {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "go".into(),
                         })],
                         role: InputRole::User,
                         status: None,
                     }))),
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        caller: None,
+                        r#async: None,
                         arguments: "{}".into(),
                         call_id: "c1".into(),
                         namespace: None,
@@ -2544,6 +2608,8 @@ mod tests {
                         status: None,
                     })),
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        caller: None,
+                        r#async: None,
                         arguments: "{}".into(),
                         call_id: "c2".into(),
                         namespace: None,
@@ -2600,12 +2666,15 @@ mod tests {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "call say".into(),
                         })],
                         role: InputRole::User,
                         status: None,
                     }))),
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        caller: None,
+                        r#async: None,
                         arguments: r#"{"x":"hi"}"#.into(),
                         call_id: "c".into(),
                         namespace: None,
@@ -2671,6 +2740,7 @@ mod tests {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "call say".into(),
                         })],
                         role: InputRole::User,
@@ -2690,6 +2760,8 @@ mod tests {
                         )],
                     }))),
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        caller: None,
+                        r#async: None,
                         arguments: r#"{"x":"hi"}"#.into(),
                         call_id: "c".into(),
                         namespace: None,
@@ -2738,12 +2810,15 @@ mod tests {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "do two things".into(),
                         })],
                         role: InputRole::User,
                         status: None,
                     }))),
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        caller: None,
+                        r#async: None,
                         arguments: "{}".into(),
                         call_id: "c1".into(),
                         namespace: None,
@@ -2752,6 +2827,8 @@ mod tests {
                         status: None,
                     })),
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        caller: None,
+                        r#async: None,
                         arguments: "{}".into(),
                         call_id: "c2".into(),
                         namespace: None,
@@ -2809,6 +2886,7 @@ mod tests {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "try again".into(),
                         })],
                         role: InputRole::User,
@@ -2825,6 +2903,7 @@ mod tests {
                     }))),
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
+                            prompt_cache_breakpoint: None,
                             text: "ok different question".into(),
                         })],
                         role: InputRole::User,
@@ -3343,7 +3422,7 @@ mod tests {
                 }]))
                 .unwrap(),
             ),
-            tool_choice: Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+            tool_choice: Some(ToolChoiceParam::Option(ToolChoiceOptions::Auto)),
             ..Default::default()
         };
         let mut chat = make_chat_resp_with_text(text);
@@ -3382,6 +3461,8 @@ mod tests {
 
         let mut req = make_response_with_input("think hard");
         req.inner.reasoning = Some(Reasoning {
+            context: None,
+            mode: None,
             effort: Some(serde_json::from_value(serde_json::json!("medium")).unwrap()),
             ..Default::default()
         });
@@ -3464,13 +3545,38 @@ mod tests {
     #[test]
     fn test_service_tier_mapped_to_chat_completion() {
         use dynamo_protocols::types::ServiceTier as ChatServiceTier;
-        use dynamo_protocols::types::responses::ServiceTier as RespServiceTier;
+        use dynamo_protocols::types::responses::ServiceTierResponses as RespServiceTier;
 
         let mut req = make_response_with_input("priority");
         req.inner.service_tier = Some(RespServiceTier::Priority);
 
         let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert_eq!(chat.inner.service_tier, Some(ChatServiceTier::Priority));
+    }
+
+    #[test]
+    fn test_service_tier_upgrade_preserves_supported_values_and_rejects_ultrafast() {
+        for (tier, expected) in [
+            ("auto", ChatServiceTier::Auto),
+            ("default", ChatServiceTier::Default),
+            ("flex", ChatServiceTier::Flex),
+            ("scale", ChatServiceTier::Scale),
+            ("priority", ChatServiceTier::Priority),
+            ("fast", ChatServiceTier::Fast),
+        ] {
+            let mut req = make_response_with_input("tier");
+            req.inner.service_tier = Some(serde_json::from_value(serde_json::json!(tier)).unwrap());
+            let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
+            assert_eq!(chat.inner.service_tier, Some(expected));
+        }
+        let mut req = make_response_with_input("tier");
+        req.inner.service_tier = Some(ServiceTierResponses::Ultrafast);
+        let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ResponsesConversionError>(),
+            Some(ResponsesConversionError::InvalidArgument(message))
+                if message.contains("ultrafast")
+        ));
     }
 
     #[test]
@@ -3488,6 +3594,8 @@ mod tests {
 
         let params = ResponseParams {
             reasoning: Some(Reasoning {
+                context: None,
+                mode: None,
                 effort: Some(serde_json::from_value(serde_json::json!("high")).unwrap()),
                 ..Default::default()
             }),
@@ -3553,10 +3661,10 @@ mod tests {
 
     #[test]
     fn test_response_echoes_service_tier() {
-        use dynamo_protocols::types::responses::ServiceTier;
+        use dynamo_protocols::types::responses::ServiceTierResponses;
 
         let params = ResponseParams {
-            service_tier: Some(ServiceTier::Flex),
+            service_tier: Some(ServiceTierResponses::Flex),
             ..Default::default()
         };
 
@@ -3576,7 +3684,7 @@ mod tests {
         };
 
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
-        assert_eq!(resp.inner.service_tier, Some(ServiceTier::Flex));
+        assert_eq!(resp.inner.service_tier, Some(ServiceTierResponses::Flex));
     }
 
     #[test]
@@ -3860,6 +3968,8 @@ mod tests {
         }]);
         let params = ResponseParams {
             reasoning: Some(Reasoning {
+                context: None,
+                mode: None,
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
             }),
@@ -4077,6 +4187,8 @@ mod tests {
             Some(dynamo_protocols::types::FinishReason::Length);
         let params = ResponseParams {
             reasoning: Some(Reasoning {
+                context: None,
+                mode: None,
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
             }),
@@ -4107,6 +4219,8 @@ mod tests {
             Some(dynamo_protocols::types::FinishReason::Length);
         let params = ResponseParams {
             reasoning: Some(Reasoning {
+                context: None,
+                mode: None,
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
             }),
@@ -4129,6 +4243,10 @@ mod tests {
     /// caching semantics. Same pattern for `prompt_cache_retention` and
     /// `safety_identifier`.
     #[test]
+    #[allow(
+        deprecated,
+        reason = "Regression coverage for the legacy response field."
+    )]
     fn test_response_echoes_passthrough_metadata() {
         let chat_resp = make_chat_resp_with_text("hello");
         let params = ResponseParams {
