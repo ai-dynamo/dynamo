@@ -791,6 +791,7 @@ mod race_tests {
 
 mod remove_tests {
     use super::*;
+    use crate::test_utils::{make_remove_event, make_store_event_full, router_event};
 
     #[test]
     fn remove_multiple_hashes_from_same_compressed_edge() {
@@ -1001,6 +1002,191 @@ mod remove_tests {
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 4);
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
         assert_eq!(worker_lookup_len(&lookup0, worker0), Some(4));
+    }
+
+    /// Evicting `[1]` leaves its node without a full holder, so cleanup unlinks the
+    /// `[2, 20, 21]` child while the lane still names it for those hashes. Restoring `[1]`
+    /// and then `[2, 20]` puts 20 on a new live node. Removing 20 and 21 must take 20 off
+    /// that live node in either order, also when 21 resolves the run to the unlinked node.
+    #[test]
+    fn grouped_removal_leaves_hashes_named_on_another_node() {
+        for tail_first in [true, false] {
+            let index = ConcurrentRadixTreeCompressed::new();
+            let mut lookup = direct_lookup();
+            apply_direct(&index, &mut lookup, make_store_event(0, &[1, 30]));
+            apply_direct(
+                &index,
+                &mut lookup,
+                make_store_event_with_parent(0, &[1], &[2, 20, 21]),
+            );
+            apply_direct(&index, &mut lookup, make_remove_event(0, &[1]));
+            apply_direct(&index, &mut lookup, make_store_event(0, &[1]));
+            apply_direct(
+                &index,
+                &mut lookup,
+                make_store_event_with_parent(0, &[1], &[2, 20]),
+            );
+
+            let mut evicted = remove_hashes_with_parent(&[1, 2], &[20, 21]);
+            if tail_first {
+                evicted.reverse();
+            }
+            apply_direct(&index, &mut lookup, remove_event(0, 0, 0, evicted));
+
+            let scores = index.find_matches_impl(&local_hashes(&[1, 2, 20]), false);
+            assert_eq!(
+                scores.scores.get(&worker(0)),
+                Some(&2),
+                "tail_first={tail_first}"
+            );
+        }
+    }
+
+    /// Randomized differential test against each rank's set of cached blocks. Removes come
+    /// tail-first, head-first or shuffled and may leave holes, stores restore parts of
+    /// evicted chains, and ranks are cleared one at a time, so unlinked subtrees keep stale
+    /// coverage and lookup entries. The tree may undercount there, but it must never score
+    /// a rank past the leading blocks the rank holds. `CRTC_REMOVE_FUZZ_SEEDS` sets the
+    /// number of seeds.
+    #[test]
+    fn random_hole_streams_never_overcount() {
+        let seeds = std::env::var("CRTC_REMOVE_FUZZ_SEEDS")
+            .ok()
+            .and_then(|seeds| seeds.parse().ok())
+            .unwrap_or(40u64);
+        // Lanes split ranks by worker id, as `ThreadPoolIndexer` does with two threads.
+        let ranks = [
+            WorkerWithDpRank::new(0, 0),
+            WorkerWithDpRank::new(0, 1),
+            WorkerWithDpRank::new(1, 0),
+            WorkerWithDpRank::new(2, 0),
+        ];
+        let mut overcounts = Vec::new();
+        let mut repair_scans = 0;
+
+        for seed in 0..seeds {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            // A base chain plus branches off prefixes of earlier chains.
+            let mut docs: Vec<Vec<u64>> = vec![(1..=24).collect()];
+            for branch in 1..10 {
+                let base = &docs[rng.usize(..docs.len())];
+                let mut doc = base[..rng.usize(1..base.len())].to_vec();
+                doc.extend((0..rng.u64(1..=12)).map(|i| 1_000 * branch + i));
+                docs.push(doc);
+            }
+            let seqs: Vec<Vec<u64>> = docs
+                .iter()
+                .map(|doc| compute_seq_hash_for_block(&local_hashes(doc)))
+                .collect();
+
+            let index = ConcurrentRadixTreeCompressed::new();
+            let mut lanes = [direct_lookup(), direct_lookup()];
+            let mut held = vec![FxHashSet::<u64>::default(); ranks.len()];
+            for step in 0..1_000 {
+                let r = rng.usize(..ranks.len());
+                let rank = ranks[r];
+                let d = rng.usize(..docs.len());
+                let (doc, seq) = (&docs[d], &seqs[d]);
+                let data = match rng.u32(..100) {
+                    0..=46 => {
+                        // Any cached parent can take a store, so evicted chains come back
+                        // in parts.
+                        let starts: Vec<usize> = (0..doc.len())
+                            .filter(|&start| start == 0 || held[r].contains(&seq[start - 1]))
+                            .collect();
+                        let start = starts[rng.usize(..starts.len())];
+                        let end = rng.usize(start + 1..=doc.len());
+                        held[r].extend(&seq[start..end]);
+                        let mut op = stored_data(make_store_event_full(
+                            rank.worker_id,
+                            &doc[..end],
+                            rank.dp_rank,
+                            None,
+                            None,
+                        ));
+                        op.parent_hash = start
+                            .checked_sub(1)
+                            .map(|parent| ExternalSequenceBlockHash(seq[parent]));
+                        op.blocks.drain(..start);
+                        KvCacheEventData::Stored(op)
+                    }
+                    47..=96 => {
+                        let cached: Vec<u64> = seq
+                            .iter()
+                            .copied()
+                            .filter(|hash| held[r].contains(hash))
+                            .collect();
+                        if cached.is_empty() {
+                            continue;
+                        }
+                        // Cached blocks from some position on, skipping any holes.
+                        let from = rng.usize(..cached.len());
+                        let len = rng.usize(1..=cached.len() - from);
+                        let mut evicted = cached[from..from + len].to_vec();
+                        match rng.u32(..3) {
+                            0 => evicted.reverse(),
+                            1 => rng.shuffle(&mut evicted),
+                            _ => {}
+                        }
+                        for hash in &evicted {
+                            held[r].remove(hash);
+                        }
+                        KvCacheEventData::Removed(KvCacheRemoveData {
+                            block_hashes: evicted
+                                .into_iter()
+                                .map(ExternalSequenceBlockHash)
+                                .collect(),
+                        })
+                    }
+                    _ => {
+                        held[r].clear();
+                        KvCacheEventData::Cleared
+                    }
+                };
+
+                let lookup = &mut lanes[(rank.worker_id % 2) as usize];
+                // A store under a parent the tree no longer holds is rejected, which
+                // only undercounts.
+                let _ = index.apply_event(
+                    lookup,
+                    router_event(rank.worker_id, step, rank.dp_rank, data),
+                    None,
+                );
+                lookup.assert_invariants();
+
+                for (doc, seq) in docs.iter().zip(&seqs) {
+                    let scores = index.find_matches_impl(&local_hashes(doc), false).scores;
+                    for (rank, held) in ranks.iter().zip(&held) {
+                        let prefix = seq.iter().take_while(|hash| held.contains(hash)).count();
+                        let score = scores.get(rank).map_or(0, |&score| score as usize);
+                        if score > prefix {
+                            overcounts.push((
+                                seed,
+                                format!(
+                                    "seed={seed} step={step} rank={rank:?} doc={doc:?} \
+                                     score={score} held_prefix={prefix}"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            repair_scans += index
+                .bench_metrics
+                .lookup_repair_scans
+                .load(Ordering::Relaxed);
+        }
+
+        // Cross-lane splits must leave stale entries for lookup repair to resolve.
+        assert!(repair_scans > 0, "the streams never repaired a lookup");
+        let failed_seeds: FxHashSet<_> = overcounts.iter().map(|&(seed, _)| seed).collect();
+        assert!(
+            overcounts.is_empty(),
+            "{} overcounting lookups in {} of {seeds} seeds, first: {}",
+            overcounts.len(),
+            failed_seeds.len(),
+            overcounts[0].1
+        );
     }
 }
 
