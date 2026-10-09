@@ -72,6 +72,7 @@
 //! check, and in strict mode of `apply_errors`, are printed above the line.
 
 use super::*;
+use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
 use dashmap::DashSet;
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -135,23 +136,6 @@ impl Config {
     }
 }
 
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        mix(self.0)
-    }
-
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n.max(1)
-    }
-
-    fn chance(&mut self, pct: u64) -> bool {
-        self.below(100) < pct
-    }
-}
-
 fn mix(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -166,7 +150,7 @@ fn hash_parts(parts: &[u64]) -> u64 {
 
 /// Local hashes of a pool sequence: system prompt, then document, then user turn, each
 /// with a fixed length per id.
-fn pool_seq(doc_len: u64, system: u64, doc: u64, turn: u64) -> Vec<u64> {
+fn pool_seq(doc_len: u64, system: u64, doc: u64, turn: u64) -> Vec<LocalBlockHash> {
     let ls = 1 + hash_parts(&[1, system]) % 12;
     let ld = hash_parts(&[2, system, doc]) % (doc_len + 1);
     let lu = 1 + hash_parts(&[3, system, doc, turn]) % 8;
@@ -174,19 +158,14 @@ fn pool_seq(doc_len: u64, system: u64, doc: u64, turn: u64) -> Vec<u64> {
     seq.extend((0..ls).map(|i| hash_parts(&[10, system, i])));
     seq.extend((0..ld).map(|i| hash_parts(&[11, system, doc, i])));
     seq.extend((0..lu).map(|i| hash_parts(&[12, system, doc, turn, i])));
-    seq
+    seq.into_iter().map(LocalBlockHash).collect()
 }
 
-fn random_pool_seq(doc_len: u64, rng: &mut Rng) -> Vec<u64> {
-    let system = rng.below(SYSTEM_PROMPTS);
-    let doc = rng.below(DOCUMENTS);
-    let turn = rng.below(USER_TURNS);
+fn random_pool_seq(doc_len: u64, rng: &mut fastrand::Rng) -> Vec<LocalBlockHash> {
+    let system = rng.u64(..SYSTEM_PROMPTS);
+    let doc = rng.u64(..DOCUMENTS);
+    let turn = rng.u64(..USER_TURNS);
     pool_seq(doc_len, system, doc, turn)
-}
-
-fn seq_hashes(locals: &[u64]) -> Vec<u64> {
-    let locals: Vec<LocalBlockHash> = locals.iter().copied().map(LocalBlockHash).collect();
-    compute_seq_hash_for_block(&locals)
 }
 
 /// One rank's cached blocks as its event stream implies them.
@@ -195,7 +174,7 @@ struct WorkerModel {
     /// Sequence hash -> (parent sequence hash, number of cached children).
     cached: FxHashMap<u64, (Option<u64>, u32)>,
     /// The most recent sequences this rank stored or extended, as local hashes.
-    live: VecDeque<Vec<u64>>,
+    live: VecDeque<Vec<LocalBlockHash>>,
 }
 
 impl WorkerModel {
@@ -228,7 +207,7 @@ impl WorkerModel {
         }
     }
 
-    fn push_live(&mut self, seq: Vec<u64>) {
+    fn push_live(&mut self, seq: Vec<LocalBlockHash>) {
         if self.live.len() >= 48 {
             self.live.pop_front();
         }
@@ -255,7 +234,7 @@ struct Shared {
     /// Each lane's rank models.
     models: Vec<Mutex<FxHashMap<WorkerWithDpRank, WorkerModel>>>,
     /// Extended decode sequences that readers sample as queries.
-    queries: RwLock<Vec<Vec<u64>>>,
+    queries: RwLock<Vec<Vec<LocalBlockHash>>>,
     stop: AtomicBool,
     events: AtomicU64,
     apply_errors: AtomicU64,
@@ -267,53 +246,13 @@ struct Shared {
     parity_mismatches: AtomicU64,
 }
 
-fn store_event(
-    worker: WorkerWithDpRank,
-    id: u64,
-    parent: Option<u64>,
-    locals: &[u64],
-    seqs: &[u64],
-) -> RouterEvent {
-    RouterEvent::new(
-        worker.worker_id,
-        KvCacheEvent {
-            event_id: id,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: parent.map(ExternalSequenceBlockHash),
-                start_position: None,
-                blocks: locals
-                    .iter()
-                    .zip(seqs)
-                    .map(|(&l, &s)| KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(s),
-                        tokens_hash: LocalBlockHash(l),
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-            dp_rank: worker.dp_rank,
-        },
-    )
-}
-
-fn data_event(worker: WorkerWithDpRank, id: u64, data: KvCacheEventData) -> RouterEvent {
-    RouterEvent::new(
-        worker.worker_id,
-        KvCacheEvent {
-            event_id: id,
-            data,
-            dp_rank: worker.dp_rank,
-        },
-    )
-}
-
 struct Writer {
     shared: Arc<Shared>,
     /// This writer's index into `Shared::models`.
     lane: usize,
     workers: Vec<WorkerWithDpRank>,
     lookup: LaneLookup,
-    rng: Rng,
+    rng: fastrand::Rng,
     next_id: u64,
     /// Ranks whose slot has not been recorded in `slot_owners` yet.
     unslotted: FxHashSet<WorkerWithDpRank>,
@@ -339,21 +278,24 @@ impl Writer {
         &mut self,
         model: &mut WorkerModel,
         worker: WorkerWithDpRank,
-        locals: &[u64],
+        locals: &[LocalBlockHash],
         from: usize,
         to: usize,
     ) {
-        let seqs = seq_hashes(&locals[..to]);
+        let seqs = compute_seq_hash_for_block(&locals[..to]);
         for &s in &seqs[from..to] {
             self.shared.ever.insert((worker, s));
         }
         let parent = (from > 0).then(|| seqs[from - 1]);
-        let event = store_event(
-            worker,
+        let event = router_event(
+            worker.worker_id,
             self.next_id,
-            parent,
-            &locals[from..to],
-            &seqs[from..to],
+            worker.dp_rank,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent.map(ExternalSequenceBlockHash),
+                start_position: None,
+                blocks: stored_blocks_with_sequence_hashes(&locals[from..to], &seqs[from..to]),
+            }),
         );
         let describe = || format!("store of {:?} under parent {parent:?}", &seqs[from..to]);
         if !self.apply(event, describe) {
@@ -380,9 +322,9 @@ impl Writer {
     /// Retires one of this writer's ranks, or every rank of its worker, and re-adds each
     /// under a fresh worker id with an empty model.
     fn churn(&mut self) {
-        let pick = self.rng.below(self.workers.len() as u64) as usize;
+        let pick = self.rng.usize(..self.workers.len());
         let shared = self.shared.clone();
-        if self.rng.chance(50) {
+        if self.rng.bool() {
             // RemoveWorkerDpRank on the rank's own lane, racing every other lane. Adopting
             // first keeps it off a rank whose worker another lane already removed.
             let _batch = shared.gate.read();
@@ -485,25 +427,25 @@ impl Writer {
     }
 
     fn step(&mut self) {
-        let worker = self.workers[self.rng.below(self.workers.len() as u64) as usize];
+        let worker = self.workers[self.rng.usize(..self.workers.len())];
         let shared = self.shared.clone();
         let config = &shared.config;
         let mut models = shared.models[self.lane].lock();
         let model = models
             .get_mut(&worker)
             .expect("every writer rank has a model");
-        let roll = self.rng.below(1000);
+        let roll = self.rng.u32(..1000);
 
         if roll < 450 {
             // Request store: extend this rank's cached prefix of a pool sequence, sometimes
             // as two chained events.
             let seq = random_pool_seq(config.doc_len, &mut self.rng);
-            let target = 1 + self.rng.below(seq.len() as u64) as usize;
-            let seqs = seq_hashes(&seq);
+            let target = self.rng.usize(1..=seq.len());
+            let seqs = compute_seq_hash_for_block(&seq);
             let cached = model.prefix_len(&seqs[..target]);
             if cached < target {
-                if target - cached >= 2 && self.rng.chance(30) {
-                    let mid = cached + 1 + self.rng.below((target - cached - 1) as u64) as usize;
+                if target - cached >= 2 && self.rng.u32(..100) < 30 {
+                    let mid = self.rng.usize(cached + 1..target);
                     self.store(model, worker, &seq, cached, mid);
                     self.store(model, worker, &seq, mid, target);
                 } else {
@@ -516,26 +458,26 @@ impl Writer {
             if model.live.is_empty() {
                 return;
             }
-            let idx = self.rng.below(model.live.len() as u64) as usize;
+            let idx = self.rng.usize(..model.live.len());
             let mut seq = model.live[idx].clone();
-            let seqs = seq_hashes(&seq);
+            let seqs = compute_seq_hash_for_block(&seq);
             if model.prefix_len(&seqs) != seq.len() {
                 return;
             }
             let tail = *seqs.last().unwrap();
             // A third of the extensions are unique to the rank; the rest take one of two
             // tails every rank shares, so ranks race to extend and split the same leaf.
-            let variant = match self.rng.below(3) {
+            let variant = match self.rng.u64(..3) {
                 0 => worker.worker_id * 4 + worker.dp_rank as u64 + 100,
                 v => v,
             };
             let start = seq.len();
-            let m = 1 + self.rng.below(4) as usize;
-            seq.extend((0..m).map(|i| hash_parts(&[20, tail, variant, i as u64])));
+            let m = self.rng.u64(1..=4);
+            seq.extend((0..m).map(|i| LocalBlockHash(hash_parts(&[20, tail, variant, i]))));
             self.store(model, worker, &seq, start, seq.len());
-            if self.rng.chance(5) {
+            if self.rng.u32(..100) < 5 {
                 let mut queries = shared.queries.write();
-                let victim = self.rng.below(QUERY_POOL as u64) as usize;
+                let victim = self.rng.usize(..QUERY_POOL);
                 if queries.len() < QUERY_POOL {
                     queries.push(seq.clone());
                 } else {
@@ -548,21 +490,21 @@ impl Writer {
             if model.live.is_empty() {
                 return;
             }
-            let idx = self.rng.below(model.live.len() as u64) as usize;
+            let idx = self.rng.usize(..model.live.len());
             let seq = model.live[idx].clone();
-            let seqs = seq_hashes(&seq);
+            let seqs = compute_seq_hash_for_block(&seq);
             let cached = model.prefix_len(&seqs);
             if cached == 0 {
                 return;
             }
             let mut removed = Vec::new();
-            if config.chaos && self.rng.chance(25) {
+            if config.chaos && self.rng.u32(..100) < 25 {
                 // Mid-chain eviction: the rank keeps the blocks after it.
-                let pos = self.rng.below(cached as u64) as usize;
+                let pos = self.rng.usize(..cached);
                 removed.push(seqs[pos]);
             } else {
                 // Tail eviction, stopping at a block that has other cached children.
-                let want = 1 + self.rng.below(config.max_remove) as usize;
+                let want = self.rng.usize(1..=config.max_remove.max(1) as usize);
                 let mut pos = cached;
                 while pos > 0 && removed.len() < want {
                     let s = seqs[pos - 1];
@@ -579,19 +521,18 @@ impl Writer {
                 return;
             }
             // Event order within a batch is arbitrary.
-            if self.rng.chance(50) {
+            if self.rng.bool() {
                 removed.reverse();
             }
-            let event = data_event(
-                worker,
+            let event = remove_event(
+                worker.worker_id,
                 self.next_id,
-                KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: removed
-                        .iter()
-                        .copied()
-                        .map(ExternalSequenceBlockHash)
-                        .collect(),
-                }),
+                worker.dp_rank,
+                removed
+                    .iter()
+                    .copied()
+                    .map(ExternalSequenceBlockHash)
+                    .collect(),
             );
             if self.apply(event, || format!("removal of {removed:?}")) {
                 // Either order keeps the child counts right: a parent removed first is
@@ -601,7 +542,12 @@ impl Writer {
                 }
             }
         } else {
-            let event = data_event(worker, self.next_id, KvCacheEventData::Cleared);
+            let event = router_event(
+                worker.worker_id,
+                self.next_id,
+                worker.dp_rank,
+                KvCacheEventData::Cleared,
+            );
             if self.apply(event, || "clear".to_string()) {
                 model.cached.clear();
                 model.live.clear();
@@ -610,15 +556,13 @@ impl Writer {
     }
 }
 
-fn check_read(shared: &Shared, query: &[u64], rng: &mut Rng) {
-    let seqs = seq_hashes(query);
-    let locals: Vec<LocalBlockHash> = query.iter().copied().map(LocalBlockHash).collect();
-    let details = rng.chance(25);
-    let (scores, last) = if details {
-        let d = shared.index.find_match_details_impl(&locals, false);
+fn check_read(shared: &Shared, query: &[LocalBlockHash], rng: &mut fastrand::Rng) {
+    let seqs = compute_seq_hash_for_block(query);
+    let (scores, last) = if rng.u32(..100) < 25 {
+        let d = shared.index.find_match_details_impl(query, false);
         (d.overlap_scores.scores, Some(d.last_matched_hashes))
     } else {
-        (shared.index.find_matches_impl(&locals, false).scores, None)
+        (shared.index.find_matches_impl(query, false).scores, None)
     };
     shared.reads.fetch_add(1, Ordering::Relaxed);
     for (&worker, &score) in &scores {
@@ -652,41 +596,40 @@ fn check_read(shared: &Shared, query: &[u64], rng: &mut Rng) {
 
 /// A pool sequence or a published decode sequence, truncated to a random length and
 /// sometimes followed by a block no rank stores.
-fn random_query(shared: &Shared, rng: &mut Rng) -> Vec<u64> {
+fn random_query(shared: &Shared, rng: &mut fastrand::Rng) -> Vec<LocalBlockHash> {
     let doc_len = shared.config.doc_len;
-    let mut q = if rng.chance(30) {
+    let mut q = if rng.u32(..100) < 30 {
         let queries = shared.queries.read();
         if queries.is_empty() {
             random_pool_seq(doc_len, rng)
         } else {
-            queries[rng.below(queries.len() as u64) as usize].clone()
+            queries[rng.usize(..queries.len())].clone()
         }
     } else {
         random_pool_seq(doc_len, rng)
     };
-    let len = 1 + rng.below(q.len() as u64) as usize;
+    let len = rng.usize(1..=q.len());
     q.truncate(len);
-    if rng.chance(10) {
-        q.push(rng.next());
+    if rng.u32(..100) < 10 {
+        q.push(LocalBlockHash(rng.u64(..)));
     }
     q
 }
 
-fn quiescent_parity(shared: &Shared, rng: &mut Rng) {
+fn quiescent_parity(shared: &Shared, rng: &mut fastrand::Rng) {
     let _paused = shared.gate.write();
     let models: Vec<_> = shared.models.iter().map(|m| m.lock()).collect();
     // Ranks of a removed worker are gone from the index before their writer drops them
     // from its model at its next batch.
     let retired = shared.retired.lock().clone();
-    let mut queries: Vec<Vec<u64>> = models
+    let mut queries: Vec<Vec<LocalBlockHash>> = models
         .iter()
         .flat_map(|m| m.values().flat_map(|w| w.live.iter().cloned()))
         .collect();
     queries.extend((0..256).map(|_| random_query(shared, rng)));
     for query in queries {
-        let seqs = seq_hashes(&query);
-        let locals: Vec<LocalBlockHash> = query.iter().copied().map(LocalBlockHash).collect();
-        let got = shared.index.find_matches_impl(&locals, false).scores;
+        let seqs = compute_seq_hash_for_block(&query);
+        let got = shared.index.find_matches_impl(&query, false).scores;
         let mut expected = FxHashMap::default();
         for m in &models {
             for (&worker, model) in m.iter().filter(|(worker, _)| !retired.contains(worker)) {
@@ -781,12 +724,12 @@ fn crtc_race_soak() {
                 unslotted: ws.iter().copied().collect(),
                 workers: ws,
                 lookup: LaneLookup::default(),
-                rng: Rng(mix(seed ^ (lane as u64 + 1))),
+                rng: fastrand::Rng::with_seed(mix(seed ^ (lane as u64 + 1))),
                 next_id: 0,
             };
             let mut batches = 0u64;
             while !shared.stop.load(Ordering::Relaxed) {
-                if writer.rng.below(1000) < shared.config.churn_per_mille {
+                if writer.rng.u64(..1000) < shared.config.churn_per_mille {
                     writer.churn();
                 }
                 let _batch = shared.gate.read();
@@ -805,7 +748,7 @@ fn crtc_race_soak() {
     for r in 0..shared.config.readers {
         let shared = shared.clone();
         handles.push(thread::spawn(move || {
-            let mut rng = Rng(mix(seed ^ (0xABCD + r as u64)));
+            let mut rng = fastrand::Rng::with_seed(mix(seed ^ (0xABCD + r as u64)));
             while !shared.stop.load(Ordering::Relaxed) {
                 let q = random_query(&shared, &mut rng);
                 check_read(&shared, &q, &mut rng);
@@ -825,7 +768,7 @@ fn crtc_race_soak() {
         }));
     }
 
-    let mut rng = Rng(mix(seed ^ 0x5151));
+    let mut rng = fastrand::Rng::with_seed(mix(seed ^ 0x5151));
     let deadline = Instant::now() + Duration::from_secs(shared.config.secs);
     while Instant::now() < deadline {
         thread::sleep(Duration::from_millis(shared.config.check_ms));
