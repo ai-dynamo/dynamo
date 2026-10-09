@@ -1966,13 +1966,7 @@ mod slot_coverage_tests {
     #[test]
     fn slot_walk_matches_hash_set_walk_on_random_coverage() {
         const WORKERS: u64 = 300;
-        let mut state = 0x2545_F491_4F6C_DD1Du64;
-        let mut next = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
+        let mut rng = fastrand::Rng::with_seed(0x2545_F491_4F6C_DD1D);
 
         for _ in 0..200 {
             let index = ConcurrentRadixTreeCompressed::new();
@@ -1980,16 +1974,16 @@ mod slot_coverage_tests {
                 .map(|id| (worker(id), slot(&index, worker(id))))
                 .collect();
             // Workers come from a small pool so coverage sets often coincide in size.
-            let pool: Vec<_> = (0..(2 + next() % 12))
-                .map(|_| ranks[(next() % WORKERS) as usize])
+            let pool: Vec<_> = (0..rng.usize(2..14))
+                .map(|_| ranks[rng.usize(..WORKERS as usize)])
                 .collect();
 
-            let chain_len = 1 + next() % 5;
+            let chain_len = rng.u64(1..=5);
             let mut chain = Vec::new();
             let mut locals = Vec::new();
             let mut parent = index.root.clone();
             for depth in 0..chain_len {
-                let edge_len = 1 + next() % 4;
+                let edge_len = rng.u64(1..=4);
                 let edge_locals: Vec<u64> = (0..edge_len).map(|i| depth * 10 + i + 1).collect();
                 let mut all = locals.clone();
                 all.extend(&edge_locals);
@@ -2007,13 +2001,13 @@ mod slot_coverage_tests {
                     cutoffs: FxHashMap::default(),
                 };
                 for &(rank, rank_slot) in &pool {
-                    match next() % 4 {
+                    match rng.u32(..4) {
                         0 | 1 => {
                             full.push(rank_slot);
                             model.full.insert(rank);
                         }
                         2 if edge_len > 1 => {
-                            let cutoff = 1 + (next() % (edge_len - 1)) as usize;
+                            let cutoff = rng.usize(1..edge_len as usize);
                             cutoffs.push((rank_slot, cutoff));
                             model.cutoffs.insert(rank, cutoff);
                         }
@@ -2028,16 +2022,16 @@ mod slot_coverage_tests {
             }
 
             for _ in 0..8 {
-                let mut query: Vec<_> = locals[..1 + (next() as usize % locals.len())]
+                let mut query: Vec<_> = locals[..rng.usize(1..=locals.len())]
                     .iter()
                     .copied()
                     .map(LocalBlockHash)
                     .collect();
-                if next() % 3 == 0 {
-                    let at = next() as usize % query.len();
+                if rng.u32(..3) == 0 {
+                    let at = rng.usize(..query.len());
                     query[at] = LocalBlockHash(9999);
                 }
-                let early_exit = next() % 4 == 0;
+                let early_exit = rng.u32(..4) == 0;
 
                 let expected = hash_set_walk(&chain, &query, early_exit);
                 let details = index.find_match_details_impl(&query, early_exit);
@@ -2097,13 +2091,7 @@ mod slot_coverage_tests {
     /// hand recycled slots to fresh worker ids.
     #[test]
     fn random_strict_streams_with_slot_recycling_match_the_model() {
-        let mut state = 0x9E37_79B9_7F4A_7C15u64;
-        let mut next = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
+        let mut rng = fastrand::Rng::with_seed(0x9E37_79B9_7F4A_7C15);
         let pool_seq = |s: u64, d: u64, u: u64| -> Vec<u64> {
             let mut seq: Vec<u64> = (0..1 + s % 4).map(|i| 1_000 + s * 10 + i).collect();
             seq.extend((0..d % 5).map(|i| 2_000 + s * 100 + d * 10 + i));
@@ -2122,13 +2110,13 @@ mod slot_coverage_tests {
         for step in 0..4_000u64 {
             let mut workers: Vec<_> = models.keys().copied().collect();
             workers.sort_by_key(|worker| worker.worker_id);
-            let worker = workers[(next() % workers.len() as u64) as usize];
+            let worker = workers[rng.usize(..workers.len())];
             let model = models.get_mut(&worker).unwrap();
-            match next() % 100 {
+            match rng.u32(..100) {
                 0..=44 => {
-                    let seq = pool_seq(next() % 3, next() % 4, next() % 3);
+                    let seq = pool_seq(rng.u64(..3), rng.u64(..4), rng.u64(..3));
                     let seqs = seq_hashes(&seq);
-                    let target = 1 + (next() % seq.len() as u64) as usize;
+                    let target = rng.usize(1..=seq.len());
                     let cached = model.prefix_len(&seqs[..target]);
                     if cached < target {
                         let parent =
@@ -2161,12 +2149,12 @@ mod slot_coverage_tests {
                     if model.live.is_empty() {
                         continue;
                     }
-                    let seq = model.live[(next() % model.live.len() as u64) as usize].clone();
+                    let seq = model.live[rng.usize(..model.live.len())].clone();
                     let seqs = seq_hashes(&seq);
                     let mut pos = model.prefix_len(&seqs);
                     let mut removed = Vec::new();
-                    let want = 1 + next() % 3;
-                    while pos > 0 && (removed.len() as u64) < want {
+                    let want = rng.usize(1..=3);
+                    while pos > 0 && removed.len() < want {
                         let seq_hash = seqs[pos - 1];
                         let children = model.cached[&seq_hash].1;
                         // Leaf first: a block may go once its only cached child went.
@@ -2180,7 +2168,7 @@ mod slot_coverage_tests {
                     if removed.is_empty() {
                         continue;
                     }
-                    if next() % 2 == 0 {
+                    if rng.bool() {
                         removed.reverse();
                     }
                     apply_direct(
@@ -2237,7 +2225,7 @@ mod slot_coverage_tests {
                 .values()
                 .flat_map(|m| m.live.iter().cloned())
                 .collect();
-            queries.extend((0..16).map(|_| pool_seq(next() % 3, next() % 4, next() % 3)));
+            queries.extend((0..16).map(|_| pool_seq(rng.u64(..3), rng.u64(..4), rng.u64(..3))));
             for query in queries {
                 let seqs = seq_hashes(&query);
                 let expected: FxHashMap<_, _> = models
