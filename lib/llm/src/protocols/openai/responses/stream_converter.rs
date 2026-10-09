@@ -52,11 +52,12 @@ pub struct ResponseStreamConverter {
     message_started: bool,
     message_output_index: u32,
     message_output_status: Option<OutputStatus>,
-    // Set once `close_open_message_item` has emitted the message's `.done`
-    // events, so a resumed reasoning item that closes the message early (see
-    // `append_reasoning_delta`) and the end-of-stream close in
-    // `append_end_events`/`append_error_events` cannot both emit them.
-    message_closed: bool,
+    // Output index of the item that received the most recent delta. A budget
+    // runs out inside the item the model was still writing, and reasoning can
+    // resume while the message item is still open, so the highest index is not
+    // always that item. `None` while the latest write is held whitespace that
+    // has no item yet.
+    last_output_index: Option<u32>,
     accumulated_text: String,
     // Whitespace-only content held while the message item is not yet open, so
     // a leading whitespace-only delta (e.g. a bare "\n" before `<think>`) does
@@ -142,7 +143,7 @@ impl ResponseStreamConverter {
             message_started: false,
             message_output_index: 0,
             message_output_status: None,
-            message_closed: false,
+            last_output_index: None,
             accumulated_text: String::new(),
             pending_content: String::new(),
             reasoning_items: Vec::new(),
@@ -182,21 +183,6 @@ impl ResponseStreamConverter {
                     OutputStatus::Completed,
                     false,
                 );
-
-                // Reasoning opening (fresh or resumed) after visible output
-                // similarly proves any still-open message item is done. Close
-                // and lock it in as Completed now, the same way pending
-                // function calls are locked in above: `terminal_output_index`
-                // (used by `append_end_events` to judge which item was cut
-                // short) doesn't know about reasoning items, so it would
-                // otherwise treat the message -- not this new, later
-                // reasoning item -- as the terminal one, and wrongly mark an
-                // already-finished message incomplete if this turn ends in
-                // `Length`/`ContentFilter`.
-                if self.message_started && !self.message_closed {
-                    self.message_output_status = Some(OutputStatus::Completed);
-                    self.close_open_message_item(events, OutputStatus::Completed);
-                }
 
                 let output_index = self.next_output_index;
                 self.next_output_index += 1;
@@ -245,6 +231,7 @@ impl ResponseStreamConverter {
             state.accumulated_text.push_str(reasoning);
             (state.item_id.clone(), state.output_index)
         };
+        self.last_output_index = Some(output_index);
         let delta =
             ResponseStreamEvent::ResponseReasoningTextDelta(ResponseReasoningTextDeltaEvent {
                 sequence_number: self.next_seq(),
@@ -352,6 +339,7 @@ impl ResponseStreamConverter {
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
         self.accumulated_text.push_str(&delta_text);
+        self.last_output_index = Some(self.message_output_index);
         let text_delta = ResponseStreamEvent::ResponseOutputTextDelta(ResponseTextDeltaEvent {
             sequence_number: self.next_seq(),
             item_id: self.message_item_id.clone(),
@@ -361,6 +349,20 @@ impl ResponseStreamConverter {
             logprobs: Some(vec![]),
         });
         events.push(self.make_sse_event(&text_delta));
+    }
+
+    /// Open the message item for whitespace-only content that never reached
+    /// real text. The message becomes the terminal item only when nothing was
+    /// written after the held whitespace.
+    fn flush_pending_content(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        if self.message_started || self.pending_content.is_empty() {
+            return;
+        }
+        let last_output_index = self.last_output_index;
+        self.open_message_item(events);
+        let delta_text = std::mem::take(&mut self.pending_content);
+        self.emit_text_delta(delta_text, events);
+        self.last_output_index = last_output_index.or(self.last_output_index);
     }
 
     fn make_response(&self, status: Status, output: Vec<OutputItem>) -> Response {
@@ -551,6 +553,7 @@ impl ResponseStreamConverter {
                     // delta arrival at all. Flushed below on the first real text,
                     // or at end of stream if the whole turn was whitespace-only.
                     self.pending_content.push_str(content);
+                    self.last_output_index = None;
                 } else {
                     // Starting the answer is an explicit reasoning phase boundary.
                     // The reasoning item completed even when this same chunk also
@@ -687,6 +690,7 @@ impl ResponseStreamConverter {
                     };
 
                     if let Some((item_id, call_id, name, namespace, output_index)) = item_added {
+                        self.last_output_index = Some(output_index);
                         let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
                             ResponseOutputItemAddedEvent {
                                 sequence_number: self.next_seq(),
@@ -705,6 +709,9 @@ impl ResponseStreamConverter {
                     }
 
                     if let Some((item_id, output_index)) = argument_target {
+                        if !argument_deltas.is_empty() {
+                            self.last_output_index = Some(output_index);
+                        }
                         for delta in argument_deltas {
                             let args_delta =
                                 ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
@@ -730,7 +737,8 @@ impl ResponseStreamConverter {
                 should_finish_function_calls = true;
             }
 
-            if self.message_started
+            // Held whitespace is still the message, so a clean finish completes it too.
+            if (self.message_started || !self.pending_content.is_empty())
                 && matches!(
                     choice.finish_reason.as_ref(),
                     Some(FinishReason::Stop | FinishReason::ToolCalls | FinishReason::FunctionCall)
@@ -758,13 +766,7 @@ impl ResponseStreamConverter {
         // fields, matching Anthropic's `is_emit_ready()` identity requirement.
         let terminal_output_index = (only_terminal_is_incomplete
             && output_status == OutputStatus::Incomplete)
-            .then(|| {
-                self.function_call_items
-                    .iter()
-                    .filter_map(|call| call.output_index)
-                    .chain(self.message_started.then_some(self.message_output_index))
-                    .max()
-            })
+            .then_some(self.last_output_index)
             .flatten();
         let mut pending: Vec<_> = self
             .function_call_items
@@ -836,16 +838,8 @@ impl ResponseStreamConverter {
         }
     }
 
-    fn terminal_output_index(&self) -> Option<u32> {
-        self.function_call_items
-            .iter()
-            .filter_map(|call| call.output_index)
-            .chain(self.message_started.then_some(self.message_output_index))
-            .max()
-    }
-
     fn item_output_status(&self, output_index: u32) -> OutputStatus {
-        if self.incomplete_reason.is_some() && Some(output_index) == self.terminal_output_index() {
+        if self.incomplete_reason.is_some() && Some(output_index) == self.last_output_index {
             OutputStatus::Incomplete
         } else {
             OutputStatus::Completed
@@ -928,10 +922,9 @@ impl ResponseStreamConverter {
         events: &mut Vec<Result<Event, anyhow::Error>>,
         output_status: OutputStatus,
     ) {
-        if !self.message_started || self.message_closed {
+        if !self.message_started {
             return;
         }
-        self.message_closed = true;
 
         let text_done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
             sequence_number: self.next_seq(),
@@ -981,18 +974,20 @@ impl ResponseStreamConverter {
         let output_status = self.output_status();
         // Without a later output item, the response finish reason determines
         // whether the still-open reasoning item completed or was truncated.
-        self.append_active_reasoning_done_events(events, output_status);
+        // Whitespace content held after it means the model left the reasoning.
+        let reasoning_status = if self.last_output_index.is_none() {
+            OutputStatus::Completed
+        } else {
+            output_status
+        };
+        self.append_active_reasoning_done_events(events, reasoning_status);
 
         // The whole turn was whitespace-only content, so nothing ever flushed
         // `pending_content` into an open message item. The unary path (mod.rs)
         // still surfaces such content as a real, if whitespace-only, `Message`
         // (it only drops whitespace-only *reasoning*, not content), so flush it
         // here rather than silently dropping it.
-        if !self.message_started && !self.pending_content.is_empty() {
-            self.open_message_item(events);
-            let delta_text = std::mem::take(&mut self.pending_content);
-            self.emit_text_delta(delta_text, events);
-        }
+        self.flush_pending_content(events);
 
         // Only the terminal item was cut short, and the terminal response reports it
         // that way. The `output_item.done` event has to agree, or a client sees one
@@ -1035,7 +1030,14 @@ impl ResponseStreamConverter {
     ) -> Result<Event, anyhow::Error> {
         let output_status = OutputStatus::Incomplete;
         self.append_active_reasoning_done_events(events, output_status);
-        self.close_open_message_item(events, output_status);
+        self.flush_pending_content(events);
+        // Match the message status that `output_with_status` reports below.
+        let message_status = if self.incomplete_reason.is_some() {
+            self.item_output_status(self.message_output_index)
+        } else {
+            output_status
+        };
+        self.close_open_message_item(events, message_status);
         self.append_pending_function_call_done_events(events, output_status, false);
 
         let mut response =
@@ -2132,7 +2134,7 @@ mod tests {
     /// This streaming path does not gate reasoning on delivery order at all:
     /// reasoning that resumes after visible output is captured as a new,
     /// second `Reasoning` item (rather than dropped or merged into the
-    /// first), with the message closed and completed in between. This test
+    /// first), while the message item stays open. This test
     /// only exercises the streaming converter -- it does not claim anything
     /// about the unary path (mod.rs), which has no delivery-order concept and
     /// merges all reasoning into a single item instead.
@@ -2155,12 +2157,6 @@ mod tests {
         assert_eq!(
             event_types(&resumed_events),
             vec![
-                // Reasoning resuming closes the still-open message item first
-                // (locking its status in as Completed -- see
-                // `append_reasoning_delta`), then opens the new reasoning item.
-                "response.output_text.done".to_string(),
-                "response.content_part.done".to_string(),
-                "response.output_item.done".to_string(),
                 "response.output_item.added".to_string(),
                 "response.content_part.added".to_string(),
                 "response.reasoning_text.delta".to_string(),
@@ -2183,14 +2179,10 @@ mod tests {
         assert_eq!(reasoning_text(second), "resumed");
     }
 
-    /// The Length-finish-reason variant of the scenario above: the message was
-    /// already finished (real text stopped when reasoning resumed) and so must
-    /// not be relabelled incomplete just because the *response* ends
-    /// incomplete -- only the item the model was still writing (the resumed
-    /// reasoning) is. Before this closed the message eagerly in
-    /// `append_reasoning_delta`, `terminal_output_index` (which does not know
-    /// about reasoning items) treated the message as the terminal item and
-    /// wrongly marked it incomplete too.
+    /// The Length-finish-reason variant of the scenario above: the message
+    /// text stopped when reasoning resumed, so the message must not be
+    /// relabelled incomplete just because the *response* ends incomplete. Only
+    /// the item that received the last delta (the resumed reasoning) is.
     #[test]
     fn test_reasoning_text_resumes_after_visible_output_then_length_leaves_message_completed() {
         use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
@@ -2235,6 +2227,185 @@ mod tests {
         );
     }
 
+    /// Answer text that resumes after resumed reasoning goes to the still-open
+    /// message item, which closes once, after its last delta. The budget runs
+    /// out in that text, so the message is the incomplete item.
+    #[test]
+    fn test_text_resumes_after_resumed_reasoning_then_length_marks_message_incomplete() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+
+        let _ = conv.process_chunk(&reasoning_chunk("first"));
+        let _ = conv.process_chunk(&text_chunk("answer"));
+        let _ = conv.process_chunk(&reasoning_chunk("second"));
+        let resumed_text_events = conv.process_chunk(&with_finish_reason(
+            text_chunk(" more"),
+            FinishReason::Length,
+        ));
+        assert_eq!(
+            event_types(&resumed_text_events),
+            vec![
+                "response.reasoning_text.done".to_string(),
+                "response.content_part.done".to_string(),
+                "response.output_item.done".to_string(),
+                "response.output_text.delta".to_string(),
+            ]
+        );
+        let end_events = conv.emit_end_events();
+        assert_eq!(
+            event_types(&end_events)
+                .iter()
+                .filter(|event_type| *event_type == "response.output_text.done")
+                .count(),
+            1
+        );
+
+        let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+        assert_eq!(response.status, Status::Incomplete);
+        assert_eq!(response.output.len(), 3);
+        let OutputItem::Reasoning(first) = &response.output[0] else {
+            panic!("expected first reasoning output");
+        };
+        assert_eq!(first.status, Some(OutputStatus::Completed));
+        let OutputItem::Message(message) = &response.output[1] else {
+            panic!("expected message output");
+        };
+        let OutputMessageContent::OutputText(text) = &message.content[0] else {
+            panic!("expected output text");
+        };
+        assert_eq!(text.text, "answer more");
+        assert_eq!(message.status, OutputStatus::Incomplete);
+        let OutputItem::Reasoning(second) = &response.output[2] else {
+            panic!("expected resumed reasoning output");
+        };
+        assert_eq!(second.status, Some(OutputStatus::Completed));
+    }
+
+    /// Leading whitespace is held and only flushed into the message at end of
+    /// stream. The model wrote the reasoning last, so the reasoning is the only
+    /// incomplete item when the budget runs out.
+    #[test]
+    fn test_flushed_leading_whitespace_is_not_the_truncated_item() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+
+        let _ = conv.process_chunk(&text_chunk("\n"));
+        let _ = conv.process_chunk(&with_finish_reason(
+            reasoning_chunk("thinking"),
+            FinishReason::Length,
+        ));
+        let _ = conv.emit_end_events();
+
+        let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+        assert_eq!(response.status, Status::Incomplete);
+        assert_eq!(response.output.len(), 2);
+        let OutputItem::Reasoning(reasoning) = &response.output[0] else {
+            panic!("expected reasoning output");
+        };
+        assert_eq!(reasoning.status, Some(OutputStatus::Incomplete));
+        let OutputItem::Message(message) = &response.output[1] else {
+            panic!("expected the flushed message");
+        };
+        assert_eq!(message.status, OutputStatus::Completed);
+    }
+
+    /// Held whitespace survives a backend error, as it does at a normal end of
+    /// stream. A clean finish before the error still completes it.
+    #[test]
+    fn test_error_flushes_held_whitespace_content() {
+        let cases = [
+            (text_chunk("\n"), OutputStatus::Incomplete),
+            (
+                with_finish_reason(text_chunk("\n"), FinishReason::Stop),
+                OutputStatus::Completed,
+            ),
+        ];
+        for (chunk, expected_status) in cases {
+            let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+            let _ = conv.process_chunk(&chunk);
+            let _ = conv.emit_error_events(ErrorObject {
+                code: "server_error".to_string(),
+                message: "backend error".to_string(),
+            });
+
+            let output = conv.output_with_status(OutputStatus::Incomplete);
+            let [OutputItem::Message(message)] = output.as_slice() else {
+                panic!("expected the held whitespace as a message");
+            };
+            let OutputMessageContent::OutputText(text) = &message.content[0] else {
+                panic!("expected output text");
+            };
+            assert_eq!(text.text, "\n");
+            assert_eq!(message.status, expected_status);
+        }
+    }
+
+    /// After the budget runs out in a later item, a backend error must close the
+    /// finished message with the same status that `response.failed` reports.
+    #[test]
+    fn test_error_after_length_closes_message_with_the_reported_status() {
+        let later_items = [
+            reasoning_chunk("thinking"),
+            tool_call_chunk(0, Some("call_0"), Some("lookup"), Some("{}")),
+        ];
+        for later_item in later_items {
+            let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+            let _ = conv.process_chunk(&text_chunk("answer"));
+            let _ = conv.process_chunk(&with_finish_reason(later_item, FinishReason::Length));
+            let events = conv.emit_error_events(ErrorObject {
+                code: "server_error".to_string(),
+                message: "backend error".to_string(),
+            });
+
+            let message_done = events
+                .iter()
+                .map(|event| format!("{:?}", event.as_ref().unwrap()))
+                .find(|debug| debug.contains("response.output_item.done") && debug.contains("msg_"))
+                .expect("message output_item.done");
+            assert!(!message_done.contains("incomplete"), "{message_done}");
+            let output = conv.output_with_status(OutputStatus::Incomplete);
+            let message = output
+                .iter()
+                .find_map(|item| match item {
+                    OutputItem::Message(message) => Some(message),
+                    _ => None,
+                })
+                .expect("message output");
+            assert_eq!(message.status, OutputStatus::Completed);
+        }
+    }
+
+    /// Whitespace held after a finished item is the model's last write, so the
+    /// flushed message is the truncated item, as in the unary path.
+    #[test]
+    fn test_trailing_held_whitespace_is_the_truncated_item() {
+        let earlier_items = [
+            reasoning_chunk("thinking"),
+            tool_call_chunk(0, Some("call_0"), Some("lookup"), Some("{}")),
+        ];
+        for earlier_item in earlier_items {
+            let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+            let _ = conv.process_chunk(&earlier_item);
+            let _ = conv.process_chunk(&with_finish_reason(text_chunk("\n"), FinishReason::Length));
+            let _ = conv.emit_end_events();
+
+            let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+            assert_eq!(response.status, Status::Incomplete);
+            assert_eq!(response.output.len(), 2);
+            match &response.output[0] {
+                OutputItem::Reasoning(reasoning) => {
+                    assert_eq!(reasoning.status, Some(OutputStatus::Completed))
+                }
+                OutputItem::FunctionCall(call) => {
+                    assert_eq!(call.status, Some(OutputStatus::Completed))
+                }
+                other => panic!("unexpected first item: {other:?}"),
+            }
+            let OutputItem::Message(message) = &response.output[1] else {
+                panic!("expected the flushed message");
+            };
+            assert_eq!(message.status, OutputStatus::Incomplete);
+        }
+    }
+
     #[test]
     fn test_reasoning_text_finishes_before_tool_call() {
         use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
@@ -2276,11 +2447,6 @@ mod tests {
         assert_eq!(
             event_types(&late_events),
             vec![
-                // Reasoning opening after visible output closes the still-open
-                // message item first (see `append_reasoning_delta`).
-                "response.output_text.done".to_string(),
-                "response.content_part.done".to_string(),
-                "response.output_item.done".to_string(),
                 "response.output_item.added".to_string(),
                 "response.content_part.added".to_string(),
                 "response.reasoning_text.delta".to_string(),
