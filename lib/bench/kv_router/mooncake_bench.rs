@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// `--features mooncake-glibc` builds without jemalloc: no global allocator, glibc malloc.
+#[cfg(feature = "router-bench")]
 #[path = "jemalloc.rs"]
 mod jemalloc;
 
@@ -15,7 +17,10 @@ use dynamo_bench::kv_router_common::issuer::pin_current_thread_to_cpus;
 use dynamo_bench::kv_router_common::replay::generate_replay_artifacts;
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use dynamo_kv_router::indexer::KvIndexerMetrics;
-use dynamo_kv_router::{ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer};
+use dynamo_kv_router::indexer::arena_b::ReaderMode;
+use dynamo_kv_router::{
+    ArenaConfig, ArenaIndex, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
+};
 use mooncake_open_loop::{
     OpenLoopConfig, OpenLoopResult, RunProvenance, parse_cpu_list, prepare_mooncake_corpus,
     prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
@@ -52,6 +57,25 @@ enum IndexerArgs {
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
     },
+
+    /// Arena index (campaign branch B) with its work-stealing lane pool.
+    ArenaB {
+        /// Number of OS threads (lanes) that consume and apply KV cache events.
+        #[clap(long, default_value = "16")]
+        num_event_workers: usize,
+
+        /// Ablation B-nosteal: lanes never steal ranks from other lanes.
+        #[clap(long)]
+        no_steal: bool,
+
+        /// Ablation B-nofast: always queue through rank mailboxes.
+        #[clap(long)]
+        no_fast_path: bool,
+
+        /// Ablation B-lockread: read every run under its lock.
+        #[clap(long)]
+        locked_reads: bool,
+    },
 }
 
 impl IndexerArgs {
@@ -64,6 +88,24 @@ impl IndexerArgs {
             IndexerArgs::ConcurrentRadixTreeCompressed { num_event_workers } => {
                 MooncakeIndexerConfig::concurrent_radix_tree_compressed(*num_event_workers)
             }
+            IndexerArgs::ArenaB {
+                num_event_workers,
+                no_steal,
+                no_fast_path,
+                locked_reads,
+            } => MooncakeIndexerConfig::arena_b(
+                *num_event_workers,
+                ArenaConfig {
+                    steal: !no_steal,
+                    inline_fast_path: !no_fast_path,
+                    reader: if *locked_reads {
+                        ReaderMode::Locked
+                    } else {
+                        ReaderMode::Optimistic
+                    },
+                    ..ArenaConfig::default()
+                },
+            ),
         }
     }
 }
@@ -109,7 +151,8 @@ struct Args {
 
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
-    /// nested-map, concurrent-radix-tree-compressed.
+    /// nested-map, concurrent-radix-tree-compressed, arena-b, arena-b-nosteal,
+    /// arena-b-nofast, arena-b-lockread.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
@@ -191,10 +234,12 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
         };
         if !matches!(
             config.kind,
-            MooncakeIndexerKind::NestedMap | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
+            MooncakeIndexerKind::NestedMap
+                | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
+                | MooncakeIndexerKind::ArenaB
         ) {
             anyhow::bail!(
-                "corrected Mooncake replay supports only nested-map and concurrent-radix-tree-compressed; got {name}"
+                "corrected Mooncake replay supports only nested-map, concurrent-radix-tree-compressed and arena-b; got {name}"
             );
         }
     }
@@ -293,6 +338,15 @@ async fn run_open_loop_for_config(
             ));
             run_backend(config.short_name(), indexer, trial, open_config).await
         }
+        MooncakeIndexerKind::ArenaB => {
+            let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
+                ArenaIndex::with_config(config.arena),
+                config.num_event_workers,
+                args.common.block_size,
+                metrics(),
+            ));
+            run_backend(config.short_name(), indexer, trial, open_config).await
+        }
         MooncakeIndexerKind::RadixTree | MooncakeIndexerKind::BranchShardedCrtc => {
             anyhow::bail!(
                 "{} is not supported by corrected Mooncake replay",
@@ -309,6 +363,7 @@ fn quiesce_prepared_heap() {
     unsafe {
         libc::malloc_trim(0);
     }
+    #[cfg(feature = "router-bench")]
     jemalloc::purge();
     std::thread::sleep(std::time::Duration::from_millis(PRE_RUN_QUIESCENCE_MS));
 }

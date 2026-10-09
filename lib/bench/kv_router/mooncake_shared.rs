@@ -4,11 +4,13 @@
 use std::sync::Arc;
 
 use dynamo_kv_router::LocalBlockHash;
+use dynamo_kv_router::indexer::arena_b::ReaderMode;
 use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
 use dynamo_kv_router::{
-    BranchShardedIndexer, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
+    ArenaConfig, ArenaIndex, BranchShardedIndexer, ConcurrentRadixTreeCompressed,
+    PositionalIndexer, ThreadPoolIndexer,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -22,6 +24,8 @@ pub enum MooncakeIndexerKind {
     NestedMap,
     ConcurrentRadixTreeCompressed,
     BranchShardedCrtc,
+    /// Campaign branch B: the arena index with its own lane pool.
+    ArenaB,
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +36,8 @@ pub struct MooncakeIndexerConfig {
     pub num_shards: usize,
     pub num_event_workers_per_shard: usize,
     pub prefix_depth: usize,
+    /// Branch-B knobs and ablation switches.
+    pub arena: ArenaConfig,
 }
 
 #[allow(dead_code)]
@@ -44,6 +50,7 @@ impl MooncakeIndexerConfig {
             num_shards: 2,
             num_event_workers_per_shard: 4,
             prefix_depth: 2,
+            arena: ArenaConfig::default(),
         }
     }
 
@@ -60,6 +67,15 @@ impl MooncakeIndexerConfig {
         Self {
             kind: MooncakeIndexerKind::ConcurrentRadixTreeCompressed,
             num_event_workers,
+            ..Self::radix_tree()
+        }
+    }
+
+    pub fn arena_b(num_event_workers: usize, arena: ArenaConfig) -> Self {
+        Self {
+            kind: MooncakeIndexerKind::ArenaB,
+            num_event_workers,
+            arena,
             ..Self::radix_tree()
         }
     }
@@ -86,6 +102,17 @@ impl MooncakeIndexerConfig {
                 "concurrent-radix-tree-compressed"
             }
             MooncakeIndexerKind::BranchShardedCrtc => "branch-sharded-crtc",
+            MooncakeIndexerKind::ArenaB => match (
+                self.arena.steal,
+                self.arena.inline_fast_path,
+                self.arena.reader,
+            ) {
+                (true, true, ReaderMode::Optimistic) => "arena-b",
+                (false, true, ReaderMode::Optimistic) => "arena-b-nosteal",
+                (true, false, ReaderMode::Optimistic) => "arena-b-nofast",
+                (true, true, ReaderMode::Locked) => "arena-b-lockread",
+                _ => "arena-b-custom",
+            },
         }
     }
 
@@ -97,8 +124,30 @@ impl MooncakeIndexerConfig {
                 Self::concurrent_radix_tree_compressed(num_event_workers)
             }
             "branch-sharded-crtc" => Self::branch_sharded_crtc(2, num_event_workers, 2),
+            "arena-b" => Self::arena_b(num_event_workers, ArenaConfig::default()),
+            "arena-b-nosteal" => Self::arena_b(
+                num_event_workers,
+                ArenaConfig {
+                    steal: false,
+                    ..ArenaConfig::default()
+                },
+            ),
+            "arena-b-nofast" => Self::arena_b(
+                num_event_workers,
+                ArenaConfig {
+                    inline_fast_path: false,
+                    ..ArenaConfig::default()
+                },
+            ),
+            "arena-b-lockread" => Self::arena_b(
+                num_event_workers,
+                ArenaConfig {
+                    reader: ReaderMode::Locked,
+                    ..ArenaConfig::default()
+                },
+            ),
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree-compressed, branch-sharded-crtc",
+                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree-compressed, branch-sharded-crtc, arena-b, arena-b-nosteal, arena-b-nofast, arena-b-lockread",
                 name
             ),
         };
@@ -130,6 +179,12 @@ impl MooncakeIndexerConfig {
                     Some(metrics),
                 ))
             }
+            MooncakeIndexerKind::ArenaB => Arc::new(ThreadPoolIndexer::new_with_metrics(
+                ArenaIndex::with_config(self.arena),
+                self.num_event_workers,
+                block_size,
+                Some(metrics),
+            )),
             MooncakeIndexerKind::BranchShardedCrtc => {
                 let shards = (0..self.num_shards)
                     .map(|_| {
@@ -184,6 +239,9 @@ impl MooncakeIndexerConfig {
             }
             MooncakeIndexerKind::BranchShardedCrtc => {
                 anyhow::bail!("branch-sharded-crtc does not support approximate pruning")
+            }
+            MooncakeIndexerKind::ArenaB => {
+                anyhow::bail!("arena-b does not support approximate pruning")
             }
         };
         Ok(indexer)

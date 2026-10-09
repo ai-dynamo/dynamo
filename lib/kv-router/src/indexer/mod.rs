@@ -73,6 +73,7 @@ mod thread_pool;
 mod traits;
 mod types;
 
+pub mod arena_b;
 pub mod concurrent_radix_tree_compressed;
 pub mod cuckoo;
 pub mod positional;
