@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 256" width="760" height="256" role="img" aria-labelledby="title desc">
   <title id="title">single-node-tp-trtllm</title>
-  <desc id="desc">On one node, a request reaches the TensorRT-LLM tensor-parallel ranks through the Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar. The sidecar calls TensorRT-LLM over native gRPC and streams results back. TensorRT-LLM and the sidecar run in one worker, on the same host or in one Kubernetes pod.</desc>
+  <desc id="desc">On one node, a request reaches the TensorRT-LLM tensor-parallel ranks through the Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar. The sidecar calls TensorRT-LLM over native gRPC and streams results back. TensorRT-LLM and the sidecar run in one worker, on the same host or in one Kubernetes pod. TensorRT-LLM publishes KV events to the sidecar, which forwards them to the frontend.</desc>
 
   <defs>
     <linearGradient id="green-fill" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -240,6 +240,13 @@
   <rect x="576" y="104" width="136" height="96" rx="10" fill="var(--surface)" stroke="var(--border)" stroke-width="1.0" filter="url(#shadow)"/>
   <text x="644.0" y="144.5" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">TensorRT-LLM</text>
   <text x="644.0" y="161.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">TP ranks</text>
+
+  <path d="M576,184 L442,184" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
+  <rect x="478.7542" y="148.0" width="58.4916" height="20.0" rx="10" class="pill-info"/>
+  <text x="508.0" y="158.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">KV events</text>
+  <path d="M312,184 L162,184" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
+  <rect x="206.7542" y="148.0" width="58.4916" height="20.0" rx="10" class="pill-info"/>
+  <text x="236.0" y="158.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">KV events</text>
 
   <path d="M160,120 L310,120" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
   <rect x="197.1152" y="84.0" width="77.76960000000003" height="20.0" rx="10" class="pill-info"/>

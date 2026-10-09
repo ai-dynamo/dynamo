@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 480" width="760" height="480" role="img" aria-labelledby="title desc">
-  <title id="title">multinode-tp-trtllm</title>
-  <desc id="desc">When one TensorRT-LLM engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0. The sidecar calls TensorRT-LLM on Node 0 over native gRPC and streams results back. TensorRT-LLM on Node 1 holds the remaining tensor-parallel ranks, exchanges TP collectives with Node 0, and has no sidecar. KV events flow from the engine to the sidecar and on to the frontend.</desc>
+  <title id="title">trtllm-multinode-dp</title>
+  <desc id="desc">TensorRT-LLM data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local TensorRT-LLM over native gRPC. The node 1 follower sidecar has no request-plane edge and no gRPC request edge; it only relays its TensorRT-LLM KV events to the frontend. TensorRT-LLM on both nodes dispatches requests between nodes and runs collectives with each other.</desc>
 
   <defs>
     <linearGradient id="green-fill" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -234,36 +234,42 @@
 
   <rect x="40" y="208" width="136" height="64" rx="10" fill="var(--surface)" stroke="var(--border)" stroke-width="1.0" filter="url(#shadow)"/>
   <text x="108.0" y="232.5" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">Dynamo Frontend</text>
-  <text x="108.0" y="249.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Tokenizer and router</text>
-  <rect x="262" y="80" width="128" height="96" rx="10" fill="var(--accent)" opacity="0.7"/>
-  <rect x="264" y="80" width="128" height="96" rx="10" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.5" filter="url(#shadow)"/>
-  <text x="328.0" y="120.5" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">Dynamo Sidecar</text>
-  <text x="328.0" y="137.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Leader node only</text>
+  <text x="108.0" y="249.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Router picks a DP rank</text>
+  <rect x="262" y="80" width="152" height="96" rx="10" fill="var(--accent)" opacity="0.7"/>
+  <rect x="264" y="80" width="152" height="96" rx="10" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="340.0" y="114.0" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">Dynamo Sidecar</text>
+  <text x="340.0" y="131.0" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Leader</text>
+  <text x="340.0" y="143.5" fill="var(--text-muted)" font-size="11px" text-anchor="middle" dominant-baseline="central">Registers DP ranks 0-3</text>
   <rect x="568" y="80" width="136" height="96" rx="10" fill="var(--surface)" stroke="var(--border)" stroke-width="1.0" filter="url(#shadow)"/>
   <text x="636.0" y="120.5" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">TensorRT-LLM</text>
-  <text x="636.0" y="137.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Local TP ranks</text>
+  <text x="636.0" y="137.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">DP ranks 0-1</text>
+  <rect x="262" y="328" width="152" height="96" rx="10" fill="var(--accent)" opacity="0.7"/>
+  <rect x="264" y="328" width="152" height="96" rx="10" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="340.0" y="362.0" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">Dynamo Sidecar</text>
+  <text x="340.0" y="379.0" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Follower</text>
+  <text x="340.0" y="391.5" fill="var(--text-muted)" font-size="11px" text-anchor="middle" dominant-baseline="central">KV events only</text>
   <rect x="568" y="328" width="136" height="96" rx="10" fill="var(--surface)" stroke="var(--border)" stroke-width="1.0" filter="url(#shadow)"/>
   <text x="636.0" y="368.5" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">TensorRT-LLM</text>
-  <text x="636.0" y="385.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Remote TP ranks</text>
+  <text x="636.0" y="385.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">DP ranks 2-3</text>
 
   <path d="M636,176 L636,326" fill="none" stroke="var(--connector)" stroke-width="1" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
-  <rect x="545.0863999999999" y="242.0" width="74.9136" height="20.0" rx="10" class="pill-info"/>
-  <text x="582.5432" y="252.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">TP collectives</text>
+  <rect x="498.5947999999999" y="242.0" width="121.40520000000002" height="20.0" rx="10" class="pill-info"/>
+  <text x="559.2973999999999" y="252.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">Dispatch and collectives</text>
 
-  <path d="M568,160 L394,160" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
-  <rect x="450.7542" y="124.0" width="58.4916" height="20.0" rx="10" class="pill-info"/>
-  <text x="480.0" y="134.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">KV events</text>
+  <path d="M568,160 L418,160" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
+  <rect x="462.7542" y="124.0" width="58.4916" height="20.0" rx="10" class="pill-info"/>
+  <text x="492.0" y="134.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">KV events</text>
+  <path d="M568,408 L418,408" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
   <path d="M264,160 L128,160 L128,206" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
   <rect x="162.7542" y="124.0" width="58.4916" height="20.0" rx="10" class="pill-info"/>
   <text x="192.0" y="134.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">KV events</text>
+  <path d="M264,344 L128,344 L128,274" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
 
   <path d="M72,208 L72,96 L262,96" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
   <rect x="129.1152" y="60.0" width="77.76960000000003" height="20.0" rx="10" class="pill-info"/>
   <text x="168.0" y="70.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">Request plane</text>
-  <path d="M392,96 L566,96" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
-  <rect x="444.5271" y="60.0" width="70.94579999999999" height="20.0" rx="10" class="pill-info"/>
-  <text x="480.0" y="70.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">Native gRPC</text>
-
-  <text x="328" y="376" class="box-label-center" style="font-size:11px;text-anchor:middle;fill:var(--text-muted)">No sidecar on this node</text>
+  <path d="M416,96 L566,96" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
+  <rect x="456.5271" y="60.0" width="70.94579999999999" height="20.0" rx="10" class="pill-info"/>
+  <text x="492.0" y="70.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">Native gRPC</text>
 
 </svg>
