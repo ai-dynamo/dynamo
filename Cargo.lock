@@ -315,6 +315,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-openai"
+version = "0.42.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63077bf55857e6963effefb5f28134c40cc2ee68bc176cc601bbdeb070017fba"
+dependencies = [
+ "bytes",
+ "derive_builder",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2410,7 +2423,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-llm",
- "dynamo-protocols",
+ "dynamo-protocols 6.1.0",
  "dynamo-rl",
  "dynamo-runtime",
  "futures",
@@ -2558,6 +2571,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-decisions"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e2805e94675457ff445c261b2d12eed0d227a3b0#e2805e94675457ff445c261b2d12eed0d227a3b0"
+dependencies = [
+ "dynamo-protocols 7.0.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dynamo-epp-sidecar"
 version = "1.6.0"
 dependencies = [
@@ -2588,7 +2612,7 @@ dependencies = [
  "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-llm",
- "dynamo-protocols",
+ "dynamo-protocols 6.1.0",
  "dynamo-runtime",
  "futures",
  "hyper-util",
@@ -2715,12 +2739,13 @@ dependencies = [
  "dialoguer",
  "dynamo-bench",
  "dynamo-custom-policy-builtin",
+ "dynamo-decisions",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-parsers-v2",
- "dynamo-protocols",
+ "dynamo-protocols 6.1.0",
  "dynamo-renderer",
  "dynamo-rl",
  "dynamo-runtime",
@@ -2883,7 +2908,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "async-stream",
- "dynamo-protocols",
+ "dynamo-protocols 6.1.0",
  "futures",
  "num-traits",
  "openai-harmony",
@@ -2921,7 +2946,7 @@ version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ef02e31ca224ca8db24b88a990b7db3eb2b99c77697b0d8ae44feaa32709e38"
 dependencies = [
- "async-openai",
+ "async-openai 0.41.1",
  "derive_builder",
  "futures",
  "serde",
@@ -2933,6 +2958,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-protocols"
+version = "7.0.0"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e2805e94675457ff445c261b2d12eed0d227a3b0#e2805e94675457ff445c261b2d12eed0d227a3b0"
+dependencies = [
+ "async-openai 0.42.1",
+ "derive_builder",
+ "futures",
+ "indexmap 2.14.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-renderer"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2940,7 +2983,7 @@ checksum = "cc939c7664a55184c789a2878d0d1ac270f4df9844491c10cfe7958d90c81916"
 dependencies = [
  "anyhow",
  "chrono",
- "dynamo-protocols",
+ "dynamo-protocols 6.1.0",
  "dynamo-tokenizers",
  "either",
  "minijinja",
@@ -7730,7 +7773,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -7750,7 +7793,7 @@ version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.14.0",
  "log",
  "multimap",

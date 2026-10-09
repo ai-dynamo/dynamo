@@ -1863,6 +1863,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn systemone_serial_cohort_excludes_unsafe_workers_at_same_endpoint() {
+        use crate::local_model::runtime_config::{
+            SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
+        };
+
+        fn worker(
+            id: u64,
+            capability: Option<serde_json::Value>,
+            capacity: Option<u64>,
+        ) -> DesiredInstance {
+            let mut desired = instance(id, "same");
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.source_path = Some("same".to_string());
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config.max_num_seqs = capacity;
+            card.runtime_config
+                .runtime_data
+                .insert(SGLANG_GENERATE_CAPABILITY.to_string(), true.into());
+            if let Some(capability) = capability {
+                card.runtime_config
+                    .runtime_data
+                    .insert(SGLANG_SYSTEMONE_SERIAL_V1.to_string(), capability);
+            }
+            desired.mdc_checksum = card.mdcsum().to_string();
+            desired.card = card;
+            desired
+        }
+
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let serial = worker(1, Some(true.into()), Some(1));
+        controller.apply_added(serial.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        for unsafe_worker in [
+            worker(2, None, Some(1)),
+            worker(3, Some(false.into()), Some(1)),
+            worker(4, Some(serde_json::json!({"enabled": true})), Some(1)),
+            worker(5, Some(true.into()), Some(2)),
+        ] {
+            assert_eq!(unsafe_worker.endpoint_id, serial.endpoint_id);
+            controller.apply_added(unsafe_worker);
+        }
+        let compatible = worker(6, Some(true.into()), Some(1));
+        controller.apply_added(compatible.clone());
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([serial.key, compatible.key])
+        );
+        assert_eq!(*host.admissions.lock().unwrap()[0].borrow(), vec![1, 6]);
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn competing_cohorts_preserve_serving_until_complete_incumbent_drain() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
