@@ -450,6 +450,71 @@ async def test_openmetrics_online_traffic_scrape_gap_rewarms_baseline() -> None:
 
 
 @pytest.mark.asyncio
+async def test_openmetrics_online_traffic_rejects_repeated_gap_for_same_exporter() -> (
+    None
+):
+    source = OpenMetricsOnlineTrafficSource(
+        pool_id="pool-a",
+        metrics_url="http://frontend.example/metrics",
+        session=_FakeOpenMetricsSession(  # type: ignore[arg-type]
+            [
+                _openmetrics("dynamo_frontend_requests_started_total 100"),
+                TimeoutError("scrape timed out"),
+                _openmetrics("unrelated_counter_total 1"),
+                _openmetrics("unrelated_counter_total 2"),
+            ]
+        ),
+        match_labels={},
+        monotonic_clock=_SequenceClock([0.0, 1.0, 11.0, 21.0, 22.0, 31.0, 32.0]),
+        wall_clock=_SequenceClock([10.0, 30.0, 40.0]),
+    )
+
+    with pytest.raises(RuntimeError, match="warming up"):
+        await source.collect_online_traffic(observed_at_s=10.0)
+    with pytest.raises(TimeoutError, match="scrape timed out"):
+        await source.collect_online_traffic(observed_at_s=20.0)
+    with pytest.raises(ValueError, match="disappeared"):
+        await source.collect_online_traffic(observed_at_s=30.0)
+    with pytest.raises(ValueError, match="disappeared"):
+        await source.collect_online_traffic(observed_at_s=40.0)
+
+
+@pytest.mark.asyncio
+async def test_openmetrics_online_traffic_restart_allows_new_absent_baseline() -> None:
+    absent_after_restart = (
+        "process_start_time_seconds 2\n"
+        "dynamo_frontend_active_requests 0\n"
+        "unrelated_counter_total 1\n"
+    )
+    source = OpenMetricsOnlineTrafficSource(
+        pool_id="pool-a",
+        metrics_url="http://frontend.example/metrics",
+        session=_FakeOpenMetricsSession(  # type: ignore[arg-type]
+            [
+                _openmetrics("dynamo_frontend_requests_started_total 100"),
+                TimeoutError("scrape timed out"),
+                absent_after_restart,
+                absent_after_restart,
+            ]
+        ),
+        match_labels={},
+        monotonic_clock=_SequenceClock([0.0, 1.0, 11.0, 21.0, 22.0, 31.0, 32.0]),
+        wall_clock=_SequenceClock([10.0, 30.0, 40.0]),
+    )
+
+    with pytest.raises(RuntimeError, match="warming up"):
+        await source.collect_online_traffic(observed_at_s=10.0)
+    with pytest.raises(TimeoutError, match="scrape timed out"):
+        await source.collect_online_traffic(observed_at_s=20.0)
+    with pytest.raises(RuntimeError, match="warming up"):
+        await source.collect_online_traffic(observed_at_s=30.0)
+
+    traffic = await source.collect_online_traffic(observed_at_s=40.0)
+
+    assert traffic[0].online_offered_rps == 0.0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("request_windows", "expected_rate"),
     [
@@ -1563,6 +1628,103 @@ async def test_llmd_async_prometheus_source_collects_and_escapes_pool() -> None:
         promql for promql in queries if "drain_limit_lease_valid" in promql
     )
     assert "or vector(0)" in lease_query
+
+
+@pytest.mark.asyncio
+async def test_llmd_async_prometheus_source_settles_query_siblings_on_failure() -> (
+    None
+):
+    blocked_started = asyncio.Event()
+    release_blocked = asyncio.Event()
+    blocked_finished = asyncio.Event()
+    query_failed = asyncio.Event()
+
+    async def query(promql: str) -> object:
+        if "inflight_requests" in promql:
+            blocked_started.set()
+            await release_blocked.wait()
+            blocked_finished.set()
+            return 0.0
+        if (
+            "broker_backlog" in promql
+            and "broker_backlog_source_available" not in promql
+        ):
+            await blocked_started.wait()
+            query_failed.set()
+            raise RuntimeError("queued query failed")
+        if "timestamp(" in promql:
+            return 0.0
+        if "broker_backlog_source_available" in promql:
+            return 1.0
+        return 0.0
+
+    source = LlmdAsyncPrometheusSource(pools=["pool-a"], query=query)
+    collection = asyncio.create_task(
+        source.collect_dispatcher_feedback(observed_at_s=1.0)
+    )
+
+    try:
+        await asyncio.wait_for(query_failed.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        assert not collection.done()
+        assert not blocked_finished.is_set()
+    finally:
+        release_blocked.set()
+
+    with pytest.raises(RuntimeError, match="queued query failed"):
+        await asyncio.wait_for(collection, timeout=1.0)
+    assert blocked_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_llmd_async_prometheus_source_settles_pool_siblings_on_failure() -> (
+    None
+):
+    pool_b_started = asyncio.Event()
+    release_pool_b = asyncio.Event()
+    pool_b_finished = asyncio.Event()
+    pool_a_failed = asyncio.Event()
+
+    async def unused_query(_promql: str) -> object:
+        raise AssertionError("controlled pool source must not issue queries")
+
+    class _ControlledPoolSource(LlmdAsyncPrometheusSource):
+        async def _collect_pool(
+            self, pool_id: str, observed_at_s: float
+        ) -> BatchDispatcherFeedback:
+            if pool_id == "pool-a":
+                await pool_b_started.wait()
+                pool_a_failed.set()
+                raise RuntimeError("pool-a failed")
+            pool_b_started.set()
+            await release_pool_b.wait()
+            pool_b_finished.set()
+            return BatchDispatcherFeedback(
+                observed_at_s=observed_at_s,
+                pool_id=pool_id,
+                observation_window_s=30.0,
+                queued_requests=0,
+                inflight_requests=0,
+                actual_dispatch_rps=0.0,
+                applied_max_admission_rps=None,
+            )
+
+    source = _ControlledPoolSource(pools=["pool-a", "pool-b"], query=unused_query)
+    collection = asyncio.create_task(
+        source.collect_dispatcher_feedback(observed_at_s=1.0)
+    )
+
+    try:
+        await asyncio.wait_for(pool_a_failed.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        assert not collection.done()
+        assert not pool_b_finished.is_set()
+    finally:
+        release_pool_b.set()
+
+    with pytest.raises(RuntimeError, match="pool-a failed"):
+        await asyncio.wait_for(collection, timeout=1.0)
+    assert pool_b_finished.is_set()
 
 
 @pytest.mark.asyncio

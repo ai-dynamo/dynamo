@@ -17,7 +17,7 @@ import math
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any, Optional, Protocol, Union
+from typing import Any, Optional, Protocol, TypeVar, Union, cast
 from urllib.parse import quote
 
 import aiohttp
@@ -111,6 +111,19 @@ class PrometheusQueryClient(Protocol):
 
 BatchResolver = Callable[[Mapping[str, Any]], str]
 PrometheusQuery = Callable[[str], Awaitable[object]]
+_GatherResult = TypeVar("_GatherResult")
+
+
+async def _gather_settled_or_raise(
+    *awaitables: Awaitable[_GatherResult],
+) -> list[_GatherResult]:
+    """Wait for every sibling operation before propagating the first error."""
+
+    results = await asyncio.gather(*awaitables, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    return [cast(_GatherResult, result) for result in results]
 
 
 class OpenMetricsOnlineTrafficSource:
@@ -193,7 +206,7 @@ class OpenMetricsOnlineTrafficSource:
         self._monotonic_clock = monotonic_clock
         self._wall_clock = wall_clock
         self._previous_counter: Optional[float] = None
-        self._previous_counter_present = False
+        self._counter_seen_for_exporter = False
         self._previous_request_end_mono_s: Optional[float] = None
         self._previous_readiness_identity: Optional[float] = None
 
@@ -237,7 +250,11 @@ class OpenMetricsOnlineTrafficSource:
                 match_labels=self._match_labels,
             )
             counter_present = bool(counter_values)
-            if not counter_present and self._previous_counter_present:
+            same_exporter = readiness == self._previous_readiness_identity
+            counter_seen_for_exporter = (
+                self._counter_seen_for_exporter if same_exporter else False
+            )
+            if not counter_present and counter_seen_for_exporter:
                 raise ValueError(
                     "required OpenMetrics sample "
                     f"{self._metric_name!r} disappeared for labels "
@@ -251,18 +268,19 @@ class OpenMetricsOnlineTrafficSource:
                 context="frontend active requests",
             )
         except BaseException:
+            # A failed scrape invalidates the rate window, but must not erase
+            # the fact that the counter already existed for this exporter. A
+            # continuing gap is unknown, not a trustworthy zero. A later
+            # process-start identity establishes independent history below.
             self._previous_counter = None
-            self._previous_counter_present = False
             self._previous_request_end_mono_s = None
-            self._previous_readiness_identity = None
             raise
 
         previous_counter = self._previous_counter
-        previous_counter_present = self._previous_counter_present
         previous_request_end_mono_s = self._previous_request_end_mono_s
         previous_readiness_identity = self._previous_readiness_identity
         self._previous_counter = counter
-        self._previous_counter_present = counter_present
+        self._counter_seen_for_exporter = counter_seen_for_exporter or counter_present
         self._previous_request_end_mono_s = request_end_mono_s
         self._previous_readiness_identity = readiness
 
@@ -270,7 +288,7 @@ class OpenMetricsOnlineTrafficSource:
             raise RuntimeError("online request-rate counter is warming up")
         if readiness != previous_readiness_identity:
             raise RuntimeError("online request-rate exporter identity changed")
-        if counter_present and not previous_counter_present:
+        if counter_present and not counter_seen_for_exporter:
             raise RuntimeError("online request-rate counter is warming up")
         # The counter sample can occur anywhere inside each scrape request.
         # current-start minus previous-end is the minimum possible separation,
@@ -888,7 +906,7 @@ class LlmdAsyncPrometheusSource:
         self, *, observed_at_s: float
     ) -> list[BatchDispatcherFeedback]:
         observed_at_s = _require_finite_non_negative("observed_at_s", observed_at_s)
-        feedback = await asyncio.gather(
+        feedback = await _gather_settled_or_raise(
             *(self._collect_pool(pool_id, observed_at_s) for pool_id in self._pools)
         )
         result = list(feedback)
@@ -954,7 +972,7 @@ class LlmdAsyncPrometheusSource:
             dispatch_rate,
             lease_valid,
             lease_unexpired,
-        ) = await asyncio.gather(
+        ) = await _gather_settled_or_raise(
             self._query_scalar(queued_query),
             self._query_scalar(backlog_available_query),
             self._query_scalar(sample_age_query),
