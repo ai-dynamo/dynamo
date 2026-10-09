@@ -1209,3 +1209,45 @@ def test_rendered_fixed_timing_engine_is_accepted_by_native_schema(tmp_path):
         "prefill_ms": 10.0,
         "decode_ms": 5.0,
     }
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("role", ["prefill", "decode", "aggregated"])
+def test_rendered_ais_engine_role_reaches_native_perf_config(tmp_path, role):
+    pytest.importorskip(
+        "dynamo._core", reason="requires the optional native replay runtime"
+    )
+    sims = pytest.importorskip("autoscaling_arena.runners.sims")
+    # Normalization validates configuration only; it loads no model or timing data.
+    config = _sim_config(
+        tmp_path,
+        "agg",
+        deployment={
+            "gpu_budget": 24,
+            "model": {"name": "deepseek-ai/DeepSeek-V4-Pro"},
+            "engines": {
+                "aggregate": {
+                    "system": "b300_sxm",
+                    "backend": "vllm",
+                    "backend_version": "0.24.0",
+                    "tp_size": 1,
+                    "attention_dp_size": 8,
+                    "moe_tp_size": 1,
+                    "moe_ep_size": 8,
+                }
+            },
+        },
+    )
+    rendered = match_runner._render_engine_args(
+        config.backend.engines.aggregate, config.backend.model.ais_model_path
+    )
+    role_bound = sims._normalize_engine_args_role(
+        rendered, expected=role, argument_name="engine_args"
+    )
+    normalized = sims._load_engine_args(role_bound)
+    perf = normalized["engine"]["timing_model"]["config"]
+    assert normalized["engine"]["worker_type"] == perf["worker_type"] == role
+    assert perf["nextn"] == 0
+    assert normalized["engine"]["aic_nextn"] is None

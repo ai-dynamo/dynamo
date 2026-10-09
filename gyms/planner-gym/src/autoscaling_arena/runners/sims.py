@@ -1070,6 +1070,8 @@ def _normalize_engine_args_role(
                         f"{argument_name}.engine.timing_model.config.worker_type "
                         f"must be {expected!r}, got {declared!r}"
                     )
+                if timing.get("provider") in {"ais", "aic"}:
+                    perf_config["worker_type"] = expected
         return json.dumps(values)
 
     declared = values.get("worker_type")

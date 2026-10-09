@@ -1212,6 +1212,40 @@ def test_canonical_launch_role_is_nested_without_legacy_fields(sims_module, role
     assert "worker_type" not in raw["engine"]
 
 
+@pytest.mark.parametrize("role", ["prefill", "decode", "aggregated"])
+@pytest.mark.parametrize("provider", ["ais", "aic"])
+def test_canonical_ais_timing_config_inherits_engine_role(sims_module, role, provider):
+    raw = _canonical_engine_args({"model": "synthetic-model"})
+    raw["engine"]["timing_model"]["provider"] = provider
+    result = json.loads(
+        sims_module._normalize_engine_args_role(
+            json.dumps(raw), expected=role, argument_name="engine_args"
+        )
+    )
+    assert result["engine"]["worker_type"] == role
+    assert result["engine"]["timing_model"]["config"]["worker_type"] == role
+    assert "worker_type" not in raw["engine"]["timing_model"]["config"]
+
+
+def test_canonical_profile_provider_config_does_not_gain_ais_fields(sims_module):
+    raw = {
+        "engine": {
+            "timing_model": {
+                "type": "external",
+                "provider": "dynamo_profile",
+                "config": {"path": "synthetic-profile.npz"},
+            }
+        }
+    }
+    result = json.loads(
+        sims_module._normalize_engine_args_role(
+            json.dumps(raw), expected="decode", argument_name="decode_engine_args"
+        )
+    )
+    assert result["engine"]["worker_type"] == "decode"
+    assert result["engine"]["timing_model"] == raw["engine"]["timing_model"]
+
+
 @pytest.mark.parametrize(
     "engine",
     [
