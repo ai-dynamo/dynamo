@@ -58,7 +58,7 @@ targets:
     type: chat-trace-replay
     traffic: Complete 1,805-row chat trace; one concurrency per run
   deploy:
-    asset: recipes/motif-3/vllm/disagg-b200-chat/deploy-generic-3p1d-kv.yaml
+    asset: recipes/motif-3/vllm/disagg-b200-chat/deploy-generic.yaml
   benchmark:
     tool: aiperf
     asset: recipes/motif-3/perf/disagg.yaml
