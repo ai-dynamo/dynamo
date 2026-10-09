@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Versioned, intentionally small on-demand profiling PoC contract."""
+"""Versioned, intentionally small on-demand profiling contract."""
 
 from typing import Literal
 

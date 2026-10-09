@@ -3,13 +3,15 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# On-demand profiling administration (PoC)
+# On-demand profiling administration
 
 The frontend receives client requests on a private Unix socket and passes an
 explicit runtime snapshot to `dynamo.profiling.Coordinator`. The coordinator
 manages capture leases, worker clock measurements, collector cleanup, and
 artifact validation. HTTP routing and process hosting live in this directory;
-the reusable coordinator and adapters live in `dynamo/profiling`.
+the reusable coordinator and adapters live in `dynamo/profiling`. See the
+[interface design](../../profiling/DESIGN.md) for the module boundaries and
+capture lifecycle.
 
 The default host runs inside the frontend process:
 
@@ -20,7 +22,8 @@ python -m dynamo.frontend --profiling-config /private/profiling/config.json
 The socket directory and output directory must be owned by the serving user and
 have mode 0700. The socket has mode 0600. The interface is separate from the
 inference port; the existing Rust frontend extension API only supports static GET
-routes. No public POST route or remote authentication layer is added by this PoC.
+routes. The interface does not provide public POST routes or remote
+authentication.
 
 ## Configuration
 
@@ -89,8 +92,8 @@ path configured, for example:
 ```
 
 The last flag avoids expensive native CUDA summary processing observed in the
-live PoC. Raw Kineto serialization can still pause inference. SGLang uses its
-existing start/stop controls and backend-specific operator `start_options`.
+live validation. Raw Kineto serialization can still pause inference. SGLang uses
+its existing start/stop controls and backend-specific operator `start_options`.
 
 ## Client requests
 
@@ -245,8 +248,13 @@ selected only decode-0 while decode-1 continued serving. The latter produced a
 unselected workers, and 69 observed lifecycle OTel spans across three probes.
 All four workload jobs and their recorded steps completed successfully.
 
-These live runs validate checkpoint `fa32249977`. Subsequent metadata/snapshot
-refinements passed 39 CPU tests; the bounds parser also verifies the saved real
-GPU artifact against its original event count and SHA-256. Frontend perf remained
-disabled in live runs. Actual Nsight collection and SGLang export validation are
-pending. These are functional validations, not overhead comparisons.
+These live runs validate checkpoint `fa32249977`. The metadata/snapshot
+refinements at `0e6ec5e1f3` were then validated with the same selected-worker
+workload: one 9.957628-second GPU trace, 104,400 CUDA kernels, 69 observed lifecycle
+OTel spans, and no profiler starts, stops, or traces on unselected workers. All
+four jobs completed successfully; the measurement/grace phase completed 83
+requests, cancelled one at the grace timeout, and recorded zero request errors.
+The synchronous stop/export response arrived 60.753 seconds after the lease
+deadline. Full-tree pre-commit and 405 applicable pre-merge tests passed.
+Frontend perf remained disabled in live runs. Actual Nsight collection and SGLang
+export validation are pending. These are functional validations, not overhead comparisons.

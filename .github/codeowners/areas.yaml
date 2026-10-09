@@ -8,7 +8,6 @@ areas:
   - components/src/dynamo/common/protocols/
   - components/src/dynamo/frontend/
   - components/src/dynamo/profiling/
-  - ON_DEMAND_PROFILING_INTERFACE.md
   - components/src/dynamo/frontend/tests/
   - examples/chat_templates/
   - lib/bindings/python/rust/parsers.rs

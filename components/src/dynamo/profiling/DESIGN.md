@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# On-demand profiling interface draft
+# On-demand profiling interface design
 
 The frontend accepts a client capture plan, gathers an explicit runtime snapshot,
 and invokes a reusable coordinator module. This is orthogonal to lifecycle
@@ -102,7 +102,7 @@ See [architecture](https://docs.nvidia.com/nsight-operator/Architecture/index.ht
 and [user guide](https://docs.nvidia.com/nsight-operator/UserGuide/index.html).
 
 The exact configuration, HTTP examples, Python API, and validation limitations
-are in [the administration README](components/src/dynamo/frontend/profiling/README.md).
+are in [the administration README](../frontend/profiling/README.md).
 
 ## Validation record
 
@@ -129,6 +129,14 @@ dispatch, same-tick process identities, clock uncertainty/steps, artifact
 integrity and membership, precise/unknown native bounds, embedded hosting,
 idempotency, cleanup failures, and caller mutation isolation. The revised
 validator also rechecks the original selected GPU trace's hash/event count and
-extracts its exact 9,800,295,631-nanosecond duration. These refinements have not
-been run in a new GPU workload. Actual frontend perf, Nsight collection, and
-SGLang export validation remain pending.
+extracts its exact 9,800,295,631-nanosecond duration.
+
+These refinements were then validated on checkpoint `0e6ec5e1f3` with the same
+selected-worker workload. Run `on_demand_refinement_20261009_213629` produced one
+9.957628-second GPU trace with 104,400 CUDA kernels and 69 observed lifecycle OTel
+spans; unselected workers had no profiler starts, stops, or traces. All four jobs
+completed successfully. The measurement/grace phase completed 83 requests,
+cancelled one at the grace timeout, and recorded zero request errors. The
+synchronous stop/export response arrived 60.753 seconds after the lease deadline.
+Full-tree pre-commit and 405 applicable pre-merge tests passed. Actual frontend
+perf, Nsight collection, and SGLang export validation remain pending.

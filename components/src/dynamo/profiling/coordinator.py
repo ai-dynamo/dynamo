@@ -176,7 +176,7 @@ class Coordinator:
             raise Conflict("A profiling session is already active or finalizing")
         if len(self.sessions) >= self.config.max_sessions:
             raise Unavailable(
-                "PoC session retention limit reached; restart coordinator"
+                "Profiling session retention limit reached; restart coordinator"
             )
         session_id = uuid.uuid4().hex
         directory = Path(self.config.output_dir) / session_id
