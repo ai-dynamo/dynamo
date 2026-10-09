@@ -11,16 +11,13 @@ and real MTP2 verification by default.
 
 Follow the [Fern recipe documentation](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/recipes/model-recipes/motif-3.mdx)
 for image access, model-cache setup, deployment, smoke tests, and benchmarking.
-After completing the prerequisites, apply a target from the repository root:
+After completing the prerequisites, apply the generic manifest from the repository root:
 
 ```bash
 kubectl apply -f recipes/motif-3/vllm/disagg-b200-chat/deploy-generic-3p1d-kv.yaml -n "${NAMESPACE}"
 ```
 
-Use [deploy-nscale-3p1d-kv.yaml](deploy-nscale-3p1d-kv.yaml) for Nscale GPU
-selection and RDMA resources. Both targets update `motif3-disagg-b200`.
-Edit [kustomize/base](kustomize/base) or [site components](kustomize/components),
-then regenerate the manifests:
+Edit [kustomize/base](kustomize/base), then regenerate the manifest:
 
 ```bash
 python3 scripts/kustomize-matrix.py unfold recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml

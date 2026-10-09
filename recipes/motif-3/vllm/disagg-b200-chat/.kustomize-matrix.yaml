@@ -19,6 +19,3 @@ matrix:
   target:
   - name: generic
     components: []
-  - name: nscale
-    components:
-    - kustomize/components/nscale

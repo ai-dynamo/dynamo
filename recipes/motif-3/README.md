@@ -12,4 +12,4 @@ for prerequisites, deployment, configuration, and benchmarking.
 | Target | GPUs | Manifest |
 |---|---:|---|
 | Aggregated | 2 | [Generic](vllm/agg-b200-chat/base/deploy.yaml) · [Nscale Kustomization](vllm/agg-b200-chat/kustomize) |
-| 3P1D, KV-aware routing | 8 | [Generic](vllm/disagg-b200-chat/deploy-generic-3p1d-kv.yaml) · [Nscale](vllm/disagg-b200-chat/deploy-nscale-3p1d-kv.yaml) |
+| 3P1D, KV-aware routing | 8 | [Generic](vllm/disagg-b200-chat/deploy-generic-3p1d-kv.yaml) |
