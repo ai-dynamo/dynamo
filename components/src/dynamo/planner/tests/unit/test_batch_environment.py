@@ -6,9 +6,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from collections.abc import Mapping
 from typing import Any, Optional
 
+import fakeredis
 import pytest
 from redis.crc import key_slot
 from redis.exceptions import ResponseError as RedisResponseError
@@ -2265,6 +2267,90 @@ async def test_redis_actuator_atomically_sets_hash_and_absolute_expiry() -> None
         "writer_sequence": "1",
     }
     assert redis.expiry_ms == 1_030_125
+
+
+@pytest.mark.asyncio
+async def test_redis_production_lua_fences_stale_writers_and_sequences() -> None:
+    redis = fakeredis.FakeAsyncRedis(decode_responses=True)
+    control_key = "planner:{pool-a}:drain"
+    fence_key = batch_environment._fence_key_for(control_key)
+    now_s = time.time()
+    valid_until_s = now_s + 120.0
+
+    def decision(decision_id: str, max_admission_rps: float) -> BatchDrainLimitDecision:
+        return BatchDrainLimitDecision(
+            pool_id="pool-a",
+            max_admission_rps=max_admission_rps,
+            valid_until_s=valid_until_s,
+            decision_id=decision_id,
+        )
+
+    def actuator(writer_id: str) -> RedisLeasedDrainLimitActuator:
+        return RedisLeasedDrainLimitActuator(
+            client=redis,
+            control_key_resolver=lambda _pool_id: control_key,
+            clock=lambda: now_s,
+            writer_id=writer_id,
+        )
+
+    old_writer = actuator("old-writer")
+    await old_writer.initialize_writer(decision("old-startup", 0.0))
+    old_epoch = await redis.hget(fence_key, "epoch")
+    assert isinstance(old_epoch, str)
+
+    current_writer = actuator("current-writer")
+    await current_writer.initialize_writer(decision("current-startup", 0.0))
+    current_epoch = await redis.hget(fence_key, "epoch")
+    assert isinstance(current_epoch, str)
+    await current_writer.apply_drain_limit(decision("current-positive", 5.0))
+
+    expected_control = await redis.hgetall(control_key)
+    expected_fence = await redis.hgetall(fence_key)
+    expected_expiry = await redis.pexpiretime(control_key)
+    assert expected_control["decision_id"] == "current-positive"
+    assert expected_control["max_admission_rps"] == "5"
+    assert expected_control["writer_sequence"] == "1"
+
+    valid_until_unix_ms = str(math.floor(valid_until_s * 1000.0))
+    stale_writer_result = await redis.eval(
+        batch_environment._REDIS_FENCED_APPLY_SCRIPT,
+        2,
+        control_key,
+        fence_key,
+        old_epoch,
+        "old-writer",
+        "99",
+        batch_environment.DISPATCH_RATE_LIMIT_API_VERSION,
+        "pool-a",
+        "9",
+        valid_until_unix_ms,
+        "stale-writer",
+    )
+    assert stale_writer_result == 0
+    assert await redis.hgetall(control_key) == expected_control
+    assert await redis.hgetall(fence_key) == expected_fence
+    assert await redis.pexpiretime(control_key) == expected_expiry
+
+    lower_sequence_result = await redis.eval(
+        batch_environment._REDIS_FENCED_APPLY_SCRIPT,
+        2,
+        control_key,
+        fence_key,
+        current_epoch,
+        "current-writer",
+        "0",
+        batch_environment.DISPATCH_RATE_LIMIT_API_VERSION,
+        "pool-a",
+        "11",
+        valid_until_unix_ms,
+        "lower-sequence",
+    )
+    assert lower_sequence_result == 0
+    assert await redis.hgetall(control_key) == expected_control
+    assert await redis.hgetall(fence_key) == expected_fence
+    assert await redis.pexpiretime(control_key) == expected_expiry
+
+    await redis.aclose()
 
 
 @pytest.mark.asyncio
