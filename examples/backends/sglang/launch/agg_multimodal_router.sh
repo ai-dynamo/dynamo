@@ -135,7 +135,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --kv-events-config "${KV_EVENTS_CONFIG}" \
         --enable-metrics \
         --disable-piecewise-cuda-graph \
-        "${NCCL_PORT_ARGS[@]}" \
+        ${NCCL_PORT_ARGS[@]+"${NCCL_PORT_ARGS[@]}"} \
         ${GPU_MEM_ARGS} ${SGLANG_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
 done
 
