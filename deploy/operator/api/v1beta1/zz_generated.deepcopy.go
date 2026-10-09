@@ -1155,11 +1155,6 @@ func (in *LPXConfig) DeepCopyInto(out *LPXConfig) {
 		*out = new(SchedulingSpec)
 		(*in).DeepCopyInto(*out)
 	}
-	if in.Checkpoint != nil {
-		in, out := &in.Checkpoint, &out.Checkpoint
-		*out = new(LPXCheckpoint)
-		**out = **in
-	}
 	if in.Experimental != nil {
 		in, out := &in.Experimental, &out.Experimental
 		*out = new(LPXExperimentalSpec)
@@ -1184,6 +1179,11 @@ func (in *LPXExperimentalSpec) DeepCopyInto(out *LPXExperimentalSpec) {
 		in, out := &in.LocalPartitions, &out.LocalPartitions
 		*out = new(LPXLocalPartitions)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.Checkpoint != nil {
+		in, out := &in.Checkpoint, &out.Checkpoint
+		*out = new(LPXCheckpoint)
+		**out = **in
 	}
 }
 

@@ -724,6 +724,15 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 			compilationMode:   manifestcapnpv2.CompilationMode_lpx,
 			nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
 		},
+		"llama3_2-1b-lpu-gpu-v2/build_checkpoint": {
+			topology:          "test-topology",
+			partitionCount:    17,
+			numChips:          8,
+			devicesPerNode:    8,
+			compilationMode:   manifestcapnpv2.CompilationMode_lpx,
+			nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
+			checkpoint:        &[2]string{"meta-llama/Llama-3.2-1B-Instruct", "9213176726f574b556790deb65791e0c5aa438b6"},
+		},
 		"llama3_2-1b-lpu-v2/build_0m851219t7py3mp8x1j5rg9j8c": {
 			topology:       "test-topology",
 			partitionCount: 17,
@@ -891,6 +900,15 @@ func testV2GraphManifestCapnp(t *testing.T, fixture testV2GraphManifestFixture) 
 
 	message, manifest := newTestGraphManifest(t)
 
+	// Record the source checkpoint when the fixture names one.
+	if fixture.checkpoint != nil {
+		checkpoint, err := manifest.NewCheckpoint()
+		require.NoError(t, err)
+		checkpoint.SetProvider(manifestcapnpv2.CheckpointProvider_huggingFace)
+		require.NoError(t, checkpoint.SetModel(fixture.checkpoint[0]))
+		require.NoError(t, checkpoint.SetRevision(fixture.checkpoint[1]))
+	}
+
 	deployment, program := newTestGraphProgram(t, manifest, fixture.compilationMode, uint32(fixture.partitionCount)*fixture.numChips/fixture.devicesPerNode, 8192)
 
 	// Describe a complete batch when a fixture uses multiple endpoints or clients.
@@ -967,6 +985,8 @@ type testV2GraphManifestFixture struct {
 	nonLPUDeviceTypes     []manifestcapnpv2.DeviceType
 	ioFPGACount           uint32
 	ioFanoutFactor        uint32
+	// checkpoint is the optional Hugging Face source checkpoint, as model and revision.
+	checkpoint *[2]string
 }
 
 func testV3GraphManifestCapnp(t *testing.T, fixture testV3GraphManifestFixture) []byte {

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
 // BuildCompilationMode records the compiler-authored execution mode in a normalized build.
@@ -53,6 +55,8 @@ type Build struct {
 	IOFPGACount int32
 	// IOFanoutFactor is the number of clients assigned to each I/O FPGA transaction.
 	IOFanoutFactor int32
+	// Checkpoint is the validated source checkpoint that the manifest records, or nil.
+	Checkpoint *dynamov1beta1.LPXCheckpoint
 }
 
 // BuildPartition describes one normalized physical compiler partition.

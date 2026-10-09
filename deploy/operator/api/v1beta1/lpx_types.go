@@ -14,15 +14,6 @@ type LPXConfig struct {
 	// +optional
 	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
 
-	// checkpoint selects the model checkpoint that the Cyborg conductor reads
-	// when it runs partitions on its GPU. Model Express downloads it to model
-	// storage before the workload starts, and the operator sets
-	// `CYBORG_WEIGHTS_PATH` in the Cyborg container to its snapshot directory.
-	// Requires a hybrid build and a configured Model Express URL. Omission
-	// leaves checkpoint selection to the Cyborg container.
-	// +optional
-	Checkpoint *LPXCheckpoint `json:"checkpoint,omitempty"`
-
 	// experimental groups opt-in LPX options whose API shape may change in
 	// breaking ways between v1beta1 releases.
 	// +optional
@@ -37,6 +28,15 @@ type LPXExperimentalSpec struct {
 	// local. Omission runs every partition on LPUs.
 	// +optional
 	LocalPartitions *LPXLocalPartitions `json:"localPartitions,omitempty"`
+
+	// checkpoint overrides the checkpoint that a hybrid build's GBuild manifest
+	// names for the Cyborg conductor. Model Express downloads the selected
+	// checkpoint to model storage before the workload starts, and the operator
+	// sets `CYBORG_WEIGHTS_PATH` in the Cyborg container to its snapshot
+	// directory. Requires a hybrid build and a configured Model Express URL.
+	// Omission uses the manifest's checkpoint, if any.
+	// +optional
+	Checkpoint *LPXCheckpoint `json:"checkpoint,omitempty"`
 }
 
 // LocalPartitions returns the experimental local-partition selection, or nil
@@ -46,6 +46,15 @@ func (c *LPXConfig) LocalPartitions() *LPXLocalPartitions {
 		return nil
 	}
 	return c.Experimental.LocalPartitions
+}
+
+// CheckpointOverride returns the experimental checkpoint override, or nil when
+// none is set. The receiver may be nil.
+func (c *LPXConfig) CheckpointOverride() *LPXCheckpoint {
+	if c == nil || c.Experimental == nil {
+		return nil
+	}
+	return c.Experimental.Checkpoint
 }
 
 // LPXLocalPartitionsMode selects how LPXLocalPartitions chooses partitions.

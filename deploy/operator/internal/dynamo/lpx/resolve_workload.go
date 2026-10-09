@@ -116,12 +116,12 @@ func ResolveWorkload(
 		hasConductor := stage.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil
 		modelNames := expandedModelNames(len(components), hasConductor, int(ptr.Deref(stage.Replicas, 1)))
 		intent := ModelProjectionInput{
-			Pipeline:        pipeline,
-			Models:          modelNames,
-			RuntimeBuildRef: model.BuildID,
-			BuildSnapshot:   snapshot,
-			LocalPartitions: model.LocalPartitions(),
-			Checkpoint:      model.Checkpoint,
+			Pipeline:           pipeline,
+			Models:             modelNames,
+			RuntimeBuildRef:    model.BuildID,
+			BuildSnapshot:      snapshot,
+			LocalPartitions:    model.LocalPartitions(),
+			CheckpointOverride: model.CheckpointOverride(),
 		}
 		projected, err := appendModelProjections(projections, intent)
 		if err != nil {

@@ -118,6 +118,11 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 		return nil, fmt.Errorf("%s artifacts.runtimeAssets.tokenEmbeddingsPath is required when standaloneTokenEmbeddings=true", gbuildManifestV2CapnpFile)
 	}
 
+	checkpoint, err := checkpointFromManifestV2(manifest)
+	if err != nil {
+		return nil, err
+	}
+
 	build := &Build{
 		Path:                      buildRef,
 		CompilationMode:           compilationMode,
@@ -126,6 +131,7 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 		SupportsCPUEmbeddings:     program.SupportsCpuEmbeddings(),
 		IOFPGACount:               ioFPGACount,
 		IOFanoutFactor:            ioFanoutFactor,
+		Checkpoint:                checkpoint,
 	}
 
 	// Complete the normalized build with scheduler-facing LPU artifacts.

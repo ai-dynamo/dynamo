@@ -3649,7 +3649,7 @@ LPXCheckpoint identifies one immutable model checkpoint.
 
 
 **Kind:** `type`
-**Appears in:** [LPXConfig](#lpxconfig)
+**Appears in:** [LPXExperimentalSpec](#lpxexperimentalspec)
 
 <ParamField path="provider" type="LPXCheckpointProvider" required={true}>
 provider selects the checkpoint source. Only `HuggingFace` is supported.
@@ -3700,12 +3700,6 @@ See [SchedulingSpec](#schedulingspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="checkpoint" type="LPXCheckpoint">
-checkpoint selects the model checkpoint that the Cyborg conductor reads when it runs partitions on its GPU. Model Express downloads it to model storage before the workload starts, and the operator sets `CYBORG_WEIGHTS_PATH` in the Cyborg container to its snapshot directory. Requires a hybrid build and a configured Model Express URL. Omission leaves checkpoint selection to the Cyborg container.
-See [LPXCheckpoint](#lpxcheckpoint).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
 <ParamField path="experimental" type="LPXExperimentalSpec">
 experimental groups opt-in LPX options whose API shape may change in breaking ways between v1beta1 releases.
 See [LPXExperimentalSpec](#lpxexperimentalspec).
@@ -3723,6 +3717,12 @@ LPXExperimentalSpec groups experimental LPX options.
 <ParamField path="localPartitions" type="LPXLocalPartitions">
 localPartitions selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. The operator schedules LPU Agents only for the remaining partitions, and schedules none when every partition is local. Omission runs every partition on LPUs.
 See [LPXLocalPartitions](#lpxlocalpartitions).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="checkpoint" type="LPXCheckpoint">
+checkpoint overrides the checkpoint that a hybrid build's GBuild manifest names for the Cyborg conductor. Model Express downloads the selected checkpoint to model storage before the workload starts, and the operator sets `CYBORG_WEIGHTS_PATH` in the Cyborg container to its snapshot directory. Requires a hybrid build and a configured Model Express URL. Omission uses the manifest's checkpoint, if any.
+See [LPXCheckpoint](#lpxcheckpoint).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

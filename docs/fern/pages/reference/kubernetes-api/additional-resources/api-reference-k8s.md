@@ -2502,7 +2502,7 @@ LPXCheckpoint identifies one immutable model checkpoint.
 
 
 _Appears in:_
-- [LPXConfig](#lpxconfig)
+- [LPXExperimentalSpec](#lpxexperimentalspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2544,7 +2544,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `buildId` _string_ | buildId references the immutable model build. |  | MinLength: 1 <br /> |
 | `scheduling` _[SchedulingSpec](#schedulingspec)_ | scheduling configures this component's LPX scheduling attempts.<br />Omission means no deadline. |  | Optional: \{\} <br /> |
-| `checkpoint` _[LPXCheckpoint](#lpxcheckpoint)_ | checkpoint selects the model checkpoint that the Cyborg conductor reads<br />when it runs partitions on its GPU. Model Express downloads it to model<br />storage before the workload starts, and the operator sets<br />`CYBORG_WEIGHTS_PATH` in the Cyborg container to its snapshot directory.<br />Requires a hybrid build and a configured Model Express URL. Omission<br />leaves checkpoint selection to the Cyborg container. |  | Optional: \{\} <br /> |
 | `experimental` _[LPXExperimentalSpec](#lpxexperimentalspec)_ | experimental groups opt-in LPX options whose API shape may change in<br />breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
 
 
@@ -2562,6 +2561,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `localPartitions` _[LPXLocalPartitions](#lpxlocalpartitions)_ | localPartitions selects partitions of a hybrid build that the Cyborg<br />conductor runs on its own GPU. The operator schedules LPU Agents only for<br />the remaining partitions, and schedules none when every partition is<br />local. Omission runs every partition on LPUs. |  | Optional: \{\} <br /> |
+| `checkpoint` _[LPXCheckpoint](#lpxcheckpoint)_ | checkpoint overrides the checkpoint that a hybrid build's GBuild manifest<br />names for the Cyborg conductor. Model Express downloads the selected<br />checkpoint to model storage before the workload starts, and the operator<br />sets `CYBORG_WEIGHTS_PATH` in the Cyborg container to its snapshot<br />directory. Requires a hybrid build and a configured Model Express URL.<br />Omission uses the manifest's checkpoint, if any. |  | Optional: \{\} <br /> |
 
 
 #### LPXLocalPartitions
