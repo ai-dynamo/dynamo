@@ -33,6 +33,18 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_dispatch_sample(
+    run_dir: Path, name: str, value: int, observed_at: str
+) -> None:
+    metrics_dir = run_dir / "metrics" / "async"
+    (metrics_dir / f"{name}.prom").write_text(
+        "llm_d_async_async_dispatched_requests_total"
+        f'{{pool_name="dynamo-batch"}} {value}\n',
+        encoding="utf-8",
+    )
+    _write_json(metrics_dir / f"{name}.json", {"observed_at": observed_at})
+
+
 def _write_missing_transitions_fixture(root: Path) -> tuple[Path, Path]:
     run_dir = root / "run"
     evidence_dir = root / "evidence"
@@ -122,6 +134,12 @@ def _write_missing_transitions_fixture(root: Path) -> tuple[Path, Path]:
 
 def _write_scale_to_zero_fixture(root: Path) -> tuple[Path, Path]:
     run_dir, evidence_dir = _write_missing_transitions_fixture(root)
+    _write_dispatch_sample(
+        run_dir,
+        "000-unchanged-after-positive-lease",
+        400,
+        "2026-08-28T21:38:17.100Z",
+    )
     states = [
         {
             "observed_at": "2026-08-28T21:35:35Z",
@@ -294,6 +312,71 @@ def test_configured_zero_idle_target_is_proven_end_to_end(tmp_path: Path) -> Non
     assert result["assertions"]["planner_policy_log_order"] is True
     assert result["observed"]["expected_idle_replicas"] == 0
     assert result["observed"]["planner_idle_replica_targets"] == [0, None, None, 0]
+    assert result["timeline"]["positive_lease"] == "2026-08-28T21:38:17Z"
+    assert result["timeline"]["last_unchanged_dispatch_counter"] == (
+        "2026-08-28T21:38:17.100Z"
+    )
+    assert result["timeline"]["first_dispatch_counter_increase"] == (
+        "2026-08-28T21:38:17.330Z"
+    )
+    assert (
+        result["observed"]["dispatch_counter"]["continuous_through_first_increase"]
+        is True
+    )
+
+
+def test_dispatch_before_positive_lease_is_not_certified(tmp_path: Path) -> None:
+    run_dir, evidence_dir = _write_scale_to_zero_fixture(tmp_path)
+    # The counter can increment after this unchanged scrape but before the
+    # positive lease at 21:38:17, then remain unseen until the 21:38:17.330
+    # scrape. That overlapping interval is intentionally inconclusive.
+    _write_dispatch_sample(
+        run_dir,
+        "000-unchanged-after-positive-lease",
+        400,
+        "2026-08-28T21:38:16.900Z",
+    )
+
+    result = verify_native_planner_e2e.verify(
+        run_dir,
+        evidence_dir,
+        worker_component="VllmDecodeWorker",
+        adapter_name="qwen3-0-6b-batch-vllmdecodeworker",
+        expected_idle_replicas=0,
+        expected_lease_duration_seconds=60,
+    )
+
+    assert result["assertions"]["dispatch_started_after_positive_lease"] is False
+    assert result["all_passed"] is False
+    assert result["timeline"]["last_unchanged_dispatch_counter"] == (
+        "2026-08-28T21:38:16.900Z"
+    )
+
+
+def test_dispatch_counter_reset_is_not_certified(tmp_path: Path) -> None:
+    run_dir, evidence_dir = _write_scale_to_zero_fixture(tmp_path)
+    _write_dispatch_sample(
+        run_dir,
+        "001-counter-reset",
+        0,
+        "2026-08-28T21:38:17.200Z",
+    )
+
+    result = verify_native_planner_e2e.verify(
+        run_dir,
+        evidence_dir,
+        worker_component="VllmDecodeWorker",
+        adapter_name="qwen3-0-6b-batch-vllmdecodeworker",
+        expected_idle_replicas=0,
+        expected_lease_duration_seconds=60,
+    )
+
+    assert result["assertions"]["dispatch_started_after_positive_lease"] is False
+    assert result["all_passed"] is False
+    assert (
+        result["observed"]["dispatch_counter"]["continuous_through_first_increase"]
+        is False
+    )
 
 
 def test_requested_idle_target_must_match_evidence(tmp_path: Path) -> None:
