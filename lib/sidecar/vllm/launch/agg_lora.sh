@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated LoRA serving (1 GPU).
-# Requires vLLM #52840; see ../README.md for runtime requirements.
 
 set -e
 
