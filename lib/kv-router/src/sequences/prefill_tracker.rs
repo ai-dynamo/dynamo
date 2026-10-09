@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use rustc_hash::FxHashMap;
@@ -197,10 +197,113 @@ impl PrefillTokenDeltas {
     }
 }
 
+const NO_SLOT: usize = usize::MAX;
+
+#[derive(Debug)]
+struct OrderedPrefill {
+    request_id: Option<RequestId>,
+    previous: usize,
+    next: usize,
+}
+
+#[derive(Debug)]
+pub(super) struct PrefillOrder {
+    slots: Vec<OrderedPrefill>,
+    front: usize,
+    back: usize,
+    free: usize,
+}
+
+impl Default for PrefillOrder {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            front: NO_SLOT,
+            back: NO_SLOT,
+            free: NO_SLOT,
+        }
+    }
+}
+
+impl PrefillOrder {
+    fn push_back(&mut self, request_id: RequestId) -> usize {
+        let entry = OrderedPrefill {
+            request_id: Some(request_id),
+            previous: self.back,
+            next: NO_SLOT,
+        };
+        let slot = if self.free == NO_SLOT {
+            self.slots.push(entry);
+            self.slots.len() - 1
+        } else {
+            let slot = self.free;
+            self.free = self.slots[slot].next;
+            self.slots[slot] = entry;
+            slot
+        };
+        if self.back == NO_SLOT {
+            self.front = slot;
+        } else {
+            self.slots[self.back].next = slot;
+        }
+        self.back = slot;
+        slot
+    }
+
+    fn remove(&mut self, slot: usize) -> bool {
+        let is_front = slot == self.front;
+        let previous = self.slots[slot].previous;
+        let next = self.slots[slot].next;
+        if previous == NO_SLOT {
+            self.front = next;
+        } else {
+            self.slots[previous].next = next;
+        }
+        if next == NO_SLOT {
+            self.back = previous;
+        } else {
+            self.slots[next].previous = previous;
+        }
+        self.slots[slot].request_id.take();
+        self.slots[slot].next = self.free;
+        self.free = slot;
+        is_front
+    }
+
+    fn front(&self) -> Option<&RequestId> {
+        self.slots.get(self.front)?.request_id.as_ref()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub(super) fn iter(&self) -> impl Iterator<Item = &RequestId> {
+        std::iter::successors((self.front != NO_SLOT).then_some(self.front), |&slot| {
+            let next = self.slots[slot].next;
+            (next != NO_SLOT).then_some(next)
+        })
+        .map(|slot| {
+            self.slots[slot]
+                .request_id
+                .as_ref()
+                .expect("active order slot")
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.front == NO_SLOT
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TrackedPrefill {
+    load: PrefillLoadState,
+    slot: usize,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct PrefillLoadTracker {
-    pub(super) prefills: HashMap<RequestId, PrefillLoadState>,
-    pub(super) prefill_order: VecDeque<RequestId>,
+    pub(super) prefills: HashMap<RequestId, TrackedPrefill>,
+    pub(super) prefill_order: PrefillOrder,
     pub(super) prefill_full_tokens_sum: usize,
     pub(super) unmodeled_prefill_count: usize,
     /// The front of `prefill_order` plus its effective decay anchor time.
@@ -223,14 +326,20 @@ impl PrefillLoadTracker {
         prefill: PrefillLoadState,
         decay_now: Instant,
     ) {
-        self.prefills.insert(request_id.clone(), prefill);
+        let slot = self.prefill_order.push_back(request_id.clone());
+        self.prefills.insert(
+            request_id.clone(),
+            TrackedPrefill {
+                load: prefill,
+                slot,
+            },
+        );
         self.prefill_full_tokens_sum += prefill.initial_effective_prefill_tokens;
         match prefill.expected_prefill_duration {
             Some(duration) => self.modeled_prefill_ms += u128::from(duration_millis_u64(duration)),
             None => self.unmodeled_prefill_count += 1,
         }
         let should_anchor = self.anchored_prefill.is_none();
-        self.prefill_order.push_back(request_id.clone());
         if should_anchor {
             self.anchored_prefill = Some((request_id.clone(), decay_now));
             self.anchored_load = Some(prefill);
@@ -242,7 +351,8 @@ impl PrefillLoadTracker {
         request_id: &RequestId,
         decay_now: Instant,
     ) -> Option<PrefillLoadState> {
-        let prefill = self.prefills.remove(request_id)?;
+        let tracked = self.prefills.remove(request_id)?;
+        let prefill = tracked.load;
         self.prefill_full_tokens_sum = self
             .prefill_full_tokens_sum
             .checked_sub(prefill.initial_effective_prefill_tokens)
@@ -261,22 +371,12 @@ impl PrefillLoadTracker {
                     .expect("unmodeled_prefill_count underflow");
             }
         }
-        let removed_front = self.prefill_order.front() == Some(request_id);
-        if removed_front {
-            let removed = self.prefill_order.pop_front();
-            debug_assert_eq!(removed.as_ref(), Some(request_id));
-        } else {
-            self.prefill_order
-                .retain(|queued_request_id| queued_request_id != request_id);
-            if let Some(expected_prefill_duration) = prefill.expected_prefill_duration {
-                self.shift_anchor_forward(expected_prefill_duration, decay_now);
-            }
-        }
-        if self
-            .anchored_prefill
-            .as_ref()
-            .is_some_and(|(anchored_request_id, _)| anchored_request_id == request_id)
+        let removed_front = self.prefill_order.remove(tracked.slot);
+        if !removed_front && let Some(expected_prefill_duration) = prefill.expected_prefill_duration
         {
+            self.shift_anchor_forward(expected_prefill_duration, decay_now);
+        }
+        if removed_front {
             self.set_anchor_to_front(decay_now);
         }
         Some(prefill)
@@ -301,7 +401,7 @@ impl PrefillLoadTracker {
         self.anchored_load = self.anchored_prefill.as_ref().map(|(request_id, _)| {
             self.prefills
                 .get(request_id)
-                .copied()
+                .map(|prefill| prefill.load)
                 .expect("anchored prefill missing request state")
         });
     }
@@ -335,12 +435,12 @@ impl PrefillLoadTracker {
         let recomputed_prefill_sum: usize = self
             .prefills
             .values()
-            .map(|prefill| prefill.initial_effective_prefill_tokens)
+            .map(|prefill| prefill.load.initial_effective_prefill_tokens)
             .sum();
         let recomputed_modeled_prefill_ms: u128 = self
             .prefills
             .values()
-            .filter_map(|prefill| prefill.expected_prefill_duration)
+            .filter_map(|prefill| prefill.load.expected_prefill_duration)
             .map(|duration| u128::from(duration_millis_u64(duration)))
             .sum();
         assert_eq!(
@@ -351,18 +451,21 @@ impl PrefillLoadTracker {
             self.anchored_load,
             self.anchored_prefill
                 .as_ref()
-                .and_then(|(request_id, _)| self.prefills.get(request_id).copied()),
+                .and_then(|(request_id, _)| self
+                    .prefills
+                    .get(request_id)
+                    .map(|prefill| prefill.load)),
             "anchored_load drifted from the anchored request state",
         );
         let recomputed_unmodeled_prefill_count = self
             .prefills
             .values()
-            .filter(|prefill| prefill.expected_prefill_duration.is_none())
+            .filter(|prefill| prefill.load.expected_prefill_duration.is_none())
             .count();
 
         assert_eq!(
             ordered_prefills.len(),
-            self.prefill_order.len(),
+            self.prefill_order.iter().count(),
             "prefill_order contains duplicate request ids",
         );
         assert_eq!(
@@ -625,7 +728,7 @@ mod tests {
 
         assert_eq!(tracker.remove(&r2, completion_time), Some(p2));
 
-        assert_eq!(tracker.prefill_order, VecDeque::from([r1.clone()]));
+        assert_eq!(tracker.prefill_order.iter().collect::<Vec<_>>(), [&r1]);
         assert!(
             tracker
                 .anchored_prefill
@@ -733,7 +836,7 @@ mod tests {
             Some(p1)
         );
 
-        assert_eq!(tracker.prefill_order, VecDeque::from([r2.clone()]));
+        assert_eq!(tracker.prefill_order.iter().collect::<Vec<_>>(), [&r2]);
         assert!(
             tracker
                 .anchored_prefill
@@ -773,7 +876,7 @@ mod tests {
             Some(p2)
         );
 
-        assert_eq!(tracker.prefill_order, VecDeque::from([r1.clone()]));
+        assert_eq!(tracker.prefill_order.iter().collect::<Vec<_>>(), [&r1]);
         assert!(
             tracker
                 .anchored_prefill
@@ -810,7 +913,7 @@ mod tests {
         assert_eq!(tracker.remove(&r1, epoch), Some(p1));
         assert_eq!(tracker.remove(&r1, epoch), None);
         assert_eq!(tracker.prefill_full_tokens_sum, 30);
-        assert_eq!(tracker.prefill_order, VecDeque::from([r2.clone()]));
+        assert_eq!(tracker.prefill_order.iter().collect::<Vec<_>>(), [&r2]);
 
         assert_eq!(tracker.remove(&r2, epoch), Some(p2));
         assert_eq!(tracker.remove(&r2, epoch), None);
@@ -818,5 +921,40 @@ mod tests {
         assert_eq!(tracker.prefill_full_tokens_sum, 0);
         assert!(tracker.prefill_order.is_empty());
         assert!(tracker.prefills.is_empty());
+    }
+
+    #[test]
+    fn reused_order_slots_preserve_oldest_prefill_and_release_request_ids() {
+        let epoch = Instant::now();
+        let mut tracker = PrefillLoadTracker::default();
+        let anchor = "anchor".to_string();
+        let state = unmodeled_prefill_state(64);
+        tracker.insert(&anchor, state, epoch);
+        for _ in 0..100 {
+            let ids: Vec<_> = (0..32).map(|i| format!("request-{i}")).collect();
+            for id in &ids {
+                tracker.insert(id, state, epoch);
+            }
+            for index in (0..32).step_by(2).chain((1..32).step_by(2).rev()) {
+                assert_eq!(tracker.remove(&ids[index], epoch), Some(state));
+                assert_eq!(tracker.remove(&ids[index], epoch), None);
+                tracker.assert_consistent();
+            }
+            assert_eq!(tracker.prefill_order.front(), Some(&anchor));
+            assert_eq!(tracker.prefill_order.slots.len(), 33);
+            assert_eq!(tracker.snapshot().active_tokens_at(epoch), 64);
+        }
+        assert_eq!(tracker.remove(&anchor, epoch), Some(state));
+        assert!(
+            tracker
+                .prefill_order
+                .slots
+                .iter()
+                .all(|slot| slot.request_id.is_none())
+        );
+        tracker.insert(&anchor, state, epoch);
+        tracker.assert_consistent();
+        assert_eq!(tracker.prefill_order.front(), Some(&anchor));
+        assert_eq!(tracker.prefill_order.slots.len(), 33);
     }
 }
