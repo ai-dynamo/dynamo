@@ -334,6 +334,25 @@ def _parse_hicache_storage_extra_config(
     return {}
 
 
+def _mooncake_key_prefix(
+    extra_config: dict[str, Any], served_model_name: Optional[str]
+) -> Optional[str]:
+    """Return the prefix SGLang's MooncakeStore prepends to every stored key.
+
+    Mirrors ``config_prefix`` in SGLang's
+    ``srt/mem_cache/storage/mooncake_store/mooncake_store.py``: the backend tag
+    (when not ``None``) and the served model name with ``/`` replaced by ``-``,
+    joined with ``_``.
+    """
+    parts = []
+    extra_backend_tag = extra_config.get("extra_backend_tag")
+    if extra_backend_tag is not None:
+        parts.append(str(extra_backend_tag))
+    if served_model_name:
+        parts.append("-".join(served_model_name.split("/")))
+    return "_".join(parts) if parts else None
+
+
 def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
     if getattr(server_args, "hicache_storage_backend", None) != "mooncake":
         return None
@@ -389,6 +408,9 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "tp_lcm_size": tp_lcm_size,
         "should_split_heads": should_split_heads,
         "extra_backend_tag": extra_backend_tag,
+        "key_prefix": _mooncake_key_prefix(
+            extra_config, getattr(server_args, "served_model_name", None)
+        ),
         "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
     }
 
