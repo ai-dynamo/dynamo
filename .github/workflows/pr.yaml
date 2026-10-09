@@ -1969,6 +1969,8 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
+    # Wait for every builder consumer, including jobs that can fall back to
+    # the same K8s pair. Test-only jobs use published images, not the builder.
     needs:
       - changed-files
       - operator
@@ -1976,12 +1978,20 @@ jobs:
       - sidecar-build
       - planner-test
       - planner-copy-to-acr
+      - frontend-build
+      - triton-build
+      - vllm-dev-build
+      - vllm-local-dev-build
       - vllm-copy-to-acr
       - vllm-multi-gpu-test
       - vllm-efa-build
+      - sglang-dev-build
+      - sglang-local-dev-build
       - sglang-copy-to-acr
       - sglang-multi-gpu-test
       - sglang-efa-build
+      - trtllm-dev-build
+      - trtllm-local-dev-build
       - trtllm-copy-to-acr
       - trtllm-multi-gpu-test
       - trtllm-efa-build

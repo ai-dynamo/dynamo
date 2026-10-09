@@ -39,7 +39,7 @@ from tests.deploy.dgd_utils import (
     validate_chat_response,
 )
 from tests.utils.client import send_request, wait_for_model_availability
-from tests.utils.test_output import resolve_test_output_path
+from tests.utils.output_paths import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 

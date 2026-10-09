@@ -34,7 +34,7 @@ from tests.deploy.vcluster_utils import (
     retry_vcluster_api_async,
 )
 from tests.utils.client import send_request
-from tests.utils.test_output import resolve_test_output_path
+from tests.utils.output_paths import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
