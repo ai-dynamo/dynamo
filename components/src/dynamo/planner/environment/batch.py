@@ -216,9 +216,7 @@ class PrometheusQueryClient(Protocol):
 
 
 class _AsyncRedisClient(Protocol):
-    def eval(
-        self, script: str, numkeys: int, *keys_and_args: str
-    ) -> Awaitable[object]:
+    def eval(self, script: str, numkeys: int, *keys_and_args: str) -> Awaitable[object]:
         ...
 
     async def aclose(self) -> None:

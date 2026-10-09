@@ -10,7 +10,6 @@ import time
 from collections.abc import Mapping
 from typing import Any, Optional
 
-import fakeredis
 import pytest
 from redis.crc import key_slot
 from redis.exceptions import ResponseError as RedisResponseError
@@ -2271,6 +2270,8 @@ async def test_redis_actuator_atomically_sets_hash_and_absolute_expiry() -> None
 
 @pytest.mark.asyncio
 async def test_redis_production_lua_fences_stale_writers_and_sequences() -> None:
+    import fakeredis
+
     redis = fakeredis.FakeAsyncRedis(decode_responses=True)
     control_key = "planner:{pool-a}:drain"
     fence_key = batch_environment._fence_key_for(control_key)
