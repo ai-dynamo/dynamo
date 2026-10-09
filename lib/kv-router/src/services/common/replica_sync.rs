@@ -18,7 +18,8 @@ use crate::identity::{RoutingPartitionId, RoutingPartitionRef};
 use crate::protocols::{ActiveSequenceEvent, WorkerWithDpRank};
 use crate::sequences::multi_worker::RateLimitedFailureLog;
 use crate::sequences::{
-    SchedulerLoadSnapshot, SequencePublishQueueError, SequencePublisher, SequenceSubscriber,
+    LocalWorkerLoad, SchedulerLoadSnapshot, SequencePublishQueueError, SequencePublisher,
+    SequenceSubscriber,
 };
 use crate::services::common::zmq::{
     create_bound_pub_socket, create_sub_socket_topics, validate_endpoint,
@@ -208,10 +209,9 @@ pub(crate) struct ScopedReplicaSync {
 pub trait SchedulerLoadSink: Send + Sync {
     fn publish(&self, snapshot: SchedulerLoadSnapshot);
 
-    /// Per-worker load after any local mutation, including output blocks,
-    /// which are never published as shared scheduler load. The sink owns the
-    /// metric label so it matches the host's cleanup path.
-    fn observe_local_load(&self, _worker: &WorkerWithDpRank, _blocks: usize, _tokens: usize) {}
+    /// Per-worker load after any local mutation. The sink owns the metric
+    /// label so it matches the host's cleanup path.
+    fn observe_local_load(&self, _worker: &WorkerWithDpRank, _load: LocalWorkerLoad) {}
 
     fn publish_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
         for snapshot in snapshots {
@@ -368,15 +368,9 @@ impl SequencePublisher for ScopedSequencePublisher {
         }
     }
 
-    fn observe_load(
-        &self,
-        worker: &WorkerWithDpRank,
-        _worker_type: &str,
-        blocks: usize,
-        tokens: usize,
-    ) {
+    fn observe_load(&self, worker: &WorkerWithDpRank, _worker_type: &str, load: LocalWorkerLoad) {
         if let Some(sink) = &self.load_sink {
-            sink.observe_local_load(worker, blocks, tokens);
+            sink.observe_local_load(worker, load);
         }
     }
 }

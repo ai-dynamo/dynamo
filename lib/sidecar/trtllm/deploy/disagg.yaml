@@ -46,6 +46,7 @@ data:
     # its own underlying transport (UCX where there is no RDMA fabric).
     cache_transceiver_config:
       backend: NIXL
+    guided_decoding_backend: xgrammar
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -55,6 +56,8 @@ data:
   config.yaml: |
     cache_transceiver_config:
       backend: NIXL
+    # Enforces a required or named tool_choice, which Dynamo sends as a JSON schema.
+    guided_decoding_backend: xgrammar
     # One gRPC chunk per N decode steps, not per token: N>1 cuts per-token gRPC
     # serialization for a throughput win, at the cost of bursty delivery. Only
     # the decode engine streams, so only it is tuned here.
