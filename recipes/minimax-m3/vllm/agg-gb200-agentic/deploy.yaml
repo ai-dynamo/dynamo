@@ -88,8 +88,6 @@ spec:
                 - --kv-cache-block-size
                 - "128"
               env:
-                - name: HF_HOME
-                  value: /shared-model-cache
                 - name: HF_HUB_OFFLINE
                   value: "1"
                 - name: TRANSFORMERS_OFFLINE
@@ -103,19 +101,12 @@ spec:
                   cpu: "8"
                   memory: 24Gi
                   ephemeral-storage: 12Gi
-              volumeMounts:
-                - name: shared-model-cache
-                  mountPath: /shared-model-cache
-          volumes:
-            - name: shared-model-cache
-              persistentVolumeClaim:
-                claimName: shared-model-cache
 
     - name: Worker
       type: worker
       runtimeVersionOverride: "1.6.0"
       replicas: 3
-      sharedMemorySize: 64Gi
+      sharedMemorySize: 448Gi
       podTemplate:
         metadata:
           annotations:
