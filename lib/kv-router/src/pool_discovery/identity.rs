@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::net::IpAddr;
+
 use async_trait::async_trait;
 
 use super::PoolDiscoveryError;
@@ -22,6 +24,10 @@ pub enum PeerCredentials {
     /// From a client certificate that TLS already checked.
     Spiffe(String),
     BearerToken(String),
+    /// The connection's source address, on a trusted network with no mesh.
+    /// Names the caller only if traffic between clusters is not
+    /// source-NATed.
+    PeerAddress(IpAddr),
 }
 
 /// Implementations live in other crates, so they return a plain

@@ -27,16 +27,31 @@ pub enum PoolDiscoveryMode {
         hub_namespace: String,
     },
     /// SIG Multicluster: pools are MCS `ServiceExport`s. Liveness is endpoint
-    /// readiness, so there is no lease.
+    /// readiness, so there is no lease. Assumes a trusted network with pod
+    /// addresses that are reachable between clusters.
     Kubernetes {
-        /// Label selector on the hub's `ServiceImport`s.
-        pool_selector: String,
-        /// The Global Router's headless Service, exported to every cluster.
+        mcs: McsImplementation,
+        /// The operator names each PoolRelay Service `<DGD name><suffix>`.
+        /// A name rule works with every MCS implementation; `exportedLabels`
+        /// does not.
+        pool_service_suffix: String,
+        /// The Global Router's Service, exported to every workload cluster.
         router_service: String,
     },
     File {
         path: PathBuf,
     },
+}
+
+/// How the MCS implementation names imported EndpointSlices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum McsImplementation {
+    /// The `multicluster.kubernetes.io` labels (Submariner, Cilium, GKE).
+    Standard,
+    /// Karmada's own names: a `derived-<service>` Service, and the source
+    /// cluster in the `work.karmada.io/namespace` annotation.
+    Karmada,
 }
 
 /// When a gRPC-mode replica treats its pool list as settled (soft readiness).
