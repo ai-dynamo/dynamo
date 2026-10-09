@@ -15,6 +15,12 @@ subtitle: Run Dynamo beside a TensorRT-LLM engine through its OpenEngine gRPC AP
 gRPC server. See [Sidecar Backends](../../../concepts/system-architecture/sidecar-backends.md)
 for the architecture.
 
+> [!TIP]
+> For the best and latest support, use the upstream TensorRT-LLM nightly image,
+> which carries the latest gRPC server updates. Nightly builds are the
+> `nvcr.io/nvidia/tensorrt-llm/release:<version>.dev<date>` tags on
+> [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/tensorrt-llm/containers/release/tags).
+
 ## Support Matrix
 
 | Feature | Supported |

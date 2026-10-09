@@ -16,6 +16,10 @@ you to.
 `dynamo-sglang-sidecar` connects a Dynamo worker to SGLang's native gRPC
 server. See the [sidecar overview](../README.md) for installation.
 
+> [!TIP]
+> For the best and latest support, use the upstream SGLang nightly image,
+> which carries the latest gRPC server updates: [`lmsysorg/sglang:dev`](https://hub.docker.com/r/lmsysorg/sglang/tags?name=dev).
+
 ## Support matrix
 
 | Feature | Supported |

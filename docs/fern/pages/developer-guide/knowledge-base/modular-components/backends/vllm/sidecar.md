@@ -15,6 +15,10 @@ subtitle: Run Dynamo beside a stock vLLM engine through native gRPC.
 (`vllm-rs`). See [Sidecar Backends](../../../concepts/system-architecture/sidecar-backends.md)
 for the architecture.
 
+> [!TIP]
+> For the best and latest support, use the upstream vLLM nightly image,
+> which carries the latest gRPC server updates: [`vllm/vllm-openai:nightly`](https://hub.docker.com/r/vllm/vllm-openai/tags?name=nightly).
+
 ## Support Matrix
 
 | Feature | Supported |

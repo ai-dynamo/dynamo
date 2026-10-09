@@ -15,6 +15,10 @@ subtitle: Run Dynamo beside a stock SGLang engine through native gRPC.
 server. See [Sidecar Backends](../../../concepts/system-architecture/sidecar-backends.md)
 for the architecture.
 
+> [!TIP]
+> For the best and latest support, use the upstream SGLang nightly image,
+> which carries the latest gRPC server updates: [`lmsysorg/sglang:dev`](https://hub.docker.com/r/lmsysorg/sglang/tags?name=dev).
+
 ## Support Matrix
 
 | Feature | Supported |

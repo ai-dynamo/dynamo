@@ -16,6 +16,10 @@ you to.
 `dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC server
 (`vllm-rs`). See the [sidecar overview](../README.md) for installation.
 
+> [!TIP]
+> For the best and latest support, use the upstream vLLM nightly image,
+> which carries the latest gRPC server updates: [`vllm/vllm-openai:nightly`](https://hub.docker.com/r/vllm/vllm-openai/tags?name=nightly).
+
 ## Support matrix
 
 | Feature | Supported |

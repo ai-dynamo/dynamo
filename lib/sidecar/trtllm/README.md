@@ -16,6 +16,12 @@ you to.
 `dynamo-trtllm-sidecar` connects a Dynamo worker to TensorRT-LLM's OpenEngine
 gRPC server. See the [sidecar overview](../README.md) for installation.
 
+> [!TIP]
+> For the best and latest support, use the upstream TensorRT-LLM nightly image,
+> which carries the latest gRPC server updates. Nightly builds are the
+> `nvcr.io/nvidia/tensorrt-llm/release:<version>.dev<date>` tags on
+> [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/tensorrt-llm/containers/release/tags).
+
 ## Support matrix
 
 | Feature | Supported |
