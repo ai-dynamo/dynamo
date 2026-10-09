@@ -85,24 +85,14 @@ def validate_request(body: dict, dialect: str) -> None:
         isinstance(body.get("model"), str) and bool(body["model"]),
         "Explicit model is required",
     )
-    require(
-        dialect in ("oai", "sglang_native", "systemone"), "Unknown decision dialect"
-    )
+    require(dialect in ("oai", "systemone"), "Unknown decision dialect")
     allowed = (
         {"model", "state", "questions", "images", "chat_template_kwargs"}
         if dialect == "systemone"
-        else {"model", "input", "questions", "nvext"}
+        else {"model", "input", "questions"}
     )
     if dialect == "oai":
         allowed |= {"safety_identifier"}
-    if dialect == "sglang_native":
-        allowed |= {
-            "images",
-            "temperature",
-            "prompt_format_version",
-            "return_prompt_token_ids",
-            "chat_template_kwargs",
-        }
     require(not set(body) - allowed, "Unsupported or mixed request fields")
     require(not body.get("images"), "Images are outside text qualification")
     controls = body.get("chat_template_kwargs", {})
@@ -135,15 +125,6 @@ def validate_request(body: dict, dialect: str) -> None:
         )
         if dialect == "oai":
             _openai_text(body["input"])
-        selector = body.get("nvext", {})
-        require(
-            isinstance(selector, dict) and not set(selector) - {"format"},
-            "Invalid format selector",
-        )
-        require(
-            selector.get("format", "oai") == dialect,
-            "Request format differs from endpoint dialect",
-        )
         questions = body.get("questions")
         require(
             isinstance(questions, list) and bool(questions),
@@ -151,38 +132,25 @@ def validate_request(body: dict, dialect: str) -> None:
         )
         for question in questions:
             _question(question, dialect)
-        if dialect == "sglang_native":
-            ids = [q["id"] for q in questions]
-            require(len(set(ids)) == len(ids), "Duplicate question identifiers")
 
 
 def _question(question: Any, dialect: str) -> None:
     require(isinstance(question, dict), "Question must be an object")
     kind = question.get("type")
-    predicate = {"oai": "predicate", "sglang_native": "yes_no", "systemone": "noul"}[
-        dialect
-    ]
+    predicate = {"oai": "predicate", "systemone": "noul"}[dialect]
     require(kind in (predicate, "choice", "score"), "Unsupported question type")
-    if dialect != "systemone":
-        candidate_fields = (
-            {"choices", "levels"}
-            if dialect == "oai"
-            else {"options", "levels", "yes", "no"}
-        )
+    if dialect == "oai":
         expected_fields = (
-            {"choices" if dialect == "oai" else "options"}
+            {"choices"}
             if kind == "choice"
             else {"levels"}
             if kind == "score"
-            else {"yes", "no"}
-            if dialect == "sglang_native"
             else set()
         )
         require(
-            not (set(question) & candidate_fields) - expected_fields,
+            not (set(question) & {"choices", "levels"}) - expected_fields,
             "Mixed question candidate fields",
         )
-    if dialect == "oai":
         require(
             isinstance(question.get("instructions"), str),
             "Missing question instructions",
@@ -195,31 +163,13 @@ def _question(question: Any, dialect: str) -> None:
             not set(question) - {"type", "name", "instructions", "choices", "levels"},
             "Mixed question schema",
         )
-    elif dialect == "sglang_native":
-        require(
-            isinstance(question.get("id"), str) and bool(question["id"]),
-            "Missing question ID",
-        )
-        require(
-            isinstance(question.get("question"), (str, dict, list)),
-            "Missing question text",
-        )
-        require(
-            not set(question)
-            - {"type", "id", "question", "options", "levels", "yes", "no"},
-            "Mixed question schema",
-        )
     else:
         require(
             not set(question) - {"type", "instructions", "criteria"},
             "Mixed question schema",
         )
     if kind == "choice":
-        options = question.get(
-            {"oai": "choices", "sglang_native": "options", "systemone": "criteria"}[
-                dialect
-            ]
-        )
+        options = question.get({"oai": "choices", "systemone": "criteria"}[dialect])
         require(
             isinstance(options, dict if dialect == "systemone" else list)
             and bool(options),
@@ -228,18 +178,13 @@ def _question(question: Any, dialect: str) -> None:
         values = (
             list(options)
             if dialect == "systemone"
-            else [
-                o.get("value" if dialect == "oai" else "name")
-                if isinstance(o, dict)
-                else None
-                for o in options
-            ]
+            else [o.get("value") if isinstance(o, dict) else None for o in options]
         )
         keys = [typed(value) for value in values]
         if dialect != "oai":
             require(
                 all(isinstance(value, str) for value in values),
-                "Native and Jev choices must be strings",
+                "Jev choices must be strings",
             )
         require(len(set(keys)) == len(keys), "Duplicate choice values")
     if kind == "score":
@@ -299,12 +244,8 @@ def validate_response(
         validate_request(request, dialect)
     if dialect == "native_score":
         return _native(body, request)
-    require(
-        dialect in ("oai", "sglang_native", "systemone"), "Unknown decision dialect"
-    )
+    require(dialect in ("oai", "systemone"), "Unknown decision dialect")
     root_fields = {"model", "answers"}
-    if dialect == "sglang_native":
-        root_fields |= {"object", "prompt_format_version"}
     require(
         set(body) - {"usage"} == root_fields,
         "Mixed or missing response envelope fields",
@@ -323,23 +264,12 @@ def validate_response(
         isinstance(answers, list if dialect == "oai" else dict) and bool(answers),
         "Missing answers",
     )
-    if dialect == "sglang_native":
-        require(
-            body.get("object") == "decisions"
-            and body.get("prompt_format_version") == 1,
-            "Wrong native response envelope",
-        )
     questions = None if request is None else request["questions"]
     if questions is not None:
         require(len(answers) == len(questions), "Answer count differs from request")
         if dialect != "oai":
-            expected_ids = (
-                list(questions)
-                if dialect == "systemone"
-                else [q["id"] for q in questions]
-            )
             require(
-                list(answers) == expected_ids,
+                list(answers) == list(questions),
                 "Answer identifiers/order differ from request",
             )
     answer_list = answers if isinstance(answers, list) else list(answers.values())
@@ -363,9 +293,8 @@ def _usage(usage: Any, dialect: str) -> tuple[int | None, int | None, int | None
     if usage is None:
         return None, None, None
     require(isinstance(usage, dict), "Missing measured usage")
-    native = dialect == "sglang_native"
-    tokens = integer(usage.get("prompt_tokens" if native else "input_tokens"))
-    output = integer(usage.get("completion_tokens" if native else "output_tokens"))
+    tokens = integer(usage.get("input_tokens"))
+    output = integer(usage.get("output_tokens"))
     require(output == 0, "P0 decision scoring must not generate tokens")
     cached = None
     if dialect == "oai":
@@ -383,10 +312,6 @@ def _usage(usage: Any, dialect: str) -> tuple[int | None, int | None, int | None
         )
         require(
             integer(out.get("reasoning_tokens")) == 0, "Unexpected reasoning tokens"
-        )
-    if native:
-        require(
-            integer(usage.get("reasoning_tokens")) == 0, "Unexpected reasoning tokens"
         )
     if dialect != "systemone":
         require(
@@ -420,47 +345,35 @@ def _answer(
             return 1, None
     if question is not None:
         require(kind == question["type"], "Answer type differs from request")
-    predicate = {"oai": "predicate", "sglang_native": "yes_no", "systemone": "noul"}[
-        dialect
-    ]
+    predicate = {"oai": "predicate", "systemone": "noul"}[dialect]
     require(kind in (predicate, "choice", "score"), "Invalid answer type")
     allowed = {"type"}
     if dialect == "oai":
         allowed.add("name")
-    if dialect == "sglang_native":
-        allowed |= {"label_mass", "prompt_token_ids", "label_token_ids"}
     if dialect == "systemone":
         allowed.add("x_label_mass")
     if kind in ("choice", "score"):
         allowed |= {kind, "probabilities"}
-        if dialect != "sglang_native":
-            allowed.add("confidence")
+        allowed.add("confidence")
         if kind == "score" and dialect == "systemone":
             allowed.add("legend")
     else:
         allowed.add(
             {
                 "oai": "probability",
-                "sglang_native": "probabilities",
                 "systemone": "noul",
             }[dialect]
         )
     require(not set(answer) - allowed, "Mixed or unknown answer fields")
     mass = None
-    if dialect == "sglang_native":
-        mass = probability(answer.get("label_mass"))
-        require(
-            "confidence" not in answer and "x_label_mass" not in answer,
-            "Mixed native answer fields",
-        )
-    elif dialect == "systemone" and "x_label_mass" in answer:
+    if dialect == "systemone" and "x_label_mass" in answer:
         mass = probability(answer["x_label_mass"])
     elif dialect == "oai":
         require(
             "label_mass" not in answer and "x_label_mass" not in answer,
             "Mixed OpenAI answer fields",
         )
-    if kind == predicate and dialect != "sglang_native":
+    if kind == predicate:
         probability(answer.get("probability" if dialect == "oai" else "noul"))
         return 0, mass
     values = answer.get("probabilities")
@@ -490,15 +403,11 @@ def _answer(
             "Choice is not the ordered modal candidate",
         )
         if question is not None:
-            options = question[
-                {"oai": "choices", "sglang_native": "options", "systemone": "criteria"}[
-                    dialect
-                ]
-            ]
+            options = question[{"oai": "choices", "systemone": "criteria"}[dialect]]
             expected = (
                 list(options)
                 if dialect == "systemone"
-                else [o["value" if dialect == "oai" else "name"] for o in options]
+                else [o["value"] for o in options]
             )
             require(
                 candidate_keys == [typed(v) for v in expected],
@@ -538,14 +447,11 @@ def _answer(
                     answer.get("legend") == {str(i): v for i, v in enumerate(levels)},
                     "Score legend differs from request",
                 )
-    else:
-        require(keys == ["yes", "no"], "Predicate candidates must be yes then no")
-    if dialect != "sglang_native":
-        confidence = probability(answer.get("confidence"))
-        require(
-            abs(confidence - _confidence(probs, kind)) <= 1e-9,
-            "Confidence does not match published reducer",
-        )
+    confidence = probability(answer.get("confidence"))
+    require(
+        abs(confidence - _confidence(probs, kind)) <= 1e-9,
+        "Confidence does not match published reducer",
+    )
     return 0, mass
 
 

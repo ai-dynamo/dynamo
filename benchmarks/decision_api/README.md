@@ -16,9 +16,10 @@ This is a Dynamo-owned external-plugin prototype for [AIPerf issue #1536](https:
 | Dialect | AIPerf endpoint plugin | HTTP route | Transport |
 |---|---|---|---|
 | `oai` | `decision_oai` | `/v1/decisions` | Non-streaming structured response |
-| `sglang_native` | `decision_sglang` | `/v1/decisions` | Non-streaming; exact request includes `nvext.format` |
 | `systemone` | `decision_systemone` | `/v1/systemone` | Non-streaming structured response |
 | `native_score` | `native_score` | `/generate` | SSE terminal scoring frame, zero generated tokens |
+
+Phase 1 exposes only the OpenAI and Jev public contracts, without a format selector. The `/generate` adapter is an internal scoring baseline, not the SGLang-native Decisions wire protocol.
 
 The `inputs_json` dataset loader preserves the supplied request, including typed choices and question ordering. The native adapter adds a fresh request-local cache salt for every actual send, including replayed dataset rows. No other native fields are changed. Decision JSON is never supplied as generated text. TTFT, inter-token latency, and output-token throughput are disabled by endpoint metadata. Both a malformed HTTP-200 response and an incomplete native SSE stream are errors.
 

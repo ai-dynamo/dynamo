@@ -212,9 +212,5 @@ class OpenAIDecisionEndpoint(DecisionEndpoint):
     dialect = "oai"
 
 
-class SGLangDecisionEndpoint(DecisionEndpoint):
-    dialect = "sglang_native"
-
-
 class NativeScoreEndpoint(DecisionEndpoint):
     dialect = "native_score"

@@ -75,7 +75,7 @@ def test_renderer_preserves_typed_values_and_structured_evidence():
     )
     body = wire_payload("model", "fact", (typed,), "oai")
     assert body["questions"][0]["choices"][0]["value"] is True
-    for dialect in ("sglang_native", "systemone"):
+    for dialect in ("systemone",):
         with pytest.raises(ValueError, match="typed"):
             wire_payload("model", [], (question,), dialect)
 
@@ -95,13 +95,10 @@ def test_predicate_score_and_ordered_wire_shapes():
         ("yes", "no"),
     )
     assert "0: Low\n1: High" in render_question("fact", questions[1])[0]
-    for dialect in ("oai", "sglang_native", "systemone"):
+    for dialect in ("oai", "systemone"):
         body = wire_payload("model", "fact", questions, dialect)
         assert len(body["questions"]) == 2
         assert "answers" not in body
-    native = wire_payload("model", "fact", questions, "sglang_native")
-    assert native["nvext"] == {"format": "sglang_native"}
-    assert native["questions"][0]["type"] == "yes_no"
     assert list(wire_payload("model", "fact", questions, "systemone")["questions"]) == [
         "urgent",
         "impact",
@@ -117,12 +114,6 @@ def test_wire_does_not_drop_descriptions():
     )
     with pytest.raises(ValueError, match="predicate descriptions"):
         wire_payload("model", "fact", (predicate,), "oai")
-    assert (
-        wire_payload("model", "fact", (predicate,), "sglang_native")["questions"][0][
-            "yes"
-        ]
-        == "Positive"
-    )
     assert wire_payload("model", "fact", (predicate,), "systemone")["questions"]["p"][
         "criteria"
     ] == {"true": "Positive", "false": "Negative"}
@@ -132,9 +123,6 @@ def test_wire_does_not_drop_descriptions():
         "Rate",
         (Candidate("0", "Minor", "Low"), Candidate("1", "Major", "High")),
     )
-    assert wire_payload("model", "fact", (score,), "sglang_native")["questions"][0][
-        "levels"
-    ] == ["Low - Minor", "High - Major"]
     assert wire_payload("model", "fact", (score,), "systemone")["questions"]["s"][
         "criteria"
     ] == ["Low - Minor", "High - Major"]

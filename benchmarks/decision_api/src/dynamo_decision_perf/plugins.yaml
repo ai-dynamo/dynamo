@@ -30,15 +30,6 @@ endpoint:
       produces_tokens: false
       tokenizes_input: false
       metrics_title: Decision Evaluation Metrics
-  decision_sglang:
-    class: dynamo_decision_perf.endpoints:SGLangDecisionEndpoint
-    description: SGLang-native decision response contract and genuine label mass.
-    metadata:
-      endpoint_path: /v1/decisions
-      supports_streaming: false
-      produces_tokens: false
-      tokenizes_input: false
-      metrics_title: Decision Evaluation Metrics
   native_score:
     class: dynamo_decision_perf.endpoints:NativeScoreEndpoint
     description: Terminal zero-decode native SGLang scoring with per-request cache isolation.
