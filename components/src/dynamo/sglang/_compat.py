@@ -69,6 +69,13 @@ except ImportError:
     sglang_get_default_attn_backend = None
 
 try:
+    from sglang.srt.configs.model_config import is_deepseek_dsa as sglang_is_dsa_model
+except ImportError:
+    # The separately pinned XPU SGLang 0.5.11 predates the DSA rename.
+    # Remove when the XPU pin is upgraded to 0.5.19+.
+    sglang_is_dsa_model = None
+
+try:
     from sglang.srt.runtime_context import publish as _sglang_publish
 except ImportError:
     # Fallback for the XPU SGLang 0.5.11 pin.
@@ -134,9 +141,14 @@ def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
     if sglang_get_default_attn_backend is None:
         return None
     try:
-        backend = sglang_get_default_attn_backend(
-            server_args, True, get_sglang_model_config(server_args)
-        )
+        model_config = get_sglang_model_config(server_args)
+        # SGLang's DeepSeek-family override picks dsa for DSA models before
+        # it falls back to the platform default.
+        if sglang_is_dsa_model is not None and sglang_is_dsa_model(
+            getattr(model_config, "hf_config", None)
+        ):
+            return "dsa"
+        backend = sglang_get_default_attn_backend(server_args, True, model_config)
     except Exception as exc:
         logger.warning(
             "Could not predict SGLang's default MLA attention backend; skipping "

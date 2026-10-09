@@ -693,6 +693,47 @@ async def test_parse_args_rejects_mla_dcp_on_backend_without_dcp_decode(
     assert ("automatically" in message) is automatic
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [{}, {"attention_backend": "dsa"}],
+    ids=["dsa-model-default", "explicit-dsa"],
+)
+async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
+    monkeypatch, mock_sglang_cli, tmp_path, overrides
+):
+    """SGLang overrides the default to dsa for DSA models, whose decode returns no LSE."""
+    # The platform default alone would accept; the DSA override must win.
+    monkeypatch.setattr(
+        "dynamo.sglang._compat.sglang_get_default_attn_backend",
+        lambda *_: "flashinfer",
+    )
+    hf_config = SimpleNamespace(
+        architectures=["DeepseekV32ForCausalLM"], index_topk=2048
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            dcp_size=2,
+            use_mla_backend=lambda: True,
+            get_model_config=lambda: SimpleNamespace(
+                is_multimodal=False, hf_config=hf_config
+            ),
+            **overrides,
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path), **overrides)
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "decode attention backend 'dsa'" in message
+    assert "Use --dcp-size 1." in message
+    assert "flashinfer" not in message
+    assert ("automatically" in message) is not overrides
+
+
 def _raise_runtime_error(*_):
     raise RuntimeError("model config unavailable")
 

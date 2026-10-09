@@ -52,7 +52,12 @@ DCP_CAPABLE_ATTENTION_BACKENDS = frozenset({"triton", "aiter"})
 
 # MLA backends whose decode returns no log-sum-exp, which SGLang's DCP decode needs.
 # Drop entries once the SGLang pin has #35384/#37735, or #33325 adds fa3 DCP decode.
-MLA_DCP_UNSUPPORTED_DECODE_BACKENDS = frozenset({"fa3", "fa4", "flashmla"})
+MLA_DCP_UNSUPPORTED_DECODE_BACKENDS = frozenset(
+    {"fa3", "fa4", "flashmla", "dsa", "nsa"}
+)
+
+# Sparse-attention MLA backends; DSA models need them, so only --dcp-size 1 helps.
+MLA_SPARSE_ATTENTION_BACKENDS = frozenset({"dsa", "nsa"})
 
 ATTENTION_BACKEND_CLI_FIELDS = (
     "attention_backend",
@@ -339,8 +344,8 @@ def _validate_mla_dcp_decode_backend(
     if automatic:
         # SGLang has not chosen yet; predict its choice (fa3 for MLA on Hopper)
         # so the worker fails here, before sgl.Engine captures CUDA graphs.
-        # The prediction skips SGLang's model-specific overrides (for example
-        # dsa for DSA-family models), so it can name the wrong backend there.
+        # The prediction covers SGLang's dsa override for DSA models, but not
+        # other model-specific overrides, so it can name the wrong backend.
         backend = sglang_default_mla_attention_backend(server_args)
     if backend not in MLA_DCP_UNSUPPORTED_DECODE_BACKENDS:
         return
@@ -351,13 +356,18 @@ def _validate_mla_dcp_decode_backend(
         if automatic or not backend_from_cli
         else ""
     )
+    remedy = (
+        "Use --dcp-size 1."
+        if backend in MLA_SPARSE_ATTENTION_BACKENDS
+        else "Use --attention-backend flashinfer (or trtllm_mla / cutedsl_mla "
+        "on Blackwell), or --dcp-size 1."
+    )
     raise ValueError(
         f"--dcp-size {dcp_size} is not supported with the decode attention "
         f"backend '{backend}' for this MLA model.{selected} This backend does "
         "not return the log-sum-exp that decode context parallel needs to merge "
         "results across DCP ranks, so the worker would crash during decode CUDA "
-        "graph capture. Use --attention-backend flashinfer (or trtllm_mla / "
-        "cutedsl_mla on Blackwell), or --dcp-size 1."
+        f"graph capture. {remedy}"
     )
 
 
