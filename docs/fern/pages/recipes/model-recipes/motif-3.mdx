@@ -98,13 +98,16 @@ kubectl apply -f recipes/motif-3/vllm/disagg-b200-chat/deploy-generic-3p1d-kv.ya
 kubectl get dgd motif3-disagg-b200 -n "${NAMESPACE}" -w
 ```
 
-For Nscale, apply the [Nscale 3P1D manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/disagg-b200-chat/deploy-nscale-3p1d-kv.yaml) instead. It selects `g.192.b200.8` B200 nodes, requests one `rdma/shared_ib` device per worker, and sets `UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc`:
+For Nscale, compose the same generic target with the optional [site component](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/disagg-b200-chat/kustomize/components/nscale). It adds B200 node selection, one `rdma/shared_ib` device per worker, and `UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc`; serving settings stay the same. Use the following command instead of applying the generic manifest directly:
 
 ```bash
-kubectl apply -f recipes/motif-3/vllm/disagg-b200-chat/deploy-nscale-3p1d-kv.yaml -n "${NAMESPACE}"
+python3 scripts/kustomize-matrix.py compose \
+  recipes/motif-3/vllm/disagg-b200-chat/kustomize/overlays/generic-3p1d-kv \
+  recipes/motif-3/vllm/disagg-b200-chat/kustomize/components/nscale \
+  | kubectl apply -f - -n "${NAMESPACE}"
 ```
 
-Both variants update the same `motif3-disagg-b200` deployment. Wait for the frontend and all four workers to become ready. The frontend uses no GPU; serving uses eight GPUs in total.
+Wait for the frontend and all four workers in `motif3-disagg-b200` to become ready. The frontend uses no GPU; serving uses eight GPUs in total.
 
 </div>
 
@@ -215,7 +218,7 @@ The pinned frontend does not populate its cached-token histogram for this chat-p
 | Target | Workers | B200 GPUs | Deployment |
 |---|---|---:|---|
 | Aggregated | 1 × TP2 | 2 | [Generic](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/agg-b200-chat/base/deploy.yaml) · [Nscale](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/agg-b200-chat/kustomize) |
-| Disaggregated, KV-aware | 3 prefill × TP2 + 1 decode × TP2 | 8 | [Generic](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/disagg-b200-chat/deploy-generic-3p1d-kv.yaml) · [Nscale](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/disagg-b200-chat/deploy-nscale-3p1d-kv.yaml) |
+| Disaggregated, KV-aware | 3 prefill × TP2 + 1 decode × TP2 | 8 | [Generic](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/disagg-b200-chat/deploy-generic-3p1d-kv.yaml) |
 
 ## Notes
 
@@ -235,7 +238,7 @@ The digest-pinned disaggregated image includes the Motif NIXL fixes: it validate
 
 Prefill sets `DYN_HEALTH_CHECK_ENABLED=false` because standalone prefill canaries retain KV blocks without a decode consumer until the transfer lease expires. Engine monitoring and Kubernetes probes remain active. Verify requests through the frontend.
 
-Edit [the recipe base and site components](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/disagg-b200-chat/kustomize), then regenerate and check both manifests:
+Edit [the recipe base](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/disagg-b200-chat/kustomize/base), then regenerate and check the generic manifest. Optional site components are applied with `compose`:
 
 ```bash
 python3 scripts/kustomize-matrix.py unfold recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
