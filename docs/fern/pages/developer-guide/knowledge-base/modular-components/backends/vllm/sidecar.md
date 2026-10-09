@@ -29,8 +29,14 @@ See [`lib/sidecar/vllm/launch/`](https://github.com/ai-dynamo/dynamo/tree/main/l
 for all topologies. For example, aggregated serving on one GPU:
 
 ```bash
-docker compose -f dev/docker-compose.yml up -d
+cargo build --release -p dynamo-vllm-sidecar
+export PATH="$PWD/target/release:$PATH" DYN_DISCOVERY_BACKEND=file
 ./lib/sidecar/vllm/launch/agg.sh
+```
+
+In a second terminal:
+
+```bash
 curl -s localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'

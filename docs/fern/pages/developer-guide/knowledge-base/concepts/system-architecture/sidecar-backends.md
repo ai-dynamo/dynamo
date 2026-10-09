@@ -81,5 +81,5 @@ To build it from source instead, run from the repository root with the
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/Dockerfile -t <your-registry>/dynamo-sidecar:dev --push .
+  -f lib/sidecar/Dockerfile -t <your-registry>/dynamo-sidecar:1.6.0-dev --push .
 ```

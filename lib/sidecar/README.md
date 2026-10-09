@@ -30,6 +30,14 @@ pip install ai-dynamo
 python -m dynamo.vllm.sidecar --help    # also dynamo.sglang.sidecar, dynamo.trtllm.sidecar
 ```
 
+The `launch/` scripts run the standalone executables instead. Build them and
+put them on `PATH`:
+
+```bash
+cargo build --release -p dynamo-vllm-sidecar -p dynamo-sglang-sidecar -p dynamo-trtllm-sidecar
+export PATH="$PWD/target/release:$PATH"
+```
+
 ### Docker
 
 The CPU-only `dynamo-sidecar` image contains all three sidecars and is
@@ -44,5 +52,5 @@ To build it from the repository root instead:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/Dockerfile -t <your-registry>/dynamo-sidecar:dev --push .
+  -f lib/sidecar/Dockerfile -t <your-registry>/dynamo-sidecar:1.6.0-dev --push .
 ```

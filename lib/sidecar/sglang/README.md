@@ -30,8 +30,13 @@ See [`launch/`](launch/) for all topologies. For example, aggregated serving on
 one GPU:
 
 ```bash
-docker compose -f dev/docker-compose.yml up -d
+export DYN_DISCOVERY_BACKEND=file
 lib/sidecar/sglang/launch/agg.sh
+```
+
+In a second terminal:
+
+```bash
 curl -s localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
