@@ -3,11 +3,11 @@
 #
 # Ordering + inclusion index for the Dynamo Recipes catalog.
 # Each id must have a matching docs/fern/pages/recipes/_catalog/recipes/<id>.yaml file.
-# `recipes:` lists the ACTIVE (customer-visible) recipes. Within a provider,
-# list order is sidebar order, newest model first. Provider order comes from
-# providers.yaml: docs/fern/scripts/gen_recipe_nav.py re-sorts this list by
-# provider and generates the Recipes sidebar in docs/fern/index.yml from it.
-# Add a new id anywhere; the generator moves it into its provider's group.
+# `recipes:` lists the ACTIVE (customer-visible) recipes, in sidebar order.
+# docs/fern/scripts/gen_recipe_nav.py sorts it: providers by providers.yaml,
+# then each provider's recipes newest model.generation first. Recipes of the
+# same generation keep their order here. Add a new id anywhere; the generator
+# moves it into place and orders the sidebar and overview cards to match.
 # `deferred_recipes:` lists recipes held back from the rendered
 # R1 surface (no rendered page); their per-entry files live alongside the
 # active ones in recipes/<id>.yaml.

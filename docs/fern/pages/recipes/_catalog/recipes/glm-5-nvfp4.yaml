@@ -7,6 +7,7 @@ page: pages/recipes/model-recipes/glm-5-nvfp4.mdx
 provider: zai
 model:
   name: GLM-5
+  generation: "5"
   hf_id: nvidia/GLM-5-NVFP4
   precision: NVFP4 (FP8 KV cache, FP8 MTP layer at load)
 status: validated

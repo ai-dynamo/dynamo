@@ -7,6 +7,7 @@ page: pages/recipes/model-recipes/motif-3.mdx
 provider: motif
 model:
   name: Motif-3-NVFP4
+  generation: "3"
   hf_id: Motif-Technologies/Motif-3-NVFP4
   precision: NVFP4 weights with FP8 KV cache
 status: experimental

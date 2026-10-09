@@ -166,7 +166,7 @@ repos:
       files: ^docs/fern/(scripts/(gen_llms_tables|check_llms_tables_determinism)\.(py|sh)|components/releases\.data\.ts|pages/reference/general/.*\.mdx)$
       pass_filenames: false
     - id: gen-recipe-nav
-      name: Regenerate the Recipes sidebar and provider filter from the catalog
+      name: Regenerate the Recipes sidebar, provider filter, and card order from the catalog
       # Write mode, not --check: a catalog edit regenerates the sidebar, the
       # overview's provider filter and counts, and the provider CSS, and the
       # hook fails only so the regenerated files get staged.

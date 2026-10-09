@@ -7,6 +7,7 @@ page: pages/recipes/model-recipes/qwen3-32b.mdx
 provider: qwen
 model:
   name: Qwen3-32B
+  generation: "3"
   hf_id: Qwen/Qwen3-32B
   precision: BF16
 status: validated

@@ -7,6 +7,7 @@ page: pages/recipes/model-recipes/qwen3-6-35b-a3b.mdx
 provider: qwen
 model:
   name: Qwen3.6-35B-A3B
+  generation: "3.6"
   hf_id: nvidia/Qwen3.6-35B-A3B-NVFP4 / Qwen/Qwen3.6-35B-A3B-FP8
   precision: NVFP4 + FP8 KV (B200, GB200) / FP8 weights + BF16 KV (H200)
 status: validated

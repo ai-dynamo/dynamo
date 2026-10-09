@@ -6,6 +6,7 @@ title: Qwen3-VL-30B
 provider: qwen
 model:
   name: Qwen3-VL-30B-A3B-Instruct
+  generation: "3"
   hf_id: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
   precision: FP8
 status: validated

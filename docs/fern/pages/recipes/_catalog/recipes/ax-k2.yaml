@@ -18,6 +18,7 @@ page: pages/recipes/model-recipes/ax-k2.mdx
 provider: skt
 model:
   name: A.X-K2
+  generation: "2"
   hf_id: skt/A.X-K2-NVFP4
   precision: NVFP4 weights and FP8 KV cache (B200) or FP8 weights and BF16 KV cache (H200)
 status: experimental

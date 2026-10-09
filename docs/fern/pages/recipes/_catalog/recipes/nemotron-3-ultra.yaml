@@ -7,6 +7,7 @@ page: pages/recipes/model-recipes/nemotron-3-ultra.mdx
 provider: nvidia
 model:
   name: Nemotron-3-Ultra-550B-A55B
+  generation: "3"
   hf_id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
   precision: NVFP4 + FP8
 status: experimental

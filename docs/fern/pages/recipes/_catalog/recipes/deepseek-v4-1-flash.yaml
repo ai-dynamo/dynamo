@@ -7,6 +7,7 @@ page: pages/recipes/model-recipes/deepseek-v4-1-flash.mdx
 provider: deepseek
 model:
   name: DeepSeek-V4.1-Flash
+  generation: "4.1"
   hf_id: deepseek-ai/DeepSeek-V4.1-Flash
   precision: FP8 dense, FP4 MoE experts, FP8 KV cache
 status: experimental  # Day-0

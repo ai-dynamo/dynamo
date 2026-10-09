@@ -7,6 +7,7 @@ page: pages/recipes/model-recipes/qwen3-32b-fp8.mdx
 provider: qwen
 model:
   name: Qwen3-32B-FP8
+  generation: "3"
   hf_id: Qwen/Qwen3-32B-FP8
   precision: FP8
 status: validated

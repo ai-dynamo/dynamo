@@ -207,12 +207,15 @@ Each page is a triple — page + catalog entry + nav:
    `deploy`, `expected_performance`. Internal `id:` **must equal the filename**; active entries carry
    `page:`, deferred ones carry `deferred_reason` and omit `page:`. Add the `<id>` to the matching
    `_catalog/index.yaml` (`recipes:` for active, `deferred_recipes:` for deferred). A recipe's
-   `provider:` must be a key in `_catalog/providers.yaml`; add a new model maker there first.
+   `provider:` must be a key in `_catalog/providers.yaml`; add a new model maker there first. Set
+   `model.generation` to the model's quoted version number (`"4.1"` for DeepSeek-V4.1, `"1"` for a
+   first, unnumbered release); it sorts the recipe within its provider, newest first.
 3. **Navigation**: for a **recipe**, run `python3 docs/fern/scripts/gen_recipe_nav.py` (the
    `gen-recipe-nav` pre-commit hook does it for you). It generates the Model Recipes sidebar in
-   `docs/fern/index.yml`, the overview's provider filter and counts, and the provider CSS from the
-   catalog; never edit those spans by hand. Provider order is popularity-ranked, then alphabetical
-   (see the catalog README's Provider order section). For a **benchmark**, add the `- page:` under
+   `docs/fern/index.yml`, the overview's provider filter and counts, the order of the overview's
+   model cards, and the provider CSS from the catalog; never edit those spans by hand. Provider
+   order is popularity-ranked, then alphabetical; within a provider, the newest `model.generation`
+   comes first (see the catalog README's Provider order section). For a **benchmark**, add the `- page:` under
    the **Feature Benchmarks** section of `docs/fern/index.yml` by hand; per-benchmark pages are
    usually `hidden: true` (surfaced from the landing page).
 4. **Patch `docs/fern/main.css` only if** the page introduces a picker axis value not already supported
@@ -220,8 +223,10 @@ Each page is a triple — page + catalog entry + nav:
    `chat`/`agentic`; `recipe-variant`: `agg`/`disagg`/…). A value missing from CSS renders but
    filters nothing. After editing `main.css`, run `python3 docs/fern/scripts/sync_site_css.py` so the
    footer's CSS mirror stays in sync — pre-commit fails otherwise.
-5. **Add the landing card** in `docs/fern/pages/recipes/model-recipes/overview.mdx`, with `data-provider` set to the
-   recipe's `provider:` key. The model/target counts are generated.
+5. **Add the landing card** in `docs/fern/pages/recipes/model-recipes/overview.mdx`, anywhere between the
+   `recipe-cards` markers; the generator sorts it. Every active recipe needs exactly one card, with
+   `data-provider` set to the recipe's `provider:` key and a `dynamo-card-link` whose `href` is the
+   recipe's page file. The model/target counts are generated.
 6. **Validate**: `python3 docs/fern/pages/recipes/_catalog/validate.py` (covers both catalogs), then `fern
    check` and `fern docs broken-links`.
 
@@ -238,6 +243,7 @@ title: Llama 3.1 8B
 provider: meta                    # a key in _catalog/providers.yaml (qwen, nvidia, …)
 model:
   name: Llama 3.1 8B
+  generation: "3.1"               # quoted; sorts newest first within the provider
   hf_id: Meta-Llama/Llama-3.1-8B
   precision: BF16
 status: validated                 # enum: validated | experimental  (NOT "active")
@@ -296,7 +302,7 @@ A catalog page is a triple (page + entry + nav) — never touch just one part:
   card; add a redirect.
 
 Then run `python3 docs/fern/scripts/gen_recipe_nav.py` to regenerate the sidebar, provider filter,
-and counts, and `python3 docs/fern/pages/recipes/_catalog/validate.py`.
+card order, and counts, and `python3 docs/fern/pages/recipes/_catalog/validate.py`.
 
 ### Add an Example or Recipe (code)
 
@@ -472,7 +478,9 @@ git commit -s -m "docs: <add|update|move|remove> <page-title>"
 | Target picker renders but filters nothing | Use `className` (not `class`) and the exact `dynamo-target-picker` classes; and ensure the axis `value=` is in `docs/fern/main.css` (add its hide rule) |
 | `validate.py` fails (orphan/dangling/id) | `_catalog/<id>.yaml` filename, internal `id:`, and the `index.yaml` entry must all match; every deploy/perf asset path must resolve |
 | Recipe page absent from the Recipes tab | Add the `<id>` to `_catalog/index.yaml`, then run `python3 docs/fern/scripts/gen_recipe_nav.py` |
-| `gen_recipe_nav.py` fails on a provider | Add the provider key to `_catalog/providers.yaml`, and give each provider with recipes at least one overview card |
+| `gen_recipe_nav.py` fails on a provider | Add the provider key to `_catalog/providers.yaml` |
+| `gen_recipe_nav.py` fails on a model card | Give each active recipe exactly one card between the overview's `recipe-cards` markers, with `data-provider` equal to the entry's `provider:` and `href` equal to its page file |
+| `gen_recipe_nav.py` fails on `model.generation` | Set it to a quoted version number, such as `generation: "4.1"`; unquoted, YAML reads `5.10` as `5.1` |
 
 ## Key References
 

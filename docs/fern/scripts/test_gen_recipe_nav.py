@@ -28,8 +28,12 @@ def providers(ranked: list[str], names: dict[str, str]):
     )
 
 
-def recipe(rid: str, provider: str, targets: int = 1) -> gen.Recipe:
-    return gen.Recipe(rid, rid.upper(), provider, f"pages/{rid}.mdx", rid, targets)
+def recipe(
+    rid: str, provider: str, targets: int = 1, generation: tuple[int, ...] = (1,)
+) -> gen.Recipe:
+    return gen.Recipe(
+        rid, rid.upper(), provider, f"pages/{rid}.mdx", rid, targets, generation
+    )
 
 
 def order(groups: list[gen.Group]) -> list[str]:
@@ -72,11 +76,39 @@ def test_provider_without_active_recipe_is_dropped():
     assert order(gen.group_recipes(registry, ranked, [recipe("z", "zai")])) == ["zai"]
 
 
-def test_recipes_keep_catalog_order_within_a_provider():
+def test_recipes_keep_catalog_order_within_a_generation():
     registry, ranked = providers(["qwen", "zai"], {"zai": "Z.ai", "qwen": "Qwen"})
     recipes = [recipe("q2", "qwen"), recipe("z1", "zai"), recipe("q1", "qwen")]
     groups = gen.group_recipes(registry, ranked, recipes)
     assert [r.id for g in groups for r in g.recipes] == ["q2", "q1", "z1"]
+
+
+def test_newest_generation_leads_within_a_provider():
+    registry, ranked = providers(["qwen"], {"qwen": "Qwen"})
+    recipes = [
+        recipe("q3-a", "qwen", generation=(3,)),
+        recipe("q3.10", "qwen", generation=(3, 10)),
+        recipe("q3.8", "qwen", generation=(3, 8)),
+        recipe("q3-b", "qwen", generation=(3,)),
+    ]
+    groups = gen.group_recipes(registry, ranked, recipes)
+    assert [r.id for r in groups[0].recipes] == ["q3.10", "q3.8", "q3-a", "q3-b"]
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [("4.1", (4, 1)), ("5.10", (5, 10)), ("2.0", (2,)), ("3", (3,))],
+)
+def test_generation_parses_as_a_version(value, expected):
+    entry = {"model": {"generation": value}}
+    assert gen.parse_generation(entry, "x") == expected
+
+
+@pytest.mark.parametrize("value", [5.1, 3, None, "v4", "4.1-flash"])
+def test_generation_must_be_a_quoted_version(value):
+    # An unquoted 5.10 loads as the float 5.1 and would sort below 5.9.
+    with pytest.raises(gen.CatalogError, match="quoted version number"):
+        gen.parse_generation({"model": {"generation": value}}, "x")
 
 
 def test_unknown_provider_fails_with_a_fix():
@@ -88,7 +120,13 @@ def test_unknown_provider_fails_with_a_fix():
 
 def test_slug_defaults_to_page_stem_and_can_be_overridden():
     registry, _ = providers([], {"zai": "Z.ai"})
-    entry = {"id": "x", "title": "X", "provider": "zai", "page": "pages/x-nvfp4.mdx"}
+    entry = {
+        "id": "x",
+        "title": "X",
+        "provider": "zai",
+        "page": "pages/x-nvfp4.mdx",
+        "model": {"generation": "1"},
+    }
     assert gen.parse_recipe(entry, registry, "x").slug == "x-nvfp4"
     assert gen.parse_recipe({**entry, "slug": "x"}, registry, "x").slug == "x"
 
@@ -128,14 +166,36 @@ def groups_for(*keys: str) -> list[gen.Group]:
     return gen.group_recipes(registry, ranked, [recipe(k, k) for k in keys])
 
 
-def test_cards_must_cover_every_provider_and_no_more():
+def card(page: str, provider: str, indent: str = "  ") -> list[str]:
+    return [
+        f'{indent}<div className="dynamo-model-card" data-recipe-card '
+        f'data-provider="{provider}">',
+        f"{indent}  <div><h3>{page}</h3></div>",
+        f'{indent}  <a className="dynamo-card-link" href="{page}.mdx">Open</a>',
+        f"{indent}</div>",
+    ]
+
+
+def test_cards_follow_sidebar_order_and_drop_blank_lines():
     groups = groups_for("zai", "qwen")
-    card = '<div className="dynamo-model-card" data-recipe-card data-provider="{}">'
-    gen.check_cards(card.format("zai") + card.format("qwen"), groups)
-    with pytest.raises(gen.CatalogError, match="no model card for Qwen"):
-        gen.check_cards(card.format("zai"), groups)
-    with pytest.raises(gen.CatalogError, match="'meta'"):
-        gen.check_cards(card.format("zai qwen meta"), groups)
+    body = card("qwen", "qwen") + [""] + card("zai", "zai")
+    assert gen.sort_cards(body, groups) == card("zai", "zai") + card("qwen", "qwen")
+
+
+@pytest.mark.parametrize(
+    "body, message",
+    [
+        (card("zai", "zai"), "no model card for QWEN"),
+        (card("zai", "zai") + card("qwen", "zai"), 'data-provider="qwen"'),
+        (card("zai", "zai") * 2 + card("qwen", "qwen"), "two model cards"),
+        (card("zai", "zai") + card("qwen", "qwen") + card("meta", "meta"), "meta.mdx"),
+        (card("zai", "zai") + ["<p>stray</p>"], "only model cards"),
+        (card("zai", "zai")[:-1], "no '</div>'"),
+    ],
+)
+def test_cards_must_match_active_recipes_one_to_one(body, message):
+    with pytest.raises(gen.CatalogError, match=message):
+        gen.sort_cards(body, groups_for("zai", "qwen"))
 
 
 def test_render_index_reorders_only_the_active_list():

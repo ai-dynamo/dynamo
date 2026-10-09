@@ -7,6 +7,7 @@ page: pages/recipes/model-recipes/kimi-k3.mdx
 provider: moonshot
 model:
   name: Kimi-K3
+  generation: "3"
   hf_id: moonshotai/Kimi-K3
   precision: MXFP4 experts, FP8 or BF16 KV cache
 status: experimental  # Day-0

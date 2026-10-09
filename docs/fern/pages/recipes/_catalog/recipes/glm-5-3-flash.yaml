@@ -7,6 +7,7 @@ page: pages/recipes/model-recipes/glm-5-3-flash.mdx
 provider: zai
 model:
   name: GLM-5.3-Flash
+  generation: "5.3"
   hf_id: zai-org/GLM-5.3-Flash
   precision: FP8-quantized checkpoint
 status: experimental

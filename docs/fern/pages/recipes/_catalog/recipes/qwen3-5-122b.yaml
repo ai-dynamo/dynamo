@@ -7,6 +7,7 @@ page: pages/recipes/model-recipes/qwen3-5-122b.mdx
 provider: qwen
 model:
   name: Qwen3.5-122B-A10B
+  generation: "3.5"
   hf_id: nvidia/Qwen3.5-122B-A10B-NVFP4 (B200) / Qwen/Qwen3.5-122B-A10B-FP8 (H200)
   precision: NVFP4 + FP8 KV (B200) / FP8 (H200; FP8 KV on disaggregated only)
 status: validated

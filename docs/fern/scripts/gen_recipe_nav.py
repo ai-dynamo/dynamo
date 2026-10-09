@@ -11,8 +11,9 @@ the catalog and the provider order cannot drift between surfaces:
   * ``index.yml``: the Model Recipes sidebar, one section per provider
     (``recipe-nav`` span).
   * ``model-recipes/overview.mdx``: the provider filter's radio inputs and
-    chips (``provider-inputs`` and ``provider-chips`` spans) and the catalog
-    counts (``family-count`` and ``config-count`` spans).
+    chips (``provider-inputs`` and ``provider-chips`` spans), the catalog
+    counts (``family-count`` and ``config-count`` spans), and the order of the
+    model cards (``recipe-cards`` span).
   * ``components/RecipeStyles.tsx``: the per-provider chip-highlight and
     card-filter CSS rules (``provider-chip-rules`` and
     ``provider-filter-rules`` spans).
@@ -21,13 +22,14 @@ the catalog and the provider order cannot drift between surfaces:
 
 Provider order comes from ``_catalog/providers.yaml``: ranked providers first,
 in their listed order, then every other provider alphabetically by name. A
-provider with no active recipe is dropped. Within a provider, recipes keep
-their ``index.yaml`` order (newest first).
+provider with no active recipe is dropped. Within a provider, recipes are
+sorted newest model generation first (the entry's ``model.generation``); recipes
+of the same generation keep their ``index.yaml`` order.
 
-The overview's model cards stay hand-written, so this script also checks them:
-every card's ``data-provider`` must name a provider that has an active recipe,
-and every such provider must have at least one card, so no filter chip is a
-dead end.
+The overview's model cards stay hand-written: this script only sorts them into
+the same order. Each active recipe needs exactly one card, matched by the card's
+``href`` to the recipe page, and the card's ``data-provider`` must equal the
+recipe's ``provider``, so every filter chip finds its cards.
 
 Usage (from any cwd; paths resolve relative to this file):
 
@@ -58,7 +60,10 @@ OVERVIEW_MDX = FERN_DIR / "pages" / "recipes" / "model-recipes" / "overview.mdx"
 STYLES_TSX = FERN_DIR / "components" / "RecipeStyles.tsx"
 
 PROVIDER_KEY = re.compile(r"^[a-z0-9]+$")
+GENERATION = re.compile(r"^[0-9]+(\.[0-9]+)*$")
+CARD_START = re.compile(r'^(\s*)<div className="dynamo-model-card"')
 CARD_PROVIDER = re.compile(r'data-recipe-card\b[^>]*?\bdata-provider="([^"]*)"')
+CARD_PAGE = re.compile(r'className="dynamo-card-link" href="([^"]+)"')
 
 
 class CatalogError(Exception):
@@ -80,6 +85,7 @@ class Recipe:
     page: str
     slug: str
     targets: int
+    generation: tuple[int, ...] = (1,)
 
 
 @dataclass(frozen=True)
@@ -145,7 +151,26 @@ def parse_recipe(entry: dict, providers: dict[str, Provider], source: str) -> Re
         page=page,
         slug=entry.get("slug") or Path(page).stem,
         targets=len(entry.get("targets") or []),
+        generation=parse_generation(entry, source),
     )
+
+
+def parse_generation(entry: dict, source: str) -> tuple[int, ...]:
+    """Return ``model.generation`` as a comparable version tuple.
+
+    The value must be a quoted string: YAML reads an unquoted ``5.10`` as the
+    float 5.1, which would sort it below 5.9.
+    """
+    value = (entry.get("model") or {}).get("generation")
+    if not isinstance(value, str) or not GENERATION.match(value):
+        raise CatalogError(
+            f"{source}: model.generation must be a quoted version number, such "
+            f'as generation: "4.1" (got {value!r})'
+        )
+    parts = [int(p) for p in value.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
 
 
 def load_catalog() -> tuple[dict[str, Provider], list[str], list[Recipe]]:
@@ -177,8 +202,8 @@ def group_recipes(
     """Group active recipes by provider in display order.
 
     Ranked providers come first in ranked order; the rest follow alphabetically
-    by display name. Providers without an active recipe are omitted. Recipes
-    keep their catalog order within a provider.
+    by display name. Providers without an active recipe are omitted. Within a
+    provider, recipes run newest generation first; ties keep catalog order.
     """
     by_provider: dict[str, list[Recipe]] = {}
     for recipe in recipes:
@@ -188,7 +213,14 @@ def group_recipes(
         (k for k in by_provider if k not in ranked),
         key=lambda k: (providers[k].name.casefold(), k),
     )
-    return [Group(providers[k], tuple(by_provider[k])) for k in head + tail]
+    # sorted() stays stable with reverse=True, so ties keep catalog order.
+    return [
+        Group(
+            providers[k],
+            tuple(sorted(by_provider[k], key=lambda r: r.generation, reverse=True)),
+        )
+        for k in head + tail
+    ]
 
 
 # -------------------------------------------------------------- rendering
@@ -286,6 +318,12 @@ def splice(text: str, name: str, render, source: Path) -> str:
     suit each file type.
     """
     lines = text.split("\n")
+    b, e = find_markers(lines, name, source)
+    indent = lines[b][: len(lines[b]) - len(lines[b].lstrip())]
+    return "\n".join(lines[: b + 1] + render(indent) + lines[e:])
+
+
+def find_markers(lines: list[str], name: str, source: Path) -> tuple[int, int]:
     begins = [i for i, line in enumerate(lines) if f"{name}:begin" in line]
     ends = [i for i, line in enumerate(lines) if f"{name}:end" in line]
     if len(begins) != 1 or len(ends) != 1 or begins[0] > ends[0]:
@@ -293,30 +331,80 @@ def splice(text: str, name: str, render, source: Path) -> str:
             f"{source.relative_to(FERN_DIR)}: expected one {name}:begin marker "
             f"followed by one {name}:end marker"
         )
-    b, e = begins[0], ends[0]
-    indent = lines[b][: len(lines[b]) - len(lines[b].lstrip())]
-    return "\n".join(lines[: b + 1] + render(indent) + lines[e:])
+    return begins[0], ends[0]
 
 
-def check_cards(overview: str, groups: list[Group]) -> None:
-    """Every card must name an active provider, and every one must have a card."""
-    active = {g.provider.key for g in groups}
-    carded: set[str] = set()
-    for value in CARD_PROVIDER.findall(overview):
-        for key in value.split():
-            if key not in active:
-                raise CatalogError(
-                    f"overview.mdx: a card has data-provider={key!r}, which has "
-                    "no active recipe in the catalog, so it has no filter chip"
-                )
-            carded.add(key)
-    missing = [g.provider.name for g in groups if g.provider.key not in carded]
+def span_body(text: str, name: str, source: Path) -> list[str]:
+    lines = text.split("\n")
+    b, e = find_markers(lines, name, source)
+    return lines[b + 1 : e]
+
+
+def split_cards(body: list[str]) -> list[list[str]]:
+    """Split the ``recipe-cards`` span into cards, dropping blank lines.
+
+    A card runs from its ``dynamo-model-card`` line to the first ``</div>`` at
+    the same indentation.
+    """
+    cards: list[list[str]] = []
+    i = 0
+    while i < len(body):
+        if not body[i].strip():
+            i += 1
+            continue
+        start = CARD_START.match(body[i])
+        if not start:
+            raise CatalogError(
+                "overview.mdx: only model cards may sit between the recipe-cards "
+                f"markers, found {body[i].strip()!r}"
+            )
+        close = start.group(1) + "</div>"
+        end = next((j for j in range(i + 1, len(body)) if body[j] == close), None)
+        if end is None:
+            raise CatalogError(
+                f"overview.mdx: the model card at {body[i].strip()[:60]!r} has no "
+                f"{close.strip()!r} at its own indentation"
+            )
+        cards.append(body[i : end + 1])
+        i = end + 1
+    return cards
+
+
+def sort_cards(body: list[str], groups: list[Group]) -> list[str]:
+    """Return the model cards in sidebar order, one card per active recipe."""
+    recipes = {Path(r.page).name: r for g in groups for r in g.recipes}
+    by_page: dict[str, list[str]] = {}
+    for card in split_cards(body):
+        link = CARD_PAGE.search("\n".join(card))
+        if not link:
+            raise CatalogError(
+                f"overview.mdx: the model card at {card[0].strip()[:60]!r} has no "
+                "dynamo-card-link href"
+            )
+        page = link.group(1)
+        recipe = recipes.get(page)
+        if recipe is None:
+            raise CatalogError(
+                f"overview.mdx: a model card links to {page}, which is not an "
+                "active recipe page in the catalog"
+            )
+        if page in by_page:
+            raise CatalogError(f"overview.mdx: two model cards link to {page}")
+        provider = CARD_PROVIDER.search(card[0])
+        if not provider or provider.group(1) != recipe.provider:
+            raise CatalogError(
+                f"overview.mdx: the {recipe.title} card needs "
+                f'data-provider="{recipe.provider}" to match its catalog entry'
+            )
+        by_page[page] = card
+    missing = [r.title for page, r in recipes.items() if page not in by_page]
     if missing:
         raise CatalogError(
             "overview.mdx: no model card for "
             + ", ".join(missing)
-            + "; add one so the provider's filter chip is not empty"
+            + "; add one between the recipe-cards markers"
         )
+    return [line for page in recipes for line in by_page[page]]
 
 
 def build() -> dict[Path, str]:
@@ -332,7 +420,8 @@ def build() -> dict[Path, str]:
     )
 
     overview = OVERVIEW_MDX.read_text(encoding="utf-8")
-    check_cards(overview, groups)
+    cards = sort_cards(span_body(overview, "recipe-cards", OVERVIEW_MDX), groups)
+    overview = splice(overview, "recipe-cards", lambda _: cards, OVERVIEW_MDX)
     overview = splice(
         overview,
         "provider-inputs",

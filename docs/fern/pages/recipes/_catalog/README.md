@@ -27,19 +27,22 @@ CSS-coupled vocabulary. For the machine-readable catalog contract, see the
    matching `index.yaml`. Each file holds exactly one object that validates
    against `schema.json`; every deploy/perf asset path must resolve in the repo.
    A recipe's `provider:` must be a key in `providers.yaml`; add a new model
-   maker there first. See [the machine-readable catalog](#the-machine-readable-catalog)
+   maker there first. Set `model.generation` to the model's quoted version
+   number (see [Provider order](#provider-order)). See [the machine-readable catalog](#the-machine-readable-catalog)
    below, then run `python3 docs/fern/pages/recipes/_catalog/validate.py`.
 3. **Generate the Model Recipes navigation**: run
    `python3 docs/fern/scripts/gen_recipe_nav.py` (the `gen-recipe-nav` pre-commit
    hook runs it for you). Do not edit the Model Recipes sidebar, the overview's
-   provider filter, its counts, or the provider CSS by hand; see
+   provider filter, its counts, its card order, or the provider CSS by hand; see
    [Provider order](#provider-order). Feature Benchmark pages are still wired
    by hand under the Feature Benchmarks section of `docs/fern/index.yml`.
 4. **Patch `docs/fern/main.css` only if** the page introduces a picker axis value not
    already supported (see below).
-5. Add the landing-page card (`docs/fern/pages/recipes/model-recipes/overview.mdx`).
-   Its `data-provider` must be the recipe's `provider:` key; the generator fails
-   if a provider has recipes but no card, or a card names a provider without one.
+5. Add the landing-page card (`docs/fern/pages/recipes/model-recipes/overview.mdx`)
+   anywhere between the `recipe-cards` markers; the generator sorts the cards.
+   Each active recipe needs exactly one card: its `data-provider` must be the
+   recipe's `provider:` key and its `dynamo-card-link` `href` the recipe's page
+   file, or the generator fails.
 6. Run `fern check` and `fern docs broken-links`; preview with `fern docs dev`.
 
 ## The machine-readable catalog
@@ -66,8 +69,9 @@ docs/fern/pages/recipes/feature-benchmarks/_catalog/
   benchmarks/<id>.yaml  # one benchmark object per file
 ```
 
-- **`index.yaml`** controls inclusion and the order of recipes within a
-  provider. The `recipes:` list is the active (customer-visible) recipes;
+- **`index.yaml`** controls inclusion and breaks ties between recipes of the
+  same provider and model generation. The `recipes:` list is the active
+  (customer-visible) recipes;
   `deferred_recipes:` lists recipes held back from the rendered surface (no
   rendered page). `gen_recipe_nav.py` re-sorts `recipes:` by provider so it
   reads in sidebar order; benchmark order matches the Feature Benchmarks
@@ -84,17 +88,21 @@ docs/fern/pages/recipes/feature-benchmarks/_catalog/
 
 ### Provider order
 
-The Model Recipes sidebar and the overview's provider filter are generated
-from the catalog by `docs/fern/scripts/gen_recipe_nav.py`, so they always list
-the same providers in the same order:
+The Model Recipes sidebar, the overview's provider filter, and the order of
+the overview's model cards are generated from the catalog by
+`docs/fern/scripts/gen_recipe_nav.py`, so they always list the same providers
+and recipes in the same order:
 
 1. Providers in `providers.yaml` `ranked:` come first, in that order (by
    model-maker popularity).
 2. Every other provider follows, alphabetically by name.
 3. A provider with no active recipe does not appear.
 
-Within a provider, recipes follow their order in `index.yaml`, newest model
-first. The generator also writes the overview's model-family and
+Within a provider, recipes run newest model generation first, by the entry's
+`model.generation`: a quoted version number such as `"4.1"` for
+DeepSeek-V4.1-Flash, or `"1"` for a first, unnumbered release. Quote it, since
+YAML reads an unquoted `5.10` as `5.1`. Recipes of the same generation keep
+their `index.yaml` order. The generator also writes the overview's model-family and
 configuration counts, the provider CSS rules in `components/RecipeStyles.tsx`,
 and the order of `index.yaml`. Each generated span sits between
 `<name>:begin` and `<name>:end` markers. The `gen-recipe-nav` pre-commit hook

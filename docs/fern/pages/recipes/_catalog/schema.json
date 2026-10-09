@@ -42,9 +42,14 @@
     "model": {
       "type": "object",
       "description": "Model identity.",
-      "required": ["name"],
+      "required": ["name", "generation"],
       "properties": {
         "name": { "type": "string" },
+        "generation": {
+          "type": "string",
+          "description": "The model's generation as a quoted version number, e.g. \"4.1\" for DeepSeek-V4.1-Flash, or \"1\" for a first, unnumbered release. Within a provider, recipes are listed newest generation first.",
+          "pattern": "^[0-9]+(\\.[0-9]+)*$"
+        },
         "hf_id": { "type": "string" },
         "precision": { "type": "string" }
       },

@@ -8,6 +8,7 @@ slug: inkling
 provider: thinkingmachines
 model:
   name: Inkling
+  generation: "1"
   hf_id: thinkingmachines/Inkling-NVFP4
   precision: NVFP4
 status: experimental

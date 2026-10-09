@@ -7,6 +7,7 @@ page: pages/recipes/model-recipes/nemotron-3-super.mdx
 provider: nvidia
 model:
   name: Nemotron-3-Super-120B-A12B
+  generation: "3"
   hf_id: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 (B200) / -FP8 (H200)
   precision: NVFP4 (B200) / FP8 (H200), FP8 KV
 status: validated
