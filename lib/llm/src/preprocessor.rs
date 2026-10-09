@@ -131,6 +131,20 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
     (priority_jump, strict_priority, priority)
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("prompt has {tokens} tokens but the remaining System One prompt limit is {limit}")]
+pub(crate) struct SystemOnePromptTooLong {
+    pub(crate) tokens: usize,
+    pub(crate) limit: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("prompt validation needs {bytes} encoded text bytes; the remaining limit is {limit}")]
+pub(crate) struct SystemOneEncodingTooLarge {
+    pub(crate) bytes: usize,
+    pub(crate) limit: usize,
+}
+
 /// Build a private validation diagnostic. Callers may attach structured `PublicDetails` only when every value is safe for clients.
 pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
     DynamoError::builder()
@@ -2931,6 +2945,99 @@ impl OpenAIPreprocessor {
             Some(segments) => self.tokenizer.encode_segments(&segments),
             None => self.tokenize(prompt.as_str()),
         }
+    }
+
+    /// Render a System One question through the model's normal chat template and resolve
+    /// candidate labels that each add exactly one distinct token at the answer position.
+    /// Reject over-budget prompts before repeating tokenization for candidate labels.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Consumed by decision execution integration")
+    )]
+    pub(crate) fn render_systemone_question(
+        &self,
+        model: &str,
+        content: &str,
+        chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+        labels: &[String],
+        limits: (usize, usize),
+    ) -> anyhow::Result<(Vec<TokenIdType>, Vec<TokenIdType>, usize)> {
+        let (max_prompt_tokens, max_encoding_bytes) = limits;
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": content}],
+                "stream": false,
+                "max_tokens": 0,
+                "thinking": false,
+                "chat_template_kwargs": chat_template_kwargs.cloned().unwrap_or_default()
+            }))?;
+        request.normalize_reasoning_template_args()?;
+        if Self::sglang_effective_reasoning_enabled(
+            self.runtime_config.reasoning_parser.as_deref(),
+            request.chat_template_args(),
+        ) {
+            anyhow::bail!(
+                "/v1/systemone requires a model with reasoning disabled at the answer position"
+            );
+        }
+        let prompt = self
+            .apply_template(&request)?
+            .ok_or_else(|| anyhow::anyhow!("chat template did not produce a text prompt"))?;
+        if Self::prompt_injected_reasoning_start(
+            self.runtime_config.reasoning_parser.as_deref(),
+            Some(prompt.as_str()),
+        ) {
+            anyhow::bail!(
+                "/v1/systemone requires a chat template that closes or disables reasoning before the answer position"
+            );
+        }
+        let encoding_bytes = prompt
+            .as_str()
+            .len()
+            .checked_mul(labels.len() + 2)
+            .and_then(|bytes| bytes.checked_add(labels.iter().map(String::len).sum()))
+            .unwrap_or(usize::MAX);
+        if encoding_bytes > max_encoding_bytes {
+            return Err(SystemOneEncodingTooLarge {
+                bytes: encoding_bytes,
+                limit: max_encoding_bytes,
+            }
+            .into());
+        }
+        let prompt_ids = self.tokenize_rendered_prompt(&prompt)?.token_ids().to_vec();
+        if prompt_ids.len() > max_prompt_tokens {
+            return Err(SystemOnePromptTooLong {
+                tokens: prompt_ids.len(),
+                limit: max_prompt_tokens,
+            }
+            .into());
+        }
+        let flat_prompt_ids = self.tokenize(prompt.as_str())?.token_ids().to_vec();
+        if flat_prompt_ids != prompt_ids {
+            anyhow::bail!(
+                "/v1/systemone requires a chat prompt whose rendered text round-trips to the same token IDs"
+            );
+        }
+
+        let mut label_ids = Vec::with_capacity(labels.len());
+        for label in labels {
+            let with_label = format!("{}{label}", prompt.as_str());
+            let encoded = self.tokenize(&with_label)?.token_ids().to_vec();
+            if encoded.len() != prompt_ids.len() + 1 || encoded[..prompt_ids.len()] != prompt_ids {
+                anyhow::bail!(
+                    "answer label {label:?} is not one token after the chat prompt for this tokenizer"
+                );
+            }
+            let label_id = encoded[prompt_ids.len()];
+            if label_ids.contains(&label_id) {
+                anyhow::bail!(
+                    "answer label {label:?} is not a distinct token after the chat prompt"
+                );
+            }
+            label_ids.push(label_id);
+        }
+        Ok((prompt_ids, label_ids, encoding_bytes))
     }
 
     /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.
@@ -9388,6 +9495,106 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap();
+        }
+    }
+
+    struct SystemOneCountingTokenizer(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl crate::tokenizers::traits::Encoder for SystemOneCountingTokenizer {
+        fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Encoding::Sp(input.bytes().map(u32::from).collect()))
+        }
+
+        fn encode_batch(&self, inputs: &[&str]) -> anyhow::Result<Vec<Encoding>> {
+            inputs.iter().map(|input| self.encode(input)).collect()
+        }
+    }
+
+    impl crate::tokenizers::traits::Decoder for SystemOneCountingTokenizer {
+        fn decode(
+            &self,
+            _token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<crate::tokenizers::traits::DecodeResult> {
+            Ok(crate::tokenizers::traits::DecodeResult::Complete(
+                String::new(),
+            ))
+        }
+    }
+
+    impl Tokenizer for SystemOneCountingTokenizer {}
+
+    #[test]
+    fn systemone_prompt_budget_rejects_before_candidate_tokenization() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = match Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap()) {
+            Ok(preprocessor) => preprocessor,
+            Err(_) => panic!("test preprocessor unexpectedly shared"),
+        };
+        let encodes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        preprocessor.tokenizer = Arc::new(SystemOneCountingTokenizer(encodes.clone()));
+        let labels: Vec<_> = ('A'..='Z').map(|label| label.to_string()).collect();
+        let error = preprocessor
+            .render_systemone_question("test-model", &"x".repeat(4096), None, &labels, (65_536, 8))
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<SystemOneEncodingTooLarge>()
+                .unwrap()
+                .limit,
+            8
+        );
+        assert_eq!(encodes.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let error = preprocessor
+            .render_systemone_question(
+                "test-model",
+                &"x".repeat(4096),
+                None,
+                &labels,
+                (8, usize::MAX),
+            )
+            .unwrap_err();
+        let oversized = error.downcast_ref::<SystemOnePromptTooLong>().unwrap();
+        assert_eq!(oversized.limit, 8);
+        assert!(oversized.tokens > oversized.limit);
+        assert_eq!(encodes.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn systemone_rejects_always_on_reasoning_before_tokenization() {
+        for parser in ["deepseek_r1", "step3", "gpt_oss", "kimi"] {
+            let mdc = ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            let mut preprocessor = match Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap()) {
+                Ok(preprocessor) => preprocessor,
+                Err(_) => panic!("test preprocessor unexpectedly shared"),
+            };
+            preprocessor.runtime_config.reasoning_parser = Some(parser.to_string());
+            let encodes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            preprocessor.tokenizer = Arc::new(SystemOneCountingTokenizer(encodes.clone()));
+            let kwargs = serde_json::Map::from_iter([
+                ("enable_thinking".to_string(), serde_json::json!(false)),
+                ("thinking_mode".to_string(), serde_json::json!("disabled")),
+            ]);
+            let error = preprocessor
+                .render_systemone_question(
+                    "test-model",
+                    "A decision",
+                    Some(&kwargs),
+                    &["yes".to_string(), "no".to_string()],
+                    (65_536, usize::MAX),
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("reasoning disabled"), "{parser}");
+            assert_eq!(encodes.load(std::sync::atomic::Ordering::Relaxed), 0);
         }
     }
 
