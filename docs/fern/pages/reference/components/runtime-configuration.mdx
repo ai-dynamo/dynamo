@@ -167,9 +167,13 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="DYN_TCP_WORK_QUEUE_SIZE" type="integer" default="40000">
-  Number of TCP request-plane requests that can wait for a `DYN_TCP_WORKER_POOL_SIZE` slot. When the
-  pool and this queue are both full, the worker rejects the request with an overload reply and
-  increments
+  Capacity of the bounded channel for TCP request-plane requests waiting for a
+  `DYN_TCP_WORKER_POOL_SIZE` slot. The dispatcher removes one request from the channel before waiting
+  for a pool slot, so one additional request can wait in the dispatcher. With a pool size of `P` and
+  channel capacity of `Q`, up to `P + Q + 1` requests can be active or waiting. For example, a pool
+  size of `1` and queue size of `1` can hold one active request and two waiting requests.
+  When no pool slot is available and the channel is full, the worker rejects the request with an
+  overload reply and increments
   [`dynamo_work_handler_enqueue_rejected_total`](../observability/metrics-catalog.mdx#component-metrics).
   Applies only to the TCP request plane. Values that are not non-negative integers fall back to the
   default. `0` does not fall back: the worker panics while it creates the TCP request-plane server.
