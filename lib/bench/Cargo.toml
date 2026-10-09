@@ -54,6 +54,9 @@ mooncake = [
 ]
 # Count `indexer_memory` allocations over the system allocator instead of jemalloc.
 indexer-memory-system-alloc = ["mooncake"]
+# Local campaign builds: run `mooncake_bench` over the system allocator (glibc malloc)
+# with no global allocator, instead of jemalloc.
+mooncake-system-alloc = ["mooncake"]
 multiturn = [
   "kv-router-stress-support",
   "dep:dynamo-mocker",

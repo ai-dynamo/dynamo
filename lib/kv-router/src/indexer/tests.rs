@@ -31,21 +31,24 @@ use crate::test_utils::{
 // CKF is added selectively through `matching_indexer_template`; this template also drives
 // dump/restore, parent-structure, and implementation-specific tests that CKF does not support.
 fn indexer_template(
-    #[values("single", "flat", "flat_binary", "concurrent_compressed")] variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent_compressed", "arena_c")] variant: &str,
 ) {
 }
 
 #[template]
 #[rstest]
 fn matching_indexer_template(
-    #[values("single", "flat", "flat_binary", "concurrent_compressed")] variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent_compressed", "arena_c")] variant: &str,
 ) {
 }
 
 #[template]
 #[rstest]
 // CKF exposes logical resident counts through Stats, not tree node shape.
-fn tree_size_indexer_template(#[values("single", "concurrent_compressed")] variant: &str) {}
+fn tree_size_indexer_template(
+    #[values("single", "concurrent_compressed", "arena_c")] variant: &str,
+) {
+}
 
 #[template]
 #[rstest]
@@ -147,6 +150,12 @@ fn make_indexer_with_metrics(
             kv_block_size,
             Some(metrics.clone()),
         )),
+        "arena_c" => Box::new(ThreadPoolIndexer::new_with_metrics(
+            super::arena_c::ArenaIndexC::new(),
+            4,
+            kv_block_size,
+            Some(metrics.clone()),
+        )),
         _ => panic!("Unknown variant: {}", variant),
     };
 
@@ -192,6 +201,7 @@ fn make_approx_indexer(variant: &str, ttl: Duration) -> Box<dyn KvIndexerInterfa
 enum TreeSizeTestIndexer {
     Single(RadixTree),
     ConcurrentCompressed(ThreadPoolIndexer<ConcurrentRadixTreeCompressed>),
+    ArenaC(ThreadPoolIndexer<super::arena_c::ArenaIndexC>),
 }
 
 impl TreeSizeTestIndexer {
@@ -200,6 +210,11 @@ impl TreeSizeTestIndexer {
             "single" => Self::Single(RadixTree::new()),
             "concurrent_compressed" => Self::ConcurrentCompressed(ThreadPoolIndexer::new(
                 ConcurrentRadixTreeCompressed::new(),
+                4,
+                4,
+            )),
+            "arena_c" => Self::ArenaC(ThreadPoolIndexer::new(
+                super::arena_c::ArenaIndexC::new(),
                 4,
                 4,
             )),
@@ -215,6 +230,9 @@ impl TreeSizeTestIndexer {
             Self::ConcurrentCompressed(index) => {
                 KvIndexerInterface::apply_event(index, event).await;
             }
+            Self::ArenaC(index) => {
+                KvIndexerInterface::apply_event(index, event).await;
+            }
         }
     }
 
@@ -222,6 +240,9 @@ impl TreeSizeTestIndexer {
         match self {
             Self::Single(_) => {}
             Self::ConcurrentCompressed(index) => {
+                index.flush().await;
+            }
+            Self::ArenaC(index) => {
                 index.flush().await;
             }
         }
@@ -233,6 +254,7 @@ impl TreeSizeTestIndexer {
             Self::ConcurrentCompressed(index) => {
                 Self::thread_pool_size_for_worker(index, worker).await
             }
+            Self::ArenaC(index) => Self::thread_pool_size_for_worker(index, worker).await,
         }
     }
 
@@ -253,6 +275,7 @@ impl TreeSizeTestIndexer {
         match self {
             Self::Single(_) => None,
             Self::ConcurrentCompressed(index) => Some(Self::thread_pool_worker_count(index).await),
+            Self::ArenaC(index) => Some(Self::thread_pool_worker_count(index).await),
         }
     }
 
@@ -270,6 +293,7 @@ impl TreeSizeTestIndexer {
         match self {
             Self::Single(index) => index.find_matches(query, false),
             Self::ConcurrentCompressed(index) => index.backend().find_matches_impl(&query, false),
+            Self::ArenaC(index) => index.backend().find_matches_impl(&query, false),
         }
     }
 
@@ -293,6 +317,9 @@ impl TreeSizeTestIndexer {
         match self {
             Self::Single(index) => snapshot_events(index.dump_tree_as_events()),
             Self::ConcurrentCompressed(index) => {
+                snapshot_events(KvIndexerInterface::dump_events(index).await.unwrap())
+            }
+            Self::ArenaC(index) => {
                 snapshot_events(KvIndexerInterface::dump_events(index).await.unwrap())
             }
         }

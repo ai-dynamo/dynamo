@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Loom models of arena-c's protocol primitives. A standalone workspace, so the main
+# workspace's lockfile does not change:
+#
+#   cd lib/kv-router/loom-arena-c && cargo test --release
+#
+# Each model has a negative control (a `#[should_panic]` test) that removes the rule the
+# model checks and must fail.
+
+[package]
+name = "loom-arena-c"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+loom = "0.7"
+
+# Declared so `table.rs`'s report-only items compile out here as in a plain build.
+[features]
+bench = []
+
+# table.rs's own unit tests use atomics outside a model; they run in the main crate.
+[lib]
+test = false
