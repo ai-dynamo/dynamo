@@ -539,10 +539,24 @@ impl LLMEngine for SglangSidecarEngine {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        let Some(mut grpc_client) = self.state.get().map(|state| state.pool.control_client())
-        else {
+        let Some(state) = self.state.get() else {
             return;
         };
+        // HTTP queues scheduler cancellation without first closing the gRPC stream.
+        if let Some(native_http) = &state.native_http {
+            match native_http
+                .abort(ctx.id(), self.transport.connect_attempt_timeout)
+                .await
+            {
+                Ok(()) => return,
+                Err(error) => tracing::debug!(
+                    request_id = ctx.id(),
+                    %error,
+                    "SGLang HTTP abort failed; falling back to gRPC"
+                ),
+            }
+        }
+        let mut grpc_client = state.pool.control_client();
         let request = pb::AbortRequest {
             rid: ctx.id().to_string(),
             abort_all: false,
