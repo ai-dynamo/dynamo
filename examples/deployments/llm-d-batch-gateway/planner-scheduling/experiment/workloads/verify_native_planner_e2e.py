@@ -81,14 +81,6 @@ def _normalize_observer_time(value: str) -> str:
     return re.sub(r"\.3NZ$", "Z", value)
 
 
-def _first_log_time(log: str, needle: str) -> datetime | None:
-    for line in log.splitlines():
-        if needle not in line:
-            continue
-        return _parse_rfc3339(line.split(maxsplit=1)[0])
-    return None
-
-
 def _planner_decisions(log: str) -> list[dict[str, Any]]:
     """Parse structured fields from native Planner decision log records.
 
@@ -133,17 +125,32 @@ def _planner_decisions(log: str) -> list[dict[str, Any]]:
     return decisions
 
 
-def _first_metric_increase(
+def _dispatch_counter_interval(
     run_dir: Path, baseline: float
-) -> tuple[str | None, float | None]:
+) -> tuple[str | None, str | None, float | None, bool]:
+    """Bound the first observed increase and reject observed counter resets.
+
+    A scrape timestamp says only when an increase was observed. The last
+    unchanged scrape is therefore the lower bound of the possible dispatch
+    interval. A counter reset breaks continuity with the pre-run baseline and
+    makes that interval unsuitable for ordering evidence.
+    """
+    last_unchanged_at: str | None = None
+    previous_value = baseline
+    counter_continuous = True
     for prom_path in sorted((run_dir / "metrics" / "async").glob("*.prom")):
         value = _metric_value(prom_path.read_text(encoding="utf-8"), DISPATCHED)
-        if value <= baseline:
-            continue
         metadata_path = prom_path.with_suffix(".json")
-        observed_at = _read_json(metadata_path)["observed_at"]
-        return observed_at, value
-    return None, None
+        observed_at = _normalize_observer_time(_read_json(metadata_path)["observed_at"])
+        if value < previous_value:
+            counter_continuous = False
+        if value == baseline and counter_continuous:
+            last_unchanged_at = observed_at
+        if value <= baseline:
+            previous_value = value
+            continue
+        return last_unchanged_at, observed_at, value, counter_continuous
+    return last_unchanged_at, None, None, counter_continuous
 
 
 def _first_index(items: list[Any], predicate: Callable[[Any], bool]) -> int | None:
@@ -216,10 +223,13 @@ def verify(
     dispatched_after = _metric_value(metrics_after, DISPATCHED)
     successful_before = _metric_value(metrics_before, SUCCESSFUL)
     successful_after = _metric_value(metrics_after, SUCCESSFUL)
-    first_increase_at, first_increase_value = _first_metric_increase(
-        run_dir, dispatched_before
-    )
-    positive_log_at = _first_log_time(planner_log, "max_admission_rps=5.0")
+    (
+        last_unchanged_at,
+        first_increase_at,
+        first_increase_value,
+        dispatch_counter_continuous,
+    ) = _dispatch_counter_interval(run_dir, dispatched_before)
+    positive_lease_at = _state_time(states, positive_index)
 
     scale_up_log_needles = [
         "replica_floor=1 max_admission_rps=0.0",
@@ -282,9 +292,10 @@ def verify(
             for index, cap in enumerate(caps)
         ),
         "dispatch_started_after_positive_lease": first_increase_at is not None
-        and positive_index is not None
-        and positive_log_at is not None
-        and _parse_rfc3339(first_increase_at) >= positive_log_at,
+        and last_unchanged_at is not None
+        and positive_lease_at is not None
+        and dispatch_counter_continuous
+        and _parse_rfc3339(last_unchanged_at) >= _parse_rfc3339(positive_lease_at),
         "terminal_zero_observed_after_positive": terminal_zero_index is not None
         and positive_index is not None
         and terminal_zero_index > positive_index
@@ -385,7 +396,8 @@ def verify(
             )
 
     notes = [
-        "The Redis lease is authoritative; Async's drain gauge reports the last gate evaluation and can remain at 5 while the queue is idle."
+        "The Redis lease is authoritative; Async's drain gauge reports the last gate evaluation and can remain at 5 while the queue is idle.",
+        "Dispatch ordering is certified only when a counter-unchanged scrape follows the first observed positive Redis lease, a later scrape increases, and no counter reset is observed between the baseline and that increase.",
     ]
     if expected_idle_replicas is None:
         notes.append(
@@ -405,6 +417,7 @@ def verify(
             "adapter_one": _state_time(states, scale_index),
             "worker_ready": _state_time(states, ready_index),
             "positive_lease": _state_time(states, positive_index),
+            "last_unchanged_dispatch_counter": last_unchanged_at,
             "first_dispatch_counter_increase": first_increase_at,
             "terminal_zero_lease": _state_time(states, terminal_zero_index),
             "observer_last": _state_time(states, len(states) - 1 if states else None),
@@ -423,6 +436,8 @@ def verify(
             "dispatch_counter": {
                 "before": dispatched_before,
                 "after": dispatched_after,
+                "continuous_through_first_increase": dispatch_counter_continuous,
+                "last_unchanged_at": last_unchanged_at,
                 "first_increase_value": first_increase_value,
             },
             "successful_counter": {

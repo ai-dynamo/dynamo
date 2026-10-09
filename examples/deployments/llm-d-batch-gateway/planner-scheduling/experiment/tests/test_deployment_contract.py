@@ -30,6 +30,36 @@ def _render(path: Path, replacements: dict[str, str]) -> str:
     return rendered
 
 
+def test_planner_overlay_image_requires_and_records_source_provenance() -> None:
+    dockerfile = (PLANNER_ROOT / "PlannerBatchImpact.Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    dated_base = "nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly:20261004-1cbc578"
+
+    assert f"FROM {dated_base}@sha256:" in dockerfile
+    assert f'org.opencontainers.image.base.name="{dated_base}"' in dockerfile
+    assert "dynamo-planner-nightly:latest" not in dockerfile
+    assert "ARG DYNAMO_SOURCE_COMMIT_SHA" in dockerfile
+    assert "ARG DYNAMO_COMMIT_SHA\n" not in dockerfile
+    assert 'test -n "${DYNAMO_SOURCE_COMMIT_SHA}"' in dockerfile
+    assert 'test -n "${PLANNER_SOURCE_SHA256}"' in dockerfile
+    assert "DYNAMO_COMMIT_SHA=${DYNAMO_SOURCE_COMMIT_SHA}" in dockerfile
+    assert 'org.opencontainers.image.revision="${DYNAMO_SOURCE_COMMIT_SHA}"' in (
+        dockerfile
+    )
+
+    instructions = (PLANNER_ROOT / "experiment" / "workloads" / "README.md").read_text(
+        encoding="utf-8"
+    )
+    assert "git archive --format=tar HEAD components/src/dynamo/planner" in instructions
+    assert '--build-arg "DYNAMO_SOURCE_COMMIT_SHA=${DYNAMO_SOURCE_COMMIT_SHA}"' in (
+        instructions
+    )
+    assert '--build-arg "PLANNER_SOURCE_SHA256=${PLANNER_SOURCE_SHA256}"' in (
+        instructions
+    )
+
+
 def test_async_values_preserve_namespace_readiness_and_leased_pool_gates() -> None:
     rendered = _render(
         EXAMPLE_ROOT / "llm-d-async-planner-values.yaml",
