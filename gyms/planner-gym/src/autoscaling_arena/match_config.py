@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
 import yaml
-from autoscaling_arena.substrates import SUBSTRATES
+from autoscaling_arena.substrates import DEFAULT_COLD_START_DELAY_S, SUBSTRATES
 from autoscaling_arena.trace_preparation import TracePreparationConfig
 from autoscaling_arena.workloads import WORKLOADS, validate_mooncake_trace
 
@@ -233,7 +233,7 @@ class ModelConfig:
 class EngineRuntimeConfig:
     """Human-facing engine lifecycle and disaggregated-transfer behavior."""
 
-    cold_start_delay_s: Optional[float] = None
+    cold_start_delay_s: Optional[float] = DEFAULT_COLD_START_DELAY_S
     kv_transfer_bandwidth_gbps: Optional[float] = None
     kv_bytes_per_token: Optional[int] = None
 
@@ -1117,7 +1117,9 @@ def _resolve_engine_config(data: Mapping[str, Any], path: str) -> EngineConfig:
         num_gpus=num_gpus,
         extra_args=dict(data.get("extra_args", {})),
         runtime=EngineRuntimeConfig(
-            cold_start_delay_s=runtime_data.get("cold_start_delay_s"),
+            cold_start_delay_s=runtime_data.get(
+                "cold_start_delay_s", DEFAULT_COLD_START_DELAY_S
+            ),
             kv_transfer_bandwidth_gbps=kv_transfer_bandwidth,
             kv_bytes_per_token=kv_bytes_per_token,
         ),

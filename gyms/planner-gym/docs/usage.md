@@ -347,7 +347,7 @@ backend:
       moe_ep_size: 1
       attention_dp_size: 1
       runtime:
-        cold_start_delay_s: 30
+        cold_start_delay_s: 60
       extra_args: {}
     # Optional partial overrides inherited from common.
     prefill:
@@ -379,7 +379,9 @@ counts by their independently resolved engine costs. An engine's `backend`
 selects DynoSim's scheduler semantics. AISimulate performance lookup defaults to that
 backend/version but can be decoupled explicitly with `ais_backend` and
 `ais_backend_version`; identity and accounting fields cannot be overridden
-through `extra_args`. `cold_start_delay_s` models worker startup. KV handoff
+through `extra_args`. `cold_start_delay_s` models worker startup and defaults to
+60 seconds for each engine role, including substrate presets. Set it to `0`
+explicitly to model immediate startup, or set a measured delay. KV handoff
 delay requires `kv_transfer_bandwidth_gbps` (GB/s) and `kv_bytes_per_token` together;
 for a disaggregated deployment they normally belong on the prefill engine.
 Replace the example bytes/token value with the model and KV-cache dtype being

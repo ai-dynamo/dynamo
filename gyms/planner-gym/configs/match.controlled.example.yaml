@@ -12,7 +12,7 @@ backend:
       system: h200_sxm
       backend: vllm
       tp_size: 1
-      runtime: {cold_start_delay_s: 0}
+      runtime: {cold_start_delay_s: 60}
       extra_args:
         timing_model: {type: fixed, prefill_ms: 10, decode_ms: 5}
         num_gpu_blocks: 65536

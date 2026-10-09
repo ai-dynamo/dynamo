@@ -182,6 +182,43 @@ def test_profile_conflicts_and_summary_policy_fail_before_replay(raw_match, tmp_
         _parse(raw_match, tmp_path)
 
 
+@pytest.mark.parametrize("topology", ["agg", "disagg"])
+@pytest.mark.parametrize(
+    ("runtime", "expected"),
+    [
+        ({}, 60.0),
+        ({"cold_start_delay_s": 0}, 0.0),
+        ({"cold_start_delay_s": 12.5}, 12.5),
+    ],
+)
+def test_cold_start_defaults_and_explicit_overrides_reach_replay(
+    raw_match, tmp_path, topology, runtime, expected
+):
+    backend = raw_match["backend"]
+    backend["topology"] = topology
+    backend["engines"]["common"]["runtime"] = runtime
+    if topology == "disagg":
+        backend["autoscalers"][0]["config"]["num_prefill"] = 1
+    config = _parse(raw_match, tmp_path)
+    for role in ("aggregate",) if topology == "agg" else ("prefill", "decode"):
+        engine = getattr(config.backend.engines, role)
+        assert engine.runtime.cold_start_delay_s == expected
+        rendered = json.loads(
+            match_runner._render_engine_args(engine, "synthetic-model")
+        )
+        assert rendered["startup_time"] == expected
+
+    overrides = {"startup_time": runtime["cold_start_delay_s"]} if runtime else {}
+    substrate = Substrate(
+        "probe",
+        "synthetic-model",
+        "synthetic-system",
+        "vllm",
+        extra_engine_args=overrides,
+    )
+    assert json.loads(substrate.engine_args())["startup_time"] == expected
+
+
 def test_external_timing_cannot_override_owned_identity(raw_match, tmp_path):
     config = _parse(raw_match, tmp_path)
     external = {

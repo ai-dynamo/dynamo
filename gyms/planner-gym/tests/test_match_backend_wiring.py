@@ -400,6 +400,7 @@ def test_run_sim_item_wires_legacy_preset_model_engine_speedup_and_sla(
     )
 
     expected_engine_args = {
+        "startup_time": 60.0,
         "tensor_parallel_size": 1,
         "dp_size": 1,
         "engine": {

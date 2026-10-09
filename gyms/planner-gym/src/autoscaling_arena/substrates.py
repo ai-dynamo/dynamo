@@ -25,6 +25,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional
 
+DEFAULT_COLD_START_DELAY_S = 60.0
+
 
 @dataclass(frozen=True)
 class Substrate:
@@ -93,6 +95,7 @@ class Substrate:
             },
         )
         args = {
+            "startup_time": DEFAULT_COLD_START_DELAY_S,
             **launch,
             "engine": rank,
             "tensor_parallel_size": self.tp_size,

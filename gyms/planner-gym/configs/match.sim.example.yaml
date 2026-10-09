@@ -28,7 +28,7 @@ backend:
       attention_dp_size: 1
       runtime:
         # Delay before a newly created worker can serve requests.
-        cold_start_delay_s: 30
+        cold_start_delay_s: 60
       extra_args: {}
     prefill:
       runtime:
