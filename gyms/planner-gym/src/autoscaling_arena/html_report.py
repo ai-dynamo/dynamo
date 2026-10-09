@@ -43,6 +43,13 @@ _COLORS = (
 _DASHES = ("solid", "dash", "dot", "dashdot", "longdash", "longdashdot")
 _SYMBOLS = ("circle", "square", "diamond", "cross", "triangle-up", "x")
 _MAX_TIMELINE_POINTS = 1_500
+# The standalone HTML embeds every run's timeline. Large sweeps (a thousand
+# runs with telemetry) would otherwise produce a page no browser opens, so the
+# frontend payload is capped at this many points in total; each run is
+# downsampled (peaks and capacity transitions preserved) to an equal share,
+# never below ``_FRONTEND_MIN_POINTS``. The published JSON keeps full detail.
+_FRONTEND_POINT_BUDGET = 50_000
+_FRONTEND_MIN_POINTS = 48
 _FRONTEND_TIMELINE_FIELDS = frozenset(
     {
         "time_s",
@@ -518,8 +525,11 @@ def _engine_gpu_widths(result: Mapping[str, Any]) -> tuple[int, int]:
     return (prefill, decode)
 
 
-def _downsample(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if len(rows) <= _MAX_TIMELINE_POINTS:
+def _downsample(
+    rows: list[dict[str, Any]], limit: Optional[int] = None
+) -> list[dict[str, Any]]:
+    limit = _MAX_TIMELINE_POINTS if limit is None else max(2, int(limit))
+    if len(rows) <= limit:
         return rows
 
     # Preserve each chart lane's global peak: otherwise a short KV, latency, or
@@ -553,7 +563,7 @@ def _downsample(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # history down to only global peaks.
     telemetry_target = min(
         len(telemetry_indexes),
-        math.ceil(_MAX_TIMELINE_POINTS * 2 / 3),
+        math.ceil(limit * 2 / 3),
     )
     telemetry_needed = max(0, telemetry_target - len(indexes & telemetry_indexes))
     indexes.update(
@@ -593,7 +603,7 @@ def _downsample(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ):
             capacity_boundaries.update((previous, index))
     capacity_candidates = sorted(capacity_boundaries - indexes)
-    event_budget = max(0, _MAX_TIMELINE_POINTS - len(indexes))
+    event_budget = max(0, limit - len(indexes))
     decision_budget, capacity_budget = _shared_event_budgets(
         len(decisions), len(capacity_candidates), event_budget
     )
@@ -603,7 +613,7 @@ def _downsample(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # Give any event budget left unused by normal runs back to measured time
     # buckets. Retain the largest queue depth in each bucket (or its center when
     # queue telemetry is unavailable) so local backlog spikes remain visible.
-    remaining = max(0, _MAX_TIMELINE_POINTS - len(indexes))
+    remaining = max(0, limit - len(indexes))
     indexes.update(
         _bucketed_timeline_indexes(sorted(telemetry_indexes - indexes), rows, remaining)
     )
@@ -1286,9 +1296,13 @@ def build_match_report_data(
 
     summary = _mapping(report.get("summary"))
     rank_by = str(summary.get("rank_by", "goodput_per_gpu"))
-    metric_columns = [str(value) for value in _sequence(summary.get("metrics"))]
-    if rank_by not in metric_columns:
-        metric_columns.insert(0, rank_by)
+    # The ranking metric is the primary column: it leads the table regardless
+    # of where metrics.include listed it.
+    metric_columns = [rank_by] + [
+        str(value)
+        for value in _sequence(summary.get("metrics"))
+        if str(value) != rank_by
+    ]
 
     configurations: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
     workloads: "OrderedDict[str, None]" = OrderedDict()
@@ -1635,7 +1649,7 @@ _REPORT_JS = r"""
     return data.configurations.find(item => item.id === configSelect.value);
   }
   function formatMetric(metric, value) {
-    if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
+    if (value == null || value === undefined || !Number.isFinite(Number(value))) return "—";
     const numeric = Number(value);
     if (metric === "good_rate") return `${(numeric * 100).toFixed(1)}%`;
     if (metric.endsWith("_ms")) return numeric >= 1000 ? numeric.toFixed(0) : numeric.toFixed(1);
@@ -1701,7 +1715,7 @@ _REPORT_JS = r"""
     scope.results.forEach(result => {
       const row = document.createElement("tr");
       if (enabled.get(result.autoscaler) === false) row.className = "is-muted";
-      row.append(text("td", result.rank === null ? "—" : String(result.rank), "rank"));
+      row.append(text("td", result.rank == null ? "—" : String(result.rank), "rank"));
       const nameCell = document.createElement("td");
       const name = text("span", "", "name");
       const swatch = text("span", "", "swatch");
@@ -1713,7 +1727,7 @@ _REPORT_JS = r"""
         row.append(text("td", formatMetric(metric, result.metrics[metric])));
       });
       const cacheRatio = result.cache.prefix_cache_reused_ratio;
-      const cacheLabel = cacheRatio === null ? "Unavailable" :
+      const cacheLabel = cacheRatio == null ? "Unavailable" :
         `${(cacheRatio * 100).toFixed(2)}%${result.cache.status === "aggregate_only" ? " · whole run only" : ""}`;
       const cacheCell = text("td", cacheLabel);
       cacheCell.title = result.cache.note;
@@ -1843,16 +1857,16 @@ _REPORT_JS = r"""
       cacheTimeline: 0, cacheAggregate: 0, replicas: 0, gpus: 0
     };
     selected.forEach(result => {
-      const queueMeasurements = result.timeline.filter(point => point.total_queued_requests !== null);
-      const schedulerQueue = result.timeline.filter(point => point.scheduler_waiting_requests !== null);
-      const routerQueue = result.timeline.filter(point => point.router_pending_requests !== null);
-      const latency = result.timeline.filter(point => point.ttft_ms !== null);
-      const tpot = result.timeline.filter(point => point.tpot_ms !== null);
-      const activeKv = result.timeline.filter(point => point.active_kv_cache_utilization !== null);
-      const physicalKv = result.timeline.filter(point => point.physical_kv_cache_utilization !== null);
-      const schedulerReuse = result.timeline.filter(point => point.scheduler_cache_reuse !== null);
-      const routerKvHit = result.timeline.filter(point => point.router_kv_hit_rate !== null);
-      const decisions = result.timeline.filter(point => point.requested_replicas !== null);
+      const queueMeasurements = result.timeline.filter(point => point.total_queued_requests != null);
+      const schedulerQueue = result.timeline.filter(point => point.scheduler_waiting_requests != null);
+      const routerQueue = result.timeline.filter(point => point.router_pending_requests != null);
+      const latency = result.timeline.filter(point => point.ttft_ms != null);
+      const tpot = result.timeline.filter(point => point.tpot_ms != null);
+      const activeKv = result.timeline.filter(point => point.active_kv_cache_utilization != null);
+      const physicalKv = result.timeline.filter(point => point.physical_kv_cache_utilization != null);
+      const schedulerReuse = result.timeline.filter(point => point.scheduler_cache_reuse != null);
+      const routerKvHit = result.timeline.filter(point => point.router_kv_hit_rate != null);
+      const decisions = result.timeline.filter(point => point.requested_replicas != null);
       const capacity = result.timeline.filter(point => !point.decision_only);
       const cachePoints = result.cache.timeline || [];
       const cacheAggregate = result.cache.prefix_cache_reused_ratio;
@@ -1864,7 +1878,7 @@ _REPORT_JS = r"""
       if (schedulerReuse.length) laneCounts.schedulerReuse += 1;
       if (routerKvHit.length) laneCounts.routerKvHit += 1;
       if (cachePoints.length) laneCounts.cacheTimeline += 1;
-      if (cacheAggregate !== null) laneCounts.cacheAggregate += 1;
+      if (cacheAggregate != null) laneCounts.cacheAggregate += 1;
       if (capacity.length) {
         laneCounts.replicas += 1;
         laneCounts.gpus += 1;
@@ -1880,13 +1894,13 @@ _REPORT_JS = r"""
         y: queueMeasurements.map(point => point.total_queued_requests),
         xaxis: "x", yaxis: "y2",
         customdata: queueMeasurements.map(point => [
-          point.queued_prefill_requests === null ? "unavailable" : point.queued_prefill_requests,
-          point.queued_decode_requests === null ? "unavailable" : point.queued_decode_requests,
-          point.scheduler_waiting_prefill_requests === null ? "unavailable" : point.scheduler_waiting_prefill_requests,
-          point.scheduler_waiting_decode_requests === null ? "unavailable" : point.scheduler_waiting_decode_requests,
-          point.router_pending_prefill_requests === null ? "unavailable" : point.router_pending_prefill_requests,
-          point.router_pending_decode_requests === null ? "unavailable" : point.router_pending_decode_requests,
-          point.preemptions === null ? "unavailable" : point.preemptions
+          point.queued_prefill_requests == null ? "unavailable" : point.queued_prefill_requests,
+          point.queued_decode_requests == null ? "unavailable" : point.queued_decode_requests,
+          point.scheduler_waiting_prefill_requests == null ? "unavailable" : point.scheduler_waiting_prefill_requests,
+          point.scheduler_waiting_decode_requests == null ? "unavailable" : point.scheduler_waiting_decode_requests,
+          point.router_pending_prefill_requests == null ? "unavailable" : point.router_pending_prefill_requests,
+          point.router_pending_decode_requests == null ? "unavailable" : point.router_pending_decode_requests,
+          point.preemptions == null ? "unavailable" : point.preemptions
         ]),
         hovertemplate: `${result.autoscaler}<br>t=%{x:.1f}s<br>%{y} total requests in queue<br>prefill total=%{customdata[0]}, ${secondaryRoleName} total=%{customdata[1]}<br>scheduler waiting P=%{customdata[2]}, ${secondaryRoleShort}=%{customdata[3]}<br>router pending P=%{customdata[4]}, ${secondaryRoleShort}=%{customdata[5]}<br>preemptions in window=%{customdata[6]}<extra>total</extra>`
       });
@@ -1919,8 +1933,8 @@ _REPORT_JS = r"""
         y: latency.map(point => point.ttft_ms), xaxis: "x", yaxis: "y3",
         customdata: latency.map(point => [
           point.window_start_s, point.time_s,
-          point.ttft_samples !== null ? `${point.ttft_samples} TTFT samples` :
-            (point.completed_requests !== null ? `${point.completed_requests} completed requests` : "sample count unavailable")
+          point.ttft_samples != null ? `${point.ttft_samples} TTFT samples` :
+            (point.completed_requests != null ? `${point.completed_requests} completed requests` : "sample count unavailable")
         ]),
         hovertemplate: `${result.autoscaler}<br>t=%{x:.1f}s<br>mean TTFT=%{y:.2f} ms<br>window %{customdata[0]:.1f}–%{customdata[1]:.1f}s<br>%{customdata[2]}<extra></extra>`
       });
@@ -1929,8 +1943,8 @@ _REPORT_JS = r"""
         y: tpot.map(point => point.tpot_ms), xaxis: "x", yaxis: "y4",
         customdata: tpot.map(point => [
           point.window_start_s, point.time_s,
-          point.tpot_samples !== null ? `${point.tpot_samples} TPOT samples` :
-            (point.completed_requests !== null ? `${point.completed_requests} completed requests` : "sample count unavailable")
+          point.tpot_samples != null ? `${point.tpot_samples} TPOT samples` :
+            (point.completed_requests != null ? `${point.completed_requests} completed requests` : "sample count unavailable")
         ]),
         hovertemplate: `${result.autoscaler}<br>t=%{x:.1f}s<br>mean TPOT=%{y:.2f} ms<br>window %{customdata[0]:.1f}–%{customdata[1]:.1f}s<br>%{customdata[2]}<extra></extra>`
       });
@@ -1942,8 +1956,8 @@ _REPORT_JS = r"""
         xaxis: "x", yaxis: "y5",
         customdata: activeKv.map(point => [
           point.active_kv_blocks, point.total_kv_blocks,
-          point.prefill_active_kv_cache_utilization === null ? "unavailable" : `${(point.prefill_active_kv_cache_utilization * 100).toFixed(2)}%`,
-          point.decode_active_kv_cache_utilization === null ? "unavailable" : `${(point.decode_active_kv_cache_utilization * 100).toFixed(2)}%`
+          point.prefill_active_kv_cache_utilization == null ? "unavailable" : `${(point.prefill_active_kv_cache_utilization * 100).toFixed(2)}%`,
+          point.decode_active_kv_cache_utilization == null ? "unavailable" : `${(point.decode_active_kv_cache_utilization * 100).toFixed(2)}%`
         ]),
         hovertemplate: `${result.autoscaler}<br>t=%{x:.1f}s<br>active KV pressure=%{y:.2f}%<br>%{customdata[0]} / %{customdata[1]} blocks<br>P=%{customdata[2]}, ${secondaryRoleShort}=%{customdata[3]}<extra>active blocks</extra>`
       });
@@ -1955,8 +1969,8 @@ _REPORT_JS = r"""
         xaxis: "x", yaxis: "y5",
         customdata: physicalKv.map(point => [
           point.active_kv_blocks, point.inactive_kv_blocks, point.total_kv_blocks,
-          point.prefill_physical_kv_cache_utilization === null ? "unavailable" : `${(point.prefill_physical_kv_cache_utilization * 100).toFixed(2)}%`,
-          point.decode_physical_kv_cache_utilization === null ? "unavailable" : `${(point.decode_physical_kv_cache_utilization * 100).toFixed(2)}%`
+          point.prefill_physical_kv_cache_utilization == null ? "unavailable" : `${(point.prefill_physical_kv_cache_utilization * 100).toFixed(2)}%`,
+          point.decode_physical_kv_cache_utilization == null ? "unavailable" : `${(point.decode_physical_kv_cache_utilization * 100).toFixed(2)}%`
         ]),
         hovertemplate: `${result.autoscaler}<br>t=%{x:.1f}s<br>physical KV residency=%{y:.2f}%<br>active=%{customdata[0]}, inactive/reusable=%{customdata[1]}, capacity=%{customdata[2]} blocks<br>P=%{customdata[3]}, ${secondaryRoleShort}=%{customdata[4]}<extra>resident blocks</extra>`
       });
@@ -1968,7 +1982,7 @@ _REPORT_JS = r"""
         xaxis: "x", yaxis: "y6",
         customdata: routerKvHit.map(point => [
           point.window_start_s, point.time_s,
-          point.router_kv_hit_samples === null ? "sample count unavailable" : `${point.router_kv_hit_samples} routed requests`
+          point.router_kv_hit_samples == null ? "sample count unavailable" : `${point.router_kv_hit_samples} routed requests`
         ]),
         hovertemplate: `${result.autoscaler}<br>t=%{x:.1f}s<br>router KV hit rate=%{y:.2f}%<br>window %{customdata[0]:.1f}–%{customdata[1]:.1f}s<br>%{customdata[2]}<extra>router overlap</extra>`
       });
@@ -1981,8 +1995,8 @@ _REPORT_JS = r"""
         xaxis: "x", yaxis: "y6",
         customdata: schedulerReuse.map(point => [
           point.scheduler_cache_hit_tokens, point.scheduler_cache_total_tokens,
-          point.prefill_scheduler_cache_reuse === null ? "unavailable" : `${(point.prefill_scheduler_cache_reuse * 100).toFixed(2)}%`,
-          point.decode_scheduler_cache_reuse === null ? "unavailable" : `${(point.decode_scheduler_cache_reuse * 100).toFixed(2)}%`
+          point.prefill_scheduler_cache_reuse == null ? "unavailable" : `${(point.prefill_scheduler_cache_reuse * 100).toFixed(2)}%`,
+          point.decode_scheduler_cache_reuse == null ? "unavailable" : `${(point.decode_scheduler_cache_reuse * 100).toFixed(2)}%`
         ]),
         hovertemplate: `${result.autoscaler}<br>t=%{x:.1f}s<br>scheduler cache reuse=%{y:.2f}%<br>%{customdata[0]} / %{customdata[1]} observed tokens hit<br>P=%{customdata[2]}, ${secondaryRoleShort}=%{customdata[3]}<extra>telemetry window</extra>`
       });
@@ -1992,11 +2006,11 @@ _REPORT_JS = r"""
         xaxis: "x", yaxis: "y6",
         customdata: cachePoints.map(point => [
           point.window_start_s, point.time_s, point.reused_input_tokens,
-          point.input_tokens, point.completed_requests === null ? "completion count unavailable" : `${point.completed_requests} completed requests`
+          point.input_tokens, point.completed_requests == null ? "completion count unavailable" : `${point.completed_requests} completed requests`
         ]),
         hovertemplate: `${result.autoscaler}<br>t=%{x:.1f}s<br>realized prefix-cache reuse=%{y:.2f}%<br>window %{customdata[0]:.1f}–%{customdata[1]:.1f}s<br>%{customdata[2]} / %{customdata[3]} input tokens reused<br>%{customdata[4]}<extra></extra>`
       });
-      if (!schedulerReuse.length && !cachePoints.length && cacheAggregate !== null) traces.push({
+      if (!schedulerReuse.length && !cachePoints.length && cacheAggregate != null) traces.push({
         ...common, mode: "lines", line: {...common.line, width: 2, dash: "dot"},
         x: [0, Math.max(scope.duration_s, 1)], y: [cacheAggregate * 100, cacheAggregate * 100],
         xaxis: "x", yaxis: "y6",
@@ -2074,7 +2088,7 @@ _REPORT_JS = r"""
     const annotations = [];
     if (scope.arrivals.status !== "ok") annotations.push(laneAnnotation(scope.arrivals.note, .945));
     const queueUnavailable = selected
-      .filter(result => !result.timeline.some(point => point.total_queued_requests !== null))
+      .filter(result => !result.timeline.some(point => point.total_queued_requests != null))
       .map(result => result.autoscaler);
     if (!laneCounts.queue) {
       annotations.push(laneAnnotation("Total requests in queue unavailable; no values inferred.", .8125));
@@ -2095,11 +2109,11 @@ _REPORT_JS = r"""
     if (!laneCounts.gpus) annotations.push(laneAnnotation("Provisioned GPU timeline unavailable for the selected series.", .0475));
     const target = currentConfiguration()?.sla || {};
     const shapes = [];
-    if (target.ttft_ms !== null && target.ttft_ms !== undefined) shapes.push({
+    if (target.ttft_ms != null && target.ttft_ms !== undefined) shapes.push({
       type: "line", xref: "x", yref: "y3", x0: 0, x1: Math.max(scope.duration_s, 1),
       y0: target.ttft_ms, y1: target.ttft_ms, line: {color: muted, width: 1, dash: "dot"}
     });
-    if (target.tpot_ms !== null && target.tpot_ms !== undefined) shapes.push({
+    if (target.tpot_ms != null && target.tpot_ms !== undefined) shapes.push({
       type: "line", xref: "x", yref: "y4", x0: 0, x1: Math.max(scope.duration_s, 1),
       y0: target.tpot_ms, y1: target.tpot_ms, line: {color: muted, width: 1, dash: "dot"}
     });
@@ -2150,7 +2164,7 @@ _REPORT_JS = r"""
           /^xaxis\d*\.(range(?:\[[01]\])?|autorange)$/.test(key)
         );
         if (!changedRange) return;
-        if (frame !== null) cancelAnimationFrame(frame);
+        if (frame != null) cancelAnimationFrame(frame);
         frame = requestAnimationFrame(() => {
           frame = requestAnimationFrame(() => {
             frame = null;
@@ -2169,7 +2183,7 @@ _REPORT_JS = r"""
         "Queue telemetry unavailable; no values inferred.");
     const aggregateOnly = selected.filter(result =>
       result.cache.status === "aggregate_only" &&
-      !result.timeline.some(point => point.scheduler_cache_reuse !== null)
+      !result.timeline.some(point => point.scheduler_cache_reuse != null)
     ).map(result => result.autoscaler);
     const cacheNote = aggregateOnly.length ?
       ` Cache reuse is available only as a whole-run summary for ${aggregateOnly.join(", ")}; no time series is inferred.` : "";
@@ -2182,7 +2196,7 @@ _REPORT_JS = r"""
           (laneCounts.queueLayers ?
             " New queue timelines include scheduler waiting plus router pending; legacy series omit router pending." :
             " Legacy queue depth contains scheduler waiting only; router pending was not captured.")));
-    const latencyWindowNote = data.telemetry_sample_interval_s === null ?
+    const latencyWindowNote = data.telemetry_sample_interval_s == null ?
       "TTFT and TPOT are means over each saved telemetry window, not whole-run means." :
       `TTFT and TPOT are means over each saved telemetry window; ${Number(data.telemetry_sample_interval_s).toLocaleString()} seconds is the nominal sampling cadence, and the final window may be shorter.`;
     const capacityNote = isDisaggregated ?
@@ -2235,9 +2249,30 @@ def _safe_script_json(value: Any) -> str:
     )
 
 
-def _frontend_report_data(data: Mapping[str, Any]) -> dict[str, Any]:
-    """Drop persisted diagnostic detail that the standalone UI never reads."""
+def _frontend_point_limit(data: Mapping[str, Any]) -> Optional[int]:
+    """Per-run point cap that keeps the whole embedded payload within budget."""
 
+    results = [
+        result
+        for scope in _sequence(data.get("scopes"))
+        for result in _sequence(_mapping(scope).get("results"))
+    ]
+    total = sum(len(_sequence(_mapping(result).get("timeline"))) for result in results)
+    if not results or total <= _FRONTEND_POINT_BUDGET:
+        return None
+    return max(_FRONTEND_MIN_POINTS, _FRONTEND_POINT_BUDGET // len(results))
+
+
+def _frontend_report_data(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop persisted diagnostic detail that the standalone UI never reads.
+
+    Points keep only the fields the page renders and omit ``null`` values (the
+    page treats a missing field exactly like ``null``). When the sweep is large,
+    every run's timeline is additionally downsampled to an equal share of
+    ``_FRONTEND_POINT_BUDGET`` so the standalone file stays openable.
+    """
+
+    limit = _frontend_point_limit(data)
     output = dict(data)
     projected_scopes: list[dict[str, Any]] = []
     for raw_scope in _sequence(data.get("scopes")):
@@ -2245,14 +2280,29 @@ def _frontend_report_data(data: Mapping[str, Any]) -> dict[str, Any]:
         projected_results: list[dict[str, Any]] = []
         for raw_result in _sequence(scope.get("results")):
             result = dict(_mapping(raw_result))
+            rows = [
+                dict(_mapping(point)) for point in _sequence(result.get("timeline"))
+            ]
+            if limit is not None and len(rows) > limit:
+                rows = _downsample(rows, limit)
             result["timeline"] = [
                 {
                     key: value
-                    for key, value in _mapping(raw_point).items()
-                    if key in _FRONTEND_TIMELINE_FIELDS
+                    for key, value in point.items()
+                    if key in _FRONTEND_TIMELINE_FIELDS and value is not None
                 }
-                for raw_point in _sequence(result.get("timeline"))
+                for point in rows
             ]
+            cache = _mapping(result.get("cache"))
+            cache_rows = _sequence(cache.get("timeline"))
+            if limit is not None and len(cache_rows) > limit:
+                keep = set(_evenly_sampled_indexes(list(range(len(cache_rows))), limit))
+                result["cache"] = {
+                    **cache,
+                    "timeline": [
+                        row for index, row in enumerate(cache_rows) if index in keep
+                    ],
+                }
             projected_results.append(result)
         scope["results"] = projected_results
         projected_scopes.append(scope)

@@ -264,6 +264,10 @@ Config's directory. Real autoscaler entries refer to endpoint catalog entries
 by `name`; the runner
 benchmarks those deployments but does not create or reconfigure them. Pass
 `--overwrite` explicitly to replace an existing JSON or HTML destination.
+`--autoscaler NAME` (repeatable) runs only the named roster entries, and
+`--merge` folds those runs into the configured results JSON and HTML report
+in place, replacing earlier runs of the same entries and keeping the rest,
+so a new planner can join a published leaderboard without rerunning it.
 Optional `autoscaler_type` and `declared_config` fields on a real entry are
 recorded as controller provenance only. Each real endpoint's `model` is the
 operational value passed to AIPerf. Its optional `declared_deployment` block
@@ -591,6 +595,12 @@ identity; generated workloads use a 512-token block size.
 For the experimental TypeSafe Jev decision engine and its five-policy synthetic
 pilot, see [the Jev guide](jev.md). It uses the same Planner engine interface
 and reports hosted-controller overhead separately from simulation metrics.
+
+The CloudAI MPC and offline-RL planners (`cloudai-mpc`, `cloudai-rl`) and the
+seven-planner leaderboard they were evaluated on are described in
+[the CloudAI autoscalers guide](cloudai_autoscalers.md); the published tables
+and the exact commands that regenerate them live in
+[`results/`](../results/README.md).
 
 ### Create a custom synthetic workload
 

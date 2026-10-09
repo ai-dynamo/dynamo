@@ -58,6 +58,16 @@ _generate_ais_decode_fpms = _replay_planner._generate_ais_decode_fpms
 _generate_ais_prefill_fpms = _replay_planner._generate_ais_prefill_fpms
 
 
+def _native_replay_accepts(parameter: str) -> bool:
+    """Whether the compiled replay entry point exposes ``parameter``.
+
+    Compiled bindings publish ``__text_signature__``. When it is unavailable
+    (a Python stand-in, for instance) assume the current contract.
+    """
+    signature = getattr(_run_mocker_trace_replay, "__text_signature__", None)
+    return signature is None or parameter in signature
+
+
 @dataclass(frozen=True)
 class ArenaReplayResult:
     """Arena timeline composed with Dynamo's canonical offline report."""
@@ -1070,6 +1080,45 @@ def _normalize_engine_args_role(
     return json.dumps(values)
 
 
+def _replay_telemetry_consumer(
+    engine: Any, *, telemetry_sample_interval_s: Optional[float]
+) -> Optional[Callable[[dict[str, Any]], None]]:
+    """Return the engine's telemetry hook when it consumes replay telemetry.
+
+    An adapter opts in with ``consumes_replay_telemetry = True`` and an
+    ``on_telemetry(sample)`` method; ``telemetry_interval_s`` (optional)
+    pins the cadence its observation contract was derived at. Running such
+    an adapter without telemetry, at another cadence, or on a Dynamo build
+    without ``telemetry_callback`` is a configuration error, not a silent
+    degradation.
+    """
+    if not getattr(engine, "consumes_replay_telemetry", False):
+        return None
+    name = type(engine).__name__
+    hook = getattr(engine, "on_telemetry", None)
+    if not callable(hook):
+        raise TypeError(f"{name} consumes replay telemetry but has no on_telemetry()")
+    if telemetry_sample_interval_s is None:
+        raise ValueError(
+            f"{name} consumes replay telemetry; set telemetry_sample_interval_s "
+            "(Match Config: backend.replay.telemetry_sample_interval_s)"
+        )
+    required = getattr(engine, "telemetry_interval_s", None)
+    if required is not None and not math.isclose(
+        float(required), float(telemetry_sample_interval_s)
+    ):
+        raise ValueError(
+            f"{name} observes telemetry at {float(required):g} s; the replay "
+            f"samples every {telemetry_sample_interval_s:g} s"
+        )
+    if not _native_replay_accepts("telemetry_callback"):
+        raise RuntimeError(
+            "this Dynamo build's run_mocker_trace_replay() has no "
+            f"telemetry_callback; {name} cannot observe replay telemetry"
+        )
+    return hook
+
+
 def _supports_planner_bootstrap(engine: EngineProtocol) -> bool:
     """Whether an Arena engine consumes Dynamo Planner bootstrap state."""
 
@@ -1471,6 +1520,9 @@ def run_arena_replay(
         )
 
     engine = autoscaler(config, capabilities)
+    telemetry_consumer = _replay_telemetry_consumer(
+        engine, telemetry_sample_interval_s=telemetry_sample_interval_s
+    )
     warmup_observations = _planner_warmup_observations(config, engine)
     adapter = ReplayPlannerAdapter(
         planner_config=config,
@@ -1509,6 +1561,13 @@ def run_arena_replay(
                     }
                 )
 
+            telemetry_kwargs: dict[str, Any] = {}
+            if telemetry_consumer is not None:
+                # Telemetry-driven policies (CloudAI RL) observe every sample
+                # through the native callback, before the scaling callback at
+                # the same simulated instant; the JSONL artifact is still
+                # written. Other engines keep the native call unchanged.
+                telemetry_kwargs["telemetry_callback"] = telemetry_consumer
             native = _run_mocker_trace_replay(
                 replay_trace_files,
                 extra_engine_args=agg_args,
@@ -1539,6 +1598,7 @@ def run_arena_replay(
                     str(telemetry_path) if telemetry_path is not None else None
                 ),
                 scaling_policy=adapter,
+                **telemetry_kwargs,
             )
             planner = adapter.finalize(native.lifecycle_operations)
             replay_report = ReplayReport(
