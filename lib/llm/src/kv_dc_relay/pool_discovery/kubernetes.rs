@@ -21,10 +21,12 @@
 //!
 //! ```ignore
 //! let announcer = KubernetesPoolAnnouncer::new(hub, replicas, lease_duration);
-//! let announcement = announcer.announce(record.clone()).await?; // keep alive
+//! let announcement = announcer.announce(record.clone()).await?;
 //! let mut replicas = announcement.replicas();
 //! // For each replica in *replicas.borrow():
 //! //     dialer.dial(&replica, &record.key, publication.clone(), cancel.clone())
+//! // On shutdown:
+//! announcement.withdraw().await?;
 //! ```
 
 // Sketch: fields and parameters are unused until the bodies exist.

@@ -48,6 +48,10 @@ pub trait Directory<T, K>: Send + Sync {
 
     async fn list(&self) -> Result<Snapshot<T>, PoolDiscoveryError>;
 
+    /// One item, from the watch cache. Admission calls this per connection,
+    /// so it must not list.
+    async fn get(&self, key: &K) -> Result<Option<T>, PoolDiscoveryError>;
+
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,

@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use dynamo_kv_router::global_view::PoolKey;
 use dynamo_kv_router::pool_discovery::watch::{Directory, Snapshot, WatchStream};
 use dynamo_kv_router::pool_discovery::{
-    BuildPoolDiscovery, PeerCredentials, PoolAdmission, PoolDiscovery, PoolDiscoveryError,
-    PoolRecord, RelayAuthenticator, RelayIdentity, ReplicaEndpoint, ReplicaId,
+    BuildPoolDiscovery, PeerCredentials, PoolAdmission, PoolDirectory, PoolDiscovery,
+    PoolDiscoveryError, PoolRecord, RelayAuthenticator, RelayIdentity, ReplicaEndpoint, ReplicaId,
     VerifiedRelayIdentity,
 };
 use dynamo_runtime::discovery::Discovery;
@@ -50,11 +50,6 @@ impl KubernetesPoolDirectory {
         todo!()
     }
 
-    /// From the watch cache, for admission.
-    pub fn get(&self, key: &PoolKey) -> Option<PoolRecord> {
-        todo!()
-    }
-
     /// Keys whose Lease renewal this replica has not seen for
     /// `lease_duration`, on this replica's clock. Emitted as `Removed`.
     fn expired(&self, now: Instant) -> Vec<PoolKey> {
@@ -69,6 +64,11 @@ impl Directory<PoolRecord, PoolKey> for KubernetesPoolDirectory {
     }
 
     async fn list(&self) -> Result<Snapshot<PoolRecord>, PoolDiscoveryError> {
+        todo!()
+    }
+
+    /// From the reflector store.
+    async fn get(&self, key: &PoolKey) -> Result<Option<PoolRecord>, PoolDiscoveryError> {
         todo!()
     }
 
@@ -102,6 +102,10 @@ impl Directory<ReplicaEndpoint, ReplicaId> for RuntimeReplicaDirectory {
         todo!()
     }
 
+    async fn get(&self, key: &ReplicaId) -> Result<Option<ReplicaEndpoint>, PoolDiscoveryError> {
+        todo!()
+    }
+
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,
@@ -127,9 +131,10 @@ impl RelayAuthenticator for TokenReviewAuthenticator {
     }
 }
 
-/// The caller must match the record's `relay_identity`.
+/// `PoolDirectory::get`, then the caller must match the record's
+/// `relay_identity`. Not Kubernetes-specific.
 pub struct ExportAdmission {
-    pools: Arc<KubernetesPoolDirectory>,
+    pools: Arc<PoolDirectory>,
 }
 
 #[async_trait]

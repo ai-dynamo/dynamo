@@ -11,9 +11,11 @@ use async_trait::async_trait;
 use dynamo_kv_router::pool_discovery::{
     Announcement, PoolAnnouncer, PoolDiscoveryError, PoolRecord, ReplicaDirectory, ReplicaEndpoint,
 };
-use kube::Client;
+use kube::{Api, Client};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+
+use super::crd::DynamoPoolExport;
 
 pub struct KubernetesPoolAnnouncer {
     hub: Client,
@@ -40,18 +42,27 @@ impl PoolAnnouncer for KubernetesPoolAnnouncer {
     }
 }
 
-/// Drop stops the renewals and deletes the record and the Lease.
 pub struct KubernetesAnnouncement {
+    exports: Api<DynamoPoolExport>,
+    name: String,
     renewals: CancellationToken,
     replicas: watch::Receiver<Vec<ReplicaEndpoint>>,
 }
 
+#[async_trait]
 impl Announcement for KubernetesAnnouncement {
     fn replicas(&self) -> watch::Receiver<Vec<ReplicaEndpoint>> {
         todo!()
     }
+
+    /// Stops the renewals and deletes the record. The Lease's
+    /// `ownerReference` deletes the Lease with it.
+    async fn withdraw(self: Box<Self>) -> Result<(), PoolDiscoveryError> {
+        todo!()
+    }
 }
 
+/// Stops the renewals only. Without `withdraw`, the Lease expires.
 impl Drop for KubernetesAnnouncement {
     fn drop(&mut self) {
         todo!()

@@ -9,7 +9,7 @@ use super::record::PoolRecord;
 use crate::global_view::PoolKey;
 
 /// Decides whether an authenticated Relay may stream state for a pool.
-/// Usually a `PoolDirectory` lookup plus a `relay_identity` check.
+/// Usually `PoolDirectory::get` plus a `relay_identity` check.
 /// The runtime keys the stream by its `PlaneLease`, not by the claimed key.
 #[async_trait]
 pub trait PoolAdmission: Send + Sync {
