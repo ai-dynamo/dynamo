@@ -1145,5 +1145,14 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 			return corev1.PodTemplateSpec{}, fmt.Errorf("checkpoint target container %q must set command for Snapshot's cuInterpose launcher, or the DGD must set %s: disabled", targetContainerName, consts.CUDASharedMemorySupportAnnotation)
 		}
 	}
+
+	// Prepare capture defaults for snapshot-backed intra-pod failover.
+	if dynamo.IsIntraPodFailoverEnabled(component) {
+		targetContainer, err := findPodTemplateContainer(&podTemplate, targetContainerName)
+		if err != nil {
+			return corev1.PodTemplateSpec{}, err
+		}
+		dynamo.PrepareSnapshotFailoverCapture(targetContainer)
+	}
 	return podTemplate, nil
 }

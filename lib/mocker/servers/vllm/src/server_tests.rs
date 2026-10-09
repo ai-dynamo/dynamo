@@ -73,12 +73,26 @@ fn preparation_is_deterministic() {
 }
 
 #[test]
-fn oversized_generation_is_rejected_before_token_planning() {
-    let mut oversized = request("too-many-tokens");
-    oversized.stopping.as_mut().unwrap().max_new_tokens = MAX_NEW_TOKENS + 1;
-    let error =
-        PreparedRequest::new(oversized, &MockerServerConfig::default(), 4, None).unwrap_err();
-    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+fn generation_output_limit_is_one_million_tokens() {
+    let config = MockerServerConfig::default();
+    for max_model_len in [None, Some(1_000_003)] {
+        for max_new_tokens in [32_769, 1_000_000] {
+            let mut req = request("large-output");
+            req.stopping.as_mut().unwrap().max_new_tokens = max_new_tokens;
+            let prepared = PreparedRequest::new(req, &config, 4, max_model_len).unwrap();
+            assert_eq!(prepared.max_output_tokens, max_new_tokens as usize);
+        }
+
+        let mut oversized = request("too-many-tokens");
+        oversized.stopping.as_mut().unwrap().max_new_tokens = 1_000_001;
+        let error = PreparedRequest::new(oversized, &config, 4, max_model_len).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            error
+                .message()
+                .contains("max_new_tokens must not exceed 1000000")
+        );
+    }
 }
 
 #[test]

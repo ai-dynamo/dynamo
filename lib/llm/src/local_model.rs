@@ -391,7 +391,8 @@ impl LocalModelBuilder {
                 model_path.display(),
             );
         }
-        let model_path = fs::canonicalize(model_path)?;
+        let original_model_path = model_path;
+        let model_path = fs::canonicalize(&original_model_path)?;
 
         let mut card =
             ModelDeploymentCard::load_from_disk(&model_path, self.custom_template_path.as_deref())?;
@@ -399,6 +400,11 @@ impl LocalModelBuilder {
         // path of the downloaded model.
         if let Some(source_path) = self.source_path.take() {
             card.set_source_path(source_path);
+        } else if self.model_name.as_deref().is_some_and(|name| {
+            name != original_model_path.to_string_lossy() && name != card.display_name
+        }) {
+            // A served name must not replace the local metadata source during registration.
+            card.set_source_path(model_path.clone());
         }
         // The served model name defaults to the full model path.
         // This matches what vllm and sglang do.
@@ -933,6 +939,102 @@ fn harvest_extra_files(
         out.push(CheckedFile::from_disk(&path)?);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod local_source_tests {
+    use super::*;
+
+    fn model_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1")
+    }
+
+    #[tokio::test]
+    async fn renamed_local_model_publishes_local_metadata() {
+        let canonical = fs::canonicalize(model_dir()).unwrap();
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(
+            runtime,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = drt
+            .namespace("local-source")
+            .unwrap()
+            .component("worker")
+            .unwrap()
+            .endpoint("generate");
+        let mut model = LocalModelBuilder::default()
+            .model_path(model_dir())
+            .model_name(Some("local-qwen".to_string()))
+            .self_host_metadata(false)
+            .build()
+            .await
+            .unwrap();
+
+        model
+            .attach(
+                &endpoint,
+                ModelType::Chat,
+                ModelInput::Tokens,
+                None,
+                Some(crate::worker_type::WorkerType::Aggregated),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let instances = drt
+            .discovery()
+            .list(dynamo_runtime::discovery::DiscoveryQuery::AllModels)
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 1);
+        let card: ModelDeploymentCard = instances[0].deserialize_model().unwrap();
+        assert_eq!(card.display_name, "local-qwen");
+        assert_eq!(card.source_path(), canonical.to_str().unwrap());
+        let files = card.iter_metadata_files();
+        assert!(!files.is_empty());
+        for (file, _) in files {
+            assert!(file.url().is_none(), "unexpected remote metadata: {file:?}");
+            assert!(file.path().unwrap().starts_with(&canonical));
+        }
+        drt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn default_names_keep_their_representation() {
+        let canonical = fs::canonicalize(model_dir()).unwrap();
+        let path_name = canonical.to_str().unwrap().to_string();
+        let relative = model_dir()
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_path_buf();
+        let dir = tempfile::tempdir().unwrap();
+        let symlink = dir.path().join("model");
+        std::os::unix::fs::symlink(&canonical, &symlink).unwrap();
+        for (path, name) in [
+            (model_dir(), None),
+            (model_dir(), Some(path_name.clone())),
+            (relative.clone(), Some(relative.display().to_string())),
+            (symlink.clone(), Some(symlink.display().to_string())),
+        ] {
+            let mut builder = LocalModelBuilder::default();
+            builder.model_path(path).model_name(name.clone());
+            let model = builder.build().await.unwrap();
+            assert_eq!(model.display_name(), name.as_deref().unwrap_or(&path_name));
+            assert_eq!(model.card().source_path, None);
+            let mut original = LocalModelBuilder::default()
+                .model_path(model_dir())
+                .build()
+                .await
+                .unwrap()
+                .card()
+                .clone();
+            original.set_name(name.as_deref().unwrap_or(&path_name));
+            assert_eq!(model.card().mdcsum(), original.mdcsum());
+        }
+    }
 }
 
 #[cfg(test)]

@@ -283,6 +283,7 @@ pub(super) fn register_worker_metrics(
     let values: Vec<Box<dyn Collector>> = vec![
         Box::new(WORKER_LOAD_METRICS.active_decode_blocks.clone()),
         Box::new(WORKER_LOAD_METRICS.active_prefill_tokens.clone()),
+        Box::new(WORKER_LOAD_METRICS.active_requests.clone()),
         Box::new(WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.clone()),
         Box::new(WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.clone()),
         Box::new(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.clone()),
@@ -303,6 +304,7 @@ mod tests {
         inventory: Arc<WorkerInventory>,
         available: Arc<Mutex<HashSet<u64>>>,
         values: Vec<IntGaugeVec>,
+        active_requests: IntGaugeVec,
     }
 
     impl Fixture {
@@ -337,6 +339,18 @@ mod tests {
                 .unwrap()
             })
             .collect();
+            let active_requests = IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::FRONTEND,
+                        frontend_service::WORKER_ACTIVE_REQUESTS
+                    ),
+                    "Active requests by phase",
+                ),
+                &["worker_id", "dp_rank", "worker_type", "request_phase"],
+            )
+            .unwrap();
             let registry = Registry::new();
             registry
                 .register(Box::new(
@@ -345,6 +359,9 @@ mod tests {
                         values
                             .iter()
                             .map(|value| Box::new(value.clone()) as Box<dyn Collector>)
+                            .chain(std::iter::once(
+                                Box::new(active_requests.clone()) as Box<dyn Collector>
+                            ))
                             .collect(),
                     )
                     .unwrap(),
@@ -355,6 +372,7 @@ mod tests {
                 inventory,
                 available,
                 values,
+                active_requests,
             }
         }
 
@@ -423,6 +441,48 @@ mod tests {
         fn count(&self, state: &str) -> Option<f64> {
             self.sample("dynamo_frontend_router_workers", &[("state", state)])
         }
+    }
+
+    #[test]
+    fn active_request_phases_follow_worker_availability_and_removal() {
+        let f = Fixture::new();
+        f.observe(&[1, 2], &[1, 2], WorkerGroupState::Ready);
+        *f.available.lock() = HashSet::from([1, 2]);
+        let name = "dynamo_frontend_worker_active_requests";
+        for phase in ["prefill", "decode"] {
+            for id in ["1", "2"] {
+                f.active_requests
+                    .with_label_values(&[id, "0", "decode", phase])
+                    .set(3);
+            }
+            assert_eq!(
+                f.sample(name, &[("worker_id", "1"), ("request_phase", phase)]),
+                Some(3.0)
+            );
+        }
+        for rank in ["none", "99"] {
+            f.active_requests
+                .with_label_values(&["1", rank, "decode", "prefill"])
+                .set(9);
+            assert_eq!(f.sample(name, &[("dp_rank", rank)]), None);
+        }
+
+        f.observe(&[2], &[2], WorkerGroupState::Ready);
+        for phase in ["prefill", "decode"] {
+            f.active_requests
+                .with_label_values(&["1", "0", "decode", phase])
+                .set(9);
+            assert_eq!(
+                f.sample(name, &[("worker_id", "1"), ("request_phase", phase)]),
+                None
+            );
+            assert_eq!(
+                f.sample(name, &[("worker_id", "2"), ("request_phase", phase)]),
+                Some(3.0)
+            );
+        }
+        f.available.lock().clear();
+        assert_eq!(f.sample(name, &[]), None);
     }
 
     #[test]
