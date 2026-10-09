@@ -542,44 +542,34 @@ mod tests {
     /// points, piling up tombstones until its table shrinks or it falls back to a scan.
     #[test]
     fn edge_positions_match_a_hash_map_model() {
-        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
-        let mut next = move || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-        fn draw(next: &mut impl FnMut() -> u64) -> u64 {
-            if next().is_multiple_of(8) {
-                1 + next() % 6
+        let mut rng = fastrand::Rng::with_seed(0x9E37_79B9_7F4A_7C15);
+        fn draw(rng: &mut fastrand::Rng) -> u64 {
+            if rng.u32(..8) == 0 {
+                rng.u64(1..=6)
             } else {
-                next()
+                rng.u64(..)
             }
         }
         let slot = Slot::new(7);
         let full = FullCoverage::single(slot);
 
         for _ in 0..300 {
-            let max_build = if next().is_multiple_of(4) {
+            let max_build = if rng.u32(..4) == 0 {
                 12 * SCAN_MAX_LEN
             } else {
                 2 * SCAN_MAX_LEN + 8
             };
             let mut chunks = vec![
-                (0..1 + next() as usize % max_build)
-                    .map(|_| draw(&mut next))
+                (0..rng.usize(1..=max_build))
+                    .map(|_| draw(&mut rng))
                     .collect::<Vec<_>>(),
             ];
-            for _ in 0..next() % 7 {
-                let len = if next().is_multiple_of(2) {
-                    1
-                } else {
-                    1 + next() as usize % 12
-                };
-                chunks.push((0..len).map(|_| draw(&mut next)).collect());
+            for _ in 0..rng.u32(..7) {
+                let len = if rng.bool() { 1 } else { rng.usize(1..=12) };
+                chunks.push((0..len).map(|_| draw(&mut rng)).collect());
             }
             let edge: Vec<u64> = chunks.concat();
-            let misses: Vec<u64> = (0..8).map(|_| next()).collect();
+            let misses: Vec<u64> = (0..8).map(|_| rng.u64(..)).collect();
             let probes: Vec<u64> = edge.iter().copied().chain(misses).collect();
 
             let mut state = CrtcNodeState::for_blocks(&blocks(&chunks[0]));
@@ -614,7 +604,7 @@ mod tests {
                 let mut suffix_model = last_positions(&edge[split..]);
                 assert_index_matches(&suffix, &suffix_model, &probes, 1);
 
-                let tail: Vec<u64> = (0..1 + next() % 20).map(|_| draw(&mut next)).collect();
+                let tail: Vec<u64> = (0..rng.u64(1..=20)).map(|_| draw(&mut rng)).collect();
                 let suffix_len = suffix.edge.len();
                 suffix.append_blocks_to_leaf(&full, slot, &blocks(&tail));
                 for (offset, &hash) in tail.iter().enumerate() {
@@ -623,14 +613,12 @@ mod tests {
                 let suffix_probes: Vec<u64> = probes.iter().chain(&tail).copied().collect();
                 assert_index_matches(&suffix, &suffix_model, &suffix_probes, 1);
 
-                split_down(prefix, &edge, &probes, &full, |len| {
-                    1 + next() as usize % (len - 1)
-                });
+                split_down(prefix, &edge, &probes, &full, |len| rng.usize(1..len));
             }
 
             // Peel a few blocks off the tail at a time, as stores that diverge late do.
             split_down(replay(&chunks, &full, slot), &edge, &probes, &full, |len| {
-                len - 1 - next() as usize % (len - 1).min(3)
+                len - 1 - rng.usize(..(len - 1).min(3))
             });
         }
     }
