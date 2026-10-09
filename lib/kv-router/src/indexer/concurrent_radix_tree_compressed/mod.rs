@@ -45,6 +45,9 @@ mod sync_impl;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod harness_impl;
+
 /// Thread-safe radix tree (compressed trie) for concurrent KV cache lookups.
 pub struct ConcurrentRadixTreeCompressed {
     /// The root of the radix tree. Has an empty edge and only contains children.
