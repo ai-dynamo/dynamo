@@ -7,13 +7,15 @@
 
 use async_trait::async_trait;
 use dynamo_kv_router::pool_discovery::watch::{Directory, Snapshot, WatchStream};
-use dynamo_kv_router::pool_discovery::{PoolDiscoveryError, ReplicaEndpoint, ReplicaId};
+use dynamo_kv_router::pool_discovery::{
+    McsImplementation, PoolDiscoveryError, ReplicaEndpoint, ReplicaId,
+};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
 
-/// The Global Router's headless Service. Must be headless: a ClusterSet IP
-/// sends each connection to only one replica.
+/// The Global Router's Service. It need not be headless: imported slices
+/// list every router pod, and the Relay reads slices, not DNS.
 #[derive(Clone, Debug)]
 pub struct RouterService {
     pub namespace: String,
@@ -24,7 +26,8 @@ pub struct RouterService {
 
 pub struct EndpointSliceReplicaDirectory {
     slices: Api<EndpointSlice>,
-    /// `kubernetes.io/service-name` or `multicluster.kubernetes.io/service-name`.
+    /// From `kubernetes.io/service-name` locally, or
+    /// [`super::mcs::service_selector`] for an import.
     selector: String,
     port_name: String,
 }
@@ -36,7 +39,7 @@ impl EndpointSliceReplicaDirectory {
     }
 
     /// The router's slices as MCS imports them into a workload cluster.
-    pub fn imported(workload: Client, router: &RouterService) -> Self {
+    pub fn imported(workload: Client, router: &RouterService, mcs: McsImplementation) -> Self {
         todo!()
     }
 

@@ -105,7 +105,7 @@ hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
 http-body-util = "0.1"
 ipnet = { workspace = true }
 k8s-openapi = { workspace = true }
-kube = { workspace = true, features = ["derive"] }
+kube = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true }
 moka = { workspace = true }
