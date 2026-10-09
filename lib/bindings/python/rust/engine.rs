@@ -556,6 +556,7 @@ fn unbuffered_python_response_stream(
         stream: Some(stream),
         ctx,
         request_id,
+        polled: false,
         exhausted: false,
     })
 }
@@ -571,6 +572,7 @@ struct DirectPythonResponseStream {
     stream: Option<PyItemStream>,
     ctx: Arc<dyn AsyncEngineContext>,
     request_id: String,
+    polled: bool,
     exhausted: bool,
 }
 
@@ -578,6 +580,7 @@ impl Stream for DirectPythonResponseStream {
     type Item = PythonResponseItem;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        self.polled = true;
         let poll = self
             .stream
             .as_mut()
@@ -604,7 +607,9 @@ impl Stream for DirectPythonResponseStream {
 
 impl Drop for DirectPythonResponseStream {
     fn drop(&mut self) {
-        if self.exhausted || !self.ctx.is_stopped() {
+        // An unopened Python async generator has no body state to clean up.
+        // Polling it here would start backend work after response setup failed.
+        if !self.polled || self.exhausted || !self.ctx.is_stopped() {
             return;
         }
 
@@ -737,8 +742,15 @@ impl AsyncEngine<ManyIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
 
 #[cfg(test)]
 mod tests {
+    use super::unbuffered_python_response_stream;
     use crate::errors::error_class_for_http_status;
     use dynamo_runtime::error::ErrorClass;
+    use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::task::Poll;
 
     #[test]
     fn http_statuses_map_to_semantic_classes() {
@@ -765,5 +777,27 @@ mod tests {
             ErrorClass::CapacityExhausted
         );
         assert_eq!(error_class_for_http_status(500), ErrorClass::Internal);
+    }
+
+    #[tokio::test]
+    async fn cancelled_unopened_python_stream_is_not_polled() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stream_polls = polls.clone();
+        let stream = futures::stream::poll_fn(move |_cx| {
+            stream_polls.fetch_add(1, Ordering::Relaxed);
+            Poll::Pending
+        });
+        let context = Context::new(()).context();
+        context.stop_generating();
+
+        let response = unbuffered_python_response_stream(
+            Box::pin(stream),
+            context,
+            "cancelled-before-acceptance".to_string(),
+        );
+        drop(response);
+        tokio::task::yield_now().await;
+
+        assert_eq!(polls.load(Ordering::Relaxed), 0);
     }
 }
