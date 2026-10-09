@@ -99,6 +99,7 @@ impl Inner {
         input_tokens: usize,
         progress: RequestProgress,
         session_final: bool,
+        ingress_at: Instant,
     ) -> Result<Arc<Notify>, ThunderAgentError> {
         let capacities = self.capacity_provider.snapshot();
         self.state.lock().register(
@@ -110,7 +111,7 @@ impl Inner {
                 session_final,
             ),
             &capacities,
-            Instant::now(),
+            ingress_at,
         )
     }
 
@@ -228,7 +229,14 @@ impl Drop for PendingClassification {
 async fn await_release<T>(
     mut pending: PendingClassification,
     value: T,
-) -> Result<(T, Option<dynamo_kv_router::protocols::WorkerWithDpRank>), ThunderAgentError> {
+) -> Result<
+    (
+        T,
+        Option<dynamo_kv_router::protocols::WorkerWithDpRank>,
+        std::time::Duration,
+    ),
+    ThunderAgentError,
+> {
     pending.inner.start_scheduler();
     let inner = Arc::clone(&pending.inner);
     let request_id = pending.request_id.clone();
@@ -238,8 +246,9 @@ async fn await_release<T>(
         let status = inner.state.lock().wait_status(&request_id, &notify);
         match status {
             WaitStatus::Released(worker) => {
+                let priority_jump = inner.state.lock().program_fcfs_priority_jump(&request_id);
                 pending.disarm();
-                return Ok((value, worker));
+                return Ok((value, worker, priority_jump));
             }
             WaitStatus::Missing => {
                 pending.disarm();
@@ -267,6 +276,7 @@ impl ThunderAgentClassifier {
             scheduler_interval_seconds = config.scheduler_interval_seconds,
             resume_timeout_seconds = config.resume_timeout_seconds,
             max_tracked_requests = config.max_tracked_requests,
+            program_fcfs = config.program_fcfs,
             "ThunderAgent admission enabled"
         );
         Ok(Self {
@@ -294,12 +304,14 @@ impl RequestClassifier for ThunderAgentClassifier {
         let session_final = session.session_final() == Some(true);
         let input_tokens = request.input_tokens();
         let progress = request.progress().clone();
+        let ingress_at = request.ingress_at();
         let notify = match self.inner.register(
             request_id.clone(),
             session_id,
             input_tokens,
             progress,
             session_final,
+            ingress_at.into_std(),
         ) {
             Ok(notify) => notify,
             Err(error) => {
@@ -312,10 +324,11 @@ impl RequestClassifier for ThunderAgentClassifier {
         Box::pin(async move {
             await_release(pending, request)
                 .await
-                .map(|(mut request, worker)| {
+                .map(|(mut request, worker, priority_jump)| {
                     if let Some(worker) = worker {
                         request.set_worker_selection_target(worker);
                     }
+                    request.add_priority_jump(priority_jump.as_secs_f64());
                     request
                 })
                 .map_err(|error| Box::new(error) as Box<ClassifierError>)
@@ -533,6 +546,7 @@ mod tests {
                 tokens,
                 progress,
                 session_final,
+                Instant::now(),
             )
             .unwrap();
     }
@@ -734,7 +748,7 @@ mod tests {
             {
                 let mut state = classifier.inner.state.lock();
                 for i in 1..programs {
-                    let mut program = scheduler::Program::new(100);
+                    let mut program = scheduler::Program::new(100, Instant::now());
                     program.assigned_worker = Some(WorkerWithDpRank::new(1, 0));
                     state.programs.insert(format!("session-{i}"), program);
                 }
@@ -1178,6 +1192,7 @@ mod tests {
             100,
             RequestProgress::new(100).0,
             false,
+            Instant::now(),
         );
         assert!(matches!(
             result,

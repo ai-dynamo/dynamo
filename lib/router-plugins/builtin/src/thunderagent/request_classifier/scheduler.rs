@@ -37,10 +37,11 @@ pub(crate) struct Program {
     marked_for_pause: bool,
     acting_since: Option<Instant>,
     deferred_since: Option<Instant>,
+    first_arrival_at: Instant,
 }
 
 impl Program {
-    pub(crate) fn new(input_tokens: usize) -> Self {
+    pub(crate) fn new(input_tokens: usize, first_arrival_at: Instant) -> Self {
         Self {
             status: ProgramStatus::Reasoning,
             lifecycle: ProgramLifecycle::Active,
@@ -51,6 +52,7 @@ impl Program {
             marked_for_pause: false,
             acting_since: None,
             deferred_since: None,
+            first_arrival_at,
         }
     }
 }
@@ -70,6 +72,8 @@ pub(crate) struct RequestState {
     prior_program: Option<Program>,
     began_program: bool,
     placement_target: Option<WorkerWithDpRank>,
+    ingress_at: Instant,
+    program_first_arrival_at: Instant,
     pub(crate) notify: Arc<Notify>,
 }
 
@@ -225,6 +229,10 @@ impl State {
         }
         self.clear_removed_workers(capacities);
         let notify = Arc::new(Notify::new());
+        let program_first_arrival_at = self
+            .programs
+            .get(&session_id)
+            .map_or(now, |program| program.first_arrival_at);
         // Keep registration identity with tombstones so reused IDs cannot revive them.
         let waiting = WaitingRequest {
             request_id: request_id.clone(),
@@ -249,6 +257,8 @@ impl State {
                 prior_program: None,
                 began_program: false,
                 placement_target: None,
+                ingress_at: now,
+                program_first_arrival_at,
                 notify: Arc::clone(&notify),
             },
         );
@@ -265,6 +275,19 @@ impl State {
             Some(request) => WaitStatus::Released(request.placement_target),
             None => WaitStatus::Missing,
         }
+    }
+
+    pub(crate) fn program_fcfs_priority_jump(&self, request_id: &str) -> Duration {
+        if !self.config.program_fcfs {
+            return Duration::ZERO;
+        }
+        self.requests
+            .get(request_id)
+            .map_or(Duration::ZERO, |request| {
+                request
+                    .ingress_at
+                    .saturating_duration_since(request.program_first_arrival_at)
+            })
     }
 
     pub(crate) fn telemetry(&self) -> StateTelemetry {
@@ -558,6 +581,7 @@ impl State {
         let session_id = request.session_id.clone();
         let input_tokens = request.input_tokens;
         let progress = request.progress.clone();
+        let program_first_arrival_at = request.program_first_arrival_at;
         let prior_program = self.programs.get(&session_id).cloned();
 
         if self.programs.contains_key(&session_id) {
@@ -571,7 +595,7 @@ impl State {
                 program.acting_since = None;
             });
         } else {
-            let mut program = Program::new(input_tokens);
+            let mut program = Program::new(input_tokens, program_first_arrival_at);
             program.request_progress = Some(progress);
             self.insert_program(session_id, program);
         }
@@ -1328,6 +1352,7 @@ mod tests {
             marked_for_pause: false,
             acting_since: Some(now),
             deferred_since: Some(now),
+            first_arrival_at: now,
         }
     }
 
@@ -1372,7 +1397,7 @@ mod tests {
             buffer_per_program: 0,
             ..Default::default()
         });
-        let mut program = Program::new(400);
+        let mut program = Program::new(400, now);
         program.status = ProgramStatus::Acting;
         program.assigned_worker = Some(worker);
         program.acting_since = Some(now);
@@ -1405,6 +1430,65 @@ mod tests {
 
         state.reconcile(&capacities, now + state.config.scheduler_interval());
         assert!(state.programs["session-a"].marked_for_pause);
+    }
+
+    #[test]
+    fn program_fcfs_uses_the_programs_first_arrival() {
+        let first_arrival = Instant::now();
+        let second_arrival = first_arrival + Duration::from_secs(12);
+        let worker = WorkerWithDpRank::new(1, 0);
+        let capacities = capacities(&[(1, 1_000)]);
+        let mut state = state(ThunderAgentConfig {
+            program_fcfs: true,
+            buffer_per_program: 0,
+            ..Default::default()
+        });
+
+        state
+            .register(
+                RequestRegistration::new(
+                    "request-1".into(),
+                    "session-a".into(),
+                    100,
+                    RequestProgress::new(100).0,
+                    false,
+                ),
+                &capacities,
+                first_arrival,
+            )
+            .unwrap();
+        assert_eq!(
+            state.program_fcfs_priority_jump("request-1"),
+            Duration::ZERO
+        );
+        state.on_event(
+            ClassifyEvent::Completed {
+                request_id: "request-1".into(),
+                worker,
+                context_tokens: Some(100),
+            },
+            &capacities,
+            first_arrival,
+        );
+
+        state
+            .register(
+                RequestRegistration::new(
+                    "request-2".into(),
+                    "session-a".into(),
+                    120,
+                    RequestProgress::new(120).0,
+                    false,
+                ),
+                &capacities,
+                second_arrival,
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.program_fcfs_priority_jump("request-2"),
+            Duration::from_secs(12)
+        );
     }
 
     #[test]
@@ -1462,14 +1546,14 @@ mod tests {
             ("healthy", healthy_rank, ProgramStatus::Acting, 100),
             ("other-worker", other_worker, ProgramStatus::Acting, 100),
         ] {
-            let mut program = Program::new(tokens);
+            let mut program = Program::new(tokens, now);
             program.status = status;
             program.assigned_worker = Some(worker);
             program.acting_since = Some(now);
             state.insert_program(id.into(), program);
         }
         state.insert_program("paused".into(), paused_program(100, now));
-        state.insert_program("unassigned".into(), Program::new(10_000));
+        state.insert_program("unassigned".into(), Program::new(10_000, now));
         let capacities = WorkerCapacitySnapshot::new(
             [acting_rank, reasoning_rank, healthy_rank, other_worker]
                 .into_iter()
@@ -1505,7 +1589,7 @@ mod tests {
             ..Default::default()
         });
         for id in ["a", "b", "c"] {
-            let mut program = Program::new(100);
+            let mut program = Program::new(100, now);
             program.status = ProgramStatus::Acting;
             program.assigned_worker = Some(worker);
             state.insert_program(id.into(), program);
@@ -1582,7 +1666,7 @@ mod tests {
                     ..Default::default()
                 });
                 for i in 0..program_count {
-                    let mut program = Program::new(100 + i / rank_count);
+                    let mut program = Program::new(100 + i / rank_count, now);
                     program.assigned_worker =
                         Some(WorkerWithDpRank::new(1, (i % rank_count) as u32));
                     if (i / rank_count) % 2 == 0 {

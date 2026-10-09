@@ -48,6 +48,7 @@ pub(crate) struct ClassificationOverrides {
     pub(crate) due_at: Option<Instant>,
     pub(crate) scheduling_cost_tokens: Option<usize>,
     pub(crate) worker_selection_target: Option<Option<WorkerAffinityTarget>>,
+    pub(crate) priority_jump: f64,
 }
 
 impl ClassifyRequest {
@@ -136,6 +137,12 @@ impl ClassifyRequest {
 
     pub fn set_scheduling_cost_tokens(&mut self, scheduling_cost_tokens: usize) {
         self.overrides.scheduling_cost_tokens = Some(scheduling_cost_tokens);
+    }
+
+    /// Add queue priority without replacing caller-provided priority.
+    /// Its interpretation depends on the configured queue policy.
+    pub fn add_priority_jump(&mut self, priority_jump: f64) {
+        self.overrides.priority_jump += priority_jump;
     }
 
     /// Prefer a worker/rank for this request, replacing its soft affinity target.

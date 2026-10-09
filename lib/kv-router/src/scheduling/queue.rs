@@ -906,6 +906,7 @@ impl<
             due_at,
             scheduling_cost_tokens,
             worker_selection_target,
+            priority_jump,
         } = classified_request.into_queue_inputs();
 
         if scheduling_cost_tokens == Some(0) {
@@ -913,6 +914,13 @@ impl<
                 "scheduling cost must be greater than zero".to_string(),
             ));
         }
+        let adjusted_priority_jump = request.priority_jump + priority_jump;
+        if !adjusted_priority_jump.is_finite() {
+            return Err(KvSchedulerError::InvalidClassificationMetadata(
+                "priority jump must remain finite".to_string(),
+            ));
+        }
+        request.priority_jump = adjusted_priority_jump;
         // An already-expired `due_at` is not validated here: the actor is the
         // single deadline authority and rejects it at enqueue on its own clock.
 
@@ -2688,6 +2696,8 @@ policy_classes:
         classified.set_policy_class("bulk");
         classified.set_due_at(due_at);
         classified.set_scheduling_cost_tokens(7);
+        classified.add_priority_jump(3.0);
+        request.priority_jump = 2.0;
 
         let metadata = queue
             .validate_classification(&mut request, classified, ingress_at)
@@ -2698,6 +2708,7 @@ policy_classes:
         );
         assert_eq!(metadata.snapshot.scheduling_cost_tokens, 7);
         assert_eq!(metadata.due_at, Some(due_at));
+        assert_eq!(request.priority_jump, 5.0);
 
         let mut invalid = queue.build_classify_request(&request, ingress_at);
         invalid.set_policy_class("missing");
@@ -2717,6 +2728,13 @@ policy_classes:
         zero_cost.set_scheduling_cost_tokens(0);
         assert!(matches!(
             queue.validate_classification(&mut request, zero_cost, ingress_at),
+            Err(KvSchedulerError::InvalidClassificationMetadata(_))
+        ));
+
+        let mut invalid_priority = queue.build_classify_request(&request, ingress_at);
+        invalid_priority.add_priority_jump(f64::INFINITY);
+        assert!(matches!(
+            queue.validate_classification(&mut request, invalid_priority, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
     }
