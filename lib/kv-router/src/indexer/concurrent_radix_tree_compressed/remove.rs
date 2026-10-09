@@ -108,8 +108,17 @@ impl ConcurrentRadixTreeCompressed {
                 // reactivated by restoring only the removed block, or emitted by dumps
                 // without a valid worker-specific parent. Preserve CRTC's locking and
                 // snapshot guarantees when implementing the traversal.
-                if let Some((consumed, stale_hashes)) =
-                    node.remove_worker_for_leading_hashes(worker.slot, &block_hashes[index..])
+                //
+                // Group only the following hashes whose entries name `node`. Another entry
+                // names the node holding this worker's coverage of its hash, which only
+                // that hash's own removal reaches: once cleanup unlinks a subtree the lane
+                // still names, a partial restore can store some of its hashes on a new
+                // live node.
+                let run_end = index
+                    + 1
+                    + lookup.leading_naming(worker.rank, &node, &block_hashes[index + 1..]);
+                if let Some((consumed, stale_hashes)) = node
+                    .remove_worker_for_leading_hashes(worker.slot, &block_hashes[index..run_end])
                 {
                     self.remove_lookup_hashes(lookup, worker.rank, &stale_hashes);
                     index += consumed;
