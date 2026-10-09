@@ -26,7 +26,9 @@ pub mod watch;
 
 pub use admission::PoolAdmission;
 pub use announce::{Announcement, PoolAnnouncer};
-pub use identity::{PeerCredentials, RelayAuthenticator, RelayIdentity, VerifiedRelayIdentity};
+pub use identity::{
+    PeerCredentials, RelayAuthenticator, RelayIdentity, VerifiedRelayIdentity, verify,
+};
 pub use mode::{BuildPoolDiscovery, PoolDiscovery, PoolDiscoveryMode, SettlePolicy};
 pub use record::{PoolDirectory, PoolEvent, PoolRecord, PoolRecordBuilder, Revision};
 pub use registrar::{LeasePolicy, PoolRegistrar, Registration};

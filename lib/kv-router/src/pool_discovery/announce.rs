@@ -20,9 +20,13 @@ pub trait PoolAnnouncer: Send + Sync {
     ) -> Result<Box<dyn Announcement>, PoolDiscoveryError>;
 }
 
-/// RAII guard. Keeps the pool registered while alive; dropping it stops
-/// heartbeats and unregisters the pool.
+/// RAII guard. Keeps the pool registered while alive. Call `withdraw` on a
+/// clean shutdown; dropping only stops heartbeats, and the lease expires.
+#[async_trait]
 pub trait Announcement: Send + Sync {
     /// Router replicas this pool must open state connections to.
     fn replicas(&self) -> watch::Receiver<Vec<ReplicaEndpoint>>;
+
+    /// Unregisters the pool and waits for the backend to confirm.
+    async fn withdraw(self: Box<Self>) -> Result<(), PoolDiscoveryError>;
 }

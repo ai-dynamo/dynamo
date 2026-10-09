@@ -26,7 +26,7 @@ pub trait RelayConnection: Send + Sync {
     async fn closed(&self);
 }
 
-/// The router's gRPC server side. Authenticates with `RelayAuthenticator` and
+/// The router's gRPC server side. Authenticates through `pool_discovery::verify` and
 /// checks with `PoolAdmission` before yielding a source.
 #[async_trait]
 pub trait RelayListener: Send + Sync {

@@ -9,8 +9,8 @@ use super::PoolDiscoveryError;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RelayIdentity(pub String);
 
-/// An identity proven by a [`RelayAuthenticator`]. Only authenticators in
-/// this module tree can create one, so writes cannot use a claimed identity.
+/// An identity proven by a [`RelayAuthenticator`]. Only [`verify`] creates
+/// one, so writes cannot use a claimed identity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct VerifiedRelayIdentity(pub(super) RelayIdentity);
 
@@ -24,10 +24,22 @@ pub enum PeerCredentials {
     BearerToken(String),
 }
 
+/// Implementations live in other crates, so they return a plain
+/// `RelayIdentity` and callers go through [`verify`].
 #[async_trait]
 pub trait RelayAuthenticator: Send + Sync {
     async fn authenticate(
         &self,
         credentials: &PeerCredentials,
-    ) -> Result<VerifiedRelayIdentity, PoolDiscoveryError>;
+    ) -> Result<RelayIdentity, PoolDiscoveryError>;
+}
+
+pub async fn verify(
+    authenticator: &dyn RelayAuthenticator,
+    credentials: &PeerCredentials,
+) -> Result<VerifiedRelayIdentity, PoolDiscoveryError> {
+    authenticator
+        .authenticate(credentials)
+        .await
+        .map(VerifiedRelayIdentity)
 }
