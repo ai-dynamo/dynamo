@@ -3,7 +3,7 @@
 
 [package]
 name = "kvbm-logical"
-version = "1.6.0"
+version = "1.6.0-dev20261009"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
