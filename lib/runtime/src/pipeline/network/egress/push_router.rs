@@ -1092,11 +1092,7 @@ where
         // Fallback resolution owns the unavailable-target decision. Allowing it
         // to see a worker already absent from discovery preserves Direct's
         // historical standalone fallback; `Deny` remains exact-target behavior.
-        let selected_is_discovered = self
-            .client
-            .instances()
-            .iter()
-            .any(|instance| instance.instance_id == instance_id);
+        let selected_is_discovered = self.client.is_instance_live(instance_id);
         if !selected_is_discovered {
             let fallback_is_available = self
                 .client
