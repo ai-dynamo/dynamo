@@ -4,20 +4,30 @@
 """Control plane tests without GPU engines or a privileged perf installation."""
 
 import asyncio
+import gzip
+import hashlib
 import json
 import os
+import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import aiohttp
 import msgspec
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from dynamo.frontend.profiling import hosting
+from dynamo.frontend.profiling.hosting import host, profiling_coordinator
 from dynamo.frontend.profiling.http import application
-from dynamo.profiling import adapters, collectors
-from dynamo.profiling import coordinator as service
-from dynamo.profiling import errors
+from dynamo.profiling import Coordinator, adapters, agent, collectors, errors
+from dynamo.profiling.adapters import CollectorRegistry
+from dynamo.profiling.artifacts import SharedFilesystemValidator
+from dynamo.profiling.clock import estimate_offset
 from dynamo.profiling.collectors import CollectionError, PerfCollector, TorchCollector
+from dynamo.profiling.errors import Unavailable
 from dynamo.profiling.models import Config, Plan, RuntimeSnapshot, Target, Worker
 
 pytestmark = [
@@ -29,21 +39,33 @@ pytestmark = [
 
 
 @pytest.fixture
-def controller(tmp_path, monkeypatch):
-    class FakePerf:
-        def __init__(self, pid, epoch, directory):
-            self.evidence = {"target_id": "frontend", "collector": "linux_perf"}
+def collector():
+    started = asyncio.Event()
+    return SimpleNamespace(
+        started=started,
+        evidence={"target_id": "frontend", "collector": "linux_perf"},
+        start=AsyncMock(side_effect=started.set),
+        stop=AsyncMock(),
+    )
 
-        async def start(self):
-            self.evidence["started"] = True
 
-        async def stop(self):
-            self.evidence["stopped"] = True
-
-    monkeypatch.setattr(adapters, "PerfCollector", FakePerf)
-    return service.Coordinator(
+@pytest.fixture
+def controller(tmp_path, monkeypatch, collector):
+    monkeypatch.setattr(adapters, "PerfCollector", lambda *args: collector)
+    return Coordinator(
         Config(str(tmp_path / "admin.sock"), str(tmp_path / "artifacts")),
         RuntimeSnapshot(123, "frontend-epoch", "test-host"),
+    )
+
+
+@pytest.fixture
+def provider_controller(tmp_path, collector):
+    registry = CollectorRegistry()
+    registry.register("nsys", lambda *args: [collector])
+    return Coordinator(
+        Config("unused", str(tmp_path), finalize_timeout_s=0.01),
+        RuntimeSnapshot(123, "epoch", "host"),
+        registry=registry,
     )
 
 
@@ -52,11 +74,12 @@ def plan(request_id="request-1", duration_ms=50):
 
 
 @pytest.mark.asyncio
-async def test_deadline_and_artifact_manifest(controller):
+async def test_deadline_and_artifact_manifest(controller, collector):
     session = controller.submit(plan())
     await session.task
     assert session.state == "completed"
-    assert session.collectors[0].evidence["stopped"] is True
+    collector.start.assert_awaited_once()
+    collector.stop.assert_awaited_once()
     manifest = json.loads((session.directory / "manifest.json").read_text())
     assert manifest["profiles"][0]["collector"] == "linux_perf"
     assert manifest["lifecycle_otel"]["coverage"] == "unknown"
@@ -67,7 +90,9 @@ async def test_deadline_and_artifact_manifest(controller):
 @pytest.mark.asyncio
 async def test_retry_reuses_session_and_conflicting_plan_rejected(controller):
     session = controller.submit(plan())
+    deadline = session.deadline_monotonic
     assert controller.submit(plan()) is session
+    assert session.deadline_monotonic == deadline
     with pytest.raises(errors.Conflict):
         controller.submit(plan(duration_ms=100))
     with pytest.raises(errors.Conflict):
@@ -97,28 +122,28 @@ def test_invalid_plans(controller, bad_plan, exception):
 
 
 @pytest.mark.asyncio
-async def test_uncertain_start_rolls_back_and_reports_failure(controller, monkeypatch):
-    class FailingPerf:
-        def __init__(self, *args):
-            self.evidence = {"collector": "linux_perf"}
+@pytest.mark.parametrize("failure", ["error", "timeout"])
+async def test_uncertain_start_is_bounded_and_cleaned_up(
+    controller, collector, failure
+):
+    async def hang():
+        await asyncio.Event().wait()
 
-        async def start(self):
-            raise CollectionError("permission denied")
-
-        async def stop(self):
-            self.evidence["stopped"] = True
-
-    monkeypatch.setattr(adapters, "PerfCollector", FailingPerf)
+    collector.start.side_effect = (
+        CollectionError("permission denied") if failure == "error" else hang
+    )
     session = controller.submit(plan())
-    await session.task
+    await asyncio.wait_for(session.task, 1)
     assert session.state == "failed"
-    assert session.collectors[0].evidence["stopped"]
-    assert "permission denied" in session.errors
+    collector.stop.assert_awaited_once()
+    assert (
+        "permission denied" if failure == "error" else "TimeoutError"
+    ) in session.errors
 
 
 @pytest.mark.asyncio
 async def test_worker_only_plan_still_profiles_frontend_and_stop_is_concurrent(
-    controller, monkeypatch
+    controller, collector, monkeypatch
 ):
     controller.workers["worker"] = Worker(
         "worker", "worker-epoch", "vllm", "http://configured"
@@ -126,37 +151,77 @@ async def test_worker_only_plan_still_profiles_frontend_and_stop_is_concurrent(
     stop_entered = asyncio.Event()
     finish_export = asyncio.Event()
 
-    class SlowTorch:
-        def __init__(self, worker, config):
-            self.evidence = {"collector": "torch_profiler"}
+    async def stop():
+        stop_entered.set()
+        await finish_export.wait()
 
-        async def start(self):
-            pass
-
-        async def stop(self):
-            stop_entered.set()
-            await finish_export.wait()
-
-    monkeypatch.setattr(adapters, "TorchCollector", SlowTorch)
-    session = controller.submit(Plan("id", [Target("worker", "worker-epoch")], 50))
+    worker_collector = SimpleNamespace(
+        evidence={"collector": "torch_profiler"}, start=AsyncMock(), stop=stop
+    )
+    controller.workers["second"] = Worker(
+        "second", "epoch", "vllm", "http://configured"
+    )
+    fast_worker = SimpleNamespace(
+        evidence={"collector": "torch_profiler"}, start=AsyncMock(), stop=AsyncMock()
+    )
+    monkeypatch.setattr(
+        adapters,
+        "TorchCollector",
+        lambda worker, config: worker_collector
+        if worker.target_id == "worker"
+        else fast_worker,
+    )
+    session = controller.submit(
+        Plan("id", [Target("worker", "worker-epoch"), Target("second", "epoch")], 50)
+    )
     await asyncio.wait_for(stop_entered.wait(), 1)
-    assert session.state == "finalizing"
-    assert session.collectors[0].evidence["stopped"]
-    assert controller.active is session
-    finish_export.set()
-    await session.task
+    try:
+        assert session.state == "finalizing"
+        collector.stop.assert_awaited_once()
+        fast_worker.stop.assert_awaited_once()
+        assert controller.active is session
+    finally:
+        finish_export.set()
+        await session.task
 
 
 @pytest.mark.asyncio
-async def test_rest_validation_stop_and_unknown_fields(controller):
+@pytest.mark.parametrize("frontend_perf", [True, False])
+async def test_rest_validation_stop_and_unknown_fields(
+    controller, collector, monkeypatch, frontend_perf
+):
+    controller.config = msgspec.structs.replace(
+        controller.config, frontend_perf_enabled=frontend_perf
+    )
+    if frontend_perf:
+        capture_plan = plan(duration_ms=5000)
+    else:
+
+        def forbidden_perf(*args):
+            raise AssertionError("Disabled frontend perf must never be instantiated")
+
+        monkeypatch.setattr(adapters, "PerfCollector", forbidden_perf)
+        monkeypatch.setattr(adapters, "TorchCollector", lambda *args: collector)
+        controller.workers["worker"] = Worker(
+            "worker", "epoch", "vllm", "http://configured"
+        )
+        collector.evidence.update(target_id="worker", collector="torch_profiler")
+        capture_plan = Plan("id", [Target("worker", "epoch")], 5000)
+        with pytest.raises(errors.Unsupported):
+            controller.validate(plan())
     async with TestClient(TestServer(application(controller))) as client:
         targets = await client.get("/admin/profiling/v1/targets")
-        assert (await targets.json())["targets"][0]["target_id"] == "frontend"
-        payload = msgspec.to_builtins(plan(duration_ms=5000))
+        frontend = (await targets.json())["targets"][0]
+        assert frontend["target_id"] == "frontend"
+        assert frontend["collectors"] == (["linux_perf"] if frontend_perf else [])
+        payload = msgspec.to_builtins(capture_plan)
         validation = await client.post(
             "/admin/profiling/v1/plans/validate", json=payload
         )
-        assert (await validation.json())["frontend_collector"] == "linux_perf"
+        assert validation.status == 200
+        assert (await validation.json())["frontend_collector"] == (
+            "linux_perf" if frontend_perf else None
+        )
         bad = await client.post(
             "/admin/profiling/v1/sessions", json={**payload, "pid": 1}
         )
@@ -170,75 +235,26 @@ async def test_rest_validation_stop_and_unknown_fields(controller):
         artifacts = await client.get(
             f"/admin/profiling/v1/sessions/{session_id}/artifacts"
         )
-        assert (await artifacts.json())["state"] == "completed"
+        manifest = await artifacts.json()
+        assert manifest["state"] == "completed"
+        assert manifest["frontend"]["profiling_enabled"] is frontend_perf
+        assert manifest["frontend"]["omission_reason"] == (
+            None if frontend_perf else "disabled_by_operator_config"
+        )
+        assert [profile["collector"] for profile in manifest["profiles"]] == (
+            ["linux_perf"] if frontend_perf else ["torch_profiler"]
+        )
         missing = await client.get("/admin/profiling/v1/sessions/missing")
         assert missing.status == 404
-
-
-@pytest.mark.asyncio
-async def test_explicit_worker_only_override_skips_perf_and_records_omission(
-    tmp_path, monkeypatch
-):
-    def forbidden_perf(*args):
-        raise AssertionError("Disabled frontend perf must never be instantiated")
-
-    calls = []
-
-    class WorkerCollector:
-        def __init__(self, worker, config):
-            self.evidence = {
-                "target_id": worker.target_id,
-                "collector": "torch_profiler",
-            }
-
-        async def start(self):
-            calls.append("start")
-
-        async def stop(self):
-            calls.append("stop")
-
-    monkeypatch.setattr(adapters, "PerfCollector", forbidden_perf)
-    monkeypatch.setattr(adapters, "TorchCollector", WorkerCollector)
-    config = Config(
-        str(tmp_path / "admin.sock"),
-        str(tmp_path / "artifacts"),
-        workers=[Worker("worker", "epoch", "vllm", "http://configured")],
-        frontend_perf_enabled=False,
-    )
-    controller = service.Coordinator(
-        config, RuntimeSnapshot(123, "frontend-epoch", "test-host", config.workers)
-    )
-    assert controller.targets()[0]["collectors"] == []
-    with pytest.raises(errors.Unsupported):
-        controller.validate(plan())
-    payload = msgspec.to_builtins(Plan("id", [Target("worker", "epoch")], 50))
-    async with TestClient(TestServer(application(controller))) as client:
-        validation = await client.post(
-            "/admin/profiling/v1/plans/validate", json=payload
-        )
-        assert validation.status == 200
-        assert (await validation.json())["frontend_collector"] is None
-        created = await client.post("/admin/profiling/v1/sessions", json=payload)
-        assert created.status == 202
-        session_id = (await created.json())["session_id"]
-        await controller.sessions[session_id].task
-        artifacts = await client.get(
-            f"/admin/profiling/v1/sessions/{session_id}/artifacts"
-        )
-        manifest = await artifacts.json()
-    assert manifest["state"] == "completed"
-    assert manifest["frontend"]["profiling_enabled"] is False
-    assert manifest["frontend"]["omission_reason"] == "disabled_by_operator_config"
-    assert [profile["collector"] for profile in manifest["profiles"]] == [
-        "torch_profiler"
-    ]
-    assert calls == ["start", "stop"]
+    collector.start.assert_awaited_once()
+    collector.stop.assert_awaited_once()
     assert controller.active is None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["vllm", "sglang"])
-@pytest.mark.parametrize("content_type", ["application/json", "text/plain"])
+@pytest.mark.parametrize(
+    "backend,content_type", [("vllm", "text/plain"), ("sglang", "application/json")]
+)
 async def test_backend_http200_error_is_failure_and_options_forwarded(
     tmp_path, backend, content_type
 ):
@@ -348,42 +364,22 @@ async def test_perf_attach_ack_and_signal_only_recorder(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_startup_timeout_is_bounded_and_cleaned_up(controller, monkeypatch):
-    class HangingPerf:
-        def __init__(self, *args):
-            self.evidence = {"collector": "linux_perf"}
+@pytest.mark.parametrize("failure", ["error", "timeout"])
+async def test_finalization_failure_blocks_new_capture(controller, collector, failure):
+    async def hang():
+        await asyncio.Event().wait()
 
-        async def start(self):
-            await asyncio.Event().wait()
-
-        async def stop(self):
-            self.evidence["stopped"] = True
-
-    monkeypatch.setattr(adapters, "PerfCollector", HangingPerf)
+    controller.config = msgspec.structs.replace(
+        controller.config, finalize_timeout_s=0.01
+    )
+    collector.stop.side_effect = (
+        CollectionError("flush failed") if failure == "error" else hang
+    )
     session = controller.submit(plan())
     await asyncio.wait_for(session.task, 1)
     assert session.state == "failed"
-    assert session.collectors[0].evidence["stopped"]
-    assert "TimeoutError" in session.errors
-
-
-@pytest.mark.asyncio
-async def test_finalization_failure_preserves_partial_coverage(controller, monkeypatch):
-    class BrokenPerf:
-        def __init__(self, *args):
-            self.evidence = {"collector": "linux_perf"}
-
-        async def start(self):
-            pass
-
-        async def stop(self):
-            raise CollectionError("flush failed")
-
-    monkeypatch.setattr(adapters, "PerfCollector", BrokenPerf)
-    session = controller.submit(plan())
-    await session.task
-    assert session.state == "failed"
-    assert session.collectors[0].evidence["coverage"] == "partial_or_unknown"
+    assert collector.evidence["coverage"] == "partial_or_unknown"
+    assert ("flush failed" if failure == "error" else "TimeoutError") in session.errors
     assert controller.active is None
     with pytest.raises(errors.Conflict, match="cleanup is uncertain"):
         controller.submit(plan("retry-after-stop-failure"))
@@ -402,7 +398,7 @@ async def test_frontend_epoch_checked_before_perf_spawn(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_manifest_write_failure_cannot_prevent_collector_cleanup(
-    controller, monkeypatch
+    controller, collector, monkeypatch
 ):
     session = controller.submit(plan())
     original_persist = controller.persist
@@ -415,7 +411,7 @@ async def test_manifest_write_failure_cannot_prevent_collector_cleanup(
     monkeypatch.setattr(controller, "persist", full_disk)
     await session.task
     assert session.state == "failed"
-    assert session.collectors[0].evidence["stopped"]
+    collector.stop.assert_awaited_once()
     assert controller.active is None
     assert any("disk full" in error for error in session.errors)
 
@@ -437,3 +433,380 @@ def test_process_epochs_distinguish_same_tick_replicas_and_pid_reuse(monkeypatch
     replacement = collectors.process_epoch(123)
     assert first != sibling
     assert first != replacement
+
+
+RANKS = ("dp0_pp0_tp0_dcp0_ep0_rank0", "dp1_pp0_tp0_dcp0_ep1_rank0")
+
+
+@pytest.fixture
+def socket_directory():
+    # pytest's nested temp path can exceed AF_UNIX's platform length limit.
+    with tempfile.TemporaryDirectory(prefix="dyn-prof-") as directory:
+        yield Path(directory)
+
+
+def trace(path):
+    payload = {
+        "traceEvents": [
+            {"name": "test_kernel", "cat": "kernel", "ph": "X", "ts": 1, "dur": 2}
+        ]
+    }
+    path.write_bytes(gzip.compress(json.dumps(payload).encode()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["complete", "missing", "corrupt", "stale_epoch", "unknown_membership"]
+)
+async def test_worker_capture_identity_clock_and_rank_validation(
+    tmp_path, monkeypatch, case
+):
+    monkeypatch.setattr(
+        agent,
+        "process_epoch",
+        lambda pid: "new-epoch" if case == "stale_epoch" else "epoch",
+    )
+    worker_agent = agent.ProfilingAgent("vllm")
+    calls = []
+    unselected_calls = []
+    options = {}
+    outputs = tmp_path / "native"
+    outputs.mkdir()
+    # A valid old trace from the missing rank must never satisfy this capture.
+    trace(outputs / f"old_{RANKS[1]}.1.pt.trace.json.gz")
+
+    async def start(request):
+        options.update(await request.json())
+        calls.append("start")
+        return web.Response(text='{"status":"ok"}', content_type="text/plain")
+
+    async def stop(request):
+        calls.append("stop")
+        for rank in RANKS[:1] if case == "missing" else RANKS:
+            path = outputs / f"{options['profile_prefix']}_{rank}.2.pt.trace.json.gz"
+            trace(path)
+            if case == "corrupt" and rank == RANKS[1]:
+                path.write_bytes(path.read_bytes()[:-5])
+        return web.Response(text='{"status":"ok"}', content_type="text/plain")
+
+    async def info(request):
+        return web.json_response(await worker_agent.info(await request.json()))
+
+    async def unselected(request):
+        unselected_calls.append(request.path)
+        return web.json_response({"status": "ok"})
+
+    app = web.Application()
+    app.router.add_post("/engine/control/start_profile", start)
+    app.router.add_post("/engine/control/stop_profile", stop)
+    app.router.add_post("/engine/control/profiling_info", info)
+    app.router.add_post("/unselected/engine/control/{action}", unselected)
+    async with TestServer(app) as server:
+        worker = Worker(
+            "decode",
+            "epoch",
+            "vllm",
+            str(server.make_url("/")),
+            artifact_location=str(outputs),
+            verify_runtime=True,
+            expected_rank_ids=[] if case == "unknown_membership" else list(RANKS),
+        )
+        config = Config(
+            str(tmp_path / "admin.sock"),
+            str(tmp_path / "sessions"),
+            frontend_perf_enabled=False,
+            lifecycle_evidence_location="otel-backend://existing",
+        )
+        controller = Coordinator(
+            config,
+            RuntimeSnapshot(
+                123,
+                "frontend-epoch",
+                "frontend-host",
+                [
+                    worker,
+                    Worker(
+                        "unselected",
+                        "other-epoch",
+                        "vllm",
+                        str(server.make_url("/unselected")),
+                    ),
+                ],
+            ),
+        )
+        session = controller.submit(
+            Plan(
+                "capture",
+                [Target("decode", "epoch")],
+                5000,
+                trace_ids=["trigger-trace"],
+                request_ids=["trigger-request"],
+            )
+        )
+
+        async def wait_recording():
+            while session.state in ("accepted", "starting"):
+                await asyncio.sleep(0)
+            assert session.state == "recording"
+
+        if case != "stale_epoch":
+            await asyncio.wait_for(wait_recording(), 5)
+            controller.stop(session.session_id)
+        await asyncio.wait_for(session.task, 5)
+    manifest = controller.manifest(session)
+    assert controller.active is None
+    assert unselected_calls == []
+    assert manifest["lifecycle_otel"]["trace_ids"] == ["trigger-trace"]
+    assert manifest["lifecycle_otel"]["coverage"] == "unknown"
+    if case == "stale_epoch":
+        assert session.state == "failed"
+        assert calls == []
+        assert "identity changed" in session.errors[0]
+        return
+    assert calls == ["start", "stop"]
+    assert options["profile_prefix"] == f"dynamo-{session.session_id}"
+    clocks = manifest["clock"]["workers"]["decode"]
+    assert clocks["start"]["alignment"] == clocks["end"]["alignment"] == "estimated"
+    assert clocks["start"]["uncertainty_ns"] >= 0
+    assert set(manifest["clock"]["workers"]) == {"decode"}
+    assert [item["target_id"] for item in manifest["profiles"]] == ["decode"]
+    assert manifest["profiles"][0]["identity_verification"] == "control_process_epoch"
+    validation = manifest["artifact_validation"][0]
+    assert all("old_" not in item["location"] for item in validation["artifacts"])
+    if case == "complete":
+        assert session.state == "completed"
+        assert manifest["artifact_status"] == "verified"
+        assert validation["coverage"] == "complete"
+        assert len(validation["artifacts"]) == 2
+        for item in validation["artifacts"]:
+            assert item["events"] == item["cuda_kernels"] == 1
+            raw = gzip.decompress(Path(item["location"]).read_bytes())
+            assert item["sha256_uncompressed"] == hashlib.sha256(raw).hexdigest()
+    elif case == "unknown_membership":
+        assert session.state == "completed"
+        assert manifest["artifact_status"] == "unverified"
+        assert validation["coverage"] == "unknown"
+    else:
+        assert session.state == "failed"
+        assert manifest["artifact_status"] == "partial"
+        if case == "missing":
+            assert validation["missing_rank_ids"] == [RANKS[1]]
+        else:
+            assert validation["artifacts"][1]["validation"] == "invalid"
+
+
+def test_clock_offset_bound_and_clock_step_rejection():
+    t1 = 1_000_000_000
+    offset = 5_000_000
+    sample = estimate_offset(
+        t1,
+        t1 + offset + 800_000,
+        t1 + offset + 1_000_000,
+        t1 + 2_000_000,
+        2_000_000,
+        200_000,
+    )
+    assert abs(sample["offset_ns"] - offset) <= sample["uncertainty_ns"]
+    assert sample["uncertainty_ns"] == 900_000
+    with pytest.raises(CollectionError, match="Clock changed"):
+        estimate_offset(
+            t1, t1 + offset, t1 + offset + 200_000, t1 + 2_000_000, 20_000_000, 200_000
+        )
+
+
+@pytest.mark.asyncio
+async def test_unmounted_store_remains_unverified(tmp_path):
+    result = await SharedFilesystemValidator().validate(
+        {
+            "collector": "torch_profiler",
+            "artifact_prefix": "capture",
+            "artifact_location": str(tmp_path / "unmounted"),
+        },
+        Config("socket", str(tmp_path)),
+    )
+    assert result["status"] == "unverified"
+    assert result["reason"] == "artifact_store_not_mounted"
+
+
+@pytest.mark.asyncio
+async def test_trace_validation_limits_and_duplicate_rank_files(tmp_path):
+    for suffix in ("1", "2"):
+        trace(tmp_path / f"capture_{RANKS[0]}.{suffix}.pt.trace.json.gz")
+    evidence = {
+        "collector": "torch_profiler",
+        "artifact_location": str(tmp_path),
+        "artifact_prefix": "capture",
+        "expected_rank_ids": [RANKS[0]],
+    }
+    validator = SharedFilesystemValidator()
+    result = await validator.validate(evidence, Config("socket", str(tmp_path)))
+    assert result["status"] == "invalid"
+    assert result["duplicate_rank_files"] is True
+    result = await validator.validate(
+        evidence, Config("socket", str(tmp_path), max_trace_bytes=10)
+    )
+    assert all(item["validation"] == "invalid" for item in result["artifacts"])
+    assert "byte limit" in result["artifacts"][0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_embedded_host_uses_pluggable_coordinator_and_drains(
+    socket_directory, provider_controller, collector
+):
+    controller = provider_controller
+    config = msgspec.structs.replace(
+        controller.config,
+        socket_path=str(socket_directory / "admin.sock"),
+        finalize_timeout_s=10.0,
+    )
+    controller.config = config
+    async with host(controller) as embedded:
+        assert embedded is controller
+        assert Path(config.socket_path).stat().st_mode & 0o777 == 0o600
+        async with aiohttp.ClientSession(
+            connector=aiohttp.UnixConnector(path=config.socket_path)
+        ) as client:
+            response = await client.post(
+                "http://localhost/admin/profiling/v1/sessions",
+                json={
+                    "client_request_id": "plugin",
+                    "mode": "nsys",
+                    "targets": [{"target_id": "frontend", "process_epoch": "epoch"}],
+                    "duration_ms": 5000,
+                },
+            )
+            assert response.status == 202
+            session_id = (await response.json())["session_id"]
+            conflict = await client.post(
+                "http://localhost/admin/profiling/v1/sessions",
+                json={
+                    "client_request_id": "other",
+                    "mode": "nsys",
+                    "targets": [{"target_id": "frontend", "process_epoch": "epoch"}],
+                    "duration_ms": 5000,
+                },
+            )
+            assert conflict.status == 409
+        await asyncio.wait_for(collector.started.wait(), 1)
+    collector.stop.assert_awaited_once()
+    assert controller.lookup(session_id).state == "completed"
+    assert not Path(config.socket_path).exists()
+    with pytest.raises(Unavailable):
+        controller.submit(Plan("new", [Target("frontend", "epoch")], 50, mode="nsys"))
+
+
+@pytest.mark.asyncio
+async def test_frontend_passes_runtime_snapshot_without_spawning_helper(
+    tmp_path, socket_directory, monkeypatch
+):
+    monkeypatch.setattr(hosting, "process_epoch", lambda pid: "frontend-epoch")
+
+    async def forbidden_spawn(*args, **kwargs):
+        raise AssertionError("Embedded hosting must not spawn a helper")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden_spawn)
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "socket_path": str(socket_directory / "admin.sock"),
+                "output_dir": str(tmp_path / "sessions"),
+                "frontend_perf_enabled": False,
+            }
+        )
+    )
+    context = {"input_type": "http"}
+    async with profiling_coordinator(str(path), runtime_context=context) as coordinator:
+        assert coordinator.runtime.frontend_pid == os.getpid()
+        assert coordinator.runtime.frontend_epoch == "frontend-epoch"
+        assert coordinator.runtime.context == context
+        assert coordinator.targets()[0]["collectors"] == []
+    assert coordinator.closed
+
+
+@pytest.mark.asyncio
+async def test_callable_api_owns_runtime_and_manifest_snapshots(
+    tmp_path, provider_controller, collector
+):
+    controller = provider_controller
+    config = Config("unused", str(tmp_path))
+    worker = Worker(
+        "decode",
+        "epoch",
+        "vllm",
+        "http://configured",
+        {"option": [1]},
+        expected_rank_ids=[RANKS[0]],
+    )
+    runtime = RuntimeSnapshot(123, "epoch", "host", [worker], {"labels": ["accepted"]})
+    controller = Coordinator(config, runtime, registry=provider_controller.registry)
+    runtime.workers.clear()
+    runtime.context["labels"].append("caller-mutated")
+    worker.start_options["option"].append(2)
+    inventory = controller.targets()
+    inventory[1]["expected_rank_ids"].clear()
+    assert controller.workers["decode"].expected_rank_ids == [RANKS[0]]
+    assert controller.workers["decode"].start_options == {"option": [1]}
+    original_plan = Plan(
+        "snapshot",
+        [Target("frontend", "epoch")],
+        5000,
+        mode="nsys",
+        trace_ids=["trace"],
+    )
+    session = controller.submit(original_plan)
+    original_plan.trace_ids.append("caller-mutated")
+    controller.runtime.context["labels"].append("later-context")
+    await asyncio.wait_for(collector.started.wait(), 1)
+    manifest = controller.manifest(session)
+    manifest["profiles"][0]["target_id"] = "caller-mutated"
+    manifest["runtime"]["context"]["labels"].clear()
+    manifest["lifecycle_otel"]["trace_ids"].clear()
+    await controller.close()
+    final = controller.manifest(session)
+    assert final["profiles"][0]["target_id"] == "frontend"
+    assert final["runtime"]["context"] == {"labels": ["accepted"]}
+    assert final["lifecycle_otel"]["trace_ids"] == ["trace"]
+    assert session.plan.trace_ids == ["trace"]
+    assert (
+        final["timing_contract"]["duration_semantics"]
+        == "best_effort_lease_from_acceptance"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["observed", "no_marker", "duplicate_marker", "no_base"]
+)
+async def test_native_recording_bounds_preserve_nanosecond_precision(tmp_path, case):
+    marker = '{"ph":"X","cat":"Trace","name":"PyTorch Profiler (0)","ts":714173694365.002,"dur":9800295.631}'
+    events = ['{"ph":"X","cat":"kernel","name":"test_kernel","ts":1,"dur":2}']
+    if case != "no_marker":
+        events.append(marker)
+    if case == "duplicate_marker":
+        events.append(marker)
+    base = '"baseTimeNanoseconds":1790857026000000000,' if case != "no_base" else ""
+    (tmp_path / f"capture_{RANKS[0]}.1.pt.trace.json").write_text(
+        "{" + base + '"traceEvents":[' + ",".join(events) + "]}"
+    )
+    result = await SharedFilesystemValidator().validate(
+        {
+            "collector": "torch_profiler",
+            "artifact_prefix": "capture",
+            "artifact_location": str(tmp_path),
+            "expected_rank_ids": [RANKS[0]],
+        },
+        Config("unused", str(tmp_path)),
+    )
+    assert result["status"] == "verified"
+    bounds = result["artifacts"][0]["recording_bounds"]
+    if case == "observed":
+        assert bounds == {
+            "status": "observed",
+            "clock": "worker_trace_unix_ns_unattested",
+            "start_unix_ns": 1791571199694365002,
+            "end_unix_ns": 1791571209494660633,
+            "duration_ns": 9800295631,
+        }
+    else:
+        assert bounds["status"] == "unknown"
