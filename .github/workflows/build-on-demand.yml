@@ -11,7 +11,7 @@ on:
       source:
         description: Frozen upstream source to validate (one source per run)
         type: choice
-        options: [base, timings]
+        options: [base, timings, file-chmod, pr340, metadata-stat]
         default: base
         required: true
       expected_head:
@@ -27,7 +27,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  HOOK_SOURCE_SHA: ${{ inputs.source == 'base' && 'd4731a43a2fe1a4d4f7ea24dc515a1a120a065c8' || inputs.source == 'timings' && '73d34cbebe8e647813e67f7fc768d2771b39aa06' || '' }}
+  HOOK_SOURCE_SHA: ${{ inputs.source == 'base' && 'd4731a43a2fe1a4d4f7ea24dc515a1a120a065c8' || inputs.source == 'timings' && '73d34cbebe8e647813e67f7fc768d2771b39aa06' || inputs.source == 'file-chmod' && '46faf02ef2fda46002c4ac3f8a51d3f2a1621a5c' || inputs.source == 'pr340' && '8e9457620f44e0cfc0aa4bb87fc7341f7758118f' || inputs.source == 'metadata-stat' && '15238c0d1d1dfa70811540518994bb435bc64787' || '' }}
+  HOOK_WORKFLOW_SHA256: ${{ inputs.source == 'pr340' && '1f1ae324b183fed6fcd2486fb8bf33e483d51ab3c2322e9d8c9b2b9a83ffba35' || 'ac9df6264ddbc8b58faf58215ac2622cbe1999ab5cc6d3bd2d8a243b880af63a' }}
   EXPECTED_WRAPPER_HEAD: ${{ inputs.expected_head }}
   WRAPPER_WORKFLOW_SHA: ${{ github.workflow_sha }}
   WRAPPER_WORKFLOW_REF: ${{ github.workflow_ref }}
@@ -50,7 +51,7 @@ jobs:
           test "$WRAPPER_WORKFLOW_SHA" = "$EXPECTED_WRAPPER_HEAD"
           test "$WRAPPER_WORKFLOW_REF" = ai-dynamo/dynamo/.github/workflows/build-on-demand.yml@refs/heads/agent/ci-hook-source-hosted
           case "$HOOK_SOURCE_SHA" in
-            d4731a43a2fe1a4d4f7ea24dc515a1a120a065c8|73d34cbebe8e647813e67f7fc768d2771b39aa06) ;;
+            d4731a43a2fe1a4d4f7ea24dc515a1a120a065c8|73d34cbebe8e647813e67f7fc768d2771b39aa06|46faf02ef2fda46002c4ac3f8a51d3f2a1621a5c|8e9457620f44e0cfc0aa4bb87fc7341f7758118f|15238c0d1d1dfa70811540518994bb435bc64787) ;;
             *) echo 'Source is outside the frozen allowlist' >&2; exit 1 ;;
           esac
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
@@ -65,7 +66,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$HOOK_SOURCE_SHA"
           test -z "$(git status --porcelain)"
           test "$(git remote get-url origin)" = https://github.com/actions/runner-container-hooks
-          printf '%s  %s\n' ac9df6264ddbc8b58faf58215ac2622cbe1999ab5cc6d3bd2d8a243b880af63a .github/workflows/build.yaml | sha256sum --check
+          printf '%s  %s\n' "$HOOK_WORKFLOW_SHA256" .github/workflows/build.yaml | sha256sum --check
           printf 'run_id=%s attempt=%s job=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_JOB"
           printf 'wrapper_head=%s workflow_sha=%s workflow_ref=%s\n' "$GITHUB_SHA" "$WRAPPER_WORKFLOW_SHA" "$WRAPPER_WORKFLOW_REF"
           printf 'source_head=%s tree=%s\n' "$HOOK_SOURCE_SHA" "$(git rev-parse 'HEAD^{tree}')"
@@ -76,6 +77,7 @@ jobs:
           package-manager-cache: false  # No shared cache reads or writes.
       - run: node --version && npm --version
         name: Log Node and npm versions
+        if: inputs.source != 'pr340'
       - run: npm ci
         name: Install dependencies
       - run: npm run bootstrap
@@ -107,7 +109,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$HOOK_SOURCE_SHA"
           test -z "$(git status --porcelain)"
           test "$(git remote get-url origin)" = https://github.com/actions/runner-container-hooks
-          printf '%s  %s\n' ac9df6264ddbc8b58faf58215ac2622cbe1999ab5cc6d3bd2d8a243b880af63a .github/workflows/build.yaml | sha256sum --check
+          printf '%s  %s\n' "$HOOK_WORKFLOW_SHA256" .github/workflows/build.yaml | sha256sum --check
           printf 'run_id=%s attempt=%s job=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_JOB"
           printf 'wrapper_head=%s workflow_sha=%s workflow_ref=%s\n' "$GITHUB_SHA" "$WRAPPER_WORKFLOW_SHA" "$WRAPPER_WORKFLOW_REF"
           printf 'source_head=%s tree=%s\n' "$HOOK_SOURCE_SHA" "$(git rev-parse 'HEAD^{tree}')"
@@ -118,6 +120,7 @@ jobs:
           package-manager-cache: false  # No shared cache reads or writes.
       - run: node --version && npm --version
         name: Log Node and npm versions
+        if: inputs.source != 'pr340'
       - run: npm ci
         name: Install dependencies
       - run: npm run bootstrap
@@ -145,7 +148,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$HOOK_SOURCE_SHA"
           test -z "$(git status --porcelain)"
           test "$(git remote get-url origin)" = https://github.com/actions/runner-container-hooks
-          printf '%s  %s\n' ac9df6264ddbc8b58faf58215ac2622cbe1999ab5cc6d3bd2d8a243b880af63a .github/workflows/build.yaml | sha256sum --check
+          printf '%s  %s\n' "$HOOK_WORKFLOW_SHA256" .github/workflows/build.yaml | sha256sum --check
           printf 'run_id=%s attempt=%s job=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_JOB"
           printf 'wrapper_head=%s workflow_sha=%s workflow_ref=%s\n' "$GITHUB_SHA" "$WRAPPER_WORKFLOW_SHA" "$WRAPPER_WORKFLOW_REF"
           printf 'source_head=%s tree=%s\n' "$HOOK_SOURCE_SHA" "$(git rev-parse 'HEAD^{tree}')"
@@ -161,7 +164,8 @@ jobs:
           config: packages/k8s/tests/test-kind.yaml
       - run: node --version && npm --version
         name: Log Node and npm versions
-      - run: npm ci
+        if: inputs.source != 'pr340'
+      - run: ${{ inputs.source == 'pr340' && 'npm install' || 'npm ci' }}
         name: Install dependencies
       - run: npm run bootstrap
         name: Bootstrap the packages
