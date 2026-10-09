@@ -8,7 +8,7 @@ use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
-use crate::protocols::ActiveSequenceEventData;
+use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
 use crate::services::indexer::backend::test_util::store_event;
@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
     crate::config::KvRouterConfig {
@@ -39,6 +40,9 @@ fn local_core_with(
         indexer_threads,
         cancel_token,
         SelectionCacheConfig::default(),
+        std::sync::Arc::new(|config, role, _| {
+            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
+        }),
     )
     .expect("valid test config")
 }
@@ -60,7 +64,14 @@ fn core_with(
         1,
         CancellationToken::new(),
         None,
-        policy_factory,
+        policy_factory.unwrap_or_else(|| {
+            Arc::new(|config, role, _| {
+                crate::WorkerSelectionPolicy::reference(
+                    config.clone(),
+                    role.default_selector_label(),
+                )
+            })
+        }),
         host,
         worker_type,
         true,
@@ -693,7 +704,11 @@ impl crate::scheduling::selector::WorkerPicker for CapturingPicker {
                 .cache()
                 .expect("CACHE inputs requested")
                 .iter()
-                .map(|cache| cache.shared_beyond_device_blocks())
+                .map(|cache| {
+                    cache.shared_hits().map_or(0, |hits| {
+                        hits.hits_beyond(cache.device_overlap_blocks().round().max(0.0) as u32)
+                    })
+                })
                 .collect(),
         });
         Ok(0)
@@ -848,15 +863,27 @@ async fn session_context_reaches_worker_selection() {
     let core = core_with_host_and_policy(SelectionHost::default(), Some(factory));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
 
-    let mut request = select_request();
-    request.session_id = Some("ignored-legacy".to_string());
-    request.session_context = Some(SelectionSessionContext {
+    let agent_headers = Arc::new(std::collections::BTreeMap::from([(
+        "x-claude-code-request-class".to_string(),
+        vec!["subagent".to_string(), "future-class".to_string()],
+    )]));
+    let session_context = SelectionSessionContext {
         session_id: "child-session".to_string(),
         parent_session_id: Some("root-session".to_string()),
         session_final: Some(true),
         input_trigger: Some(super::super::types::SelectionInputTrigger::ToolResult),
-    });
+        agent_headers: Some(Arc::clone(&agent_headers)),
+    };
+    let mut request = select_request();
+    request.session_id = Some("ignored-legacy".to_string());
+    request.session_context = Some(session_context.clone());
     core.select(request).await.expect("select");
+
+    let mut request = reserve_request("structured-session-reservation");
+    request.session_context = Some(session_context);
+    core.select_and_reserve(request)
+        .await
+        .expect("select and reserve with headers");
 
     let mut request = reserve_request("legacy-session-reservation");
     request.session_id = Some("legacy-only".to_string());
@@ -865,24 +892,31 @@ async fn session_context_reaches_worker_selection() {
         .expect("select and reserve");
 
     let observations = observed.lock();
-    let context = observations[0]
-        .session_context
-        .as_ref()
-        .expect("structured session context");
-    assert_eq!(context.session_id(), "child-session");
-    assert_eq!(context.parent_session_id(), Some("root-session"));
-    assert_eq!(context.session_final(), Some(true));
-    assert_eq!(
-        context.input_trigger(),
-        Some(crate::scheduling::WorkerSelectionInputTrigger::ToolResult)
-    );
+    for observation in &observations[..2] {
+        let context = observation
+            .session_context
+            .as_ref()
+            .expect("structured session context");
+        assert_eq!(context.session_id(), "child-session");
+        assert_eq!(context.parent_session_id(), Some("root-session"));
+        assert_eq!(context.session_final(), Some(true));
+        assert_eq!(
+            context.input_trigger(),
+            Some(crate::scheduling::WorkerSelectionInputTrigger::ToolResult)
+        );
+        assert!(std::ptr::eq(
+            context.agent_headers(),
+            agent_headers.as_ref()
+        ));
+    }
 
-    let legacy = observations[1]
+    let legacy = observations[2]
         .session_context
         .as_ref()
         .expect("legacy session context");
     assert_eq!(legacy.session_id(), "legacy-only");
     assert_eq!(legacy.parent_session_id(), None);
+    assert!(legacy.agent_headers().is_empty());
 }
 
 #[tokio::test]
@@ -924,7 +958,7 @@ async fn injected_load_providers_restrict_selection() {
     let provider_state = Arc::clone(&available);
     let core = core_with_host(SelectionHost {
         load: HostLoad {
-            available_workers: Some(Arc::new(move || provider_state.lock().clone())),
+            available_workers: Some(Arc::new(move |_| provider_state.lock().clone())),
             overloaded_workers: Some(Arc::new(|| Some(HashSet::from([1])))),
             ..HostLoad::default()
         },
@@ -2756,7 +2790,7 @@ async fn failed_replay_preserves_a_newer_cached_selection() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn cancelled_free_releases_reservation_and_affinity() {
+async fn free_releases_reservation_and_affinity_without_actor_progress() {
     let mut config = test_config(false);
     config.router_queue_threshold = Some(0.0);
     let core = core_with(
@@ -2779,9 +2813,12 @@ async fn cancelled_free_releases_reservation_and_affinity() {
 
     let mut freeing = Box::pin(core.free_reservation("r1"));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    assert!(freeing.as_mut().poll(&mut context).is_pending());
+    assert!(matches!(
+        freeing.as_mut().poll(&mut context),
+        std::task::Poll::Ready(Ok(()))
+    ));
     assert!(!entry.scheduler.has_request("r1"));
-    // The queue actor has not acknowledged the release yet.
+    // No actor poll was needed to release state and its owner metadata.
     drop(freeing);
     assert!(!core.reservation_index.read().contains_key("r1"));
     assert_eq!(lease_count(&core, "s"), Some(0));
@@ -2790,7 +2827,7 @@ async fn cancelled_free_releases_reservation_and_affinity() {
     assert_eq!(bound_worker(&core, "s"), None);
     core.select_and_reserve(session_reservation("r1", "s"))
         .await
-        .expect("cancelled cleanup must not prevent ID reuse");
+        .expect("completed cleanup must not prevent ID reuse");
 }
 
 #[tokio::test]

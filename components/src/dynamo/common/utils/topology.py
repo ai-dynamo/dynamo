@@ -10,7 +10,7 @@ and its contents as this worker's value for that domain. The Rust runtime
 derives canonical topology taints from the published topology domains.
 
 Environment variables:
-    DYN_TOPOLOGY_ENABLED: Set to "true" to enable topology reading.
+    DYN_TOPOLOGY_ENABLED: Set to a truthy value (true/1/on/yes) to enable; any other non-empty value is logged and ignored.
     DYN_TOPOLOGY_MOUNT_PATH: Directory containing topology domain files
         (default: /etc/dynamo/topology).
     DYN_KV_TRANSFER_DOMAIN: Which topology domain the router should enforce
@@ -22,12 +22,15 @@ Environment variables:
         enforcement is "preferred".
 """
 
+import argparse
 import logging
 import os
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from dynamo.common.configuration.utils import parse_bool
 
 _TOPOLOGY_ENABLED_VAR = "DYN_TOPOLOGY_ENABLED"
 _TOPOLOGY_MOUNT_PATH_VAR = "DYN_TOPOLOGY_MOUNT_PATH"
@@ -100,7 +103,7 @@ def _read_kv_transfer_policy() -> tuple[str, str | None, float | None]:
 
     if not kv_transfer_domain:
         logger.error(
-            "DYN_TOPOLOGY_ENABLED=true but %s is not set. The deployment "
+            "DYN_TOPOLOGY_ENABLED is set but %s is not set. The deployment "
             "environment must set the KV transfer domain when topology is "
             "enabled. Exiting.",
             _KV_TRANSFER_DOMAIN_VAR,
@@ -119,7 +122,7 @@ def read_topology_config(
 
     The deployment environment injects env vars for topology location and
     transfer policy:
-      - DYN_TOPOLOGY_ENABLED=true
+      - DYN_TOPOLOGY_ENABLED=true  # any truthy value (true/1/on/yes) enables
       - DYN_TOPOLOGY_MOUNT_PATH=/etc/dynamo/topology
       - DYN_KV_TRANSFER_DOMAIN=zone
       - DYN_KV_TRANSFER_ENFORCEMENT=required
@@ -138,12 +141,21 @@ def read_topology_config(
         Empty config if topology is not enabled.
 
     Raises:
-        SystemExit: If DYN_TOPOLOGY_ENABLED=true but DYN_KV_TRANSFER_DOMAIN is
+        SystemExit: If DYN_TOPOLOGY_ENABLED is set but DYN_KV_TRANSFER_DOMAIN is
             not set, the transfer-domain topology file is still missing or
             empty after the timeout.
     """
-    enabled = os.environ.get(_TOPOLOGY_ENABLED_VAR, "").strip().lower()
-    if enabled != "true":
+    raw = os.environ.get(_TOPOLOGY_ENABLED_VAR, "").strip()
+    try:
+        enabled = parse_bool(raw)
+    except argparse.ArgumentTypeError:
+        if raw:
+            logger.warning(
+                "Unrecognized DYN_TOPOLOGY_ENABLED=%r, treating as disabled; use 'true'/'false' (or 1/0, on/off, yes/no)",
+                raw,
+            )
+        return TopologyConfig()
+    if not enabled:
         return TopologyConfig()
 
     (
@@ -173,7 +185,7 @@ def read_topology_config(
 
     if kv_transfer_domain not in topology_domains:
         logger.error(
-            "DYN_TOPOLOGY_ENABLED=true but topology file %s was not populated "
+            "DYN_TOPOLOGY_ENABLED is set but topology file %s was not populated "
             "within %.0fs. This indicates the configured topology source did "
             "not publish the selected transfer domain. Exiting.",
             transfer_domain_file,

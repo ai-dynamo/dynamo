@@ -10,6 +10,7 @@ the media loaders, so they run quickly with no network and no vLLM imports.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import socket
 from pathlib import Path
@@ -132,6 +133,15 @@ def test_python_and_rust_policy_constants_match() -> None:
     assert set(url_validator._BLOCKED_HOSTS) == rust_hosts
 
 
+def test_python_and_rust_data_url_cap_match() -> None:
+    """The frontend and the workers read the same variable and default."""
+    rust_source = _find_rust_media_loader_source().read_text(encoding="utf-8")
+    assert f'"{url_validator.DYN_MM_MAX_DATA_URL_MB}"' in rust_source
+    default = re.search(r"const DEFAULT_MAX_DATA_URL_MB: usize = (\d+);", rust_source)
+    assert default is not None
+    assert int(default.group(1)) == url_validator.DEFAULT_MAX_DATA_URL_MB
+
+
 # ---------------------------------------------------------------------------
 # validate_url() — scheme handling
 # ---------------------------------------------------------------------------
@@ -160,6 +170,60 @@ async def test_validate_url_rejects_ftp() -> None:
 async def test_validate_url_accepts_data_url_by_default() -> None:
     # data: URLs never touch the network — we allow them without further checks.
     await validate_url("data:image/png;base64,iVBORw0KGgoAAAA=", STRICT_HTTPS)
+
+
+_MIB = 1024 * 1024
+_DATA_PREFIX = "data:text/plain;base64,"
+
+
+def _data_url(size: int) -> str:
+    """Return an ASCII data: URL of exactly ``size`` characters."""
+    return _DATA_PREFIX + "A" * (size - len(_DATA_PREFIX))
+
+
+async def test_validate_url_rejects_oversized_data_url(monkeypatch) -> None:
+    # The cap is read per call, so a value set after import applies.
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", "1")
+    await validate_url(_data_url(_MIB), STRICT_HTTPS)
+    with pytest.raises(
+        UrlValidationError, match="exceeds the 1048576-byte limit"
+    ) as exc_info:
+        await validate_url(_data_url(_MIB + 1), STRICT_HTTPS)
+    assert (
+        "To raise the limit, set DYN_MM_MAX_DATA_URL_MB (in megabytes) "
+        "on both the frontend and the workers." in str(exc_info.value)
+    )
+
+
+async def test_validate_url_measures_data_url_in_utf8_bytes(monkeypatch) -> None:
+    # "é" is one character and two UTF-8 bytes: under the cap in characters,
+    # over it in bytes.
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", "1")
+    url = _DATA_PREFIX + "é" * (_MIB // 2)
+    assert len(url) < _MIB < len(url.encode("utf-8"))
+    with pytest.raises(UrlValidationError, match="exceeds"):
+        await validate_url(url, STRICT_HTTPS)
+
+
+async def test_validate_url_measures_data_url_with_lone_surrogate() -> None:
+    # A lone surrogate has no UTF-8 encoding. Measuring it must not raise
+    # UnicodeEncodeError, which callers that catch UrlValidationError miss.
+    await validate_url(_DATA_PREFIX + "\ud800", STRICT_HTTPS)
+
+
+def test_max_data_url_bytes_defaults_when_unset_or_blank(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_MM_MAX_DATA_URL_MB", raising=False)
+    assert url_validator.max_data_url_bytes() == 16 * _MIB
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", " ")
+    assert url_validator.max_data_url_bytes() == 16 * _MIB
+
+
+@pytest.mark.parametrize("raw", ["abc", "1.5", "0", "-1"])
+def test_max_data_url_bytes_falls_back_on_bad_value(monkeypatch, caplog, raw) -> None:
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", raw)
+    with caplog.at_level(logging.WARNING, logger=url_validator.__name__):
+        assert url_validator.max_data_url_bytes() == 16 * _MIB
+    assert "DYN_MM_MAX_DATA_URL_MB" in caplog.text
 
 
 async def test_validate_url_http_allowed_when_opted_in() -> None:
@@ -500,12 +564,40 @@ def test_describe_media_source_bounds_data_uri_metadata() -> None:
         assert f"({len(source)} chars" in label  # true size stays visible
 
 
-def test_describe_media_source_keeps_an_ordinary_data_uri_intact() -> None:
-    """Control: a real media type is short and must survive the new bound."""
-    label = describe_media_source("data:image/png;base64," + "A" * 50_000)
+@pytest.mark.parametrize("scheme", ["data", "DATA", " \tDaTa"])
+def test_describe_media_source_elides_data_uri_payload(scheme) -> None:
+    label = describe_media_source(scheme + ":image/png;base64," + "A" * 50_000)
 
     assert label.startswith("data:image/png (")
     assert "payload elided" in label
+
+
+@pytest.mark.parametrize("scheme", ["data", "DATA", " \tDaTa"])
+def test_malformed_inline_source_label_elides_payload(scheme) -> None:
+    source = scheme + "://[;base64,private-inline-payload"
+
+    label = describe_media_source(source)
+
+    assert "private-inline-payload" not in label
+    assert len(label) < 200
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (
+            "https://user:private-password@example.com/ref.png?sig=private-token#private-fragment",
+            "https://example.com/ref.png",
+        ),
+        ("http://example.com/ref.png?sig=private-token", "http://example.com/ref.png"),
+        (
+            "https://user:private-password@[::1]:1234/ref.png?sig=private-token",
+            "https://[::1]:1234/ref.png",
+        ),
+    ],
+)
+def test_http_source_label_redacts_credentials(source, expected) -> None:
+    assert describe_media_source(source) == expected
 
 
 def test_validate_local_path_keeps_an_ordinary_path_intact(tmp_path) -> None:
@@ -530,6 +622,7 @@ async def test_validate_media_reference_rejects_empty(tmp_path) -> None:
         "https:///" + "A" * 200_000,  # no host component
         "A" * 200_000 + "://x",  # scheme is client-supplied too
     ],
+    ids=["missing-host", "oversized-scheme"],
 )
 async def test_validate_url_bounds_the_url_in_its_message(url) -> None:
     """These messages became client-visible once the diffusion handlers
@@ -547,10 +640,14 @@ async def test_redirect_chain_in_the_limit_message_is_bounded() -> None:
     long_hop = "https://example.com/" + "A" * 200_000
 
     class _Client(HttpClient):
-        async def _fetch_simple(self, url, timeout, *, max_bytes=None):
+        async def _fetch_simple(
+            self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
+        ):
             raise AssertionError("unused")
 
-        async def _fetch_body_or_redirect(self, url, timeout, *, max_bytes=None):
+        async def _fetch_body_or_redirect(
+            self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
+        ):
             return None, long_hop
 
         async def close(self):

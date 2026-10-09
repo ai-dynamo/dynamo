@@ -4,6 +4,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -21,6 +22,62 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.parametrize(
+    "parser, skip_tokenizer_init, has_engine, has_tokenizer, supports_gate, think_end_ids, expected",
+    [
+        ("kimi_k3", False, True, True, True, [163588, 39964, 163589], True),
+        (None, False, True, True, True, [163588], False),
+        ("kimi_k3", True, True, True, True, [163588], False),
+        ("kimi_k3", False, False, True, True, [163588], False),
+        ("kimi_k3", False, True, False, True, [163588], False),
+        ("kimi_k3", False, True, True, False, [163588], False),
+        ("kimi_k3", False, True, True, True, [], False),
+    ],
+)
+def test_structural_tag_reasoning_policy_advertises_only_an_available_gate(
+    parser,
+    skip_tokenizer_init,
+    has_engine,
+    has_tokenizer,
+    supports_gate,
+    think_end_ids,
+    expected,
+):
+    from dynamo.sglang import register
+
+    async def async_generate(*, require_reasoning=False):
+        pass
+
+    async def legacy_async_generate(*, sampling_params=None):
+        pass
+
+    tokenizer = Mock()
+    tokenizer.encode.return_value = think_end_ids
+    engine = (
+        SimpleNamespace(
+            tokenizer_manager=SimpleNamespace(
+                tokenizer=tokenizer if has_tokenizer else None
+            ),
+            async_generate=async_generate if supports_gate else legacy_async_generate,
+        )
+        if has_engine
+        else None
+    )
+    server_args = SimpleNamespace(
+        reasoning_parser=parser, skip_tokenizer_init=skip_tokenizer_init
+    )
+    runtime_config = register.ModelRuntimeConfig()
+
+    register.publish_sglang_structural_tag_reasoning_policy(
+        runtime_config, engine, server_args
+    )
+
+    key = register.TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY
+    assert (key in runtime_config.runtime_data) is expected
+    if expected:
+        assert json.loads(runtime_config.runtime_data[key]) is True
 
 
 @pytest.mark.parametrize(
@@ -135,20 +192,41 @@ def test_token_budget_matches_sglang_policy(
     assert _get_token_budget(engine, server_args) == expected
 
 
-def test_runtime_config_without_engine_omits_token_budget(monkeypatch, caplog):
+@pytest.mark.parametrize(
+    "disaggregation_mode, runtime_supported, enable_multimodal, capability_expected",
+    [
+        (None, True, False, False),
+        ("null", True, False, False),
+        ("prefill", False, False, False),
+        ("prefill", True, True, False),
+        ("prefill", True, False, True),
+        ("decode", True, False, True),
+    ],
+)
+def test_runtime_config_publishes_supported_disagg_capabilities(
+    monkeypatch,
+    caplog,
+    disaggregation_mode,
+    runtime_supported,
+    enable_multimodal,
+    capability_expected,
+):
     from dynamo.sglang import register
 
     server_args = SimpleNamespace(
         allow_auto_truncate=False,
         context_length=4096,
-        disaggregation_mode=None,
+        disaggregation_mode=disaggregation_mode,
         max_prefill_tokens=None,
         page_size=16,
+        reasoning_parser="kimi_k3",
+        skip_tokenizer_init=False,
         speculative_algorithm="NONE",
         speculative_num_steps=None,
     )
     dynamo_args = register.DynamoConfig()
     dynamo_args.enable_local_indexer = False
+    dynamo_args.enable_multimodal = enable_multimodal
     capacity = SimpleNamespace(
         max_num_seqs=None,
         max_num_batched_tokens=None,
@@ -164,12 +242,44 @@ def test_runtime_config_without_engine_omits_token_budget(monkeypatch, caplog):
     monkeypatch.setattr(register, "get_spec_decode_runtime_data", lambda _: None)
     monkeypatch.setattr(register, "_get_mooncake_runtime_data", lambda _: None)
     monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
+    monkeypatch.setattr(
+        register, "supports_disagg_prefill_cancel_anytime", lambda _: runtime_supported
+    )
+    engine = None
+    if runtime_supported:
+
+        async def async_generate(*, require_reasoning=False):
+            pass
+
+        tokenizer = Mock()
+        tokenizer.encode.return_value = [163588, 39964, 163589]
+        engine = SimpleNamespace(
+            async_generate=async_generate,
+            tokenizer_manager=SimpleNamespace(
+                tokenizer=tokenizer,
+                context_len=4096,
+                validate_total_tokens=True,
+                num_reserved_tokens=0,
+                rid_to_state={},
+            ),
+            _scheduler_init_result=SimpleNamespace(scheduler_infos=[{}]),
+        )
 
     runtime_config = asyncio.run(
-        register.get_runtime_config(None, server_args, dynamo_args)
+        register.get_runtime_config(engine, server_args, dynamo_args)
     )
 
-    assert TOKEN_BUDGET_RUNTIME_KEY not in runtime_config.runtime_data
+    assert (
+        TOKEN_BUDGET_RUNTIME_KEY in runtime_config.runtime_data
+    ) is runtime_supported
+    capability = register.DISAGG_PREFILL_CANCEL_ANYTIME_V1
+    assert (capability in runtime_config.runtime_data) is capability_expected
+    if capability_expected:
+        assert json.loads(runtime_config.runtime_data[capability]) is True
+    reasoning_gate = register.TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY
+    assert (reasoning_gate in runtime_config.runtime_data) is (
+        runtime_supported and not enable_multimodal
+    )
     assert "Failed to get runtime config" not in caplog.text
 
 

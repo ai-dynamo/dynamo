@@ -37,13 +37,15 @@ targets:
   workload:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 94
+    sla: user output >= 50 tok/s P50 and TTFT P50 < 5 s
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-256K-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 637.41 output tok/s/GPU, 50.89 user tok/s P50, TTFT P50 526 ms at concurrency 94 (15% agentic Moontrace replay)
 - id: agg-b200-1m
   recommended: true
   hardware:
@@ -60,13 +62,15 @@ targets:
   workload:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 46
+    sla: user output >= 50 tok/s P50 and TTFT P50 < 5 s
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-1M-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 255.95 output tok/s/GPU, 52.00 user tok/s P50, TTFT P50 180 ms at concurrency 46 (15% agentic Moontrace replay)
 - id: agg-gb200-256k
   recommended: true
   hardware:
@@ -84,13 +88,15 @@ targets:
   workload:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 96
+    sla: user output >= 50 tok/s P50 and TTFT P50 < 5 s
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/agg-gb200-agentic-256K-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 665.95 output tok/s/GPU, 51.15 user tok/s P50, TTFT P50 612 ms at concurrency 96 (15% agentic Moontrace replay)
 - id: agg-gb200-1m
   recommended: true
   hardware:
@@ -107,13 +113,15 @@ targets:
   workload:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 48
+    sla: user output >= 50 tok/s P50 and TTFT P50 < 5 s
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/agg-gb200-agentic-1M-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 269.55 output tok/s/GPU, 51.21 user tok/s P50, TTFT P50 274 ms at concurrency 48 (15% agentic Moontrace replay)
 - id: agg-h200-256k
   recommended: true
   hardware:
@@ -131,13 +139,15 @@ targets:
   workload:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 64
+    sla: user output >= 50 tok/s P50 and TTFT P50 < 5 s
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-256K-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 203.58 output tok/s/GPU, 51.94 user tok/s P50, TTFT P50 565 ms at concurrency 64 (15% agentic Moontrace replay)
 - id: agg-h200-1m
   recommended: true
   hardware:
@@ -154,13 +164,15 @@ targets:
   workload:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 32
+    sla: user output >= 50 tok/s P50 and TTFT P50 < 5 s
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-1M-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 81.50 output tok/s/GPU, 53.02 user tok/s P50, TTFT P50 215 ms at concurrency 32 (15% agentic Moontrace replay)
 - id: disagg-b200-256k
   recommended: true
   hardware:
@@ -179,13 +191,15 @@ targets:
   workload:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 144
+    sla: user output >= 50 tok/s P50 and TTFT P50 < 5 s
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-256K/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 510.82 output tok/s/GPU, 52.08 user tok/s P50, TTFT P50 3,681 ms at concurrency 144 (15% agentic Moontrace replay)
 - id: disagg-b200-1m
   recommended: true
   hardware:
@@ -204,13 +218,15 @@ targets:
   workload:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 38
+    sla: user output >= 50 tok/s P50 and TTFT P50 < 5 s
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-1M/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 223.49 output tok/s/GPU, 53.57 user tok/s P50, TTFT P50 1,294 ms at concurrency 38 (15% agentic Moontrace replay)
 - id: disagg-gb200-256k
   recommended: true
   hardware:
@@ -229,13 +245,15 @@ targets:
   workload:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 140
+    sla: user output >= 50 tok/s P50 and TTFT P50 < 5 s
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-256K/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 534.82 output tok/s/GPU, 55.47 user tok/s P50, TTFT P50 3,343 ms at concurrency 140 (15% agentic Moontrace replay)
 - id: disagg-gb200-1m
   recommended: true
   hardware:
@@ -254,13 +272,15 @@ targets:
   workload:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 48
+    sla: user output >= 50 tok/s P50 and TTFT P50 < 5 s
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-1M/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 270.93 output tok/s/GPU, 50.55 user tok/s P50, TTFT P50 1,696 ms at concurrency 48 (15% agentic Moontrace replay)
 - id: disagg-h200-256k
   recommended: true
   hardware:
@@ -279,13 +299,15 @@ targets:
   workload:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 72
+    sla: user output >= 50 tok/s P50 and TTFT P50 < 5 s
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-256K/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 136.96 output tok/s/GPU, 56.30 user tok/s P50, TTFT P50 4,576 ms at concurrency 72 (15% agentic Moontrace replay)
 - id: disagg-h200-1m
   recommended: true
   hardware:
@@ -304,18 +326,20 @@ targets:
   workload:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 30
+    sla: user output >= 50 tok/s P50 and TTFT P50 < 5 s
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-1M/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 88.13 output tok/s/GPU, 60.71 user tok/s P50, TTFT P50 4,309 ms at concurrency 30 (15% agentic Moontrace replay)
 related_benchmarks: []
 maintainer: null
 gaps:
 - no related Feature Benchmark page exists for this model
-- no SLA/goodput target in source (perf.yaml has no goodput flags)
+- SLA (user output >= 50 tok/s P50, TTFT P50 < 5 s) is stated in the recipe page; perf.yaml has no goodput flags
 - 'Dynamo 1.4.0 structured output: reasoning-enabled response_format json_object or json_schema may return malformed JSON with HTTP 200 with the bundled OSS vLLM; fixed upstream by vLLM PR #44993'
 - 'Dynamo 1.4.0 tool calling: reasoning-enabled required or named tool_choice may omit structured tool_calls with the bundled OSS vLLM; fixed upstream by vLLM PR #44993'
 - maintainer unknown

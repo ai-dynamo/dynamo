@@ -47,6 +47,10 @@
 # URL returns 404 until merge.
 ^https://github\.com/ai-dynamo/dynamo/tree/main/examples/power-aware-budget$
 
+# The Nemotron Speech example lands with its voice docs page, so its main-branch
+# links return 404 until merge. Remove this entry after merge.
+^https://github\.com/ai-dynamo/dynamo/tree/main/examples/nemotron_speech_cascaded_pipeline(#.*)?$
+
 # The sidecar Dockerfile is introduced by the same PR as its docs link,
 # so the blob/main URL returns 404 until merge. Remove this entry after merge.
 ^https://github\.com/ai-dynamo/dynamo/blob/main/lib/sidecar/Dockerfile$
@@ -56,9 +60,13 @@
 # (afterwards lychee validates the URL again, catching any later rename/move).
 ^https://github\.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg\.yaml
 
-# The v1.4.0 release entry lands with the current-release promotion; the tag
-# URL 404s from CI until v1.4.0 is cut. Remove after the tag exists.
-^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.4\.0$
+# The v1.5.0 release entry lands with the current-release promotion; the tag
+# URL 404s from CI until v1.5.0 is cut. Remove after the tag exists.
+^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.5\.0$
+
+# The classic dynamo-platform 1.5.0 chart publishes to helm.ngc.nvidia.com in a
+# follow-up NGC publishing MR; the .tgz URL 404s until then. Remove once live.
+^https://helm\.ngc\.nvidia\.com/nvidia/ai-dynamo/charts/dynamo-platform-1\.5\.0\.tgz$
 
 # The Dynamo Enterprise NGC collection is not published on the public catalog
 # yet, so the canonical collection URL 404s from CI. The org and team segments
@@ -76,12 +84,34 @@
 ^https://github\.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro-0813/perf$
 ^https://github\.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/deepseek-v4-pro-0813/perf/README\.md$
 
-# The Solar Open2 250B recipe page is introduced by the same PR as its docs link,
-# so the rendered docs URL 404s from CI until the page is published. Remove this
-# entry once the page is live.
-^https://docs\.nvidia\.com/dynamo/latest/recipes/model-recipes/solar-open2-250b$
-
 # The DeepSeek-V4.1-Flash docs page is published by the same PR that adds this
 # link, so the URL returns 404 until the docs deploy. Remove this entry after
 # the page is live.
 ^https://docs\.nvidia\.com/dynamo/dev/recipes/deepseek-v4-1-flash$
+
+# The TokenSpeed example is introduced with its docs link in the same PR.
+# Its canonical main-branch URL returns 404 until merge. Cleanup tracked in:
+# https://github.com/ai-dynamo/dynamo/issues/15025
+^https://github\.com/ai-dynamo/dynamo/tree/main/examples/backends/tokenspeed$
+
+# Introduced by the same PR as its docs link: the K-EXAONE 2.0 recipe does not exist on main
+# until this PR merges, so these blob/main URLs 404 during review. Remove after merge.
+^https://github\.com/ai-dynamo/dynamo/(tree|blob)/main/recipes/k-exaone-2\.0
+
+# Introduced by the same PR as their docs links: the A.X-K2 H200 recipe trees (perf/h200,
+# vllm/agg-h200, vllm/disagg-h200) do not exist on main until this PR merges, so these
+# tree/blob main URLs 404 during review. Remove after merge.
+^https://github\.com/ai-dynamo/dynamo/(tree|blob)/main/recipes/ax-k2/(perf/h200|vllm/(agg|disagg)-h200)
+
+# Motif-3 recipe files land on the release/1.5.0-motif-3-post.1 branch, so their
+# canonical blob/main and tree/main links 404 from CI until they reach main.
+# Remove this entry once the recipe is on main.
+^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/(recipes/motif-3|docs/fern/pages/recipes/model-recipes/motif-3\.mdx)
+# recipes/glm-5.3/ is only a symlink on main (recipes/glm-5.3 -> glm-5.2) and GitHub
+# does not traverse directory symlinks in blob/ URLs, so the canonical links on the
+# GLM-5.3/5.2 recipe page 404 until the glm-5.3 rename merges. Remove after merge.
+^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/recipes/glm-5\.3/
+
+# examples/gpu-sharing is added in the same PR as the GPU sharing docs
+# that link to it on main. Remove this rule once that PR merges.
+^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/examples/gpu-sharing

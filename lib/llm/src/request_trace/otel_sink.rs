@@ -157,7 +157,13 @@ impl OtelRequestTraceSink {
             }
         };
         if payload.len() <= max_payload_bytes {
-            return Some((payload, true, None));
+            let (complete, drop_reason) = record.payload.as_ref().map_or((true, None), |payload| {
+                (
+                    payload.payload_complete,
+                    payload.payload_drop_reason.clone(),
+                )
+            });
+            return Some((payload, complete, drop_reason));
         }
 
         marker_payload(
@@ -185,6 +191,11 @@ fn marker_payload(
             "request trace otel: dropping oversized non-payload record"
         );
         return None;
+    };
+
+    let reason = match payload.payload_drop_reason.as_deref() {
+        Some(capture_reason) => format!("{reason}:capture_drop_reason={capture_reason}"),
+        None => reason,
     };
 
     tracing::warn!(
@@ -393,6 +404,53 @@ mod tests {
                 .collect(),
         ));
         record
+    }
+
+    #[test]
+    fn payload_under_limit_preserves_capture_metadata() {
+        for (complete, drop_reason) in [
+            (true, None),
+            (false, Some("aggregation_failed:engine died mid-stream")),
+        ] {
+            let mut record = sample_payload_record();
+            let capture = record.payload.as_mut().unwrap();
+            capture.payload_complete = complete;
+            capture.payload_drop_reason = drop_reason.map(str::to_owned);
+            let serialized = serde_json::to_string(&record).unwrap();
+
+            let (payload, exported_complete, exported_reason) =
+                OtelRequestTraceSink::payload_for_limit(&record, serialized.len()).unwrap();
+
+            assert_eq!(payload, serialized);
+            assert_eq!(exported_complete, complete);
+            assert_eq!(exported_reason.as_deref(), drop_reason);
+        }
+    }
+
+    #[test]
+    fn payload_over_limit_preserves_capture_reason() {
+        let mut record = sample_payload_record_with_headers();
+        let capture_reason = "aggregation_failed:engine died mid-stream";
+        let capture = record.payload.as_mut().unwrap();
+        capture.payload_complete = false;
+        capture.payload_drop_reason = Some(capture_reason.to_string());
+        let full_len = serde_json::to_string(&record).unwrap().len();
+
+        for limit in [full_len - 1, 1] {
+            let (payload, complete, drop_reason) =
+                OtelRequestTraceSink::payload_for_limit(&record, limit).unwrap();
+            let expected_reason = format!(
+                "otel_payload_too_large:max_bytes={limit}:actual_bytes={full_len}:capture_drop_reason={capture_reason}"
+            );
+
+            assert!(!complete);
+            assert_eq!(drop_reason.as_deref(), Some(expected_reason.as_str()));
+            let decoded: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(decoded["payload"]["payload_complete"], false);
+            assert_eq!(decoded["payload"]["payload_drop_reason"], expected_reason);
+            assert!(decoded["payload"].get("request").is_none());
+            assert!(decoded["payload"].get("response").is_none());
+        }
     }
 
     #[test]

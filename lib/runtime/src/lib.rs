@@ -48,6 +48,9 @@ pub mod service;
 pub mod slug;
 pub mod storage;
 pub mod system_health;
+pub mod telemetry;
+#[cfg(test)]
+mod test_utils;
 pub mod tls_utils;
 pub mod traits;
 pub mod transports;

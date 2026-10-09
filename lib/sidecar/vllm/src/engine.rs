@@ -8,9 +8,13 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, RlAdminBaseUrl, WorkerConfig, usage,
+    LLMEngineOutputExt, RlAdminBaseUrl, RuntimeConfig, WorkerConfig, usage,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
+use dynamo_llm::lora::{LoRADownloader, lora_serving_enabled};
+use dynamo_runtime::component::Endpoint;
+use dynamo_sidecar_common::{
+    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
+};
 use futures::stream::BoxStream;
 use serde_json::{Map, Value, json};
 use tokio::sync::OnceCell;
@@ -20,9 +24,12 @@ use tokio_util::sync::CancellationToken;
 use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{
-    ResponseState, build_generate_request, data_parallel_rank, normalize_response_options,
+    ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
+    normalize_response_options, request_has_multimodal_input,
 };
+use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
+use crate::proto as pb;
 
 pub struct VllmSidecarEngine {
     endpoint: GrpcEndpoint,
@@ -30,6 +37,12 @@ pub struct VllmSidecarEngine {
     mode: DisaggregationMode,
     transport: GrpcTransportConfig,
     client: OnceCell<VllmClient>,
+    runtime_endpoint: OnceCell<Endpoint>,
+    lora_downloader: OnceCell<LoRADownloader>,
+    is_lora_enabled: bool,
+    is_hot_swap_requested: bool,
+    lifecycle: lora::LoraLifecycle,
+    routing_image_token_id: OnceCell<Option<u32>>,
     cancel: CancellationToken,
 }
 
@@ -48,11 +61,17 @@ impl VllmSidecarEngine {
         transport: GrpcTransportConfig,
     ) -> Self {
         Self {
+            is_lora_enabled: lora_serving_enabled() && model.supports_lora(),
+            is_hot_swap_requested: is_hot_swap_requested(),
             endpoint,
             model,
             mode,
             transport,
             client: OnceCell::new(),
+            runtime_endpoint: OnceCell::new(),
+            lora_downloader: OnceCell::new(),
+            lifecycle: lora::LoraLifecycle::default(),
+            routing_image_token_id: OnceCell::new(),
             cancel: CancellationToken::new(),
         }
     }
@@ -78,20 +97,56 @@ impl VllmSidecarEngine {
         Self::from_parsed(args).map_err(Into::into)
     }
 
-    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        if args.sidecar.common.dyn_tool_call_parser.is_some()
-            || args.sidecar.common.dyn_reasoning_parser.is_some()
-        {
-            return Err(client::invalid_argument(
-                "vLLM gRPC does not preserve the request options required by Dynamo tool-call and reasoning parsers",
-            ));
-        }
+    /// Parse CLI arguments without connecting; discovery runs after probe startup.
+    pub fn from_cli() -> Result<
+        (
+            RuntimeConfig,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
+        ),
+        DynamoError,
+    > {
+        let args = <Args as clap::Parser>::parse();
+        let vllm_http_url = Self::validate_args(&args)?;
+        Ok((
+            args.sidecar.common.runtime.clone(),
+            Self::from_parsed_async(args, vllm_http_url, false),
+        ))
+    }
 
-        let endpoint = args.sidecar.grpc_endpoint;
-        let enable_rl = args.sidecar.common.enable_rl;
-        let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
-        let vllm_http_url = args
-            .vllm_http_endpoint
+    /// Parse embedded launcher arguments now, then discover metadata after the
+    /// shared sidecar runner has started probes and connected the runtime.
+    pub fn try_from_args_async(
+        argv: Vec<String>,
+    ) -> Result<
+        (
+            RuntimeConfig,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
+        ),
+        SidecarStartupError,
+    > {
+        let args = <Args as clap::Parser>::try_parse_from(argv)?;
+        let vllm_http_url = Self::validate_args(&args)?;
+        Ok((
+            args.sidecar.common.runtime.clone(),
+            Self::from_parsed_async(args, vllm_http_url, false),
+        ))
+    }
+
+    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+        let vllm_http_url = Self::validate_args(&args)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
+        runtime.block_on(Self::from_parsed_async(args, vllm_http_url, true))
+    }
+
+    fn validate_args(args: &Args) -> Result<Option<RlAdminBaseUrl>, DynamoError> {
+        // Reject overflow before runtime connections, but start the actual
+        // engine deadline only when the bootstrap future is polled.
+        client::startup_deadline(args.sidecar.grpc.config().startup_deadline)?;
+        args.vllm_http_endpoint
+            .as_ref()
             .map(|endpoint| {
                 RlAdminBaseUrl::parse(endpoint.as_str()).map_err(|error| {
                     client::invalid_argument(format!(
@@ -99,14 +154,48 @@ impl VllmSidecarEngine {
                     ))
                 })
             })
-            .transpose()?;
+            .transpose()
+    }
+
+    async fn from_parsed_async(
+        args: Args,
+        vllm_http_url: Option<RlAdminBaseUrl>,
+        bootstrap: bool,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
+        let endpoint = &args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
-        eprintln!(
-            "Discovering vLLM model metadata from {endpoint}; startup deadline: {:?}",
-            transport.startup_deadline
-        );
-        let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline)?;
+        if bootstrap {
+            eprintln!(
+                "Discovering vLLM model metadata from {endpoint}; startup deadline: {:?}",
+                transport.startup_deadline
+            );
+        } else {
+            tracing::info!(%endpoint, startup_deadline = ?transport.startup_deadline,
+                "Discovering vLLM model metadata");
+        }
+        let model = bootstrap_discover(endpoint, transport, bootstrap_deadline, bootstrap).await?;
+        Self::from_discovered(args, model, vllm_http_url)
+    }
+
+    fn from_discovered(
+        args: Args,
+        model: DiscoveredModel,
+        vllm_http_url: Option<RlAdminBaseUrl>,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
+        let dynamo_parsers = args.sidecar.common.dyn_tool_call_parser.is_some()
+            || args.sidecar.common.dyn_reasoning_parser.is_some();
+        if dynamo_parsers && let Some(parser) = model.reasoning_parser() {
+            // vLLM's own reasoning parser gates structured output on request
+            // settings that the gRPC protocol cannot carry.
+            return Err(client::invalid_argument(format!(
+                "Dynamo parsers need vLLM without its own reasoning parser, but vLLM runs `{parser}`; start vllm-rs with `--reasoning-parser none`"
+            )));
+        }
+        let endpoint = args.sidecar.grpc_endpoint;
+        let enable_rl = args.sidecar.common.enable_rl;
+        let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
+        let transport = args.sidecar.grpc.config();
         let mode = args.sidecar.common.disaggregation_mode;
         if mode.is_encode() && !model.supports_multimodal {
             return Err(client::invalid_argument(format!(
@@ -119,6 +208,7 @@ impl VllmSidecarEngine {
             .transpose()?;
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let config = WorkerConfig {
+            runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
             // Disaggregated workers register under fixed role components so the
             // frontend can route the disaggregated handoff; aggregated keeps the
@@ -132,14 +222,13 @@ impl VllmSidecarEngine {
             custom_jinja_template: args.sidecar.common.custom_jinja_template,
             model_name: model.source.clone(),
             served_model_name: Some(model.served_name.clone()),
-            // gRPC cannot yet preserve the parser request semantics.
-            tool_call_parser: None,
-            reasoning_parser: None,
+            tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
+            reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
             exclude_tools_when_tool_choice_none: args
                 .sidecar
                 .common
                 .exclude_tools_when_tool_choice_none,
-            enable_kv_routing: true,
+            enable_kv_routing: !mode.is_encode(),
             disaggregation_mode: mode,
             route_to_encoder: args.sidecar.common.route_to_encoder,
             enable_rl,
@@ -153,6 +242,499 @@ impl VllmSidecarEngine {
         self.client
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))
+    }
+
+    fn ready_endpoint(&self) -> Result<&Endpoint, DynamoError> {
+        self.runtime_endpoint
+            .get()
+            .ok_or_else(|| client::engine_shutdown("vLLM sidecar runtime endpoint is not ready"))
+    }
+
+    fn is_lora_enabled(&self) -> bool {
+        self.is_lora_enabled
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_lora_enabled(mut self, enabled: bool) -> Self {
+        self.is_lora_enabled = enabled && self.model.supports_lora();
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_hot_swap_requested(mut self, requested: bool) -> Self {
+        self.is_hot_swap_requested = requested;
+        self
+    }
+
+    async fn native_inventory(&self) -> Result<Vec<pb::LoraAdapter>, DynamoError> {
+        let adapters = self
+            .started_client()?
+            .list_loras()
+            .await
+            .map_err(client::LoraRpcError::into_dynamo)?;
+        crate::lora::validate_inventory(adapters)
+    }
+
+    fn rl_updates(&self) -> Vec<String> {
+        let Some(capabilities) = self.model.rl_capabilities() else {
+            return Vec::new();
+        };
+        let mut updates = vec!["update_weight_version".to_string()];
+        if capabilities.weight_transfer_enabled {
+            updates.extend([
+                "init_weight_transfer_engine".to_string(),
+                "start_weight_update".to_string(),
+                "update_weights".to_string(),
+                "finish_weight_update".to_string(),
+            ]);
+            if capabilities.draft_weight_updates_enabled {
+                updates.push("start_draft_weight_update".to_string());
+            }
+        }
+        updates
+    }
+
+    async fn lora_updates(&self) -> Vec<String> {
+        if !self.is_lora_enabled() {
+            return Vec::new();
+        }
+        if let Err(error) = self.reconcile_loaded_loras().await {
+            tracing::warn!(
+                %error,
+                "LoRA restart reconciliation failed; serving the base model without \
+                 republished adapters. Reconciliation is retried on the next lifecycle call."
+            );
+        }
+        vec![
+            lora::LOAD_LORA.to_string(),
+            lora::UNLOAD_LORA.to_string(),
+            lora::LIST_LORAS.to_string(),
+        ]
+    }
+
+    async fn lora_engine_update(&self, update: &str, body: Value) -> Result<Value, DynamoError> {
+        let lora_name = body
+            .get("lora_name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let result = if !self.is_lora_enabled() {
+            Err(client::invalid_argument(
+                "LoRA lifecycle is not available: it requires DYN_LORA_ENABLED and a vLLM \
+                 server advertising LoRA support with max_loras > 0",
+            ))
+        } else {
+            if let Err(error) = self.reconcile_loaded_loras().await {
+                tracing::warn!(%error, "LoRA reconciliation is still failing; continuing with the requested operation");
+            }
+            match update {
+                lora::LOAD_LORA => self.load_lora(&body).await,
+                lora::UNLOAD_LORA => self.unload_lora(&body).await,
+                lora::LIST_LORAS => self.list_loras().await,
+                _ => Err(client::invalid_argument(format!(
+                    "unsupported engine update: {update}"
+                ))),
+            }
+        };
+        Ok(match result {
+            Ok(response) => response,
+            Err(error) => json!({
+                "status": "error",
+                "message": error.to_string(),
+                "lora_name": lora_name,
+            }),
+        })
+    }
+
+    async fn reconcile_loaded_loras(&self) -> Result<(), DynamoError> {
+        let mut state = self.lifecycle.updates.lock().await;
+        if state.is_reconciled {
+            return Ok(());
+        }
+        let endpoint = self.ready_endpoint()?;
+        self.unpublish_pending_loras(endpoint, &mut state).await?;
+        let adapters = self.native_inventory().await?;
+        for adapter in &adapters {
+            lora::validate_adapter_name(
+                &adapter.lora_name,
+                |name| self.model.is_base_model_name(name),
+                &adapters,
+            )?;
+        }
+        let mut records = std::collections::BTreeSet::new();
+        for adapter in &adapters {
+            self.ensure_published(endpoint, adapter, &mut state).await?;
+            records.insert(adapter.lora_name.clone());
+        }
+        state
+            .pending_unpublish
+            .extend(self.lifecycle.replace_published(records).await);
+        self.unpublish_pending_loras(endpoint, &mut state).await?;
+        state.is_reconciled = true;
+        Ok(())
+    }
+
+    async fn load_lora(&self, body: &Value) -> Result<Value, DynamoError> {
+        let request = parse_load_lora(body)?;
+        let client = self.started_client()?;
+        let endpoint = self.ready_endpoint()?;
+        let mut state = self.lifecycle.updates.lock().await;
+        let is_reconciled = std::mem::replace(&mut state.is_reconciled, false);
+        let _guard = self
+            .lifecycle
+            .adapter_lock(&request.name)
+            .await
+            .write_owned()
+            .await;
+
+        self.unpublish_pending_loras(endpoint, &mut state).await?;
+        let loaded = self.native_inventory().await?;
+        lora::validate_adapter_name(
+            &request.name,
+            |name| self.model.is_base_model_name(name),
+            &loaded,
+        )?;
+        let existing = loaded
+            .iter()
+            .find(|adapter| adapter.lora_name == request.name);
+
+        if let Some(existing) = existing {
+            if self.is_hot_swap_requested {
+                return Err(client::invalid_argument(format!(
+                    "LoRA adapter `{}` is already loaded; hot swap is not supported by the \
+                     gRPC backend. Load new weights under a different name.",
+                    request.name
+                )));
+            }
+            self.ensure_published(endpoint, existing, &mut state)
+                .await?;
+            state.is_reconciled = is_reconciled;
+            tracing::info!(
+                lora_name = %existing.lora_name,
+                lora_id = existing.lora_id,
+                "LoRA adapter already loaded"
+            );
+            return Ok(json!({
+                "status": "success",
+                "message": format!("LoRA adapter '{}' already loaded", existing.lora_name),
+                "lora_name": existing.lora_name,
+                "lora_id": existing.lora_id,
+                "hot_swap": false,
+            }));
+        }
+
+        if loaded.len() >= self.model.max_loras() as usize {
+            return Err(client::invalid_argument(format!(
+                "LoRA capacity exceeded: at most {} adapter(s) may be loaded",
+                self.model.max_loras()
+            )));
+        }
+
+        let downloader = self
+            .lora_downloader
+            .get_or_try_init(|| async { build_downloader() })
+            .await?;
+        tracing::info!(lora_name = %request.name, uri = %request.uri, "resolving LoRA source");
+        let source_path = resolve_source_path(downloader, &request.uri).await?;
+        let source_path_arg = source_path.to_string_lossy().to_string();
+
+        let adapter = match client
+            .load_lora(request.name.clone(), source_path_arg)
+            .await
+        {
+            Ok(response) => self.expect_adapter(response.adapter, &request.name)?,
+            Err(error) if error.is_definitive() => {
+                if error.code == tonic::Code::AlreadyExists {
+                    let observed = self.find_loaded(&request.name).await?.ok_or_else(|| {
+                        client::protocol_error(format!(
+                            "LoadLora reported `{}` as already loaded but ListLoras does not \
+                             report it",
+                            request.name
+                        ))
+                    })?;
+                    self.ensure_published(endpoint, &observed, &mut state)
+                        .await?;
+                    state.is_reconciled = is_reconciled;
+                    return Ok(json!({
+                        "status": "success",
+                        "message": format!("LoRA adapter '{}' already loaded", observed.lora_name),
+                        "lora_name": observed.lora_name,
+                        "lora_id": observed.lora_id,
+                        "hot_swap": false,
+                    }));
+                }
+                return Err(error.into_dynamo());
+            }
+            Err(error) => {
+                tracing::warn!(%error, lora_name = %request.name, "LoadLora outcome is ambiguous; reconciling");
+                match self.find_loaded(&request.name).await? {
+                    Some(observed)
+                        if std::path::Path::new(&observed.source_path) == source_path =>
+                    {
+                        observed
+                    }
+                    Some(observed) => {
+                        return Err(client::protocol_error(format!(
+                            "LoRA adapter `{}` is loaded from `{}` but this load requested `{}`; \
+                             vLLM and Dynamo disagree about adapter state",
+                            request.name,
+                            observed.source_path,
+                            source_path.display()
+                        )));
+                    }
+                    None => return Err(error.into_dynamo()),
+                }
+            }
+        };
+
+        if let Err(error) = self.ensure_published(endpoint, &adapter, &mut state).await {
+            tracing::error!(%error, lora_name = %adapter.lora_name, "failed to publish LoRA discovery record; rolling back the native load");
+            if let Err(cleanup_error) = self.unpublish_pending_loras(endpoint, &mut state).await {
+                tracing::warn!(%cleanup_error, lora_name = %adapter.lora_name, "failed to remove LoRA discovery record during rollback");
+            }
+            self.rollback_loaded_adapter(client, &adapter).await;
+            self.lifecycle.forget(&adapter.lora_name).await;
+            return Err(error);
+        }
+        state.is_reconciled = is_reconciled;
+
+        tracing::info!(lora_name = %adapter.lora_name, lora_id = adapter.lora_id, "loaded LoRA adapter");
+        Ok(json!({
+            "status": "success",
+            "message": format!("LoRA adapter '{}' loaded successfully", adapter.lora_name),
+            "lora_name": adapter.lora_name,
+            "lora_id": adapter.lora_id,
+            "hot_swap": false,
+        }))
+    }
+
+    async fn unload_lora(&self, body: &Value) -> Result<Value, DynamoError> {
+        let lora_name = parse_lora_name(body)?;
+        let client = self.started_client()?;
+        let endpoint = self.ready_endpoint()?;
+        let mut state = self.lifecycle.updates.lock().await;
+        let is_reconciled = std::mem::replace(&mut state.is_reconciled, false);
+        let _guard = self
+            .lifecycle
+            .adapter_lock(&lora_name)
+            .await
+            .write_owned()
+            .await;
+
+        let loaded = client
+            .list_loras()
+            .await
+            .map_err(client::LoraRpcError::into_dynamo)?;
+        let Some(existing) = loaded
+            .iter()
+            .find(|adapter| adapter.lora_name == lora_name)
+            .cloned()
+        else {
+            let available: Vec<&str> = loaded
+                .iter()
+                .map(|adapter| adapter.lora_name.as_str())
+                .collect();
+            return Err(client::invalid_argument(format!(
+                "LoRA adapter '{lora_name}' not found. Available LoRAs: {available:?}"
+            )));
+        };
+
+        // Stop routing new requests before unloading the adapter.
+        let is_published = self.lifecycle.is_published(&lora_name).await;
+        state.pending_unpublish.insert(lora_name.clone());
+        lora::unpublish_lora_model(endpoint, &lora_name).await?;
+        state.pending_unpublish.remove(&lora_name);
+        self.lifecycle.forget(&lora_name).await;
+
+        let removed = match client.unload_lora(lora_name.clone()).await {
+            Ok(response) => self.expect_adapter(response.adapter, &lora_name)?,
+            Err(error) if error.is_definitive() && error.code == tonic::Code::NotFound => {
+                existing.clone()
+            }
+            Err(error) => {
+                let is_definitive = error.is_definitive();
+                let still_loaded = if is_definitive {
+                    Some(existing.clone())
+                } else {
+                    tracing::warn!(%error, %lora_name, "UnloadLora outcome is ambiguous; reconciling");
+                    client
+                        .list_loras()
+                        .await
+                        .map_err(client::LoraRpcError::into_dynamo)?
+                        .into_iter()
+                        .find(|adapter| adapter.lora_name == lora_name)
+                };
+                match still_loaded {
+                    Some(observed) => {
+                        if is_published {
+                            self.restore_unloaded_adapter(endpoint, &observed, &mut state)
+                                .await;
+                        }
+                        return Err(error.into_dynamo());
+                    }
+                    None => existing.clone(),
+                }
+            }
+        };
+
+        state.is_reconciled = is_reconciled;
+        tracing::info!(%lora_name, lora_id = removed.lora_id, "unloaded LoRA adapter");
+        Ok(json!({
+            "status": "success",
+            "message": format!("LoRA adapter '{lora_name}' unloaded successfully"),
+            "lora_name": lora_name,
+            "lora_id": removed.lora_id,
+        }))
+    }
+
+    async fn list_loras(&self) -> Result<Value, DynamoError> {
+        let adapters = self.native_inventory().await?;
+        let loras: Map<String, Value> = adapters
+            .into_iter()
+            .map(|adapter| (adapter.lora_name, json!(adapter.lora_id)))
+            .collect();
+        Ok(json!({
+            "status": "success",
+            "count": loras.len(),
+            "loras": loras,
+        }))
+    }
+
+    async fn admit_lora_request(&self, lora_name: &str) -> Result<lora::LoraGuard, DynamoError> {
+        if !self.model.supports_lora() {
+            return Err(client::invalid_argument(format!(
+                "request selected LoRA adapter `{lora_name}` but this vLLM server did not \
+                 advertise LoRA support"
+            )));
+        }
+        // Hold admission until vLLM resolves the adapter for the request.
+        let guard = self
+            .lifecycle
+            .adapter_lock(lora_name)
+            .await
+            .read_owned()
+            .await;
+        if !self.lifecycle.is_published(lora_name).await {
+            return Err(client::invalid_argument(format!(
+                "unknown model or LoRA adapter: '{lora_name}'"
+            )));
+        }
+        Ok(guard)
+    }
+
+    async fn find_loaded(&self, lora_name: &str) -> Result<Option<pb::LoraAdapter>, DynamoError> {
+        Ok(self
+            .native_inventory()
+            .await?
+            .into_iter()
+            .find(|adapter| adapter.lora_name == lora_name))
+    }
+
+    fn expect_adapter(
+        &self,
+        adapter: Option<pb::LoraAdapter>,
+        lora_name: &str,
+    ) -> Result<pb::LoraAdapter, DynamoError> {
+        let adapter = adapter.ok_or_else(|| {
+            client::protocol_error(format!(
+                "vLLM returned no adapter identity for LoRA `{lora_name}`"
+            ))
+        })?;
+        if adapter.lora_name != lora_name {
+            return Err(client::protocol_error(format!(
+                "vLLM returned adapter `{}` for LoRA `{lora_name}`",
+                adapter.lora_name
+            )));
+        }
+        if adapter.lora_id <= 0 {
+            return Err(client::protocol_error(format!(
+                "vLLM returned a non-positive id {} for LoRA `{lora_name}`",
+                adapter.lora_id
+            )));
+        }
+        Ok(adapter)
+    }
+
+    async fn ensure_published(
+        &self,
+        endpoint: &Endpoint,
+        adapter: &pb::LoraAdapter,
+        state: &mut lora::LoraUpdateState,
+    ) -> Result<(), DynamoError> {
+        state.pending_unpublish.insert(adapter.lora_name.clone());
+        lora::publish_lora_model(endpoint, adapter, self.model.max_loras()).await?;
+        state.pending_unpublish.remove(&adapter.lora_name);
+        self.lifecycle.mark_published(&adapter.lora_name).await;
+        Ok(())
+    }
+
+    async fn unpublish_pending_loras(
+        &self,
+        endpoint: &Endpoint,
+        state: &mut lora::LoraUpdateState,
+    ) -> Result<(), DynamoError> {
+        while let Some(name) = state.pending_unpublish.first().cloned() {
+            lora::unpublish_lora_model(endpoint, &name).await?;
+            state.pending_unpublish.remove(&name);
+            self.lifecycle.forget(&name).await;
+        }
+        Ok(())
+    }
+
+    async fn rollback_loaded_adapter(&self, client: &VllmClient, adapter: &pb::LoraAdapter) {
+        match client.unload_lora(adapter.lora_name.clone()).await {
+            Ok(_) => tracing::info!(
+                lora_name = %adapter.lora_name,
+                "rolled back the native LoRA load"
+            ),
+            Err(error) => tracing::error!(
+                %error,
+                lora_name = %adapter.lora_name,
+                "failed to roll back the native LoRA load; the adapter still occupies GPU capacity"
+            ),
+        }
+    }
+
+    async fn restore_unloaded_adapter(
+        &self,
+        endpoint: &Endpoint,
+        adapter: &pb::LoraAdapter,
+        state: &mut lora::LoraUpdateState,
+    ) {
+        match self.ensure_published(endpoint, adapter, state).await {
+            Ok(()) => {
+                tracing::info!(
+                    lora_name = %adapter.lora_name,
+                    "restored the LoRA discovery record after a failed unload"
+                );
+            }
+            Err(error) => tracing::error!(
+                %error,
+                lora_name = %adapter.lora_name,
+                "failed to restore the LoRA discovery record; the adapter is loaded but unroutable"
+            ),
+        }
+    }
+
+    async fn unpublish_all_loras(&self) {
+        let mut state = self.lifecycle.updates.lock().await;
+        state.is_reconciled = false;
+        let Ok(endpoint) = self.ready_endpoint() else {
+            return;
+        };
+        state
+            .pending_unpublish
+            .extend(self.lifecycle.published_names().await);
+        for name in state.pending_unpublish.clone() {
+            match lora::unpublish_lora_model(endpoint, &name).await {
+                Ok(_) => {
+                    state.pending_unpublish.remove(&name);
+                    self.lifecycle.forget(&name).await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, lora_name = %name, "failed to unpublish LoRA discovery record during shutdown");
+                }
+            }
+        }
     }
 }
 
@@ -172,7 +754,8 @@ impl LLMEngine for VllmSidecarEngine {
             "connecting to vLLM gRPC"
         );
         let startup_deadline = client::startup_deadline(self.transport.startup_deadline)?;
-        let client = VllmClient::connect(&self.endpoint, self.transport, startup_deadline).await?;
+        let client =
+            VllmClient::connect(&self.endpoint, self.transport, startup_deadline, false).await?;
         client
             .wait_for_services(
                 &[CONTROL_SERVICE, INFERENCE_SERVICE],
@@ -183,6 +766,12 @@ impl LLMEngine for VllmSidecarEngine {
         let (model, server) = client.discover(startup_deadline).await?;
         let observed = DiscoveredModel::from_proto(model, server)?;
         self.model.ensure_startup_compatible(&observed)?;
+        let engine_config = observed.engine_config(!self.mode.is_encode())?;
+        let routing_image_token_id =
+            resolve_routing_image_token_id(&observed, startup_deadline).await;
+        self.routing_image_token_id
+            .set(routing_image_token_id)
+            .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
         let connection_count = client.connection_count();
         self.client
             .set(client)
@@ -195,7 +784,7 @@ impl LLMEngine for VllmSidecarEngine {
             mode = %self.mode,
             "vLLM gRPC services are ready"
         );
-        Ok(observed.engine_config())
+        Ok(engine_config)
     }
 
     async fn generate(
@@ -203,12 +792,7 @@ impl LLMEngine for VllmSidecarEngine {
         request: dynamo_backend_common::PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        if request
-            .multi_modal_data
-            .as_ref()
-            .is_some_and(|media| media.values().any(|items| !items.is_empty()))
-            && !self.model.supports_multimodal
-        {
+        if request_has_multimodal_input(&request) && !self.model.supports_multimodal {
             return Err(client::invalid_argument(format!(
                 "model `{}` does not advertise multimodal support",
                 self.model.served_name
@@ -219,30 +803,39 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let request = normalize_response_options(request)?;
+        let mut request = normalize_response_options(request)?;
+        if self.model.reasoning_parser().is_none() {
+            consume_reasoning_parser_args(&mut request.extra_args);
+        }
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;
         proto_request.model.clone_from(&self.model.served_name);
+        if self.model.is_base_model_name(&proto_request.lora_name) {
+            // Routers may address the base model by name through the adapter field.
+            proto_request.lora_name.clear();
+        }
+        let submit = async {
+            let _admission = if proto_request.lora_name.is_empty() {
+                None
+            } else {
+                Some(self.admit_lora_request(&proto_request.lora_name).await?)
+            };
+            client
+                .generate_stream(proto_request, data_parallel_rank)
+                .await
+        };
         let defer_request_cancellation = self.mode.is_decode();
         let stopped_ctx = ctx.inner_arc();
         let shutdown = self.cancel.child_token();
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
-        let stream = if defer_request_cancellation {
+        let stream = tokio::select! {
+            biased;
+            _ = shutdown_cancellation.as_mut() => None,
             // Decode must reach vLLM so NIXL can release transferred KV.
-            tokio::select! {
-                biased;
-                _ = shutdown_cancellation.as_mut() => None,
-                result = client.generate_stream(proto_request, data_parallel_rank) => Some(result?),
-            }
-        } else {
-            tokio::select! {
-                biased;
-                _ = shutdown_cancellation.as_mut() => None,
-                _ = request_cancellation.as_mut() => None,
-                result = client.generate_stream(proto_request, data_parallel_rank) => Some(result?),
-            }
+            _ = request_cancellation.as_mut(), if !defer_request_cancellation => None,
+            result = submit => Some(result?),
         };
         let Some(mut stream) = stream else {
             let output = cancelled(&state);
@@ -466,26 +1059,16 @@ impl LLMEngine for VllmSidecarEngine {
     }
 
     async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
-        let Some(capabilities) = self.model.rl_capabilities() else {
-            return Ok(Vec::new());
-        };
-        let mut updates = vec!["update_weight_version".to_string()];
-        if capabilities.weight_transfer_enabled {
-            updates.extend([
-                "init_weight_transfer_engine".to_string(),
-                "start_weight_update".to_string(),
-                "update_weights".to_string(),
-                "finish_weight_update".to_string(),
-            ]);
-            if capabilities.draft_weight_updates_enabled {
-                updates.push("start_draft_weight_update".to_string());
-            }
-        }
+        let mut updates = self.lora_updates().await;
+        updates.extend(self.rl_updates());
         Ok(updates)
     }
 
     async fn engine_update(&self, update: String, body: Value) -> Result<Value, DynamoError> {
-        if !self.supported_updates().await?.contains(&update) {
+        if crate::lora::is_lora_update(&update) {
+            return self.lora_engine_update(&update, body).await;
+        }
+        if !self.rl_updates().contains(&update) {
             return Ok(unsupported("update", &update));
         }
         let body = request_object(&body)?;
@@ -541,7 +1124,14 @@ impl LLMEngine for VllmSidecarEngine {
         }
     }
 
+    async fn on_endpoint_ready(&self, endpoint: Endpoint) -> Result<(), DynamoError> {
+        self.runtime_endpoint.set(endpoint).map_err(|_| {
+            client::engine_shutdown("vLLM sidecar runtime endpoint was already initialized")
+        })
+    }
+
     async fn cleanup(&self) -> Result<(), DynamoError> {
+        self.unpublish_all_loras().await;
         self.cancel.cancel();
         Ok(())
     }
@@ -551,13 +1141,15 @@ impl LLMEngine for VllmSidecarEngine {
             .client
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
-        let expected_dp_size = self.model.data_parallel_size();
+        let expected_dp_range = self.model.data_parallel_range();
+        let expected_dp_size = expected_dp_range.end - expected_dp_range.start;
         let mut ranks = HashSet::new();
         let mut sources = Vec::new();
         let reported_sources = client.kv_event_sources().await?;
         if reported_sources.is_empty() {
             return Ok(Vec::new());
         }
+        let image_token_id = self.routing_image_token_id.get().copied().flatten();
         for source in reported_sources {
             if source.transport != "zmq" {
                 tracing::warn!(
@@ -572,9 +1164,9 @@ impl LLMEngine for VllmSidecarEngine {
                     "GetKvEventSources returned a ZMQ source without data_parallel_rank",
                 )
             })?;
-            if dp_rank >= expected_dp_size {
+            if !expected_dp_range.contains(&dp_rank) {
                 return Err(client::protocol_error(format!(
-                    "GetKvEventSources returned rank {dp_rank}, outside the expected range 0..{expected_dp_size}",
+                    "GetKvEventSources returned rank {dp_rank}, outside the expected local range {expected_dp_range:?}",
                 )));
             }
             if !ranks.insert(dp_rank) {
@@ -591,15 +1183,110 @@ impl LLMEngine for VllmSidecarEngine {
                 endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint),
                 topic: source.topic,
                 dp_rank,
+                image_token_id,
             });
         }
         if ranks.len() != expected_dp_size as usize {
             return Err(client::protocol_error(format!(
-                "GetKvEventSources returned ZMQ sources for {} of {expected_dp_size} data-parallel ranks; KV routing requires one source for every rank",
+                "GetKvEventSources returned ZMQ sources for {} of {expected_dp_size} local data-parallel ranks; KV routing requires one source for every local rank",
                 ranks.len()
             )));
         }
         Ok(sources)
+    }
+}
+
+#[cfg(feature = "mm-routing")]
+const MM_ROUTING_CONFIG_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(feature = "mm-routing")]
+fn routing_config_fetch_deadline(now: Instant, startup_deadline: Instant) -> Instant {
+    now.checked_add(MM_ROUTING_CONFIG_FETCH_TIMEOUT)
+        .map_or(startup_deadline, |deadline| deadline.min(startup_deadline))
+}
+
+#[cfg(feature = "mm-routing")]
+async fn resolve_routing_image_token_id(
+    model: &DiscoveredModel,
+    startup_deadline: Instant,
+) -> Option<u32> {
+    use dynamo_llm::local_model::LocalModel;
+    use dynamo_llm::preprocessor::mm_routing::image::resolve_exact_routing_image_token_id;
+    use std::path::PathBuf;
+    use tokio::time::timeout_at;
+
+    if !model.supports_multimodal {
+        return None;
+    }
+
+    let source_path = PathBuf::from(&model.source);
+    let model_dir = if source_path.is_dir() {
+        source_path
+    } else {
+        let fetch_deadline = routing_config_fetch_deadline(Instant::now(), startup_deadline);
+        let fetched = timeout_at(fetch_deadline, LocalModel::fetch(&model.source, true))
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("model configuration fetch timed out")));
+        match fetched {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    model = %model.source,
+                    fetch_timeout_secs = MM_ROUTING_CONFIG_FETCH_TIMEOUT.as_secs(),
+                    %error,
+                    "Unable to fetch model configuration; exact multimodal KV routing is disabled"
+                );
+                return None;
+            }
+        }
+    };
+    let image_token_id = resolve_exact_routing_image_token_id(&model.source, &model_dir);
+    match image_token_id {
+        Some(image_token_id) => tracing::info!(
+            model = %model.source,
+            image_token_id,
+            "Resolved image placeholder token for multimodal KV routing"
+        ),
+        None => tracing::warn!(
+            model = %model.source,
+            model_dir = %model_dir.display(),
+            "Exact multimodal routing prerequisites are unavailable; source metadata will omit the image token"
+        ),
+    }
+    image_token_id
+}
+
+#[cfg(not(feature = "mm-routing"))]
+async fn resolve_routing_image_token_id(
+    _model: &DiscoveredModel,
+    _startup_deadline: Instant,
+) -> Option<u32> {
+    None
+}
+
+#[cfg(all(test, feature = "mm-routing"))]
+mod mm_routing_tests {
+    use super::*;
+
+    #[test]
+    fn config_fetch_deadline_is_capped_independently_of_startup() {
+        let now = Instant::now();
+        let long_startup_deadline = now
+            .checked_add(std::time::Duration::from_secs(30 * 60))
+            .expect("test startup deadline");
+        assert_eq!(
+            routing_config_fetch_deadline(now, long_startup_deadline),
+            now.checked_add(MM_ROUTING_CONFIG_FETCH_TIMEOUT)
+                .expect("test config fetch deadline")
+        );
+
+        let short_startup_deadline = now
+            .checked_add(std::time::Duration::from_secs(5))
+            .expect("test startup deadline");
+        assert_eq!(
+            routing_config_fetch_deadline(now, short_startup_deadline),
+            short_startup_deadline
+        );
     }
 }
 
@@ -740,29 +1427,229 @@ fn required_object_json(body: &Map<String, Value>, field: &str) -> Result<Vec<u8
         .map_err(|error| client::invalid_argument(format!("invalid `{field}`: {error}")))
 }
 
-fn bootstrap_discover(
+async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: GrpcTransportConfig,
     startup_deadline: Instant,
+    bootstrap: bool,
 ) -> Result<DiscoveredModel, DynamoError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
-    runtime.block_on(async {
-        let bootstrap_transport = GrpcTransportConfig {
-            connections: std::num::NonZeroUsize::MIN,
-            ..transport
-        };
-        let client = VllmClient::connect(endpoint, bootstrap_transport, startup_deadline).await?;
-        client
-            .wait_for_services(
-                &[CONTROL_SERVICE],
-                startup_deadline,
-                transport.retry_interval,
-            )
-            .await?;
-        let (model, server) = client.discover(startup_deadline).await?;
-        DiscoveredModel::from_proto(model, server)
-    })
+    let bootstrap_transport = GrpcTransportConfig {
+        connections: std::num::NonZeroUsize::MIN,
+        ..transport
+    };
+    let client =
+        VllmClient::connect(endpoint, bootstrap_transport, startup_deadline, bootstrap).await?;
+    client
+        .wait_for_services(
+            &[CONTROL_SERVICE],
+            startup_deadline,
+            transport.retry_interval,
+        )
+        .await?;
+    let (model, server) = client.discover(startup_deadline).await?;
+    DiscoveredModel::from_proto(model, server)
+}
+
+fn is_hot_swap_requested() -> bool {
+    dynamo_runtime::config::env_is_truthy("DYN_LORA_HOTSWAP_ENABLED")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_fixtures::{minimal_request, model_info, server_info};
+
+    use clap::Parser;
+    use dynamo_backend_common::{BackendError, ErrorType};
+
+    fn args(mode: &str) -> Args {
+        Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:12345",
+            "--namespace",
+            "test-namespace",
+            "--component",
+            "configured-component",
+            "--endpoint",
+            "tokens",
+            "--disaggregation-mode",
+            mode,
+            "--custom-jinja-template",
+            "local-template.jinja",
+        ])
+        .unwrap()
+    }
+
+    fn worker(mode: &str) -> (VllmSidecarEngine, WorkerConfig) {
+        let mut info = model_info();
+        info.supports_multimodal = true;
+        let model = DiscoveredModel::from_proto(info, server_info()).unwrap();
+        VllmSidecarEngine::from_discovered(args(mode), model, None).unwrap()
+    }
+
+    #[test]
+    fn worker_defaults_omit_parsers_and_preserve_encode_options() {
+        for mode in ["aggregated", "prefill", "decode", "encode"] {
+            let (_, config) = worker(mode);
+            assert!(config.tool_call_parser.is_none());
+            assert!(config.reasoning_parser.is_none());
+            if mode == "encode" {
+                assert_eq!(config.namespace, "test-namespace");
+                assert_eq!(config.component, "encode");
+                assert_eq!(config.endpoint, "tokens");
+                assert_eq!(
+                    config.custom_jinja_template.as_deref(),
+                    Some(std::path::Path::new("local-template.jinja"))
+                );
+                assert_eq!(config.model_name, "model-source");
+                assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
+                assert!(!config.enable_kv_routing);
+                assert_eq!(config.disaggregation_mode.as_str(), "encode");
+            }
+        }
+    }
+
+    #[test]
+    fn worker_advertises_configured_parsers() {
+        let args = Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:12345",
+            "--dyn-tool-call-parser",
+            "qwen3_coder",
+            "--dyn-reasoning-parser",
+            "qwen3",
+        ])
+        .unwrap();
+        let vllm_http_url = VllmSidecarEngine::validate_args(&args).unwrap();
+        // Native parser names differ from the explicit Dynamo configuration.
+        let mut info = model_info();
+        info.reasoning_parser = String::new();
+        let model = DiscoveredModel::from_proto(info, server_info()).unwrap();
+        let (_, config) = VllmSidecarEngine::from_discovered(args, model, vllm_http_url).unwrap();
+        assert_eq!(config.tool_call_parser.as_deref(), Some("qwen3_coder"));
+        assert_eq!(config.reasoning_parser.as_deref(), Some("qwen3"));
+    }
+
+    #[test]
+    fn dynamo_parsers_need_an_engine_without_a_reasoning_parser() {
+        let args = Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:12345",
+            "--dyn-reasoning-parser",
+            "qwen3",
+        ])
+        .unwrap();
+        let vllm_http_url = VllmSidecarEngine::validate_args(&args).unwrap();
+        // The fixture engine runs vLLM's `deepseek_r1` reasoning parser.
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let error = VllmSidecarEngine::from_discovered(args, model, vllm_http_url)
+            .err()
+            .expect("startup must fail");
+        assert!(error.to_string().contains("--reasoning-parser none"));
+    }
+
+    #[test]
+    fn encode_requires_multimodal_model() {
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let error = VllmSidecarEngine::from_discovered(args("encode"), model, None)
+            .err()
+            .expect("encode requires media");
+        assert!(error.to_string().contains("requires a multimodal engine"));
+    }
+
+    #[tokio::test]
+    async fn draft_updates_require_both_native_capabilities() {
+        for flags in [
+            None,
+            Some((false, false)),
+            Some((false, true)),
+            Some((true, false)),
+            Some((true, true)),
+        ] {
+            let mut server = server_info();
+            match flags {
+                None => server.rl_capabilities = None,
+                Some((transfer, draft)) => {
+                    let capabilities = server.rl_capabilities.as_mut().unwrap();
+                    capabilities.weight_transfer_enabled = transfer;
+                    capabilities.draft_weight_updates_enabled = draft;
+                }
+            }
+            let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+            let (engine, _) =
+                VllmSidecarEngine::from_discovered(args("aggregated"), model, None).unwrap();
+            let supported = flags == Some((true, true));
+            assert_eq!(
+                engine
+                    .supported_updates()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == "start_draft_weight_update"),
+                supported,
+                "capabilities: {flags:?}"
+            );
+            assert!(engine.client.get().is_none());
+            if !supported {
+                assert_eq!(
+                    engine
+                        .engine_update("start_draft_weight_update".into(), serde_json::json!({}))
+                        .await
+                        .unwrap(),
+                    serde_json::json!({
+                        "status": "error",
+                        "message": "unsupported engine update: start_draft_weight_update"
+                    }),
+                    "capabilities: {flags:?}"
+                );
+                assert!(engine.client.get().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn worker_options_and_model_identity_are_preserved() {
+        for (mode, component) in [
+            ("aggregated", "configured-component"),
+            ("prefill", "prefill"),
+            ("decode", "backend"),
+        ] {
+            let (_, config) = worker(mode);
+            assert_eq!(config.namespace, "test-namespace");
+            assert_eq!(config.component, component);
+            assert_eq!(config.endpoint, "tokens");
+            assert_eq!(
+                config.custom_jinja_template.as_deref(),
+                Some(std::path::Path::new("local-template.jinja"))
+            );
+            assert_eq!(config.model_name, "model-source");
+            assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
+            assert!(config.enable_kv_routing);
+            assert_eq!(
+                config.disaggregation_mode.as_str(),
+                if mode == "aggregated" { "agg" } else { mode }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unstarted_generation_fails_and_cleanup_is_idempotent() {
+        let (engine, _) = worker("aggregated");
+        let context = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let error = engine
+            .generate(minimal_request(), context)
+            .await
+            .err()
+            .expect("unstarted engine");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::EngineShutdown)
+        );
+        engine.cleanup().await.unwrap();
+        engine.cleanup().await.unwrap();
+        assert!(engine.cancel.is_cancelled());
+    }
 }
