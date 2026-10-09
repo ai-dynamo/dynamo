@@ -130,13 +130,14 @@ Prefill and encode use their canonical one-token request and do not apply decode
 
 The Python `vllm` package and `vllm-rs` must come from compatible vLLM revisions. Do not combine a wheel from one nightly with a binary from another. The sidecar's `vllm-proto` dependency is pinned in the workspace `Cargo.toml`.
 
-vLLM-Omni changes the engine response format, causing `vllm-rs` to reject
-responses. The Dynamo vLLM runtime image provides a `vllm-rs` wrapper that
-disables Omni by default. Use `vllm-rs` from `PATH` when starting the engine.
+The CUDA image uses the upstream `vllm-rs` command, which accepts
+the extra engine response fields added by vLLM-Omni. Use `vllm-rs` from `PATH`
+when starting the engine.
 
-The wrapper enables only ModelExpress when installed; otherwise it disables
-all plugins. An exported `VLLM_PLUGINS` overrides this default. The `dev` and
-`local-dev` images do not install Omni and retain normal plugin discovery.
+Runtime images on older vLLM versions retain a wrapper that disables Omni by
+default, enabling only ModelExpress when installed. An exported `VLLM_PLUGINS`
+overrides this default. CUDA images and the `dev` and `local-dev` images use
+normal plugin discovery; the latter two do not install Omni.
 
 Start vLLM with its gRPC listener:
 
@@ -338,8 +339,8 @@ unhealthy engine containers, with a 30-minute startup budget; increase this for
 larger models. The engine listens on `0.0.0.0` for kubelet probes, while the
 sidecar connects over loopback.
 
-The Dynamo vLLM runtime image exposes `vllm-rs` through the
-[wrapper described above](#runtime-compatibility). On CPU and XPU, check that
+The Dynamo vLLM runtime image exposes `vllm-rs` on `PATH`; see
+[runtime compatibility](#runtime-compatibility). On CPU and XPU, check that
 the binary is available with `command -v vllm-rs`. The example manifests use
 upstream vLLM images and locate the binary inside the Python package.
 

@@ -15,6 +15,38 @@ dynamo-sidecar  Convenience entrypoint mapping vllm/sglang/trtllm to the above
 
 Engine protocols and request conversion remain in each engine's crate.
 
+## Runtime configuration
+
+All three sidecars accept the same Dynamo runtime flags through both their
+standalone executables and Python module launchers:
+
+| Flag | Environment variable | Values | Default |
+|------|----------------------|--------|---------|
+| `--discovery-backend` | `DYN_DISCOVERY_BACKEND` | `etcd`, `kubernetes`, `file`, `mem` | `etcd` |
+| `--request-plane` | `DYN_REQUEST_PLANE` | `tcp`, `nats` | `tcp` |
+| `--response-plane` | `DYN_RESPONSE_PLANE` | `tcp`, `quic` | `tcp` |
+| `--event-plane` | `DYN_EVENT_PLANE` | `zmq`, `nats` | `zmq` |
+
+Explicit CLI values override the corresponding environment variables. When both
+are unset, the runtime defaults apply. These settings are resolved before
+connecting runtime dependencies or discovering engine metadata.
+
+For example, with a vLLM engine listening on port 50051:
+
+```bash
+python -m dynamo.vllm.sidecar \
+  --grpc-endpoint 127.0.0.1:50051 \
+  --discovery-backend file \
+  --request-plane tcp \
+  --response-plane tcp \
+  --event-plane zmq
+```
+
+Configure the frontend with matching transports and discovery settings. File
+discovery requires all participants to share the same directory, selected by
+`DYN_FILE_KV` (default: `$TMPDIR/dynamo_store_kv`). The engine's native gRPC
+connection is configured separately with `--grpc-endpoint`.
+
 ## Health and startup
 
 Set `DYN_SYSTEM_PORT` to enable the sidecar HTTP server. The standalone sidecar

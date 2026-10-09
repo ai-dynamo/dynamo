@@ -56,7 +56,7 @@ use crate::{
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
-    types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
+    types::generic::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent},
     worker_type::WorkerType,
 };
 
@@ -66,7 +66,7 @@ use super::{
     controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
     model_manager::RemovedDiscoveryGroup,
 };
-use crate::namespace::NamespaceFilter;
+use crate::namespace::{NamespaceFilter, NamespacePrefixMode};
 use tokio_util::sync::CancellationToken;
 
 /// Constructs a collision-free WorkerSet storage key from its exact endpoint,
@@ -183,6 +183,7 @@ pub enum ModelUpdate {
 }
 
 pub struct ModelWatcher {
+    namespace_prefix_mode: NamespacePrefixMode,
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
     router_config: RouterConfig,
@@ -302,6 +303,7 @@ impl ModelWatcher {
     ) -> Self {
         Self {
             manager: model_manager,
+            namespace_prefix_mode: NamespacePrefixMode::from_env(),
             drt: runtime,
             router_config,
             migration_limit,
@@ -326,6 +328,10 @@ impl ModelWatcher {
 
     pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
         self.local_model_path = path;
+    }
+
+    pub fn set_namespace_prefix_mode(&mut self, mode: NamespacePrefixMode) {
+        self.namespace_prefix_mode = mode;
     }
 
     pub fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) {
@@ -413,6 +419,8 @@ impl ModelWatcher {
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
+        validate_card_parser_version(card)?;
+
         validate_policy_worker_role(card, &self.plugins)?;
 
         // Prepare without exact video routing unless the cohort agreed on a contract.
@@ -434,7 +442,6 @@ impl ModelWatcher {
                  exact video routing disabled for this group"
             );
         }
-
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
         // are process-local, so preserve them when the MDC supplies the base config.
@@ -919,7 +926,7 @@ impl ModelWatcher {
             if card.model_type.supports_realtime() {
                 // `Text` is overloaded for Realtime; its I/O passes through.
                 let realtime_router = PushRouter::<
-                    RealtimeClientEvent,
+                    DynamoRealtimeClientEvent,
                     Annotated<RealtimeServerEvent>,
                 >::from_client_with_monitor(
                     client.clone(), router_config.router_mode, None
@@ -1031,7 +1038,7 @@ impl ControllerHost for ModelWatcher {
         namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Option<DesiredInstance>> {
         let mcid = model_card_instance_id(&instance)?;
-        if !namespace_filter.matches(&mcid.namespace) {
+        if !namespace_filter.matches_with_prefix_mode(&mcid.namespace, self.namespace_prefix_mode) {
             return Ok(None);
         }
 
@@ -1406,6 +1413,21 @@ fn validate_card_shape(card: &ModelDeploymentCard) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_card_parser_version(card: &ModelDeploymentCard) -> anyhow::Result<()> {
+    if should_validate_parser_version(card) {
+        crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
+            card.runtime_config.tool_call_parser.as_deref(),
+            card.runtime_config.reasoning_parser.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
+    card.model_type.supports_chat()
+        && effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
+}
+
 fn effective_router_config<'a>(
     worker_config: Option<&'a RouterConfig>,
     frontend_config: &'a RouterConfig,
@@ -1714,6 +1736,68 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn operator_namespace_scope_filters_model_discovery() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let make_watcher = || {
+            ModelWatcher::new(
+                drt.clone(),
+                Arc::new(ModelManager::new()),
+                RouterConfig::default(),
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+            )
+        };
+        temp_env::with_var("DYN_NAMESPACE_PREFIX_STRICT", None::<&str>, || {
+            assert_eq!(
+                make_watcher().namespace_prefix_mode,
+                NamespacePrefixMode::Literal
+            );
+        });
+        let mut watcher = temp_env::with_var("DYN_NAMESPACE_PREFIX_STRICT", Some("true"), || {
+            let watcher = make_watcher();
+            assert_eq!(
+                watcher.namespace_prefix_mode,
+                NamespacePrefixMode::WorkerGeneration
+            );
+            watcher
+        });
+        let card = ModelDeploymentCard::with_name_only("isolated-model");
+        let literal = NamespaceFilter::from_namespace_and_prefix(None, Some("default-foo"));
+        for (namespace, admitted) in [
+            ("default-foo", true),
+            ("default-foo-1a2b3c4d", true),
+            ("default-foo-legacy", true),
+            ("default-foo-bar", false),
+            ("default-foo-bar-1a2b3c4d", false),
+        ] {
+            let DiscoveryEvent::Added(instance) = discovered_card(namespace, 1, &card) else {
+                unreachable!();
+            };
+            watcher.set_namespace_prefix_mode(NamespacePrefixMode::WorkerGeneration);
+            assert_eq!(
+                watcher
+                    .normalize(instance.clone(), &literal)
+                    .unwrap()
+                    .is_some(),
+                admitted,
+                "{namespace}"
+            );
+            watcher.set_namespace_prefix_mode(NamespacePrefixMode::Literal);
+            assert!(
+                watcher.normalize(instance, &literal).unwrap().is_some(),
+                "manual scope: {namespace}"
+            );
+        }
+        runtime.shutdown();
+    }
+
     type TestDiscoverySender =
         tokio::sync::mpsc::UnboundedSender<(DiscoveryEvent, tokio::sync::oneshot::Sender<()>)>;
 
@@ -1798,8 +1882,7 @@ mod tests {
         if std::env::var("DYNAMO_ALIAS_TEST").as_deref() != Ok(test_name) {
             let output = tokio::time::timeout(
                 Duration::from_secs(30),
-                tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", test_name, "--nocapture"])
+                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
                     .env("DYNAMO_ALIAS_TEST", test_name)
                     .env("DYN_TCP_RPC_HOST", "127.0.0.1")
                     .env("DYN_TCP_RPC_PORT", "0")
@@ -1811,19 +1894,7 @@ mod tests {
             .await
             .expect("classify subprocess must finish within its deadline")
             .expect("classify subprocess must start");
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                stdout
-                    .lines()
-                    .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;")),
-                "classify subprocess must run exactly one passing test: {stdout}"
-            );
+            crate::test_utils::assert_isolated_success(&output);
             return;
         }
 
@@ -2157,8 +2228,7 @@ mod tests {
             // more than libtest's default 2 MiB stack, like the prefill routing tests.
             let output = tokio::time::timeout(
                 Duration::from_secs(30),
-                tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", test_name, "--nocapture"])
+                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
                     .env("DYNAMO_CLASSIFIER_CATALOG_TEST", test_name)
                     .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
                     .env("DYN_TCP_RPC_HOST", "127.0.0.1")
@@ -2171,12 +2241,7 @@ mod tests {
             .await
             .expect("classifier subprocess timed out")
             .unwrap();
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+            crate::test_utils::assert_isolated_success(&output);
             return;
         }
         use dynamo_kv_router::scheduling::{
@@ -3084,6 +3149,55 @@ request_classifier:
 
         card.worker_type = Some(WorkerType::Decode);
         assert!(validate_policy_worker_role(&card, &custom).is_ok());
+    }
+
+    #[test]
+    fn parser_validation_skips_non_chat_and_prefill_workers() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::parser_validation_skips_non_chat_and_prefill_workers"
+            ),
+            &[("DYN_PARSER_VERSION", "2")],
+        ) {
+            return;
+        }
+
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+        card.model_type = ModelType::Embedding;
+        assert!(validate_card_parser_version(&card).is_ok());
+        card.model_type = ModelType::Chat;
+        card.worker_type = Some(WorkerType::Prefill);
+        assert!(validate_card_parser_version(&card).is_ok());
+        for role in [None, Some(WorkerType::Decode), Some(WorkerType::Encode)] {
+            card.worker_type = role;
+            assert!(validate_card_parser_version(&card).is_err());
+        }
+        card.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
+        card.runtime_config.reasoning_parser = Some("qwen3".to_string());
+        assert!(validate_card_parser_version(&card).is_ok());
+    }
+
+    #[test]
+    fn parser_version_validation_applies_only_to_chat_surfaces() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+
+        card.model_type = ModelType::Embedding;
+        assert!(!should_validate_parser_version(&card));
+
+        card.model_type = ModelType::Chat;
+        assert!(should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Encode);
+        assert!(should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Prefill);
+        assert!(!should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Decode);
+        assert!(should_validate_parser_version(&card));
     }
 
     #[test]

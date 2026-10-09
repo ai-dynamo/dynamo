@@ -23,6 +23,7 @@ from fsspec.implementations.dirfs import DirFileSystem
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
+from vllm_omni.model_extras import build_image_to_image_prompt, get_model_class_name
 
 from dynamo._core import Context
 from dynamo.common.multimodal import ImageLoader
@@ -108,7 +109,7 @@ def _apply_media_passthrough(
 class OmniHandler(BaseOmniHandler):
     """Unified handler for multi-stage pipelines using vLLM-Omni.
 
-    Handles text-to-image, text-to-video, image-to-video, and text-to-audio generation.
+    Handles image generation/editing, video generation, and audio generation.
     Audio/TTS logic is delegated to AudioGenerationHandler via composition.
     """
 
@@ -611,7 +612,32 @@ class OmniHandler(BaseOmniHandler):
             return self._engine_inputs_from_chat(parsed_request)
         elif request_type == RequestType.IMAGE_GENERATION:
             assert isinstance(parsed_request, NvCreateImageRequest)
-            return self._engine_inputs_from_image(parsed_request)
+            dimensions = image_generation_size_from_str(parsed_request.size)
+            inputs = self._engine_inputs_from_image(
+                parsed_request, dimensions=dimensions
+            )
+            if parsed_request.input_reference is not None:
+                try:
+                    image = await self._image_loader.load_image(
+                        parsed_request.input_reference
+                    )
+                except (ValueError, PIL.Image.DecompressionBombError) as e:
+                    # Keep URLs and inline image data out of the client error.
+                    raise ValueError("Failed to load input_reference") from e
+            if image is not None:
+                inputs.prompt.update(
+                    build_image_to_image_prompt(
+                        model_class_name=get_model_class_name(self.engine_client),
+                        prompt=parsed_request.prompt,
+                        negative_prompt=(
+                            parsed_request.nvext or ImageNvExt()
+                        ).negative_prompt,
+                        input_image=[image],
+                        height=dimensions[1],
+                        width=dimensions[0],
+                    )
+                )
+            return inputs
         elif request_type == RequestType.VIDEO_GENERATION:
             assert isinstance(parsed_request, NvCreateVideoRequest)
             return self._engine_inputs_from_video(parsed_request, image=image)
@@ -777,11 +803,14 @@ class OmniHandler(BaseOmniHandler):
         self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
         _apply_media_passthrough(sp, req.extra_args)
 
-    def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
+    def _engine_inputs_from_image(
+        self,
+        req: NvCreateImageRequest,
+        *,
+        dimensions: tuple[int, int],
+    ) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
-        # req.size is a free-form client string, so it needs the same bound the
-        # chat path applies -- parse_size alone returns whatever it parses.
-        width, height = image_generation_size_from_str(req.size)
+        width, height = dimensions
         nvext = req.nvext or ImageNvExt()
 
         prompt = build_image_generation_prompt(
@@ -790,7 +819,6 @@ class OmniHandler(BaseOmniHandler):
             width,
             negative_prompt=nvext.negative_prompt,
         )
-
         sp = OmniDiffusionSamplingParams(
             height=height,
             width=width,

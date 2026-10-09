@@ -416,6 +416,8 @@ navigation:
                 contents:
                   - page: Overview
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/overview.md
+                  - page: Protocol Field Handling
+                    path: pages/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md
                   - page: KServe gRPC Frontend
                     slug: kserve-grpc-frontend
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/frontend-guide.md
@@ -486,6 +488,8 @@ navigation:
                       - page: Write Custom Routing Strategies
                         slug: write-custom-routing-strategies
                         path: pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx
+                      - page: Write an Admission Control Plugin
+                        path: pages/developer-guide/knowledge-base/modular-components/router/custom-admission-control.md
                       - page: Router Examples
                         path: pages/developer-guide/knowledge-base/modular-components/router/router-examples.md
                       - page: Router Testing
@@ -779,6 +783,23 @@ navigation:
             path: pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.md
           - page: Troubleshooting Tool Calls
             path: pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
+      - section: Many-Model Serving
+        collapsed: true
+        icon: layer-group
+        slug: many-model-serving
+        contents:
+          - page: Interpreting GPU Sharing Results
+            path: pages/use-cases/gpu-sharing/gpu-sharing-results.mdx
+          - page: Deploy the Baseline Experiment
+            path: pages/use-cases/gpu-sharing/deploy-baseline.md
+          - page: Deploy the KAI + HAMi Experiment
+            path: pages/use-cases/gpu-sharing/deploy-kai-hami.md
+          - page: Build the KAI-Scheduler and GPU Fractioning Forks
+            path: pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md
+          - page: Deploy the KAI + GPU Fractions Experiment
+            path: pages/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md
+          - page: Per-GPU Compute and Memory Limits with MPS
+            path: pages/use-cases/gpu-sharing/mps-per-gpu-limits.md
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================
@@ -1308,6 +1329,9 @@ navigation:
         contents:
           # Keep this archive in reverse chronological order. Publication dates are
           # rendered in each article header and on the custom landing page.
+          - page: "AIPerf Benchmarking"
+            path: pages/blog/2026/aiperf-benchmarking.mdx
+            slug: aiperf-benchmarking
           - page: "When to use EPD Disaggregation for Multimodal Serving"
             path: pages/blog/2026/epd-disaggregation-multimodal.mdx
             slug: epd-disaggregation-multimodal
