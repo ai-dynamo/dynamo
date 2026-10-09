@@ -1,25 +1,38 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Experimental Dynamo Snapshot restore example for Qwen3-0.6B with TensorRT-LLM.
 #
-# This example uses DynamoCheckpoint Auto mode: the operator starts a checkpoint
-# job for TRTLLMWorker, waits for it to become Ready, and then restores the DGD
-# worker from that checkpoint. Use the same TensorRT-LLM runtime image for
-# capture and restore, and use the matching frontend image. Replace the image
-# names below with tags for the Dynamo/TensorRT-LLM revision being tested.
+# With checkpoint.enabled=true and no checkpointRef, Dynamo creates a
+# SnapshotJob for TRTLLMWorker. WaitForCheckpoint holds serving replicas at zero
+# until capture completes, then restores them from the generated PodSnapshot.
+# The default Immediate policy starts workers cold during capture; only later
+# Pods restore, and snapshot readiness does not restart existing workers.
 #
-# Requirements validated for the single-GPU TRTLLM path:
+# Use the same TensorRT-LLM runtime image for capture and restore, and a matching
+# frontend image. Replace the image names below with the revision being tested.
+# Omit the deprecated checkpoint.mode and checkpoint.identity fields.
+#
+# Requirements for the single-GPU TensorRT-LLM path:
+# - Install standalone Snapshot and enable checkpoint support in the Dynamo
+#   operator before applying this manifest.
 # - Create a PersistentVolumeClaim (PVC) named model-cache in the target
 #   namespace before applying this manifest.
-# - Run the normal TRTLLM entrypoint. Do not wrap it in cuda-checkpoint
+# - Run the normal TensorRT-LLM entrypoint. Do not wrap it in cuda-checkpoint
 #   --launch-job; the snapshot-agent drives CRIU/cuda-checkpoint externally.
-# - Keep the TRTLLM engine config conservative enough for a small smoke test.
-# - Restrict UCX away from RDMA/IB transports. The snapshot stack can migrate
-#   established TCP sockets, but it cannot dump UCX/OpenMPI mappings backed by
-#   /dev/infiniband/uverbs*. For one GPU, tcp,self is sufficient.
-# - Mount /dev/net/tun. CRIU may need it while restoring network devices created
-#   by the TRT-LLM/PyTorch/OpenMPI stack even in this single-GPU recipe.
+# - The engine config limits the batch size and KV cache allocation for Qwen3-0.6B.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
