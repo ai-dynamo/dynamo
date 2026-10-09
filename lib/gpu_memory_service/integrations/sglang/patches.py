@@ -366,8 +366,8 @@ def patch_static_state_for_gms() -> None:
             from sglang.srt.managers.scheduler_components import weight_updater
         except ImportError:
             # SGLang <0.5.21 kept these on the scheduler mixin module.
-            from sglang.srt.managers import (  # type: ignore[no-redef]
-                scheduler_update_weights_mixin as weight_updater,
+            from sglang.srt.managers import (
+                scheduler_update_weights_mixin as weight_updater,  # type: ignore[no-redef]
             )
 
         def _export_noop(model):
