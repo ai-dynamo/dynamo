@@ -122,6 +122,8 @@ ignore:
   # pipeline (it is excluded from the `deploy` filter below).
   - 'deploy/utils/convert_api_version.py'
   - 'deploy/utils/tests/**'
+  # The path-triggered OpenAPI workflows own these CPU tooling tests.
+  - 'scripts/protocol_compatibility/**'
   - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'

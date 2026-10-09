@@ -465,6 +465,30 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Generate frontend OpenAPI specification
+      if: matrix.dir == '.'
+      # Reuse the root Rust job's build environment. cargo test does not run
+      # the generator's main(), which builds the actual HttpService router.
+      run: |
+        set -euo pipefail
+        cargo run --locked -p dynamo-llm --bin generate-frontend-openapi
+        git rev-parse HEAD > docs/frontends/source-revision.txt
+        cp Cargo.lock docs/frontends/Cargo.lock
+        echo 'cargo run --locked -p dynamo-llm --bin generate-frontend-openapi' > docs/frontends/generation-command.txt
+        (cd docs/frontends && sha256sum openapi.json Cargo.lock > checksums.sha256)
+    - name: Retain generated frontend OpenAPI specification
+      if: matrix.dir == '.'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: frontend-openapi-${{ github.sha }}
+        path: |
+          docs/frontends/openapi.json
+          docs/frontends/source-revision.txt
+          docs/frontends/Cargo.lock
+          docs/frontends/generation-command.txt
+          docs/frontends/checksums.sha256
+        if-no-files-found: error
+        retention-days: 14
     - name: Check isolated kv-router feature builds
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
