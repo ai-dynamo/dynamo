@@ -93,9 +93,11 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 			Generation: 7,
 		},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName: "prefill",
+					ComponentType: v1beta1.ComponentTypeWorker,
 					Experimental: &v1beta1.ExperimentalSpec{
 						Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
 						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
@@ -104,6 +106,7 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 				},
 				{
 					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeWorker,
 					Experimental: &v1beta1.ExperimentalSpec{
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
 						Failover:   &v1beta1.FailoverSpec{},
@@ -143,8 +146,7 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 	require.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
 	require.Equal(t,
 		"component \"prefill\": Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
-			"component \"prefill\": Snapshot with active/passive failover is temporarily unsupported\n"+
-			"component \"decode\": Snapshot with active/passive failover is temporarily unsupported",
+			"spec.components[1].experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture",
 		ready.Message,
 	)
 	require.Zero(t, stored.Status.ObservedGeneration)
