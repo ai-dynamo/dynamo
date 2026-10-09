@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Guard request-schema declarations that derives alone cannot express: input
+//! aliases and endpoint-specific extensions. Alias claims are checked against real
+//! Serde parsing, not against a framework server or backend execution.
+//!
+//! Run: `cargo test -p dynamo-llm --no-default-features --test openapi_request_schema`.
+
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use utoipa::ToSchema;
 
@@ -22,6 +28,8 @@ fn http_export_describes_request_aliases() {
             .and_then(|v| v.as_array())
             .is_some_and(|parts| parts.iter().any(|part| assert_alias(part, field, alias)))
     }
+    // Both copies are consumed by schema readers: the registered component and
+    // the currently inlined request body must advertise the same input aliases.
     for node in [
         &spec["components"]["schemas"]["NvCreateChatCompletionRequest"],
         &spec["paths"]["/v1/chat/completions"]["post"]["requestBody"]["content"]["application/json"]
@@ -53,6 +61,7 @@ fn advertised_aliases_populate_the_same_fields_and_reject_dual_names() {
             false
         );
     }
+    // Duplicate spellings are invalid even when their values are equal.
     for alternate in [json!({}), json!({"enable_thinking": false})] {
         assert!(
             serde_json::from_value::<NvCreateChatCompletionRequest>(json!({
@@ -78,6 +87,8 @@ fn advertised_aliases_populate_the_same_fields_and_reject_dual_names() {
 
 #[test]
 fn chat_only_fields_are_exported_without_advertising_them_for_completions() {
+    // The runtime shares CommonExt, but completions rejects these chat options.
+    // Exporting the shared runtime shape verbatim would overstate its contract.
     let mut schemas = Vec::new();
     NvCreateChatCompletionRequest::schemas(&mut schemas);
     let chat_common = schemas

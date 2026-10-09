@@ -1,8 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared cases exercise real Serde, separately from JSON Schema validation.
-//! Passing these cases is representative evidence, not behavioral conformance.
+//! Establish the Rust parsing expectations used by schema-fidelity checks.
+//!
+//! `fixtures/openapi/requests.json` supplies `body` and the expected Serde result
+//! (`valid`). This test does not load or validate an OpenAPI document. The separate
+//! offline composition suite consumes the same cases and their `schema_valid` / `gap`
+//! metadata; known mismatches must not be mistaken for schema/Serde agreement.
+//! Parsing success does not establish request validation, backend support, or inference.
+//!
+//! Run: `cargo test -p dynamo-llm --no-default-features --test openapi_request_fidelity`.
 
 use dynamo_llm::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
@@ -23,7 +30,7 @@ struct Cases {
 }
 
 #[test]
-fn composed_schema_cases_match_rust_deserialization() {
+fn request_fixtures_match_rust_deserialization() {
     let cases: Cases =
         serde_json::from_str(include_str!("fixtures/openapi/requests.json")).unwrap();
     let mut failures = Vec::new();
