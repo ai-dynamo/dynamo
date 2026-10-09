@@ -136,7 +136,12 @@ impl<V> BlockLookup<V> {
     }
 
     pub(crate) fn remove(&mut self, key: &ExternalSequenceBlockHash) -> Option<V> {
-        let mut hole = self.find(*key)?;
+        let hole = self.find(*key)?;
+        self.remove_at(hole)
+    }
+
+    /// Empties slot `hole` and closes the gap it leaves in its probe run.
+    fn remove_at(&mut self, mut hole: usize) -> Option<V> {
         let (_, value) = self.slots[hole].take()?;
         self.len -= 1;
 
@@ -247,6 +252,62 @@ impl<V: Copy + Eq> BlockLookup<V> {
         changed
     }
 
+    /// How many leading `keys` hold `value`, stopping at the first that does not.
+    pub(crate) fn count_leading(&self, keys: &[ExternalSequenceBlockHash], value: V) -> usize {
+        if self.len == 0 {
+            return 0;
+        }
+        for key in keys.iter().take(PREFETCH_DISTANCE) {
+            self.prefetch(*key);
+        }
+        for (i, key) in keys.iter().enumerate() {
+            if let Some(next) = keys.get(i + PREFETCH_DISTANCE) {
+                self.prefetch(*next);
+            }
+            match self.probe(*key) {
+                Ok(slot) if self.slots[slot].as_ref().is_some_and(|(_, v)| *v == value) => {}
+                _ => return i,
+            }
+        }
+        keys.len()
+    }
+
+    /// Removes the entries among `keys` whose value `matches` accepts, leaving entries
+    /// that hold anything else: removal scrubs only entries that name the node it
+    /// uncovered. Calls `on_removed` with the removed value, or with `None` for a key
+    /// that has no entry at all, and not for a key whose entry stays.
+    pub(crate) fn remove_all_if(
+        &mut self,
+        keys: &[ExternalSequenceBlockHash],
+        mut matches: impl FnMut(V) -> bool,
+        mut on_removed: impl FnMut(ExternalSequenceBlockHash, Option<V>),
+    ) {
+        if self.len == 0 {
+            for &key in keys {
+                on_removed(key, None);
+            }
+            return;
+        }
+        self.for_each_prefetched(keys.iter().copied(), |lookup, key| {
+            if lookup.len == 0 {
+                on_removed(key, None);
+                return;
+            }
+            match lookup.probe(key) {
+                Err(_) => on_removed(key, None),
+                Ok(slot) => {
+                    let Some(&(_, value)) = lookup.slots[slot].as_ref() else {
+                        return;
+                    };
+                    if matches(value) {
+                        lookup.remove_at(slot);
+                        on_removed(key, Some(value));
+                    }
+                }
+            }
+        });
+    }
+
     /// Points keys holding `from` at `to`, leaving missing keys and keys holding anything
     /// else alone: lookup repair treats a missing or differently placed entry as
     /// meaningful state. Returns the number changed.
@@ -293,7 +354,7 @@ mod tests {
 
             for step in 0..20_000u64 {
                 let k = key(rng.u64(..key_space));
-                match rng.u32(..10) {
+                match rng.u32(..11) {
                     0..=3 => assert_eq!(lookup.insert(k, step), model.insert(k, step)),
                     4..=6 => assert_eq!(lookup.remove(&k), model.remove(&k)),
                     7 => {
@@ -329,6 +390,45 @@ mod tests {
                         let expected: Vec<_> =
                             keys.iter().map(|&k| (k, model.remove(&k))).collect();
                         assert_eq!(seen, expected);
+                    }
+                    9 if rng.bool() => {
+                        let keys: Vec<_> = (0..rng.usize(..12))
+                            .map(|_| key(rng.u64(..key_space)))
+                            .collect();
+                        // Remove entries holding one of two recent values.
+                        let wanted = [
+                            step.saturating_sub(rng.u64(..4)),
+                            step.saturating_sub(rng.u64(..4)),
+                        ];
+                        let mut seen = Vec::new();
+                        lookup.remove_all_if(
+                            &keys,
+                            |v| wanted.contains(&v),
+                            |k, v| seen.push((k, v)),
+                        );
+                        let mut expected = Vec::new();
+                        for &k in &keys {
+                            match model.get(&k) {
+                                None => expected.push((k, None)),
+                                Some(&v) if wanted.contains(&v) => {
+                                    model.remove(&k);
+                                    expected.push((k, Some(v)));
+                                }
+                                Some(_) => {}
+                            }
+                        }
+                        assert_eq!(seen, expected);
+                    }
+                    9 => {
+                        let keys: Vec<_> = (0..rng.usize(..12))
+                            .map(|_| key(rng.u64(..key_space)))
+                            .collect();
+                        let value = step.saturating_sub(rng.u64(..64));
+                        let expected = keys
+                            .iter()
+                            .take_while(|k| model.get(k) == Some(&value))
+                            .count();
+                        assert_eq!(lookup.count_leading(&keys, value), expected);
                     }
                     _ => {
                         let keys: Vec<_> = (0..rng.usize(..12))

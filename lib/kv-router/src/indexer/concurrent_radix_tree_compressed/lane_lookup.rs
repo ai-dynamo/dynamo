@@ -187,6 +187,70 @@ impl LaneLookup {
         self.nodes.id_of(node).is_some()
     }
 
+    /// The length of the removal run starting at `hashes[0]` on `node`: 1 plus the number
+    /// of following hashes whose `worker` entry names `node`, or `origin` when lookup
+    /// repair resolved the run from `origin` to `node`, stopping at the first that names
+    /// neither. The first hash always belongs to the run, because its entry is what
+    /// picked `node`. Compares lane-local ids, so no node's reference count is touched.
+    ///
+    /// A hash whose entry names any other node is left to its own run: that node holds
+    /// the rank's coverage of it, and consuming it here would leave that coverage with no
+    /// entry left to remove it.
+    pub(super) fn run_naming(
+        &self,
+        worker: WorkerWithDpRank,
+        hashes: &[ExternalSequenceBlockHash],
+        node: &SharedNode,
+        origin: Option<&SharedNode>,
+    ) -> usize {
+        debug_assert!(!hashes.is_empty());
+        let Some(blocks) = self.workers.get(&worker) else {
+            return 1;
+        };
+        let rest = &hashes[1..];
+        let id = self.nodes.id_of(node);
+        let Some(origin_id) = origin.and_then(|origin| self.nodes.id_of(origin)) else {
+            return 1 + id.map_or(0, |id| blocks.count_leading(rest, id));
+        };
+        let Some(id) = id else {
+            return 1 + blocks.count_leading(rest, origin_id);
+        };
+        1 + rest
+            .iter()
+            .take_while(|hash| blocks.get(hash).is_some_and(|&v| v == id || v == origin_id))
+            .count()
+    }
+
+    /// Removes `worker`'s entries for `hashes` that name `node` or `origin`, and leaves
+    /// entries naming any other node. Calls `on_removed` for each removed entry and for
+    /// each hash with no entry at all, and not for an entry it leaves. Does nothing if the
+    /// lane has no lookup for `worker`.
+    pub(super) fn remove_all_naming(
+        &mut self,
+        worker: WorkerWithDpRank,
+        hashes: &[ExternalSequenceBlockHash],
+        node: &SharedNode,
+        origin: Option<&SharedNode>,
+        mut on_removed: impl FnMut(ExternalSequenceBlockHash),
+    ) {
+        let Some(blocks) = self.workers.get_mut(&worker) else {
+            return;
+        };
+        let nodes = &mut self.nodes;
+        let id = nodes.id_of(node);
+        let origin_id = origin.and_then(|origin| nodes.id_of(origin));
+        blocks.remove_all_if(
+            hashes,
+            |v| Some(v) == id || Some(v) == origin_id,
+            |hash, removed| {
+                if let Some(id) = removed {
+                    nodes.drop_refs(id, 1);
+                }
+                on_removed(hash);
+            },
+        );
+    }
+
     /// Points `worker`'s entries for `hashes` at `node`. Returns the number of entries
     /// inserted or changed.
     pub(super) fn upsert_all<I>(
@@ -301,6 +365,18 @@ impl LaneLookup {
         });
     }
 
+    /// Every hash `worker` has an entry for, in no particular order.
+    #[cfg(test)]
+    pub(super) fn hashes_for_test(
+        &self,
+        worker: WorkerWithDpRank,
+    ) -> Vec<ExternalSequenceBlockHash> {
+        self.workers
+            .get(&worker)
+            .map(|blocks| blocks.iter().map(|(&hash, _)| hash).collect())
+            .unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub(super) fn block_count(&self, worker: WorkerWithDpRank) -> Option<usize> {
         self.workers.get(&worker).map(BlockLookup::len)
@@ -382,7 +458,7 @@ mod tests {
                 let hashes: Vec<_> = (0..rng.usize(..8))
                     .map(|_| hash(rng.u64(..key_space)))
                     .collect();
-                match rng.u32(..12) {
+                match rng.u32(..14) {
                     0..=3 => {
                         let changed = lane.upsert_all(worker, hashes.iter().copied(), &pool[node]);
                         let expected = hashes
@@ -428,6 +504,45 @@ mod tests {
                             }
                         }
                         assert_eq!(changed, expected);
+                    }
+                    12 if !hashes.is_empty() => {
+                        let origin = rng.bool().then(|| rng.usize(..pool.len()));
+                        let named = |h: &ExternalSequenceBlockHash| {
+                            model
+                                .get(&(worker, *h))
+                                .is_some_and(|&m| m == node || Some(m) == origin)
+                        };
+                        let expected = 1 + hashes[1..].iter().take_while(|h| named(h)).count();
+                        let got =
+                            lane.run_naming(worker, &hashes, &pool[node], origin.map(|o| &pool[o]));
+                        assert_eq!(got, expected);
+                    }
+                    13 => {
+                        let origin = rng.bool().then(|| rng.usize(..pool.len()));
+                        let mut seen = Vec::new();
+                        lane.remove_all_naming(
+                            worker,
+                            &hashes,
+                            &pool[node],
+                            origin.map(|o| &pool[o]),
+                            |h| seen.push(h),
+                        );
+                        let mut expected = Vec::new();
+                        for &h in &hashes {
+                            match model.get(&(worker, h)) {
+                                None => expected.push(h),
+                                Some(&m) if m == node || Some(m) == origin => {
+                                    model.remove(&(worker, h));
+                                    expected.push(h);
+                                }
+                                Some(_) => {}
+                            }
+                        }
+                        if lane.contains_worker(worker) {
+                            assert_eq!(seen, expected);
+                        } else {
+                            assert!(seen.is_empty());
+                        }
                     }
                     _ => {
                         let mut removed = Vec::new();

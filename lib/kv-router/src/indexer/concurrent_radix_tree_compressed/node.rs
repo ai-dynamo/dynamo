@@ -705,8 +705,10 @@ impl Node {
     }
 
     /// Removes `slot` from the leading run of `hashes` found in this edge, under one
-    /// exclusive shape gate. Returns how many hashes the run consumed and the newly uncovered
-    /// hashes, or `None` if the first hash is no longer in this edge.
+    /// exclusive shape gate. Returns how many hashes the run consumed and the hashes whose
+    /// lookup entries the removal retires: the newly uncovered ones, plus consumed hashes
+    /// past the slot's old cutoff, which the event evicts all the same. Returns `None` if
+    /// the first hash is no longer in this edge.
     pub(super) fn remove_worker_for_leading_hashes(
         &self,
         slot: Slot,
@@ -717,6 +719,7 @@ impl Node {
         let _gate = self.shape_gate.write();
         let state = self.state.upgradable_read();
         let mut min_match: Option<(usize, ExternalSequenceBlockHash)> = None;
+        let mut max_pos = 0;
         let mut consumed = 0;
         let mut last_pos = None;
 
@@ -728,13 +731,28 @@ impl Node {
             if min_match.is_none_or(|(min_pos, _)| pos < min_pos) {
                 min_match = Some((pos, hash));
             }
+            max_pos = max_pos.max(pos);
             consumed += 1;
         }
 
         let (pos, block_hash) = min_match?;
-        let outcome = if pos >= state.current_cutoff(&self.full, slot) {
+        let old_cutoff = state.current_cutoff(&self.full, slot);
+        // Consumed hashes the slot no longer covered here have no coverage to drop, but
+        // their entries still go with the event. Rare: entries normally leave with the
+        // coverage they name.
+        let beyond: Vec<_> = if max_pos >= old_cutoff {
+            hashes[..consumed]
+                .iter()
+                .copied()
+                .filter(|&hash| state.position(hash).is_some_and(|p| p >= old_cutoff))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut outcome = if pos >= old_cutoff {
+            debug_assert!(beyond.contains(&block_hash));
             RemoveOutcome {
-                stale_hashes: vec![block_hash],
+                stale_hashes: Vec::new(),
             }
         } else if pos == 0 && self.full.contains(slot) {
             state.drop_full_slot(&self.full, slot)
@@ -745,6 +763,7 @@ impl Node {
             }
             .remove_worker_at_pos(&self.full, slot, pos, block_hash)
         };
+        outcome.stale_hashes.extend(beyond);
         let should_clear_children = self.full.is_empty();
         self.clear_children_if_unreachable(should_clear_children);
         Some((consumed, outcome.stale_hashes))

@@ -86,7 +86,7 @@ impl ConcurrentRadixTreeCompressed {
         let mut index = 0;
 
         while let Some(&block_hash) = block_hashes.get(index) {
-            let Some(mut node) = lookup.node(worker.rank, block_hash) else {
+            let Some(origin) = lookup.node(worker.rank, block_hash) else {
                 tracing::debug!(
                     worker_id = worker.rank.worker_id.to_string(),
                     dp_rank = worker.rank.dp_rank,
@@ -98,33 +98,54 @@ impl ConcurrentRadixTreeCompressed {
                 index += 1;
                 continue;
             };
+            // The node lookup repair moved the run to, if any. Entries that still name
+            // `origin` are stale entries for hashes that moved with it.
+            let mut resolved: Option<SharedNode> = None;
 
             // The grouped removal validates `block_hash` against the edge under its own
             // lock, so a stale lookup entry costs no separate probe on the common path.
             loop {
+                let node = resolved.as_ref().unwrap_or(&origin);
+                let stale_origin = resolved.is_some().then_some(&origin);
                 // TODO(CORRECTNESS): Invalidate this worker throughout the descendant
                 // subtree when a mid-edge removal leaves the node alive for another
                 // worker. Otherwise stale descendants can be reused as store parents,
                 // reactivated by restoring only the removed block, or emitted by dumps
                 // without a valid worker-specific parent. Preserve CRTC's locking and
                 // snapshot guarantees when implementing the traversal.
-                if let Some((consumed, stale_hashes)) =
-                    node.remove_worker_for_leading_hashes(worker.slot, &block_hashes[index..])
-                {
-                    self.remove_lookup_hashes(lookup, worker.rank, &stale_hashes);
+                //
+                // The run takes only the following hashes whose entries name this node
+                // (or the stale node repair resolved it from). An entry naming another
+                // node marks where the worker's coverage of that hash lives: once cleanup
+                // unlinks a subtree the lane still names, a partial restore can store some
+                // of its hashes on a new live node, and consuming them here would leave
+                // that coverage behind.
+                let run =
+                    lookup.run_naming(worker.rank, &block_hashes[index..], node, stale_origin);
+                if let Some((consumed, stale_hashes)) = node.remove_worker_for_leading_hashes(
+                    worker.slot,
+                    &block_hashes[index..index + run],
+                ) {
+                    self.remove_lookup_hashes_naming(
+                        lookup,
+                        worker.rank,
+                        &stale_hashes,
+                        node,
+                        stale_origin,
+                    );
                     index += consumed;
                     break;
                 }
 
                 // A cross-thread split moved the hash below `node`; retry the run there.
-                if let Some(resolved) = self.repair_stale(
+                if let Some(next) = self.repair_stale(
                     lookup,
                     worker.table,
-                    &node,
+                    node,
                     block_hash,
                     LookupRepairDirection::TowardHead,
                 ) {
-                    node = resolved;
+                    resolved = Some(next);
                     continue;
                 }
 
@@ -147,6 +168,28 @@ impl ConcurrentRadixTreeCompressed {
         }
 
         Ok(())
+    }
+
+    /// Scrubs `worker`'s entries for `hashes`, which a removal just uncovered on `node`,
+    /// that name `node` or `origin`, the stale node lookup repair resolved `node` from.
+    /// An entry naming any other node stays: the worker still holds that hash there, and
+    /// only that hash's own removal may drop it. Releases only the hashes whose entries
+    /// were removed, plus hashes with no entry at all.
+    fn remove_lookup_hashes_naming(
+        &self,
+        lookup: &mut LaneLookup,
+        worker: WorkerWithDpRank,
+        hashes: &[ExternalSequenceBlockHash],
+        node: &SharedNode,
+        origin: Option<&SharedNode>,
+    ) {
+        if self.lifecycle.is_enabled() {
+            lookup.remove_all_naming(worker, hashes, node, origin, |hash| {
+                self.release_hash(worker, hash)
+            });
+        } else {
+            lookup.remove_all_naming(worker, hashes, node, origin, |_| {});
+        }
     }
 
     fn remove_lookup_hashes(
