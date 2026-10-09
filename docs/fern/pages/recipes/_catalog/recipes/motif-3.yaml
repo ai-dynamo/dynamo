@@ -37,9 +37,38 @@ targets:
   expected_performance:
     available: false
     summary: 'Benchmark-only synthetic proxy, not reproducible from the shipped manifests: 587.92 output tok/s, 293.96 output tok/s/GPU, 66.27 output tok/s/user P50, TTFT P50 388.18 ms at concurrency 11 with Dynamo MTP2 and TP2 using synthetic acceptance length 2.13 from SPEED-Bench coding. The deployment uses real MTP verification; a real-MTP chat-trace run is not yet attached. 35 trace requests exceeded the 262,144-token context limit.'
+- id: disagg-b200-chat-3p1d-kv
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: vLLM
+    image: nvcr.io/nvstaging/nim/motif-3:dynamo-db6a3705-disagg-41e2d0b33@sha256:dca0373c70ddd7ec613f6b9cf5dad67411a61e239739608c600c8f6deca54501
+  topology: disaggregated
+  techniques:
+  - tp2
+  - mtp2
+  - expert-parallel
+  - kv-aware-routing
+  - prefix-caching
+  - nixl
+  - shared-model-cache
+  workload:
+    type: chat-trace-replay
+    traffic: Complete 1,805-row chat trace; one concurrency per run
+  deploy:
+    asset: recipes/motif-3/vllm/disagg-b200-chat/deploy-generic-3p1d-kv.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/motif-3/perf/disagg.yaml
+  expected_performance:
+    available: false
+    summary: 'The deployment defaults to real MTP2 verification. Synthetic MTP2 AL 2.13 observations at concurrency 8, 16, 32, 40, 48, and 64 do not establish real-MTP performance.'
 related_benchmarks: []
 maintainer: null
 gaps:
 - maintainer unknown
 - public image vllm-runtime:1.5.0-motif-3-dev.1 is pending NGC publication and is referenced by tag, not digest
 - published performance is a synthetic-acceptance proxy; no real-MTP chat-trace result yet
+- disaggregated image requires private registry access

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Run warmup separately, then clear both worker roles before this profiling run.
-# Set variables.concurrency to 8, 16, or 32; preserve all 1,805 trace rows.
+# Set variables.concurrency for each run; preserve all 1,805 trace rows.
 schemaVersion: '2.0'
 randomSeed: 42
 benchmark:
@@ -56,6 +56,6 @@ benchmark:
     ui: none
     apiHost: 127.0.0.1
     apiPort: 18080
-    workers: '{{ concurrency }}'
+    workers: 8
 variables:
   concurrency: 8
