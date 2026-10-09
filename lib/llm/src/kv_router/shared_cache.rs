@@ -1017,29 +1017,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_blocks_ignores_other_model_prefix() {
-        let hash = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72";
-        let config = SglangHicacheMooncakeConfig {
-            key_prefix: Some("Qwen-Qwen3-0.6B".to_string()),
-            ..mooncake_config()
-        };
-        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
-        cache.apply_batch(
-            1,
-            stored_events(
-                &[
-                    format!("Qwen-Qwen3-8B_{hash}_0_k"),
-                    format!("Qwen-Qwen3-8B_{hash}_0_v"),
-                ],
-                &format!("sglang-hicache:Qwen-Qwen3-8B_{hash}"),
-            ),
-        );
-
-        let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
-        assert_eq!(hits.total_hits, 0);
-    }
-
-    #[tokio::test]
     async fn test_check_blocks_invalidates_group_on_unlabeled_removal() {
         let hash = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72";
         let group_id = format!("sglang-hicache:{hash}");

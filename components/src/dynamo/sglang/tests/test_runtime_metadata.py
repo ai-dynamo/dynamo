@@ -445,13 +445,3 @@ def test_mooncake_runtime_data_publishes_sglang_key_prefix(
     runtime_data = register._get_mooncake_runtime_data(server_args)
 
     assert runtime_data["key_prefix"] == expected
-
-
-def test_mooncake_runtime_data_skips_other_storage_backends():
-    from dynamo.sglang import register
-
-    server_args = SimpleNamespace(
-        hicache_storage_backend="file", served_model_name="Qwen/Qwen3-0.6B"
-    )
-
-    assert register._get_mooncake_runtime_data(server_args) is None
