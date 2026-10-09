@@ -559,8 +559,11 @@ def _test_frontend_kv_routing(
     model_name: str,
     block_size: int,
     dp_ranks: tuple[int, ...] = (0,),
+    is_disaggregated: bool = False,
+    transfer_total: Callable[[], float] | None = None,
 ) -> None:
     """Verify engine events drive HTTP routing to two independently warmed ranks."""
+    assert is_disaggregated == (transfer_total is not None)
     assert len(system_ports) * len(dp_ranks) == 2
     url = f"http://localhost:{frontend_port}/v1/chat/completions"
     prompts = [
@@ -572,8 +575,10 @@ def _test_frontend_kv_routing(
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30)
         ) as session:
+            component = "prefill" if is_disaggregated else "backend"
             deadline = time.monotonic() + 60
             worker_ids = []
+            decode_ids = []
             while time.monotonic() < deadline:
                 try:
                     async with session.get(
@@ -582,21 +587,36 @@ def _test_frontend_kv_routing(
                     ) as response:
                         if response.status == 200:
                             health = await response.json()
+                            instances = [
+                                instance
+                                for instance in health["instances"]
+                                if instance["namespace"] == namespace
+                                and instance["endpoint"] == "generate"
+                            ]
                             worker_ids = sorted(
                                 {
                                     instance["instance_id"]
-                                    for instance in health["instances"]
-                                    if instance["namespace"] == namespace
-                                    and instance["component"] == "backend"
-                                    and instance["endpoint"] == "generate"
+                                    for instance in instances
+                                    if instance["component"] == component
                                 }
                             )
-                            if len(worker_ids) >= len(system_ports):
+                            decode_ids = sorted(
+                                {
+                                    instance["instance_id"]
+                                    for instance in instances
+                                    if instance["component"] == "backend"
+                                }
+                            )
+                            if len(worker_ids) >= len(system_ports) and (
+                                not is_disaggregated or len(decode_ids) >= 2
+                            ):
                                 break
                 except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
                     pass
                 await asyncio.sleep(0.25)
             assert len(worker_ids) == len(system_ports), worker_ids
+            if is_disaggregated:
+                assert len(decode_ids) == 2 and set(worker_ids).isdisjoint(decode_ids)
             targets = [
                 (worker_id, rank) for worker_id in worker_ids for rank in dp_ranks
             ]
@@ -608,6 +628,9 @@ def _test_frontend_kv_routing(
                 target: tuple[int, int] | None = None,
             ) -> tuple[tuple[int, int], float | None]:
                 """Send one request and return its selected target and KV hit rate."""
+                if is_disaggregated:
+                    # Keep the cached prefix while forcing at least one fresh KV block.
+                    prompt += f"\nRequest {uuid.uuid4()}. " + "Continue counting. " * 32
                 payload = {
                     "model": model_name,
                     "messages": [{"role": "user", "content": prompt}],
@@ -619,27 +642,50 @@ def _test_frontend_kv_routing(
                         "annotations": ["query_instance_id:"] if is_query_only else [],
                     },
                 }
-                headers = (
-                    {
-                        "x-dynamo-worker-instance-id": str(target[0]),
-                        "x-dynamo-dp-rank": str(target[1]),
-                    }
-                    if target is not None
-                    else None
+                headers = None
+                if target is not None:
+                    headers = (
+                        {
+                            "x-dynamo-prefill-instance-id": str(target[0]),
+                            "x-dynamo-prefill-dp-rank": str(target[1]),
+                        }
+                        if is_disaggregated
+                        else {
+                            "x-dynamo-worker-instance-id": str(target[0]),
+                            "x-dynamo-dp-rank": str(target[1]),
+                        }
+                    )
+                # Warm both prefill engines before requiring their transfer metrics.
+                check_transfer = (
+                    transfer_total is not None and target is None and not is_query_only
+                )
+                before = (
+                    await asyncio.to_thread(transfer_total) if check_transfer else None
                 )
                 nvext, has_generated_text = await send_router_chat_request(
                     session, url, payload, headers
                 )
                 selected = require_router_worker_id({"nvext": nvext})
                 selected_target = (
-                    selected["decode_worker_id"],
-                    selected["decode_dp_rank"],
-                )
-                assert selected_target in targets, selected
-                assert (
                     selected["prefill_worker_id"],
                     selected["prefill_dp_rank"],
-                ) == selected_target, selected
+                )
+                assert selected_target in targets, selected
+                if is_disaggregated:
+                    assert selected["decode_worker_id"] in decode_ids, selected
+                else:
+                    assert (
+                        selected["decode_worker_id"],
+                        selected["decode_dp_rank"],
+                    ) == selected_target, selected
+                if check_transfer:
+                    deadline = time.monotonic() + 10
+                    while await asyncio.to_thread(transfer_total) <= before:
+                        assert time.monotonic() < deadline, (
+                            "No completed KV transfer for routed request",
+                            selected,
+                        )
+                        await asyncio.sleep(0.05)
                 hit_rate = nvext.get("timing", {}).get("kv_hit_rate")
                 if is_query_only:
                     assert not has_generated_text, nvext
@@ -656,8 +702,9 @@ def _test_frontend_kv_routing(
                 port: await get_stored_kv_event_counts(session, port)
                 for port in system_ports
             }
-            for prompt in prompts:
-                await send(prompt, is_query_only=True)
+            if not is_disaggregated:
+                for prompt in prompts:
+                    await send(prompt, is_query_only=True)
             for prompt, target in zip(prompts, targets):
                 selected, _ = await send(prompt, target=target)
                 assert selected == target, (selected, target)
@@ -693,9 +740,10 @@ def _test_frontend_kv_routing(
                     f"routing={observed}, Stored counters={counts}, baselines={baselines}"
                 )
 
-            for prompt, target in zip(prompts, targets):
-                selected, _ = await send(prompt, is_query_only=True)
-                assert selected == target, (selected, target)
+            if not is_disaggregated:
+                for prompt, target in zip(prompts, targets):
+                    selected, _ = await send(prompt, is_query_only=True)
+                    assert selected == target, (selected, target)
 
             for prompt_index in (0, 0, 1, 0, 1, 1):
                 selected, hit_rate = await send(prompts[prompt_index])
