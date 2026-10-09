@@ -14,26 +14,36 @@ use crate::common::protocols::ForwardPassSnapshot;
 pub(crate) fn dynamo_kv_event(event: KvEvent) -> (KvCacheEvent, Option<Vec<Vec<u32>>>) {
     let (data, block_token_ids) = match event.data {
         KvEventData::Stored(stored) => {
-            let block_token_ids = stored
+            let block_count = stored.blocks.len();
+            let mut block_token_ids = Some(Vec::new());
+            let blocks = stored
                 .blocks
-                .iter()
-                .map(|block| block.token_ids.clone())
-                .collect::<Option<Vec<_>>>();
+                .into_iter()
+                .map(|block| {
+                    match (&mut block_token_ids, block.token_ids) {
+                        (Some(payloads), Some(tokens)) => {
+                            if payloads.is_empty() {
+                                payloads.reserve_exact(block_count);
+                            }
+                            payloads.push(tokens);
+                        }
+                        (_, None) => block_token_ids = None,
+                        (None, Some(_)) => {}
+                    }
+                    KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(block.block_hash),
+                        tokens_hash: LocalBlockHash(block.tokens_hash),
+                        mm_extra_info: None,
+                    }
+                })
+                .collect();
             let data = KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: stored.parent_hash.map(ExternalSequenceBlockHash),
                 start_position: stored.start_position.map(|position| {
                     u32::try_from(position)
                         .expect("native KV start position exceeds the Dynamo router protocol")
                 }),
-                blocks: stored
-                    .blocks
-                    .into_iter()
-                    .map(|block| KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(block.block_hash),
-                        tokens_hash: LocalBlockHash(block.tokens_hash),
-                        mm_extra_info: None,
-                    })
-                    .collect(),
+                blocks,
             });
             (data, block_token_ids)
         }
@@ -160,6 +170,43 @@ mod tests {
             ]
         );
         assert_eq!(token_ids, None);
+    }
+
+    #[test]
+    fn stored_token_metadata_requires_every_block_payload() {
+        for payloads in [
+            vec![],
+            vec![Some(vec![1]), Some(vec![2])],
+            vec![None, None],
+            vec![None, Some(vec![2])],
+            vec![Some(vec![1]), None, Some(vec![3])],
+        ] {
+            let expected = payloads.iter().cloned().collect::<Option<Vec<_>>>();
+            let mut input = stored_event(7, 2, Some(99), 3, &[]);
+            let KvEventData::Stored(stored) = &mut input.data else {
+                unreachable!()
+            };
+            stored.blocks = payloads
+                .into_iter()
+                .enumerate()
+                .map(|(i, token_ids)| KvBlock {
+                    block_hash: 100 + i as u64,
+                    tokens_hash: 200 + i as u64,
+                    token_ids,
+                })
+                .collect();
+            let count = stored.blocks.len();
+            let (event, token_ids) = dynamo_kv_event(input);
+            assert_eq!(token_ids, expected);
+            let KvCacheEventData::Stored(stored) = event.data else {
+                panic!("expected converted Stored event");
+            };
+            assert_eq!(stored.blocks.len(), count);
+            for (i, block) in stored.blocks.iter().enumerate() {
+                assert_eq!(block.block_hash, ExternalSequenceBlockHash(100 + i as u64));
+                assert_eq!(block.tokens_hash, LocalBlockHash(200 + i as u64));
+            }
+        }
     }
 
     #[tokio::test]
