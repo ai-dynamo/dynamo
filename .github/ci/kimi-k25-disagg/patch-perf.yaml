@@ -24,7 +24,8 @@ spec:
         - name: CONCURRENCIES
           value: "512"
         - name: BENCHMARK_DURATION
-          value: "60"
+          # Allow the 200-request multi-turn trace to finish before the time cap.
+          value: "300"
       volumes:
       - name: model-cache
         persistentVolumeClaim:
