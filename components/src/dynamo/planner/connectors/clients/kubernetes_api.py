@@ -53,6 +53,9 @@ JSON_PATCH_CONTENT_TYPE = "application/json-patch+json"
 DYNAMO_DGD_NAME_LABEL = "nvidia.com/dynamo-graph-deployment-name"
 DYNAMO_COMPONENT_LABEL = "nvidia.com/dynamo-component"
 GROVE_PCSG_REPLICA_INDEX_LABEL = "grove.io/podcliquescalinggroup-replica-index"
+# (connect, read) seconds. The client honors only an int or a 2-tuple; a float
+# is silently ignored and leaves the request without a timeout.
+REQUEST_TIMEOUT = (5, 30)
 
 
 def get_current_k8s_namespace() -> str:
@@ -85,6 +88,7 @@ class KubernetesAPI:
             namespace=self.current_namespace,
             plural=DGD_PLURAL,
             name=graph_deployment_name,
+            _request_timeout=REQUEST_TIMEOUT,
         )
 
     def list_graph_deployments(self) -> list[dict]:
@@ -94,6 +98,7 @@ class KubernetesAPI:
             version=DYNAMO_API_VERSION,
             namespace=self.current_namespace,
             plural=DGD_PLURAL,
+            _request_timeout=REQUEST_TIMEOUT,
         )
         return result.get("items", [])
 
@@ -141,6 +146,7 @@ class KubernetesAPI:
                 plural=DGDSA_PLURAL,
                 name=adapter_name,
                 body={"spec": {"replicas": replicas}},
+                _request_timeout=REQUEST_TIMEOUT,
             )
             logger.info(f"Scaled DGDSA {adapter_name} to {replicas} replicas")
 
@@ -165,6 +171,7 @@ class KubernetesAPI:
                 namespace=self.current_namespace,
                 plural=DGDSA_PLURAL,
                 name=f"{graph_deployment_name}-{service_name.lower()}",
+                _request_timeout=REQUEST_TIMEOUT,
             )
             return int(scale["spec"]["replicas"])
         except client.ApiException as e:
@@ -265,6 +272,7 @@ class KubernetesAPI:
             auth_settings=["BearerToken"],
             _return_http_data_only=True,
             collection_formats={},
+            _request_timeout=REQUEST_TIMEOUT,
         )
 
     def update_graph_replicas(
@@ -475,6 +483,7 @@ class KubernetesAPI:
             self.core_api.list_namespaced_pod(
                 namespace=self.current_namespace,
                 label_selector=f"{DYNAMO_DGD_NAME_LABEL}={dgd_name}",
+                _request_timeout=REQUEST_TIMEOUT,
             ).items
             or []
         )
