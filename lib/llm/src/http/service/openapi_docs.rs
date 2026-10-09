@@ -41,8 +41,7 @@ use crate::http::service::RouteDoc;
 
 /// OpenAPI documentation structure
 ///
-/// This struct defines the complete OpenAPI specification for the Dynamo HTTP service.
-/// It includes all the schemas, paths, and metadata needed to document the API.
+/// Registers native schemas; dependency import slots are resolved separately.
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -83,12 +82,18 @@ pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenAp
 
 /// Generate the document for the configured client-visible reasoning key.
 /// The default helper retains the canonical `reasoning_content` spelling.
+///
+/// # Panics
+/// Panics if the compiled schemas no longer contain the fields required by the
+/// alias annotations or reasoning projection, rather than publishing stale metadata.
 pub fn generate_openapi_spec_with_reasoning_field(
     route_docs: &[RouteDoc],
     reasoning_field: crate::reasoning_field::ReasoningField,
 ) -> utoipa::openapi::OpenApi {
     let mut openapi = ApiDoc::openapi();
-    configure_response_schemas(&mut openapi, reasoning_field);
+    // Like input aliases below, response projection is a compiled-schema invariant.
+    configure_response_schemas(&mut openapi, reasoning_field)
+        .expect("response reasoning schema locations changed");
 
     // Build paths from route documentation
     let mut paths = Paths::new();
@@ -208,71 +213,49 @@ fn annotate_request_aliases(document: &mut utoipa::openapi::OpenApi) -> Result<(
             return Err(format!("expected exactly one {field} at {name}"));
         }
     }
-    // Request bodies currently embed the root schema rather than reference its
-    // component. Annotate that copy too; referenced roots use the component above.
-    if let Some(node) = document
-        .paths
-        .paths
-        .get_mut("/v1/chat/completions")
-        .and_then(|path| path.post.as_mut())
-        .and_then(|operation| operation.request_body.as_mut())
-        .and_then(|body| body.content.get_mut("application/json"))
-        .and_then(|content| content.schema.as_mut())
-    {
-        if !matches!(node, RefOr::Ref(_))
-            && annotate(node, "chat_template_args", "chat_template_kwargs")? != 1
-        {
-            return Err("chat request root no longer contains chat_template_args".into());
-        }
-    }
     Ok(())
 }
 
-/// Utoipa's shared request/response derives treat every Option as optional.
-/// These response-only types instead always serialize several nullable fields.
-/// Keep the serialized-output correction at the HTTP export boundary, without
-/// tightening request schemas or changing runtime serialization.
+/// Match the configured response spelling without changing request schemas.
+/// Required nullable fields are already annotated by dynamo-protocols.
 fn configure_response_schemas(
     openapi: &mut utoipa::openapi::OpenApi,
     reasoning_field: crate::reasoning_field::ReasoningField,
-) {
+) -> Result<(), String> {
     use utoipa::openapi::schema::Schema;
 
-    let Some(components) = openapi.components.as_mut() else {
-        return;
-    };
-    for (name, fields) in [
-        ("ChatChoice", &["finish_reason", "logprobs"][..]),
-        ("ChatChoiceStream", &["finish_reason", "logprobs"][..]),
-        ("ChatCompletionResponseMessage", &["content", "refusal"][..]),
-        ("ChatChoiceLogprobs", &["content", "refusal"][..]),
-        ("ChatCompletionTokenLogprob", &["bytes"][..]),
+    let components = openapi.components.as_mut().ok_or("missing components")?;
+    for name in [
+        "ChatCompletionResponseMessage",
+        "ChatCompletionStreamResponseDelta",
     ] {
-        if let Some(RefOr::T(Schema::Object(object))) = components
+        let name = format!("dynamo_protocols.chat.{name}");
+        let schema = components
             .schemas
-            .get_mut(&format!("dynamo_protocols.chat.{name}"))
-        {
-            for field in fields {
-                if !object.required.iter().any(|required| required == field) {
-                    object.required.push((*field).to_owned());
-                }
+            .get_mut(&name)
+            .ok_or_else(|| format!("missing {name}"))?;
+        let RefOr::T(Schema::Object(object)) = schema else {
+            return Err(format!("expected object schema at {name}"));
+        };
+        if object.properties.contains_key("reasoning") {
+            return Err(format!(
+                "reasoning collides with an existing property at {name}"
+            ));
+        }
+        let property = object
+            .properties
+            .remove("reasoning_content")
+            .ok_or_else(|| format!("missing reasoning_content at {name}"))?;
+        object
+            .properties
+            .insert(reasoning_field.as_str().to_owned(), property);
+        for required in &mut object.required {
+            if required == "reasoning_content" {
+                *required = reasoning_field.as_str().to_owned();
             }
         }
     }
-    if reasoning_field == crate::reasoning_field::ReasoningField::Reasoning {
-        for name in [
-            "ChatCompletionResponseMessage",
-            "ChatCompletionStreamResponseDelta",
-        ] {
-            if let Some(RefOr::T(Schema::Object(object))) = components
-                .schemas
-                .get_mut(&format!("dynamo_protocols.chat.{name}"))
-                && let Some(schema) = object.properties.remove("reasoning_content")
-            {
-                object.properties.insert("reasoning".to_owned(), schema);
-            }
-        }
-    }
+    Ok(())
 }
 
 /// Create an OpenAPI operation for a specific route
@@ -334,6 +317,7 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
 
 /// The SSE schema describes one successful JSON `data` payload, not the
 /// transport framing, error events, annotations, or the literal `[DONE]` marker.
+/// `x-dynamo-sse-data-schema: true` marks this payload-only convention for consumers.
 fn success_response(method: &str, path: &str) -> utoipa::openapi::Response {
     use utoipa::openapi::{ContentBuilder, Ref, ResponseBuilder};
 
@@ -356,8 +340,7 @@ fn success_response(method: &str, path: &str) -> utoipa::openapi::Response {
              server-sent events; each successful JSON data payload follows the \
              text/event-stream schema. The literal data: [DONE] terminates the \
              stream and is not a JSON chunk. Error events and optional annotation \
-             events are outside this successful-payload schema. Schema comparison \
-             does not validate event ordering or termination.",
+             events are outside this successful-payload schema.",
         )
         .content(
             "application/json",
@@ -369,6 +352,11 @@ fn success_response(method: &str, path: &str) -> utoipa::openapi::Response {
             "text/event-stream",
             ContentBuilder::new()
                 .schema(Some(Ref::from_schema_name(streaming)))
+                .extensions(Some(
+                    [("x-dynamo-sse-data-schema", serde_json::json!(true))]
+                        .into_iter()
+                        .collect(),
+                ))
                 .build(),
         )
         .build()
@@ -430,8 +418,7 @@ fn add_request_body_for_path(
 
 /// Create schema for chat completion request
 fn create_chat_completion_schema() -> RefOr<utoipa::openapi::schema::Schema> {
-    // Schema derived from actual NvCreateChatCompletionRequest type via ToSchema
-    <crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest as utoipa::PartialSchema>::schema()
+    utoipa::openapi::Ref::from_schema_name("NvCreateChatCompletionRequest").into()
 }
 
 /// Create example for chat completion request
@@ -456,7 +443,7 @@ fn create_chat_completion_example() -> serde_json::Value {
 
 /// Create schema for completion request
 fn create_completion_schema() -> RefOr<utoipa::openapi::schema::Schema> {
-    <crate::protocols::openai::completions::NvCreateCompletionRequest as utoipa::PartialSchema>::schema()
+    utoipa::openapi::Ref::from_schema_name("NvCreateCompletionRequest").into()
 }
 
 /// Create example for completion request
@@ -606,6 +593,59 @@ mod tests {
     fn stale_alias_metadata_is_not_silently_ignored() {
         let mut document = utoipa::openapi::OpenApi::default();
         assert!(annotate_request_aliases(&mut document).is_err());
+    }
+
+    #[test]
+    fn stale_response_reasoning_schemas_are_not_silently_ignored() {
+        use crate::reasoning_field::ReasoningField;
+        use utoipa::openapi::{Ref, Schema};
+
+        // Exercise both projections and both response types: dependency schema
+        // drift must fail export instead of silently advertising the wrong key.
+        for field in [ReasoningField::ReasoningContent, ReasoningField::Reasoning] {
+            let mut missing_components = utoipa::openapi::OpenApi::default();
+            assert!(configure_response_schemas(&mut missing_components, field).is_err());
+            for name in [
+                "ChatCompletionResponseMessage",
+                "ChatCompletionStreamResponseDelta",
+            ] {
+                let name = format!("dynamo_protocols.chat.{name}");
+                for change in [
+                    "missing component",
+                    "reference",
+                    "missing property",
+                    "collision",
+                ] {
+                    let mut document = ApiDoc::openapi();
+                    let schemas = &mut document.components.as_mut().unwrap().schemas;
+                    match change {
+                        "missing component" => {
+                            schemas.remove(&name);
+                        }
+                        "reference" => {
+                            schemas.insert(name.clone(), Ref::from_schema_name("Other").into());
+                        }
+                        _ => {
+                            let RefOr::T(Schema::Object(object)) = schemas.get_mut(&name).unwrap()
+                            else {
+                                panic!("expected response object at {name}");
+                            };
+                            let property = object.properties.remove("reasoning_content").unwrap();
+                            if change == "collision" {
+                                object
+                                    .properties
+                                    .insert("reasoning".to_owned(), property.clone());
+                                object
+                                    .properties
+                                    .insert("reasoning_content".to_owned(), property);
+                            }
+                        }
+                    }
+                    let error = configure_response_schemas(&mut document, field).unwrap_err();
+                    assert!(error.contains(&name), "{change}: {error}");
+                }
+            }
+        }
     }
 
     #[test]

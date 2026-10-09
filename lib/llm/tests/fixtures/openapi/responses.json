@@ -1,4 +1,13 @@
 {
+  "license": "SPDX-License-Identifier: Apache-2.0",
+  "copyright": "SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+  "description": "Shared response serialization examples, not captured inference output. Rust tests establish the output; separate offline composition tests validate it against the composed schema.",
+  "field_descriptions": {
+    "name": "Diagnostic case identifier describing the protected serialization behavior.",
+    "kind": "Rust response type selector: chat, stream, or completion.",
+    "input": "JSON deserialized into the selected response type to construct the test value.",
+    "output": "Exact expected JSON after serializing that value, including explicit nulls and omitted fields. For stream cases this is one JSON payload, not SSE framing or a complete stream."
+  },
   "cases": [
     {
       "name": "unary nullable fields and omitted optional envelope",
