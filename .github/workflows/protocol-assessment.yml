@@ -10,7 +10,7 @@ on:
       - 'lib/llm/src/protocols/**'
       - 'lib/llm/src/http/service/openapi_docs.rs'
       - 'lib/llm/src/bin/generate_frontend_openapi.rs'
-      - 'lib/llm/tests/openapi_request*.rs'
+      - 'lib/llm/tests/protocols/openapi_request*.rs'
       - 'scripts/protocol_compatibility/**'
       - 'lib/llm/tests/fixtures/openapi/**'
       - '.github/workflows/protocol-assessment.yml'
