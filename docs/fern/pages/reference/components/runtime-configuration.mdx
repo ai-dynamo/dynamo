@@ -34,8 +34,6 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
               args:
                 - --dyn-tool-call-parser
                 - llama3_json
-                - --engine-request-limit
-                - "32"
               env:
                 - name: DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB
                   value: "4.0"
@@ -155,6 +153,23 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   inline-media worker frames.
 
   See [Frontend Configuration](frontend-configuration.mdx) for `DYN_HTTP_BODY_LIMIT_MB`.
+</ParamField>
+
+<ParamField path="DYN_TCP_WORKER_POOL_SIZE" type="integer" default="10000">
+  Number of TCP request-plane requests a worker process handles at once. The pool is shared by every
+  endpoint served from the process, and a request holds its slot until its response stream ends.
+  Applies only to the TCP request plane. Invalid values fall back to the default.
+
+  This is a transport limit, not engine admission. It is unrelated to engine settings such as vLLM
+  `max_num_seqs`.
+</ParamField>
+
+<ParamField path="DYN_TCP_WORK_QUEUE_SIZE" type="integer" default="40000">
+  Number of TCP request-plane requests that can wait for a `DYN_TCP_WORKER_POOL_SIZE` slot. When the
+  pool and this queue are both full, the worker rejects the request with an overload reply and
+  increments
+  [`dynamo_work_handler_enqueue_rejected_total`](../observability/metrics-catalog.mdx#component-metrics).
+  Applies only to the TCP request plane. Invalid values fall back to the default.
 </ParamField>
 
 <ParamField path="DYN_TCP_RPC_HOST" type="string" default="auto-detected local address">
@@ -376,18 +391,22 @@ address.
   Environment variable: `DYN_HEALTH_CHECK_PAYLOAD`
 </ParamField>
 
+<Warning>
+  Starting with Dynamo 1.6.0, `--engine-request-limit` (`DYN_ENGINE_REQUEST_LIMIT`) and
+  `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` are accepted but not enforced. The worker does not limit or queue
+  requests by engine capacity and does not reject them for it. Use Frontend busy thresholds to shed
+  load; see [Request Rejection](../../kubernetes/fault-tolerance/request-rejection.md).
+</Warning>
+
 <ParamField path="--engine-request-limit" type="integer" default="null">
-  Maximum requests handled concurrently by the engine. Setting a positive integer enables worker-side
-  admission control. When the engine slots and the Dynamo overflow queue are full, the worker rejects
-  the request and the Frontend returns the configured overload status, 529 by default.
+  Accepted for compatibility; has no effect starting with Dynamo 1.6.0. The value must still be a
+  positive integer if set.
 
   Environment variable: `DYN_ENGINE_REQUEST_LIMIT`
 </ParamField>
 
 <ParamField path="DYN_DYNAMO_REQUEST_QUEUE_LIMIT" type="integer" default="16">
-  Advanced overflow-queue size for requests waiting in Dynamo before entering the engine. Applies only
-  when `--engine-request-limit` or `DYN_ENGINE_REQUEST_LIMIT` is set. Must be at least `2`; the
-  effective per-worker cap is the engine limit plus this queue limit.
+  Accepted for compatibility; has no effect starting with Dynamo 1.6.0.
 </ParamField>
 
 <ParamField path="DYN_SYSTEM_HOST" type="string" default="0.0.0.0">

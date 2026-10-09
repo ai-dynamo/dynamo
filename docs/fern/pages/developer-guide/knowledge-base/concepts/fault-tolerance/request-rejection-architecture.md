@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Rejection Architecture
-subtitle: Worker-load event processing, busy-state aggregation, overload errors, and hard worker admission limits.
+subtitle: Worker-load event processing, busy-state aggregation, overload errors, and the backend admission boundary.
 ---
 
-Dynamo implements request rejection (load shedding) at two layers: Frontend routing can avoid workers
-reported as busy, and each worker can enforce a hard request-plane concurrency cap.
+Dynamo implements request rejection (load shedding) in Frontend routing, which avoids workers reported
+as busy and rejects a request when every eligible worker is busy.
 
 For deployment steps, see [Request Rejection](../../../../kubernetes/fault-tolerance/request-rejection.md). For exact
 configuration fields, see [Frontend Configuration](../../../../reference/components/frontend-configuration.mdx#fault-tolerance)
@@ -101,12 +101,24 @@ threshold that is simply too high.
 
 ## Worker-Side Request Admission
 
-A worker can impose a hard cap independently of Frontend busy detection. Setting
-`--engine-request-limit N` creates `N` engine slots. Requests that arrive while those slots are full
-enter a small Dynamo overflow queue of size `Q`. When the engine and queue are both full, the worker
-returns `Server overloaded: worker at capacity`; the Frontend maps the resulting
-rejection to the worker-scoped `WorkerOverloaded` error. When request migration is enabled, it can
-retry the request without changing its allowlist or routing constraints.
+Every request plane reaches a backend admission boundary in the worker immediately before engine
+generation. Starting with Dynamo 1.6.0, that boundary passes every request through unchanged. It
+applies no concurrency limit or queue and exports no admission metrics. Workers still accept
+`--engine-request-limit` (`DYN_ENGINE_REQUEST_LIMIT`) and `DYN_DYNAMO_REQUEST_QUEUE_LIMIT`, but they
+ignore them. The `dynamo_rejection_request_total`, `dynamo_engine_request`, and `dynamo_request_queue`
+metrics are no longer exported.
+
+A worker that serves the TCP request plane has a separate, process-wide transport pool sized by
+`DYN_TCP_WORKER_POOL_SIZE` and `DYN_TCP_WORK_QUEUE_SIZE`. It bounds TCP requests in flight across every
+endpoint in the process, not engine slots, and the NATS request plane does not use it. These settings
+are not an engine admission limit. See
+[Runtime Configuration](../../../../reference/components/runtime-configuration.mdx#communication-planes)
+for their defaults.
+
+When the TCP pool and its work queue are both full, the worker increments
+`dynamo_work_handler_enqueue_rejected_total` and returns `Server overloaded: worker at capacity`; the
+Frontend maps the resulting rejection to the worker-scoped `WorkerOverloaded` error. When request
+migration is enabled, it can retry the request without changing its allowlist or routing constraints.
 
 The worker rejection does not add a failed-worker exclusion to the routing request or change the
 standalone router protocol. An in-process router can exclude the failed worker with request-local
@@ -116,28 +128,12 @@ migration is therefore best-effort in that topology. Pool-scoped `ResourceExhaus
 non-migratable because no eligible worker has known capacity. If either overload error reaches the
 client, the Frontend returns the configured overload status, HTTP 529 by default.
 
-The effective maximum is `N + Q` requests. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` defaults to `16`, is an
-advanced override, must be at least `2`, and is read only when the engine limit is enabled.
-
-### Overflow Channel Sizing
-
-The channel capacity is `Q - 1` because one dispatcher task can hold a request between the queue and
-an engine slot. This produces an exact `N + Q` cap for `Q >= 2`. A value of `1` would still require a
-channel capacity of one and could permit two queued requests, which is why the supported minimum is
-`2`.
-
-Worker admission exports:
-
-- `dynamo_rejection_request_total`
-- `dynamo_engine_request`
-- `dynamo_request_queue`
-
-See [Cancellation and Rejection](../../../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection)
-for metric types and labels.
+See [Component metrics](../../../../reference/observability/metrics-catalog.mdx#component-metrics)
+for the TCP rejection counter.
 
 ## Related Documentation
 
 - [Request Rejection](../../../../kubernetes/fault-tolerance/request-rejection.md) - Enable, tune, verify, and troubleshoot load shedding
 - [Frontend Configuration](../../../../reference/components/frontend-configuration.mdx#fault-tolerance) - Threshold and overload response fields
-- [Runtime Configuration](../../../../reference/components/runtime-configuration.mdx#operations) - Worker hard-cap fields
+- [Runtime Configuration](../../../../reference/components/runtime-configuration.mdx#communication-planes) - TCP request-plane pool settings
 - [Observability Architecture](../observability-architecture.md#active-worker-health-checks) - Worker health monitoring
