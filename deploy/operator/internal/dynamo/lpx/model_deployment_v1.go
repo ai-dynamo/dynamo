@@ -352,7 +352,7 @@ func buildPartitionFromDeploymentV1(raw deploymentcapnpv1.PartitionDeployment) (
 	case deploymentcapnpv1.LpuArchitecture_lp30:
 		return buildLPUArtifact(gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail, BuildFamilyHX)
 	default:
-		return BuildPartition{}, false, fmt.Errorf("%s LPU partition %d unsupported chip architecture %s", gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail.Architecture())
+		return BuildPartition{}, false, fmt.Errorf("%s LPU partition %d unsupported chip architecture %d", gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail.Architecture())
 	}
 }
 
