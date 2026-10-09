@@ -1144,7 +1144,9 @@ async fn tcp_listener(
         // the [`Prologue`]
         // there must be a second control message it indicate the other segment's generate method was successful
         // No timeout here: the worker sends the prologue only after generate() setup completes,
-        // which can take arbitrarily long (model load, queue delay, cold start).
+        // which can take arbitrarily long (model load, queue delay, cold start). When
+        // DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS is set, the frontend's request-plane
+        // dispatch bounds this wait instead, starting from the worker's ACK.
         let prologue = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {

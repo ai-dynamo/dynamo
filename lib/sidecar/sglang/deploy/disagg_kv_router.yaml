@@ -17,8 +17,8 @@
 #   - RDMA/NIXL: engines need rdma/ib devices, IPC_LOCK, and shared memory; tune
 #     UCX for your fabric.
 #   - Model, served model name, page size, and TP must match across both roles.
-#   - No published sidecar image yet; build lib/sidecar/Dockerfile and set
-#     <your-registry> below.
+#   - Set the sidecar image to nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>,
+#     or build lib/sidecar/Dockerfile.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment

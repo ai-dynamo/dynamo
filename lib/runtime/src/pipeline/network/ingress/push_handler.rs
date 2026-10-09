@@ -298,7 +298,7 @@ where
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
-            if (publisher.send(resp_bytes).await).is_err() {
+            if let Err(send_err) = publisher.send(resp_bytes).await {
                 send_complete_final = false;
                 if context.is_stopped() {
                     // Say there are 2 threads accessing `context`, the sequence can be either:
@@ -309,10 +309,18 @@ where
                     // Case 1 can happen when client closed the connection after receiving the
                     // complete response from frontend. Hence, send failure can be expected in this
                     // case.
-                    tracing::warn!("Failed to publish response for stream {}", context.id());
+                    tracing::warn!(
+                        error = %send_err,
+                        "Failed to publish response for stream {}",
+                        context.id()
+                    );
                 } else {
                     // Otherwise, this is an error.
-                    tracing::error!("Failed to publish response for stream {}", context.id());
+                    tracing::error!(
+                        error = %send_err,
+                        "Failed to publish response for stream {}",
+                        context.id()
+                    );
                     context.stop_generating();
                 }
                 // Account errors in all cases, including cancellation. Therefore this metric can be

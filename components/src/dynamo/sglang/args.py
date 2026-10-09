@@ -40,6 +40,7 @@ from dynamo.sglang._compat import (
     sglang_uses_mla_backend,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
+from dynamo.sglang.capacity import sglang_dp_layout
 from dynamo.sglang.elastic_ep_preflight import check_elastic_ep_backend
 
 configure_dynamo_logging()
@@ -587,7 +588,7 @@ async def parse_args(args: list[str]) -> Config:
     # the supported SGLang releases.
     check_elastic_ep_backend(
         parsed_args.elastic_ep_backend,
-        parsed_args.enable_dp_attention,
+        sglang_dp_layout(parsed_args)[1],
     )
 
     # Dynamo argument processing
