@@ -4401,3 +4401,152 @@ def test_unrequested_logprobs_stay_null(vllm_processor_module):
     assert choice["logprobs"] is None
     assert pending == []
     assert emitted == []
+
+
+class _ReasoningRecordingToolParser(_FakeStructuralTagParser):
+    """Tool parser whose structural-tag hook records the requested reasoning mode."""
+
+    def __init__(self, tokenizer=None, tools=None):
+        super().__init__()
+        self.reasoning = []
+
+    def adjust_request(self, request):
+        return request
+
+    def get_structural_tag(self, request, *, reasoning=False):
+        self.reasoning.append(reasoning)
+        return super().get_structural_tag(request)
+
+
+def _prompt_reasoning_parser(reasoning_ended: bool):
+    class PromptReasoningParser:
+        def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
+            del tokenizer, chat_template_kwargs, model_config
+
+        def adjust_request(self, request):
+            return request
+
+        def is_reasoning_end(self, prompt_token_ids):
+            return reasoning_ended
+
+    return PromptReasoningParser
+
+
+class TestToolCallGrammarReasoningStart:
+    """The tool-call grammar must match where generation starts.
+
+    Templates that end the generation prompt inside an open reasoning block
+    (e.g. DeepSeek V4.1 with thinking on) start generation in reasoning. Unless
+    the worker engine holds the grammar back until reasoning ends, a tag built
+    for the post-reasoning output forbids the end-of-reasoning marker from the
+    first token, so thinking-mode tool calls can never complete.
+    """
+
+    async def _guidance(
+        self,
+        tokenizer,
+        monkeypatch,
+        *,
+        reasoning_parser_class,
+        structural_tag_excludes_reasoning=False,
+        structural_tag_mode="on",
+    ):
+        parsers = []
+
+        def make_parser(tokenizer, tools):
+            parser = _ReasoningRecordingToolParser(tokenizer, tools)
+            parsers.append(parser)
+            return parser
+
+        monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
+        result = await prepost_module.preprocess_chat_request(
+            {**TOOL_REQUEST, "tool_choice": "auto"},
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1, 2, 3]})
+                )
+            ),
+            tool_parser_class=make_parser,
+            reasoning_parser_class=reasoning_parser_class,
+            enable_auto_tool_choice=True,
+            structural_tag_mode=structural_tag_mode,
+            structural_tag_scope="always",
+            structural_tag_excludes_reasoning=structural_tag_excludes_reasoning,
+        )
+        return result, [r for parser in parsers for r in parser.reasoning]
+
+    @pytest.mark.asyncio
+    async def test_prompt_open_reasoning_builds_reasoning_prefix(
+        self, tokenizer, monkeypatch
+    ):
+        result, reasoning = await self._guidance(
+            tokenizer,
+            monkeypatch,
+            reasoning_parser_class=_prompt_reasoning_parser(reasoning_ended=False),
+        )
+        assert reasoning == [True]
+        assert "structural_tag" in result.guided_decoding
+
+    @pytest.mark.asyncio
+    async def test_engine_gated_reasoning_keeps_post_reasoning_tag(
+        self, tokenizer, monkeypatch
+    ):
+        _, reasoning = await self._guidance(
+            tokenizer,
+            monkeypatch,
+            reasoning_parser_class=_prompt_reasoning_parser(reasoning_ended=False),
+            structural_tag_excludes_reasoning=True,
+        )
+        assert reasoning == [False]
+
+    @pytest.mark.asyncio
+    async def test_prompt_closed_reasoning_keeps_post_reasoning_tag(
+        self, tokenizer, monkeypatch
+    ):
+        _, reasoning = await self._guidance(
+            tokenizer,
+            monkeypatch,
+            reasoning_parser_class=_prompt_reasoning_parser(reasoning_ended=True),
+        )
+        assert reasoning == [False]
+
+    @pytest.mark.asyncio
+    async def test_no_reasoning_parser_keeps_post_reasoning_tag(
+        self, tokenizer, monkeypatch
+    ):
+        _, reasoning = await self._guidance(
+            tokenizer, monkeypatch, reasoning_parser_class=None
+        )
+        assert reasoning == [False]
+
+    @pytest.mark.asyncio
+    async def test_registry_path_receives_reasoning(self, tokenizer, monkeypatch):
+        seen = {}
+
+        class RegistryParser(_ReasoningRecordingToolParser):
+            structural_tag_model = "deepseek_v4_1"
+
+        def fake_get_model_structural_tag(*, model, tools, tool_choice, reasoning):
+            seen["reasoning"] = reasoning
+            return _FakeStructuralTag({"format": {"type": "tag"}})
+
+        monkeypatch.setattr(
+            prepost_module, "get_model_structural_tag", fake_get_model_structural_tag
+        )
+        result = await prepost_module.preprocess_chat_request(
+            {**TOOL_REQUEST, "tool_choice": "auto"},
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1, 2, 3]})
+                )
+            ),
+            tool_parser_class=RegistryParser,
+            reasoning_parser_class=_prompt_reasoning_parser(reasoning_ended=False),
+            enable_auto_tool_choice=True,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+        assert seen == {"reasoning": True}
+        assert result.guided_decoding == {"structural_tag": {"format": {"type": "tag"}}}

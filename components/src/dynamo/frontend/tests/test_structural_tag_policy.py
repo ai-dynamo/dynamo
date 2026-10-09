@@ -5,6 +5,7 @@ import pytest
 
 from dynamo.frontend.structural_tag_policy import (
     effective_tool_strict,
+    runtime_structural_tag_excludes_reasoning,
     runtime_structural_tag_options,
     should_attempt_structural_tag,
 )
@@ -92,3 +93,24 @@ def test_runtime_structural_tag_options_read_model_card_policy():
 )
 def test_canonical_structural_tag_policy_takes_precedence(config, expected):
     assert runtime_structural_tag_options(config) == expected
+
+
+@pytest.mark.parametrize(
+    ("runtime_config", "expected"),
+    [
+        (None, False),
+        ({}, False),
+        ({"runtime_data": {}}, False),
+        ({"runtime_data": {"tool_call_structural_tag_excludes_reasoning": True}}, True),
+        (
+            {"runtime_data": {"tool_call_structural_tag_excludes_reasoning": False}},
+            False,
+        ),
+        (
+            {"runtime_data": {"tool_call_structural_tag_excludes_reasoning": "true"}},
+            False,
+        ),
+    ],
+)
+def test_runtime_structural_tag_excludes_reasoning(runtime_config, expected):
+    assert runtime_structural_tag_excludes_reasoning(runtime_config) is expected

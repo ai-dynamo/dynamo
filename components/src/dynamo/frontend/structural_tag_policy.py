@@ -28,6 +28,32 @@ def runtime_structural_tag_options(
     )
 
 
+# Published by the vLLM worker (dynamo.vllm.main.publish_vllm_structural_tag_reasoning_policy)
+# and read by the Rust preprocessor (lib/llm/src/preprocessor/structural_tag.rs).
+TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
+    "tool_call_structural_tag_excludes_reasoning"
+)
+
+
+def runtime_structural_tag_excludes_reasoning(runtime_config: Any) -> bool:
+    """Whether the worker engine applies tool grammars only after reasoning ends.
+
+    True only when the vLLM worker runs its own reasoning parser with
+    ``enable_in_reasoning`` off. Missing or invalid metadata keeps the
+    compatibility behavior (the grammar must model the open reasoning block),
+    as in the Rust preprocessor.
+    """
+    if not isinstance(runtime_config, dict):
+        return False
+    runtime_data = runtime_config.get("runtime_data")
+    if not isinstance(runtime_data, dict):
+        return False
+    return (
+        runtime_data.get(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
+        is True
+    )
+
+
 def should_attempt_structural_tag(
     *,
     mode: str,
