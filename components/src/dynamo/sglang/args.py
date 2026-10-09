@@ -37,6 +37,7 @@ from dynamo.sglang._compat import (
     ConfigArgumentMerger,
     add_sglang_cli_compat,
     resolved_server_args,
+    sglang_default_mla_attention_backend,
     sglang_uses_mla_backend,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
@@ -48,6 +49,15 @@ PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 # Non-MLA attention backends that read the DCP parallel state in their forward
 # path. `aiter` is here because SGLang itself allows dcp_size > 1 on ROCm.
 DCP_CAPABLE_ATTENTION_BACKENDS = frozenset({"triton", "aiter"})
+
+# MLA attention backends whose decode path returns no log-sum-exp, so SGLang's
+# DCP decode (`attn_mqa_for_dcp_decode` in forward_mla.py) cannot merge the
+# per-rank partial outputs. `fa3` and `fa4` share flashattention_backend.py,
+# which has no DCP code; `flashmla` returns its LSE only on a path the MLA
+# absorb branch never selects. Upstream SGLang #35384 (fa3) and #37735
+# (flashmla) add the same rejection inside SGLang; drop entries once the pin
+# contains them or SGLang #33325 adds an fa3 DCP decode path.
+MLA_DCP_UNSUPPORTED_DECODE_BACKENDS = frozenset({"fa3", "fa4", "flashmla"})
 
 ATTENTION_BACKEND_CLI_FIELDS = (
     "attention_backend",
@@ -266,9 +276,10 @@ def _validate_dcp_attention_backend(
     if dcp_size <= 1:
         return
 
-    # MLA KV pools have no per-rank KV head split to disagree about, and every
-    # MLA attention backend consumes the DCP parallel state.
     if sglang_uses_mla_backend(server_args):
+        _validate_mla_dcp_decode_backend(
+            server_args, dcp_size=dcp_size, backend_from_cli=backend_from_cli
+        )
         return
 
     # Read the effective backend, not the flag the user typed: fa3 is the
@@ -307,6 +318,50 @@ def _validate_dcp_attention_backend(
         "Use --dcp-size 1, or an attention backend that implements decode "
         "context parallel (--attention-backend triton), or an MLA model with "
         "one of SGLang's MLA attention backends."
+    )
+
+
+def _validate_mla_dcp_decode_backend(
+    server_args: Any, *, dcp_size: int, backend_from_cli: bool
+) -> None:
+    """Reject MLA decode context parallel on a backend with no DCP decode path.
+
+    MLA KV pools have no per-rank KV head split to disagree about, but the DCP
+    decode branch needs the backend to return ``(output, lse)`` so it can merge
+    the ranks' partial results. A backend that returns only the output makes
+    the worker crash at decode CUDA graph capture with ``too many values to
+    unpack``, deep inside engine startup.
+    """
+    resolved = resolved_server_args(server_args)
+    # Prefill workers never run the DCP decode branch.
+    if getattr(resolved, "disaggregation_mode", None) == "prefill":
+        return
+
+    backend = getattr(resolved, "decode_attention_backend", None) or getattr(
+        resolved, "attention_backend", None
+    )
+    automatic = backend is None
+    if automatic:
+        # At CLI time SGLang has not chosen yet; predict its choice (fa3 for
+        # MLA on Hopper) so the worker fails here, before sgl.Engine captures
+        # CUDA graphs and before the post-engine check can run.
+        backend = sglang_default_mla_attention_backend(server_args)
+    if backend not in MLA_DCP_UNSUPPORTED_DECODE_BACKENDS:
+        return
+
+    selected = (
+        " SGLang selects it automatically for this model and GPU because no "
+        "attention backend was passed."
+        if automatic or not backend_from_cli
+        else ""
+    )
+    raise ValueError(
+        f"--dcp-size {dcp_size} is not supported with the decode attention "
+        f"backend '{backend}' for this MLA model.{selected} This backend does "
+        "not return the log-sum-exp that decode context parallel needs to merge "
+        "results across DCP ranks, so the worker would crash during decode CUDA "
+        "graph capture. Use --attention-backend flashinfer (or trtllm_mla / "
+        "cutedsl_mla on Blackwell), or --dcp-size 1."
     )
 
 

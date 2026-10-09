@@ -60,6 +60,15 @@ except ImportError:
     sglang_use_mla_backend = None
 
 try:
+    from sglang.srt.arg_groups.model_override_base import (
+        get_default_attn_backend as sglang_get_default_attn_backend,
+    )
+except ImportError:
+    # The separately pinned XPU SGLang 0.5.11 keeps the default-backend choice
+    # inside ServerArgs. Remove when the XPU pin is upgraded to 0.5.19+.
+    sglang_get_default_attn_backend = None
+
+try:
     from sglang.srt.runtime_context import publish as _sglang_publish
 except ImportError:
     # Fallback for the XPU SGLang 0.5.11 pin.
@@ -113,6 +122,25 @@ def sglang_uses_mla_backend(server_args: Any) -> bool:
     if sglang_use_mla_backend is None:
         raise AttributeError("SGLang does not expose an MLA backend accessor")
     return bool(sglang_use_mla_backend(server_args))
+
+
+def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
+    """Predict the attention backend SGLang picks for an MLA model by itself.
+
+    SGLang only makes that choice inside ``sgl.Engine``, after Dynamo hands the
+    arguments over. Return ``None`` when the prediction is unavailable: an
+    unknown backend must not be treated as an unsupported one.
+    """
+    if sglang_get_default_attn_backend is None:
+        return None
+    try:
+        backend = sglang_get_default_attn_backend(
+            server_args, True, get_sglang_model_config(server_args)
+        )
+    except Exception as exc:
+        logger.debug("Could not predict SGLang's default MLA backend: %s", exc)
+        return None
+    return backend if isinstance(backend, str) else None
 
 
 def publish_server_args(server_args: Any, *, role: str) -> None:
@@ -438,6 +466,7 @@ __all__ = [
     "publish_server_args",
     "require_reasoning_kwargs",
     "resolved_server_args",
+    "sglang_default_mla_attention_backend",
     "sglang_uses_mla_backend",
     "supports_external_mm_hashes",
 ]
