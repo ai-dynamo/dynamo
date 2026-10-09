@@ -29,6 +29,7 @@ from PIL import Image
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://localhost:8000")
+    parser.add_argument("--model", default="nvidia/Cosmos3-Nano")
     parser.add_argument("--mode", choices=("image", "video"), required=True)
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -40,7 +41,7 @@ def main() -> None:
 
     image_mode = args.mode == "image"
     payload = {
-        "model": "nvidia/Cosmos3-Nano",
+        "model": args.model,
         "prompt": args.prompt,
         "size": "1024x1024" if image_mode else "1280x720",
         "response_format": "b64_json",

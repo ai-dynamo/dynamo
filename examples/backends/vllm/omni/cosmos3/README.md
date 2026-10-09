@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Cosmos3 Nano with vLLM-Omni
+# Cosmos3 with vLLM-Omni
 
 **Experimental.** Serve Cosmos3 Nano through NVIDIA Dynamo's image and video
 APIs. One aggregated worker loads the native vLLM-Omni pipeline. Start it in
@@ -49,8 +49,7 @@ flag. Guardrails-enabled execution requires separate qualification.
 Start the image worker:
 
 ```bash
-DYN_COSMOS_MODALITY=image \
-  bash examples/backends/vllm/launch/agg_omni_cosmos3.sh --no-guardrails
+bash examples/backends/vllm/launch/agg_omni_cosmos3_image.sh --no-guardrails
 ```
 
 Wait for the worker to register `nvidia/Cosmos3-Nano` at `/v1/models`. In another
@@ -71,8 +70,7 @@ The client requests one 1024×1024 image with 50 steps, guidance scale 7, and se
 Stop the image launcher. Start the video worker with the same environment:
 
 ```bash
-DYN_COSMOS_MODALITY=video \
-  bash examples/backends/vllm/launch/agg_omni_cosmos3.sh --no-guardrails
+bash examples/backends/vllm/launch/agg_omni_cosmos3_video.sh --no-guardrails
 ```
 
 After the worker registers, request a short clip:
@@ -104,6 +102,58 @@ python examples/backends/vllm/omni/cosmos3/generate.py \
 The client encodes the image as a PNG data URI in `input_reference`. Dynamo
 loads it and passes the PIL image in `multi_modal_data.image`; vLLM-Omni
 performs reference preprocessing, latent conditioning, and generation.
+The `agg_omni_cosmos3_i2v.sh` launcher starts the same video worker; the request's
+`input_reference` selects image-to-video generation.
+
+## Select a Model
+
+The launchers and client accept `--model`, defaulting to `nvidia/Cosmos3-Nano`.
+Pass the same identifier to both. `DYN_COSMOS_MODEL_PATH` optionally selects a
+local checkpoint directory while the model identifier remains the public served
+name. Unset that variable when switching to a model downloaded from the Hub, or
+update it to the matching checkpoint.
+
+| Checkpoint | Dynamo qualification |
+| --- | --- |
+| [Cosmos3 Nano](https://huggingface.co/nvidia/Cosmos3-Nano) | The image and short-video configuration documented here |
+| [Cosmos3 Super](https://huggingface.co/nvidia/Cosmos3-Super) | Model selection is available; GPU execution has not been qualified in this example |
+
+Super requires a separate memory and parallelism configuration. Consult its
+model card before allocating hardware; selecting the model alone does not make
+it fit on the Nano test GPU. Extra launcher options, such as
+`--enable-layerwise-offload`, `--cfg-parallel-size`, and `--use-hsdp`, are passed
+to the Omni worker. Their effectiveness must be tested for the selected model
+and hardware.
+
+The three workflow launchers share `agg_omni_cosmos3.sh`. The shared launcher
+also accepts `DYN_COSMOS_MODALITY=image` or `video` for direct use.
+
+## Send a JSON Request
+
+Sample requests with structured Cosmos prompts live in
+[`launch/cosmos3`](../../launch/cosmos3). They default to Nano and request
+inline base64 media. The video samples use 33 frames at 24 FPS; the prompts
+describe longer scenes, but these requests generate only short clips.
+
+| File | Worker mode | Endpoint |
+| --- | --- | --- |
+| `t2i.json` | `image` | `/v1/images/generations` |
+| `t2v.json` | `video` | `/v1/videos` |
+| `i2v.json` | `video` | `/v1/videos`, with an HTTPS `input_reference` |
+
+With the image worker running, send the image sample:
+
+```bash
+curl --fail-with-body -sS "http://localhost:${DYN_HTTP_PORT:-8000}/v1/images/generations" \
+  -H 'Content-Type: application/json' \
+  --data-binary @examples/backends/vllm/launch/cosmos3/t2i.json \
+  | jq -r '.data[0].b64_json' | base64 -d > /tmp/cosmos-sample.png
+```
+
+For video, use the video worker, `/v1/videos`, and `t2v.json` or `i2v.json`;
+save the decoded payload with an `.mp4` extension. Change the JSON `model`
+field if the worker serves a different model. The image-to-video sample fetches
+its reference over HTTPS; the Python client above supports client-local images.
 
 ## Request Controls and Limits
 
@@ -143,6 +193,12 @@ cover a clean build of the full Dynamo container.
 | Text-to-image | Five requests, including a repeated seed and guidance/step variations, matched native vLLM-Omni pixels exactly |
 | Text-to-video | The 33-frame 720p response decoded at 24 FPS and matched native output byte-for-byte after the same VP9 encoding |
 | Image-to-video | Two contrasting references with the same prompt and seed produced reference-conditioned videos; both matched native output byte-for-byte after the same encoding |
+
+The three JSON samples above were also compared with native vLLM-Omni in this
+configuration. `t2i.json` matched native pixels exactly; `t2v.json` and
+`i2v.json` matched native output byte-for-byte after identical VP9 encoding.
+The image-to-video sample used its HTTPS reference, with the same downloaded
+image supplied to the native baseline.
 
 Video comparisons account for the delivery codec: an MP4 decoded after lossy
 VP9 compression need not equal the raw native frames. The example client also
