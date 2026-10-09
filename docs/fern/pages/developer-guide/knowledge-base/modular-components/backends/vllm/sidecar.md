@@ -54,54 +54,25 @@ kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000
 ## Topologies
 
 The frontend reaches each sidecar over Dynamo's request, discovery, and event
-planes; the sidecar reaches the engine over its native gRPC API. Dotted arrows
-carry KV cache events only.
+planes; the sidecar reaches the engine over its native gRPC API. Dashed arrows
+carry KV events.
 
 ### Single-node TP
 
 One engine on one node, with one sidecar.
 
-```mermaid
-flowchart LR
-  F[Dynamo frontend] <-->|Request, discovery, and event planes| S
-  subgraph P[Worker pod, node 0]
-    S[Dynamo sidecar] <-->|Native gRPC| E[vLLM: TP ranks]
-  end
-```
+![On one node, a request reaches the vLLM tensor-parallel ranks through the Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar.](../../../../../../assets/img/sidecar-vllm-single-node-tp.svg)
 
 ### Multi-node TP
 
-One engine spans two nodes. Only the leader pod has a sidecar; the follower
-pod holds the remaining TP ranks.
+One engine spans two nodes. Only the leader node has a sidecar; the follower
+node holds the remaining TP ranks.
 
-```mermaid
-flowchart LR
-  F[Dynamo frontend] <-->|Request, discovery, and event planes| S
-  subgraph L[Leader pod, node 0]
-    S[Dynamo sidecar] <-->|Native gRPC| E0[vLLM: local TP ranks]
-  end
-  subgraph W[Follower pod, node 1]
-    E1[vLLM: remote TP ranks]
-  end
-  E0 <-->|TP collectives| E1
-```
+![When one vLLM engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../../../../assets/img/sidecar-vllm-multinode-tp.svg)
 
 ### Multi-node DP
 
 Hybrid DP load balancing: each node runs vLLM for its local DP ranks plus a
-sidecar that serves requests. The frontend routes to either pod.
+sidecar that serves requests. The frontend routes to either node.
 
-```mermaid
-flowchart LR
-  F[Dynamo frontend] <-->|Request, discovery, and event planes| SA
-  F <-->|Request, discovery, and event planes| SB
-  subgraph A[Worker pod A, node 0]
-    SA[Dynamo sidecar: DP 0-1] <-->|Native gRPC| EA[vLLM]
-  end
-  subgraph B[Worker pod B, node 1]
-    SB[Dynamo sidecar: DP 2-3] <-->|Native gRPC| EB[vLLM]
-  end
-  C{{DP/EP collectives}}
-  EA <--> C
-  EB <--> C
-```
+![vLLM hybrid data parallelism across two nodes. The Dynamo Frontend router picks a DP rank and sends requests over the request plane to the Dynamo Sidecar on the node that owns that rank: node 0 serves DP ranks 0-1 and node 1 serves DP ranks 2-3.](../../../../../../assets/img/sidecar-vllm-multinode-dp.svg)

@@ -54,37 +54,21 @@ kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ## Topologies
 
 The frontend reaches each sidecar over Dynamo's request, discovery, and event
-planes; the sidecar reaches the engine over its native gRPC API. Dotted arrows
-carry KV cache events only.
+planes; the sidecar reaches the engine over its native gRPC API. Dashed arrows
+carry KV events.
 
 ### Single-node TP
 
 One engine on one node, with one sidecar.
 
-```mermaid
-flowchart LR
-  F[Dynamo frontend] <-->|Request, discovery, and event planes| S
-  subgraph P[Worker pod, node 0]
-    S[Dynamo sidecar] <-->|Native gRPC| E[SGLang: TP ranks]
-  end
-```
+![On one node, a request reaches the SGLang tensor-parallel ranks through the Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar.](../../../../../../assets/img/sidecar-sglang-single-node-tp.svg)
 
 ### Multi-node TP
 
-One engine spans two nodes. Only the leader pod has a sidecar; the follower
-pod holds the remaining TP ranks.
+One engine spans two nodes. Only the leader node has a sidecar; the follower
+node holds the remaining TP ranks.
 
-```mermaid
-flowchart LR
-  F[Dynamo frontend] <-->|Request, discovery, and event planes| S
-  subgraph L[Leader pod, node 0]
-    S[Dynamo sidecar] <-->|Native gRPC| E0[SGLang: local TP ranks]
-  end
-  subgraph W[Follower pod, node 1]
-    E1[SGLang: remote TP ranks]
-  end
-  E0 <-->|TP collectives| E1
-```
+![When one SGLang engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../../../../assets/img/sidecar-sglang-multinode-tp.svg)
 
 ### Multi-node DP
 
@@ -92,17 +76,4 @@ The leader sidecar registers every DP rank and serves all requests; SGLang
 dispatches each one to the right scheduler. The follower sidecar
 accepts no requests and relays its node's KV events directly to the frontend.
 
-```mermaid
-flowchart LR
-  F[Dynamo frontend] <-->|Request, discovery, and event planes| SL
-  F <-.->|Discovery and event planes| SW
-  subgraph L[Leader pod, node 0]
-    SL[Dynamo sidecar: DP 0-1] <-->|Native gRPC| EL[SGLang]
-  end
-  subgraph W[Follower pod, node 1]
-    SW[Dynamo sidecar: KV events only, DP 2-3] <-.->|KV events| EW[SGLang]
-  end
-  C{{Dispatch and collectives}}
-  EL <--> C
-  EW <--> C
-```
+![SGLang data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local SGLang over native gRPC.](../../../../../../assets/img/sidecar-sglang-multinode-dp.svg)

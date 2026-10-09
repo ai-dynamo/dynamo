@@ -28,13 +28,7 @@ native gRPC API.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  F[Dynamo Frontend] <-->|Request, discovery, and event planes| S
-  subgraph W[Same host or Kubernetes pod]
-    S[Dynamo Sidecar] <-->|Native gRPC| E[Inference Engine]
-  end
-```
+![Dynamo Sidecar architecture. A client sends OpenAI-compatible HTTP to the Dynamo Frontend, which tokenizes, routes, and sends token IDs over the request plane to the Dynamo Sidecar.](../../../../../assets/img/sidecar-architecture.svg)
 
 The frontend and router discover sidecars and send requests to them over the
 Dynamo request plane. Each sidecar converts requests to the engine's native gRPC

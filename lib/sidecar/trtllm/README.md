@@ -61,33 +61,17 @@ TensorRT-LLM sidecar does not publish KV cache events.
 
 One engine on one node, with one sidecar.
 
-```mermaid
-flowchart LR
-  F[Dynamo frontend] <-->|Request, discovery, and event planes| S
-  subgraph P[Worker pod, node 0]
-    S[Dynamo sidecar] <-->|Native gRPC| E[TensorRT-LLM: TP ranks]
-  end
-```
+![On one node, a request reaches the TensorRT-LLM tensor-parallel ranks through the Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar.](../../../docs/fern/assets/img/sidecar-trtllm-single-node-tp.svg)
 
 ### Multi-node TP
 
-One engine spans two nodes. Only the leader pod has a sidecar; the follower
-pod holds the remaining TP ranks.
+One engine spans two nodes. Only the leader node has a sidecar; the follower
+node holds the remaining TP ranks.
 
 > [!NOTE]
 > This topology has not been validated with the TensorRT-LLM sidecar yet.
 
-```mermaid
-flowchart LR
-  F[Dynamo frontend] <-->|Request, discovery, and event planes| S
-  subgraph L[Leader pod, node 0]
-    S[Dynamo sidecar] <-->|Native gRPC| E0[TensorRT-LLM: local TP ranks]
-  end
-  subgraph W[Follower pod, node 1]
-    E1[TensorRT-LLM: remote TP ranks]
-  end
-  E0 <-->|TP collectives| E1
-```
+![When one TensorRT-LLM engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../docs/fern/assets/img/sidecar-trtllm-multinode-tp.svg)
 
 ### Multi-node DP
 
