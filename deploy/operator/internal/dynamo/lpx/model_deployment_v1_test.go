@@ -201,51 +201,74 @@ func TestDeploymentContractRejectsInvalidFacts(t *testing.T) {
 }
 
 func TestDeploymentContractAcquisitionAndRuntimePath(t *testing.T) {
-	t.Log("Materialize deployment and opaque execution without a report or JSON")
-	root := t.TempDir()
-	deployment := newDeploymentV1ContractFixture(t)
-	payload, err := deployment.Message().Marshal()
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(root, gbuildDeploymentV1CapnpFile), payload, 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "execution.v1.capnp.bin"), []byte("opaque runtime bytes"), 0o600))
-	registry, err := NewModelRegistry("", nil)
-	require.NoError(t, err)
+	for _, test := range []struct {
+		name         string
+		architecture deploymentcapnpv1.LpuArchitecture
+		family       BuildFamily
+		topology     string
+		chips        uint32
+	}{
+		{"LP20", deploymentcapnpv1.LpuArchitecture_lp20, BuildFamilyXT, registryTestTopology, 8},
+		{"LP30", deploymentcapnpv1.LpuArchitecture_lp30, BuildFamilyHX, hxTopologyFamily, 16},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Materialize deployment and opaque execution without a report or JSON")
+			root := t.TempDir()
+			deployment := newDeploymentV1ContractFixture(t)
+			partitions, err := deployment.Partitions()
+			require.NoError(t, err)
+			detail, err := partitions.At(0).Detail().Lpu()
+			require.NoError(t, err)
+			detail.SetArchitecture(test.architecture)
+			require.NoError(t, detail.SetTopology(test.topology))
+			detail.SetNumChips(test.chips)
+			detail.SetDevicesPerNode(test.chips)
+			payload, err := deployment.Message().Marshal()
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(root, gbuildDeploymentV1CapnpFile), payload, 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(root, "execution.v1.capnp.bin"), []byte("opaque runtime bytes"), 0o600))
+			registry, err := NewModelRegistry("", nil)
+			require.NoError(t, err)
 
-	t.Log("Acquire and normalize exactly the scheduler contract")
-	snapshot, err := registry.AcquireBuildSnapshot(t.Context(), root)
-	require.NoError(t, err)
-	require.Equal(t, payload, snapshot.manifestBytes)
-	require.Equal(t, buildContractDeploymentV1, snapshot.format)
-	normalized, err := normalizeBuildSnapshot(snapshot)
-	require.NoError(t, err)
-	require.Equal(t, buildContractDeploymentV1, normalized.format)
-	require.EqualValues(t, 4, normalized.build.IOFPGACount)
+			t.Log("Acquire and normalize exactly the scheduler contract")
+			snapshot, err := registry.AcquireBuildSnapshot(t.Context(), root)
+			require.NoError(t, err)
+			require.Equal(t, payload, snapshot.manifestBytes)
+			require.Equal(t, buildContractDeploymentV1, snapshot.format)
+			normalized, err := normalizeBuildSnapshot(snapshot)
+			require.NoError(t, err)
+			require.Equal(t, buildContractDeploymentV1, normalized.format)
+			require.EqualValues(t, 4, normalized.build.IOFPGACount)
+			require.Equal(t, test.family, normalized.build.Family)
 
-	t.Log("Pass the selected deployment file to Cyborg before authored environment references")
-	projections, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
-	})
-	require.NoError(t, err)
-	require.Len(t, projections, 1)
-	projection := projections[0]
-	require.Equal(t, buildContractDeploymentV1, projection.contractFormat)
-	container := corev1.Container{Env: []corev1.EnvVar{{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"}}}
-	require.NoError(t, applyCyborgManifestPath(&container, projection, "/models"))
-	require.Equal(t, []corev1.EnvVar{
-		{Name: gbuildManifestPathEnv, Value: filepath.Join(root, gbuildDeploymentV1CapnpFile)},
-		{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"},
-	}, container.Env)
+			t.Log("Pass the selected deployment file to Cyborg before authored environment references")
+			projections, err := appendModelProjections(nil, ModelProjectionInput{
+				Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+			})
+			require.NoError(t, err)
+			require.Len(t, projections, 1)
+			projection := projections[0]
+			require.Equal(t, buildContractDeploymentV1, projection.contractFormat)
+			require.Equal(t, test.family, projection.configuredBuild.Family)
+			container := corev1.Container{Env: []corev1.EnvVar{{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"}}}
+			require.NoError(t, applyCyborgManifestPath(&container, projection, "/models"))
+			require.Equal(t, []corev1.EnvVar{
+				{Name: gbuildManifestPathEnv, Value: filepath.Join(root, gbuildDeploymentV1CapnpFile)},
+				{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"},
+			}, container.Env)
 
-	t.Log("Bind exact deployment bytes to snapshot identity")
-	identity, err := deployment.Identity()
-	require.NoError(t, err)
-	require.NoError(t, identity.SetBuildId("different-build"))
-	changed, err := deployment.Message().Marshal()
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(root, gbuildDeploymentV1CapnpFile), changed, 0o600))
-	second, err := registry.AcquireBuildSnapshot(t.Context(), root)
-	require.NoError(t, err)
-	require.NotEqual(t, snapshot.contentID, second.contentID)
+			t.Log("Bind exact deployment bytes to snapshot identity")
+			identity, err := deployment.Identity()
+			require.NoError(t, err)
+			require.NoError(t, identity.SetBuildId("different-build"))
+			changed, err := deployment.Message().Marshal()
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(root, gbuildDeploymentV1CapnpFile), changed, 0o600))
+			second, err := registry.AcquireBuildSnapshot(t.Context(), root)
+			require.NoError(t, err)
+			require.NotEqual(t, snapshot.contentID, second.contentID)
+		})
+	}
 }
 
 func TestDeploymentContractCorruptionNeverUsesLegacy(t *testing.T) {
