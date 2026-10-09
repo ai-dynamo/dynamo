@@ -187,6 +187,23 @@ impl LaneLookup {
         self.nodes.id_of(node).is_some()
     }
 
+    /// How many leading `hashes` have `worker` entries naming `node`. Compares lane-local
+    /// ids, so no node's reference count is touched.
+    pub(super) fn leading_naming(
+        &self,
+        worker: WorkerWithDpRank,
+        node: &SharedNode,
+        hashes: &[ExternalSequenceBlockHash],
+    ) -> usize {
+        let (Some(blocks), Some(id)) = (self.workers.get(&worker), self.nodes.id_of(node)) else {
+            return 0;
+        };
+        hashes
+            .iter()
+            .take_while(|hash| blocks.get(hash) == Some(&id))
+            .count()
+    }
+
     /// Points `worker`'s entries for `hashes` at `node`. Returns the number of entries
     /// inserted or changed.
     pub(super) fn upsert_all<I>(

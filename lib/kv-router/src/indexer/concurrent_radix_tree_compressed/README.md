@@ -163,6 +163,14 @@ When a remove event arrives for worker `w` at edge position `i`:
   written before its full bit is cleared.
 - Worker lookup entries for the newly uncovered suffix are scrubbed eagerly.
 
+A remove event is applied in runs, each under one lock. A run starts at the node its
+first hash's lookup entry names, or the node [lookup repair](#lookup-repair) resolves
+that hash to, and takes the following hashes whose entries name that node. A hash
+whose entry names another node starts its own run, because that node holds the
+worker's coverage of it: once cleanup unlinks a subtree the lane still names, a
+partial restore can store some of its hashes on a new live node, and consuming them
+on the unlinked node would leave the live coverage behind.
+
 After the coverage update, removal may clear children only when no full-edge
 workers remain. Because `internal` is sticky, clearing those children does not
 make the node eligible for future leaf extension.
