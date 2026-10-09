@@ -124,16 +124,20 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     A ``data:`` URI carries the whole media payload inline, so echoing one into
     an error message serializes megabytes of base64 -- to the client, and to
     every log sink that records the failure. Describe those by media type and
-    size instead, never by content. Other sources are truncated, since a URL
-    identifies the request without being unbounded.
+    size instead, never by content. HTTP credentials, queries and fragments
+    are omitted, and other sources are truncated.
 
     Lives here rather than in ``multimodal.media_source`` so the validators
     below can bound their own messages: importing that package pulls in torch.
     """
     if not isinstance(source, str):
         return "<non-string media source>"
-    if source.startswith("data:"):
-        meta = source[len("data:") :].partition(",")[0]
+    try:
+        parsed = urlparse(source)
+    except ValueError:
+        return f"<invalid media source> ({len(source)} chars)"
+    if parsed.scheme == "data":
+        meta = parsed.path.partition(",")[0]
         media_type = meta.split(";")[0] or "application/octet-stream"
         # The media-type field is client-supplied and unbounded: a reference of
         # ``"data:" + "A" * 200_000 + ",AAAA"`` puts all of it here, so eliding
@@ -142,6 +146,10 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
         if len(media_type) > limit:
             media_type = f"{media_type[:limit]}... ({len(media_type)} chars)"
         return f"data:{media_type} ({len(source)} chars, payload elided)"
+    if parsed.scheme in ("http", "https"):
+        source = parsed._replace(
+            netloc=parsed.netloc.rsplit("@", 1)[-1], query="", fragment=""
+        ).geturl()
     if len(source) > limit:
         return f"{source[:limit]}... ({len(source)} chars)"
     return source

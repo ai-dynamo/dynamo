@@ -73,12 +73,178 @@ fn preparation_is_deterministic() {
 }
 
 #[test]
-fn oversized_generation_is_rejected_before_token_planning() {
-    let mut oversized = request("too-many-tokens");
-    oversized.stopping.as_mut().unwrap().max_new_tokens = MAX_NEW_TOKENS + 1;
-    let error =
-        PreparedRequest::new(oversized, &MockerServerConfig::default(), 4, None).unwrap_err();
-    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+fn generation_output_limit_is_one_million_tokens() {
+    let config = MockerServerConfig::default();
+    for max_model_len in [None, Some(1_000_003)] {
+        for max_new_tokens in [32_769, 1_000_000] {
+            let mut req = request("large-output");
+            req.stopping.as_mut().unwrap().max_new_tokens = max_new_tokens;
+            let prepared = PreparedRequest::new(req, &config, 4, max_model_len).unwrap();
+            assert_eq!(prepared.max_output_tokens, max_new_tokens as usize);
+        }
+
+        let mut oversized = request("too-many-tokens");
+        oversized.stopping.as_mut().unwrap().max_new_tokens = 1_000_001;
+        let error = PreparedRequest::new(oversized, &config, 4, max_model_len).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            error
+                .message()
+                .contains("max_new_tokens must not exceed 1000000")
+        );
+    }
+}
+
+#[test]
+fn image_sources_are_opaque_but_require_payloads() {
+    use pb::media_item::Source;
+
+    let features = pb::PreprocessedMediaFeatures {
+        kwargs: Some(vec![0xc1]), // Deliberately opaque, not valid MessagePack.
+        identifier: "image-1".to_string(),
+        length: 1,
+        ..Default::default()
+    };
+    let cases = [
+        (
+            "url",
+            Some(Source::Url("https://example.invalid/image.png".into())),
+            true,
+        ),
+        (
+            "data URI",
+            Some(Source::DataUri("data:image/png;base64,b3BhcXVl".into())),
+            true,
+        ),
+        ("bytes", Some(Source::RawBytes(vec![1, 2, 3])), true),
+        ("features", Some(Source::Features(features.clone())), true),
+        ("missing source", None, false),
+        ("empty URL", Some(Source::Url(String::new())), false),
+        (
+            "empty data URI",
+            Some(Source::DataUri(String::new())),
+            false,
+        ),
+        ("empty bytes", Some(Source::RawBytes(Vec::new())), false),
+        (
+            "missing kwargs",
+            Some(Source::Features(pb::PreprocessedMediaFeatures {
+                kwargs: None,
+                ..features.clone()
+            })),
+            false,
+        ),
+        (
+            "empty kwargs",
+            Some(Source::Features(pb::PreprocessedMediaFeatures {
+                kwargs: Some(Vec::new()),
+                ..features.clone()
+            })),
+            false,
+        ),
+        (
+            "missing identifier",
+            Some(Source::Features(pb::PreprocessedMediaFeatures {
+                identifier: String::new(),
+                ..features.clone()
+            })),
+            false,
+        ),
+        (
+            "missing length",
+            Some(Source::Features(pb::PreprocessedMediaFeatures {
+                length: 0,
+                ..features
+            })),
+            false,
+        ),
+    ];
+    let config = MockerServerConfig {
+        supports_multimodal: true,
+        ..Default::default()
+    };
+    let text = PreparedRequest::new(request("image"), &config, 4, None).unwrap();
+    for (name, source, valid) in cases {
+        let mut req = request("image");
+        req.media.push(pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source,
+            ..Default::default()
+        });
+        let result = PreparedRequest::new(req, &config, 4, None);
+        if valid {
+            let prepared = result.unwrap();
+            assert_eq!(
+                prepared.direct_request().tokens,
+                text.direct_request().tokens,
+                "{name}"
+            );
+            assert_eq!(prepared.output_token(0), text.output_token(0), "{name}");
+        } else {
+            assert_eq!(
+                result.unwrap_err().code(),
+                tonic::Code::InvalidArgument,
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn non_image_modalities_are_rejected() {
+    let config = MockerServerConfig {
+        supports_multimodal: true,
+        ..Default::default()
+    };
+    for modality in [
+        pb::Modality::Audio as i32,
+        pb::Modality::Video as i32,
+        pb::Modality::Unspecified as i32,
+        99,
+    ] {
+        let mut req = request("non-image");
+        req.media.push(pb::MediaItem {
+            modality,
+            source: Some(pb::media_item::Source::RawBytes(vec![1, 2, 3])),
+            ..Default::default()
+        });
+        let error = PreparedRequest::new(req, &config, 4, None).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{modality}");
+    }
+}
+
+#[test]
+fn image_requests_require_multimodal_support() {
+    let mut req = request("image");
+    req.media.push(pb::MediaItem {
+        modality: pb::Modality::Image as i32,
+        source: Some(pb::media_item::Source::RawBytes(vec![1, 2, 3])),
+        ..Default::default()
+    });
+    let error = PreparedRequest::new(req, &MockerServerConfig::default(), 4, None).unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
+}
+
+#[tokio::test]
+async fn model_discovery_reports_configured_multimodal_support() {
+    for supports_multimodal in [false, true] {
+        let service = VllmMockerService::new(
+            MockerServerConfig {
+                supports_multimodal,
+                ..Default::default()
+            },
+            admitting_args(),
+        )
+        .unwrap();
+        let model = pb::control_server::Control::get_model_info(
+            &service,
+            Request::new(pb::GetModelInfoRequest::default()),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(model.supports_multimodal, supports_multimodal);
+    }
 }
 
 #[test]
