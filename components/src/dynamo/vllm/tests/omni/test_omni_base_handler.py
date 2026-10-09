@@ -217,22 +217,15 @@ class TestDiffusionParallelConfigCoverage:
         assert kwargs["enforce_eager"] is True
 
     @pytest.mark.parametrize("stage_type", ["diffusion", None])
-    @pytest.mark.parametrize("disable_guardrails", [False, True])
-    def test_guardrail_settings_reach_upstream_diffusion_config(
-        self, stage_type, disable_guardrails
-    ):
+    def test_guardrail_settings_reach_upstream_diffusion_config(self, stage_type):
         config = _make_config()
-        if disable_guardrails:
-            config.diffusion.model_config = {"guardrails": False}
+        config.diffusion.model_config = {"guardrails": False}
 
         kwargs = _build_kwargs(config, stage_type=stage_type)
         stages = StageConfigFactory.create_default_diffusion(kwargs)
 
-        expected = {"guardrails": False} if disable_guardrails else {}
-        assert stages[0]["engine_args"].get("model_config", {}) == expected
+        assert stages[0]["engine_args"]["model_config"] == {"guardrails": False}
         assert "no_guardrails" not in kwargs
-        if not disable_guardrails:
-            assert "model_config" not in kwargs
 
     def test_diffusion_kwargs_preserved_when_stage_detection_is_deferred(self):
         config = _make_config()

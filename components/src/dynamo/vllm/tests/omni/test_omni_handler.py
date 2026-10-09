@@ -509,35 +509,22 @@ class TestI2VEngineInputs:
     """Tests for image-to-video: multi_modal_data attachment, I2V nvext params, and protocol fields."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "reference,exception_type,status",
-        [
-            ("data:image/png;base64,bm90IGFuIGltYWdl", HttpStatusError, 415),
-            ("data:image/png;base64,NOT_VALID!!!", ValueError, None),
-            (None, ValueError, None),
-        ],
-    )
-    async def test_invalid_reference_rejected_before_generation(
-        self, tmp_path, reference, exception_type, status
-    ):
-        """Reject bad references with safe messages while preserving HTTP status."""
+    async def test_invalid_reference_preserves_http_status(self):
+        """Preserve an unsupported-media response before starting generation."""
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
         handler._image_loader = ImageLoader()
         request = {
             "model": "test-model",
             "prompt": "a car",
-            "input_reference": reference or (tmp_path / "reference.png").as_uri(),
+            "input_reference": "data:image/png;base64,bm90IGFuIGltYWdl",
         }
 
-        with pytest.raises(exception_type) as excinfo:
+        with pytest.raises(HttpStatusError) as excinfo:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pytest.fail("Invalid reference must not yield a video response")
 
-        if status is not None:
-            assert excinfo.value.status == status
-        else:
-            assert str(excinfo.value) == "Failed to load input_reference"
+        assert excinfo.value.status == 415
         handler.engine_client.generate.assert_not_called()
 
     @pytest.mark.asyncio

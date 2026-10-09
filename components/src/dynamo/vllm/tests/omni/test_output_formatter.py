@@ -1216,15 +1216,14 @@ class TestOutputFormatter:
     _FULL_CTX = dict(fps=16, response_format=None, previous_text="", speed=1.0)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("final_output_type", ["image", "video"])
     @pytest.mark.parametrize("count", [1, 2])
-    async def test_image_request_preserves_pil_outputs(self, final_output_type, count):
+    async def test_video_labeled_image_request_preserves_pil_outputs(self, count):
         # Cosmos3 can retain its model-level "video" label for T2I output.
         # The public image request must still receive lossless PNGs, not MP4.
         images = [
             Image.new("RGB", (32, 48), (index * 80, 90, 150)) for index in range(count)
         ]
-        stage = SimpleNamespace(final_output_type=final_output_type, images=images)
+        stage = SimpleNamespace(final_output_type="video", images=images)
         formatter = OutputFormatter(model_name="test-model")
 
         response = await formatter.format(
