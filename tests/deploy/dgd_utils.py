@@ -1520,7 +1520,7 @@ class ManagedDeployment:
 
                 result[original_name] = list(  # type: ignore[arg-type]
                     kr8s.get(
-                        "pods",
+                        Pod,
                         namespace=self.namespace,
                         label_selector=label_selector,
                     )
