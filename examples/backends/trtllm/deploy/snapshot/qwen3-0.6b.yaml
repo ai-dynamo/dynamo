@@ -52,6 +52,7 @@ spec:
   - name: TRTLLMWorker
     type: worker
     replicas: 1
+    sharedMemorySize: 8Gi
     experimental:
       checkpoint:
         enabled: true
@@ -74,10 +75,6 @@ spec:
             claimName: model-cache
         - name: criu-work
           emptyDir: {}
-        - name: shm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 1Gi
         - name: engine-config
           configMap:
             name: qwen3-0-6b-trtllm-snapshot-restore-engine
@@ -123,8 +120,6 @@ spec:
             mountPath: /home/dynamo/.cache/huggingface
           - name: criu-work
             mountPath: /var/criu-work
-          - name: shm
-            mountPath: /dev/shm
           - name: engine-config
             mountPath: /etc/dynamo-engine
             readOnly: true

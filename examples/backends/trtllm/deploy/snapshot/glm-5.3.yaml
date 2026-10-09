@@ -61,6 +61,9 @@ spec:
         - name: main
           image: my-registry/tensorrtllm-runtime:my-tag
           imagePullPolicy: IfNotPresent
+          env:
+          - name: HF_MODULES_CACHE
+            value: /tmp/huggingface/modules
           volumeMounts:
           - name: hf-cache
             mountPath: /home/dynamo/.cache/huggingface
@@ -72,6 +75,7 @@ spec:
   - name: TRTLLMWorker
     type: worker
     replicas: 1
+    sharedMemorySize: 64Gi
     experimental:
       checkpoint:
         enabled: true
@@ -94,10 +98,6 @@ spec:
             claimName: model-cache
         - name: criu-work
           emptyDir: {}
-        - name: shm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 64Gi
         - name: engine-config
           configMap:
             name: glm-5-3-trtllm-snapshot-restore-engine
@@ -122,6 +122,8 @@ spec:
           - --extra-engine-args
           - /etc/dynamo-engine/config.yaml
           env:
+          - name: HF_MODULES_CACHE
+            value: /tmp/huggingface/modules
           - name: OMPI_MCA_pml
             value: ob1
           - name: OMPI_MCA_btl
@@ -143,8 +145,6 @@ spec:
             mountPath: /home/dynamo/.cache/huggingface
           - name: criu-work
             mountPath: /var/criu-work
-          - name: shm
-            mountPath: /dev/shm
           - name: engine-config
             mountPath: /etc/dynamo-engine
             readOnly: true
