@@ -4,11 +4,12 @@
 use tonic_v14 as tonic;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, RlAdminBaseUrl, RuntimeConfig, WorkerConfig, usage,
+    AsyncEngineContext, DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine,
+    LLMEngineOutput, LLMEngineOutputExt, RlAdminBaseUrl, RuntimeConfig, WorkerConfig, usage,
 };
 use dynamo_llm::lora::{LoRADownloader, lora_serving_enabled};
 use dynamo_runtime::component::Endpoint;
@@ -940,6 +941,21 @@ impl LLMEngine for VllmSidecarEngine {
                 }
             }
         }))
+    }
+
+    async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
+        let Some(client) = self.client.get() else {
+            return;
+        };
+        if let Err(error) = client.abort(ctx.id().to_string()).await {
+            // Escaped: the message embeds the engine's gRPC status text, so raw
+            // newlines from the peer could forge separate log records.
+            tracing::warn!(
+                request_id = ctx.id(),
+                error = %error.to_string().escape_debug(),
+                "vLLM Control.Abort failed"
+            );
+        }
     }
 
     async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {

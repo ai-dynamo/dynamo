@@ -326,8 +326,11 @@ impl pb::control_server::Control for FakeVllm {
 
     async fn abort(
         &self,
-        _request: Request<pb::AbortRequest>,
+        request: Request<pb::AbortRequest>,
     ) -> Result<Response<pb::AbortResponse>, Status> {
+        let request = request.into_inner();
+        self.record_control("abort", json!({"request_ids": request.request_ids}))
+            .await;
         Ok(Response::new(pb::AbortResponse {}))
     }
 
@@ -2598,6 +2601,44 @@ async fn pool_uses_each_configured_connection() {
             .iter()
             .all(Option::is_none)
     );
+}
+
+#[tokio::test]
+async fn abort_sends_control_abort_for_the_request_id() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    engine.abort(context.clone()).await;
+
+    let calls = server.service.control_calls.lock().await;
+    assert_eq!(
+        *calls,
+        vec![("abort".to_string(), json!({"request_ids": [context.id()]}))]
+    );
+}
+
+#[tokio::test]
+async fn abort_before_start_is_a_noop() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
+
+    engine
+        .abort(dynamo_backend_common::testing::mock_context())
+        .await;
+
+    assert!(server.service.control_calls.lock().await.is_empty());
 }
 
 #[tokio::test]
