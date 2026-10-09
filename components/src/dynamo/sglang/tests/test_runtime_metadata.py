@@ -445,3 +445,47 @@ def test_mooncake_runtime_data_publishes_sglang_key_prefix(
     runtime_data = register._get_mooncake_runtime_data(server_args)
 
     assert runtime_data["key_prefix"] == expected
+
+
+@pytest.mark.parametrize(
+    "filename, content",
+    [
+        ("extra.json", '{"extra_backend_tag": "t"}'),
+        ("extra.toml", 'extra_backend_tag = "t"\n'),
+        ("extra.yaml", "extra_backend_tag: t\n"),
+        ("extra.yml", "extra_backend_tag: t\n"),
+    ],
+)
+def test_mooncake_key_prefix_reads_at_file_extra_config(
+    monkeypatch, tmp_path, filename, content
+):
+    from dynamo.sglang import register
+
+    config_path = tmp_path / filename
+    config_path.write_text(content)
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    server_args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=f"@{config_path}",
+        served_model_name="Qwen/Qwen3-0.6B",
+        page_size=64,
+        tp_size=1,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+
+    runtime_data = register._get_mooncake_runtime_data(server_args)
+
+    assert runtime_data["extra_backend_tag"] == "t"
+    assert runtime_data["key_prefix"] == "t_Qwen-Qwen3-0.6B"
+
+
+@pytest.mark.parametrize("filename", ["missing.json", "extra.ini"])
+def test_unreadable_at_file_extra_config_is_ignored(tmp_path, filename):
+    from dynamo.sglang import register
+
+    path = tmp_path / filename
+    if filename.endswith(".ini"):
+        path.write_text("extra_backend_tag = t\n")
+
+    assert register._parse_hicache_storage_extra_config(f"@{path}") == {}

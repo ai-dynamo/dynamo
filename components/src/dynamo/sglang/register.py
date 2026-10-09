@@ -7,7 +7,13 @@ import logging
 import os
 from typing import Any, List, Optional
 
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+
 import sglang as sgl
+import yaml
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
@@ -298,6 +304,24 @@ def _get_bootstrap_info_for_config(
     return compute_bootstrap_address(engine)
 
 
+def _load_hicache_storage_extra_config_file(path: str) -> Any:
+    """Load an ``@path`` extra config the way SGLang's HiCache does.
+
+    SGLang accepts ``.json``, ``.toml``, ``.yaml`` and ``.yml`` files.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".json":
+        with open(path) as f:
+            return json.load(f)
+    if ext == ".toml":
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    if ext in (".yaml", ".yml"):
+        with open(path) as f:
+            return yaml.safe_load(f)
+    raise ValueError(f"unsupported config file {path!r} (format {ext!r})")
+
+
 def _parse_hicache_storage_extra_config(
     raw_extra_config: Optional[Any],
 ) -> dict[str, Any]:
@@ -312,10 +336,13 @@ def _parse_hicache_storage_extra_config(
         if not raw_extra_config:
             return {}
         try:
-            parsed = json.loads(raw_extra_config)
-        except json.JSONDecodeError as e:
+            if raw_extra_config.startswith("@"):
+                parsed = _load_hicache_storage_extra_config_file(raw_extra_config[1:])
+            else:
+                parsed = json.loads(raw_extra_config)
+        except (OSError, ValueError, yaml.YAMLError) as e:
             logging.warning(
-                f"Failed to parse hicache_storage_backend_extra_config JSON: {e}"
+                f"Failed to parse hicache_storage_backend_extra_config: {e}"
             )
             return {}
 
@@ -323,7 +350,7 @@ def _parse_hicache_storage_extra_config(
             return parsed
 
         logging.warning(
-            "hicache_storage_backend_extra_config JSON was not an object; ignoring it."
+            "hicache_storage_backend_extra_config was not an object; ignoring it."
         )
         return {}
 
