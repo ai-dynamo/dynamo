@@ -5,18 +5,19 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from typing import Any, List, Optional
-
-try:
-    import tomllib
-except ImportError:
-    import tomli as tomllib
 
 import sglang as sgl
 import yaml
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 from dynamo._core import Endpoint
 from dynamo.common.configuration.groups.router_args import build_router_config
