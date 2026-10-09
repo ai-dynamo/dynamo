@@ -451,6 +451,8 @@ where
                 ))
             })?;
 
+        // Delayed payload decoding must not retain the transport receive buffer.
+        let data = data.map(|data| Bytes::copy_from_slice(&data));
         Ok((control_msg, data))
     }
 }
@@ -1070,6 +1072,66 @@ mod tests {
     type TestRequest = serde_json::Value;
     type TestResponse = Annotated<serde_json::Value>;
     type TestIngress = Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>;
+
+    #[test]
+    fn control_decode_releases_receive_storage_before_body_consumption() {
+        struct ReceiveStorage {
+            bytes: Box<[u8]>,
+            released: Arc<AtomicBool>,
+        }
+
+        impl AsRef<[u8]> for ReceiveStorage {
+            fn as_ref(&self) -> &[u8] {
+                &self.bytes
+            }
+        }
+
+        impl Drop for ReceiveStorage {
+            fn drop(&mut self) {
+                self.released.store(true, Ordering::Release);
+            }
+        }
+
+        let connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
+            address: "127.0.0.1:1234".to_string(),
+            subject: "storage-probe".to_string(),
+            context: "storage-probe".to_string(),
+            stream_type: crate::pipeline::network::StreamType::Response,
+        }
+        .into();
+        for body in [b"".as_slice(), b"request body".as_slice()] {
+            let header = serde_json::to_vec(&serde_json::json!({
+                "id": "storage-probe",
+                "request_type": if body.is_empty() { "many_in" } else { "single_in" },
+                "response_type": "many_out",
+                "connection_info": &connection,
+                "metadata": {"trace": "preserved"},
+                "frontend_send_ts_ns": 42,
+            }))
+            .unwrap();
+            let wire = TwoPartCodec::default()
+                .encode_message(TwoPartMessage::from_parts(
+                    Bytes::copy_from_slice(&header),
+                    Bytes::copy_from_slice(body),
+                ))
+                .unwrap();
+            let mut storage = vec![0; 256 * 1024].into_boxed_slice();
+            storage[..wire.len()].copy_from_slice(&wire);
+            let released = Arc::new(AtomicBool::new(false));
+            let payload = Bytes::from_owner(ReceiveStorage {
+                bytes: storage,
+                released: released.clone(),
+            })
+            .slice(..wire.len());
+            let (control, data) = TestIngress::new().decode_control_message(payload).unwrap();
+
+            assert!(released.load(Ordering::Acquire));
+            assert_eq!(control.id, "storage-probe");
+            assert_eq!(control.metadata["trace"], "preserved");
+            assert_eq!(control.frontend_send_ts_ns, Some(42));
+            assert_eq!(data.as_deref(), (!body.is_empty()).then_some(body));
+        }
+    }
 
     /// The positive half of the recovery hop: a worker's typed refusal, boxed
     /// into the `anyhow::Error` payload of `PipelineError::GenerateError`,

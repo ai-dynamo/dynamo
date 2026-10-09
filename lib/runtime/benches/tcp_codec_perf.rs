@@ -92,6 +92,12 @@ fn bench_two_part_decoding(c: &mut Criterion) {
                 black_box(codec.decode_message(black_box(encoded.clone())).unwrap());
             });
         });
+        group.bench_function(BenchmarkId::new("detached_body", size), |b| {
+            b.iter(|| {
+                let msg = codec.decode_message(black_box(encoded.clone())).unwrap();
+                black_box((msg.header, Bytes::copy_from_slice(&msg.data)));
+            });
+        });
         group.bench_function(BenchmarkId::new("copy_then_decode", size), |b| {
             b.iter(|| {
                 let data = black_box(encoded.clone());

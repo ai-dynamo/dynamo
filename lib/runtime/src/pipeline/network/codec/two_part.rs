@@ -265,6 +265,14 @@ mod tests {
 
     #[test]
     fn decoded_parts_share_and_release_the_outer_buffer() {
+        struct BufferOwner(Arc<Vec<u8>>);
+
+        impl AsRef<[u8]> for BufferOwner {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+
         let codec = TwoPartCodec::default();
         let encoded = codec
             .encode_message(TwoPartMessage::from_parts(
@@ -275,11 +283,11 @@ mod tests {
         let offset = 32;
         let mut outer = vec![0x55; 256 * 1024];
         outer[offset..offset + encoded.len()].copy_from_slice(&encoded);
-        let owner: Arc<[u8]> = outer.into();
+        let owner = Arc::new(outer);
         let weak = Arc::downgrade(&owner);
         let header_ptr = owner.as_ptr().wrapping_add(offset + 24);
         let data_ptr = header_ptr.wrapping_add(6);
-        let input = Bytes::from_owner(owner).slice(offset..offset + encoded.len());
+        let input = Bytes::from_owner(BufferOwner(owner)).slice(offset..offset + encoded.len());
 
         let TwoPartMessage { header, data } = codec.decode_message(input).unwrap();
         assert_eq!(header.as_ptr(), header_ptr);
