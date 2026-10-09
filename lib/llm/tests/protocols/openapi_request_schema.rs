@@ -5,7 +5,7 @@
 //! aliases and endpoint-specific extensions. Alias claims are checked against real
 //! Serde parsing, not against a framework server or backend execution.
 //!
-//! Run: `cargo test -p dynamo-llm --no-default-features --test openapi_request_schema`.
+//! Run: `cargo test -p dynamo-llm --no-default-features --test protocols openapi_request_schema::`.
 
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use utoipa::ToSchema;

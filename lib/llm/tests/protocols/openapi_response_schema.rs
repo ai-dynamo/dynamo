@@ -10,7 +10,7 @@
 //! These checks do not prove framework compatibility, inference, or SSE ordering and
 //! termination: the streaming schema describes successful JSON data payloads only.
 //!
-//! Run: `cargo test -p dynamo-llm --no-default-features --test openapi_response_schema`.
+//! Run: `cargo test -p dynamo-llm --no-default-features --test protocols openapi_response_schema::`.
 
 use axum::http::Method;
 use dynamo_llm::{
@@ -161,7 +161,7 @@ fn shared_response_fixtures_are_actual_serialized_output() {
     // Inputs construct real response values; outputs pin serialization, including
     // null-versus-omitted fields. They are not captured inference/SSE transcripts.
     let cases: Value =
-        serde_json::from_str(include_str!("fixtures/openapi/responses.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/openapi/responses.json")).unwrap();
     for case in cases["cases"].as_array().unwrap() {
         let input = case["input"].clone();
         let serialized = match case["kind"].as_str().unwrap() {
