@@ -14,7 +14,7 @@ for image access, model-cache setup, deployment, smoke tests, and benchmarking.
 After completing the prerequisites, apply the generic manifest from the repository root:
 
 ```bash
-kubectl apply -f recipes/motif-3/vllm/disagg-b200-chat/deploy-generic-3p1d-kv.yaml -n "${NAMESPACE}"
+kubectl apply -f recipes/motif-3/vllm/disagg-b200-chat/deploy-generic.yaml -n "${NAMESPACE}"
 ```
 
 Edit [kustomize/base](kustomize/base), then regenerate the manifest:

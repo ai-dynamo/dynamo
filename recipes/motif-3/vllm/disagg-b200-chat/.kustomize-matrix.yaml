@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 source: kustomize/base
-nameTemplate: ${target}-3p1d-kv
+nameTemplate: ${target}
 matrix:
   target:
   - name: generic

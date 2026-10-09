@@ -91,10 +91,10 @@ The aggregated Kustomization fetches the shared Dynamo OpenAPI schema from a pin
 
 <div data-variant="disagg">
 
-Configure GPU node selection and fabric resources for your cluster, then apply the [generic 3P1D manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/disagg-b200-chat/deploy-generic-3p1d-kv.yaml):
+Configure GPU node selection and fabric resources for your cluster, then apply the [generic 3P1D manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/disagg-b200-chat/deploy-generic.yaml):
 
 ```bash
-kubectl apply -f recipes/motif-3/vllm/disagg-b200-chat/deploy-generic-3p1d-kv.yaml -n "${NAMESPACE}"
+kubectl apply -f recipes/motif-3/vllm/disagg-b200-chat/deploy-generic.yaml -n "${NAMESPACE}"
 kubectl get dgd motif3-disagg-b200 -n "${NAMESPACE}" -w
 ```
 
@@ -102,7 +102,7 @@ For Nscale, compose the same generic target with the optional [site component](h
 
 ```bash
 python3 scripts/kustomize-matrix.py compose \
-  recipes/motif-3/vllm/disagg-b200-chat/kustomize/overlays/generic-3p1d-kv \
+  recipes/motif-3/vllm/disagg-b200-chat/kustomize/overlays/generic \
   recipes/motif-3/vllm/disagg-b200-chat/kustomize/components/nscale \
   | kubectl apply -f - -n "${NAMESPACE}"
 ```
@@ -218,7 +218,7 @@ The pinned frontend does not populate its cached-token histogram for this chat-p
 | Target | Workers | B200 GPUs | Deployment |
 |---|---|---:|---|
 | Aggregated | 1 × TP2 | 2 | [Generic](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/agg-b200-chat/base/deploy.yaml) · [Nscale](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/agg-b200-chat/kustomize) |
-| Disaggregated, KV-aware | 3 prefill × TP2 + 1 decode × TP2 | 8 | [Generic](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/disagg-b200-chat/deploy-generic-3p1d-kv.yaml) |
+| Disaggregated, KV-aware | 3 prefill × TP2 + 1 decode × TP2 | 8 | [Generic](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/disagg-b200-chat/deploy-generic.yaml) |
 
 ## Notes
 
