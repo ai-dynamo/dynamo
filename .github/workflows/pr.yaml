@@ -1201,6 +1201,42 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  # Mirror a pinned EFA image from ECR to ACR on every push that touches the
+  # workflow file, without requiring a fresh vllm-efa-build.  The source is the
+  # base EFA image baked for the parent commit (cbc9e1a); re-run this job to
+  # update the pin when a new EFA image is needed.
+  vllm-efa-mirror-to-acr:
+    name: vllm-runtime-efa / Mirror pinned ECR→ACR
+    runs-on: ubuntu-latest
+    needs: [changed-files]
+    if: always() && !cancelled()
+    env:
+      ECR_SRC: 210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/nemotron3-5-supervl:cbc9e1a73cb297965735b437610f07926e06d471-vllm-runtime-efa
+      ACR_DST: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:cbc9e1a73cb297965735b437610f07926e06d471-vllm-runtime-efa
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502  # v4.0.2
+        with:
+          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions
+      - name: Log in to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076  # v2.0.1
+        with:
+          registries: "210086341041"
+      - name: Log in to ACR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772  # v3.4.0
+        with:
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          username: ${{ secrets.AZURE_ACR_USER }}
+          password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Mirror EFA image ECR → ACR
+        run: |
+          docker pull "$ECR_SRC"
+          docker tag  "$ECR_SRC" "$ACR_DST"
+          docker push "$ACR_DST"
+          echo "Mirrored $ECR_SRC → $ACR_DST"
+
   frontend-copy-to-acr:
     name: frontend
     needs: [changed-files, frontend-build]
