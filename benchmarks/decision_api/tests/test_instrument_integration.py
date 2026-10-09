@@ -22,7 +22,7 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("dialect", ["oai", "systemone", "sglang_native"])
+@pytest.mark.parametrize("dialect", ["oai", "systemone"])
 @pytest.mark.skipif(
     os.environ.get("DECISION_PERF_INTEGRATION") != "1",
     reason="set DECISION_PERF_INTEGRATION=1 for real AIPerf subprocess validation",

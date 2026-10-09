@@ -68,42 +68,11 @@ def fixture(dialect="oai"):
             "usage": {"input_tokens": 10, "output_tokens": 0},
         }
     else:
-        request = {
-            "model": "m",
-            "input": "x",
-            "nvext": {"format": "sglang_native"},
-            "questions": [
-                {
-                    "type": "choice",
-                    "id": "q",
-                    "question": "pick",
-                    "options": [{"name": "a"}, {"name": "b"}],
-                }
-            ],
-        }
-        body = {
-            "model": "m",
-            "object": "decisions",
-            "prompt_format_version": 1,
-            "answers": {
-                "q": {
-                    "type": "choice",
-                    "choice": "a",
-                    "probabilities": {"a": 0.8, "b": 0.2},
-                    "label_mass": 0.9,
-                }
-            },
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 0,
-                "total_tokens": 10,
-                "reasoning_tokens": 0,
-            },
-        }
+        raise ValueError("unsupported fixture dialect")
     return request, body
 
 
-@pytest.mark.parametrize("dialect", ["oai", "systemone", "sglang_native"])
+@pytest.mark.parametrize("dialect", ["oai", "systemone"])
 def test_valid_dialects_preserve_question_and_usage(dialect):
     request, body = fixture(dialect)
     original = copy.deepcopy(body)
@@ -114,7 +83,7 @@ def test_valid_dialects_preserve_question_and_usage(dialect):
     assert body == original
 
 
-@pytest.mark.parametrize("dialect", ["oai", "systemone", "sglang_native"])
+@pytest.mark.parametrize("dialect", ["oai", "systemone"])
 @pytest.mark.parametrize("explicit_null", [False, True])
 def test_missing_usage_is_unknown_not_zero(dialect, explicit_null):
     request, body = fixture(dialect)
@@ -169,11 +138,7 @@ def test_actual_refusal_is_counted_not_manufactured_as_answer():
     assert (summary.question_count, summary.refusal_count) == (1, 1)
 
 
-def test_native_requires_mass_and_jev_preserves_key_order():
-    request, body = fixture("sglang_native")
-    body["answers"]["q"].pop("label_mass")
-    with pytest.raises(DecisionContractError):
-        validate_response(body, "sglang_native", request)
+def test_jev_preserves_key_order():
     request, body = fixture("systemone")
     body["answers"]["q"]["probabilities"] = {"b": 0.2, "a": 0.8}
     with pytest.raises(DecisionContractError):
@@ -203,13 +168,11 @@ def native_fixture():
     return request, body
 
 
-@pytest.mark.parametrize("dialect", ["oai", "systemone", "sglang_native"])
+@pytest.mark.parametrize("dialect", ["oai", "systemone"])
 @pytest.mark.parametrize("kind", ["score", "predicate"])
 def test_scores_and_predicates_match_each_dialect(dialect, kind):
     request, body = fixture(dialect)
-    predicate = {"oai": "predicate", "systemone": "noul", "sglang_native": "yes_no"}[
-        dialect
-    ]
+    predicate = {"oai": "predicate", "systemone": "noul"}[dialect]
     q = {"type": "score" if kind == "score" else predicate}
     if dialect == "oai":
         q.update(name="q", instructions="rate")
@@ -235,11 +198,6 @@ def test_scores_and_predicates_match_each_dialect(dialect, kind):
                 answer.update(legend={"0": "low", "1": "high"}, confidence=0.6)
         elif dialect == "systemone":
             answer["noul"] = 0.8
-        else:
-            answer["probabilities"] = {"yes": 0.8, "no": 0.2}
-        if dialect == "sglang_native":
-            q.update(id="q", question="rate")
-            answer["label_mass"] = 0.9
     request["questions"] = {"q": q} if dialect == "systemone" else [q]
     body["answers"] = [answer] if dialect == "oai" else {"q": answer}
     assert validate_response(body, dialect, request).question_count == 1
@@ -265,29 +223,12 @@ def test_native_model_optional_but_decoding_controls_strict():
         validate_request(request, "native_score")
 
 
-@pytest.mark.parametrize("dialect", ["oai", "systemone", "sglang_native"])
+@pytest.mark.parametrize("dialect", ["oai", "systemone"])
 def test_request_dialect_rejects_mixed_fields(dialect):
     request, _ = fixture(dialect)
     request["messages"] = []
     with pytest.raises(DecisionContractError):
         validate_request(request, dialect)
-
-
-@pytest.mark.parametrize(
-    "change", ["images", "thinking", "mixed_question", "native_bool"]
-)
-def test_unsupported_request_controls_are_not_ignored(change):
-    request, _ = fixture("sglang_native")
-    if change == "images":
-        request["images"] = ["image"]
-    if change == "thinking":
-        request["chat_template_kwargs"] = {"enable_thinking": True}
-    if change == "mixed_question":
-        request["questions"][0]["levels"] = ["low", "high"]
-    if change == "native_bool":
-        request["questions"][0]["options"][0]["name"] = True
-    with pytest.raises(DecisionContractError):
-        validate_request(request, "sglang_native")
 
 
 def test_mixed_response_root_and_nontext_openai_input_fail_closed():

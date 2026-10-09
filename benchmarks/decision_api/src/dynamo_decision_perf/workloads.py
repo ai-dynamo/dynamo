@@ -24,7 +24,7 @@ from .rendering import (
 
 MODEL_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 CORE_REVISION = "6ce6582b25e78d8dd85b5f4e9dc107838217e1fa"
-DIALECTS = ("oai", "sglang_native", "systemone")
+DIALECTS = ("oai", "systemone")
 
 
 @dataclass(frozen=True)
@@ -143,34 +143,6 @@ def wire_payload(
                     }
                     for c in q.candidates
                 ]
-        elif dialect == "sglang_native":
-            item = {
-                "id": q.id,
-                "type": "yes_no" if q.kind == "predicate" else q.kind,
-                "question": q.instructions,
-            }
-            if q.kind == "choice":
-                item["options"] = [
-                    {
-                        "name": c.value,
-                        **(
-                            {"description": c.description}
-                            if c.description is not None
-                            else {}
-                        ),
-                    }
-                    for c in q.candidates
-                ]
-            elif q.kind == "score":
-                item["levels"] = [score_level(c) for c in q.candidates]
-            elif q.kind == "predicate":
-                item.update(
-                    {
-                        key: c.description
-                        for key, c in zip(("yes", "no"), q.candidates)
-                        if c.description is not None
-                    }
-                )
         else:
             item = {
                 "type": "noul" if q.kind == "predicate" else q.kind,
@@ -199,8 +171,6 @@ def wire_payload(
     }
     if dialect != "oai":
         body["chat_template_kwargs"] = {"enable_thinking": False}
-    if dialect == "sglang_native":
-        body["nvext"] = {"format": "sglang_native"}
     return body
 
 

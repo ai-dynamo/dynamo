@@ -49,7 +49,7 @@ def test_real_aiperf_mocker_contracts(tmp_path):
         model_path=tokenizer_path, model=model, log_dir=tmp_path / "serving"
     )
     with serve(config) as server:
-        for dialect in ("oai", "sglang_native", "systemone"):
+        for dialect in ("oai", "systemone"):
             artifacts = tmp_path / dialect
             spec = RunSpec(
                 dialect=dialect,

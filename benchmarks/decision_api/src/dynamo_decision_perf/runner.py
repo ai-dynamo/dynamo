@@ -24,7 +24,6 @@ AIPERF_COMMIT = "794f8bb75f8582f22e412d7e650fc71ca2a3d21a"
 ENDPOINTS = {
     "oai": "decision_oai",
     "systemone": "decision_systemone",
-    "sglang_native": "decision_sglang",
     "native_score": "native_score",
 }
 
