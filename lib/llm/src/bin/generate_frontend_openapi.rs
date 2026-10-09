@@ -36,6 +36,8 @@ use dynamo_llm::http::service::{openapi_docs, service_v2::HttpService};
 /// additional stack space due to recursive type expansion.
 const GENERATOR_STACK_SIZE: usize = 8 * 1024 * 1024;
 
+/// Run file export on the generator thread, returning spawn/export failures and
+/// converting a generator-thread panic into an error.
 fn main() -> anyhow::Result<()> {
     // Spawn a thread with a larger stack to handle deeply nested schema generation
     let handle = thread::Builder::new()
@@ -48,6 +50,10 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("generator thread panicked: {:?}", e))?
 }
 
+/// Export the native document to `docs/frontends/openapi.json` under the current directory.
+/// Creates parent directories and overwrites the file non-atomically without starting
+/// a listener. Returns service-construction, serialization, or I/O errors; a failed
+/// write may leave a truncated file. Panics if compiled schema invariants are violated.
 fn generate_openapi() -> anyhow::Result<()> {
     // Build an HttpService instance with all standard OpenAI-compatible
     // frontend endpoints enabled so that the generated OpenAPI document
