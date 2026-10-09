@@ -64,7 +64,7 @@ jobs:
           access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
           command: sync
           version: ${{ env.MAIN_RELEASE_VERSION }}
-          name: Dynamo ${{ env.MAIN_RELEASE_VERSION }}
+          name: Dynamo v${{ env.MAIN_RELEASE_VERSION }}
           base_ref: ${{ env.RELEASE_SCAN_BASE }}
           # Live. The Linear "Dynamo v1.7.0" release carries version 1.7.0, so
           # each run updates that release instead of creating one. The action
