@@ -53,8 +53,9 @@ kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000
 
 ## Topologies
 
-Arrows carry requests and responses, and KV cache events flow back to the
-frontend for routing. Dotted arrows carry KV cache events only.
+The frontend reaches each sidecar over Dynamo's request, discovery, and event
+planes; the sidecar reaches the engine over its native gRPC API. Dotted arrows
+carry KV cache events only.
 
 ### Single-node TP
 
@@ -62,7 +63,7 @@ One engine on one node, with one sidecar.
 
 ```mermaid
 flowchart LR
-  F[Dynamo frontend] <-->|Requests, KV events| S
+  F[Dynamo frontend] <-->|Request, discovery, and event planes| S
   subgraph P[Worker pod, node 0]
     S[Dynamo sidecar] <-->|Native gRPC| E[vLLM: TP ranks]
   end
@@ -75,7 +76,7 @@ pod holds the remaining TP ranks.
 
 ```mermaid
 flowchart LR
-  F[Dynamo frontend] <-->|Requests, KV events| S
+  F[Dynamo frontend] <-->|Request, discovery, and event planes| S
   subgraph L[Leader pod, node 0]
     S[Dynamo sidecar] <-->|Native gRPC| E0[vLLM: local TP ranks]
   end
@@ -88,17 +89,19 @@ flowchart LR
 ### Multi-node DP
 
 Hybrid DP load balancing: each node runs vLLM for its local DP ranks plus a
-sidecar that serves requests. The frontend routes to either pod, and the vLLM
-engines coordinate DP/EP across nodes.
+sidecar that serves requests. The frontend routes to either pod.
 
 ```mermaid
 flowchart LR
-  F[Dynamo frontend] <-->|Requests, KV events| SA
-  F <-->|Requests, KV events| SB
+  F[Dynamo frontend] <-->|Request, discovery, and event planes| SA
+  F <-->|Request, discovery, and event planes| SB
   subgraph A[Worker pod A, node 0]
     SA[Dynamo sidecar: DP 0-1] <-->|Native gRPC| EA[vLLM]
   end
   subgraph B[Worker pod B, node 1]
     SB[Dynamo sidecar: DP 2-3] <-->|Native gRPC| EB[vLLM]
   end
+  C{{DP/EP collectives}}
+  EA <--> C
+  EB <--> C
 ```

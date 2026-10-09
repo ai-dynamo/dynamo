@@ -53,8 +53,9 @@ kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 
 ## Topologies
 
-Arrows carry requests and responses. The TensorRT-LLM sidecar does not
-publish KV cache events.
+The frontend reaches each sidecar over Dynamo's request, discovery, and event
+planes; the sidecar reaches the engine over its native gRPC API. The
+TensorRT-LLM sidecar does not publish KV cache events.
 
 ### Single-node TP
 
@@ -62,7 +63,7 @@ One engine on one node, with one sidecar.
 
 ```mermaid
 flowchart LR
-  F[Dynamo frontend] <-->|Requests| S
+  F[Dynamo frontend] <-->|Request, discovery, and event planes| S
   subgraph P[Worker pod, node 0]
     S[Dynamo sidecar] <-->|Native gRPC| E[TensorRT-LLM: TP ranks]
   end
@@ -78,7 +79,7 @@ pod holds the remaining TP ranks.
 
 ```mermaid
 flowchart LR
-  F[Dynamo frontend] <-->|Requests| S
+  F[Dynamo frontend] <-->|Request, discovery, and event planes| S
   subgraph L[Leader pod, node 0]
     S[Dynamo sidecar] <-->|Native gRPC| E0[TensorRT-LLM: local TP ranks]
   end

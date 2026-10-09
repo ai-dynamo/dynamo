@@ -53,8 +53,9 @@ kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 
 ## Topologies
 
-Arrows carry requests and responses, and KV cache events flow back to the
-frontend for routing. Dotted arrows carry KV cache events only.
+The frontend reaches each sidecar over Dynamo's request, discovery, and event
+planes; the sidecar reaches the engine over its native gRPC API. Dotted arrows
+carry KV cache events only.
 
 ### Single-node TP
 
@@ -62,7 +63,7 @@ One engine on one node, with one sidecar.
 
 ```mermaid
 flowchart LR
-  F[Dynamo frontend] <-->|Requests, KV events| S
+  F[Dynamo frontend] <-->|Request, discovery, and event planes| S
   subgraph P[Worker pod, node 0]
     S[Dynamo sidecar] <-->|Native gRPC| E[SGLang: TP ranks]
   end
@@ -75,7 +76,7 @@ pod holds the remaining TP ranks.
 
 ```mermaid
 flowchart LR
-  F[Dynamo frontend] <-->|Requests, KV events| S
+  F[Dynamo frontend] <-->|Request, discovery, and event planes| S
   subgraph L[Leader pod, node 0]
     S[Dynamo sidecar] <-->|Native gRPC| E0[SGLang: local TP ranks]
   end
@@ -88,17 +89,20 @@ flowchart LR
 ### Multi-node DP
 
 The leader sidecar registers every DP rank and serves all requests; SGLang
-dispatches each one to the right scheduler across nodes. The follower sidecar
+dispatches each one to the right scheduler. The follower sidecar
 accepts no requests and relays its node's KV events directly to the frontend.
 
 ```mermaid
 flowchart LR
-  F[Dynamo frontend] <-->|Requests, KV events| SL
-  F <-.->|KV events| SW
+  F[Dynamo frontend] <-->|Request, discovery, and event planes| SL
+  F <-.->|Discovery and event planes| SW
   subgraph L[Leader pod, node 0]
     SL[Dynamo sidecar: DP 0-1] <-->|Native gRPC| EL[SGLang]
   end
   subgraph W[Follower pod, node 1]
     SW[Dynamo sidecar: KV events only, DP 2-3] <-.->|KV events| EW[SGLang]
   end
+  C{{Dispatch and collectives}}
+  EL <--> C
+  EW <--> C
 ```
