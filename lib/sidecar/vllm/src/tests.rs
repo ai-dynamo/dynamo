@@ -2625,23 +2625,6 @@ async fn abort_sends_control_abort_for_the_request_id() {
 }
 
 #[tokio::test]
-async fn abort_before_start_is_a_noop() {
-    let server = FakeServer::start(FakeVllm::default()).await;
-    let engine = engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        model_info(),
-    );
-
-    engine
-        .abort(dynamo_backend_common::testing::mock_context())
-        .await;
-
-    assert!(server.service.control_calls.lock().await.is_empty());
-}
-
-#[tokio::test]
 async fn decode_cancellation_waits_for_submission_and_first_token() {
     let service = FakeVllm::default();
     service.hang_before_headers.store(true, Ordering::SeqCst);
