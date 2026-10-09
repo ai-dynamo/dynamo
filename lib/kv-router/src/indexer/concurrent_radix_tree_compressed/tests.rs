@@ -976,6 +976,157 @@ mod remove_tests {
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
         assert_eq!(worker_lookup_len(&lookup0, worker0), Some(4));
     }
+
+    /// Removing block 1 unlinks the subtree [2, 20, 21] while the worker's
+    /// lookup entries still name it. Re-storing [1] and [2, 20] puts 20 into a
+    /// new live node. Removing [20, 21] then resolves 21 to the unlinked node,
+    /// which also contains 20 but must not consume it: 20's lookup entry names
+    /// the live node, which still holds the worker's coverage of 20.
+    fn remove_after_partial_restore_of_unlinked_subtree(tail_first: bool) {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup = direct_lookup();
+        let mut removed = remove_hashes_with_parent(&[1, 2], &[20, 21]);
+        if tail_first {
+            removed.reverse();
+        }
+
+        for event in [
+            make_store_event(0, &[1, 30]),
+            make_store_event_with_parent(0, &[1], &[2, 20, 21]),
+            make_remove_event_with_parent(0, &[], &[1]),
+            make_store_event(0, &[1]),
+            make_store_event_with_parent(0, &[1], &[2, 20]),
+            remove_event(0, 0, 0, removed),
+        ] {
+            apply_direct(&index, &mut lookup, event);
+        }
+
+        assert_direct_score(&index, &[1, 2, 20], worker(0), 2);
+    }
+
+    #[test]
+    fn tail_first_remove_after_partial_restore_of_unlinked_subtree() {
+        remove_after_partial_restore_of_unlinked_subtree(true);
+    }
+
+    #[test]
+    fn head_first_remove_after_partial_restore_of_unlinked_subtree() {
+        remove_after_partial_restore_of_unlinked_subtree(false);
+    }
+
+    /// Randomized differential check against sets of held blocks: worker 0's
+    /// score must never exceed its held prefix of the query. Worker 0 removes
+    /// one block or a held run in either order, leaving mid-chain holes that
+    /// later stores partially refill. The other workers share and split its
+    /// edges but evict only leaves, so the documented equal-size skip in
+    /// `find_matches` cannot credit worker 0 past its prefix.
+    #[test]
+    fn randomized_removes_never_overcount_held_prefix() {
+        const SEEDS: u64 = 32;
+        const OPS: usize = 300;
+        const WORKERS: u64 = 3;
+
+        for seed in 0..SEEDS {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let mut docs: Vec<Vec<u64>> = vec![(1..=16).collect()];
+            for d in 1..8 {
+                let parent = &docs[rng.usize(..docs.len())];
+                let mut doc = parent[..rng.usize(1..parent.len())].to_vec();
+                doc.extend((0..rng.u64(1..=8)).map(|i| 1000 * d + i));
+                docs.push(doc);
+            }
+            let seqs: Vec<Vec<u64>> = docs
+                .iter()
+                .map(|doc| compute_seq_hash_for_block(&local_hashes(doc)))
+                .collect();
+            let mut children = FxHashMap::<u64, Vec<u64>>::default();
+            for pair in seqs.iter().flat_map(|seq| seq.windows(2)) {
+                children.entry(pair[0]).or_default().push(pair[1]);
+            }
+
+            let index = ConcurrentRadixTreeCompressed::new();
+            let mut lookup = direct_lookup();
+            let mut held = vec![FxHashSet::<u64>::default(); WORKERS as usize];
+
+            for step in 0..OPS {
+                let w = rng.u64(..WORKERS);
+                let held_w = &mut held[w as usize];
+                let d = rng.usize(..docs.len());
+                let (doc, seq) = (&docs[d], &seqs[d]);
+                let held_positions: Vec<usize> = (0..seq.len())
+                    .filter(|&i| held_w.contains(&seq[i]))
+                    .collect();
+
+                let event = match rng.u32(..100) {
+                    0..50 => {
+                        let starts: Vec<usize> = (0..doc.len())
+                            .filter(|&s| s == 0 || held_w.contains(&seq[s - 1]))
+                            .collect();
+                        let start = starts[rng.usize(..starts.len())];
+                        let end = rng.usize(start + 1..=doc.len());
+                        held_w.extend(&seq[start..end]);
+                        make_store_event_with_parent(w, &doc[..start], &doc[start..end])
+                    }
+                    50..97 if w > 0 => {
+                        let leaves: Vec<usize> = held_positions
+                            .into_iter()
+                            .filter(|&i| {
+                                children
+                                    .get(&seq[i])
+                                    .is_none_or(|kids| !kids.iter().any(|kid| held_w.contains(kid)))
+                            })
+                            .collect();
+                        if leaves.is_empty() {
+                            continue;
+                        }
+                        let i = leaves[rng.usize(..leaves.len())];
+                        held_w.remove(&seq[i]);
+                        remove_event(w, step as u64, 0, vec![ExternalSequenceBlockHash(seq[i])])
+                    }
+                    50..97 if !held_positions.is_empty() => {
+                        let first = held_positions[rng.usize(..held_positions.len())];
+                        let mut positions = match rng.u8(..3) {
+                            0 => vec![first],
+                            _ => held_positions.into_iter().filter(|&i| i >= first).collect(),
+                        };
+                        if rng.bool() {
+                            positions.reverse();
+                        }
+                        let hashes = positions
+                            .into_iter()
+                            .map(|i| {
+                                held_w.remove(&seq[i]);
+                                ExternalSequenceBlockHash(seq[i])
+                            })
+                            .collect();
+                        remove_event(w, step as u64, 0, hashes)
+                    }
+                    97.. => {
+                        held_w.clear();
+                        make_clear_event_with_dp_rank(w, 0)
+                    }
+                    _ => continue,
+                };
+                let _ = index.apply_event(&mut lookup, event, None);
+
+                for (doc, seq) in docs.iter().zip(&seqs) {
+                    for len in 1..=doc.len() {
+                        let scores = index.find_matches_impl(&local_hashes(&doc[..len]), false);
+                        let reference = seq[..len]
+                            .iter()
+                            .take_while(|h| held[0].contains(h))
+                            .count();
+                        let score = scores.scores.get(&worker(0)).copied().unwrap_or(0);
+                        assert!(
+                            score as usize <= reference,
+                            "seed={seed} step={step} query={:?}: score {score} exceeds held prefix {reference}",
+                            &doc[..len],
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 mod structural_tests {

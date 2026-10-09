@@ -193,12 +193,24 @@ impl Node {
         self.children.get(&local_hash)
     }
 
-    /// Number of leading `hashes` present in this node's edge, read under one lock.
-    pub(super) fn leading_edge_hash_count(&self, hashes: &[ExternalSequenceBlockHash]) -> usize {
+    /// Number of leading `hashes` present in this node's edge whose worker
+    /// lookup entry also names this node, read under one lock. A hash whose
+    /// entry names another node is covered there: this node can still contain
+    /// it after being unlinked, when the worker later re-stored it elsewhere.
+    pub(super) fn leading_edge_hash_count(
+        &self,
+        hashes: &[ExternalSequenceBlockHash],
+        worker_lookup: &WorkerLookup,
+    ) -> usize {
         let state = self.state.read();
         hashes
             .iter()
-            .take_while(|hash| state.edge_index.contains_key(hash))
+            .take_while(|hash| {
+                state.edge_index.contains_key(hash)
+                    && worker_lookup
+                        .get(hash)
+                        .is_some_and(|node| std::ptr::eq(Arc::as_ptr(node), self))
+            })
             .count()
     }
 
