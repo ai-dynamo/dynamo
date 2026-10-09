@@ -2105,13 +2105,12 @@ dependencies = [
 [[package]]
 name = "dynamo-decisions"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=6ce6582b25e78d8dd85b5f4e9dc107838217e1fa#6ce6582b25e78d8dd85b5f4e9dc107838217e1fa"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e2805e94675457ff445c261b2d12eed0d227a3b0#e2805e94675457ff445c261b2d12eed0d227a3b0"
 dependencies = [
  "dynamo-protocols 7.0.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "unicode-casefold",
 ]
 
 [[package]]
@@ -2380,7 +2379,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "7.0.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=6ce6582b25e78d8dd85b5f4e9dc107838217e1fa#6ce6582b25e78d8dd85b5f4e9dc107838217e1fa"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e2805e94675457ff445c261b2d12eed0d227a3b0#e2805e94675457ff445c261b2d12eed0d227a3b0"
 dependencies = [
  "async-openai 0.42.1",
  "derive_builder",
@@ -8632,12 +8631,6 @@ name = "unicase"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
-
-[[package]]
-name = "unicode-casefold"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7f66b1c8f8caa2ab31dc6d3f35386f16efdab89668f93411e565ac368908e8f"
 
 [[package]]
 name = "unicode-general-category"
