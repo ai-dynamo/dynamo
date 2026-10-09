@@ -156,6 +156,10 @@ def memory_saver_stub(monkeypatch):
         yield
 
     tms = ModuleType("torch_memory_saver")
+    # The real package is installed in the XPU image and is shadowed for the
+    # duration of this test. Keep __path__ so any submodule import attempted
+    # meanwhile raises ModuleNotFoundError rather than a bare AttributeError.
+    tms.__path__ = []
     tms.entrypoint = entrypoint
     tms.TorchMemorySaver = TorchMemorySaver
     tms.torch_memory_saver = TorchMemorySaver()
