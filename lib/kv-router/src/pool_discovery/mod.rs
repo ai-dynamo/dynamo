@@ -12,7 +12,7 @@
 //! |---|---|---|
 //! | gRPC | Router memory | `RegisterPool` on the router |
 //! | Hybrid | Hub Kubernetes API, written by the router | `RegisterPool` on the router |
-//! | Kubernetes | Hub Kubernetes API, written by the pool | Hub Kubernetes API |
+//! | Kubernetes (SIG Multicluster) | Imported EndpointSlices, written by the MCS implementation | Nothing: the operator creates a `ServiceExport` |
 //! | File | Static file (tests, first deployments) | Nothing |
 
 pub mod admission;
@@ -29,7 +29,9 @@ pub use announce::{Announcement, PoolAnnouncer};
 pub use identity::{
     PeerCredentials, RelayAuthenticator, RelayIdentity, VerifiedRelayIdentity, verify,
 };
-pub use mode::{BuildPoolDiscovery, PoolDiscovery, PoolDiscoveryMode, SettlePolicy};
+pub use mode::{
+    BuildPoolDiscovery, McsImplementation, PoolDiscovery, PoolDiscoveryMode, SettlePolicy,
+};
 pub use record::{PoolDirectory, PoolEvent, PoolRecord, PoolRecordBuilder, Revision};
 pub use registrar::{LeasePolicy, PoolRegistrar, Registration};
 pub use replicas::{ReplicaDirectory, ReplicaEndpoint, ReplicaEvent, ReplicaId};

@@ -11,7 +11,7 @@ use super::record::PoolRecord;
 use super::replicas::ReplicaEndpoint;
 
 /// gRPC and Hybrid modes call `RegisterPool` on the regional router address.
-/// Kubernetes mode writes the record to the hub and renews its Lease.
+/// Kubernetes mode has no announcer: the operator creates a `ServiceExport`.
 #[async_trait]
 pub trait PoolAnnouncer: Send + Sync {
     async fn announce(
