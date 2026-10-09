@@ -44,6 +44,7 @@ def test_optional_package_collection_boundary(tmp_path, mode, missing):
             "DECISION_PERF_INTEGRATION",
             "DECISION_PERF_MOCKER_INTEGRATION",
             "PYTHONPATH",
+            "PYTEST_ADDOPTS",
         }
     }
     env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
