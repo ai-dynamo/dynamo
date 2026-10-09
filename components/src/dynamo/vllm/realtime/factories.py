@@ -14,6 +14,8 @@ from typing import Any
 
 import numpy as np
 
+from dynamo.common.output_token_limit import cap_output_tokens
+
 #: Adapt float32 audio chunks and generated-token feedback to vLLM StreamingInput.
 StreamingInputFactory = Callable[
     [AsyncGenerator[np.ndarray, None], "asyncio.Queue[list[int]]"],
@@ -73,6 +75,7 @@ def build_realtime_text_factories(
     model_name: str,
     model_path: str,
     chat_template_path: str | None,
+    output_token_limit: int | None = None,
 ) -> tuple[ChatCompletionFactory, TextPrefillFactory]:
     """Bind final-generation and prefix-warming callbacks to one vLLM engine.
 
@@ -143,7 +146,9 @@ def build_realtime_text_factories(
         request = ChatCompletionRequest(
             messages=messages,
             model=model_name,
-            max_completion_tokens=max_output_tokens,
+            max_completion_tokens=cap_output_tokens(
+                max_output_tokens, output_token_limit
+            ),
             stream=True,
             stream_options={"include_usage": True},
         )

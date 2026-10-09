@@ -559,6 +559,8 @@ class BaseWorkerHandler(
     - Disaggregated serving support
     """
 
+    max_output_tokens: int | None = None
+
     def __init__(
         self,
         engine: sgl.Engine,
@@ -582,6 +584,7 @@ class BaseWorkerHandler(
         # LLM-specific initialization
         self.engine = engine
         self.config = config
+        self.max_output_tokens = config.dynamo_args.max_output_tokens
         self.generate_endpoint = generate_endpoint
         self.publisher = publisher
         self.shutdown_event = shutdown_event

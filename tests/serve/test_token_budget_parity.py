@@ -227,7 +227,9 @@ def _native_command(spec: BackendParitySpec, port: int, tmp_path: Path) -> list[
     raise AssertionError(f"Unsupported framework: {spec.framework}")
 
 
-def _dynamo_config(spec: BackendParitySpec, tmp_path: Path) -> EngineConfig:
+def _dynamo_config(
+    spec: BackendParitySpec, tmp_path: Path, output_limit: int | None = None
+) -> EngineConfig:
     backend_dir = os.path.join(WORKSPACE_DIR, "examples", "backends", spec.framework)
     script_args: list[str] = []
     env: dict[str, str] = {}
@@ -255,6 +257,9 @@ def _dynamo_config(spec: BackendParitySpec, tmp_path: Path) -> EngineConfig:
         }
     else:
         raise AssertionError(f"Unsupported framework: {spec.framework}")
+
+    if output_limit is not None:
+        env["DYN_OUTPUT_TOKEN_LIMIT"] = str(output_limit)
 
     return EngineConfig(
         name=f"dynamo-{spec.name}",
@@ -507,3 +512,50 @@ def test_native_and_dynamo_token_budget_parity(
                 f"{case.name}: native={native_outcome.usage}, "
                 f"Dynamo={dynamo_outcome.usage}"
             )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_1
+@pytest.mark.e2e
+@pytest.mark.core
+@pytest.mark.token_budget_parity
+@pytest.mark.model(MODEL)
+@pytest.mark.timeout(900)
+@pytest.mark.parametrize("spec", PARITY_SPECS)
+def test_worker_output_ceiling(
+    spec,
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
+    tmp_path,
+):
+    """Prove termination at a small configured ceiling, with EOS disabled."""
+    config = _dynamo_config(spec, tmp_path, output_limit=32)
+    with managed_serve_deployment(config, request, ports=dynamo_dynamic_ports):
+        for stream in (False, True):
+            for requested in (8, 32, 64):
+                outcome = _send_case(
+                    dynamo_dynamic_ports.frontend_port,
+                    RequestCase("output-overflow", "Hello", requested, stream),
+                )
+                assert outcome.status_code == 200
+                assert outcome.stream_error is None
+                assert outcome.usage is not None
+                assert outcome.usage.completion_tokens == min(requested, 32)
+                if stream:
+                    assert outcome.stream_finished
+        response = requests.post(
+            f"http://127.0.0.1:{dynamo_dynamic_ports.frontend_port}/v1/completions",
+            json={
+                "model": MODEL,
+                "prompt": "Hello",
+                "max_tokens": 64,
+                "min_tokens": 33,
+            },
+            timeout=180,
+        )
+        try:
+            assert response.status_code == 400
+        finally:
+            response.close()

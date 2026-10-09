@@ -216,12 +216,14 @@ class RealtimeTextHandler:
         model_name: str,
         model_path: str,
         chat_template_path: str | None,
+        output_token_limit: int | None = None,
     ) -> "RealtimeTextHandler":
         chat_completion, text_prefill = build_realtime_text_factories(
             engine_client=engine_client,
             model_name=model_name,
             model_path=model_path,
             chat_template_path=chat_template_path,
+            output_token_limit=output_token_limit,
         )
         return cls(
             model_name=model_name,
