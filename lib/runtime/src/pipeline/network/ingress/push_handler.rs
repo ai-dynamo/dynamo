@@ -155,10 +155,8 @@ trait ResponsePublisher {
     /// Send a failure prologue keeping the worker's [`crate::error::ErrorType`]
     /// where the transport can carry it.
     ///
-    /// The default drops the type and sends the text alone. That is what the
-    /// QUIC response plane does: its error frame is a raw byte payload with no
-    /// field to put a typed error in, so a typed refusal over QUIC classifies
-    /// exactly as it did before this method existed.
+    /// The default drops the type and sends the text alone. TCP and QUIC
+    /// override this so a typed refusal survives the response plane.
     async fn send_prologue_typed(
         &mut self,
         error: Option<StreamPrologueError>,
@@ -184,6 +182,15 @@ impl ResponsePublisher for quic_response::QuicResponseSender {
 
     async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
         quic_response::QuicResponseSender::send_prologue(self, error)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::send_prologue_typed(self, error)
             .await
             .map_err(anyhow::Error::msg)
     }
@@ -303,6 +310,11 @@ where
                         .inc();
                 }
             }
+            // Notify before the publish: engine progress counts even if the send fails.
+            // Error chunks do not prove health, so they never reset the canary.
+            if !is_error && let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                notifier.notify_one();
+            }
             let resp_bytes = encoded.bytes;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
@@ -332,12 +344,6 @@ where
                         .inc();
                 }
                 break;
-            } else if !is_error {
-                // Only notify on non-error chunks — error responses don't prove
-                // the engine is healthy and should not reset the canary timer.
-                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
-                    notifier.notify_one();
-                }
             }
             if encoded.stop_stream {
                 // Dropping the engine stream after the terminal frame is sent
@@ -898,8 +904,11 @@ where
         let advertised_mode =
             ResponsePlaneMode::from_transport_name(&response_connection_info.transport)
                 .map_err(|error| PipelineError::Generic(error.to_string()))?;
-        let configured_mode = ResponsePlaneMode::configured()
-            .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        let configured_mode = match self.response_plane.get() {
+            Some(mode) => *mode,
+            None => ResponsePlaneMode::configured()
+                .map_err(|error| PipelineError::Generic(error.to_string()))?,
+        };
         let response_modes = ResponsePlaneModes {
             configured: configured_mode,
             advertised: advertised_mode,
@@ -987,7 +996,7 @@ where
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
-        self.bind_lifecycle_endpoint(endpoint);
+        self.bind_endpoint_config(endpoint);
     }
 
     fn add_metrics(
@@ -1023,7 +1032,7 @@ where
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
-        self.bind_lifecycle_endpoint(endpoint);
+        self.bind_endpoint_config(endpoint);
     }
 
     fn add_metrics(
@@ -1073,7 +1082,7 @@ mod tests {
     use crate::pipeline::network::{Ingress, RequestPlanePayloadCodec, StreamSender};
     use crate::pipeline::{Context, ManyOut, ResponseStream, SingleIn};
     use crate::protocols::annotated::Annotated;
-    use futures::stream;
+    use futures::{FutureExt, Stream, stream};
     use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1739,6 +1748,57 @@ mod tests {
                 .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
                 .get(),
             0
+        );
+    }
+
+    /// Run the pump with a health-check notifier set and a publisher whose
+    /// receiver is already gone, so every `send` fails. This models a client
+    /// that left before the engine produced its first chunk.
+    /// Returns whether the pump left a notification permit for the canary.
+    async fn pump_with_dead_publisher(
+        engine: impl Stream<Item = TestResponse> + Send + 'static,
+    ) -> bool {
+        let ingress = TestIngress::new();
+        let notifier = Arc::new(tokio::sync::Notify::new());
+        ingress
+            .set_endpoint_health_check_notifier(notifier.clone())
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        drop(rx);
+        let publisher = StreamSender { tx, prologue: None };
+
+        let ctx = Context::new(serde_json::json!({}));
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(engine), ctx.context());
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
+
+        // `notify_one` stores a permit when no task is waiting, so a pending
+        // notification resolves immediately here.
+        notifier.notified().now_or_never().is_some()
+    }
+
+    /// Issue #15707: under overload the client often leaves before the engine
+    /// sends its first chunk, so every publish fails. The engine is still
+    /// making progress, so the canary timer must be reset.
+    #[tokio::test]
+    async fn publish_failure_with_engine_progress_still_resets_canary() {
+        let chunk = TestResponse::from_data(serde_json::json!({ "token": 0 }));
+        assert!(
+            pump_with_dead_publisher(stream::iter([chunk])).await,
+            "a produced non-error chunk must reset the canary even when the publish fails"
+        );
+    }
+
+    /// Error chunks do not prove the engine is healthy, so they must not reset
+    /// the canary timer even though they are engine output.
+    #[tokio::test]
+    async fn error_only_output_does_not_reset_canary() {
+        assert!(
+            !pump_with_dead_publisher(stream::iter(vec![TestResponse::from_error("boom")])).await,
+            "an error-only chunk must not reset the canary"
         );
     }
 }

@@ -33,6 +33,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     # Building the vLLM argument parser resolves a device; on an accelerator-less
     # host that raises unless a platform is pinned first.
@@ -147,6 +148,7 @@ def test_diffusion_only_options_remain_unset_when_omitted():
 
     assert {
         "enable_layerwise_offload": args.enable_layerwise_offload,
+        "layerwise_num_gpu_layers": args.layerwise_num_gpu_layers,
         "vae_use_slicing": args.vae_use_slicing,
         "vae_use_tiling": args.vae_use_tiling,
         "boundary_ratio": args.boundary_ratio,
@@ -154,12 +156,34 @@ def test_diffusion_only_options_remain_unset_when_omitted():
         "enable_cpu_offload": args.enable_cpu_offload,
     } == {
         "enable_layerwise_offload": None,
+        "layerwise_num_gpu_layers": None,
         "vae_use_slicing": None,
         "vae_use_tiling": None,
         "boundary_ratio": None,
         "enable_cache_dit_summary": None,
         "enable_cpu_offload": None,
     }
+
+
+@pytest.mark.parametrize("source", ["cli", "environment"])
+@pytest.mark.parametrize("layers", [0, 1])
+def test_removed_layerwise_gpu_layers_rejected(monkeypatch, source, layers):
+    monkeypatch.delenv("DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS", raising=False)
+    argv = []
+    if source == "environment":
+        monkeypatch.setenv("DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS", str(layers))
+    else:
+        argv = ["--layerwise-num-gpu-layers", str(layers)]
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+    args = parser.parse_args(argv)
+    config = _make_omni_config(layerwise_num_gpu_layers=args.layerwise_num_gpu_layers)
+
+    with pytest.raises(
+        ValueError,
+        match="--layerwise-num-gpu-layers.*no longer supported.*--enable-layerwise-offload",
+    ):
+        config.validate()
 
 
 def test_diffusion_bool_option_preserves_explicit_false():

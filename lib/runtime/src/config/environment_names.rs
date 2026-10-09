@@ -196,6 +196,9 @@ pub mod nats {
     /// NATS request/reply timeout in seconds. Unset = async-nats default (10 s).
     pub const DYN_NATS_REQUEST_TIMEOUT_SECS: &str = "DYN_NATS_REQUEST_TIMEOUT_SECS";
 
+    /// Maximum time in seconds to establish the initial NATS connection.
+    pub const NATS_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "NATS_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
     /// NATS authentication environment variables (checked in priority order)
     pub mod auth {
         /// Username for NATS authentication (use with NATS_AUTH_PASSWORD)
@@ -245,11 +248,17 @@ pub mod etcd {
     /// ETCD endpoints (comma-separated list of URLs)
     pub const ETCD_ENDPOINTS: &str = "ETCD_ENDPOINTS";
 
-    /// ETCD lease TTL in seconds (default: 10)
+    /// ETCD lease TTL in seconds (default: 30)
     pub const ETCD_LEASE_TTL: &str = "ETCD_LEASE_TTL";
 
     /// Maximum time in seconds to retry the initial ETCD connection (default: 120)
     pub const ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
+    /// HTTP/2 keepalive ping interval in seconds for the ETCD channel (default: 15, 0 disables)
+    pub const ETCD_KEEPALIVE_INTERVAL_SECONDS: &str = "ETCD_KEEPALIVE_INTERVAL_SECONDS";
+
+    /// Seconds to wait for a keepalive ping ack before the ETCD channel is closed (default: 10)
+    pub const ETCD_KEEPALIVE_TIMEOUT_SECONDS: &str = "ETCD_KEEPALIVE_TIMEOUT_SECONDS";
 
     /// ETCD authentication environment variables
     pub mod auth {
@@ -438,19 +447,21 @@ pub mod llm {
     /// Accepted values: "reasoning_content" (default) or "reasoning".
     pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
 
-    /// \[EXPERIMENTAL\] Use `dynamo-parsers-v2` instead of the v1 tool-call jail, for
-    /// BOTH the batch and the streaming path. Off by default.
+    /// Select the parser generation. Unset or `auto` keeps the original family defaults.
     ///
-    /// Which v2 shape a request gets is decided by the configured parsers, not by a
-    /// second flag:
-    /// * tool-call parser only (Qwen3-Coder, DeepSeek-V4) -> the v2 TOOL parser owns
-    ///   incremental tool-call emission and drops values truncated at EOF.
-    /// * tool-call AND reasoning parser naming the same family (`qwen3_coder` +
-    ///   `qwen3`) -> the v2 UNIFIED parser owns reasoning, visible text and tool calls
-    ///   in one ordered stream, so reasoning that followed a tool call stays after it
-    ///   instead of being hoisted to the front and fused with the first thought.
+    /// Explicit `1` keeps the V1 parsers; explicit `2` selects a compatible unified
+    /// parser for the configured family. When both parser slots are set, their names
+    /// must resolve to the same family. Unsupported explicit selections fail during
+    /// preprocessor construction.
     ///
-    /// One switch, because both are the same decision: stop using v1.
+    /// Accepted values are `auto`, `1`, and `2`. Explicit
+    /// generations fail during preprocessor construction when the configured family has
+    /// no compatible parser.
+    pub const DYN_PARSER_VERSION: &str = "DYN_PARSER_VERSION";
+
+    /// Compatibility alias for `DYN_PARSER_VERSION=2` when enabled. Uses the shared
+    /// boolean parser: `1`/`true`/`on`/`yes` enable it; `0`/`false`/`off`/`no`/empty
+    /// disable it. This conflicts with `DYN_PARSER_VERSION=1`; `false` conflicts with `2`.
     pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
 
     /// Rollback lever for incremental guided-tool-call streaming.
@@ -531,6 +542,13 @@ pub mod llm {
     /// 30-second default.
     pub const DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS: &str =
         "DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS";
+
+    /// Progress-thread delay, in microseconds, of the frontend media loader's NIXL
+    /// agent (default 1000, range 0 to 1000000). NIXL rounds it up to whole
+    /// milliseconds; `0` makes the thread busy-poll one core. Over TCP, a read can
+    /// wait up to the full delay, so larger values add longer stalls. Values that do
+    /// not parse or are above 1000000 use the default.
+    pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
 
     /// Metrics configuration
     pub mod metrics {
@@ -808,6 +826,11 @@ pub mod request_plane {
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 
+    /// Serialize `PreprocessedRequest.token_ids` as one packed little-endian int32 blob on
+    /// binary codecs instead of a sequence. Opt-in; every msgpack worker must run a release
+    /// whose readers accept the packed form.
+    pub const DYN_TOKEN_IDS_AS_BYTES: &str = "DYN_TOKEN_IDS_AS_BYTES";
+
     /// Maximum TCP request-plane message size, in bytes.
     pub const DYN_TCP_MAX_MESSAGE_SIZE: &str = "DYN_TCP_MAX_MESSAGE_SIZE";
 
@@ -836,6 +859,11 @@ pub mod tcp_response_stream {
     /// Port shared by the TCP request callback and QUIC response listeners.
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
+
+    /// Listen backlog of the TCP response stream (CallHome) listener. Defaults to
+    /// 4096, capped by the kernel at `net.core.somaxconn`. Unset, zero, negative, or
+    /// unparseable values fall back to the default.
+    pub const DYN_TCP_LISTEN_BACKLOG: &str = "DYN_TCP_LISTEN_BACKLOG";
 
     /// Host or interface for the TCP response stream server and QUIC response listener.
     ///
@@ -1051,6 +1079,7 @@ mod tests {
             // NATS
             nats::NATS_SERVER,
             nats::DYN_NATS_REQUEST_TIMEOUT_SECS,
+            nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
             nats::auth::NATS_AUTH_USERNAME,
             nats::auth::NATS_AUTH_PASSWORD,
             nats::auth::NATS_AUTH_TOKEN,
@@ -1065,6 +1094,8 @@ mod tests {
             etcd::ETCD_ENDPOINTS,
             etcd::ETCD_LEASE_TTL,
             etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
+            etcd::ETCD_KEEPALIVE_INTERVAL_SECONDS,
+            etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
             etcd::auth::ETCD_AUTH_USERNAME,
             etcd::auth::ETCD_AUTH_PASSWORD,
             etcd::auth::ETCD_AUTH_CA,
@@ -1101,9 +1132,11 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::DYN_REASONING_FIELD_NAME,
+            llm::DYN_PARSER_VERSION,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
             llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS,
+            llm::DYN_MM_NIXL_PROGRESS_DELAY_US,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
@@ -1178,6 +1211,7 @@ mod tests {
             request_plane::DYN_TCP_RPC_PORT,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+            tcp_response_stream::DYN_TCP_LISTEN_BACKLOG,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
             tcp_response_stream::tls::DYN_TCP_TLS_CERT_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_KEY_PATH,

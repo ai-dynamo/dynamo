@@ -19,7 +19,9 @@ pytestmark = [
 ]
 
 
-def test_audio_request_wire_shape_and_defaults():
+def test_audio_request_wire_shape_adds_no_defaults():
+    # The model carries the fields the client sent and nothing else. The
+    # handlers own the defaults for `response_format` and `speed`.
     request = NvCreateAudioSpeechRequest(
         input="hello",
         model="qwen-tts",
@@ -34,8 +36,6 @@ def test_audio_request_wire_shape_and_defaults():
         "model": "qwen-tts",
         "voice": "vivian",
         "data_source": "b64_json",
-        "response_format": "wav",
-        "speed": 1.0,
         "task_type": "CustomVoice",
         "language": "English",
     }

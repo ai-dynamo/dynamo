@@ -7,7 +7,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
-from dynamo._core import AicPerfConfig as AicPerfConfig
+from dynamo._core import AisPerfConfig as AisPerfConfig
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import FpmDirectPublisher as FpmDirectPublisher
@@ -62,6 +62,7 @@ except ImportError:
     pass
 
 from ._unary import LLMUnaryClient as LLMUnaryClient
+from ._unary import UnaryChatModel as UnaryChatModel
 from ._unary import with_engine_data as with_engine_data
 from .exceptions import HttpError
 from .exceptions import RouterQueueLimitExceeded as RouterQueueLimitExceeded

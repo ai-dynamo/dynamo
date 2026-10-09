@@ -169,6 +169,9 @@ article:has(.dynamo-blog-home) > header {
   background: linear-gradient(135deg, transparent 40%, rgba(0, 0, 0, 0.35));
 }
 
+.dynamo-blog-art--aiperf { background: linear-gradient(145deg, #16181f, #4b5368 52%, #0b0c10); }
+.dynamo-blog-art--encoder { background: linear-gradient(145deg, #2b0a1c, #a01f5c 52%, #1a0512); }
+
 .dynamo-blog-art--snapshot { background: linear-gradient(145deg, #031d28, #006b78 52%, #001318); }
 
 .dynamo-blog-art--tokens { background: linear-gradient(145deg, #211600, #9b5b00 52%, #1b0e00); }
@@ -594,6 +597,11 @@ article:has(.dynamo-blog-article) pre {
 }
 
 /* Date-first archive labels, inspired by editorial blog indexes. */
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/aiperf-benchmarking"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/aiperf-benchmarking"]::before { content: "SEP 18"; }
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/epd-disaggregation-multimodal"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/epd-disaggregation-multimodal"]::before { content: "SEP 09"; }
+
 body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/agent-optimization-skills"]::before,
 body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/agent-optimization-skills"]::before { content: "AUG 21"; }
 
@@ -971,6 +979,11 @@ body:has(.dynamo-blog-home) #fern-sidebar a[href*="/digest/"]::before,
 body:has(.dynamo-blog-article) #fern-sidebar a[href*="/digest/"]::before {
   content: "" !important;
 }
+
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/aiperf-benchmarking"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/aiperf-benchmarking"] .fern-sidebar-link-title-inner::before { content: "SEP 18"; }
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/epd-disaggregation-multimodal"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/epd-disaggregation-multimodal"] .fern-sidebar-link-title-inner::before { content: "SEP 09"; }
 
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/agent-optimization-skills"] .fern-sidebar-link-title-inner::before,
 body:has(.dynamo-blog-article) #fern-sidebar a[href$="/agent-optimization-skills"] .fern-sidebar-link-title-inner::before { content: "AUG 21"; }
