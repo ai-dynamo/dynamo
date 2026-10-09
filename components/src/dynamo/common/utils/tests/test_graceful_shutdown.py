@@ -17,7 +17,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -40,8 +40,6 @@ _GRACEFUL_SHUTDOWN_PATH = Path(__file__).parent.parent / "graceful_shutdown.py"
 _dynamo_stub = types.ModuleType("dynamo")
 _dynamo_core_stub = types.ModuleType("dynamo._core")
 _dynamo_core_stub.DistributedRuntime = object
-sys.modules.setdefault("dynamo", _dynamo_stub)
-sys.modules.setdefault("dynamo._core", _dynamo_core_stub)
 
 
 def _load_graceful_shutdown():
@@ -50,7 +48,16 @@ def _load_graceful_shutdown():
         _GRACEFUL_SHUTDOWN_PATH,
     )
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    stubs = {
+        name: module
+        for name, module in (
+            ("dynamo", _dynamo_stub),
+            ("dynamo._core", _dynamo_core_stub),
+        )
+        if name not in sys.modules
+    }
+    with patch.dict(sys.modules, stubs):
+        spec.loader.exec_module(mod)
     return mod
 
 
@@ -86,7 +93,9 @@ def test_drain_callback_called_before_shutdown():
     call_order = []
 
     mock_runtime = MagicMock()
-    mock_runtime.shutdown = MagicMock(side_effect=lambda: call_order.append("shutdown"))
+    mock_runtime.shutdown_and_wait = AsyncMock(
+        side_effect=lambda: call_order.append("shutdown")
+    )
 
     async def mock_drain():
         call_order.append("drain")
@@ -106,11 +115,11 @@ def test_drain_callback_called_before_shutdown():
     asyncio.run(_run())
 
     assert "drain" in call_order, "drain_callback was not called"
-    assert "shutdown" in call_order, "runtime.shutdown was not called"
+    assert "shutdown" in call_order, "runtime.shutdown_and_wait was not awaited"
     drain_idx = call_order.index("drain")
     shutdown_idx = call_order.index("shutdown")
     assert drain_idx < shutdown_idx, (
-        "drain_callback must be called before runtime.shutdown() to ensure "
+        "drain_callback must be called before runtime.shutdown_and_wait() to ensure "
         "in-flight NIXL transfers complete before GPU memory is freed"
     )
 
@@ -118,6 +127,7 @@ def test_drain_callback_called_before_shutdown():
 def test_no_drain_callback_still_shuts_down():
     """Backward compatibility: shutdown still works without drain_callback."""
     mock_runtime = MagicMock()
+    mock_runtime.shutdown_and_wait = AsyncMock()
 
     async def _run():
         mock_endpoint = AsyncMock()
@@ -132,7 +142,7 @@ def test_no_drain_callback_still_shuts_down():
         )
 
     asyncio.run(_run())
-    mock_runtime.shutdown.assert_called_once()
+    mock_runtime.shutdown_and_wait.assert_awaited_once()
 
 
 def test_drain_callback_exception_does_not_block_shutdown():
@@ -142,6 +152,7 @@ def test_drain_callback_exception_does_not_block_shutdown():
     so the process exits cleanly.
     """
     mock_runtime = MagicMock()
+    mock_runtime.shutdown_and_wait = AsyncMock()
 
     async def failing_drain():
         raise RuntimeError("drain timed out")
@@ -160,7 +171,7 @@ def test_drain_callback_exception_does_not_block_shutdown():
 
     # Should not raise
     asyncio.run(_run())
-    mock_runtime.shutdown.assert_called_once()
+    mock_runtime.shutdown_and_wait.assert_awaited_once()
 
 
 def test_cleanup_callback_runs_after_drain():
@@ -168,7 +179,9 @@ def test_cleanup_callback_runs_after_drain():
     call_order = []
 
     mock_runtime = MagicMock()
-    mock_runtime.shutdown = MagicMock(side_effect=lambda: call_order.append("shutdown"))
+    mock_runtime.shutdown_and_wait = AsyncMock(
+        side_effect=lambda: call_order.append("shutdown")
+    )
 
     async def mock_drain():
         call_order.append("drain")
@@ -198,7 +211,9 @@ def test_pre_shutdown_callback_withdraws_before_worker_teardown():
     """Lease-owned records disappear before the worker shutdown event is set."""
     call_order = []
     mock_runtime = MagicMock()
-    mock_runtime.shutdown = MagicMock(side_effect=lambda: call_order.append("runtime"))
+    mock_runtime.shutdown_and_wait = AsyncMock(
+        side_effect=lambda: call_order.append("runtime")
+    )
 
     async def withdraw():
         assert not shutdown_event.is_set()
@@ -228,6 +243,7 @@ def test_pre_shutdown_callback_withdraws_before_worker_teardown():
 def test_cleanup_callback_exception_does_not_block_shutdown():
     """A cleanup failure must not prevent runtime shutdown."""
     mock_runtime = MagicMock()
+    mock_runtime.shutdown_and_wait = AsyncMock()
 
     async def failing_cleanup():
         raise RuntimeError("engine cleanup failed")
@@ -245,7 +261,7 @@ def test_cleanup_callback_exception_does_not_block_shutdown():
         )
 
     asyncio.run(_run())
-    mock_runtime.shutdown.assert_called_once()
+    mock_runtime.shutdown_and_wait.assert_awaited_once()
 
 
 @pytest.mark.timeout(1)
@@ -253,6 +269,7 @@ def test_cleanup_callback_timeout_does_not_block_shutdown(monkeypatch):
     """A hanging cleanup callback must time out before runtime shutdown."""
     monkeypatch.setattr(_gs, "_DEFAULT_CLEANUP_TIMEOUT_SECS", 0.05)
     mock_runtime = MagicMock()
+    mock_runtime.shutdown_and_wait = AsyncMock()
 
     async def hanging_cleanup():
         await asyncio.sleep(10)
@@ -270,4 +287,103 @@ def test_cleanup_callback_timeout_does_not_block_shutdown(monkeypatch):
         )
 
     asyncio.run(_run())
-    mock_runtime.shutdown.assert_called_once()
+    mock_runtime.shutdown_and_wait.assert_awaited_once()
+
+
+def test_install_signal_handlers_returns_a_joinable_teardown():
+    """Regression: the shutdown task was detached and nothing joined it.
+
+    The sequence sets ``shutdown_event`` *before* awaiting the runtime
+    teardown, so the serve loop wakes and returns while the teardown is still
+    suspended; ``asyncio.run`` then closes the loop and destroys it pending.
+    The frontend grew a join for exactly this; the helper every backend uses
+    did not.
+
+    Asserts the teardown actually *completes*, not merely that a joiner exists.
+    """
+    _gs._shutdown_started.clear()
+    teardown_finished = False
+
+    async def slow_teardown():
+        nonlocal teardown_finished
+        await asyncio.sleep(0.05)
+        teardown_finished = True
+
+    runtime = MagicMock()
+    runtime.shutdown_and_wait = slow_teardown
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        shutdown_event = asyncio.Event()
+        wait_for_shutdown = install_signal_handlers(
+            loop, runtime, [], shutdown_event, grace_period_s=0
+        )
+        assert callable(wait_for_shutdown), "the caller needs something to join"
+
+        # Stand in for the signal: the handler is registered on the loop, and
+        # unit tests must not raise a real SIGTERM at the test runner.
+        for sig, handler in _installed_handlers(loop):
+            handler()
+            break
+
+        # The serve loop's wake-up, i.e. what the backend `main` awaits on.
+        await shutdown_event.wait()
+        assert not teardown_finished, "precondition: teardown still in flight"
+
+        await wait_for_shutdown()
+        assert teardown_finished, (
+            "wait_for_shutdown returned before the runtime teardown completed; "
+            "the event loop would close on a pending teardown"
+        )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("application_failure", ["none", "error", "cancelled"])
+def test_shutdown_failure_propagates_without_masking_application_error(
+    application_failure,
+):
+    async def scenario():
+        runtime_error = RuntimeError("runtime teardown incomplete")
+        application_error = {
+            "none": None,
+            "error": ValueError("application failed"),
+            "cancelled": asyncio.CancelledError(),
+        }[application_failure]
+        runtime = MagicMock()
+        runtime.shutdown_and_wait = AsyncMock(side_effect=runtime_error)
+        loop = asyncio.get_running_loop()
+        shutdown_event = asyncio.Event()
+        join = install_signal_handlers(
+            loop, runtime, [], shutdown_event, grace_period_s=0
+        )
+        _installed_handlers(loop)[0][1]()
+        await shutdown_event.wait()
+
+        async def application():
+            try:
+                if application_error is not None:
+                    raise application_error
+            finally:
+                await join()
+
+        expected = application_error if application_error is not None else runtime_error
+        with pytest.raises(type(expected)) as caught:
+            await application()
+        assert caught.value is expected
+        runtime.shutdown_and_wait.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+def _installed_handlers(loop):
+    """The SIGTERM/SIGINT callbacks `install_signal_handlers` registered."""
+    import signal as _signal
+
+    found = []
+    for sig in (_signal.SIGTERM, _signal.SIGINT):
+        handle = loop._signal_handlers.get(sig)  # type: ignore[attr-defined]
+        if handle is not None:
+            found.append((sig, handle._callback))
+    assert found, "no signal handler was installed"
+    return found
