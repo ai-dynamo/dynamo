@@ -7,9 +7,7 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-# shellcheck disable=SC1091
 source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"
-# shellcheck disable=SC1091
 source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
