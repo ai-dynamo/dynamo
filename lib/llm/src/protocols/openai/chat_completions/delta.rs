@@ -948,6 +948,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_python_prompt_logprobs_survive_aggregation_but_not_sse() {
+        let payload = serde_json::json!([
+            null,
+            {"17": {"logprob": -0.25, "rank": 1, "decoded_token": " hello"}}
+        ]);
+        let mut wire = serde_json::json!({
+            "data": {
+                "id": "python-chat",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "test-model",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+            }
+        });
+
+        for include_payload in [false, true] {
+            if include_payload {
+                wire["data"]["prompt_logprobs"] = payload.clone();
+            }
+            let chunk: crate::protocols::Annotated<NvCreateChatCompletionStreamResponse> =
+                serde_json::from_value(wire.clone()).expect("deserialize Python chunk");
+            let data = chunk.data.as_ref().expect("chunk data");
+            assert_eq!(data.prompt_logprobs.is_some(), include_payload);
+            assert!(
+                serde_json::to_value(data)
+                    .expect("serialize SSE chunk")
+                    .get("prompt_logprobs")
+                    .is_none()
+            );
+
+            let response = crate::protocols::openai::chat_completions::DeltaAggregator::apply(
+                futures::stream::iter(vec![chunk]),
+                crate::protocols::openai::ParsingOptions::default(),
+            )
+            .await
+            .expect("aggregate Python chunk");
+            let response = serde_json::to_value(response).expect("serialize unary response");
+            if include_payload {
+                assert_eq!(response["prompt_logprobs"], payload);
+            } else {
+                assert!(response.get("prompt_logprobs").is_none());
+            }
+        }
+
+        for invalid in [
+            serde_json::json!("invalid"),
+            serde_json::json!([{"not-a-token": {"logprob": -0.25}}]),
+            serde_json::json!([{"-1": {"logprob": -0.25}}]),
+            serde_json::json!([{"4294967296": {"logprob": -0.25}}]),
+        ] {
+            wire["data"]["prompt_logprobs"] = invalid;
+            assert!(
+                serde_json::from_value::<
+                    crate::protocols::Annotated<NvCreateChatCompletionStreamResponse>,
+                >(wire.clone())
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn test_backend_choice_index_is_preserved() {
         let request = create_test_request();

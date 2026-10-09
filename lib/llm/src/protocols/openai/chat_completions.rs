@@ -302,7 +302,11 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub nvext: Option<serde_json::Value>,
     /// Internal prompt logprobs payload for non-streaming response aggregation.
     /// This must never be serialized to client-facing streams.
-    #[serde(skip)]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "deserialize_prompt_logprobs"
+    )]
     pub prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
@@ -311,6 +315,64 @@ pub struct NvCreateChatCompletionStreamResponse {
     /// Internal transport evidence; the HTTP chat converter removes it before SSE serialization.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_call_completion: Vec<ToolCallCompletion>,
+}
+
+fn deserialize_prompt_logprobs<'de, D>(
+    deserializer: D,
+) -> Result<Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use crate::protocols::common::llm_backend::PromptLogprobEntry;
+
+    #[derive(Deserialize)]
+    #[serde(transparent)]
+    struct Position(
+        #[serde(deserialize_with = "deserialize_position")] HashMap<u32, PromptLogprobEntry>,
+    );
+
+    fn deserialize_position<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<u32, PromptLogprobEntry>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct PositionVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for PositionVisitor {
+            type Value = HashMap<u32, PromptLogprobEntry>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map from string token IDs to prompt logprobs")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut position = HashMap::with_capacity(map.size_hint().unwrap_or(0));
+                // pythonize does not coerce string map keys to integers like serde_json.
+                while let Some(token_id) = map.next_key::<String>()? {
+                    let token_id = token_id.parse().map_err(serde::de::Error::custom)?;
+                    position.insert(token_id, map.next_value()?);
+                }
+                Ok(position)
+            }
+        }
+
+        deserializer.deserialize_map(PositionVisitor)
+    }
+
+    Option::<Vec<Option<Position>>>::deserialize(deserializer).map(|positions| {
+        positions.map(|positions| {
+            Arc::new(
+                positions
+                    .into_iter()
+                    .map(|position| position.map(|position| position.0))
+                    .collect(),
+            )
+        })
+    })
 }
 
 /// Synthetic chunks reuse a real response envelope but consume no backend data.
