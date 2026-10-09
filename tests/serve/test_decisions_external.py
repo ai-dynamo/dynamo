@@ -155,8 +155,8 @@ def test_external_native_sglang_numeric_parity(external_decision_server):
         pytest.skip(
             "Set DYNAMO_DECISION_NATIVE_URL to an independently provisioned native SGLang server"
         )
-    assert native_url.rstrip("/") != base_url, (
-        "Native parity requires an independent server, not Dynamo /generate"
-    )
+    assert (
+        native_url.rstrip("/") != base_url
+    ), "Native parity requires an independent server, not Dynamo /generate"
     tokenizer_path = os.environ.get("DYNAMO_DECISION_TOKENIZER_PATH")
     assert_native_sglang_parity(base_url, native_url.rstrip("/"), model, tokenizer_path)

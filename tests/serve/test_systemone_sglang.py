@@ -55,9 +55,9 @@ def systemone_sglang_server(
     dynamo_dynamic_ports,
     predownload_models,
 ):
-    assert version("sglang").split("+")[0] == "0.5.19", (
-        "Parity is pinned to SGLang 0.5.19"
-    )
+    assert (
+        version("sglang").split("+")[0] == "0.5.19"
+    ), "Parity is pinned to SGLang 0.5.19"
     ports = dynamo_dynamic_ports
     base_url = f"http://localhost:{ports.frontend_port}"
     env = {**os.environ, "DYN_SYSTEM_PORT": str(ports.system_ports[0])}
