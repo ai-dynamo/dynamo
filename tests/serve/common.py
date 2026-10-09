@@ -488,14 +488,15 @@ def run_serve_deployment(
                     try:
                         for attempt in range(payload.max_attempts):
                             try:
-                                response = send_request(
+                                payload.before_request()
+                                with send_request(
                                     url=payload.url(),
                                     payload=request_body,
                                     timeout=payload.timeout,
                                     method=payload.method,
                                     stream=payload.http_stream,
-                                )
-                                server_process.check_response(payload, response)
+                                ) as response:
+                                    server_process.check_response(payload, response)
                                 last_err = None
                                 break
                             except ResponseValidationError as e:

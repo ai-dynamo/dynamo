@@ -20,6 +20,7 @@ import math
 import re
 import struct
 import time
+import uuid
 import wave
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
+from tests.utils.engine_metrics import EngineMetrics
 from tests.utils.http_checks import check_health_generate as check_health_generate
 from tests.utils.http_checks import check_models_api as check_models_api
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
@@ -90,6 +92,9 @@ class BasePayload:
         """Return the request body for one repeat_count iteration."""
         return self.body
 
+    def before_request(self) -> None:
+        """Prepare observations immediately before each HTTP request attempt."""
+
     def response_handler(self, response: Any) -> str:
         """Extract a text representation of the response for logging/validation."""
         raise NotImplementedError("Subclasses must implement response_handler()")
@@ -145,6 +150,75 @@ class HttpErrorPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return response.text
+
+
+@dataclass
+class HttpCancellationPayload(BasePayload):
+    """Disconnect an active chat stream and require early engine cleanup.
+
+    Follow this with a normal chat payload to verify recovery on the same
+    deployment. The supplied checker owns engine-specific metric semantics.
+    """
+
+    metrics: EngineMetrics = field(kw_only=True)
+    endpoint: str = "/v1/chat/completions"
+    http_stream: bool = True
+    timeout: int = 30
+    _before: float | None = field(default=None, init=False, repr=False)
+    _completion_progress: float = field(default=0, init=False, repr=False)
+
+    def before_request(self) -> None:
+        if not self.http_stream or self.body.get("stream") is not True:
+            raise ValueError("Cancellation requires a streaming request")
+        if self.body.get("ignore_eos") is not True or self.body.get("n", 1) != 1:
+            raise ValueError("Cancellation requires ignore_eos=True and n=1")
+        max_tokens = self.body.get("max_tokens")
+        if type(max_tokens) is not int or max_tokens <= 1:
+            raise ValueError("Cancellation requires max_tokens > 1")
+        if self.max_attempts != 1:
+            raise ValueError("Cancellation checks must not retry failed assertions")
+        self._completion_progress = self.metrics.completion_progress(max_tokens)
+        self.metrics.wait_for_scheduler()
+        self._before = self.metrics.progress()
+
+    def response_handler(self, response: requests.Response) -> str:
+        try:
+            if self._before is None:
+                raise RuntimeError("before_request must run before cancellation")
+            response.raise_for_status()
+            deadline = time.monotonic() + self.timeout
+            content = ""
+            # Read only the first generated fragment, without buffering a full
+            # response. Closing an unread requests stream closes its connection.
+            for line in response.iter_lines(chunk_size=1):
+                assert time.monotonic() < deadline, "No content before cancellation"
+                if not line.startswith(b"data:"):
+                    continue
+                data = line[5:].strip()
+                assert data != b"[DONE]", "Generation finished before cancellation"
+                chunk = json.loads(data)
+                assert "error" not in chunk, chunk
+                for choice in chunk.get("choices", []):
+                    assert choice.get("finish_reason") is None, (
+                        "Generation finished before cancellation",
+                        choice,
+                    )
+                    delta = choice.get("delta") or {}
+                    content = (
+                        delta.get("content") or delta.get("reasoning_content") or ""
+                    )
+                    if content:
+                        break
+                if content:
+                    break
+            assert content, "Stream ended without generated content"
+            self.metrics.wait_for_scheduler(is_active=True)
+        finally:
+            response.close()
+        self.metrics.assert_cancelled(
+            before=self._before, completion_progress=self._completion_progress
+        )
+        return content
 
 
 @dataclass
@@ -219,8 +293,32 @@ class ChatPayload(BasePayload):
         )
 
 
+def _validate_chat_token_usage(result: Dict[str, Any]) -> None:
+    usage = result.get("usage")
+    assert isinstance(usage, dict), f"Missing usage: {result!r}"
+    nvext = result.get("nvext") or {}
+    for kind in ("completion", "prompt"):
+        count = usage.get(f"{kind}_tokens")
+        assert type(count) is int and count > 0, usage
+        field = f"{kind}_token_ids"
+        token_ids = nvext.get(field)
+        assert isinstance(token_ids, list) and all(
+            type(token) is int and token >= 0 for token in token_ids
+        ), f"Missing or invalid {field}: {token_ids!r}"
+        assert (
+            len(token_ids) == count
+        ), f"{field} count does not match usage: {token_ids!r}, {usage!r}"
+    assert usage.get("total_tokens") == (
+        usage["prompt_tokens"] + usage["completion_tokens"]
+    ), f"Inconsistent total token usage: {usage!r}"
+
+
+@dataclass
 class DisaggregatedChatPayload(ChatPayload):
     """Require a completed chat request served by distinct prefill and decode workers."""
+
+    expected_finish_reason: str | None = None
+    expected_completion_tokens: int | None = None
 
     def validate(self, response: Any, content: str) -> None:
         super().validate(response, content)
@@ -232,6 +330,10 @@ class DisaggregatedChatPayload(ChatPayload):
             raise AssertionError("Completion is empty")
         if choices[0].get("finish_reason") not in {"stop", "length"}:
             raise AssertionError(f"Unexpected finish reason: {choices[0]!r}")
+        if self.expected_finish_reason is not None:
+            assert (
+                choices[0]["finish_reason"] == self.expected_finish_reason
+            ), f"Expected finish reason {self.expected_finish_reason!r}: {choices[0]!r}"
 
         usage = result.get("usage")
         if not isinstance(usage, dict):
@@ -244,6 +346,11 @@ class DisaggregatedChatPayload(ChatPayload):
             raise AssertionError(
                 f"Expected decode to generate more than the prefill token: {usage!r}"
             )
+        if self.expected_completion_tokens is not None:
+            assert (
+                completion_tokens == self.expected_completion_tokens
+            ), f"Expected {self.expected_completion_tokens} completion tokens: {usage!r}"
+            _validate_chat_token_usage(result)
 
         workers = require_router_worker_id(result, context=type(self).__name__)
         for role in ("prefill_worker_id", "decode_worker_id"):
@@ -253,6 +360,32 @@ class DisaggregatedChatPayload(ChatPayload):
             raise AssertionError(
                 f"Expected distinct prefill and decode workers: {dict(workers)!r}"
             )
+
+
+@dataclass
+class KvTransferPayload(DisaggregatedChatPayload):
+    """Require a fresh completed KV transfer for this frontend request."""
+
+    prefill_metrics: EngineMetrics = field(kw_only=True)
+    decode_metrics: EngineMetrics = field(kw_only=True)
+    transfer_metrics: EngineMetrics = field(kw_only=True)
+    _transfer_before: float | None = field(default=None, init=False, repr=False)
+
+    def before_request(self) -> None:
+        self.prefill_metrics.wait_for_scheduler()
+        self.decode_metrics.wait_for_scheduler()
+        self._transfer_before = self.transfer_metrics.transfer_progress()
+        message = self.body["messages"][0]
+        message["content"] = f"Request {uuid.uuid4()}. " + message["content"]
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        assert (
+            self._transfer_before is not None
+        ), "Missing pre-request transfer baseline"
+        self.transfer_metrics.wait_for_transfer(before=self._transfer_before)
+        self.decode_metrics.wait_for_scheduler()
+        self.prefill_metrics.wait_for_scheduler()
 
 
 class RouterNvextChatPayload(ChatPayload):
@@ -276,72 +409,167 @@ class RouterNvextChatPayload(ChatPayload):
         )
 
 
+def _validate_chat_logprobs(content_logprobs) -> None:
+    assert content_logprobs, "Missing or empty requested output logprobs"
+    for item in content_logprobs:
+        candidates = item["top_logprobs"]
+        for entry in [item, *candidates]:
+            value = entry["logprob"]
+            assert math.isfinite(value) and value <= 0, f"Invalid logprob: {entry!r}"
+            assert isinstance(entry["token"], str), f"Invalid token: {entry!r}"
+            assert "bytes" in entry, f"Missing token bytes: {entry!r}"
+            if entry["bytes"] is not None:
+                assert isinstance(
+                    entry["bytes"], list
+                ), f"Invalid token bytes: {entry!r}"
+
+
 @dataclass
 class ChatPayloadWithLogprobs(ChatPayload):
-    """Chat payload that validates logprobs in response."""
+    """Chat payload that validates requested selected and candidate logprobs."""
 
     def validate(self, response: Any, content: str) -> None:
-        """Validate response contains logprobs fields."""
         super().validate(response, content)
+        logprobs = response.json()["choices"][0]["logprobs"]
+        content_logprobs = (logprobs or {}).get("content")
+        if self.body.get("logprobs") or content_logprobs:
+            _validate_chat_logprobs(content_logprobs)
 
-        result = response.json()
-        choice = result["choices"][0]
 
-        # Validate logprobs field exists
-        assert "logprobs" in choice, "Missing 'logprobs' in choice"
+@dataclass
+class StreamingChatPayload(BasePayload):
+    """Validate a complete chat SSE stream, including requested token metadata."""
 
-        logprobs_data = choice["logprobs"]
-        if logprobs_data is not None:
-            assert "content" in logprobs_data, "Missing 'content' in logprobs"
-            content_logprobs = logprobs_data["content"]
+    endpoint: str = "/v1/chat/completions"
+    http_stream: bool = True
+    expected_finish_reason: str | None = None
+    expected_completion_tokens: int | None = None
+    min_token_chunks: int = 0
 
-            if content_logprobs:
-                # Validate structure of logprobs
-                for item in content_logprobs:
-                    assert "token" in item, "Missing 'token' in logprobs content"
-                    assert "logprob" in item, "Missing 'logprob' in logprobs content"
+    def process_response(self, response: Any) -> str:
+        try:
+            return super().process_response(response)
+        finally:
+            response.close()
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        content_parts = []
+        output_logprobs = []
+        completion_ids = []
+        terminal_nvext = {}
+        finish_reason = None
+        usage = None
+        is_done = False
+        token_chunks = 0
+        fields = self.body.get("nvext", {}).get("extra_fields", [])
+        deadline = time.monotonic() + self.timeout
+        for line in response.iter_lines(chunk_size=1):
+            assert (
+                time.monotonic() < deadline
+            ), f"Chat stream exceeded its {self.timeout}s deadline"
+            if isinstance(line, bytes):
+                line = line.decode("utf-8")
+            if not line.startswith("data:"):
+                continue
+            assert not is_done, "Received data after [DONE]"
+            data = line[5:].strip()
+            if data == "[DONE]":
+                is_done = True
+                continue
+            chunk = json.loads(data)
+            assert "error" not in chunk, f"Stream error: {chunk!r}"
+            choices = chunk["choices"]
+            nvext = chunk.get("nvext") or {}
+            chunk_ids = nvext.get("completion_token_ids") or []
+            chunk_logprobs = []
+            completion_ids.extend(chunk_ids)
+            if choices:
+                assert finish_reason is None, "Received choices after terminal chunk"
+                assert len(choices) == 1 and choices[0]["index"] == 0, chunk
+                choice = choices[0]
+                content_parts.append(choice["delta"].get("content") or "")
+                logprobs = choice.get("logprobs") or {}
+                chunk_logprobs = logprobs.get("content") or []
+                output_logprobs.extend(chunk_logprobs)
+                finish_reason = choice.get("finish_reason")
+                if finish_reason is not None:
+                    terminal_nvext = nvext
+                else:
                     assert (
-                        "top_logprobs" in item
-                    ), "Missing 'top_logprobs' in logprobs content"
+                        nvext.get("prompt_logprobs") is None
+                    ), "Prompt logprobs must appear only on the terminal chunk"
+            if chunk_ids or chunk_logprobs:
+                token_chunks += 1
+            if "completion_token_ids" in fields and self.body.get("logprobs"):
+                assert [
+                    item["token_id"] for item in chunk_logprobs
+                ] == chunk_ids, "Output logprobs do not match this chunk's completion token positions"
+            if chunk.get("usage") is not None:
+                assert finish_reason is not None, "Usage arrived before completion"
+                assert usage is None, "Duplicate terminal usage"
+                usage = chunk["usage"]
 
-                    # Sanity check: logprob should be valid (not nan/inf/positive)
-                    logprob_val = item["logprob"]
-                    assert not math.isnan(logprob_val), "logprob is NaN"
-                    assert not math.isinf(logprob_val), "logprob is infinite"
+        assert is_done, "Stream ended without [DONE]"
+        assert (
+            token_chunks >= self.min_token_chunks
+        ), f"Expected at least {self.min_token_chunks} token-bearing chunks, got {token_chunks}"
+        assert finish_reason in {
+            "stop",
+            "length",
+        }, f"Missing or unexpected finish reason: {finish_reason!r}"
+        if self.expected_finish_reason is not None:
+            assert finish_reason == self.expected_finish_reason
+        content = "".join(content_parts)
+        assert content.strip(), "Stream returned no content"
+        if self.body.get("stream_options", {}).get("include_usage"):
+            assert usage is not None, "Missing terminal usage"
+            for key in ("prompt_tokens", "completion_tokens"):
+                assert type(usage[key]) is int and usage[key] > 0, usage
+            assert usage["total_tokens"] == (
+                usage["prompt_tokens"] + usage["completion_tokens"]
+            ), usage
+            if self.expected_completion_tokens is not None:
+                assert usage["completion_tokens"] == self.expected_completion_tokens
+        if self.body.get("logprobs"):
+            _validate_chat_logprobs(output_logprobs)
+        if "completion_token_ids" in fields:
+            assert completion_ids, "Missing requested completion token IDs"
+            assert all(type(token) is int and token >= 0 for token in completion_ids)
+            if usage is not None:
+                assert len(completion_ids) == usage["completion_tokens"]
+            if self.body.get("logprobs") and self.body.get(
+                "return_tokens_as_token_ids"
+            ):
+                for item in output_logprobs:
+                    assert item["token"] == f"token_id:{item['token_id']}"
+                    candidates = item["top_logprobs"]
+                    for entry in candidates:
+                        assert entry["token"].startswith("token_id:")
+                        assert int(entry["token"].removeprefix("token_id:")) >= 0
+                        if entry["token"] == item["token"]:
+                            assert entry["logprob"] == item["logprob"]
+        if "prompt_logprobs" in fields:
+            prompt_ids = terminal_nvext.get("prompt_token_ids")
+            prompt_logprobs = terminal_nvext.get("prompt_logprobs")
+            assert prompt_ids, "Missing requested prompt token IDs"
+            assert prompt_logprobs, "Missing requested prompt logprobs"
+            assert len(prompt_logprobs) == len(prompt_ids)
+            if usage is not None:
+                assert len(prompt_ids) == usage["prompt_tokens"]
+            assert prompt_logprobs[0] is None, "First prompt token must have no logprob"
+            for token, entries in zip(prompt_ids[1:], prompt_logprobs[1:], strict=True):
+                assert entries and str(token) in entries, "Missing prompt token logprob"
+                assert len(entries) >= (self.body.get("prompt_logprobs") or 0)
+                for candidate, entry in entries.items():
                     assert (
-                        logprob_val <= 0
-                    ), f"logprob should be <= 0, got {logprob_val}"
-
-                    # Validate bytes field is populated for the selected token
-                    assert "bytes" in item, "Missing 'bytes' in logprobs content item"
-                    token_str = item["token"]
-                    if token_str:
-                        assert (
-                            item["bytes"] is not None
-                        ), f"'bytes' should be populated for non-empty token {token_str!r}"
-                        assert isinstance(
-                            item["bytes"], list
-                        ), f"'bytes' should be a list, got {type(item['bytes'])}"
-
-                    # Validate top_logprobs entries have token, logprob, and bytes
-                    for top_lp in item["top_logprobs"]:
-                        assert (
-                            "token" in top_lp
-                        ), "Missing 'token' in top_logprobs entry"
-                        assert (
-                            "logprob" in top_lp
-                        ), "Missing 'logprob' in top_logprobs entry"
-                        assert (
-                            "bytes" in top_lp
-                        ), "Missing 'bytes' in top_logprobs entry"
-                        if top_lp["token"]:
-                            assert (
-                                top_lp["bytes"] is not None
-                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
-
-                logger.info(
-                    f"✓ Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
-                )
+                        int(candidate) >= 0
+                    ), f"Invalid prompt token ID: {candidate!r}"
+                    value = entry["logprob"]
+                    assert math.isfinite(value) and -9999 < value <= 0, entry
+                    if entry.get("rank") is not None:
+                        assert type(entry["rank"]) is int and entry["rank"] > 0, entry
+        return content
 
 
 @dataclass
@@ -415,9 +643,20 @@ class ToolCallingChatPayload(ChatPayload):
 class GuidedDecodingChatPayload(ChatPayload):
     """ChatPayload that validates a json_schema response_format produces valid JSON."""
 
-    def __init__(self, *args, required_keys: Optional[List[str]] = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        required_keys: Optional[List[str]] = None,
+        expected_json: Optional[Dict[str, Any]] = None,
+        expected_finish_reason: Optional[str] = None,
+        needs_token_ids: bool = False,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.required_keys = required_keys or []
+        self.expected_json = expected_json
+        self.expected_finish_reason = expected_finish_reason
+        self.needs_token_ids = needs_token_ids
 
     def validate(self, response, content: str) -> None:
         try:
@@ -439,7 +678,26 @@ class GuidedDecodingChatPayload(ChatPayload):
                 f"Parsed: {parsed}"
             )
 
-        logger.info(f"Guided decoding validation passed: {parsed}")
+        if self.expected_json is not None:
+            assert json.dumps(parsed, sort_keys=True) == json.dumps(
+                self.expected_json, sort_keys=True
+            ), f"Expected JSON {self.expected_json!r}, got {parsed!r}"
+        if self.needs_token_ids:
+            _validate_chat_token_usage(response.json())
+        elif self.expected_json is not None:
+            usage = response.json().get("usage")
+            assert usage, "Missing structured-output usage"
+            for key in ("prompt_tokens", "completion_tokens"):
+                assert type(usage[key]) is int and usage[key] > 0, usage
+            assert usage["total_tokens"] == (
+                usage["prompt_tokens"] + usage["completion_tokens"]
+            ), usage
+        if self.expected_finish_reason is not None:
+            assert response.json()["choices"][0]["finish_reason"] == (
+                self.expected_finish_reason
+            )
+
+        logger.info("Guided decoding validation passed: %s", parsed)
 
 
 @dataclass
