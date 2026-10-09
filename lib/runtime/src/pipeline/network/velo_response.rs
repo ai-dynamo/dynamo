@@ -25,8 +25,8 @@ use uuid::Uuid;
 use velo::{
     PeerInfo, Velo,
     streaming::{
-        MuxConfig, StreamAnchor, StreamAnchorHandle, StreamController, StreamFrame, StreamSender,
-        control::StreamOpenTicket,
+        AutoFlush, FlushPolicy, MuxConfig, StreamAnchor, StreamAnchorHandle, StreamController,
+        StreamFrame, StreamSender, control::StreamOpenTicket,
     },
 };
 
@@ -82,12 +82,27 @@ const RESPONSE_CREDIT_WINDOW: u32 = 32;
 /// 37.4 ms of frontend CPU per request.
 const RESPONSE_TCP_LANES: u16 = 4;
 
-fn response_mux_config() -> MuxConfig {
-    MuxConfig {
+fn response_mux_config() -> Result<MuxConfig> {
+    use crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_BATCH_MS;
+
+    let batch_ms = match std::env::var(DYN_VELO_RESPONSE_BATCH_MS) {
+        Err(std::env::VarError::NotPresent) => 5,
+        Ok(value) => value.parse::<u64>().map_err(|_| {
+            anyhow::anyhow!(
+                "{DYN_VELO_RESPONSE_BATCH_MS} must be a non-negative integer in milliseconds"
+            )
+        })?,
+        Err(error) => bail!("{DYN_VELO_RESPONSE_BATCH_MS}: {error}"),
+    };
+    Ok(MuxConfig {
         enabled: true,
         initial_credit: RESPONSE_CREDIT_WINDOW,
+        flush_policy: FlushPolicy::Auto(AutoFlush {
+            on_admission: batch_ms == 0,
+            max_linger: (batch_ms != 0).then(|| Duration::from_millis(batch_ms)),
+        }),
         ..Default::default()
-    }
+    })
 }
 
 fn tcp_transport(address: SocketAddr) -> Result<velo::transports::tcp::TcpTransport> {
@@ -268,7 +283,7 @@ impl VeloResponseService {
         let mut builder = Velo::builder()
             .metrics(PROCESS_METRICS.1.clone())
             .mux_only()
-            .messenger_mux(response_mux_config())?;
+            .messenger_mux(response_mux_config()?)?;
         match transport {
             ResponseTransport::Tcp => {
                 builder = builder.add_transport(Arc::new(tcp_transport(address)?));
@@ -720,6 +735,42 @@ mod tests {
     use super::*;
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context as EngineContext;
+
+    #[test]
+    fn response_batch_policy() {
+        use crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_BATCH_MS;
+
+        if crate::test_utils::run_isolated(concat!(module_path!(), "::response_batch_policy"), &[])
+        {
+            return;
+        }
+        for (value, on_admission, max_linger) in [
+            (None, false, Some(Duration::from_millis(5))),
+            (Some("0"), true, None),
+            (Some("12"), false, Some(Duration::from_millis(12))),
+        ] {
+            temp_env::with_var(DYN_VELO_RESPONSE_BATCH_MS, value, || {
+                let config = response_mux_config().unwrap();
+                assert_eq!(
+                    config.flush_policy,
+                    FlushPolicy::Auto(AutoFlush {
+                        on_admission,
+                        max_linger
+                    })
+                );
+            });
+        }
+        for value in ["", "-1", "1.5", "invalid", "18446744073709551616"] {
+            temp_env::with_var(DYN_VELO_RESPONSE_BATCH_MS, Some(value), || {
+                assert!(
+                    response_mux_config()
+                        .unwrap_err()
+                        .to_string()
+                        .contains(DYN_VELO_RESPONSE_BATCH_MS)
+                );
+            });
+        }
+    }
 
     #[tokio::test]
     async fn runtime_shutdown_closes_only_the_last_owner_after_endpoint_drain() {
