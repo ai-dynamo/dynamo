@@ -58,6 +58,18 @@ JsonLike = Any
 
 RequestHandler = Callable[..., AsyncIterator[JsonLike]]
 
+class ShutdownWatchdog:
+    """OS-thread shutdown deadline; force-exits with code 70 when it expires."""
+
+    def __init__(self, timeout_secs: float) -> None: ...
+    def finish(self) -> None:
+        """Disarm after engine cleanup and runtime teardown finish."""
+        ...
+
+def worker_shutdown_timeout_secs() -> int:
+    """Resolve the worker timeout using the native build profile and environment."""
+    ...
+
 class DistributedRuntime:
     """
     The runtime object for dynamo applications
@@ -135,6 +147,14 @@ class DistributedRuntime:
         """
         Explicitly set the system-level health status (Ready / NotReady).
         """
+        ...
+
+    async def shutdown_engine_routes(self) -> None:
+        """Close terminal engine-control admission and join admitted callbacks."""
+        ...
+
+    def engine_routes_closed(self) -> bool:
+        """Whether terminal shutdown has closed engine-control admission."""
         ...
 
     def register_engine_route(
@@ -3214,6 +3234,10 @@ class ConnectionTimeout(DynamoException):
 class Cancelled(DynamoException):
     """The request was cancelled."""
 
+    ...
+
+class WorkerDraining(DynamoException):
+    """The worker has stopped admitting new requests."""
     ...
 
 class EngineShutdown(DynamoException):

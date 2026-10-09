@@ -186,7 +186,8 @@ def test_process_group_cleanup_is_ordered_and_idempotent(monkeypatch):
     group.cleanup(timeout=2.0)
 
     child.terminate.assert_called_once()
-    engine_manager.shutdown.assert_called_once_with(timeout=2.0)
+    engine_manager.shutdown.assert_called_once()
+    assert 0 < engine_manager.shutdown.call_args.kwargs["timeout"] <= 2.0
     rpc_directory.cleanup.assert_called_once()
     assert os.environ[processes._RPC_BASE_PATH_ENV] == "/tmp/original-rpc"
 

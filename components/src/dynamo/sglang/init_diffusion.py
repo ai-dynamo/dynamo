@@ -11,6 +11,7 @@ import sglang as sgl
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.llm import WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config, _diffusion_generator_kwargs
@@ -42,6 +43,7 @@ async def init_llm_diffusion(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize diffusion language model worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
@@ -63,40 +65,44 @@ async def init_llm_diffusion(
     set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
 
     engine = sgl.Engine(server_args=server_args)
-    server_args = config.use_resolved_server_args(engine.server_args)
-
-    shutdown_endpoints[:] = [generate_endpoint]
-
-    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
-        engine, config, generate_endpoint
-    )
-    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
-    # which take a different init path entirely. Narrow for mypy.
-    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
-
-    if server_args.node_rank >= 1:
-        await handle_non_leader_node(engine, publisher, metrics_task)
-        return
-
-    ready_event = asyncio.Event()
-
-    handler = DiffusionWorkerHandler(
-        engine, config, publisher, generate_endpoint, shutdown_event
-    )
-    handler.register_engine_routes(runtime)
-
-    health_check_payload = SglangHealthCheckPayload(
-        engine, use_text_input=dynamo_args.use_sglang_tokenizer
-    ).to_dict()
-
-    logging.info(
-        f"Registering diffusion model with endpoint types: {dynamo_args.endpoint_types}"
-    )
-
+    handler = None
+    metrics_task = None
     try:
+        server_args = config.use_resolved_server_args(engine.server_args)
+
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
+            engine, config, generate_endpoint
+        )
+        # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+        # which take a different init path entirely. Narrow for mypy.
+        assert publisher is not None, "setup_sgl_metrics returned None on chat path"
+
+        if server_args.node_rank >= 1:
+            await handle_non_leader_node(engine, publisher, metrics_task)
+            return
+
+        ready_event = asyncio.Event()
+
+        handler = DiffusionWorkerHandler(
+            engine, config, publisher, generate_endpoint, shutdown_event
+        )
+        handler.register_engine_routes(runtime)
+
+        health_check_payload = SglangHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
+
+        logging.info(
+            f"Registering diffusion model with endpoint types: {dynamo_args.endpoint_types}"
+        )
+
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(
+            serve_endpoint(
+                generate_endpoint,
                 handler.generate,
+                shutdown=shutdown,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
@@ -116,13 +122,16 @@ async def init_llm_diffusion(
         logging.error(f"Failed to serve diffusion endpoints: {e}")
         raise
     finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
+        if metrics_task is not None:
+            metrics_task.cancel()
+            try:
+                await metrics_task
+            except asyncio.CancelledError:
+                logging.info("Metrics task successfully cancelled")
+        if handler is not None:
+            handler.cleanup()
+        else:
+            engine.shutdown()
         if run_deferred_handlers is not None:
             logging.info("Running deferred handlers")
             await run_deferred_handlers()
@@ -133,6 +142,7 @@ async def init_image_diffusion(
     config: Config,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize image diffusion worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
@@ -181,8 +191,10 @@ async def init_image_diffusion(
     register_model_taint_route(runtime, generate_endpoint)
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(
+            serve_endpoint(
+                generate_endpoint,
                 handler.generate,
+                shutdown=shutdown,
                 graceful_shutdown=True,
                 metrics_labels=[],
                 health_check_payload=health_check_payload,
@@ -210,6 +222,7 @@ async def init_video_diffusion(
     config: Config,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize video generation worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
@@ -247,8 +260,10 @@ async def init_video_diffusion(
     register_model_taint_route(runtime, generate_endpoint)
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(
+            serve_endpoint(
+                generate_endpoint,
                 handler.generate,
+                shutdown=shutdown,
                 graceful_shutdown=True,
                 metrics_labels=[],
                 health_check_payload=health_check_payload,

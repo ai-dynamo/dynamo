@@ -75,6 +75,31 @@ def _make_factory(**overrides) -> WorkerFactory:
     return WorkerFactory(**defaults)
 
 
+@pytest.mark.asyncio
+async def test_encode_worker_cancellation_during_registration_cleans_handler():
+    entered = asyncio.Event()
+    handler = Mock(async_init=AsyncMock())
+
+    async def register(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    with (
+        patch("dynamo.vllm.worker_factory.EncodeWorkerHandler", return_value=handler),
+        patch("dynamo.vllm.worker_factory.register_model", side_effect=register),
+    ):
+        task = asyncio.create_task(
+            _make_factory()._create_multimodal_encode_worker(
+                Mock(), _make_config(), asyncio.Event(), []
+            )
+        )
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    handler.cleanup.assert_called_once()
+
+
 def test_register_request_cache_metrics_includes_multimodal_image_loader():
     endpoint = Mock()
     embedding_cache = object()

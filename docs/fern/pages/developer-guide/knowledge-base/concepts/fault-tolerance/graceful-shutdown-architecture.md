@@ -4,19 +4,19 @@
 title: Graceful Shutdown Architecture
 ---
 
-This document describes the internals of how Dynamo components handle shutdown signals to ensure in-flight requests complete successfully and resources are properly cleaned up.
+NVIDIA Dynamo gives admitted requests time to finish before releasing engine resources. Shutdown deadlines bound this wait: expiry can interrupt requests and force termination.
 
 This is an architecture reference. For how to tune graceful shutdown for a deployment — grace periods, drain windows, and enabling migration — see the [Graceful Shutdown](../../../../kubernetes/fault-tolerance/graceful-shutdown.md) use-case guide.
 
 ## Overview
 
-Graceful shutdown in Dynamo ensures that:
+Backend workers follow this order within one total deadline:
 
-1. **Routing stops quickly** - Endpoints are unregistered from discovery first
-2. **In-flight requests can finish** - Workers keep serving during a short grace period
-3. **Endpoints drain** - After the grace period, endpoints are invalidated and optionally wait for in-flight work
-4. **Resources are cleaned up** - Engines, connections, and temporary files are released
-5. **Pods restart cleanly** - Exit codes signal Kubernetes for proper restart behavior
+1. Withdraw endpoints from discovery.
+2. Keep serving during router propagation grace.
+3. Close admission and drain tracked requests.
+4. On prefill workers, wait for KV transfers or apply the declared fallback.
+5. Clean up the engine and await runtime teardown.
 
 ## Signal Handling
 
@@ -29,43 +29,18 @@ All Dynamo components handle Unix signals for graceful shutdown:
 
 ### Implementation
 
-Each component registers signal handlers at startup:
+Rust backends use the `dynamo-backend-common` worker lifecycle. Python vLLM, SGLang, and TensorRT-LLM use `WorkerShutdown`, which owns admission tracking and joins the engine-owning task during cleanup. Both follow the sequence above. SGLang defers engine-installed signal callbacks until cleanup and runtime teardown complete.
 
-```python
-def signal_handler():
-    asyncio.create_task(graceful_shutdown(runtime, endpoints))
+`DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS` sets the SIGTERM-origin total. Pre-cleanup stages withhold the cleanup reserve; engine cleanup and runtime teardown share that reserve inside the total. An OS-thread watchdog bounds stalled teardown, and a second SIGTERM or SIGINT forces termination with exit code 70.
 
-for sig in (signal.SIGTERM, signal.SIGINT):
-    loop.add_signal_handler(sig, signal_handler)
-```
+> [!WARNING]
+> A successful request drain establishes that tracked requests have finished. A timed-out drain does not: engine cleanup must handle unfinished execution. Likewise, waiting a fixed KV-transfer fallback allowance is not proof that remote reads have completed.
 
-The `graceful_shutdown()` function:
-
-1. Logs the shutdown signal
-2. Unregisters all endpoints from discovery
-3. Waits for a configurable grace period (`DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`, default 5s)
-4. Awaits the optional `drain_callback` and `pre_shutdown_callback`, in that order
-5. Sets `shutdown_event`, if provided, to initiate cancellation of unfinished requests
-6. Awaits the optional `cleanup_callback` before runtime teardown
-7. Calls `runtime.shutdown()` to initiate runtime shutdown
-8. Returns while the runtime waits for request handlers to finish, including with an error (based on `graceful_shutdown` per endpoint)
-
-> **Rust backend workers follow a stricter order.** Workers built on
-> `dynamo-backend-common` run: unregister from discovery -> router grace ->
-> stop admission -> wait for in-flight requests to finish -> wait for prefill
-> KV-transfer quiescence -> engine cleanup -> transport teardown. The in-flight
-> barrier deliberately precedes engine cleanup, so a request can never be
-> executing against memory that cleanup has released. Every stage draws from a
-> single budget rather than its own independent timeout.
-
-The aggregate wait in `runtime.shutdown()` is bounded by
-`DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`, which defaults to 900 seconds
-(15 minutes). If endpoint draining exceeds this timeout, Dynamo logs the
-remaining graceful endpoint count and proceeds with runtime teardown.
+`runtime.shutdown()` starts teardown without waiting. `runtime.shutdown_and_wait()` joins the runtime-owned teardown task, including bounded lease revocation. The Rust API's optional timeout bounds endpoint draining only; worker coordinators additionally bound the entire wait by their remaining shutdown allowance. When no explicit bound is supplied, Rust uses `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` (900 seconds). Python's `shutdown_and_wait()` supplies the worker total-budget setting instead.
 
 ## Endpoint Draining
 
-After the grace period, `runtime.shutdown()` invalidates endpoints so no new requests are accepted. The behavior for in-flight requests depends on the `graceful_shutdown` parameter when serving the endpoint.
+Worker admission closes after router grace, before engine cleanup. Runtime endpoint invalidation happens later during transport teardown. For endpoints without a worker coordinator, `graceful_shutdown` controls whether runtime invalidation waits for in-flight work.
 
 ### Configuration
 
@@ -110,7 +85,7 @@ drain into a restart loop.
 
 ### Migration Integration
 
-Backend workers always use `graceful_shutdown=True`, meaning they wait for in-flight requests to complete until the engine is stopped. Request migration is configured at the **frontend** level via `--migration-limit`:
+Worker admission rejects stale-routed requests with a typed unavailable response before entering the engine. Draining errors use the established worker-unavailable wire identity so older frontends can apply their existing migration policy. Request migration is configured at the frontend via `--migration-limit`:
 
 - When migration is enabled at the frontend, requests interrupted by worker failure or graceful shutdown after grace expires are retried on healthy workers, subject to the retry budget and request limits
 - Workers don't need to know about migration configuration - they simply complete their work or signal incomplete streams
@@ -208,7 +183,7 @@ async def _initiate_shutdown(self, error: Exception):
 
 1. Kubernetes sends `SIGTERM` to the pod
 2. Dynamo initiates graceful shutdown
-3. Dynamo operator-created pods have `terminationGracePeriodSeconds` to complete (default: 60s)
+3. The pod's `terminationGracePeriodSeconds` bounds termination, including any `preStop` hook; explicit worker budgets must fit within this grace period with the required margin.
 4. If not terminated, Kubernetes sends `SIGKILL`
 
 ### Health Check Integration

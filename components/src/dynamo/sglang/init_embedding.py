@@ -9,6 +9,7 @@ import sglang as sgl
 
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
+from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
@@ -31,6 +32,7 @@ async def init_embedding(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize embedding worker component"""
     await _init_pooling(
@@ -39,6 +41,7 @@ async def init_embedding(
         shutdown_event,
         shutdown_endpoints,
         run_deferred_handlers,
+        shutdown=shutdown,
         rerank=False,
     )
 
@@ -49,6 +52,7 @@ async def _init_pooling(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    shutdown: WorkerShutdown | None = None,
     *,
     rerank: bool,
 ) -> None:
@@ -60,38 +64,39 @@ async def _init_pooling(
     set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
 
     engine = sgl.Engine(server_args=server_args)
-    server_args = config.use_resolved_server_args(engine.server_args)
-
-    shutdown_endpoints[:] = [generate_endpoint]
-
-    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
-        engine, config, generate_endpoint
-    )
-
-    if not rerank:
-        # Wire ``dynamo_embedding_*`` histograms to the worker's /metrics
-        # endpoint via a dedicated CollectorRegistry — the default Prometheus
-        # global registry is not exposed by the Dynamo SGLang publisher.
-        # Done AFTER engine init (and after setup_sgl_metrics) so the lazy
-        # ``prometheus_client`` import in metrics.py doesn't interfere with
-        # SGLang's multiprocess Prometheus setup.
-        from prometheus_client import CollectorRegistry
-
-        embedding_metrics_registry = CollectorRegistry()
-        register_engine_metrics_callback(
-            endpoint=generate_endpoint,
-            registry=embedding_metrics_registry,
-            metric_prefix_filters=["dynamo_embedding_"],
-            namespace_name=dynamo_args.namespace,
-            component_name=dynamo_args.component,
-            endpoint_name=dynamo_args.endpoint,
-            model_name=server_args.served_model_name,
-        )
-        init_embedding_metrics(embedding_metrics_registry)
-
-    ready_event = asyncio.Event()
     handler: EmbeddingWorkerHandler | RerankWorkerHandler | None = None
+    metrics_task = None
     try:
+        server_args = config.use_resolved_server_args(engine.server_args)
+
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
+            engine, config, generate_endpoint
+        )
+
+        if not rerank:
+            # Wire ``dynamo_embedding_*`` histograms to the worker's /metrics
+            # endpoint via a dedicated CollectorRegistry — the default Prometheus
+            # global registry is not exposed by the Dynamo SGLang publisher.
+            # Done AFTER engine init (and after setup_sgl_metrics) so the lazy
+            # ``prometheus_client`` import in metrics.py doesn't interfere with
+            # SGLang's multiprocess Prometheus setup.
+            from prometheus_client import CollectorRegistry
+
+            embedding_metrics_registry = CollectorRegistry()
+            register_engine_metrics_callback(
+                endpoint=generate_endpoint,
+                registry=embedding_metrics_registry,
+                metric_prefix_filters=["dynamo_embedding_"],
+                namespace_name=dynamo_args.namespace,
+                component_name=dynamo_args.component,
+                endpoint_name=dynamo_args.endpoint,
+                model_name=server_args.served_model_name,
+            )
+            init_embedding_metrics(embedding_metrics_registry)
+
+        ready_event = asyncio.Event()
         if rerank:
             handler = RerankWorkerHandler(engine, config, publisher, shutdown_event)
             health_check_payload = SglangRerankHealthCheckPayload(
@@ -106,8 +111,10 @@ async def _init_pooling(
             ).to_dict()
         register_model_taint_route(runtime, generate_endpoint)
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(
+            serve_endpoint(
+                generate_endpoint,
                 handler.generate,
+                shutdown=shutdown,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
@@ -128,12 +135,12 @@ async def _init_pooling(
         logging.error("Failed to serve pooling endpoint: %s", e)
         raise
     finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
+        if metrics_task is not None:
+            metrics_task.cancel()
+            try:
+                await metrics_task
+            except asyncio.CancelledError:
+                logging.info("Metrics task successfully cancelled")
         if handler is not None:
             handler.cleanup()
         else:
