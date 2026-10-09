@@ -68,7 +68,9 @@ The image's default entrypoint, `dynamo-sidecar`, maps the short names `vllm`,
 `docker run`; the deployment manifests override it with `command`. The inference
 engine remains in a separate GPU container, so the sidecar image does not
 include vLLM, SGLang, TensorRT-LLM, CUDA, or engine-specific Python
-dependencies.
+dependencies. The image runs as the non-root `dynamo` user with numeric user ID
+`1000` and declares port `9090` for Dynamo system endpoints, so Kubernetes can
+enforce `runAsNonRoot`.
 
 The sidecar image is published to NGC for each release, starting with 1.6.0:
 
@@ -83,3 +85,46 @@ To build it from source instead, run from the repository root with the
 docker buildx build --platform linux/amd64,linux/arm64 \
   -f lib/sidecar/Dockerfile -t <your-registry>/dynamo-sidecar:1.6.0-dev --push .
 ```
+
+## Pod Layout
+
+> [!NOTE]
+> Kubernetes sidecar mode is a work in progress.
+
+The engine and sidecar share one worker pod. The engine is the `main`
+container; the sidecar is a
+[native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/):
+an init container named `runtime` with `restartPolicy: Always`, which requires
+Kubernetes 1.29 or later. The two connect over loopback.
+
+```yaml
+podTemplate:
+  spec:
+    initContainers:
+    - name: runtime
+      image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>
+      command: [dynamo-vllm-sidecar]
+      args: [--grpc-endpoint, 127.0.0.1:50051]
+      restartPolicy: Always
+    containers:
+    - name: main
+      image: vllm/vllm-openai:<version>
+```
+
+Kubernetes starts the sidecar before the engine and keeps it running for the
+life of the pod. Declaring the `runtime` init container enables sidecar mode in
+the Dynamo operator, which gives the sidecar `/live` and `/health` probes on
+port `9090`. These probes do not track engine loading, so keep the engine's own
+probes on `main`. Sidecar mode supports worker, prefill, and decode components;
+multinode deployments are not yet supported.
+
+## Topologies
+
+Each engine page shows its single-node TP, multi-node TP, and multi-node DP
+topologies:
+[vLLM](../../modular-components/backends/vllm/sidecar.md#topologies),
+[SGLang](../../modular-components/backends/sglang/sidecar.md#topologies),
+[TensorRT-LLM](../../modular-components/backends/tensorrt-llm/sidecar.md#topologies).
+
+> [!NOTE]
+> The operator does not yet support multinode sidecar deployments.
