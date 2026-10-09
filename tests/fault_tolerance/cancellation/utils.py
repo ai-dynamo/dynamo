@@ -676,6 +676,42 @@ def strip_ansi_codes(text: str) -> str:
     return ansi_escape.sub("", text)
 
 
+def poll_for_any_pattern(
+    process: ManagedProcess,
+    patterns: list[str],
+    log_offset: int = 0,
+    max_wait_ms: int = 500,
+    poll_interval_ms: int = 5,
+) -> tuple[str, int]:
+    """Poll a process log until any one of *patterns* appears.
+
+    For assertions where several distinct log lines are all correct outcomes,
+    so requiring one specific line would make the test depend on a race rather
+    than on the property under test.
+
+    Returns:
+        Tuple of (matched pattern, new log offset).
+    """
+    max_iterations = max_wait_ms // poll_interval_ms
+    current_offset = log_offset
+
+    for iteration in range(max_iterations):
+        log_content = read_log_content(process.log_path)
+        for line in log_content[current_offset:].split("\n"):
+            clean_line = strip_ansi_codes(line).strip()
+            for pattern in patterns:
+                if pattern in clean_line:
+                    logger.info(f"Found pattern '{pattern}' at iteration {iteration}")
+                    return pattern, len(log_content)
+        current_offset = len(log_content)
+        time.sleep(poll_interval_ms / 1000.0)
+
+    raise AssertionError(
+        f"Failed to find any of {patterns} after {max_iterations} "
+        f"iterations ({max_wait_ms}ms)"
+    )
+
+
 def poll_for_pattern(
     process: ManagedProcess,
     pattern: str,
