@@ -10,7 +10,7 @@ use axum::{
     http::HeaderMap,
     routing::post,
 };
-use dynamo_decisions::{ParseOptions, Route, parse_request_with_options};
+use dynamo_decisions::{Route, parse_request};
 
 const BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
@@ -58,15 +58,7 @@ async fn handle_http(
         Dialect::OpenAi
     };
     let parsed = match body {
-        Ok(body) => parse_request_with_options(
-            &body,
-            route,
-            ParseOptions {
-                extensions_enabled: state.nvext_enabled(),
-                ..Default::default()
-            },
-        )
-        .map_err(decision_error),
+        Ok(body) => parse_request(&body, route).map_err(decision_error),
         Err(rejection) => Err(error(
             default_dialect,
             rejection.status(),

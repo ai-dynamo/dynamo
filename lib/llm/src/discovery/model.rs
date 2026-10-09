@@ -127,7 +127,6 @@ impl SystemOneExecutionSelection {
             supports_predicate: true,
             supports_choice: true,
             supports_score: true,
-            vocabulary_label_mass: true,
             measured_cache_reads: true,
             prompt_format_version: 1,
         }

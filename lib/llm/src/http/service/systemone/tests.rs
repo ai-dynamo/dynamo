@@ -21,7 +21,7 @@ use tokio::sync::{Notify, Semaphore};
 #[tokio::test]
 async fn dialect_errors_preserve_request_ids_and_validation_envelopes() {
     use dynamo_decisions::{DecisionError, Dialect};
-    for dialect in [Dialect::OpenAi, Dialect::SglangNative, Dialect::Jev] {
+    for dialect in [Dialect::OpenAi, Dialect::Jev] {
         let mut response =
             super::decision_error(DecisionError::validation(dialect, "invalid questions"));
         super::attach_request_ids(&mut response, "fixture-request");
@@ -37,7 +37,6 @@ async fn dialect_errors_preserve_request_ids_and_validation_envelopes() {
         let body = response_body(response).await;
         match dialect {
             Dialect::OpenAi => assert_eq!(body["error"]["type"], "invalid_request_error"),
-            Dialect::SglangNative => assert_eq!(body["object"], "error"),
             Dialect::Jev => assert!(body["detail"].is_array()),
         }
     }
