@@ -101,7 +101,9 @@ and recipes in the same order:
 Within a provider, recipes run newest model generation first, by the entry's
 `model.generation`: a quoted version number such as `"4.1"` for
 DeepSeek-V4.1-Flash, or `"1"` for a first, unnumbered release. Quote it, since
-YAML reads an unquoted `5.10` as `5.1`. Recipes of the same generation keep
+YAML reads an unquoted `5.10` as `5.1`. Within a generation, a title tagged
+`Pro` comes first, then `Flash`, then untagged titles (DeepSeek-V4-Pro,
+DeepSeek-V4-Flash, then a plain DeepSeek-V4). Recipes that still tie keep
 their `index.yaml` order. The generator also writes the overview's model-family and
 configuration counts, the provider CSS rules in `components/RecipeStyles.tsx`,
 and the order of `index.yaml`. Each generated span sits between

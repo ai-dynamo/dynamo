@@ -23,8 +23,9 @@ the catalog and the provider order cannot drift between surfaces:
 Provider order comes from ``_catalog/providers.yaml``: ranked providers first,
 in their listed order, then every other provider alphabetically by name. A
 provider with no active recipe is dropped. Within a provider, recipes are
-sorted newest model generation first (the entry's ``model.generation``); recipes
-of the same generation keep their ``index.yaml`` order.
+sorted newest model generation first (the entry's ``model.generation``). Within a
+generation, a title tagged Pro comes first, then Flash, then untagged titles;
+recipes that still tie keep their ``index.yaml`` order.
 
 The overview's model cards stay hand-written: this script only sorts them into
 the same order. Each active recipe needs exactly one card, matched by the card's
@@ -61,6 +62,10 @@ STYLES_TSX = FERN_DIR / "components" / "RecipeStyles.tsx"
 
 PROVIDER_KEY = re.compile(r"^[a-z0-9]+$")
 GENERATION = re.compile(r"^[0-9]+(\.[0-9]+)*$")
+# Variant tags in a recipe title, in display order; untagged titles follow.
+VARIANT_TAGS = tuple(
+    re.compile(rf"(?<![A-Za-z]){tag}(?![A-Za-z])") for tag in ("Pro", "Flash")
+)
 CARD_START = re.compile(r'^(\s*)<div className="dynamo-model-card"')
 CARD_PROVIDER = re.compile(r'data-recipe-card\b[^>]*?\bdata-provider="([^"]*)"')
 CARD_PAGE = re.compile(r'className="dynamo-card-link" href="([^"]+)"')
@@ -173,6 +178,14 @@ def parse_generation(entry: dict, source: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
+def variant_rank(title: str) -> int:
+    """Rank a title by its variant tag: Pro, then Flash, then untagged."""
+    return next(
+        (i for i, tag in enumerate(VARIANT_TAGS) if tag.search(title)),
+        len(VARIANT_TAGS),
+    )
+
+
 def load_catalog() -> tuple[dict[str, Provider], list[str], list[Recipe]]:
     providers, ranked = parse_providers(load_yaml(PROVIDERS_YAML))
     index = load_yaml(INDEX_YAML)
@@ -203,7 +216,8 @@ def group_recipes(
 
     Ranked providers come first in ranked order; the rest follow alphabetically
     by display name. Providers without an active recipe are omitted. Within a
-    provider, recipes run newest generation first; ties keep catalog order.
+    provider, recipes run newest generation first, then Pro, Flash, and untagged
+    within a generation; ties keep catalog order.
     """
     by_provider: dict[str, list[Recipe]] = {}
     for recipe in recipes:
@@ -213,14 +227,13 @@ def group_recipes(
         (k for k in by_provider if k not in ranked),
         key=lambda k: (providers[k].name.casefold(), k),
     )
-    # sorted() stays stable with reverse=True, so ties keep catalog order.
-    return [
-        Group(
-            providers[k],
-            tuple(sorted(by_provider[k], key=lambda r: r.generation, reverse=True)),
-        )
-        for k in head + tail
-    ]
+    return [Group(providers[k], order_within(by_provider[k])) for k in head + tail]
+
+
+def order_within(recipes: list[Recipe]) -> tuple[Recipe, ...]:
+    # Stable sorts, secondary key first: variant tag, then newest generation.
+    by_variant = sorted(recipes, key=lambda r: variant_rank(r.title))
+    return tuple(sorted(by_variant, key=lambda r: r.generation, reverse=True))
 
 
 # -------------------------------------------------------------- rendering

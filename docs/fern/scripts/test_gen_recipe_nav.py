@@ -95,6 +95,26 @@ def test_newest_generation_leads_within_a_provider():
     assert [r.id for r in groups[0].recipes] == ["q3.10", "q3.8", "q3-a", "q3-b"]
 
 
+def test_pro_then_flash_then_untagged_within_a_generation():
+    registry, ranked = providers(["deepseek"], {"deepseek": "DeepSeek"})
+    titles = ["V4", "V4-Flash", "V4-Pro-0813", "V4-Pro", "V4.1-Flash", "V4-Profile"]
+    recipes = [
+        gen.Recipe(
+            t, t, "deepseek", f"pages/{t}.mdx", t, 1, (4, 1) if "4.1" in t else (4,)
+        )
+        for t in titles
+    ]
+    groups = gen.group_recipes(registry, ranked, recipes)
+    assert [r.title for r in groups[0].recipes] == [
+        "V4.1-Flash",
+        "V4-Pro-0813",
+        "V4-Pro",
+        "V4-Flash",
+        "V4",
+        "V4-Profile",
+    ]
+
+
 @pytest.mark.parametrize(
     "value, expected",
     [("4.1", (4, 1)), ("5.10", (5, 10)), ("2.0", (2,)), ("3", (3,))],

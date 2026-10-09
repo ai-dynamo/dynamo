@@ -5,8 +5,9 @@
 # Each id must have a matching docs/fern/pages/recipes/_catalog/recipes/<id>.yaml file.
 # `recipes:` lists the ACTIVE (customer-visible) recipes, in sidebar order.
 # docs/fern/scripts/gen_recipe_nav.py sorts it: providers by providers.yaml,
-# then each provider's recipes newest model.generation first. Recipes of the
-# same generation keep their order here. Add a new id anywhere; the generator
+# then each provider's recipes newest model.generation first, and within a
+# generation Pro titles, then Flash, then untagged. Remaining ties keep their
+# order here. Add a new id anywhere; the generator
 # moves it into place and orders the sidebar and overview cards to match.
 # `deferred_recipes:` lists recipes held back from the rendered
 # R1 surface (no rendered page); their per-entry files live alongside the

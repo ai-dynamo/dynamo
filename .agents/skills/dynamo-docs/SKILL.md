@@ -215,7 +215,8 @@ Each page is a triple — page + catalog entry + nav:
    `docs/fern/index.yml`, the overview's provider filter and counts, the order of the overview's
    model cards, and the provider CSS from the catalog; never edit those spans by hand. Provider
    order is popularity-ranked, then alphabetical; within a provider, the newest `model.generation`
-   comes first (see the catalog README's Provider order section). For a **benchmark**, add the `- page:` under
+   comes first, and within a generation a `Pro` title precedes `Flash`, which precedes untagged
+   titles (see the catalog README's Provider order section). For a **benchmark**, add the `- page:` under
    the **Feature Benchmarks** section of `docs/fern/index.yml` by hand; per-benchmark pages are
    usually `hidden: true` (surfaced from the landing page).
 4. **Patch `docs/fern/main.css` only if** the page introduces a picker axis value not already supported
