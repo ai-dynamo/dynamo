@@ -87,3 +87,70 @@ disabled: v42 removes one quote-escape layer when writing each file, while its
 shell sanitization would alter filenames. Filenames are never interpolated into
 shell source. The reporter preserves spaces, quotes, and newlines and prints
 JSON-escaped names so they cannot introduce workflow commands into the log.
+
+## Standalone runtime admission
+
+The PR workflow may omit standalone SGLang CPU/GPU jobs for a nonempty set of
+ordinary modifications contained entirely in one audited class in
+`actions/changed-files/report.py`. Classes cannot be mixed. All eight change
+statuses must be present and valid; additions, copies, deletions, renames,
+type changes, unmerged/unknown files, unlisted siblings and malformed or missing
+data retain the existing full selection. Set repository variable
+`FORCE_FULL_CI=true` to bypass admission. Main, postmerge and nightly are unchanged.
+
+The initial vLLM processor unit-test class retains vLLM CPU tests and mypy.
+The operator class below retains builds/compliance and every existing operator,
+Helm, deployment, DGDR and Snapshot gate. Only `sglang-test` and
+`sglang-multi-gpu-test` are omitted: this includes standalone `gpu_0` tests on
+amd64/arm64 and `gpu_1`/`gpu_2` tests on amd64. Shared CPU selection is unchanged;
+execution still follows the original path filters and `RUN_DEPLOY_TESTS`.
+
+The exact operator consumer audit is below. These inputs do not configure the
+standalone backend launch scripts or runtime Python/Rust packages. Generated
+schemas are consumed by Kustomize, not by standalone model workers. Future
+consumer changes must revisit admission before broadening these dependencies.
+Paths are relative to the repository root.
+
+| Exact path | Consumer retained when its existing gate selects it |
+| --- | --- |
+| `deploy/helm/charts/platform/README.md` | Operator/Helm selection; no standalone runtime selection |
+| `deploy/helm/charts/platform/components/operator/templates/deployment.yaml` | Helm tests, operator deployment and Snapshot operator setup |
+| `deploy/helm/charts/platform/components/operator/values.yaml` | Helm tests, operator deployment and Snapshot operator setup |
+| `deploy/helm/charts/platform/tests/namespace_restriction_deployment_test.yaml` | Helm chart tests |
+| `deploy/helm/charts/platform/values.yaml` | Helm chart tests and deployment setup |
+| `deploy/operator/api/v1beta2/dynamographdeploymentcandidate_types.go` | Operator Go build/tests, CRD generation and DGDR deployment |
+| `deploy/operator/api/v1beta2/dynamographdeploymentrequest_types.go` | Operator Go build/tests, CRD generation and DGDR deployment |
+| `deploy/operator/api/v1beta2/dynamographdeploymentrun_types.go` | Operator Go build/tests, CRD generation and DGDR deployment |
+| `deploy/operator/api/v1beta2/groupversion_info.go` | Operator API registration/build/tests |
+| `deploy/operator/api/v1beta2/types_test.go` | Operator Go tests |
+| `deploy/operator/api/v1beta2/zz_generated.deepcopy.go` | Operator Go build/tests |
+| `deploy/operator/cmd/crd-apply/main.go` | Operator image/build/tests and CRD deployment setup |
+| `deploy/operator/cmd/crd-apply/main_test.go` | Operator Go tests |
+| `deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentcandidates.yaml` | Operator CRD installation, DGDR and schema generation |
+| `deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml` | Operator CRD installation, DGDR and schema generation |
+| `deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentruns.yaml` | Operator CRD installation, DGDR and schema generation |
+| `deploy/operator/docs/fix-api-anchors.py` | Operator API documentation generation |
+| `docs/fern/pages/kubernetes/installation/install-dynamo.md` | Fern documentation checks |
+| `docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md` | Fern/API documentation checks |
+| `docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx` | Generated API documentation checks |
+| `docs/fern/scripts/tests/test_gen_kubernetes_api.py` | Existing API generator regression checks |
+| `recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json` | Recipe/schema generation validation and Kustomize consumers |
+| `recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json` | Recipe/schema generation validation and Kustomize consumers |
+
+Historical PRs #15930 and #13603 contain eight **added** paths in this list, so
+both actual diffs retain full execution. Their recorded runtime cost is not
+measured admission savings. Paths not yet present on the target branch cannot
+qualify until introduced and later modified; introduction itself stays full.
+
+Admission saves runtime work only when the original gates selected that work.
+For this operator list, only these four existing paths select standalone backend
+runtime jobs through the `deploy` filter:
+
+- `deploy/helm/charts/platform/components/operator/templates/deployment.yaml`
+- `deploy/helm/charts/platform/components/operator/values.yaml`
+- `deploy/helm/charts/platform/tests/namespace_restriction_deployment_test.yaml`
+- `deploy/helm/charts/platform/values.yaml`
+
+README-, Go-, CRD-, documentation- and OpenAPI-only subsets already omit those
+runtime jobs and therefore save zero additional runtime work. A mixed set of
+allowed ordinary modifications can save work when it includes a listed Helm path.

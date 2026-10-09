@@ -7,9 +7,38 @@ import json
 import os
 from pathlib import Path
 
+# Exact operator/Helm/CRD consumers audited in FILTERS.md; additions, removals,
+# renames and any unlisted sibling still require the full runtime matrix.
+OPERATOR_ONLY_FILES = {
+    "deploy/helm/charts/platform/README.md",
+    "deploy/helm/charts/platform/components/operator/templates/deployment.yaml",
+    "deploy/helm/charts/platform/components/operator/values.yaml",
+    "deploy/helm/charts/platform/tests/namespace_restriction_deployment_test.yaml",
+    "deploy/helm/charts/platform/values.yaml",
+    "deploy/operator/api/v1beta2/dynamographdeploymentcandidate_types.go",
+    "deploy/operator/api/v1beta2/dynamographdeploymentrequest_types.go",
+    "deploy/operator/api/v1beta2/dynamographdeploymentrun_types.go",
+    "deploy/operator/api/v1beta2/groupversion_info.go",
+    "deploy/operator/api/v1beta2/types_test.go",
+    "deploy/operator/api/v1beta2/zz_generated.deepcopy.go",
+    "deploy/operator/cmd/crd-apply/main.go",
+    "deploy/operator/cmd/crd-apply/main_test.go",
+    "deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentcandidates.yaml",
+    "deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml",
+    "deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentruns.yaml",
+    "deploy/operator/docs/fix-api-anchors.py",
+    "docs/fern/pages/kubernetes/installation/install-dynamo.md",
+    "docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md",
+    "docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx",
+    "docs/fern/scripts/tests/test_gen_kubernetes_api.py",
+    "recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json",
+    "recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json",
+}
+
 # Each class must independently contain the entire modified-file set. Do not
 # union classes: mixed changes require the existing full runtime selection.
 SGLANG_UNRELATED_CHANGE_CLASSES = (
+    OPERATOR_ONLY_FILES,
     {"components/src/dynamo/frontend/tests/test_vllm_processor_unit.py"},
 )
 

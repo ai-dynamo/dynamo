@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 import yaml
+from report import OPERATOR_ONLY_FILES
 
 ACTION_DIR = Path(__file__).resolve().parent
 ACTION = yaml.safe_load((ACTION_DIR / "action.yml").read_text())
@@ -167,6 +168,39 @@ class ChangedFilesTests(unittest.TestCase):
             with self.subTest(files=files, outputs=outputs):
                 result = self.run_report(
                     {"all": files, "core": files}, extra_outputs=outputs
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.outputs["sglang_runtime"], expected)
+
+    def test_operator_admission_retains_unlisted_and_mixed_inputs(self):
+        files = sorted(OPERATOR_ONLY_FILES)
+        for extra, expected in (
+            ([], "false"),
+            (["deploy/operator/api/v1beta2/unreviewed.go"], "true"),
+            (
+                ["components/src/dynamo/frontend/tests/test_vllm_processor_unit.py"],
+                "true",
+            ),
+            (["components/src/dynamo/common/utils.py"], "true"),
+        ):
+            changed = files + extra
+            outputs = {
+                f"all_{name}_files.json": "[]"
+                for name in (
+                    "added",
+                    "copied",
+                    "deleted",
+                    "renamed",
+                    "type_changed",
+                    "unmerged",
+                    "unknown",
+                )
+            }
+            outputs["all_modified_files.json"] = json.dumps(changed)
+            outputs["all_all_changed_and_modified_files.json"] = json.dumps(changed)
+            with self.subTest(extra=extra):
+                result = self.run_report(
+                    {"all": changed, "deploy": changed}, extra_outputs=outputs
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.outputs["sglang_runtime"], expected)
