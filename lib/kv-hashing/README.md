@@ -86,6 +86,8 @@ Wire formats that carry only PLH (e.g., a slimmed-down `KvCacheEvent`) are now s
 
 **Existing zero-MM constructors are unchanged.** All pre-existing tests pass unchanged, and `tokens_mm_zero_mm_equivalence` proves field-for-field equality between the MM-empty `new_with_mm` path and the existing `new` path. `cross_check_tokens_zero_mm` proves the same gate at the kv-hashing level.
 
+`Request::into_blocks` does not build `TokenBlock`s. It hashes borrowed token slices through `hash_complete_blocks`. A window with no overlapping multimodal run is hashed in place; only an overlapping window allocates the 13-byte tagged frame.
+
 ## 5. Non-goals
 
 This crate intentionally does NOT contain — and should NOT grow:

@@ -20,3 +20,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 rmp-serde = "1.3"
+criterion = "0.5"
+
+[[bench]]
+name = "request_hash"
+harness = false

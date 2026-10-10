@@ -4,7 +4,7 @@
 //! Block-hash computation for a [`crate::Request`].
 
 use dynamo_tokens::{
-    BlockHash, PositionalLineageHash, SaltHash, SequenceHash, TokenBlockSequence, Tokens,
+    BlockHash, PositionalLineageHash, SaltHash, SequenceHash, hash_complete_blocks,
 };
 
 use crate::block::UniversalBlock;
@@ -18,67 +18,64 @@ impl Request {
         compute_salt_hash(self.salt(), self.lora_name())
     }
 
+    fn block_lineages(
+        &self,
+        block_size: u32,
+    ) -> Result<Vec<dynamo_tokens::BlockLineage>, KvHashingError> {
+        let salt_hash = self.salt_hash()?;
+        let token_mm = self.token_mm_info();
+        Ok(hash_complete_blocks(
+            &self.tokens,
+            &token_mm,
+            block_size,
+            salt_hash,
+        ))
+    }
+
     /// Returns the rich per-block result.
     ///
     /// One [`UniversalBlock`] per *complete* `block_size`-sized window in the request's
     /// token stream (placeholder slots count toward `block_size`). A trailing partial
     /// block — fewer than `block_size` slots — is not hashed and not returned.
+    ///
+    /// Tokens are borrowed. Text windows are hashed in place. Only a window that
+    /// overlaps a multimodal run allocates the 13-byte tagged frame.
     pub fn into_blocks(&self, block_size: u32) -> Result<Vec<UniversalBlock>, KvHashingError> {
-        let salt_hash = self.salt_hash()?;
-        let token_mm = self.token_mm_info();
-        let seq = TokenBlockSequence::new_with_mm(
-            Tokens::from(self.tokens.clone()),
-            &token_mm,
-            block_size,
-            Some(salt_hash),
-        )?;
-        Ok(seq.blocks().iter().map(UniversalBlock::from).collect())
-    }
-
-    fn into_blocks_consuming(self, block_size: u32) -> Result<Vec<UniversalBlock>, KvHashingError> {
-        let salt_hash = compute_salt_hash(self.salt(), self.lora_name())?;
-        let token_mm = self.mm_info.into_iter().map(Into::into).collect::<Vec<_>>();
-        let seq = TokenBlockSequence::new_with_mm(
-            Tokens::from(self.tokens),
-            &token_mm,
-            block_size,
-            Some(salt_hash),
-        )?;
-        Ok(seq.blocks().iter().map(UniversalBlock::from).collect())
+        Ok(self
+            .block_lineages(block_size)?
+            .into_iter()
+            .map(UniversalBlock::from)
+            .collect())
     }
 
     /// Projection: per-block [`BlockHash`].
     pub fn block_hashes(&self, block_size: u32) -> Result<Vec<BlockHash>, KvHashingError> {
         Ok(self
-            .into_blocks(block_size)?
+            .block_lineages(block_size)?
             .into_iter()
-            .map(|b| b.block_hash)
+            .map(|lineage| lineage.block_hash)
             .collect())
     }
 
     /// Projection: per-block [`SequenceHash`] (parent-chained, derived from PLH).
     pub fn sequence_hashes(&self, block_size: u32) -> Result<Vec<SequenceHash>, KvHashingError> {
         Ok(self
-            .into_blocks(block_size)?
+            .block_lineages(block_size)?
             .into_iter()
-            .map(|b| b.sequence_hash())
+            .map(|lineage| lineage.sequence_hash)
             .collect())
     }
 
     /// Consuming projection: per-block [`SequenceHash`].
     ///
-    /// This preserves the borrowed [`Self::sequence_hashes`] API for callers that need to
-    /// keep the request, while allowing one-shot producers to move the token vector into
-    /// block construction and avoid an extra full-prompt clone.
+    /// Hashing borrows the token slice, so this does the same work as
+    /// [`Self::sequence_hashes`]. It remains for callers that already own the
+    /// request and do not need it afterward.
     pub fn into_sequence_hashes(
         self,
         block_size: u32,
     ) -> Result<Vec<SequenceHash>, KvHashingError> {
-        Ok(self
-            .into_blocks_consuming(block_size)?
-            .into_iter()
-            .map(|b| b.sequence_hash())
-            .collect())
+        self.sequence_hashes(block_size)
     }
 
     /// Projection: per-block [`PositionalLineageHash`] (the universal identifier).
@@ -87,9 +84,9 @@ impl Request {
         block_size: u32,
     ) -> Result<Vec<PositionalLineageHash>, KvHashingError> {
         Ok(self
-            .into_blocks(block_size)?
+            .block_lineages(block_size)?
             .into_iter()
-            .map(|b| b.plh)
+            .map(|lineage| lineage.positional_lineage_hash)
             .collect())
     }
 }
