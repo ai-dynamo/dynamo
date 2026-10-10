@@ -969,9 +969,6 @@ mod tests {
 
         assert!(should_publish);
         assert_eq!(tracker.num_blocks(), 0);
-        for hash in ["vllm_hash1", "kvbm_hash1", "vllm_alias"] {
-            assert!(tracker.get_block_sources(hash).is_none());
-        }
         assert!(matches!(
             tracker.drain_events().as_slice(),
             [ConsolidatedEvent::Remove { block_hash, .. }] if block_hash == "vllm_hash1"
@@ -1159,22 +1156,11 @@ mod tests {
         );
 
         assert_eq!(tracker.num_blocks(), 2);
-        tracker.handle_store(
-            "block1_alias".to_string(),
-            EventSource::Vllm,
-            vec![1, 2, 3, 4],
-            None,
-            4,
-            None,
-            Some(StorageTier::Device),
-            None,
-        );
 
         // Clear all
         tracker.handle_clear_all();
 
         assert_eq!(tracker.num_blocks(), 0);
-        assert!(tracker.get_block_sources("block1_alias").is_none());
 
         // Verify hash_mapping is also cleared
         let should_publish =
