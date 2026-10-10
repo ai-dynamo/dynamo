@@ -33,7 +33,8 @@ use tokenizers::Tokenizer as HfTokenizer;
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
-const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const FALLBACK_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DEFAULT_TOKENIZER_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 static TOKENIZER_CACHE: OnceLock<crate::tokenizers::SharedTokenizerCache> = OnceLock::new();
 
 fn append_runtime_contract_checksum(
@@ -100,30 +101,58 @@ fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
     !matches!(value, Some("0"))
 }
 
-fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
-    match value {
-        Some(value) => match value.parse::<usize>() {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!(
-                    env_var = "DYN_TOKENIZER_CACHE_BYTES",
-                    value,
-                    default = DEFAULT_TOKENIZER_CACHE_BYTES,
-                    %error,
-                    "Failed to parse tokenizer cache byte budget; using default"
-                );
-                DEFAULT_TOKENIZER_CACHE_BYTES
-            }
-        },
-        None => DEFAULT_TOKENIZER_CACHE_BYTES,
+fn tokenizer_cache_memory_capacity() -> Option<u64> {
+    let pid = sysinfo::get_current_pid().ok()?;
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().without_tasks(),
+    );
+    // TODO: Consider upgrading sysinfo when a published release includes
+    // https://github.com/GuillaumeGomez/sysinfo/pull/1723
+    // for hybrid cgroups and remapped mount paths.
+    Some(system.process(pid)?.cgroup_limits()?.total_memory)
+}
+
+fn tokenizer_cache_budget(
+    value: Option<&str>,
+    memory_capacity: impl FnOnce() -> Option<u64>,
+) -> (usize, &'static str) {
+    let parsed = value.map(str::parse::<usize>).transpose();
+    if let Ok(Some(bytes)) = parsed {
+        return (bytes, "DYN_TOKENIZER_CACHE_BYTES");
     }
+
+    let (default, source) = match memory_capacity()
+        .and_then(|bytes| usize::try_from((bytes / 8).min(MAX_DEFAULT_TOKENIZER_CACHE_BYTES)).ok())
+    {
+        Some(bytes) => (bytes, "memory_capacity"),
+        None => (FALLBACK_TOKENIZER_CACHE_BYTES, "fallback"),
+    };
+    if let Err(error) = parsed {
+        tracing::warn!(
+            env_var = "DYN_TOKENIZER_CACHE_BYTES",
+            value,
+            default,
+            %error,
+            "Failed to parse tokenizer cache byte budget; using default"
+        );
+    }
+    (default, source)
 }
 
 fn shared_tokenizer_cache() -> &'static crate::tokenizers::SharedTokenizerCache {
     TOKENIZER_CACHE.get_or_init(|| {
-        let cache_bytes =
-            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
-        tracing::info!(cache_bytes, "initializing process-wide tokenizer cache");
+        let (cache_bytes, source) = tokenizer_cache_budget(
+            std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref(),
+            tokenizer_cache_memory_capacity,
+        );
+        tracing::info!(
+            cache_bytes,
+            source,
+            "initializing process-wide tokenizer cache"
+        );
         crate::tokenizers::SharedTokenizerCache::new(cache_bytes)
     })
 }
@@ -1342,8 +1371,12 @@ impl ModelDeploymentCard {
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — combined token-ID byte budget for all models
-    ///   in this process (default 64 MiB), read once when the first eligible tokenizer
-    ///   creates the shared cache. Models compete for capacity without reserved shares.
+    ///   in this process. The default is 1/8 of the memory capacity reported by sysinfo
+    ///   for this process's cgroup, capped at 8 GiB, or 64 MiB if unavailable (including
+    ///   on non-Linux platforms). Valid overrides, including zero, bypass detection;
+    ///   invalid values use the calculated default. The budget is read once when the
+    ///   first eligible tokenizer creates the shared cache. Models compete for capacity
+    ///   without reserved shares.
     ///   Cache metadata and tokenizer objects are excluded; eviction is deferred.
     /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
     ///   (when the cache is enabled) a partial hit also caches the new suffix so each
@@ -2571,17 +2604,42 @@ mod tests {
     }
 
     #[test]
-    fn tokenizer_cache_bytes_defaults_to_64_mib_and_accepts_valid_overrides() {
-        assert_eq!(
-            super::tokenizer_cache_bytes(None),
-            super::DEFAULT_TOKENIZER_CACHE_BYTES
-        );
-        assert_eq!(super::tokenizer_cache_bytes(Some("1024")), 1024);
-        assert_eq!(super::tokenizer_cache_bytes(Some("0")), 0);
-        assert_eq!(
-            super::tokenizer_cache_bytes(Some("invalid")),
-            super::DEFAULT_TOKENIZER_CACHE_BYTES
-        );
+    fn tokenizer_cache_budget_scales_with_memory_capacity() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        for (capacity, expected) in [
+            (Some(4 * GIB), 512 * 1024 * 1024),
+            (Some(32 * GIB), 4 * GIB as usize),
+            (Some(64 * GIB), 8 * GIB as usize),
+            (Some(128 * GIB), 8 * GIB as usize),
+            (Some(u64::MAX), 8 * GIB as usize),
+            (Some(8), 1),
+            (Some(7), 0),
+            (None, super::FALLBACK_TOKENIZER_CACHE_BYTES),
+        ] {
+            for value in [None, Some("invalid")] {
+                let (bytes, source) = super::tokenizer_cache_budget(value, || capacity);
+                assert_eq!(bytes, expected, "capacity={capacity:?}, value={value:?}");
+                assert_eq!(
+                    source,
+                    if capacity.is_some() {
+                        "memory_capacity"
+                    } else {
+                        "fallback"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tokenizer_cache_budget_overrides_bypass_memory_detection() {
+        for expected in [0, 1024, usize::MAX] {
+            let value = expected.to_string();
+            assert_eq!(
+                super::tokenizer_cache_budget(Some(&value), || panic!("unexpected detection")),
+                (expected, "DYN_TOKENIZER_CACHE_BYTES")
+            );
+        }
     }
 
     #[test]
