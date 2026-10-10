@@ -76,10 +76,11 @@ impl FpmEventRelay {
 
 /// Direct Forward Pass Metrics publisher for in-process producers such as
 /// the TRT-LLM adapter. The underlying Rust `FpmDirectPublisher` owns per-DP
-/// serialization tasks (each with its own 1s idle heartbeat timer) and a
-/// single event-plane publisher task. Python callers do not need to manage
-/// heartbeat — the Rust side emits a zeroed snapshot when no data arrives
-/// for `IDLE_HEARTBEAT_INTERVAL` (matches vLLM's `HEARTBEAT_INTERVAL = 1.0`).
+/// serialization tasks and a single event-plane publisher task. Each rank's
+/// idle heartbeat defaults to one second and can be set with
+/// `DYN_FPM_HEARTBEAT_INTERVAL_MS` up to 300,000 ms. Python callers do not need
+/// to manage heartbeat — the Rust side emits a zeroed snapshot when no data
+/// arrives for that interval.
 #[pyclass]
 pub(crate) struct FpmDirectPublisher {
     // Owns the CancellationToken that drives Drop-based shutdown of all
