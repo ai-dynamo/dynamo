@@ -23,6 +23,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
 from dynamo.common.gms_failover import (
+    lease_transition_serving_enabled,
     run_gms_failover_post_lock_fence,
     run_gms_failover_promotion_warmup,
 )
@@ -1384,6 +1385,23 @@ class WorkerFactory:
             )
             raise
 
+    async def _resume_after_kv_fence(self, handler) -> None:
+        """Resume scheduling after a mapped standby has completed KV fencing."""
+        timeout = float(os.environ.get("DYN_GMS_FAILOVER_WAKEUP_TIMEOUT_SECS", "120"))
+        try:
+            await _run_gms_operation_with_hard_timeout(
+                handler._pause_controller.resume([]),
+                timeout=timeout,
+                label="GMS scheduler and generation resume",
+            )
+        except _GMSHardTimeout:
+            logger.critical(
+                "[GMS failover] scheduler resume did not complete within %.0fs; "
+                "failing closed",
+                timeout,
+            )
+            raise
+
     def _maybe_start_rank_liveness_monitor(
         self, handler, config: Config, *, failover_lock=None
     ):
@@ -1467,14 +1485,19 @@ class WorkerFactory:
             # process-owned lock is released.
             os.kill(os.getpid(), signal.SIGTERM)
 
-        monitor_kwargs = {"expected_ranks": range(1, nnodes)}
+        mapped_standby = os.environ.get(
+            "DYN_VLLM_GMS_MAPPED_STANDBY", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        monitor_kwargs = {
+            "expected_ranks": range(1, nnodes),
+            "broadcast_fence": mapped_standby,
+        }
         if handler is None:
             # Model/process startup can starve Python heartbeat threads for
             # hundreds of milliseconds. Use the conservative default until the
             # serving handler is attached, then adopt the configured deadline.
-            monitor_kwargs["timeout_ms_override"] = max(
-                rl.timeout_ms(), rl.DEFAULT_TIMEOUT_MS
-            )
+            monitor_kwargs["timeout_ms_override"] = rl.startup_timeout_ms()
+            monitor_kwargs["runtime_armed"] = False
         monitor = rl.RankLivenessMonitor(on_rank_lost, **monitor_kwargs)
         setattr(monitor, "_gms_handler_ref", handler_ref)
         if handler is None:
@@ -1594,8 +1617,20 @@ class WorkerFactory:
 
         # The pre-initialized standby relinquishes its writer role without clearing
         # prefix metadata, then waits while remaining healthy but undiscoverable.
-        await handler._pause_controller.pause(1, clear_cache=False)
-        await handler.engine_client.wake_up(["weights"])
+        mapped_standby = os.environ.get(
+            "DYN_VLLM_GMS_MAPPED_STANDBY", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        lease_transition_serving = lease_transition_serving_enabled(
+            "vllm", mapped_standby=mapped_standby
+        )
+        if mapped_standby:
+            await handler._pause_controller.pause_generation_only(clear_cache=False)
+            logger.info(
+                "[Shadow] Generation paused with persistent KV mappings retained"
+            )
+        else:
+            await handler._pause_controller.pause(1, clear_cache=False)
+            await handler.engine_client.wake_up(["weights"])
         if failover_metrics is not None:
             failover_metrics.set_state("standby")
         runtime.set_health_status(True)
@@ -1610,14 +1645,24 @@ class WorkerFactory:
         resume_attempted = False
         resumed = False
         try:
-            await run_gms_failover_post_lock_fence(backend_name="vllm", role="shadow")
             resume_attempted = True
-            await self._wake_up_kv_fenced(handler, ["kv_cache"])
+            # Classify predecessor readers before admitting any successor
+            # access. Optional GPU-quiescence reclamation remains asynchronous.
+            await run_gms_failover_post_lock_fence(backend_name="vllm", role="shadow")
+            if mapped_standby:
+                await self._resume_after_kv_fence(handler)
+            else:
+                await self._wake_up_kv_fenced(handler, ["kv_cache"])
             resumed = True
             handler._pause_controller.mark_resumed()
             if promotion_warmup is not None:
                 await promotion_warmup()
-            self._maybe_start_rank_liveness_monitor(handler, config)
+            self._maybe_start_rank_liveness_monitor(handler, config, failover_lock=lock)
+            if lease_transition_serving:
+                logger.info(
+                    "[Shadow] Serving from FREE and exact-generation SEALED leases "
+                    "while GPU-quiescence recovery completes"
+                )
         except BaseException as activation_error:
             safe_to_release = not resume_attempted
             activation_may_still_run = isinstance(

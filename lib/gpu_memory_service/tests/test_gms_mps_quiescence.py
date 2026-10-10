@@ -1036,3 +1036,63 @@ async def test_control_stderr_is_not_cuda_success(monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
     with pytest.raises(RuntimeError, match="MPS control diagnostic"):
         await GPUQuiescenceManager()._control("vllm", "terminate_client", "1", "2")
+
+
+def test_failure_notifier_is_connected_before_crash_and_sends_hint(monkeypatch):
+    import zmq
+
+    connected: list[str] = []
+    sent: list[list[bytes]] = []
+
+    class Socket:
+        def setsockopt(self, *_args):
+            pass
+
+        def connect(self, address):
+            connected.append(address)
+
+        def send_multipart(self, frames, **_kwargs):
+            sent.append(frames)
+
+        def close(self, _linger):
+            pass
+
+    socket = Socket()
+    monkeypatch.setattr(
+        zmq,
+        "Context",
+        type(
+            "Context",
+            (),
+            {
+                "instance": staticmethod(
+                    lambda: type("C", (), {"socket": lambda self, _kind: socket})()
+                )
+            },
+        ),
+    )
+    manager = GPUQuiescenceManager()
+    pid = os.getpid()
+    address = "tcp://leader.example:29555"
+    manager._ensure_failure_notifier(address)
+    client = GPUClient(
+        "vllm",
+        "/shared/cohort",
+        pid,
+        quiescence.process_start_time(pid),
+        7,
+        address,
+    )
+
+    manager._notify_gpu_failure(client, "signal-11")
+
+    assert connected == [address]
+    assert sent == [
+        [
+            b"gpu-failed-v1",
+            b"/shared/cohort",
+            b"7",
+            str(pid).encode(),
+            b"signal-11",
+        ]
+    ]

@@ -21,8 +21,10 @@ NOTE on failover latency: the serving timeout governs DETECTION. How fast the pr
 *dies* (releasing the failover flock) is governed by TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC —
 the monitoring thread waits that long for the flight-recorder dump to coordinate before
 aborting. Default 60000ms; measured ~69s exit at the default vs ~5.5s with it set to 1000.
-Set TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC=1000 (and TORCH_NCCL_ASYNC_ERROR_HANDLING=1) for
-prompt failover. This module warns once if it is left high.
+The Dynamo vLLM and SGLang failover entrypoints default
+TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC to 1000 and TORCH_NCCL_ASYNC_ERROR_HANDLING to 1
+before importing CUDA-facing modules. Explicit operator values remain authoritative. This
+module warns once if an explicit configuration leaves the teardown wait high.
 """
 
 from __future__ import annotations

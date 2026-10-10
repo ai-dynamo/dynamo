@@ -48,6 +48,11 @@ from typing import Callable, Iterable, Optional
 
 from dynamo.common.utils.env import env_bool
 from dynamo.common.utils.env import env_int as _int_env
+from gpu_memory_service.common.gpu_failure_marker import (
+    gpu_failure_marker_path,
+    read_gpu_failure_marker,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +60,7 @@ DEFAULT_HEARTBEAT_MS = 250
 DEFAULT_TIMEOUT_MS = 750
 DEFAULT_LIVENESS_PORT = 29555
 DEFAULT_STARTUP_GRACE_MS = 30_000
+DEFAULT_STARTUP_TIMEOUT_MS = 5_000
 # Limit receive work per poll so a busy peer cannot starve lost-rank deadlines.
 _MAX_HEARTBEATS_PER_POLL = 64
 
@@ -78,6 +84,17 @@ def startup_grace_ms() -> int:
     return max(
         timeout_ms(),
         _int_env("DYN_GMS_RANK_LIVENESS_STARTUP_GRACE_MS", DEFAULT_STARTUP_GRACE_MS),
+    )
+
+
+def startup_timeout_ms() -> int:
+    """Deadline for already-connected peers until serving is armed."""
+
+    return max(
+        timeout_ms(),
+        _int_env(
+            "DYN_GMS_RANK_LIVENESS_STARTUP_TIMEOUT_MS", DEFAULT_STARTUP_TIMEOUT_MS
+        ),
     )
 
 
@@ -119,6 +136,19 @@ def leader_connect_addr(leader_host: str, cohort_identity: str | None = None) ->
     return f"tcp://{leader_host}:{liveness_port(cohort_identity)}"
 
 
+def configured_gpu_failure_marker() -> str | None:
+    """Return this boot's GMS crash marker path, when shared KV is active."""
+
+    for name in (
+        "GMS_VLLM_WRITER_COHORT_PATH",
+        "GMS_SGLANG_WRITER_COHORT_PATH",
+    ):
+        cohort = os.environ.get(name)
+        if cohort:
+            return str(gpu_failure_marker_path(cohort))
+    return None
+
+
 class RankLivenessClient:
     """Worker heartbeat client with optional leader-loss detection.
 
@@ -136,6 +166,7 @@ class RankLivenessClient:
         on_leader_lost: Callable[[int, str], None] | None = None,
         timeout_ms_override: Optional[int] = None,
         startup_grace_ms_override: Optional[int] = None,
+        startup_timeout_ms_override: Optional[int] = None,
     ):
         self._leader_host = leader_host
         self._rank = int(rank)
@@ -154,6 +185,14 @@ class RankLivenessClient:
             else max(0, startup_grace_ms_override)
         )
         self._startup_grace = grace_value / 1000.0
+        startup_timeout_value = (
+            startup_timeout_ms()
+            if startup_timeout_ms_override is None
+            else max(1, startup_timeout_ms_override)
+        )
+        self._startup_timeout = startup_timeout_value / 1000.0
+        self._runtime_armed = False
+        self._runtime_armed_event = threading.Event()
         self._fired = False
 
     def start(self) -> None:
@@ -172,9 +211,16 @@ class RankLivenessClient:
 
     def stop(self) -> None:
         self._stop.set()
+        self._runtime_armed_event.set()
         if self._thread is not None:
             self._thread.join(timeout=0.5)
             self._thread = None
+
+    def wait_for_runtime_arm(self, timeout: float | None = None) -> bool:
+        """Wait until the leader releases this rank into serving runtime."""
+
+        self._runtime_armed_event.wait(timeout)
+        return self._runtime_armed and not self._stop.is_set() and not self._fired
 
     def _run(self) -> None:
         import zmq
@@ -217,7 +263,26 @@ class RankLivenessClient:
                             frame = sock.recv(flags=zmq.NOBLOCK)
                         except zmq.Again:
                             break
-                        if frame == b"ack":
+                        if frame == b"fence":
+                            logger.warning(
+                                "[GMS liveness] leader fenced the TP cohort after "
+                                "a peer-rank failure"
+                            )
+                            try:
+                                sock.send(b"fence-ack", flags=zmq.NOBLOCK)
+                            except zmq.ZMQError:
+                                logger.debug(
+                                    "[GMS liveness] rank %d fence acknowledgement "
+                                    "failed",
+                                    self._rank,
+                                    exc_info=True,
+                                )
+                            self._fire(0, "peer-rank-lost")
+                            return
+                        if frame in (b"startup-ack", b"ack"):
+                            if frame == b"ack":
+                                self._runtime_armed = True
+                                self._runtime_armed_event.set()
                             if last_ack is None:
                                 logger.info(
                                     "[GMS liveness] rank %d received leader acknowledgement",
@@ -228,13 +293,16 @@ class RankLivenessClient:
                     if last_ack is None and now - started > self._startup_grace:
                         self._fire(0, "startup-timeout")
                         return
-                    if last_ack is not None and now - last_ack > self._timeout:
+                    deadline = (
+                        self._timeout if self._runtime_armed else self._startup_timeout
+                    )
+                    if last_ack is not None and now - last_ack > deadline:
                         logger.warning(
                             "[GMS liveness] leader silent %.0fms (deadline %.0fms); "
                             "local scheduling gap %.0fms, poll cycle %.0fms; "
                             "suspected failure, writer fencing still required",
                             (now - last_ack) * 1000,
-                            self._timeout * 1000,
+                            deadline * 1000,
                             scheduling_gap_ms,
                             (now - cycle_started) * 1000,
                         )
@@ -279,6 +347,9 @@ class RankLivenessMonitor:
         timeout_ms_override: Optional[int] = None,
         expected_ranks: Optional[Iterable[int]] = None,
         startup_grace_ms_override: Optional[int] = None,
+        runtime_armed: bool = True,
+        broadcast_fence: bool = False,
+        failure_marker_path: Optional[str] = None,
     ):
         self._on_rank_lost = on_rank_lost
         self._bind_addr = bind_addr or leader_bind_addr()
@@ -297,7 +368,14 @@ class RankLivenessMonitor:
             else max(0, startup_grace_ms_override)
         )
         self._startup_grace = grace_value / 1000.0
+        self._runtime_armed = bool(runtime_armed)
+        self._broadcast_fence_enabled = bool(broadcast_fence)
         self._stop = threading.Event()
+        self._failure_marker_path = (
+            configured_gpu_failure_marker()
+            if failure_marker_path is None
+            else failure_marker_path
+        )
         self._thread: Optional[threading.Thread] = None
         self._fired = False
         self._bind_ready = threading.Event()
@@ -352,6 +430,12 @@ class RankLivenessMonitor:
         after the serving handler is attached.
         """
         self._timeout = max(1, int(value)) / 1000.0
+        self.arm_runtime()
+
+    def arm_runtime(self) -> None:
+        """Release registered ranks from startup fencing into serving runtime."""
+
+        self._runtime_armed = True
 
     def wait_for_ranks(
         self, expected_ranks: Iterable[int], timeout: float | None = None
@@ -399,6 +483,23 @@ class RankLivenessMonitor:
             while not self._stop.is_set():
                 cycle_started = time.monotonic()
                 # Recompute every cycle: set_timeout_ms() is used after model
+                if self._failure_marker_path:
+                    failure = read_gpu_failure_marker(self._failure_marker_path)
+                    if failure is not None:
+                        rank, pid, source = failure
+                        logger.warning(
+                            "[GMS liveness] GPU crash interlock reported rank %d "
+                            "pid %d (%s); writer fencing remains authoritative",
+                            rank,
+                            pid,
+                            source,
+                        )
+                        if self._broadcast_fence_enabled:
+                            self._broadcast_fence(
+                                sock, poller, last_seen, lost_rank=rank
+                            )
+                        self._fire(rank, "gpu-crash-interlock")
+                        return
                 # startup and must change both the deadline and observation
                 # cadence without recreating the bound ROUTER socket.
                 poll_ms = self._poll_interval_ms(self._timeout)
@@ -410,6 +511,24 @@ class RankLivenessMonitor:
                             frames = sock.recv_multipart(flags=zmq.NOBLOCK)
                         except zmq.Again:
                             break
+                        failure = self._gpu_failure_of(frames)
+                        if failure is not None:
+                            rank, pid, source = failure
+                            logger.warning(
+                                "[GMS liveness] direct GPU crash notification "
+                                "rank %d pid %d (%s); writer fencing remains "
+                                "authoritative",
+                                rank,
+                                pid,
+                                source,
+                            )
+                            if self._broadcast_fence_enabled:
+                                self._broadcast_fence(
+                                    sock, poller, last_seen, lost_rank=rank
+                                )
+                            self._fire(rank, "gpu-crash-interlock-zmq")
+                            return
+
                         if len(frames) < 2 or frames[-1] != b"hb":
                             continue
                         rank = self._rank_of(frames[0])
@@ -430,7 +549,8 @@ class RankLivenessMonitor:
                             self._seen_ranks.add(rank)
                             self._seen_changed.notify_all()
                         try:
-                            sock.send_multipart([frames[0], b"ack"], flags=zmq.NOBLOCK)
+                            ack = b"ack" if self._runtime_armed else b"startup-ack"
+                            sock.send_multipart([frames[0], ack], flags=zmq.NOBLOCK)
                         except zmq.ZMQError:
                             logger.debug(
                                 "[GMS liveness] leader acknowledgement failed for rank %d",
@@ -459,10 +579,96 @@ class RankLivenessMonitor:
                             self._timeout * 1000,
                             (now - cycle_started) * 1000,
                         )
+                        if self._broadcast_fence_enabled:
+                            self._broadcast_fence(
+                                sock, poller, last_seen, lost_rank=rank
+                            )
                         self._fire(rank, "liveness-timeout")
                         return
         finally:
             sock.close(0)
+
+    def _gpu_failure_of(self, frames: list[bytes]) -> tuple[int, int, str] | None:
+        """Validate a direct GMS hint against this monitor's exact cohort."""
+
+        if len(frames) != 6 or frames[1] != b"gpu-failed-v1":
+            return None
+        try:
+            cohort = frames[2].decode()
+            rank = int(frames[3])
+            pid = int(frames[4])
+            source = frames[5].decode()
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if rank < 0 or pid <= 0 or not source:
+            return None
+        expected_marker = str(gpu_failure_marker_path(cohort))
+        if not self._failure_marker_path or os.path.normpath(
+            expected_marker
+        ) != os.path.normpath(self._failure_marker_path):
+            logger.warning(
+                "[GMS liveness] ignoring GPU crash notification for another cohort %s",
+                cohort,
+            )
+            return None
+        return rank, pid, source
+
+    def _broadcast_fence(self, sock, poller, last_seen, *, lost_rank: int) -> None:
+        """Prompt surviving ranks to fail-stop before the leader releases ownership.
+
+        The writer-cohort lock remains the correctness fence: takeover still waits
+        for every writer guard even when this best-effort latency hint is lost. An
+        acknowledgement only keeps the ROUTER alive long enough to put the fence
+        on each established connection; it is not treated as proof of process or
+        CUDA termination.
+        """
+
+        import zmq
+
+        pending = {rank for rank in last_seen if rank != lost_rank}
+        if not pending:
+            return
+        for rank in pending:
+            try:
+                sock.send_multipart(
+                    [f"rank-{rank}".encode(), b"fence"], flags=zmq.NOBLOCK
+                )
+            except zmq.ZMQError:
+                logger.debug(
+                    "[GMS liveness] failed to send cohort fence to rank %d",
+                    rank,
+                    exc_info=True,
+                )
+
+        # Bound this optimization well below the normal heartbeat deadline. Ranks
+        # that do not acknowledge still fail-stop when the leader disappears, and
+        # the successor cannot pass retire_writer_cohort until their guards close.
+        deadline = time.monotonic() + min(0.1, self._timeout / 2)
+        while pending:
+            remaining_ms = int(max(0.0, deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                break
+            events = dict(poller.poll(remaining_ms))
+            if sock not in events:
+                break
+            for _ in range(_MAX_HEARTBEATS_PER_POLL):
+                try:
+                    frames = sock.recv_multipart(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    break
+                if len(frames) < 2:
+                    continue
+                rank = self._rank_of(frames[0])
+                if rank is not None and frames[-1] == b"fence-ack":
+                    pending.discard(rank)
+        if pending:
+            logger.warning(
+                "[GMS liveness] cohort fence unacknowledged by ranks %s; "
+                "writer-cohort retirement remains authoritative",
+                sorted(pending),
+            )
+        else:
+            logger.info("[GMS liveness] surviving ranks acknowledged cohort fence")
 
     def _fire(self, rank: int, reason: str) -> bool:
         if self._fired:
