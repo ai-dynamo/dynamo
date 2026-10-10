@@ -10,7 +10,7 @@ Validates:
   - tool_choice variants: auto / required / none / named function
   - Multi-turn conversations carrying tool results
   - Multi-tool parallel calls
-  - Tool calling on an EAGLE3 speculative decoding worker (nightly)
+  - Tool calling on an EAGLE3 speculative decoding worker
 
 """
 
@@ -44,9 +44,7 @@ Draft7Validator = jsonschema.Draft7Validator
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-# Same main/draft pair as examples/backends/sglang/launch/agg_spec_decoding.sh.
-SPEC_DECODING_MODEL = "Qwen/Qwen3-8B"
-SPEC_DECODING_DRAFT_MODEL = "Tengyunw/qwen3_8b_eagle3"
+SPEC_DECODING_DRAFT_MODEL = "GavinLucky/SGLang-EAGLE3-Qwen3-0.6B-SpecForge"
 
 pytestmark = [
     pytest.mark.sglang,
@@ -55,6 +53,8 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.integration,
     pytest.mark.model(MODEL_NAME),
+    # CI workers run HF_HUB_OFFLINE=True, so the draft must be predownloaded too.
+    pytest.mark.model(SPEC_DECODING_DRAFT_MODEL),
     pytest.mark.timeout(300),
 ]
 
@@ -142,31 +142,14 @@ def _cleanup_sglang_stragglers(timeout: float = 10.0) -> None:
 #     propagated to the frontend via the model runtime config registered at
 #     discovery time.
 #
-#   * ``spec_decoding`` — the ``rust_parsers`` layout on a Qwen3-8B worker
-#     with an EAGLE3 draft model. It uses the 8B main/draft pair that the
-#     ``aggregated_spec_decoding`` serve test already validates, so it is
-#     nightly-only.
-TOPOLOGIES = (
-    "chat_processor_frontend",
-    "rust_parsers",
-    pytest.param(
-        "spec_decoding",
-        marks=[
-            pytest.mark.nightly,
-            pytest.mark.model(SPEC_DECODING_MODEL),
-            # CI workers run HF_HUB_OFFLINE=True, so the draft must be
-            # predownloaded too.
-            pytest.mark.model(SPEC_DECODING_DRAFT_MODEL),
-        ],
-    ),
-)
-_TOPOLOGY_MODELS = {"spec_decoding": SPEC_DECODING_MODEL}
+#   * ``spec_decoding`` — the ``rust_parsers`` layout with an EAGLE3 draft
+#     model on the worker.
+TOPOLOGIES = ("chat_processor_frontend", "rust_parsers", "spec_decoding")
 
 
 @dataclass(frozen=True)
 class ToolCallingStack:
     topology: str
-    model: str
     frontend_port: int
     system_port: int
 
@@ -181,7 +164,6 @@ class WorkerProcess(ManagedProcess):
         system_port: int,
         fpm_port: int,
         topology: str,
-        model: str,
     ):
         env = os.environ.copy()
         env["DYN_LOG"] = "info"
@@ -196,9 +178,9 @@ class WorkerProcess(ManagedProcess):
             "-m",
             "dynamo.sglang",
             "--model-path",
-            model,
+            MODEL_NAME,
             "--served-model-name",
-            model,
+            MODEL_NAME,
             "--trust-remote-code",
         ]
         if topology in ("rust_parsers", "spec_decoding"):
@@ -328,7 +310,6 @@ def tool_calling_services(
     frontend in front of a speculative decoding worker.
     """
     topology: str = request.param
-    model = _TOPOLOGY_MODELS.get(topology, MODEL_NAME)
     # Allocate from the disjoint bases in tests/utils/constants.py so this
     # module cannot land on the window another suite allocates from.
     allocated_ports: list[int] = []
@@ -346,7 +327,6 @@ def tool_calling_services(
             system_port=system_port,
             fpm_port=fpm_port,
             topology=topology,
-            model=model,
         ):
             # Allow worker to register with discovery.
             time.sleep(2)
@@ -365,7 +345,6 @@ def tool_calling_services(
                 )
                 yield ToolCallingStack(
                     topology=topology,
-                    model=model,
                     frontend_port=frontend_port,
                     system_port=system_port,
                 )
@@ -395,8 +374,8 @@ def client(tool_calling_services: ToolCallingStack) -> OpenAI:
 
 
 @pytest.fixture(scope="module")
-def model(tool_calling_services: ToolCallingStack) -> str:
-    return tool_calling_services.model
+def model() -> str:
+    return MODEL_NAME
 
 
 # ---------------------------------------------------------------------------
