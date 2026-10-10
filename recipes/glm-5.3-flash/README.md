@@ -37,7 +37,9 @@ Dynamo + vLLM deployment profiles for the GB200 and H200 agentic workload:
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **GLM-5.3-Flash image**: `vllm/vllm-openai:glm53-flash` — a GLM-specific vLLM build with
-   GLA/KDA attention kernels. `ai-dynamo` is pip-installed at pod startup.
+   GLA/KDA attention kernels. `ai-dynamo` is pip-installed at pod startup. The manifests pin this
+   image by digest; do not drop the digest, because the tag is mutable and was re-pushed upstream
+   on 2026-09-09 to an incompatible vLLM nightly.
 3. **Hugging Face access** to `zai-org/GLM-5.3-Flash`.
 
 ## Quick Start
@@ -80,6 +82,12 @@ kubectl apply -f vllm/${MODE}-${SKU}-agentic/deploy.yaml -n ${NAMESPACE}
 
 ## Limitations
 
+- **Image pinned by digest.** The worker image is
+  `vllm/vllm-openai:glm53-flash@sha256:2c6da6c6f16ed15c91e412d896dba13701f25fe1861eaec9ddaa4db34d1d21c4`.
+  The `:glm53-flash` tag alone is not reproducible: it was re-pushed upstream on 2026-09-09 to a
+  re-tagged vLLM nightly whose FlashMLA-sparse backend rejects this model's head size, which breaks
+  the recipe's `--attention-backend FLASHMLA_SPARSE`. The validated image is currently reachable
+  only as an untagged digest, so it remains exposed to registry garbage collection.
 - **GB200 disaggregated:** KV transport uses `cuda_copy+tcp` with the `glm53-flash` image. The
   image's UCX build does not support MNNVL IPC, so `^cuda_ipc` prevents a C-level crash at
   `uct_cuda_ipc_ep_get_zcopy`. To enable MNNVL NVLink KV transfer, rebuild the image on the
