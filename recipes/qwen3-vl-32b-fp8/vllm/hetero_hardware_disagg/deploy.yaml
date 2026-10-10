@@ -92,7 +92,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - >-
+            - |-
               ulimit -l unlimited
               TRANSFER_LOCAL=0 \
               python -m dynamo.vllm \
@@ -167,7 +167,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - >-
+            - |-
               ulimit -l unlimited
               TRANSFER_LOCAL=0 CUDA_VISIBLE_DEVICES=0 \
               python -m dynamo.vllm \
