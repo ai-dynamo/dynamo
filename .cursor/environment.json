@@ -1,0 +1,5 @@
+{
+  "name": "Dynamo development",
+  "user": "ubuntu",
+  "install": "bash .cursor/cloud-agent-install.sh"
+}

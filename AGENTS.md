@@ -278,6 +278,29 @@ cargo fmt --all && cargo clippy --workspace
 See [the contribution guide](docs/fern/pages/community/contributing/overview.md) for the full workflow
 (issue sizing, CODEOWNERS, review process).
 
+## Cloud Agents
+
+The repository-managed environment is `.cursor/environment.json` (install:
+`.cursor/cloud-agent-install.sh`). After install, activate the venv with
+`source .venv/bin/activate`.
+
+- **Build / CLI smoke:** `python3 -m dynamo.frontend --help` and
+  `python3 -m dynamo.mocker --help`.
+- **Diagnostics:** `python3 dev/sanity_check.py`.
+- **GPU-free live stack:** file discovery avoids etcd/NATS — see
+  [Mocker live simulation](docs/fern/pages/cli/operations/simulation-with-dynosim/mocker-live-simulation.mdx).
+  Chat completions need Hugging Face Hub egress (or a cached model under
+  `~/.cache/huggingface/hub`). Offline worker registration works with the
+  install-generated `.cursor/demo-model/` and `--model-path` pointing at that
+  directory.
+- **Personal skills (optional):** `bash .cursor/setup-personal-skills.sh` links
+  your Cursor personal skills from `/cursor/stores/user/skills` into
+  `~/.cursor/skills/` so skill-local scripts resolve. Install also pulls in `gh`
+  for skills that use the GitHub CLI; slide-rendering skills need Chrome/Chromium.
+
+Set `CXX=g++` if `maturin develop` fails building `zmq-sys` with missing C++
+headers (clang default vs GCC 14 headers).
+
 ## Docs, Examples, Recipes
 
 Any change under `docs/`, `examples/`, or `recipes/` must follow

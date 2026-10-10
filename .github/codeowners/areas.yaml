@@ -325,6 +325,7 @@ areas:
   - .coderabbit.yaml
   - .coveragerc
   - .devcontainer/
+  - .cursor/
   - .dockerignore
   - .gitattributes
   - .github/
