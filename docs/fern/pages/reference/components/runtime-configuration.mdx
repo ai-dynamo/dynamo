@@ -5,6 +5,10 @@ title: Runtime Configuration (DynamoRuntimeConfig)
 subtitle: Field reference for the cross-cutting Dynamo runtime CLI flags and environment variables shared by every backend and the frontend.
 ---
 
+import { EnumStyles } from "@/components/EnumStyles";
+
+<EnumStyles />
+
 `DynamoRuntimeConfig` holds the configuration that is **common to every Dynamo process** — the frontend, the standalone router, and all three backend workers (vLLM, SGLang, TRT-LLM) parse this same argument group. Most fields, types, defaults, and choices on this page come from the [`DynamoRuntimeArgGroup` and `DynamoRuntimeConfig`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/groups/runtime_args.py) definitions. The page also catalogs runtime environment-only controls implemented below the Python argument layer.
 
 <Note>
