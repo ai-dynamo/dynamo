@@ -464,7 +464,12 @@ mod tests {
                         "type": "function",
                         "function": {
                             "name": "wrapped_dynamic",
-                            "parameters": {"type": "object", "properties": {"x": {"type": "integer"}}},
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"x": {"type": "integer"}},
+                                "required": ["x"],
+                                "additionalProperties": false
+                            },
                             "strict": true
                         }
                     }]
@@ -795,7 +800,6 @@ mod tests {
                 "type": "function",
                 "function": {
                     "name": "get_weather",
-                    "strict": true,
                     "parameters": {
                         "type": "object",
                         "properties": {

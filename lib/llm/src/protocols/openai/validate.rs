@@ -705,6 +705,7 @@ pub fn validate_tools(
                 tool.function.name,
             );
         }
+        super::strict_schema::validate_strict_function(&tool.function)?;
     }
     Ok(())
 }
