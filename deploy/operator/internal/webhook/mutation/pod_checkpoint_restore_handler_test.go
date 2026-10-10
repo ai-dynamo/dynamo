@@ -382,8 +382,9 @@ func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
 			args:    []string{"-m", "dynamo.vllm"},
 		},
 		{
-			name:    "unsupported Dynamo module",
-			command: []string{"python3", "-m", "dynamo.frontend"},
+			name:      "other Python module",
+			command:   []string{"python3", "-m", "dynamo.frontend"},
+			supported: true,
 		},
 	}
 
@@ -392,7 +393,7 @@ func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
 			t.Log("Given a restore destination with an explicit container entrypoint")
 			container := &corev1.Container{Command: test.command, Args: test.args}
 
-			t.Log("Then only a direct invocation of a standby-aware engine is accepted")
+			t.Log("Then any direct python -m invocation is accepted")
 			assert.Equal(t, test.supported, usesSupportedDynamoRestoreEntrypoint(container))
 		})
 	}

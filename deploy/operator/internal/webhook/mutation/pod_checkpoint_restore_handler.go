@@ -352,7 +352,7 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 		}
 		if !usesSupportedDynamoRestoreEntrypoint(container) {
 			return fmt.Errorf(
-				"restore destination container %q must directly invoke python -m dynamo.vllm, python -m dynamo.sglang, or python -m dynamo.trtllm; command=%q args=%q",
+				"restore destination container %q must directly invoke python -m <module>; command=%q args=%q",
 				mapping.Destination,
 				container.Command,
 				container.Args,
@@ -387,8 +387,8 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 	return nil
 }
 
-// usesSupportedDynamoRestoreEntrypoint recognizes only direct Python module
-// invocations that are known to consume SNAPSHOT_RESTORE_STANDBY. Shell and
+// usesSupportedDynamoRestoreEntrypoint recognizes direct Python module
+// invocations (python -m <module>); the module name is not restricted. Shell and
 // custom wrappers are rejected because admission cannot prove they honor it.
 func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container) bool {
 	if len(container.Command) == 0 {
@@ -412,12 +412,7 @@ func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container) bool {
 		return false
 	}
 
-	switch arguments[moduleFlagIndex+1] {
-	case "dynamo.vllm", "dynamo.sglang", "dynamo.trtllm":
-		return true
-	default:
-		return false
-	}
+	return true
 }
 
 // isOperandFreePythonInterpreterFlag recognizes options that cannot consume
