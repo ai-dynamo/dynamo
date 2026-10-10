@@ -29,7 +29,9 @@
 #    to produce a uniformly distributed score per (group, arch, pod) triple.
 # 2. RANKING: Pods are sorted by score (descending) per group. StatefulSet
 #    pod names are constant, so rankings are stable across invocations.
-# 3. POOL SIZING: Pool Size = ceil(Active Pods / 3) ensures even distribution.
+# 3. POOL SIZING: Each group gets its GROUP_WEIGHTS share of the active pods,
+#    rounded, and at least one pod. General gets any pod that rounding
+#    leaves out.
 # 4. COVERAGE-AWARE SELECTION: Pools are built round-by-round across all 3
 #    groups simultaneously. In each round, each group picks its highest-ranked
 #    pod that is NOT YET in any group's pool (preferring uncovered pods).
@@ -37,19 +39,20 @@
 # 5. RANDOM PICK: ONE pod is randomly selected from the candidate pool.
 #
 # LOAD DISTRIBUTION (example: amd64; arm64 ranks differently, all pods utilized):
-# +------+------+-------------------+-------------------+---------------------+
-# | Pods | Pool | G0: vLLM/SGLang   | G1: General       | G2: TRT-LLM         |
-# +------+------+-------------------+-------------------+---------------------+
-# | 1    | 1    | {0}               | {0}               | {0}                 |
-# | 2    | 1    | {0}               | {1}               | {1}                 |
-# | 3    | 1    | {2}               | {0}               | {1}                 |
-# | 4    | 2    | {2, 0}            | {3, 2}            | {1, 2}              |
-# | 5    | 2    | {4, 0}            | {2, 3}            | {1, 4}              |
-# | 6    | 2    | {4, 0}            | {2, 3}            | {1, 5}              |
-# | 7    | 3    | {4, 2, 0}         | {6, 3, 2}         | {1, 5, 4}           |
-# | 8    | 3    | {7, 4, 0}         | {6, 2, 3}         | {1, 5, 4}           |
-# | 9    | 3    | {7, 4, 8}         | {6, 2, 3}         | {1, 5, 0}           |
-# +------+------+-------------------+-------------------+---------------------+
+# +------+-------+-------------------+---------------------------+---------------+
+# | Pods | Sizes | G0: vLLM/SGLang   | G1: General               | G2: TRT-LLM   |
+# +------+-------+-------------------+---------------------------+---------------+
+# | 1    | 1/1/1 | {0}               | {0}                       | {0}           |
+# | 2    | 1/1/1 | {0}               | {1}                       | {1}           |
+# | 3    | 1/2/1 | {2}               | {0, 2}                    | {1}           |
+# | 4    | 1/2/1 | {2}               | {3, 0}                    | {1}           |
+# | 5    | 2/3/1 | {4, 0}            | {2, 3, 4}                 | {1}           |
+# | 6    | 2/3/1 | {4, 0}            | {2, 3, 5}                 | {1}           |
+# | 7    | 2/4/1 | {4, 2}            | {6, 3, 5, 0}              | {1}           |
+# | 8    | 2/4/2 | {7, 4}            | {6, 2, 3, 0}              | {1, 5}        |
+# | 9    | 3/5/2 | {7, 4, 8}         | {6, 2, 3, 0, 8}           | {1, 5}        |
+# | 14   | 4/7/3 | {12, 7, 2, 8}     | {6, 9, 13, 3, 5, 10, 0}   | {1, 4, 11}    |
+# +------+-------+-------------------+---------------------------+---------------+
 #
 # =============================================================================
 
@@ -199,6 +202,10 @@ get_active_indices() {
 # cold-starts its cache.
 GROUP_KEYS=("vllm-sglang" "general" "trtllm")
 
+# Share of the active pods per group, in GROUP_KEYS order, sized to the
+# relative build load of each group.
+GROUP_WEIGHTS=(30 50 20)
+
 # Map a flavor to a group index (0, 1, or 2).
 flavor_to_group() {
   local flavor=$1
@@ -221,7 +228,20 @@ compute_group_pools() {
     return
   fi
 
-  local pool_size=$(( (count + 2) / 3 ))
+  local total_weight=$(( GROUP_WEIGHTS[0] + GROUP_WEIGHTS[1] + GROUP_WEIGHTS[2] ))
+  local -a pool_sizes=()
+  local max_size=0 assigned=0
+  for g in 0 1 2; do
+    pool_sizes[g]=$(( (count * GROUP_WEIGHTS[g] + total_weight / 2) / total_weight ))
+    if [ "${pool_sizes[g]}" -lt 1 ]; then pool_sizes[g]=1; fi
+    assigned=$(( assigned + pool_sizes[g] ))
+  done
+  if [ "$assigned" -lt "$count" ]; then
+    pool_sizes[1]=$(( pool_sizes[1] + count - assigned ))
+  fi
+  for g in 0 1 2; do
+    if [ "${pool_sizes[g]}" -gt "$max_size" ]; then max_size=${pool_sizes[g]}; fi
+  done
 
   local rank0="" rank1="" rank2=""
   for g in 0 1 2; do
@@ -240,8 +260,9 @@ compute_group_pools() {
   local pool0=" " pool1=" " pool2=" "
   local covered=" "
 
-  for (( round=0; round<pool_size; round++ )); do
+  for (( round=0; round<max_size; round++ )); do
     for g in 0 1 2; do
+      if [ "$round" -ge "${pool_sizes[g]}" ]; then continue; fi
       local current_rank="" current_pool=""
       if [ "$g" -eq 0 ]; then current_rank="$rank0"; current_pool="$pool0"; fi
       if [ "$g" -eq 1 ]; then current_rank="$rank1"; current_pool="$pool1"; fi
