@@ -765,6 +765,10 @@ where
             );
             return DynamoError::builder()
                 .error_type(ErrorType::ResourceExhausted)
+                .reason(
+                    crate::error::ErrorReason::new("router.admission_rejected")
+                        .expect("registered router admission reason"),
+                )
                 .message("All workers are busy, please retry later")
                 .cause(cause)
                 .build()
@@ -2917,9 +2921,11 @@ mod tests {
             .await
             .unwrap();
 
-        let result = router.generate(SingleIn::new(42u64)).await;
-        assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
+        let err = router
+            .generate(SingleIn::new(42u64))
+            .await
+            .expect_err("a busy pool must reject");
+        let msg = format!("{err}");
         // With pre-selection filtering on free_ids, the single-overloaded-worker
         // case is now caught before selection rather than after — the chosen
         // worker is never overloaded because the candidate pool excludes it.
@@ -2929,6 +2935,10 @@ mod tests {
             msg.contains("All workers are busy"),
             "expected empty-free-pool rejection, got: {msg}"
         );
+        let dynamo_error = err
+            .downcast_ref::<DynamoError>()
+            .expect("busy pool rejection should be a DynamoError");
+        assert_eq!(dynamo_error.reason().as_str(), "router.admission_rejected");
 
         rt.shutdown();
     }

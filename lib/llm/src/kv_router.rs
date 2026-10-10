@@ -557,6 +557,11 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
             dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
                 .expect("registered queue deadline reason"),
         )
+    } else if error_type == ErrorType::ResourceExhausted {
+        error.reason(
+            dynamo_runtime::error::ErrorReason::new("router.admission_rejected")
+                .expect("registered router admission reason"),
+        )
     } else {
         error
     };
@@ -568,6 +573,11 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     } else {
         error.build().into()
     }
+}
+
+#[cfg(test)]
+pub(crate) fn scheduler_error_for_test(error: scheduling::KvSchedulerError) -> anyhow::Error {
+    map_scheduler_error(error)
 }
 
 fn cancelled_error(context_id: &str) -> anyhow::Error {

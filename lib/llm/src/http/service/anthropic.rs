@@ -663,6 +663,20 @@ async fn anthropic_messages(
                 super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             );
         }
+        if super::metrics::router_admission_rejected(e.as_ref()) {
+            if super::metrics::request_was_rejected(e.as_ref()) {
+                state
+                    .metrics_clone()
+                    .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+            }
+            inflight_guard.mark_error(super::metrics::ErrorType::Overload);
+            return anthropic_error(
+                ErrorClass::CapacityExhausted,
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                "Service temporarily overloaded",
+            );
+        }
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
