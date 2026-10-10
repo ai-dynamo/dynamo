@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 import yaml
+from report import OPERATOR_ONLY_FILES
 
 ACTION_DIR = Path(__file__).resolve().parent
 ACTION = yaml.safe_load((ACTION_DIR / "action.yml").read_text())
@@ -167,6 +168,67 @@ class ChangedFilesTests(unittest.TestCase):
             with self.subTest(files=files, outputs=outputs):
                 result = self.run_report(
                     {"all": files, "core": files}, extra_outputs=outputs
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.outputs["sglang_runtime"], expected)
+
+    def test_operator_admission_retains_unlisted_and_mixed_inputs(self):
+        # Regression: additions in the audited operator class were rejected;
+        # incomplete/conflicting status must still never omit runtime coverage.
+        files = sorted(OPERATOR_ONLY_FILES)
+        outputs = {
+            f"all_{name}_files.json": "[]"
+            for name in (
+                "added",
+                "modified",
+                "copied",
+                "deleted",
+                "renamed",
+                "type_changed",
+                "unmerged",
+                "unknown",
+            )
+        }
+        outputs["all_added_files.json"] = json.dumps(files[:8])
+        outputs["all_modified_files.json"] = json.dumps(files[8:])
+        outputs["all_all_changed_and_modified_files.json"] = json.dumps(files)
+        cases = [(files, outputs, "false")]
+        for added in ([], files):
+            changed = dict(outputs)
+            changed["all_added_files.json"] = json.dumps(added)
+            changed["all_modified_files.json"] = json.dumps(
+                sorted(set(files) - set(added))
+            )
+            cases.append((files, changed, "false"))
+        for extra in (
+            "deploy/operator/api/v1beta2/unreviewed.go",
+            "components/src/dynamo/frontend/tests/test_vllm_processor_unit.py",
+            "components/src/dynamo/common/utils.py",
+        ):
+            changed = dict(outputs)
+            changed["all_modified_files.json"] = json.dumps(files[8:] + [extra])
+            changed["all_all_changed_and_modified_files.json"] = json.dumps(
+                files + [extra]
+            )
+            cases.append((files + [extra], changed, "true"))
+        for name in outputs:
+            for value in (None, "{", "[17]", json.dumps([files[0]])):
+                changed = dict(outputs)
+                if value is None:
+                    del changed[name]
+                else:
+                    changed[name] = value
+                cases.append((files, changed, "true"))
+        # Complete accounting also rejects a path listed as both A and M.
+        changed = dict(outputs)
+        changed["all_modified_files.json"] = json.dumps(files)
+        cases.append((files, changed, "true"))
+        cases.append((files[8:], outputs, "true"))
+        for changed_files, status, expected in cases:
+            with self.subTest(files=changed_files, status=status):
+                result = self.run_report(
+                    {"all": changed_files, "deploy": changed_files},
+                    extra_outputs=status,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.outputs["sglang_runtime"], expected)

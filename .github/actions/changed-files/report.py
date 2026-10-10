@@ -7,6 +7,34 @@ import json
 import os
 from pathlib import Path
 
+# Exact operator/Helm/CRD consumers audited in FILTERS.md; only ordinary additions
+# and modifications qualify. Removals, renames and unlisted siblings stay full.
+OPERATOR_ONLY_FILES = {
+    "deploy/helm/charts/platform/README.md",
+    "deploy/helm/charts/platform/components/operator/templates/deployment.yaml",
+    "deploy/helm/charts/platform/components/operator/values.yaml",
+    "deploy/helm/charts/platform/tests/namespace_restriction_deployment_test.yaml",
+    "deploy/helm/charts/platform/values.yaml",
+    "deploy/operator/api/v1beta2/dynamographdeploymentcandidate_types.go",
+    "deploy/operator/api/v1beta2/dynamographdeploymentrequest_types.go",
+    "deploy/operator/api/v1beta2/dynamographdeploymentrun_types.go",
+    "deploy/operator/api/v1beta2/groupversion_info.go",
+    "deploy/operator/api/v1beta2/types_test.go",
+    "deploy/operator/api/v1beta2/zz_generated.deepcopy.go",
+    "deploy/operator/cmd/crd-apply/main.go",
+    "deploy/operator/cmd/crd-apply/main_test.go",
+    "deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentcandidates.yaml",
+    "deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml",
+    "deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentruns.yaml",
+    "deploy/operator/docs/fix-api-anchors.py",
+    "docs/fern/pages/kubernetes/installation/install-dynamo.md",
+    "docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md",
+    "docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx",
+    "docs/fern/scripts/tests/test_gen_kubernetes_api.py",
+    "recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json",
+    "recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json",
+}
+
 # Each class must independently contain the entire modified-file set. Do not
 # union classes: mixed changes require the existing full runtime selection.
 SGLANG_UNRELATED_CHANGE_CLASSES = (
@@ -14,15 +42,17 @@ SGLANG_UNRELATED_CHANGE_CLASSES = (
 )
 
 
-def modified_only_files(output_dir: Path, all_files: set[str]) -> set[str]:
-    """Return verified ordinary modifications; uncertainty keeps full tests."""
+def ordinary_files(
+    output_dir: Path, all_files: set[str], *, allow_added: bool = False
+) -> set[str]:
+    """Verify complete ordinary statuses; only the operator class allows A/M."""
     try:
         modified = load_files(output_dir / "all_modified_files.json")
+        added = load_files(output_dir / "all_added_files.json")
         complete = load_files(output_dir / "all_all_changed_and_modified_files.json")
         other_statuses = [
             load_files(output_dir / f"all_{status}_files.json")
             for status in (
-                "added",
                 "copied",
                 "deleted",
                 "renamed",
@@ -33,17 +63,29 @@ def modified_only_files(output_dir: Path, all_files: set[str]) -> set[str]:
         ]
     except (OSError, ValueError):
         return set()
-    if modified != all_files or complete != all_files or any(other_statuses):
+    if (
+        modified | added != all_files
+        or complete != all_files
+        or modified & added
+        or (added and not allow_added)
+        or any(other_statuses)
+    ):
         return set()
-    return modified
+    return modified | added
 
 
 def runtime_test_outputs(output_dir: Path, all_files: set[str]) -> dict[str, bool]:
-    modified = modified_only_files(output_dir, all_files)
+    modified = ordinary_files(output_dir, all_files)
+    operator = ordinary_files(output_dir, all_files, allow_added=True)
     return {
         "sglang_runtime": not (
-            modified
-            and any(modified <= allowed for allowed in SGLANG_UNRELATED_CHANGE_CLASSES)
+            (operator and operator <= OPERATOR_ONLY_FILES)
+            or (
+                modified
+                and any(
+                    modified <= allowed for allowed in SGLANG_UNRELATED_CHANGE_CLASSES
+                )
+            )
         ),
     }
 
