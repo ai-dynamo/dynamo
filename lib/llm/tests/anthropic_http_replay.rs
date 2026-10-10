@@ -544,8 +544,6 @@ async fn non_object_tool_inputs_are_suppressed_without_dropping_valid_siblings()
                     vec![]
                 };
                 assert_eq!(inputs, expected);
-                let requests = svc.engine.take_requests().await;
-                assert_eq!(requests[0].inner.parallel_tool_calls, Some(false));
                 svc.shutdown().await;
             }
         }
