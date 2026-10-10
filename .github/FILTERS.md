@@ -90,7 +90,7 @@ JSON-escaped names so they cannot introduce workflow commands into the log.
 
 ## Standalone runtime admission
 
-The PR workflow may omit standalone SGLang CPU/GPU jobs for a nonempty set of
+The PR workflow may omit standalone backend CPU/GPU jobs for a nonempty set of
 ordinary changes contained entirely in one audited class in
 `actions/changed-files/report.py`. The exact operator class allows additions and
 modifications; the vLLM unit-test class allows modifications only. Classes cannot
@@ -101,9 +101,9 @@ data retain the existing full selection. Set repository variable
 `FORCE_FULL_CI=true` to bypass admission. Main, postmerge and nightly are unchanged.
 
 The initial vLLM processor unit-test class retains vLLM CPU tests and mypy.
-The operator class below retains builds/compliance and every existing operator,
-Helm, deployment, DGDR and Snapshot gate. Only `sglang-test` and
-`sglang-multi-gpu-test` are omitted: this includes standalone `gpu_0` tests on
+The operator class covers SGLang and TRT-LLM and retains builds/compliance and every existing operator,
+Helm, deployment, DGDR and Snapshot gate. Only each admitted backend's `*-test` and
+`*-multi-gpu-test` jobs are omitted: this includes standalone `gpu_0` tests on
 amd64/arm64 and `gpu_1`/`gpu_2` tests on amd64. Shared CPU selection is unchanged;
 execution still follows the original path filters and `RUN_DEPLOY_TESTS`.
 
