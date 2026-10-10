@@ -3,6 +3,7 @@
 
 """Unit tests for profiler ``--config`` parsing in ``dynamo.profiler.__main__``."""
 
+import errno
 import json
 
 import pytest
@@ -47,7 +48,10 @@ def test_parse_dgdr_spec_handles_oserror_during_path_probe(monkeypatch) -> None:
     monkeypatch.setattr(profiler_main, "DynamoGraphDeploymentRequestSpec", _DummySpec)
 
     def _path_too_long(_: object) -> bool:
-        raise OSError(36, "File name too long")
+        # errno by name: 36 is ENAMETOOLONG only on Linux. On macOS it is
+        # EINPROGRESS, which Python raises as BlockingIOError, so the value the
+        # code under test compares against never matches and it re-raises.
+        raise OSError(errno.ENAMETOOLONG, "File name too long")
 
     monkeypatch.setattr(profiler_main.Path, "is_file", _path_too_long)
 
