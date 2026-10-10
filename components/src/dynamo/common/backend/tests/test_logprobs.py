@@ -101,6 +101,52 @@ def test_extract_completion_skips_token_ids_when_logprobs_empty():
     assert extract_from_completion_output(output, 1) == (None, None)
 
 
+def test_extract_completion_uses_supplied_delta_without_reading_cumulative_tokens():
+    output = SimpleNamespace(
+        token_ids=_ExplodingTokenIds(),
+        logprobs=[
+            {7: _logprob(-0.7, decoded="a")},
+            {8: _logprob(-0.8, decoded="b")},
+        ],
+    )
+
+    log_probs, top_logprobs = extract_from_completion_output(
+        output,
+        1,
+        token_ids_delta=[8],
+    )
+
+    assert log_probs == [-0.8]
+    assert [entry["token_id"] for entry in top_logprobs[0]] == [8]
+
+
+def test_extract_completion_delta_path_bails_on_missing_selected_token():
+    output = SimpleNamespace(
+        token_ids=_ExplodingTokenIds(),
+        logprobs=[
+            {7: _logprob(-0.7)},
+            {99: _logprob(-0.8)},
+        ],
+    )
+
+    assert extract_from_completion_output(
+        output,
+        0,
+        token_ids_delta=[7, 8],
+    ) == (None, None)
+
+
+def test_extract_completion_does_not_fall_back_to_cumulative_tokens_for_empty_delta():
+    output = SimpleNamespace(
+        token_ids=_ExplodingTokenIds(),
+        logprobs=[{7: _logprob(-0.7)}],
+    )
+    assert extract_from_completion_output(output, 1, token_ids_delta=[]) == (
+        None,
+        None,
+    )
+
+
 def test_extract_completion_returns_none_past_end_of_tokens():
     output = SimpleNamespace(
         token_ids=[7, 8], logprobs=[{7: _logprob(-0.7)}, {8: _logprob(-0.8)}]
