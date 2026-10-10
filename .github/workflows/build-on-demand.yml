@@ -18,6 +18,14 @@ on:
         description: 'Build and push trtllm image, tagged with branch name'
         type: boolean
         default: false
+      build_wheelbuilder:
+        description: 'Build the nightly Dynamo wheel_builder stage for amd64 and arm64'
+        type: boolean
+        default: false
+      wheelbuilder_source_ref:
+        description: 'Source ref/SHA for the wheel-builder comparison; empty uses this workflow ref'
+        type: string
+        default: ''
       build_triton:
         description: 'Build and push triton image, tagged with branch name'
         type: boolean
@@ -52,6 +60,22 @@ jobs:
   # ============================================================================
   # FRAMEWORK PIPELINES (build-only)
   # ============================================================================
+
+  wheelbuilder-build:
+    name: dynamo-wheel_builder
+    needs: [init]
+    if: inputs.build_wheelbuilder
+    uses: $/.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: wheel_builder
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.init.outputs.builder_name }}
+      build_timeout_minutes: 120
+      show_summary: true
+      source_ref: ${{ inputs.wheelbuilder_source_ref }}
+    secrets: inherit
 
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
@@ -218,7 +242,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, triton-build, operator]
+    needs: [init, wheelbuilder-build, vllm-build, sglang-build, trtllm-build, triton-build, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

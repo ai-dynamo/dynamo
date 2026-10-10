@@ -609,7 +609,7 @@ jobs:
           # RC promotions inherit the source archive.
           archive_sources: ${{ inputs.archive_sources }}
       - name: Refresh BuildKit builder
-        if: ${{ inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
+        if: ${{ inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' && inputs.target != 'wheel_builder' }}
         uses: $/.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
@@ -619,7 +619,7 @@ jobs:
           fresh_builder: ${{ inputs.fresh_builder }}
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Build and Push Test Image
-        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
+        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' && inputs.target != 'wheel_builder' }}
         shell: bash
         env:
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
