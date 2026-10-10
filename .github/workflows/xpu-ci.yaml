@@ -198,17 +198,26 @@ jobs:
         shell: bash
         run: |
           mkdir -p xpu-diagnostics
-          sycl-ls > xpu-diagnostics/sycl-ls.txt 2>&1 || true
-          zeinfo > xpu-diagnostics/zeinfo.txt 2>&1 || true
           if [[ -e /dev/dri/renderD128 ]]; then
             RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-            docker run --rm \
+            docker run --rm -i \
               -v /dev/dri:/dev/dri \
               --device /dev/dri:/dev/dri \
               --group-add "${RENDER_GID}" \
               "${{ env.TEST_IMAGE_TAG }}" \
-              sh -c 'python -c "from gpu_memory_service.common.vmm import _sycl_vmm; print(_sycl_vmm.__file__)" | xargs -r ldd' \
-              > xpu-diagnostics/sycl-vmm-ldd.txt 2>&1 || true
+              sh -c '
+                set -e
+                extension_dir=$(python -c "import importlib.util; from pathlib import Path; print(Path(importlib.util.find_spec(\"gpu_memory_service.common.vmm\").origin).parent / \"_sycl_vmm\")")
+                set -- "$extension_dir"/_sycl_vmm*.so
+                if [ ! -f "$1" ]; then
+                  echo "SYCL VMM extension not found in $extension_dir" >&2
+                  exit 1
+                fi
+                for extension in "$@"; do
+                  echo "ldd $extension"
+                  ldd "$extension"
+                done
+              ' > xpu-diagnostics/sycl-vmm-ldd.txt 2>&1 || true
           else
             echo "/dev/dri/renderD128 is unavailable on the XPU runner" > xpu-diagnostics/sycl-vmm-ldd.txt
           fi
