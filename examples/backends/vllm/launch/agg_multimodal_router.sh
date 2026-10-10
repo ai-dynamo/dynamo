@@ -41,7 +41,8 @@ BLOCK_SIZE="${BLOCK_SIZE:-16}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.20}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
-# --single-gpu / SINGLE_GPU: Packs all workers onto GPU 0 for functional
+# --single-gpu / SINGLE_GPU: Packs all workers onto one GPU (the inherited
+# CUDA_VISIBLE_DEVICES, else GPU 0) for functional
 # testing on machines with a single GPU.  Reduces performance by sharing
 # GPU memory between workers; production deployments should leave it false.
 SINGLE_GPU="${SINGLE_GPU:-false}"
@@ -137,7 +138,7 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 for i in $(seq 1 "${NUM_WORKERS}"); do
     WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2)))
     KV_EVENTS_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + (i - 1))))
-    if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=0; else GPU_ID=$((i - 1)); fi
+    if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=$(inherited_gpu_id); else GPU_ID=$((i - 1)); fi
 
     KV_EVENTS_CONFIG="{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENTS_PORT}\"}"
 

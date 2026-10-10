@@ -98,10 +98,10 @@ if [[ "$FRONTEND_DECODING" == "true" ]]; then
 fi
 
 # GPU assignments (override via environment variables)
-# In single-GPU mode both workers share the same GPU.
+# In single-GPU mode both workers share the inherited GPU (see inherited_gpu_id).
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
-    DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-$(inherited_gpu_id)}
+    DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-$(inherited_gpu_id)}
     DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.1}
     DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.7}
     EXTRA_ARGS="--enforce-eager --max-model-len $PD_MAX_MODEL_LEN"

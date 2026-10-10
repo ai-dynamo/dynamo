@@ -126,13 +126,13 @@ DECODE_GPU_MEM_ARGS=""
 
 # GPU assignments (override via environment variables).
 # Modes:
-#   --single-gpu : all 3 workers on GPU 0
+#   --single-gpu : all 3 workers on the inherited GPU (see inherited_gpu_id)
 #   --two-gpu    : encode + prefill on GPU 0, decode on GPU 1
 #   default      : encode 0, prefill 1, decode 2 (3 GPUs)
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
-    DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
-    DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-0}
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-$(inherited_gpu_id)}
+    DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-$(inherited_gpu_id)}
+    DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-$(inherited_gpu_id)}
 elif [[ "$TWO_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
