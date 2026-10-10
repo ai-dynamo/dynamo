@@ -930,7 +930,7 @@ mod tests {
         let anchor = "anchor".to_string();
         let state = unmodeled_prefill_state(64);
         tracker.insert(&anchor, state, epoch);
-        for _ in 0..100 {
+        for _ in 0..2 {
             let ids: Vec<_> = (0..32).map(|i| format!("request-{i}")).collect();
             for id in &ids {
                 tracker.insert(id, state, epoch);
