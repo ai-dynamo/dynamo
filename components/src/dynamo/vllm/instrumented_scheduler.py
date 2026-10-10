@@ -2126,6 +2126,7 @@ class _FpmPublisherThread:
         max_queue_size: int = 10_000,
         start_paused: bool = False,
     ) -> None:
+        """Expose the resolved ``endpoint`` without cross-thread socket access."""
         self._queue: queue.Queue[ForwardPassMetrics | None] = queue.Queue(
             maxsize=max_queue_size
         )
@@ -2139,6 +2140,8 @@ class _FpmPublisherThread:
         self._ctx = zmq.Context.instance()
         self._pub = self._ctx.socket(zmq.PUB)
         self._pub.bind(endpoint)
+        # Read socket metadata before the publisher thread takes ownership.
+        self.endpoint = self._pub.getsockopt_string(zmq.LAST_ENDPOINT)
 
         self._running = True
         self._thread = threading.Thread(
