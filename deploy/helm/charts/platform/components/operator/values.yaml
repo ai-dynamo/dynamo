@@ -52,6 +52,51 @@ gpuDiscovery:
 controllerManager:
   tolerations: []
   affinity: {}
+  # Soft topology spread for the controller-manager pods: spread replicas
+  # across nodes when possible. Defaults are soft (ScheduleAnyway) so they
+  # never block scheduling on small clusters; set whenUnsatisfiable:
+  # DoNotSchedule when the fleet has enough eligible nodes to make the spread
+  # a hard requirement.
+  #
+  # The default is hostname-ONLY on purpose (review r4165559041): with any
+  # explicit constraint present, the scheduler's podtopologyspread plugin
+  # requires ALL constraint topology keys on a node — a node missing
+  # topology.kubernetes.io/zone (bare-metal/local clusters) would be ignored
+  # by spread scoring entirely, including the hostname constraint, removing
+  # the hostname spreading the scheduler's system defaults would have
+  # provided. Hostname-only keeps node spreading effective on every cluster.
+  # To also spread across zones, override with both constraints (all
+  # eligible nodes must carry zone labels):
+  #
+  #   topologySpreadConstraints:
+  #     - maxSkew: 1
+  #       topologyKey: kubernetes.io/hostname
+  #       ...
+  #     - maxSkew: 1
+  #       topologyKey: topology.kubernetes.io/zone
+  #       ...
+  #
+  # Set to [] to omit the field and restore the scheduler's system-default
+  # spreading.
+  #
+  # matchLabelKeys is deliberately NOT set. The canonical pattern
+  # (matchLabelKeys: [pod-template-hash], requires k8s >= 1.28) scopes the
+  # constraint to the incoming pod's ReplicaSet generation, but the API
+  # rejects a constraint whose matchLabelKeys entry also appears in the
+  # labelSelector — and pod-spec rewriters that inject pod-template-hash
+  # into the labelSelector (e.g. vcluster's syncer when translating pods to
+  # the host cluster) hit that validation and fail pod creation entirely.
+  # Omitting it keeps the chart compatible with those environments; the only
+  # cost is that during a rolling update the spread also counts the previous
+  # ReplicaSet's pods, which biases placement of new pods toward the new
+  # generation — the desirable direction.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          control-plane: controller-manager
 
   # -- Extra labels to add to the controller-manager pod template.
   # Useful for unified service tagging conventions
