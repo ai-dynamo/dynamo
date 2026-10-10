@@ -51,9 +51,24 @@ use dynamo_runtime::error::DynamoError;
 
 /// Apply the request-level tool-call gates shared by the HTTP protocol handlers.
 fn apply_request_tool_call_parsing_options(
-    parsing_options: ParsingOptions,
+    mut parsing_options: ParsingOptions,
     request: &NvCreateChatCompletionRequest,
 ) -> Result<ParsingOptions, DynamoError> {
+    let unified_family =
+        crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        );
+    parsing_options.reasoning_disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
+        request,
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+        parsing_options.default_thinking_mode.as_deref(),
+        unified_family,
+    );
+    parsing_options.structured_response =
+        OpenAIPreprocessor::has_structured_response_format(request);
+    parsing_options.tool_choice = request.inner.tool_choice.clone();
     let tool_call_parsing_enabled = OpenAIPreprocessor::tool_call_parsing_enabled(request);
     let tool_choice = request
         .inner
@@ -61,8 +76,8 @@ fn apply_request_tool_call_parsing_options(
         .as_ref()
         .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
     let converted_tool_choice = crate::preprocessor::tool_choice::convert_tool_choice(tool_choice);
-    let tools = request.inner.tools.as_deref().unwrap_or(&[]);
-    let converted_tools = crate::preprocessor::tool_choice::convert_tools(tools);
+    let effective_tools = crate::preprocessor::tool_choice::effective_tools(&request.inner)?;
+    let converted_tools = crate::preprocessor::tool_choice::convert_tools(effective_tools.as_ref());
     let uses_structural_tag = crate::preprocessor::structural_tag::structural_tag_decision(
         parsing_options.tool_call_parser.as_deref(),
         &converted_tool_choice,
@@ -73,12 +88,14 @@ fn apply_request_tool_call_parsing_options(
         parsing_options.exclude_tools_when_tool_choice_none,
     )?
     .is_required();
-    let guided_tool_constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
-        request,
-        parsing_options.tool_call_parser.as_deref(),
-        parsing_options.reasoning_parser.as_deref(),
-        uses_structural_tag,
-    )?;
+    let guided_tool_constraint =
+        crate::preprocessor::tool_choice::guided_tool_constraint_with_effective_tools(
+            request,
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+            uses_structural_tag,
+            effective_tools.as_ref(),
+        )?;
     Ok(parsing_options
         .with_guided_tool_constraint(guided_tool_constraint)
         .with_tool_call_parsing_enabled(tool_call_parsing_enabled)
@@ -90,6 +107,134 @@ mod tests {
     use super::*;
     use crate::protocols::openai::GuidedToolConstraint;
     use serde_json::{Value, json};
+
+    #[test]
+    fn raw_batch_reasoning_policy_respects_deployment_default_and_client_override() {
+        let mut options =
+            ParsingOptions::new(Some("gemma4".to_string()), Some("gemma4".to_string()));
+        options.default_thinking_mode = Some("enabled".to_string());
+        assert!(
+            !apply_request_tool_call_parsing_options(options.clone(), &request(json!("auto")))
+                .unwrap()
+                .reasoning_disabled
+        );
+        let mut disabled = request(json!("auto"));
+        disabled.thinking = Some(json!(false));
+        assert!(
+            apply_request_tool_call_parsing_options(options, &disabled)
+                .unwrap()
+                .reasoning_disabled
+        );
+    }
+
+    #[test]
+    fn muse_auto_batch_reasoning_policy_honors_disabled_request() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::muse_auto_batch_reasoning_policy_honors_disabled_request"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "auto",
+            )],
+        ) {
+            return;
+        }
+
+        let mut req = request(json!("auto"));
+        req.chat_template_args = Some(std::collections::HashMap::from([(
+            "thinking".to_string(),
+            json!(false),
+        )]));
+        let result = apply_request_tool_call_parsing_options(
+            ParsingOptions::new(Some("muse_glimmer".to_string()), None),
+            &req,
+        )
+        .unwrap();
+
+        assert!(result.reasoning_disabled);
+    }
+
+    #[test]
+    fn structured_response_schema_roots_reconstruct_response_policy() {
+        for kind in ["object", "array", "string", "number", "boolean", "null"] {
+            let req: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model":"test", "messages":[{"role":"user", "content":"answer"}],
+                "response_format":{"type":"json_schema", "json_schema":{"name":"answer", "schema":{"type":kind}}}
+            })).unwrap();
+            let result = apply_request_tool_call_parsing_options(
+                ParsingOptions::new(Some("qwen3".into()), Some("qwen3".into())),
+                &req,
+            )
+            .unwrap();
+            assert!(result.structured_response, "{kind}");
+            assert_eq!(
+                result.guided_tool_constraint,
+                GuidedToolConstraint::None,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn unified_request_controls_use_canonical_family_for_each_selector_shape() {
+        use crate::protocols::openai::chat_completions::unified_parser;
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::unified_request_controls_use_canonical_family_for_each_selector_shape"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for selector in unified_parser::FAMILY_NAMES.iter() {
+            let family = unified_parser::canonical_family(selector).unwrap();
+            for (tool, reasoning) in [
+                (Some(*selector), None),
+                (None, Some(*selector)),
+                (Some(*selector), Some(*selector)),
+            ] {
+                for thinking in [None, Some(false), Some(true)] {
+                    let mut req = request(json!("auto"));
+                    req.thinking = thinking.map(|value| json!(value));
+                    req.normalize_reasoning_template_args().unwrap();
+                    let options =
+                        ParsingOptions::new(tool.map(str::to_owned), reasoning.map(str::to_owned));
+                    let result = apply_request_tool_call_parsing_options(options, &req).unwrap();
+                    assert_eq!(
+                        result.reasoning_disabled,
+                        if family == "gemma4" {
+                            thinking != Some(true)
+                        } else {
+                            thinking == Some(false)
+                        },
+                        "{selector} {tool:?} {reasoning:?} {thinking:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unified_deepseek_retains_renderer_chat_and_thinking_modes() {
+        for family in ["deepseek_v4", "deepseek-v4", "deepseek_v41"] {
+            for mode in ["chat", "thinking"] {
+                let mut req = request(json!("auto"));
+                req.chat_template_args = Some(std::collections::HashMap::from([(
+                    "thinking_mode".to_owned(),
+                    json!(mode),
+                )]));
+                let options = ParsingOptions::new(Some(family.into()), Some(family.into()));
+                let result = apply_request_tool_call_parsing_options(options, &req).unwrap();
+                assert_eq!(result.reasoning_disabled, mode == "chat", "{family} {mode}");
+            }
+        }
+    }
 
     fn request(tool_choice: Value) -> NvCreateChatCompletionRequest {
         let value = json!({
@@ -109,6 +254,91 @@ mod tests {
             }]
         });
         serde_json::from_value(value).expect("request must deserialize")
+    }
+
+    fn dynamic_request(tool_choice: Option<Value>) -> NvCreateChatCompletionRequest {
+        let mut value = json!({
+            "model": "test-model",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "",
+                    "tools": [{
+                        "name": "lookup",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}}
+                        },
+                        "strict": true
+                    }]
+                },
+                {"role": "user", "content": "test"}
+            ]
+        });
+        if let Some(tool_choice) = tool_choice {
+            value["tool_choice"] = tool_choice;
+        }
+        serde_json::from_value(value).expect("dynamic request must deserialize")
+    }
+
+    #[test]
+    fn kimi_k3_dynamic_tools_enable_response_parsing_without_a_top_level_sentinel() {
+        let parsing_options = ParsingOptions {
+            tool_call_parser: Some("kimi_k3".to_string()),
+            ..Default::default()
+        };
+        let result =
+            apply_request_tool_call_parsing_options(parsing_options, &dynamic_request(None))
+                .expect("dynamic tools must configure parsing");
+
+        assert!(!result.suppress_tool_calls);
+        assert_eq!(result.tools.len(), 1);
+        assert_eq!(result.tools[0].name, "lookup");
+        assert_eq!(result.tools[0].strict, Some(true));
+    }
+
+    #[test]
+    fn kimi_k3_named_dynamic_tool_uses_structural_tag_policy() {
+        let parsing_options = ParsingOptions {
+            tool_call_parser: Some("kimi_k3".to_string()),
+            ..Default::default()
+        };
+        let result = apply_request_tool_call_parsing_options(
+            parsing_options,
+            &dynamic_request(Some(
+                json!({"type": "function", "function": {"name": "lookup"}}),
+            )),
+        )
+        .expect("named dynamic tool choice must configure parsing");
+
+        assert!(!result.suppress_tool_calls);
+        assert_eq!(
+            result.guided_tool_constraint,
+            GuidedToolConstraint::StructuralTag
+        );
+        assert_eq!(result.tools.len(), 1);
+        assert_eq!(result.tools[0].name, "lookup");
+    }
+
+    #[test]
+    fn dynamic_tools_with_tool_choice_none_still_suppress_calls() {
+        let parsing_options = ParsingOptions {
+            tool_call_parser: Some("kimi_k3".to_string()),
+            ..Default::default()
+        };
+        let result = apply_request_tool_call_parsing_options(
+            parsing_options,
+            &dynamic_request(Some(json!("none"))),
+        )
+        .expect("tool_choice none must remain valid");
+
+        assert!(result.suppress_tool_calls);
+        assert_eq!(result.guided_tool_constraint, GuidedToolConstraint::None);
+        assert_eq!(
+            result.tools.len(),
+            1,
+            "declarations remain available to parsers"
+        );
     }
 
     // A Kimi K2 pair with a forced/named tool_choice must resolve to the real
@@ -132,7 +362,7 @@ mod tests {
         assert_eq!(
             result.guided_tool_constraint,
             GuidedToolConstraint::StructuralTag,
-            "kimi_k2 + required must use the intrinsic structural tag, not a reconstructed JSON schema"
+            "kimi_k2 + required must retain its native structural tag when mode is off"
         );
     }
 
@@ -148,7 +378,7 @@ mod tests {
         assert_eq!(
             result.guided_tool_constraint,
             GuidedToolConstraint::StructuralTag,
-            "kimi_k2 + a named tool choice must use the intrinsic structural tag, not a reconstructed JSON schema"
+            "kimi_k2 + a named tool choice must retain its native structural tag when mode is off"
         );
     }
 
@@ -194,11 +424,12 @@ mod tests {
         );
     }
 
-    // With the operator default (`structural_tag_mode = Off`), the same non-Kimi
-    // parser must NOT get a structural tag — confirms the mode gate above is real,
-    // not a permanently-on regression.
+    // With the low-level ParsingOptions default (`structural_tag_mode = Off`),
+    // the same non-Kimi parser must NOT get a structural tag. Regular workers
+    // explicitly publish the deployment's default-on policy into the model card;
+    // native sidecars that do not do so retain this conservative default.
     #[test]
-    fn operator_default_mode_off_does_not_resolve_structural_tag_for_a_non_kimi_parser() {
+    fn parsing_options_default_mode_off_does_not_resolve_structural_tag() {
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("qwen3_coder".to_string()),
             ..Default::default()

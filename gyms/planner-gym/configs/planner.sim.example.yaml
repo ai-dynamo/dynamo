@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Reusable Dynamo Planner policy. Match-owned topology, GPU budget, engine
+# costs, and report paths stay in the Match Config and are injected by Arena.
+optimization_target: sla
+# Match Config supplies the selected profile's TTFT and ITL targets per run.
+enable_load_scaling: true
+enable_throughput_scaling: false
+pre_deployment_sweeping_mode: none
+load_adjustment_interval_seconds: 5
+load_min_observations: 5
+load_scaling_down_sensitivity: 80
+min_endpoint: 1

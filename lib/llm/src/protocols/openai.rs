@@ -119,9 +119,13 @@ pub(crate) trait OpenAIStopConditionsProvider {
     }
 
     /// Get max_thinking_tokens from nvext
-    /// NOTE: This is currently a passthrough for future thinking budget implementation
+    /// NOTE: This is a legacy passthrough; prefer root-level `thinking_token_budget`.
     fn get_max_thinking_tokens(&self) -> Option<u32> {
         self.nvext().and_then(|nv| nv.max_thinking_tokens)
+    }
+
+    fn get_thinking_token_budget(&self) -> Option<u32> {
+        None
     }
 }
 
@@ -135,6 +139,10 @@ pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_formatted_prompt(&self) -> Option<bool>;
 
     fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
+        None
+    }
+
+    fn get_no_stop_trim(&self) -> Option<bool> {
         None
     }
 }
@@ -218,7 +226,9 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
         let stop_token_ids = self.get_stop_token_ids();
-        let max_thinking_tokens = self.get_max_thinking_tokens();
+        let max_thinking_tokens = self
+            .get_thinking_token_budget()
+            .or_else(|| self.get_max_thinking_tokens());
 
         if let Some(stop) = &stop
             && stop.len() > MAX_STOP_SEQUENCES
@@ -269,6 +279,7 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
             skip_special_tokens,
             formatted_prompt,
             return_tokens_as_token_ids,
+            no_stop_trim: self.get_no_stop_trim(),
         })
     }
 }
@@ -394,9 +405,23 @@ impl GuidedToolConstraint {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParsingOptions {
+    /// Request mode retained so stream and batch use the same native-family eligibility.
+    #[serde(default)]
+    pub tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
+
+    /// A disabled thinking request must not regain a reasoning channel during raw batch recovery.
+    #[serde(default)]
+    pub reasoning_disabled: bool,
+
+    /// JSON response formatting is a content contract, separate from guided tool JSON.
+    #[serde(default)]
+    pub structured_response: bool,
+
+    #[serde(default)]
+    pub default_thinking_mode: Option<String>,
 
     /// Final request policy for tool output. Some model parsers (currently
     /// Harmony) must still run during non-streaming aggregation to remove
@@ -466,6 +491,10 @@ impl ParsingOptions {
         Self {
             tool_call_parser,
             reasoning_parser,
+            reasoning_disabled: false,
+            structured_response: false,
+            default_thinking_mode: None,
+            tool_choice: None,
             suppress_tool_calls: false,
             guided_tool_constraint: GuidedToolConstraint::None,
             parallel_tool_calls: None,
@@ -502,13 +531,11 @@ impl ParsingOptions {
             let whole_response_decoder = matches!(
                 self.tool_call_parser.as_deref(),
                 Some("harmony" | "kimi_k3" | "kimi-k3")
-            )
-                || chat_completions::unified_parser::selected_batch_family(
-                    self.tool_call_parser.as_deref(),
-                    self.reasoning_parser.as_deref(),
-                )
-                .is_some()
-                || chat_completions::tool_parser_v2::unified_family(
+            ) || chat_completions::unified_parser::configured_family(
+                self.tool_call_parser.as_deref(),
+                self.reasoning_parser.as_deref(),
+            ) == Some("muse_glimmer")
+                || chat_completions::unified_parser::selected_content_decoder_family(
                     self.tool_call_parser.as_deref(),
                     self.reasoning_parser.as_deref(),
                 )

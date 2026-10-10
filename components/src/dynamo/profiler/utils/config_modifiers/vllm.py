@@ -43,7 +43,10 @@ formatter = logging.Formatter(
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-DEFAULT_VLLM_KV_TRANSFER_CONFIG = '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+DEFAULT_VLLM_KV_TRANSFER_CONFIG = {
+    SubComponentType.PREFILL: '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
+    SubComponentType.DECODE: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}',
+}
 
 
 def _get_valued_arg(args: list[str], key: str) -> str | None:
@@ -99,14 +102,11 @@ def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[s
     finalized = set_unique_argument_value(
         cleaned_args, "--disaggregation-mode", role.value
     )
-    if (
-        role == SubComponentType.PREFILL
-        and _get_valued_arg(finalized, "--kv-transfer-config") is None
-    ):
+    if _get_valued_arg(finalized, "--kv-transfer-config") is None:
         finalized = set_unique_argument_value(
             finalized,
             "--kv-transfer-config",
-            DEFAULT_VLLM_KV_TRANSFER_CONFIG,
+            DEFAULT_VLLM_KV_TRANSFER_CONFIG[role],
         )
     return finalized
 
@@ -422,6 +422,8 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         config: dict,
         tp_size: int,
         component_type: SubComponentType = SubComponentType.DECODE,
+        *,
+        num_gpus_per_node: int | None = None,
     ) -> dict:
         cfg = Config.model_validate(config)
         worker_service = get_worker_component_from_config(
@@ -429,7 +431,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         )
 
         # Set up resources
-        setup_worker_component_resources(worker_service, tp_size)
+        setup_worker_component_resources(worker_service, tp_size, num_gpus_per_node)
 
         # Get and validate args
         args = validate_and_get_worker_args(worker_service, backend="vllm")
@@ -438,6 +440,67 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         # Remove --tp alias if present, use --tensor-parallel-size as canonical form
         args = remove_valued_arguments(args, "--tp")
         args = set_argument_value(args, "--tensor-parallel-size", str(tp_size))
+
+        get_main_container(worker_service).args = args
+
+        return cfg.model_dump()
+
+    @classmethod
+    def set_config_kv_cache(
+        cls,
+        config: dict,
+        block_size: int,
+        memory_fraction: float | None,
+        prefix_caching: bool,
+        num_gpu_blocks: int | None = None,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply KV-cache block size, memory budget, and prefix-caching policy.
+
+        Mirrors set_config_tp_size's shape: read the searched Candidate values,
+        write the corresponding vLLM flags, and leave everything else in the
+        worker's existing args untouched.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="vllm", sub_component_type=component_type
+        )
+
+        args = validate_and_get_worker_args(worker_service, backend="vllm")
+        args = break_arguments(args)
+
+        args = set_argument_value(args, "--block-size", str(block_size))
+        if (memory_fraction is None) == (num_gpu_blocks is None):
+            raise ValueError(
+                "exactly one of memory_fraction and num_gpu_blocks must be set"
+            )
+        args = remove_valued_arguments(args, "--gpu-memory-utilization")
+        args = remove_valued_arguments(args, "--num-gpu-blocks-override")
+        if memory_fraction is not None:
+            args = set_argument_value(
+                args, "--gpu-memory-utilization", str(memory_fraction)
+            )
+        else:
+            args = set_argument_value(
+                args, "--num-gpu-blocks-override", str(num_gpu_blocks)
+            )
+
+        # --enable-prefix-caching / --no-enable-prefix-caching are bare
+        # boolean flags, not "--key value" pairs, so remove_valued_arguments
+        # (which deletes two tokens) does not apply here -- confirmed by a
+        # regression test where a trailing boolean flag with no following
+        # token silently failed to be removed. Matches the plain list.remove
+        # pattern convert_config already uses for this same flag pair.
+        if "--enable-prefix-caching" in args:
+            args.remove("--enable-prefix-caching")
+        if "--no-enable-prefix-caching" in args:
+            args.remove("--no-enable-prefix-caching")
+        args = append_argument(
+            args,
+            "--enable-prefix-caching"
+            if prefix_caching
+            else "--no-enable-prefix-caching",
+        )
 
         get_main_container(worker_service).args = args
 
@@ -663,6 +726,37 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = set_argument_value(
             args, "--max-num-batched-tokens", str(per_gpu_max_tokens)
         )
+
+        get_main_container(worker_service).args = args
+        return cfg.model_dump()
+
+    @classmethod
+    def set_config_model(
+        cls,
+        config: dict,
+        model_name: str,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply the evaluated Candidate's model to the worker's CLI args.
+
+        Uses cls.WORKER_MODEL_PATH_ARG / cls.WORKER_SERVED_MODEL_NAME_ARG so
+        the correct per-backend flag name is picked automatically (vLLM
+        overrides WORKER_MODEL_PATH_ARG to "--model"; other backends use
+        "--model-path"). Without this call, the base template's placeholder
+        model name survives untouched into the materialized DGD -- confirmed
+        via a real end-to-end sweep where the evaluated/scored model
+        (Qwen/Qwen3-8B) did not match the model written into the output DGD
+        (the template's example placeholder, Qwen/Qwen3-0.6B).
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="vllm", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="vllm")
+        args = break_arguments(args)
+
+        args = set_argument_value(args, cls.WORKER_MODEL_PATH_ARG, model_name)
+        args = set_argument_value(args, cls.WORKER_SERVED_MODEL_NAME_ARG, model_name)
 
         get_main_container(worker_service).args = args
         return cfg.model_dump()

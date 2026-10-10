@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
+import io
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -14,6 +17,14 @@ try:
     from vllm.sampling_params import RequestOutputKind, SamplingParams
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
+    import dynamo.common.http as dynamo_http
+    from dynamo.common.http import (
+        AiohttpClient,
+        HttpConfigurationError,
+        HttpError,
+        HttpStatusError,
+    )
+    from dynamo.common.multimodal import ImageLoader
     from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
@@ -52,6 +63,7 @@ def _make_handler(stage_types=("diffusion",)):
     config.model = "test-model"
     config.served_model_name = None
     config.output_modalities = ["text"]
+    config.default_video_fps = 16
     config.enable_lora = False  # Disable LoRA for tests unless explicitly set
     config.engine_args = SimpleNamespace(enable_lora=False)
     handler.config = config
@@ -66,6 +78,7 @@ def _make_handler(stage_types=("diffusion",)):
             defaults.append(llm_default)
 
     engine_client = MagicMock()
+    engine_client.engine.od_config = SimpleNamespace(model_class_name=None)
     engine_client.default_sampling_params_list = defaults
     engine_client.engine.get_stage_metadata.side_effect = lambda i: SimpleNamespace(
         stage_type=stage_types[i]
@@ -75,6 +88,8 @@ def _make_handler(stage_types=("diffusion",)):
     # BaseOmniHandler.__init__ is mocked out in tests; recreate LoRA state attrs
     # expected by BaseWorkerHandler helpers called by OmniHandler.
     handler._lora_state = LoRAState()
+    handler._paused = False
+    handler._pause_lock = asyncio.Lock()
     handler.loaded_loras = handler._lora_state.loaded_loras
     handler._lora_load_locks = handler._lora_state.lora_load_locks
     handler._lora_load_locks_guard = handler._lora_state.lora_load_locks_guard
@@ -203,6 +218,51 @@ class TestBuildEngineInputs:
         assert inputs.request_type == RequestType.VIDEO_GENERATION
         assert inputs.prompt["prompt"] == "a drone"
         assert inputs.fps > 0
+        assert inputs.response_format is None
+
+    @pytest.mark.parametrize("response_format", ["b64_json", "url"])
+    @pytest.mark.asyncio
+    async def test_video_and_i2v_forward_response_format(self, response_format):
+        """T2V and I2V share _engine_inputs_from_video; b64_json must not be dropped."""
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a drone",
+            model="test-model",
+            size="832x480",
+            response_format=response_format,
+        )
+        t2v = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        assert t2v.response_format == response_format
+
+        img = Image.new("RGB", (64, 64), color="red")
+        i2v = await handler.build_engine_inputs(
+            req, RequestType.VIDEO_GENERATION, image=img
+        )
+        assert i2v.response_format == response_format
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fps", [0, -1])
+    async def test_video_generation_rejects_non_positive_fps(self, fps):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a drone",
+            model="test-model",
+            nvext=VideoNvExt(num_frames=24, fps=fps),
+        )
+
+        with pytest.raises(ValueError, match="fps must be greater than zero"):
+            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+    @pytest.mark.asyncio
+    async def test_video_generation_normalizes_mp4_output_format(self):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a drone", model="test-model", output_format="MP4"
+        )
+
+        inputs = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+        assert inputs.output_format == "mp4"
 
     @pytest.mark.asyncio
     async def test_audio_generation_delegates_toaudio(self):
@@ -213,7 +273,11 @@ class TestBuildEngineInputs:
             request_type=RequestType.AUDIO_GENERATION,
         )
 
-        async def mock_engine_inputs(req):
+        seen = {}
+
+        async def mock_engine_inputs(req, request_id=None):
+            """Record the request id the handler forwarded to the audio handler."""
+            seen["request_id"] = request_id
             return expected
 
         handler.audio = MagicMock()
@@ -221,13 +285,262 @@ class TestBuildEngineInputs:
         inputs = await handler.build_engine_inputs(
             NvCreateAudioSpeechRequest(input="Hello world"),
             RequestType.AUDIO_GENERATION,
+            request_id="req-1",
         )
         assert inputs.request_type == RequestType.AUDIO_GENERATION
         assert inputs.prompt["prompt"] == "Hello world"
+        # Audex binds its CFG pair id to the final request id.
+        assert seen["request_id"] == "req-1"
+
+
+def _cumulative_stage_params():
+    """A stand-in for stage params that reach the engine asking for snapshots.
+
+    Deliberately not a real ``SamplingParams``: the coercion in
+    ``streaming_sampling_params`` would rewrite that to ``DELTA``, and no params
+    type the pinned vLLM-Omni actually ships can carry ``CUMULATIVE`` past it
+    (see ``utils.audio_output_is_cumulative``). So this pins the *branch* --
+    that a cumulative answer de-duplicates rather than concatenates -- not a
+    reachable deployment. The delta test below is the one guarding production.
+    """
+    return [SimpleNamespace(output_kind=RequestOutputKind.CUMULATIVE)]
+
+
+class TestAggregatedAudioFollowsOutputKind:
+    """Buffering must follow the output kind the engine was actually given.
+
+    Under ``DELTA`` the output processor drains the audio it emits, so the
+    payloads are disjoint pieces that must all be kept; under ``CUMULATIVE``
+    every payload repeats the whole waveform decoded so far, so they must be
+    de-duplicated to the longest. Reading the model's identity instead
+    truncated Audex — whose stages are coerced to ``DELTA`` — to one 100 ms
+    delta.
+    """
+
+    @staticmethod
+    def _audio_output(samples):
+        """One streamed audio stage output carrying the given samples."""
+        import numpy as np
+
+        return SimpleNamespace(
+            final_output_type="audio",
+            multimodal_output={
+                "audio": np.asarray(samples, dtype=np.float32),
+                "sr": 24000,
+            },
+        )
+
+    async def _run(
+        self,
+        handler,
+        stage_outputs,
+        *,
+        sampling_params_list=None,
+        reuse_formatter=False,
+    ):
+        """Drive the handler over ``stage_outputs`` and collect the responses.
+
+        Uses a real OutputFormatter so the buffering path under test is the
+        production one; only the engine and the abort monitor are stubbed.
+        ``sampling_params_list`` is what the request carries into the handler,
+        so it goes through the same streaming coercion a real request does.
+        ``reuse_formatter`` keeps the formatter from a previous call, so a
+        second request runs against the state the first one left behind.
+        """
+        from contextlib import asynccontextmanager
+
+        from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+        if not reuse_formatter:
+            handler.output_formatter = OutputFormatter(model_name="test-model")
+
+        async def fake_generate(**kwargs):
+            """Replay the scripted stage outputs as the engine's stream."""
+            for so in stage_outputs:
+                yield so
+
+        handler.engine_client.generate = fake_generate
+
+        @asynccontextmanager
+        async def no_abort_monitor(context, request_id):
+            """Abort monitor that never fires."""
+            yield None
+
+        handler._abort_monitor = no_abort_monitor
+        handler.config.output_modalities = ["audio"]
+        handler.audio = MagicMock()
+        handler.audio.build_engine_inputs = _AsyncReturn(
+            EngineInputs(
+                prompt={"prompt": "hi"},
+                request_type=RequestType.AUDIO_GENERATION,
+                sampling_params_list=sampling_params_list,
+            )
+        )
+
+        return [
+            c
+            async for c in handler._generate_openai_mode(
+                {"input": "hi"}, MagicMock(), "req-1"
+            )
+        ]
+
+    @staticmethod
+    def _decode(chunk):
+        """Read the response's base64 audio back as (samples, sample_rate)."""
+        import base64
+        import io
+
+        import soundfile as sf
+
+        return sf.read(io.BytesIO(base64.b64decode(chunk["data"][0]["b64_json"])))
+
+    @pytest.mark.asyncio
+    async def test_delta_payloads_are_all_concatenated(self):
+        """Every delta must survive: the engine already drained what it emitted.
+
+        This is the Audex shape — its code2wav stage never re-decodes left
+        context — and the regression the keep-longest branch caused: the client
+        used to receive only the longest single delta.
+        """
+        handler = _make_handler(stage_types=("llm",))
+        chunks = await self._run(
+            handler,
+            [
+                self._audio_output([]),  # streams can open with an empty payload
+                self._audio_output([0.1] * 1200),
+                self._audio_output([0.1] * 2400),
+            ],
+            sampling_params_list=[SamplingParams()],
+        )
+
+        assert len(chunks) == 1
+        assert chunks[0]["status"] == "completed"
+        audio, sr = self._decode(chunks[0])
+        assert len(audio) == 3600
+        assert sr == 24000
+
+    @pytest.mark.asyncio
+    async def test_cumulative_payloads_are_deduplicated(self):
+        """Snapshots repeat the waveform, so concatenating them triples it."""
+        handler = _make_handler(stage_types=("llm",))
+        chunks = await self._run(
+            handler,
+            [
+                self._audio_output([]),
+                self._audio_output([0.1] * 1200),
+                self._audio_output([0.1] * 2400),
+            ],
+            sampling_params_list=_cumulative_stage_params(),
+        )
+
+        assert len(chunks) == 1
+        assert chunks[0]["status"] == "completed"
+        audio, sr = self._decode(chunks[0])
+        # The final snapshot verbatim: not the partial one, and not 3600 samples
+        # of the snapshots concatenated.
+        assert len(audio) == 2400
+        assert sr == 24000
+
+    @pytest.mark.asyncio
+    async def test_no_audio_at_all_reports_failure(self):
+        """Otherwise the client gets a valid but silent, header-only file."""
+        handler = _make_handler()
+        chunks = await self._run(handler, [self._audio_output([])])
+
+        assert len(chunks) == 1
+        assert chunks[0]["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_missing_audio_stage_output_reports_failure(self):
+        """A buffered request must not end on an empty stream.
+
+        A thinker-only stream yields no audio-typed output at all, so nothing
+        is ever buffered and there is no payload to report per chunk.
+        """
+        handler = _make_handler()
+        chunks = await self._run(
+            handler, [SimpleNamespace(final_output_type="unknown")]
+        )
+
+        assert [c["status"] for c in chunks] == ["failed"]
+
+    @pytest.mark.asyncio
+    async def test_audio_does_not_leak_into_the_next_request(self):
+        """The formatter is shared across requests, so its audio must not be.
+
+        Buffering lives in a per-request AudioAggregateState the handler
+        creates, so a second request through the same formatter must answer
+        with its own waveform only. Both requests run cumulative with the longer
+        waveform first on purpose: that is the mode where keep-longest
+        de-duplication would let the first request's audio win on length alone,
+        so shared state would otherwise go unnoticed.
+        """
+        import numpy as np
+
+        handler = _make_handler(stage_types=("llm",))
+        cumulative = dict(sampling_params_list=_cumulative_stage_params())
+        await self._run(handler, [self._audio_output([0.2] * 2400)], **cumulative)
+        chunks = await self._run(
+            handler,
+            [self._audio_output([0.1] * 1200)],
+            reuse_formatter=True,
+            **cumulative,
+        )
+
+        assert len(chunks) == 1
+        audio, _ = self._decode(chunks[0])
+        assert len(audio) == 1200
+        assert np.allclose(audio, 0.1, atol=1e-3)
+
+
+class _AsyncReturn:
+    """Awaitable stub that ignores its arguments and returns a fixed value."""
+
+    def __init__(self, value):
+        """Store the value every call resolves to."""
+        self._value = value
+
+    async def __call__(self, *args, **kwargs):
+        """Return the fixed value, ignoring the arguments."""
+        return self._value
 
 
 class TestI2VEngineInputs:
     """Tests for image-to-video: multi_modal_data attachment, I2V nvext params, and protocol fields."""
+
+    @pytest.mark.parametrize(
+        "negative_prompt,with_image",
+        [
+            (None, False),
+            ("", False),
+            ("blurry", False),
+            ("模糊 🛶", False),
+            ("blurry", True),
+        ],
+    )
+    def test_video_negative_prompt(self, negative_prompt, with_image):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a small boat",
+            model="test-model",
+            response_format="b64_json",
+            nvext=VideoNvExt(negative_prompt=negative_prompt),
+        )
+        image = Image.new("RGB", (64, 64)) if with_image else None
+
+        result = handler._engine_inputs_from_video(req, image=image)
+
+        assert result.prompt["prompt"] == req.prompt
+        if negative_prompt is None:
+            assert "negative_prompt" not in result.prompt
+        else:
+            assert result.prompt["negative_prompt"] == negative_prompt
+        if with_image:
+            assert result.prompt["multi_modal_data"]["image"] is image
+        else:
+            assert "multi_modal_data" not in result.prompt
+        assert result.request_type == RequestType.VIDEO_GENERATION
+        assert result.response_format == "b64_json"
 
     @pytest.mark.asyncio
     async def test_t2v_no_multi_modal_data_and_i2v_attaches_image(self):
@@ -265,6 +578,189 @@ class TestI2VEngineInputs:
         assert sp.boundary_ratio == 0.875
         assert sp.guidance_scale_2 == 1.0
         assert sp.num_inference_steps == 40
+
+    @pytest.mark.asyncio
+    async def test_video_preserves_each_stage_default_and_merges_passthrough(self):
+        handler = _make_handler(stage_types=("diffusion", "diffusion"))
+        (
+            first_default,
+            second_default,
+        ) = handler.engine_client.default_sampling_params_list
+        first_default.num_frames = 209
+        first_default.seed = 7
+        first_default.extra_args = {"stage": "first", "flow_shift": 11.0}
+        second_default.num_frames = 243
+        second_default.seed = 8
+        second_default.extra_args = {"stage": "second", "flow_shift": 10.0}
+        req = NvCreateVideoRequest(
+            prompt="cat playing piano",
+            model="video-model",
+            nvext=VideoNvExt(num_inference_steps=50),
+            extra_args={
+                "media_passthrough": {
+                    "task": "t2va",
+                    "duration": 10.0,
+                    "flow_shift": 12.0,
+                    "audio_flow_shift": 3.0,
+                }
+            },
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        first, second = result.sampling_params_list
+
+        assert (first.num_frames, first.seed) == (209, 7)
+        assert (second.num_frames, second.seed) == (243, 8)
+        assert first.extra_args == {
+            "stage": "first",
+            "flow_shift": 12.0,
+            "task": "t2va",
+            "duration": 10.0,
+            "audio_flow_shift": 3.0,
+        }
+        assert second.extra_args == {
+            "stage": "second",
+            "flow_shift": 12.0,
+            "task": "t2va",
+            "duration": 10.0,
+            "audio_flow_shift": 3.0,
+        }
+        assert first_default.extra_args == {"stage": "first", "flow_shift": 11.0}
+        assert second_default.extra_args == {"stage": "second", "flow_shift": 10.0}
+
+    @pytest.mark.asyncio
+    async def test_video_passthrough_does_not_leak_between_requests(self):
+        handler = _make_handler()
+        first = NvCreateVideoRequest(
+            prompt="first",
+            model="video-model",
+            extra_args={"media_passthrough": {"task": "t2va"}},
+        )
+        second = NvCreateVideoRequest(prompt="second", model="video-model")
+
+        first_inputs = await handler.build_engine_inputs(
+            first, RequestType.VIDEO_GENERATION
+        )
+        second_inputs = await handler.build_engine_inputs(
+            second, RequestType.VIDEO_GENERATION
+        )
+
+        assert first_inputs.sampling_params_list[0].extra_args == {"task": "t2va"}
+        assert second_inputs.sampling_params_list[0].extra_args == {}
+
+    @pytest.mark.asyncio
+    async def test_video_fps_only_preserves_model_num_frames(self):
+        handler = _make_handler()
+        model_defaults = handler.engine_client.default_sampling_params_list[0]
+        model_defaults.num_frames = 33
+        req = NvCreateVideoRequest(
+            prompt="cat", model="video-model", nvext=VideoNvExt(fps=8)
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+
+        assert sp.num_frames == 33
+        assert sp.fps == 8
+        assert sp.frame_rate == 8.0
+
+    @pytest.mark.asyncio
+    async def test_explicit_video_fields_override_model_defaults(self):
+        handler = _make_handler()
+        model_defaults = handler.engine_client.default_sampling_params_list[0]
+        model_defaults.width = 1024
+        model_defaults.height = 576
+        model_defaults.num_frames = 209
+        model_defaults.fps = None
+        model_defaults.seed = 7
+        req = NvCreateVideoRequest(
+            prompt="cat",
+            model="video-model",
+            size="448x256",
+            seconds=10,
+            nvext=VideoNvExt(fps=24, seed=42),
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+
+        assert (sp.width, sp.height) == (448, 256)
+        assert sp.num_frames == 240
+        assert sp.fps == 24
+        assert sp.frame_rate == 24.0
+        assert sp.seed == 42
+        assert result.fps == 24
+
+    @pytest.mark.parametrize("fps", [None, 8])
+    @pytest.mark.asyncio
+    async def test_video_uses_video_default_for_image_num_frames_sentinel(self, fps):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="cat", model="video-model", nvext=VideoNvExt(fps=fps)
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+        assert result.sampling_params_list[0].num_frames == 97
+
+    @pytest.mark.asyncio
+    async def test_video_resolves_fractional_frame_rate(self):
+        handler = _make_handler()
+        model_defaults = handler.engine_client.default_sampling_params_list[0]
+        model_defaults.fps = 16
+        model_defaults.frame_rate = 23.976
+        req = NvCreateVideoRequest(prompt="cat", model="video-model", seconds=10)
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+
+        assert sp.num_frames == 240
+        assert isinstance(sp.num_frames, int)
+        assert result.fps == 24
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("num_frames", 0, "nvext.num_frames must be greater than zero"),
+            ("num_frames", -1, "nvext.num_frames must be greater than zero"),
+            ("fps", 0, "nvext.fps must be greater than zero"),
+            ("fps", -1, "nvext.fps must be greater than zero"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_video_rejects_non_positive_overrides(self, field, value, message):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="cat", model="video-model", nvext=VideoNvExt(**{field: value})
+        )
+
+        with pytest.raises(ValueError, match=message):
+            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+    @pytest.mark.parametrize("seconds", [0, -1])
+    @pytest.mark.asyncio
+    async def test_video_rejects_non_positive_duration(self, seconds):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(prompt="cat", model="video-model", seconds=seconds)
+
+        with pytest.raises(ValueError, match="seconds must be greater than zero"):
+            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+    @pytest.mark.asyncio
+    async def test_video_rejection_propagates_as_invalid_argument(self):
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        request = {
+            "prompt": "cat",
+            "model": "video-model",
+            "nvext": {"fps": 0},
+        }
+
+        with pytest.raises(InvalidArgument) as excinfo:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        assert str(excinfo.value) == "nvext.fps must be greater than zero"
 
     async def test_media_passthrough_reaches_sampling_params(self):
         """A top-level SDK extra_body field, nested by the frontend under
@@ -640,6 +1136,26 @@ class TestParseOmniRequest:
         assert result["engine_inputs"]["negative_prompt"] == "blurry, low quality"
         assert result["original_prompt"]["negative_prompt"] == "blurry, low quality"
 
+    def test_video_request_uses_nvext_negative_prompt(self):
+        request = {
+            "model": "test-model",
+            "prompt": "a small boat",
+            "size": "320x192",
+            "nvext": {"negative_prompt": "blurry, distorted"},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["video"]))
+
+        assert result["engine_inputs"]["negative_prompt"] == "blurry, distorted"
+        assert result["original_prompt"]["negative_prompt"] == "blurry, distorted"
+
+    def test_video_request_without_negative_prompt_omits_it(self):
+        request = {"model": "test-model", "prompt": "a small boat", "size": "320x192"}
+
+        result = asyncio.run(parse_omni_request(request, ["video"]))
+
+        assert "negative_prompt" not in result["engine_inputs"]
+
     def test_image_request_uses_nvext_dimensions_consistently(self):
         request = {
             "prompt": "a red apple",
@@ -798,33 +1314,271 @@ class TestImageGenerationSizeValidation:
         assert image_generation_size_from_request({"size": 1024}) == (1024, 1024)
 
 
+@pytest.fixture
+def image_request_handler():
+    handler = _make_handler()
+    handler.config.output_modalities = ["image"]
+    handler._image_loader = ImageLoader()
+    handler._image_loader.load_image = AsyncMock(wraps=handler._image_loader.load_image)
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    handler.engine_client.generate.return_value.__aiter__.return_value = []
+    return handler
+
+
+class TestImageReferenceInputs:
+    @pytest.mark.asyncio
+    async def test_rejected_controls_do_not_load_reference(self, image_request_handler):
+        handler = image_request_handler
+        handler._image_loader.load_image.side_effect = AssertionError(
+            "Invalid controls must be rejected before image loading"
+        )
+        request = {
+            "prompt": "edit",
+            "input_reference": "https://example.com/ref.png",
+            "extra_args": {"media_passthrough": {"guardrails": False}},
+        }
+
+        with pytest.raises(InvalidArgument, match="cannot be set per request"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        handler._image_loader.load_image.assert_not_awaited()
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "model_class_name, image_modality, edit_prompt",
+        [
+            (None, "image", "a teapot"),
+            ("QwenImageEditPipeline", "image", "a teapot"),
+            (
+                "BagelPipeline",
+                "img2img",
+                "<|fim_middle|><|im_start|>a teapot<|im_end|>",
+            ),
+            ("MingImagePipeline", "img2img", "a teapot"),
+        ],
+    )
+    async def test_references_reach_engine_and_do_not_leak(
+        self, image_request_handler, model_class_name, image_modality, edit_prompt
+    ):
+        handler = image_request_handler
+        handler.engine_client.engine.od_config.model_class_name = model_class_name
+        # Text-only recovery bypasses the model-specific image builder.
+        colors = (
+            ("red", "green", None) if model_class_name is None else ("red", "green")
+        )
+        for index, color in enumerate(colors):
+            request = {
+                "prompt": "a teapot",
+                "size": "512x768",
+                "nvext": {"negative_prompt": "blurry"},
+            }
+            if color is not None:
+                reference = Image.new("RGB", (8, 8), color=color)
+                with io.BytesIO() as buffer:
+                    reference.save(buffer, format="PNG")
+                    encoded = base64.b64encode(buffer.getvalue()).decode()
+                request["input_reference"] = f"data:image/png;base64,{encoded}"
+
+            chunks = [
+                chunk
+                async for chunk in handler._generate_openai_mode(
+                    request, None, f"req-{index}"
+                )
+            ]
+            assert chunks == []
+            prompt = handler.engine_client.generate.call_args.kwargs["prompt"]
+            assert prompt["negative_prompt"] == "blurry"
+            processor_kwargs = {"target_h": 768, "target_w": 512}
+            if color is None:
+                assert prompt["prompt"] == request["prompt"]
+                assert prompt["modalities"] == ["image"]
+                assert "multi_modal_data" not in prompt
+            else:
+                assert prompt["prompt"] == edit_prompt
+                assert prompt["modalities"] == [image_modality]
+                assert set(prompt["multi_modal_data"]) == {image_modality}
+                images = prompt["multi_modal_data"][image_modality]
+                assert len(images) == 1
+                assert images[0].size == reference.size
+                assert images[0].tobytes() == reference.tobytes()
+                if image_modality == "img2img":
+                    processor_kwargs["modalities"] = ["img2img"]
+            assert prompt["mm_processor_kwargs"] == processor_kwargs
+
+        assert handler.engine_client.generate.call_count == len(colors)
+        assert handler._image_loader.load_image.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reference",
+        [
+            "data:image/png;base64,%%%",
+            "",
+        ],
+        ids=["invalid-base64", "empty-reference"],
+    )
+    async def test_invalid_reference_rejected_before_generation(
+        self, image_request_handler, reference
+    ):
+        handler = image_request_handler
+        request = {"prompt": "a teapot", "input_reference": reference}
+
+        with pytest.raises(InvalidArgument, match="Failed to load input_reference"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_oversized_reference_rejected_before_generation(
+        self, image_request_handler
+    ):
+        handler = image_request_handler
+        handler._image_loader = ImageLoader(max_bytes=1)
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (8, 8), color="red").save(buffer, format="PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode()
+        request = {
+            "prompt": "a teapot",
+            "input_reference": f"data:image/png;base64,{encoded}",
+        }
+
+        with pytest.raises(InvalidArgument) as exc_info:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        assert str(exc_info.value) == "Failed to load input_reference"
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unsupported_reference_preserves_status(self, image_request_handler):
+        handler = image_request_handler
+        request = {
+            "prompt": "a teapot",
+            "input_reference": "data:image/png;base64,bm90IGFuIGltYWdl",
+        }
+
+        with pytest.raises(HttpStatusError) as exc_info:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        assert exc_info.value.status == 415
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            HttpStatusError(503, "Service Unavailable", "https://example.com/image"),
+            HttpConfigurationError("Untrusted configured egress proxy"),
+            HttpError("fetch failed"),
+        ],
+        ids=["origin-unavailable", "configuration", "fetch"],
+    )
+    async def test_reference_http_error_preserved_before_generation(
+        self, image_request_handler, error
+    ):
+        handler = image_request_handler
+        handler._image_loader.load_image.side_effect = error
+        request = {
+            "prompt": "a teapot",
+            "input_reference": "https://example.com/reference.png",
+        }
+
+        with pytest.raises(type(error)) as exc_info:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        assert exc_info.value is error
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["https", "data"])
+    async def test_truncated_reference_preserves_loader_error_contract(
+        self, image_request_handler, source
+    ):
+        handler = image_request_handler
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (64, 64), color="red").save(buffer, format="JPEG")
+            truncated = buffer.getvalue()[:-20]
+        reference = "https://8.8.8.8/reference.jpg"
+        expected_error = OSError
+        if source == "data":
+            reference = "data:image/jpeg;base64," + base64.b64encode(truncated).decode()
+            expected_error = HttpStatusError
+
+        with patch(
+            "dynamo.common.multimodal.image_loader.fetch_bytes",
+            new=AsyncMock(return_value=truncated),
+        ) as fetch:
+            with pytest.raises(expected_error) as exc_info:
+                async for _ in handler._generate_openai_mode(
+                    {"prompt": "a teapot", "input_reference": reference}, None, "req-1"
+                ):
+                    pass
+
+        if source == "data":
+            assert exc_info.value.status == 400
+            fetch.assert_not_awaited()
+        else:
+            fetch.assert_awaited_once()
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reference_exceeding_pixel_limit_rejected(
+        self, image_request_handler, monkeypatch
+    ):
+        handler = image_request_handler
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 16)
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (8, 8)).save(buffer, format="PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode()
+        request = {
+            "prompt": "a teapot",
+            "input_reference": f"data:image/png;base64,{encoded}",
+        }
+
+        with pytest.raises(InvalidArgument, match="Failed to load input_reference"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        handler.engine_client.generate.assert_not_called()
+
+
 class TestImageEndpointSizeValidation:
     """/v1/images/generations takes the same bound as the chat path."""
 
-    def test_rejects_out_of_range_size(self):
+    @pytest.mark.asyncio
+    async def test_rejects_out_of_range_size(self):
         handler = _make_handler()
         req = NvCreateImageRequest(prompt="x", size="99999x99999")
         with pytest.raises(ValueError, match=r"width in size='99999x99999'"):
-            handler._engine_inputs_from_image(req)
+            await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
 
-    def test_accepts_a_supported_size(self):
+    @pytest.mark.asyncio
+    async def test_accepts_a_supported_size(self):
         handler = _make_handler()
         req = NvCreateImageRequest(prompt="x", size="1024x768")
-        inputs = handler._engine_inputs_from_image(req)
+        inputs = await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
         assert inputs.prompt["mm_processor_kwargs"] == {
             "target_h": 768,
             "target_w": 1024,
         }
 
     @pytest.mark.asyncio
-    async def test_rejection_propagates_instead_of_yielding_a_chat_chunk(self):
-        """The images route has no failure shape, so a rejection must not be
-        yielded as a chat.completion.chunk. It leaves the handler as
-        InvalidArgument, the registered binding exception the HTTP layer answers
-        with a 400."""
-        handler = _make_handler()
-        handler.config.output_modalities = ["image"]
+    @pytest.mark.parametrize("reference", [None, "https://example.com/reference.png"])
+    async def test_rejection_propagates_instead_of_yielding_a_chat_chunk(
+        self, image_request_handler, reference
+    ):
+        handler = image_request_handler
+        handler._image_loader.load_image.side_effect = AssertionError(
+            "Invalid dimensions must be rejected before image loading"
+        )
         request = {"prompt": "x", "size": "99999x99999"}
+        if reference is not None:
+            request["input_reference"] = reference
 
         with pytest.raises(InvalidArgument) as excinfo:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
@@ -835,6 +1589,29 @@ class TestImageEndpointSizeValidation:
         assert str(excinfo.value) == (
             "width in size='99999x99999' must be between 1 and 4096"
         )
+        handler._image_loader.load_image.assert_not_awaited()
+        handler.engine_client.generate.assert_not_called()
+
+
+class TestVideoEndpointValidation:
+    """Video requests reject invalid controls before generation."""
+
+    @pytest.mark.asyncio
+    async def test_video_rejection_propagates_before_generation(self):
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        handler.engine_client.generate = MagicMock(
+            side_effect=AssertionError("engine must not run for a rejected request")
+        )
+        request = {
+            "prompt": "a drone",
+            "model": "test-model",
+            "output_format": "webm",
+        }
+
+        with pytest.raises(InvalidArgument, match="only 'mp4' is supported"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -919,3 +1696,32 @@ class TestAudioHandlerFieldMapping:
             NvCreateAudioSpeechRequest(input="hi")
         )
         assert result.request_type == RequestType.AUDIO_GENERATION
+
+
+class TestRefAudioRejection:
+    """A rejected ref_audio URL reaches the client as a failed response."""
+
+    @pytest.mark.asyncio
+    async def test_a_blocked_ref_audio_url_fails_the_request(self, monkeypatch):
+        """The frontend answers a failed audio response with a 400."""
+        monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+        monkeypatch.setattr(dynamo_http, "_default", AiohttpClient())
+        handler = _make_handler()
+        handler.config.output_modalities = ["audio"]
+        handler.audio = _make_audio_handler()
+        handler.audio._is_tts_model = MagicMock(return_value=True)
+        handler.engine_client.generate = MagicMock(
+            side_effect=AssertionError("engine must not run for a rejected request")
+        )
+
+        chunks = [
+            chunk
+            async for chunk in handler._generate_openai_mode(
+                {"input": "hi", "ref_audio": "https://100.64.0.1/ref.wav"},
+                MagicMock(),
+                "req-1",
+            )
+        ]
+
+        assert [chunk["status"] for chunk in chunks] == ["failed"]
+        assert "blocked range" in chunks[0]["error"]

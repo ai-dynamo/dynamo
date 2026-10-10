@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::ops::Range;
+
 use dynamo_backend_common::{
     DynamoError, EngineConfig, LlmRegistration, RlAdminBaseUrl, RlWorkerMetadata,
 };
+use dynamo_llm::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 
 use crate::client;
 use crate::proto as pb;
@@ -17,6 +20,9 @@ struct ModelIdentity {
     aliases: Vec<String>,
     reasoning_parser: Option<String>,
     tool_call_parser: Option<String>,
+    supports_lora: bool,
+    max_loras: u32,
+    supports_multimodal: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -26,6 +32,7 @@ pub(crate) struct DiscoveredModel {
     pub supports_multimodal: bool,
     identity: ModelIdentity,
     server: pb::ServerInfo,
+    data_parallel_range: Range<u32>,
 }
 
 impl DiscoveredModel {
@@ -39,19 +46,15 @@ impl DiscoveredModel {
                 server.api_version
             )));
         }
-        if let Some(parallelism) = server.parallelism.as_ref() {
-            if parallelism.data_parallel_size == 0 {
-                return Err(client::protocol_error(
-                    "vLLM reports a data-parallel size of zero",
-                ));
-            }
-            if parallelism.data_parallel_rank != 0 {
-                return Err(client::protocol_error(format!(
-                    "vLLM reports data_parallel_rank {}; the sidecar currently requires one frontend hosting the complete data-parallel group starting at rank 0",
-                    parallelism.data_parallel_rank
-                )));
-            }
-        }
+        let data_parallel_range = if let Some(parallelism) = server.parallelism.as_ref() {
+            local_data_parallel_range(
+                parallelism.data_parallel_size,
+                parallelism.data_parallel_rank,
+                parallelism.data_parallel_size_local,
+            )?
+        } else {
+            0..1
+        };
         let source = required("model_id", model.model_id)?;
         let served_name = required("served_model_name", model.served_model_name)?;
         if !model.supports_token_ids_input {
@@ -61,12 +64,17 @@ impl DiscoveredModel {
         }
         let reasoning_parser = nonempty(model.reasoning_parser);
         let tool_call_parser = nonempty(model.tool_call_parser);
+        let supports_lora = model.supports_lora;
+        let max_loras = server.max_loras;
         let identity = ModelIdentity {
             source: source.clone(),
             served_name: served_name.clone(),
             aliases: model.served_model_aliases,
             reasoning_parser: reasoning_parser.clone(),
             tool_call_parser: tool_call_parser.clone(),
+            supports_lora,
+            max_loras,
+            supports_multimodal: model.supports_multimodal,
         };
         Ok(Self {
             source,
@@ -74,6 +82,7 @@ impl DiscoveredModel {
             supports_multimodal: model.supports_multimodal,
             identity,
             server,
+            data_parallel_range,
         })
     }
 
@@ -97,6 +106,10 @@ impl DiscoveredModel {
             )));
         }
         Ok(())
+    }
+
+    pub(crate) fn reasoning_parser(&self) -> Option<&str> {
+        self.identity.reasoning_parser.as_deref()
     }
 
     pub(crate) fn rl_capabilities(&self) -> Option<&pb::RlCapabilities> {
@@ -163,43 +176,89 @@ impl DiscoveredModel {
             .map_err(|error| client::protocol_error(error.to_string()))
     }
 
-    pub(crate) fn engine_config(&self) -> EngineConfig {
+    pub(crate) fn engine_config(
+        &self,
+        enable_kv_routing: bool,
+    ) -> Result<EngineConfig, DynamoError> {
         let parallelism = self.server.parallelism.as_ref();
-        EngineConfig {
+        let kv_cache_block_size = if enable_kv_routing {
+            self.kv_cache_block_size()?
+        } else {
+            None
+        };
+        Ok(EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
             model_aliases: self.identity.aliases.clone(),
-            // The released protocol lacks native sampling JSON and its capability
-            // flag. Advertise native Generate only once upstream supports both.
-            runtime_data: Default::default(),
+            runtime_data: [
+                (
+                    dynamo_llm::lora::LORA_REQUIRES_REGISTRATION.to_string(),
+                    serde_json::Value::Bool(true),
+                ),
+                (
+                    VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+                    serde_json::Value::Bool(true),
+                ),
+            ]
+            .into_iter()
+            .collect(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
-                kv_cache_block_size: nonzero(self.server.kv_block_size),
-                total_kv_blocks: self.total_kv_blocks_per_rank(),
+                kv_cache_block_size,
+                total_kv_blocks: enable_kv_routing
+                    .then(|| self.total_kv_blocks_per_rank())
+                    .flatten(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
-                data_parallel_size: parallelism
-                    .and_then(|parallelism| nonzero(parallelism.data_parallel_size)),
-                data_parallel_start_rank: parallelism.map(|_| 0),
+                max_gpu_lora_count: self.supports_lora().then_some(self.max_loras()),
+                data_parallel_size: parallelism.map(|_| self.data_parallel_size_local()),
+                data_parallel_start_rank: parallelism.map(|_| self.data_parallel_range.start),
                 ..Default::default()
             }),
-        }
+        })
     }
 
-    pub(crate) fn data_parallel_size(&self) -> u32 {
-        self.server
-            .parallelism
-            .as_ref()
-            .map_or(1, |parallelism| parallelism.data_parallel_size)
+    fn kv_cache_block_size(&self) -> Result<Option<u32>, DynamoError> {
+        let Some(block_size) = self.server.effective_attention_block_size else {
+            return Ok(nonzero(self.server.kv_block_size));
+        };
+        let block_size = u32::try_from(block_size)
+            .ok()
+            .and_then(nonzero)
+            .ok_or_else(|| {
+                client::protocol_error(format!(
+                    "invalid effective_attention_block_size {block_size}; KV routing requires a nonzero size that fits u32"
+                ))
+            })?;
+        Ok(Some(block_size))
+    }
+
+    pub(crate) fn data_parallel_range(&self) -> &Range<u32> {
+        &self.data_parallel_range
+    }
+
+    fn data_parallel_size_local(&self) -> u32 {
+        self.data_parallel_range.end - self.data_parallel_range.start
+    }
+
+    pub(crate) fn supports_lora(&self) -> bool {
+        self.identity.supports_lora && self.identity.max_loras > 0
+    }
+
+    pub(crate) fn max_loras(&self) -> u32 {
+        self.identity.max_loras
+    }
+
+    pub(crate) fn is_base_model_name(&self, name: &str) -> bool {
+        name == self.identity.source
+            || name == self.identity.served_name
+            || self.identity.aliases.iter().any(|alias| alias == name)
     }
 
     fn total_kv_blocks_per_rank(&self) -> Option<u64> {
         let total_kv_blocks = nonzero(self.server.total_kv_blocks)?;
-        let data_parallel_size = u64::from(self.data_parallel_size());
-        // Control exposes only the aggregate across DP engines. This arithmetic-mean
-        // estimate assumes homogeneous ranks; exact division does not prove they are equal.
-        // TODO(rank-aware-kv-capacity): consume a per-rank Control response when available and
-        // publish it atomically; never relabel this quotient as exact for hard admission.
+        let data_parallel_size = u64::from(self.data_parallel_size_local());
+        // Control reports total KV blocks across the frontend's local DP engines.
         let per_rank = total_kv_blocks / data_parallel_size;
 
         if per_rank == 0 {
@@ -224,6 +283,45 @@ impl DiscoveredModel {
     }
 }
 
+// A zero local size means unknown, including metadata from older Control servers.
+fn local_data_parallel_range(
+    global_size: u32,
+    start: u32,
+    local_size: u32,
+) -> Result<Range<u32>, DynamoError> {
+    if global_size == 0 {
+        return Err(client::protocol_error(
+            "vLLM reports a data-parallel size of zero",
+        ));
+    }
+    let local_size = match local_size {
+        0 if start == 0 => {
+            if global_size > 1 {
+                tracing::warn!(
+                    global_size,
+                    "vLLM omits data_parallel_size_local; assuming this frontend hosts the entire DP group. Hybrid deployments require a vLLM build that reports local DP size to avoid registering unhosted ranks and underestimating per-rank KV capacity"
+                );
+            }
+            global_size
+        }
+        0 => {
+            return Err(client::protocol_error(format!(
+                "vLLM reports data_parallel_rank {start} without data_parallel_size_local; hybrid rank ownership requires the local-size Control field"
+            )));
+        }
+        size => size,
+    };
+    let end = start
+        .checked_add(local_size)
+        .filter(|&end| end <= global_size)
+        .ok_or_else(|| {
+            client::protocol_error(format!(
+                "vLLM reports an invalid local data-parallel range: start {start}, local size {local_size}, global size {global_size}"
+            ))
+        })?;
+    Ok(start..end)
+}
+
 fn required(field: &str, value: String) -> Result<String, DynamoError> {
     if value.trim().is_empty() {
         return Err(client::protocol_error(format!(
@@ -242,4 +340,354 @@ where
     T: Default + PartialEq,
 {
     (value != T::default()).then_some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_fixtures::{model_info, server_info};
+    use serde_json::json;
+
+    #[test]
+    fn engine_config_advertises_supported_capabilities() {
+        let model =
+            DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
+        assert_eq!(
+            model
+                .engine_config(true)
+                .unwrap()
+                .runtime_data
+                .get("vllm_inference_v1_generate"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            model
+                .engine_config(true)
+                .unwrap()
+                .runtime_data
+                .get(dynamo_llm::lora::LORA_REQUIRES_REGISTRATION),
+            Some(&json!(true))
+        );
+    }
+
+    #[test]
+    fn rl_worker_metadata_identifies_zero_parallelism_dimensions() {
+        for (dimension, expected) in [
+            ("tensor", "tensor-parallel size of zero"),
+            ("pipeline", "pipeline-parallel size of zero"),
+        ] {
+            let mut server = server_info();
+            let parallelism = server.parallelism.as_mut().expect("parallelism metadata");
+            match dimension {
+                "tensor" => parallelism.tensor_parallel_size = 0,
+                "pipeline" => parallelism.pipeline_parallel_size = 0,
+                _ => unreachable!(),
+            }
+            let model = DiscoveredModel::from_proto(model_info(), server).expect("valid discovery");
+            let error = model.rl_worker_metadata(None, None).unwrap_err();
+            assert!(error.to_string().contains(expected));
+        }
+    }
+
+    #[test]
+    fn discovery_rejects_zero_data_parallelism() {
+        let mut server = server_info();
+        server
+            .parallelism
+            .as_mut()
+            .expect("parallelism metadata")
+            .data_parallel_size = 0;
+
+        let error = DiscoveredModel::from_proto(model_info(), server)
+            .expect_err("zero data parallelism must fail discovery");
+
+        assert!(error.to_string().contains("data-parallel size of zero"));
+    }
+
+    #[test]
+    fn startup_compatibility_rejects_parallelism_change() {
+        let bootstrap = DiscoveredModel::from_proto(model_info(), server_info())
+            .expect("valid bootstrap discovery");
+
+        for dimension in ["tensor", "pipeline", "local_dp"] {
+            let mut changed_server = server_info();
+            let parallelism = changed_server
+                .parallelism
+                .as_mut()
+                .expect("parallelism metadata");
+            match dimension {
+                "tensor" => parallelism.tensor_parallel_size += 1,
+                "pipeline" => parallelism.pipeline_parallel_size += 1,
+                "local_dp" => parallelism.data_parallel_size_local = 1,
+                _ => unreachable!(),
+            }
+            let observed = DiscoveredModel::from_proto(model_info(), changed_server)
+                .expect("valid startup discovery");
+
+            assert!(
+                bootstrap.ensure_startup_compatible(&observed).is_err(),
+                "{dimension} parallelism change should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_rejects_incompatible_model_metadata() {
+        let mut unsupported_api = server_info();
+        unsupported_api.api_version = "unsupported".to_string();
+
+        let mut missing_served_name = model_info();
+        missing_served_name.served_model_name.clear();
+
+        let mut unsupported_input = model_info();
+        unsupported_input.supports_token_ids_input = false;
+
+        for (case, model, server) in [
+            ("unsupported API", model_info(), unsupported_api),
+            ("missing served name", missing_served_name, server_info()),
+            ("unsupported input", unsupported_input, server_info()),
+        ] {
+            assert!(
+                DiscoveredModel::from_proto(model, server).is_err(),
+                "{case} metadata should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_rejects_nonzero_dp_start_without_local_size() {
+        let mut server = server_info();
+        let parallelism = server.parallelism.as_mut().unwrap();
+        parallelism.data_parallel_size = 8;
+        parallelism.data_parallel_rank = 4;
+        assert!(DiscoveredModel::from_proto(model_info(), server).is_err());
+    }
+
+    #[test]
+    fn engine_config_handles_zero_and_inexact_aggregate_kv_capacity() {
+        for (aggregate_blocks, expected_per_rank_blocks) in [(0, None), (4097, Some(2048))] {
+            let mut server = server_info();
+            server.total_kv_blocks = aggregate_blocks;
+
+            let model = DiscoveredModel::from_proto(model_info(), server)
+                .expect("valid discovery metadata");
+            let registration = model
+                .engine_config(true)
+                .unwrap()
+                .llm
+                .expect("LLM registration");
+
+            assert_eq!(
+                registration.total_kv_blocks, expected_per_rank_blocks,
+                "aggregate blocks {aggregate_blocks}"
+            );
+        }
+    }
+
+    #[test]
+    fn discovered_aliases_lora_and_legacy_parallelism_are_preserved() {
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let config = model.engine_config(true).unwrap();
+        assert_eq!(config.model_aliases, vec!["model-alias"]);
+        for name in ["model-source", "served-model", "model-alias"] {
+            assert!(model.is_base_model_name(name));
+        }
+        assert!(!model.is_base_model_name("other-adapter"));
+        assert!(model.supports_lora());
+        let llm = config.llm.unwrap();
+        assert_eq!(llm.max_gpu_lora_count, Some(4));
+        let mut info = model_info();
+        info.supports_lora = false;
+        let server = pb::ServerInfo {
+            api_version: "vllm".into(),
+            ..Default::default()
+        };
+        let model = DiscoveredModel::from_proto(info, server).unwrap();
+        let llm = model.engine_config(true).unwrap().llm.unwrap();
+        assert_eq!(llm.max_gpu_lora_count, None);
+        assert_eq!(
+            (llm.data_parallel_size, llm.data_parallel_start_rank),
+            (None, None)
+        );
+        assert!(!model.supports_lora());
+    }
+
+    #[test]
+    fn incompatible_bootstrap_identity_and_capabilities_fail_closed() {
+        let baseline = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let model_changes: &[fn(&mut pb::ModelInfo)] = &[
+            |m| m.model_id = "changed".into(),
+            |m| m.served_model_name = "changed".into(),
+            |m| m.served_model_aliases.push("changed".into()),
+            |m| m.reasoning_parser = "changed".into(),
+            |m| m.tool_call_parser = "changed".into(),
+            |m| m.supports_lora = false,
+        ];
+        for change in model_changes {
+            let mut info = model_info();
+            change(&mut info);
+            let observed = DiscoveredModel::from_proto(info, server_info()).unwrap();
+            assert!(
+                baseline
+                    .ensure_startup_compatible(&observed)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("identity changed")
+            );
+        }
+        let mut server = server_info();
+        server.rl_capabilities = None;
+        let observed = DiscoveredModel::from_proto(model_info(), server).unwrap();
+        assert!(
+            baseline
+                .ensure_startup_compatible(&observed)
+                .unwrap_err()
+                .to_string()
+                .contains("RL capabilities changed")
+        );
+    }
+
+    #[test]
+    fn missing_model_identity_is_rejected() {
+        assert!(
+            DiscoveredModel::from_proto(
+                {
+                    let mut info = model_info();
+                    info.model_id.clear();
+                    info
+                },
+                server_info()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn local_dp_ownership_requires_a_valid_unambiguous_range() {
+        for (global, start, local, expected) in [(2, 0, 0, 0..2), (8, 0, 4, 0..4), (8, 4, 4, 4..8)]
+        {
+            assert_eq!(
+                local_data_parallel_range(global, start, local).unwrap(),
+                expected
+            );
+        }
+        for (global, start, local) in [
+            (0, 0, 0),
+            (8, 4, 0),
+            (8, 0, 9),
+            (8, 4, 5),
+            (u32::MAX, u32::MAX - 1, 4),
+        ] {
+            assert!(
+                local_data_parallel_range(global, start, local).is_err(),
+                "invalid range: {start} + {local} of {global}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_identity_and_limits_are_preserved() {
+        let config = DiscoveredModel::from_proto(model_info(), server_info())
+            .unwrap()
+            .engine_config(true)
+            .unwrap();
+        assert_eq!(config.model, "model-source");
+        assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
+        let llm = config.llm.expect("LLM registration");
+        assert_eq!(llm.context_length, Some(8192));
+        assert_eq!(llm.kv_cache_block_size, Some(16));
+        assert_eq!(llm.max_num_seqs, Some(128));
+        assert_eq!(llm.max_num_batched_tokens, Some(2048));
+    }
+
+    #[test]
+    fn missing_optional_limits_are_not_invented() {
+        let llm = DiscoveredModel::from_proto(
+            model_info(),
+            pb::ServerInfo {
+                api_version: "vllm".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .engine_config(true)
+        .unwrap()
+        .llm
+        .expect("LLM registration");
+        assert_eq!(
+            (
+                llm.context_length,
+                llm.kv_cache_block_size,
+                llm.max_num_seqs,
+                llm.max_num_batched_tokens,
+            ),
+            (None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn logical_block_size_and_per_rank_capacity_are_registered() {
+        let mut server = server_info();
+        server.effective_attention_block_size = Some(64);
+        let llm = DiscoveredModel::from_proto(model_info(), server)
+            .unwrap()
+            .engine_config(true)
+            .unwrap()
+            .llm
+            .expect("LLM registration");
+        assert_eq!(llm.kv_cache_block_size, Some(64));
+        assert_eq!(llm.total_kv_blocks, Some(2048));
+        assert_eq!(llm.data_parallel_size, Some(2));
+        assert_eq!(llm.data_parallel_start_rank, Some(0));
+    }
+
+    #[test]
+    fn engine_config_uses_effective_attention_block_size() {
+        for (case, dcp, physical, reported, expected) in [
+            ("DCP=1", 1, 16, Some(16), Ok(Some(16))),
+            ("DCP=2", 2, 16, Some(32), Ok(Some(32))),
+            ("engine is authoritative", 2, 16, Some(64), Ok(Some(64))),
+            ("legacy DCP=1", 1, 16, None, Ok(Some(16))),
+            ("legacy DCP=2", 2, 16, None, Ok(Some(16))),
+            ("legacy unknown size", 1, 0, None, Ok(None)),
+            ("zero", 1, 16, Some(0), Err("nonzero size")),
+            (
+                "overflow",
+                1,
+                16,
+                Some(u64::from(u32::MAX) + 1),
+                Err("fits u32"),
+            ),
+        ] {
+            let mut server = server_info();
+            server
+                .parallelism
+                .as_mut()
+                .unwrap()
+                .decode_context_parallel_size = dcp;
+            server.kv_block_size = physical;
+            server.effective_attention_block_size = reported;
+            let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+            let result = model.engine_config(true);
+            match expected {
+                Ok(size) => {
+                    let registration = result.unwrap().llm.unwrap();
+                    assert_eq!(registration.kv_cache_block_size, size, "{case}");
+                    assert_eq!(registration.total_kv_blocks, Some(2048), "{case}");
+                }
+                Err(message) => {
+                    assert!(result.unwrap_err().to_string().contains(message), "{case}")
+                }
+            }
+            let registration = model.engine_config(false).unwrap().llm.unwrap();
+            assert_eq!(
+                registration.kv_cache_block_size, None,
+                "{case}: KV routing disabled"
+            );
+            assert_eq!(
+                registration.total_kv_blocks, None,
+                "{case}: KV routing disabled"
+            );
+        }
+    }
 }

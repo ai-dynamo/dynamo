@@ -1,19 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_custom_policy_builtin::DefaultWorkerSelector;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::common::protocols::MockEngineArgs;
+use crate::common::protocols::MockerConfig;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
     ActiveSequenceEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
-use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
-use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, SequencePublisher,
-};
+use dynamo_kv_router::sequences::{LocalWorkerLoad, SchedulerLoadSnapshot};
+use dynamo_kv_router::{ActiveSequencesMultiWorker, LocalScheduler, SequencePublisher};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReplayNoopPublisher;
@@ -25,7 +24,7 @@ impl SequencePublisher for ReplayNoopPublisher {
 
     fn publish_scheduler_load(&self, _load: SchedulerLoadSnapshot) {}
 
-    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: LocalWorkerLoad) {}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,12 +56,13 @@ impl WorkerConfigLike for ReplayWorkerConfig {
 pub(super) type ReplayScheduler =
     LocalScheduler<ReplayNoopPublisher, ReplayWorkerConfig, DefaultWorkerSelector>;
 
-pub(in crate::replay) fn replay_worker_config(args: &MockEngineArgs) -> ReplayWorkerConfig {
+pub(in crate::replay) fn replay_worker_config(args: &MockerConfig) -> ReplayWorkerConfig {
     ReplayWorkerConfig {
-        max_num_batched_tokens: args
-            .max_num_batched_tokens
-            .map(|tokens| tokens as u64)
-            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS),
+        max_num_batched_tokens: if args.max_num_batched_tokens == usize::MAX {
+            DEFAULT_MAX_BATCHED_TOKENS
+        } else {
+            args.max_num_batched_tokens as u64
+        },
         total_kv_blocks: args.num_gpu_blocks as u64,
         data_parallel_start_rank: 0,
         data_parallel_size: args.dp_size.max(1),
@@ -70,7 +70,7 @@ pub(in crate::replay) fn replay_worker_config(args: &MockEngineArgs) -> ReplayWo
 }
 
 pub(super) fn replay_workers_with_configs(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     num_workers: usize,
 ) -> HashMap<WorkerId, ReplayWorkerConfig> {
     let worker_config = replay_worker_config(args);
@@ -80,7 +80,7 @@ pub(super) fn replay_workers_with_configs(
 }
 
 pub(super) fn replay_slots(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
 ) -> Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>> {
     let dp_range = workers_with_configs
@@ -115,6 +115,9 @@ pub(super) fn replay_selector_with_seed(
     config: &KvRouterConfig,
     selector_seed: Option<u64>,
 ) -> anyhow::Result<DefaultWorkerSelector> {
+    if config.request_classifier_config()?.is_some() {
+        anyhow::bail!("offline replay does not support request_classifier plugins");
+    }
     if let Some(instance) = config
         .selected_worker_selection_policy_instance()
         .map_err(anyhow::Error::from)?
@@ -132,11 +135,11 @@ pub(super) fn replay_selector_with_seed(
 }
 
 pub(crate) fn replay_router_config(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
     let mut config = router_config.unwrap_or_default();
-    if let Some(policy) = args.router_queue_policy {
+    if let Some(policy) = args.runtime.router_queue_policy {
         config.router_queue_policy = policy;
     }
     config
@@ -145,6 +148,24 @@ pub(crate) fn replay_router_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_selector_rejects_request_classifier() {
+        let policy = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy.path(), "request_classifier: {type: test}").unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy.path().display().to_string()),
+            ..Default::default()
+        };
+        let Err(error) = replay_selector(&config) else {
+            panic!("classifier ignored")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("offline replay does not support request_classifier")
+        );
+    }
 
     #[test]
     fn replay_selector_rejects_custom_worker_selection() {

@@ -5,7 +5,7 @@ use aisimulate_core::engine::KvEvent;
 use anyhow::Context;
 use dynamo_kv_router::protocols::{RouterEvent, StorageTier};
 
-use crate::common::protocols::{MockEngineArgs, OutputSignal};
+use crate::common::protocols::{MockerConfig, OutputSignal};
 use crate::engine_observations::dynamo_kv_event;
 use crate::loadgen::Trace;
 use crate::replay::{
@@ -64,8 +64,9 @@ impl ReplayEngineObservation for RouterEventObservation {
             events
                 .into_iter()
                 .map(|event| {
+                    let tier = crate::engine_observations::dynamo_storage_tier(event.tier);
                     let (event, _) = dynamo_kv_event(event);
-                    RouterEvent::with_storage_tier(worker_id, event, StorageTier::Device)
+                    RouterEvent::with_storage_tier(worker_id, event, tier)
                 })
                 .collect(),
         )
@@ -75,6 +76,10 @@ impl ReplayEngineObservation for RouterEventObservation {
         batch
             .0
             .iter()
+            // Handoff evidence describes GPU-resident blocks. Host stores
+            // remain in the batch for G2 routing, but are not completed P/D
+            // handoff destinations.
+            .filter(|event| event.storage_tier == StorageTier::Device)
             .flat_map(|event| match &event.event.data {
                 dynamo_kv_router::protocols::KvCacheEventData::Stored(store) => {
                     store.blocks.as_slice()
@@ -172,7 +177,7 @@ fn timestamp_us_from_ms(timestamp_ms: f64) -> u64 {
 }
 
 pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
     router_event_visibility_override: Option<RouterEventVisibility>,
 ) -> anyhow::Result<ReplayWorkerArtifacts> {
@@ -241,10 +246,101 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
             .kv_events
             .into_iter()
             .map(|event| ReplayTimedKvEvent {
-                storage_tier: StorageTier::Device,
+                storage_tier: crate::engine_observations::dynamo_storage_tier(event.event.tier),
                 event: dynamo_kv_event(event.event).0,
                 timestamp_us: timestamp_us_from_ms(event.observed_at_ms),
             })
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aisimulate_core::engine::{KvBlock, KvEventData, KvEventTier, StoredBlocks};
+
+    fn stored(tier: KvEventTier, event_id: u64) -> KvEvent {
+        KvEvent {
+            event_id,
+            dp_rank: 0,
+            tier,
+            data: KvEventData::Stored(StoredBlocks {
+                parent_hash: None,
+                start_position: Some(0),
+                blocks: vec![KvBlock {
+                    block_hash: 71,
+                    tokens_hash: 7,
+                    token_ids: None,
+                }],
+            }),
+        }
+    }
+
+    fn removed(tier: KvEventTier, event_id: u64) -> KvEvent {
+        KvEvent {
+            event_id,
+            dp_rank: 0,
+            tier,
+            data: KvEventData::Removed {
+                block_hashes: vec![71],
+            },
+        }
+    }
+
+    #[test]
+    fn g2_events_remain_routable_but_do_not_prove_gpu_handoff_residency() {
+        for stage in [WorkerStage::Aggregated, WorkerStage::Prefill] {
+            let transitions = [
+                (
+                    stored(KvEventTier::Device, 1),
+                    StorageTier::Device,
+                    vec![7],
+                    "G1 store",
+                ),
+                (
+                    removed(KvEventTier::Device, 2),
+                    StorageTier::Device,
+                    vec![],
+                    "G1 eviction",
+                ),
+                (
+                    stored(KvEventTier::HostPinned, 3),
+                    StorageTier::HostPinned,
+                    vec![],
+                    "G2 store",
+                ),
+                (
+                    stored(KvEventTier::Device, 4),
+                    StorageTier::Device,
+                    vec![7],
+                    "G2 to G1 restore",
+                ),
+                (
+                    removed(KvEventTier::HostPinned, 5),
+                    StorageTier::HostPinned,
+                    vec![],
+                    "G2 eviction",
+                ),
+            ];
+            for (event, expected_tier, expected_hashes, transition) in transitions {
+                let batch = RouterEventObservation::observe_engine_events(stage, 3, 0, vec![event]);
+                assert_eq!(batch.0.len(), 1, "{transition}: retain the router event");
+                assert_eq!(
+                    batch.0[0].storage_tier, expected_tier,
+                    "{transition}: preserve tier"
+                );
+                assert_eq!(batch.0[0].worker_id, 3, "{transition}: preserve worker");
+                assert_eq!(
+                    RouterEventObservation::stored_hashes(&batch),
+                    expected_hashes,
+                    "{transition}: only a Device store proves handoff residency"
+                );
+                assert_eq!(
+                    RouterEventObservation::kv_ingest_event_count(&batch),
+                    Some(1),
+                    "{transition}: retain KV ingest evidence for either tier"
+                );
+            }
+        }
+    }
 }
