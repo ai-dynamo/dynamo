@@ -108,8 +108,7 @@ echo "HTTP_PORT=${HTTP_PORT}, NAMESPACE=${NAMESPACE}"
 trap 'trap - EXIT INT TERM; echo; kill 0' EXIT INT TERM
 
 # A worker that dies during startup never answers /health, so the readiness
-# loops check the recorded worker PIDs on every poll and fail fast instead of
-# polling a dead port until the deadline.
+# loops check these PIDs on every poll and fail fast.
 WORKER_PIDS=()
 check_workers_alive() {
     local i pid status
