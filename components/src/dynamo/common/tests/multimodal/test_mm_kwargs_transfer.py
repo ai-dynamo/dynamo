@@ -5,10 +5,13 @@
 
 import asyncio
 import struct
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import torch
+from pydantic import ValidationError
 
+from dynamo import nixl_connect
 from dynamo.common.multimodal import mm_kwargs_transfer
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlSender,
@@ -589,6 +592,94 @@ class TestMmKwargsNixlReceiverDescriptorValidation:
 
         with pytest.raises(RuntimeError, match="no data reference"):
             receiver._acquire_descriptor(512)
+
+
+class TestMmKwargsNixlReceiverPreparation:
+    @pytest.fixture
+    def receiver(self, monkeypatch):
+        # Real receiver, metadata and registered CPU descriptors. Only native
+        # NIXL agent calls are mocked; no read operation should be issued.
+        native = MagicMock()
+        native.register_memory.side_effect = lambda *_: object()
+        api = MagicMock()
+        api.nixl_agent.return_value = native
+        monkeypatch.setattr(nixl_connect, "nixl_api", api)
+        receiver = mm_kwargs_transfer.MmKwargsNixlReceiver(
+            max_item_bytes=64, pool_size=2
+        )
+        descriptors = [receiver._pool.get_nowait() for _ in range(2)]
+        for desc in descriptors:
+            receiver._pool.put(desc)
+        receiver._connector.begin_read = AsyncMock(wraps=receiver._connector.begin_read)
+        receiver._acquire_descriptor = MagicMock(wraps=receiver._acquire_descriptor)
+        try:
+            yield receiver, descriptors, native
+        finally:
+            for desc in descriptors:
+                if desc._connection is not None:
+                    desc.deregister_with_connector(desc._connection)
+
+    @staticmethod
+    def metadata(sizes):
+        return MmKwargsTransferMetadata(
+            modality="image",
+            mm_hashes=[str(i) for i in range(len(sizes))],
+            tensor_specs=[
+                TensorTransferSpec(
+                    field_name="__pickled_kwargs_item__",
+                    shape=[size],
+                    dtype_str="uint8",
+                    serialized_request={
+                        "descriptors": [{"ptr": 1, "size": size, "device": "cpu"}],
+                        "operation_kind": nixl_connect.OperationKind.READ.value,
+                        "notification_key": str(i),
+                        "nixl_metadata": "unused-before-transfer",
+                    },
+                )
+                for i, size in enumerate(sizes)
+            ],
+        )
+
+    @staticmethod
+    def assert_pool_preserved(receiver, descriptors, native, handles):
+        assert receiver._pool.qsize() == len(descriptors)
+        pooled = [receiver._pool.get_nowait() for _ in descriptors]
+        assert {id(desc) for desc in pooled} == {id(desc) for desc in descriptors}
+        for desc, handle in zip(descriptors, handles):
+            assert desc.size == 64
+            assert desc._nixl_hndl is handle
+        for desc in pooled:
+            receiver._pool.put(desc)
+        receiver._connector.begin_read.assert_not_called()
+        native.initialize_xfer.assert_not_called()
+        native.deregister_memory.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_index", [0, 1])
+    async def test_invalid_metadata_does_not_borrow_buffers(
+        self, receiver, invalid_index
+    ):
+        receiver, descriptors, native = receiver
+        handles = [desc._nixl_hndl for desc in descriptors]
+        metadata = self.metadata([4, 8])
+        metadata.tensor_specs[invalid_index].serialized_request = {"invalid": True}
+        with pytest.raises(ValidationError):
+            await receiver.receive(metadata)
+        receiver._acquire_descriptor.assert_not_called()
+        self.assert_pool_preserved(receiver, descriptors, native, handles)
+
+    @pytest.mark.asyncio
+    async def test_allocation_failure_restores_prepared_buffers(
+        self, receiver, monkeypatch
+    ):
+        receiver, descriptors, native = receiver
+        handles = [desc._nixl_hndl for desc in descriptors]
+        allocation = MagicMock(side_effect=RuntimeError("buffer allocation failed"))
+        monkeypatch.setattr(torch, "empty", allocation)
+        with pytest.raises(RuntimeError, match="buffer allocation failed"):
+            await receiver.receive(self.metadata([4, 8, 128]))
+        allocation.assert_called_once_with(128, dtype=torch.uint8)
+        self.assert_pool_preserved(receiver, descriptors, native, handles)
 
 
 class TestMmKwargsNixlReceiverOrdering:
