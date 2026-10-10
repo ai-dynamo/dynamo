@@ -853,7 +853,9 @@ impl ErrorMessage {
                 code,
                 Json(ErrorMessage {
                     message,
-                    error_type: map_error_code_to_error_type(code),
+                    // Not map_error_code_to_error_type: when the configured
+                    // overload status is also 429, that helper returns "Overloaded".
+                    error_type: "Too Many Requests".to_string(),
                     code: code.as_u16(),
                     details,
                     metric_error_type: None,
