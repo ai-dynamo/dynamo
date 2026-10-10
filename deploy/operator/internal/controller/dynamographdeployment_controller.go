@@ -66,11 +66,6 @@ const (
 	dgdComponentPodIndex = ".metadata.dgdComponent"
 )
 
-// rbacManager interface for managing RBAC resources
-type rbacManager interface {
-	EnsureServiceAccountWithRBAC(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error
-}
-
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
@@ -80,7 +75,6 @@ type DynamoGraphDeploymentReconciler struct {
 	Recorder              events.EventRecorder
 	DockerSecretRetriever DockerSecretRetriever
 	SSHKeyManager         *secret.SSHKeyManager
-	RBACManager           rbacManager
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
