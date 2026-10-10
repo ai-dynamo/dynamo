@@ -6099,6 +6099,43 @@ def test_kvwarm_native_decode_dispatch_uses_real_continuation_and_provenance():
     assert stub._kvwarm_meta["points_real_kv"] == 1
 
 
+@pytest.mark.core
+def test_kvwarm_native_decode_records_stage_prompt_evidence():
+    stub, requests = _kvwarm_native_resume_stub(False)
+    point = BenchmarkPoint(
+        point_type="decode", benchmark_id=7, batch_size=2, total_kv_read_tokens=9
+    )
+    stage_prompts = []
+    for request, context in zip(requests, (4, 3), strict=True):
+        request.num_computed_tokens = context
+        request.all_token_ids = list(range(context + 1))
+        stage_prompts.append(list(range(10, 10 + context)))
+        stub._kvwarm_chain_prompts[request.request_id] = stage_prompts[-1]
+    stub._kvwarm_stage_point = point
+    stub._kvwarm_stage_batch = 2
+    stub._kvwarm_building = False
+    stub._kvwarm_plan = {stub._kvwarm_plan_key(point): 4}
+    stub._bench_grid = deque([point])
+    stub._bench_current_point = None
+    stub._bench_drain_pending = False
+    stub._bench_frees_pending = lambda: False
+    stub._bench_stop_at_timeout_boundary = lambda phase: False
+    stub.max_model_len = 8192
+
+    assert stub._bench_step_decode() is not None
+
+    # The stage prompts are the injected input. The admission token is a
+    # sampled continuation, which prompt evidence does not cover.
+    expected = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    expected._bench_record_prompt_evidence(stage_prompts)
+    assert stub._bench_prompt_evidence == expected._bench_prompt_evidence
+    assert stub._bench_prompt_evidence["status"] == "recorded"
+    assert [row["num_tokens"] for row in stub._bench_prompt_evidence["requests"]] == [
+        4,
+        3,
+    ]
+
+
 def _kvwarm_uncovered_dispatch_stub(warm_eligible, skip_reason=None):
     """Native-layout decode dispatch of a point no warm-up stage covers."""
     stub, _ = _kvwarm_native_resume_stub(False)

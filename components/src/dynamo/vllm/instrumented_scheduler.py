@@ -7113,6 +7113,11 @@ class InstrumentedScheduler(AsyncScheduler):
     def _kvwarm_resume_native(self) -> SchedulerOutput | None:
         """Continue the prefills themselves; their private window state is exact."""
         req_ids = self._kvwarm_chain_ids
+        # The stage prompts are this point's injected input. The admission
+        # token is a sampled continuation, which prompt evidence never covers.
+        self._bench_record_prompt_evidence(
+            [self._kvwarm_chain_prompts[req_id] for req_id in req_ids]
+        )
         self._kvwarm_native_active = True
         self._kvwarm_native_resume_ids = set(req_ids)
         self._bench_active_req_ids.update(req_ids)
