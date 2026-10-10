@@ -114,3 +114,25 @@ def test_canonical_structural_tag_policy_takes_precedence(config, expected):
 )
 def test_runtime_structural_tag_excludes_reasoning(runtime_config, expected):
     assert runtime_structural_tag_excludes_reasoning(runtime_config) is expected
+
+
+_EXCLUDES = {"runtime_data": {"tool_call_structural_tag_excludes_reasoning": True}}
+
+
+@pytest.mark.parametrize(
+    ("boundary", "backend_excludes", "expected"),
+    [
+        ("auto", False, False),
+        ("auto", True, True),
+        ("backend", False, True),
+        ("backend", True, True),
+        ("structural_tag", False, False),
+        # Conflicting pairing: Rust rejects it; follow the backend.
+        ("structural_tag", True, True),
+    ],
+)
+def test_reasoning_boundary_resolution(boundary, backend_excludes, expected):
+    config = {"structural_tag": {"reasoning_boundary": boundary}}
+    if backend_excludes:
+        config.update(_EXCLUDES)
+    assert runtime_structural_tag_excludes_reasoning(config) is expected

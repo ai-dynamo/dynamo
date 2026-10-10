@@ -4404,8 +4404,6 @@ def test_unrequested_logprobs_stay_null(vllm_processor_module):
 
 
 class _ReasoningRecordingToolParser(_FakeStructuralTagParser):
-    """Tool parser whose structural-tag hook records the requested reasoning mode."""
-
     def __init__(self, tokenizer=None, tools=None):
         super().__init__()
         self.reasoning = []
