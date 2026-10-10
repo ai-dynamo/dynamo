@@ -52,6 +52,7 @@ pub use config::{
     RouterQueuePolicy, SharedCacheType,
 };
 pub use identity::{DEFAULT_ROUTING_GROUP, DcId, RoutingPartitionId, RoutingPartitionRef};
+pub use indexer::arena_b::{ArenaConfig, ArenaIndex};
 #[allow(deprecated)]
 pub use indexer::{
     AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,

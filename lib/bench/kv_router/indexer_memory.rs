@@ -47,7 +47,7 @@ use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::replay::{WorkerReplayArtifacts, generate_replay_artifacts};
 use dynamo_kv_router::indexer::SyncIndexer;
 use dynamo_kv_router::protocols::{KvCacheEventData, LocalBlockHash, RouterEvent, WorkerId};
-use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
+use dynamo_kv_router::{ArenaIndex, ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
 use serde::Serialize;
 
 #[cfg(not(feature = "indexer-memory-system-alloc"))]
@@ -393,6 +393,7 @@ fn replay<T: SyncIndexer>(
     args: &Args,
     corpus: Corpus,
     make: impl FnOnce() -> T,
+    inspect: impl FnOnce(&T),
 ) -> anyhow::Result<Report> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -504,6 +505,7 @@ fn replay<T: SyncIndexer>(
         samples,
         after_sweep,
     };
+    inspect(indexer.backend());
     drop(indexer);
     drop(entries);
     Ok(report)
@@ -512,8 +514,19 @@ fn replay<T: SyncIndexer>(
 fn run_backend(args: &Args, corpus: Corpus) -> anyhow::Result<Report> {
     match args.backend.as_str() {
         "crtc" | "concurrent-radix-tree-compressed" => {
-            replay(args, corpus, ConcurrentRadixTreeCompressed::new)
+            replay(args, corpus, ConcurrentRadixTreeCompressed::new, |_| {})
         }
+        // After the replay, print the arena's own byte breakdown and shape (the counted
+        // bytes above include its reserved arena and slab segments), and check its
+        // structural invariants on the real corpus.
+        "arena-b" => replay(args, corpus, ArenaIndex::new, |index| {
+            println!("ARENA_MEMORY {:?}", index.memory_report());
+            println!("ARENA_SHAPE {:?}", index.shape_report());
+            match index.probe_check() {
+                Ok(()) => println!("ARENA_CHECK ok"),
+                Err(errors) => println!("ARENA_CHECK failed:\n{errors}"),
+            }
+        }),
         other => anyhow::bail!("unknown backend {other:?}; add an arm to run_backend"),
     }
 }

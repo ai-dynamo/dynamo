@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Loom models of the arena index's protocol primitives (campaign branch B). It compiles
+# `../src/indexer/arena_b/protocol.rs` against loom's atomics and is its own workspace, so
+# loom never enters the main lockfile. Run:
+#   RUSTFLAGS="--cfg loom" cargo test --release --manifest-path lib/kv-router/arena-loom/Cargo.toml
+
+[package]
+name = "arena-loom"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

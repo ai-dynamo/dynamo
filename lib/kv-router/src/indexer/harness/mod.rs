@@ -174,3 +174,4 @@ harness_suite!(
     crtc,
     crate::indexer::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed
 );
+harness_suite!(arena_b, crate::indexer::arena_b::ArenaIndex);
