@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import io
 import logging
 import tempfile
 import time
@@ -21,14 +22,22 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from urllib.parse import urlparse
 
+import soundfile as sf
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
 from tensorrt_llm.inputs.multimodal_data import VideoData
+from tensorrt_llm.inputs.registry import MULTIMODAL_PLACEHOLDER_REGISTRY
 from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
+from dynamo.common.http import (
+    HttpConfigurationError,
+    HttpConnectionError,
+    HttpStatusError,
+    HttpTimeoutError,
+    fetch_bytes,
+)
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -46,6 +55,7 @@ from dynamo.common.multimodal.media_source import decode_data_uri, describe_medi
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.token_ids import token_ids_to_list
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -156,8 +166,10 @@ class MultimodalRequestProcessor:
         tokenizer: Optional[TokenizerProtocol] = None,
         allowed_local_media_path: str = "",
         enable_frontend_decoding: bool = False,
+        supports_audio: bool = True,
     ):
         self.model_type = model_type
+        self.supports_audio = supports_audio
         self.model_dir = model_dir
         self.modality = ""
         self.allowed_local_media_path = allowed_local_media_path
@@ -375,11 +387,49 @@ class MultimodalRequestProcessor:
                 embedding_paths = mm_emb
         return text, image_urls, embedding_paths
 
+    async def _load_audio(self, item: Any) -> tuple[Any, int]:
+        url = item.get("Url") if isinstance(item, dict) else item
+        source = describe_media_source(url) if isinstance(url, str) else "audio item"
+        if not isinstance(url, str):
+            raise HttpStatusError(400, "Malformed audio_url item", source)
+        try:
+            normalized_url = await validate_media_url(url, self._url_policy)
+            scheme = urlparse(normalized_url).scheme
+            if scheme == "data":
+                content = decode_data_uri(
+                    normalized_url, max_bytes=self.max_file_size_bytes
+                )
+            elif scheme in ("http", "https"):
+                content = await fetch_bytes(
+                    normalized_url,
+                    30.0,
+                    policy=self._url_policy,
+                    max_bytes=self.max_file_size_bytes,
+                )
+            else:
+                raise HttpStatusError(400, "Unsupported audio URL scheme", source)
+        except UrlValidationError as exc:
+            raise HttpStatusError(400, str(exc), source) from exc
+        except HttpTimeoutError as exc:
+            raise HttpStatusError(408, "Timed out loading audio", source) from exc
+        except HttpConnectionError as exc:
+            raise HttpStatusError(400, "Could not load audio URL", source) from exc
+
+        try:
+            waveform, sample_rate = await asyncio.to_thread(
+                sf.read, io.BytesIO(content), dtype="float32"
+            )
+            if waveform.size == 0 or sample_rate <= 0 or waveform.ndim not in (1, 2):
+                raise ValueError("Audio has no decodable samples")
+            return waveform, sample_rate
+        except (RuntimeError, ValueError) as exc:
+            raise HttpStatusError(400, "Invalid audio data", source) from exc
+
     async def process_openai_request(
         self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
     ) -> Optional[Any]:
         """
-        Process OpenAI request and return multimodal data in TokensPrompt format.
+        Prepare an OpenAI request for TRT-LLM multimodal inference.
 
         Supports three flows:
         1. EPD Case 1: Encoder fully processed (has _epd_processed_prompt)
@@ -389,7 +439,7 @@ class MultimodalRequestProcessor:
         Returns dict compatible with TRT-LLM's generate_async:
         {
             "prompt_token_ids": List[int],
-            "multi_modal_data": Dict[str, List[torch.Tensor]]
+            "multi_modal_data": Dict[str, List[Any]]
         }
         or for EPD Case 1:
         {
@@ -399,6 +449,35 @@ class MultimodalRequestProcessor:
 
         """
         self.previous_decoded_text = ""
+
+        multi_modal_data = request.get("multi_modal_data")
+        audio_items = (
+            multi_modal_data.get("audio_url", [])
+            if isinstance(multi_modal_data, dict)
+            else []
+        )
+        if not isinstance(audio_items, list):
+            raise HttpStatusError(
+                400, "Malformed audio_url field: expected a list", "audio_url"
+            )
+        if audio_items and (
+            request.get("_epd_processed_prompt") is not None
+            or embeddings is not None
+            or ep_disaggregated_params is not None
+        ):
+            raise HttpStatusError(
+                400,
+                "Audio with disaggregated encoder inputs is not supported by TensorRT-LLM",
+                "audio_url",
+            )
+
+        if audio_items and (
+            not self.supports_audio
+            or not MULTIMODAL_PLACEHOLDER_REGISTRY.is_valid(self.model_type, "audio")
+        ):
+            raise InvalidArgument(
+                "This model does not support audio input in TensorRT-LLM"
+            )
 
         # EPD Flow Case 1: Encoder has fully processed the prompt
         # The encode worker has done everything: vision encoding, prompt processing, tokenization
@@ -432,6 +511,13 @@ class MultimodalRequestProcessor:
         # This is a temporary workaround to bypass TRT-LLM's bug where token IDs & embeddings
         # are not processed correctly.
         formatted_prompt_from_frontend = extra_args.get("formatted_prompt")
+        if audio_items and (
+            not isinstance(formatted_prompt_from_frontend, str)
+            or not formatted_prompt_from_frontend
+        ):
+            raise HttpStatusError(
+                400, "Audio request is missing the formatted prompt", "audio_url"
+            )
 
         # EPD Flow Case 2: Embeddings received via NIXL from encode worker
         # The encode worker computed vision embeddings and transferred them via RDMA/NIXL
@@ -457,7 +543,6 @@ class MultimodalRequestProcessor:
         # TODO: Add frontend decoding support
 
         # Handle multimodal data if present
-        multi_modal_data = request.get("multi_modal_data")
         if multi_modal_data and isinstance(multi_modal_data, dict):
             processed_mm_data = {}
             loaded_embeddings: list[torch.Tensor] = []
@@ -674,6 +759,19 @@ class MultimodalRequestProcessor:
                 processed_mm_data["video"] = videos
                 logging.info("Loaded %d video(s)", len(videos))
 
+            if loaded_embeddings and audio_items:
+                raise HttpStatusError(
+                    400,
+                    "Audio with precomputed image embeddings is not supported by TensorRT-LLM",
+                    "audio_url",
+                )
+
+            if audio_items:
+                processed_mm_data["audio"] = [
+                    await self._load_audio(item) for item in audio_items
+                ]
+                logging.info("Loaded %d audio clip(s)", len(audio_items))
+
             if loaded_embeddings:
                 # For TRT-LLM MM embeddings, the currently
                 # supported modality is "image".
@@ -701,6 +799,12 @@ class MultimodalRequestProcessor:
                     and len(mm_hashes) == len(images)
                 ):
                     processed_inputs["multi_modal_uuids"] = {"image": list(mm_hashes)}
+
+        if audio_items:
+            # TRT-LLM's audio processor needs the prompt text to expand its
+            # audio placeholders and prepare model-specific features.
+            processed_inputs["prompt"] = formatted_prompt_from_frontend
+            return processed_inputs
 
         # Get token_ids from request (already tokenized by Rust frontend)
         token_ids = token_ids_to_list(request.get("token_ids"))

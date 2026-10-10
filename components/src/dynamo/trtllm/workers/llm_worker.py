@@ -680,6 +680,10 @@ async def init_llm_worker(
             tokenizer=tokenizer,
             allowed_local_media_path=config.allowed_local_media_path,
             enable_frontend_decoding=config.frontend_decoding,
+            supports_audio=(
+                not hasattr(model_config, "audio_config")
+                or model_config.audio_config is not None
+            ),
         )
 
     else:
