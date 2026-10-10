@@ -640,6 +640,7 @@ class NativePlannerBase:
         traffic = None
         worker_counts = None
         fpm_obs = None
+        batch = None
 
         if tick.need_traffic_metrics:
             if tick.use_full_traffic_metrics:
@@ -648,15 +649,40 @@ class NativePlannerBase:
                 traffic = await self._collect_kv_hit_rate_observation(
                     tick.traffic_metrics_duration_s
                 )
-        if tick.need_worker_states:
-            worker_counts = await self._collect_worker_counts()
         if tick.need_worker_fpm:
             fpm_obs = self._collect_fpm()
+        if tick.need_batch_scheduling:
+            try:
+                batch = await self.environment.collect_batch_scheduling()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Batch scheduling observation failed; continuing fail-closed"
+                )
+        if tick.need_worker_states:
+            capacity_available = True
+            if tick.need_batch_scheduling:
+                try:
+                    await self.environment.refresh_replica_state()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    capacity_available = False
+                    logger.exception(
+                        "Post-batch worker-state refresh failed; continuing "
+                        "with capacity missing"
+                    )
+            if capacity_available:
+                worker_counts = await self._collect_worker_counts()
+        if tick.need_batch_scheduling:
+            now = time.time()
         return TickInput(
             now_s=now,
             traffic=traffic,
             worker_counts=worker_counts,
             fpm_observations=fpm_obs,
+            batch=batch,
         )
 
     async def _observe_tick(
@@ -678,6 +704,13 @@ class NativePlannerBase:
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         pass
+
+    async def _apply_submitted_effects(self, effects: PlannerEffects) -> None:
+        """Apply one admitted drain-and-scaling decision in safety order."""
+
+        if effects.batch_drain_limits and not self.config.advisory:
+            await self.environment.apply_batch_drain_limits(effects.batch_drain_limits)
+        await self._apply_effects(effects)
 
     def _effect_submission_done(self, task: asyncio.Task[None]) -> None:
         if self._effect_submission_task is not task:
@@ -763,7 +796,7 @@ class NativePlannerBase:
                 # Creating the remote task is the admission point. PATCH uses
                 # the same outer lock, so no update can linearize between the
                 # generation check and admission.
-                task = asyncio.create_task(self._apply_effects(effects))
+                task = asyncio.create_task(self._apply_submitted_effects(effects))
                 self._effect_submission_task = task
                 task.add_done_callback(self._effect_submission_done)
 
@@ -985,6 +1018,7 @@ class NativePlannerBase:
             tick.run_load_scaling
             or tick.run_throughput_scaling
             or effects.scale_to is not None
+            or bool(effects.batch_drain_limits)
             or bool(diag.audit_events)
             or bool(diag.short_circuit_reason)
         )

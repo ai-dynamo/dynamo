@@ -45,6 +45,9 @@ class ScheduledTick:
     traffic_metrics_duration_s: float = 0.0
     need_worker_states: bool = False
     need_worker_fpm: bool = False
+    # Collect the complete batch scheduling snapshot (Gateway jobs, strict
+    # online demand, and dispatcher feedback) for the native batch policy.
+    need_batch_scheduling: bool = False
     at_monotonic_s: Optional[float] = None
 
 

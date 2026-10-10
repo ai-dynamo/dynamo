@@ -182,6 +182,11 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         await self.fpm_provider.refresh(self._state)
         return self._state
 
+    async def refresh_replica_state(self) -> DeploymentState:
+        """Refresh worker counts without repeating model, GPU, or FPM work."""
+        await self._refresh_replica_counts()
+        return self._state
+
     def deployment_state(self) -> DeploymentState:
         return self._state
 
