@@ -110,24 +110,31 @@ class GMSServer:
     fd and drops every context, giving downstream tests a clean GPU.
     """
 
-    def __init__(self, device: int, tag: str = "weights"):
+    def __init__(
+        self,
+        device: int,
+        tag: str = "weights",
+        *,
+        directory_socket_path: str | None = None,
+    ):
         self.device = device
         self.socket_path = get_socket_path(device, tag)
+        self.directory_socket_path = directory_socket_path
         self._proc: subprocess.Popen | None = None
 
     def __enter__(self) -> "GMSServer":
         self._reclaim_stale_socket()
-        self._proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "tests.gpu_memory_service.common._gms_server_runner",
-                self.socket_path,
-                "--device",
-                str(self.device),
-            ],
-            start_new_session=True,
-        )
+        command = [
+            sys.executable,
+            "-m",
+            "tests.gpu_memory_service.common._gms_server_runner",
+            self.socket_path,
+            "--device",
+            str(self.device),
+        ]
+        if self.directory_socket_path:
+            command.extend(["--directory-socket", self.directory_socket_path])
+        self._proc = subprocess.Popen(command, start_new_session=True)
         self._wait_until_serving()
         return self
 
@@ -135,8 +142,9 @@ class GMSServer:
         try:
             self._stop_subprocess()
         finally:
-            if os.path.exists(self.socket_path):
-                os.unlink(self.socket_path)
+            for socket_path in (self.socket_path, self.directory_socket_path):
+                if socket_path and os.path.exists(socket_path):
+                    os.unlink(socket_path)
 
     def _reclaim_stale_socket(self) -> None:
         """Detect and clear a socket file left behind by a crashed prior run.
@@ -145,6 +153,8 @@ class GMSServer:
         on the same path would race the test. If nothing answers, the socket is
         a stale artifact and we unlink it so Popen can bind cleanly.
         """
+        if self.directory_socket_path and os.path.exists(self.directory_socket_path):
+            os.unlink(self.directory_socket_path)
         if not os.path.exists(self.socket_path):
             return
         try:
@@ -175,6 +185,11 @@ class GMSServer:
             if os.path.exists(self.socket_path):
                 try:
                     self.get_runtime_state()
+                    if self.directory_socket_path and not os.path.exists(
+                        self.directory_socket_path
+                    ):
+                        time.sleep(_POLL_INTERVAL_SECONDS)
+                        continue
                     return
                 except OSError as exc:
                     last_probe_error = exc

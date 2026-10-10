@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -41,6 +42,64 @@ pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance]
 # 6. Shadow A enters a new RW KV layout, hits allocation_oom, then finishes resume.
 
 logger = logging.getLogger(__name__)
+
+
+def _directory_diagnostics(*processes: ManagedProcess) -> str:
+    lines = []
+    for process in processes:
+        for line in process.read_logs().splitlines():
+            if any(
+                marker in line.lower()
+                for marker in (
+                    "gms-kvdiag",
+                    "gms-kvdirectory",
+                    "hbm directory adoption",
+                    "bulk hbm hydration",
+                    "traceback",
+                    "runtimeerror",
+                )
+            ):
+                lines.append(line)
+    return "\n".join(lines[-80:])
+
+
+def _wait_for_directory_writer(directory, manifest, expected, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while True:
+        result = directory.directory_lookup(manifest, [])
+        if result[2] == expected or time.monotonic() >= deadline:
+            return result
+        time.sleep(0.01)
+
+
+def _wait_for_hbm_inventory(directory, writer, epoch, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while True:
+        protected, rejected = directory.directory_hbm_inventory(
+            writer, epoch, scope="vllm"
+        )
+        if rejected or protected or time.monotonic() >= deadline:
+            return protected, rejected
+        time.sleep(0.01)
+
+
+def _wait_for_log(process: ManagedProcess, marker: str, timeout=30.0) -> str:
+    deadline = time.monotonic() + timeout
+    while True:
+        logs = process.read_logs()
+        if marker in logs:
+            return logs
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"timed out waiting for {marker!r}\n" + _directory_diagnostics(process)
+            )
+        time.sleep(0.05)
+
+
+_HBM_RECOVERY_PROMPT = (
+    "GMS persistent HBM recovery probe. The promoted shadow must reuse this exact "
+    "deterministic prefix without recomputing its key value cache. "
+) * 16
 
 
 def _kill_process_group(process: ManagedProcess) -> None:
@@ -253,6 +312,103 @@ def _run_shadow_failover_test(
             success_message="Shadow inference after failover OK",
             retry_timeout=30.0,
         )
+
+
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(8.0)
+@pytest.mark.requested_vllm_kv_cache_bytes(5_000_000_000)
+@pytest.mark.timeout(600)
+@pytest.mark.vllm
+def test_gms_authoritative_hbm_failover_vllm(
+    request, runtime_services_dynamic_ports, predownload_models, monkeypatch
+):
+    """Exercise production automatic takeover without test-side promotion."""
+    from gms_kv_ring.daemon.client import DaemonClient
+
+    monkeypatch.setenv("DYN_VLLM_GMS_SHADOW_MODE", "1")
+    monkeypatch.setenv("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "0")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setenv("VLLM_GMS_GPU_MEM_UTIL", "0.20")
+
+    with GMSProcessManager(request, VLLMWithGMSProcess, kv_directory=True) as manager:
+        assert manager.frontend_port is not None
+        assert manager.kv_cache_gms is not None
+        assert manager.kv_directory_socket is not None
+        assert manager.kv_directory_manifest is not None
+
+        primary = manager.start_engine("0")
+        primary_output = assert_completion_ok(
+            manager.frontend_port,
+            _HBM_RECOVERY_PROMPT,
+            failure_message="Primary HBM warmup failed",
+            success_message="Primary HBM warmup OK",
+            body_overrides={"temperature": 0},
+        )
+        assert (
+            assert_completion_ok(
+                manager.frontend_port,
+                _HBM_RECOVERY_PROMPT,
+                failure_message="Primary deterministic repeat failed",
+                success_message="Primary deterministic repeat OK",
+                body_overrides={"temperature": 0},
+            )
+            == primary_output
+        )
+
+        with DaemonClient(manager.kv_directory_socket) as directory:
+            _entries, epoch, writer = _wait_for_directory_writer(
+                directory, manager.kv_directory_manifest, "engine-0"
+            )
+            assert writer == "engine-0"
+            protected, rejected = _wait_for_hbm_inventory(directory, writer, epoch)
+            assert not rejected
+            assert sum(map(len, protected.values())) > 0
+
+        allocation_count = manager.kv_cache_gms.get_runtime_state().allocation_count
+        shadow = manager.start_engine("1", read_only_weights=True)
+        _wait_for_log(shadow, "Engine sleeping, waiting for failover lock")
+
+        # Starting the standby must not withdraw or pause the active primary.
+        assert (
+            assert_completion_ok(
+                manager.frontend_port,
+                _HBM_RECOVERY_PROMPT,
+                failure_message="Primary stopped serving while shadow waited",
+                success_message="Primary remained active while shadow waited",
+                body_overrides={"temperature": 0},
+            )
+            == primary_output
+        )
+
+        _kill_process_group(primary)
+        with DaemonClient(manager.kv_directory_socket) as directory:
+            _entries, _epoch, writer = _wait_for_directory_writer(
+                directory, manager.kv_directory_manifest, "engine-1", timeout=30.0
+            )
+            assert writer == "engine-1", _directory_diagnostics(primary, shadow)
+
+        _wait_for_log(shadow, "Engine awake, registering with discovery")
+        shadow_output = assert_completion_ok(
+            manager.frontend_port,
+            _HBM_RECOVERY_PROMPT,
+            failure_message="Automatic shadow HBM recovery failed",
+            success_message="Automatic shadow HBM recovery OK",
+            retry_timeout=30.0,
+            body_overrides={"temperature": 0},
+            min_cached_tokens=1,
+        )
+        assert shadow_output == primary_output
+        assert (
+            manager.kv_cache_gms.get_runtime_state().allocation_count
+            == allocation_count
+        ), "automatic takeover changed the persistent KV allocation count"
+        diagnostics = _directory_diagnostics(primary, shadow)
+        for counter in ("adopted_hbm_blocks", "bulk_hydrated_hbm_blocks"):
+            logs = _wait_for_log(shadow, f"{counter}=")
+            values = [int(value) for value in re.findall(rf"{counter}=(\d+)", logs)]
+            assert values and max(values) > 0, diagnostics
 
 
 @pytest.mark.e2e
