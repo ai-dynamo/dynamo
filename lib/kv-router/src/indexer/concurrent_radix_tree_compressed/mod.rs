@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use crossbeam_epoch::Guard;
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
@@ -19,12 +20,15 @@ use super::{
     MatchDetails, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::cleanup::{CleanupGuard, CleanupState};
-use crate::lookup_update::{update_arc_lookup_for_keys, update_existing_arc_lookup_for_keys};
+use crate::lookup_update::{redirect_arc_lookup_for_keys, update_arc_lookup_for_keys};
 use crate::protocols::*;
 
 mod children;
+mod coverage;
 mod node;
+mod state;
 mod types;
+use coverage::{Slot, SlotRegistry, SlotSet, SlotTable, wait_for_pinned_threads};
 use node::*;
 use types::*;
 
@@ -44,6 +48,8 @@ pub struct ConcurrentRadixTreeCompressed {
     root: SharedNode,
 
     anchor_nodes: DashMap<ExternalSequenceBlockHash, SharedNode, FxBuildHasher>,
+    /// Dense slots of the ranks with coverage in this tree.
+    slots: SlotRegistry,
     cleanup: CleanupState,
     lifecycle: super::HashLifecycle,
     #[cfg(feature = "bench")]
@@ -122,6 +128,7 @@ impl ConcurrentRadixTreeCompressed {
         Self {
             root: Arc::new(Node::new()),
             anchor_nodes: DashMap::with_hasher(FxBuildHasher),
+            slots: SlotRegistry::default(),
             cleanup: CleanupState::new(),
             lifecycle: super::HashLifecycle::default(),
             #[cfg(feature = "bench")]
@@ -187,15 +194,38 @@ impl ConcurrentRadixTreeCompressed {
         children
     }
 
+    /// The slot `worker` is currently mapped to, if any.
+    #[cfg(test)]
+    fn slot_for_test(&self, worker: WorkerWithDpRank) -> Option<coverage::Slot> {
+        self.slots.table(&crossbeam_epoch::pin()).slot_of(worker)
+    }
+
+    /// Resolves `worker`'s slot as an event would, allocating one if needed.
+    #[cfg(test)]
+    fn event_worker_for_test<'g>(
+        &self,
+        worker: WorkerWithDpRank,
+        guard: &'g Guard,
+    ) -> EventWorker<'g> {
+        EventWorker {
+            rank: worker,
+            slot: self.slots.acquire(worker, guard).unwrap(),
+            table: self.slots.table(guard),
+        }
+    }
+
     fn resolve_anchor_lookup(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         hash: ExternalSequenceBlockHash,
     ) -> Option<SharedNode> {
         let node = self.anchor_nodes.get(&hash)?.clone();
-        node.promote_worker_to_full_edge(worker);
-        lookup.entry(worker).or_default().insert(hash, node.clone());
+        node.promote_slot_to_full_edge(worker.slot);
+        lookup
+            .entry(worker.rank)
+            .or_default()
+            .insert(hash, node.clone());
         Some(node)
     }
 
@@ -211,22 +241,35 @@ impl ConcurrentRadixTreeCompressed {
 
     /// Apply deferred lookup updates after `Node::split_at`.
     ///
-    /// Updates worker lookup maps so entries for blocks that moved to the suffix now
-    /// point to the suffix node. Must be called **after** the write guard is dropped.
+    /// Repoints this lane's entries for blocks that moved from `prefix` to the suffix,
+    /// for every rank the suffix credits with them. Must be called **after** the write
+    /// guard is dropped.
+    ///
+    /// Only entries that still name `prefix` move. An entry naming another node is left
+    /// to lazy repair; this way an entry never moves onto a node only because a slot's
+    /// bits there are stale, which a recycled slot can inherit on an unlinked subtree.
     fn apply_split_lookup(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        table: &SlotTable,
+        prefix: &SharedNode,
         split: SplitLookupData,
     ) {
         #[cfg(feature = "bench")]
         self.bench_metrics
             .node_splits
             .fetch_add(1, Ordering::Relaxed);
-        for (worker, hashes) in split.suffix.lookup_entries_by_worker() {
-            if let Some(wl) = lookup.get_mut(&worker) {
-                for hash in hashes {
-                    wl.insert(hash, split.suffix.clone());
-                }
+        let (hashes, cutoffs) = split
+            .suffix
+            .covered_prefixes(lookup.keys().map(|&worker| table.slot_of(worker)));
+        for (wl, cutoff) in lookup.values_mut().zip(cutoffs) {
+            if cutoff > 0 {
+                redirect_arc_lookup_for_keys(
+                    wl,
+                    hashes[..cutoff].iter().copied(),
+                    prefix,
+                    &split.suffix,
+                );
             }
         }
     }
@@ -266,20 +309,21 @@ impl ConcurrentRadixTreeCompressed {
         let (id, op) = (kv_event.event_id, kv_event.data);
         let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
 
-        // One pin per store or remove: child-map loads and publications nest inside it.
-        // A clear walks the whole tree and pins per node instead, so it cannot hold back
-        // epoch reclamation for the length of the walk.
+        // One pin per store or remove: child-map loads and publications nest inside it,
+        // and it keeps the rank's slot from being released mid-event. A clear walks the
+        // whole tree and repins every few nodes instead, so it cannot hold back epoch
+        // reclamation for the length of the walk.
         match op {
             KvCacheEventData::Stored(op) => {
-                let _guard = crossbeam_epoch::pin();
-                self.apply_stored(lookup, worker, op, id, counters)
+                let guard = crossbeam_epoch::pin();
+                self.apply_stored(lookup, worker, op, id, counters, &guard)
             }
             KvCacheEventData::Removed(op) => {
-                let _guard = crossbeam_epoch::pin();
-                self.apply_removed(lookup, worker, op, id)
+                let guard = crossbeam_epoch::pin();
+                self.apply_removed(lookup, worker, op, id, &guard)
             }
             KvCacheEventData::Cleared => {
-                self.erase_worker_coverage(lookup, WorkerRemovalTarget::DpRank(worker), true);
+                self.clear_worker_coverage(lookup, worker);
                 Ok(())
             }
         }

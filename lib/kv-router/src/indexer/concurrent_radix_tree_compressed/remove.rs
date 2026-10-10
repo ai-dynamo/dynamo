@@ -53,8 +53,8 @@ impl ConcurrentRadixTreeCompressed {
     /// For each evicted block hash, finds its position in the node via `edge_index` (O(1)).
     /// Updates the worker's match index without splitting the tree:
     /// - `pos >= current_cutoff`: no-op (already beyond coverage)
-    /// - `pos < current_cutoff`: `new_cutoff = pos`; moves worker to `worker_cutoffs`
-    ///   or removes entirely if `new_cutoff == 0`.
+    /// - `pos < current_cutoff`: `new_cutoff = pos`; records the slot's cutoff in `cutoffs`
+    ///   or removes it entirely if `new_cutoff == 0`.
     ///
     /// Lookup entries for the newly uncovered suffix are removed eagerly so
     /// later duplicate remove events fast-path through the missing-hash case.
@@ -64,12 +64,25 @@ impl ConcurrentRadixTreeCompressed {
         worker: WorkerWithDpRank,
         op: KvCacheRemoveData,
         id: u64,
+        guard: &Guard,
     ) -> Result<(), KvCacheEventError> {
         if !lookup.contains_key(&worker) {
             return Err(KvCacheEventError::BlockNotFound);
         }
 
         let block_hashes = op.block_hashes;
+        let table = self.slots.table(guard);
+        let Some(slot) = table.slot_of(worker) else {
+            // The rank is being removed: its slot is unmapped, and the sweep that releases
+            // the slot drops its coverage. Only the lookup entries are left to scrub.
+            self.remove_lookup_hashes(lookup, worker, block_hashes);
+            return Ok(());
+        };
+        let worker = EventWorker {
+            rank: worker,
+            slot,
+            table,
+        };
         let mut index = 0;
 
         while let Some(&block_hash) = block_hashes.get(index) {
@@ -86,8 +99,8 @@ impl ConcurrentRadixTreeCompressed {
                 }
                 None => {
                     tracing::debug!(
-                        worker_id = worker.worker_id.to_string(),
-                        dp_rank = worker.dp_rank,
+                        worker_id = worker.rank.worker_id.to_string(),
+                        dp_rank = worker.rank.dp_rank,
                         id,
                         block_hash = ?block_hash,
                         "Block not found during remove; skipping"
@@ -100,7 +113,7 @@ impl ConcurrentRadixTreeCompressed {
                     // entry (and the per-worker tracked-block count) leaks
                     // permanently. Mirrors the scrubs in apply_removed_hash's
                     // miss branches.
-                    self.remove_lookup_hashes(lookup, worker, [block_hash]);
+                    self.remove_lookup_hashes(lookup, worker.rank, [block_hash]);
                     index += 1;
                 }
             }
@@ -112,7 +125,7 @@ impl ConcurrentRadixTreeCompressed {
     pub(super) fn apply_removed_group(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         cur_node: &SharedNode,
         block_hashes: &[ExternalSequenceBlockHash],
         id: u64,
@@ -121,9 +134,9 @@ impl ConcurrentRadixTreeCompressed {
             return;
         }
 
-        match cur_node.remove_worker_for_hashes(worker, block_hashes) {
+        match cur_node.remove_worker_for_hashes(worker.slot, block_hashes) {
             Some(outcome) => {
-                self.remove_lookup_hashes(lookup, worker, outcome.stale_hashes);
+                self.remove_lookup_hashes(lookup, worker.rank, outcome.stale_hashes);
                 for block_hash in outcome.unmatched_hashes {
                     self.apply_removed_hash(lookup, worker, block_hash, id);
                 }
@@ -139,7 +152,7 @@ impl ConcurrentRadixTreeCompressed {
     fn apply_removed_hash(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         block_hash: ExternalSequenceBlockHash,
         id: u64,
     ) {
@@ -150,13 +163,13 @@ impl ConcurrentRadixTreeCompressed {
             LookupRepairDirection::TowardHead,
         ) else {
             tracing::debug!(
-                worker_id = worker.worker_id.to_string(),
-                dp_rank = worker.dp_rank,
+                worker_id = worker.rank.worker_id.to_string(),
+                dp_rank = worker.rank.dp_rank,
                 id,
                 block_hash = ?block_hash,
                 "Block not found during batched remove fallback; skipping"
             );
-            self.remove_lookup_hashes(lookup, worker, [block_hash]);
+            self.remove_lookup_hashes(lookup, worker.rank, [block_hash]);
             return;
         };
 
@@ -167,10 +180,11 @@ impl ConcurrentRadixTreeCompressed {
             // reactivated by restoring only the removed block, or emitted by dumps
             // without a valid worker-specific parent. Preserve CRTC's locking and
             // snapshot guarantees when implementing the traversal.
-            match cur_node.remove_worker_for_hashes(worker, std::slice::from_ref(&block_hash)) {
+            match cur_node.remove_worker_for_hashes(worker.slot, std::slice::from_ref(&block_hash))
+            {
                 Some(outcome) => {
                     debug_assert!(outcome.unmatched_hashes.is_empty());
-                    self.remove_lookup_hashes(lookup, worker, outcome.stale_hashes);
+                    self.remove_lookup_hashes(lookup, worker.rank, outcome.stale_hashes);
                     return;
                 }
                 None => {
@@ -179,7 +193,9 @@ impl ConcurrentRadixTreeCompressed {
                         Some(resolved) => {
                             self.repair_lookup_for_resolved_node(
                                 lookup,
+                                worker.table,
                                 block_hash,
+                                &cur_node,
                                 &resolved,
                                 LookupRepairDirection::TowardHead,
                             );
@@ -193,13 +209,13 @@ impl ConcurrentRadixTreeCompressed {
                         None => {
                             // Hash not found anywhere -- evicted by a concurrent clear.
                             tracing::debug!(
-                                worker_id = worker.worker_id.to_string(),
-                                dp_rank = worker.dp_rank,
+                                worker_id = worker.rank.worker_id.to_string(),
+                                dp_rank = worker.rank.dp_rank,
                                 id,
                                 block_hash = ?block_hash,
                                 "Block not found in subtree during batched remove; skipping"
                             );
-                            self.remove_lookup_hashes(lookup, worker, [block_hash]);
+                            self.remove_lookup_hashes(lookup, worker.rank, [block_hash]);
                             return;
                         }
                     }
@@ -222,11 +238,11 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
-    pub(super) fn erase_worker_coverage(
+    /// Drops `target`'s lookups on this lane, releasing their hashes.
+    fn erase_lane_lookups(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         target: WorkerRemovalTarget,
-        sweep_tree: bool,
     ) {
         lookup.retain(|worker, blocks| {
             if target.matches(*worker) {
@@ -240,10 +256,73 @@ impl ConcurrentRadixTreeCompressed {
                 true
             }
         });
+    }
+
+    /// Applies a `Cleared` event: drops the rank's lookups on this lane and its coverage
+    /// everywhere. The rank keeps its slot.
+    pub(super) fn clear_worker_coverage(
+        &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        worker: WorkerWithDpRank,
+    ) {
+        self.erase_lane_lookups(lookup, WorkerRemovalTarget::DpRank(worker));
+        let slot = self.slots.table(&crossbeam_epoch::pin()).slot_of(worker);
+        if let Some(slot) = slot {
+            self.clear_rank_slot(worker, slot);
+        }
+        // A removal on another lane may have unmapped this slot or, if the rank has stored
+        // since, an earlier one. Its sweep drops that coverage; wait for it.
+        self.slots
+            .wait_for_release(WorkerRemovalTarget::DpRank(worker));
+    }
+
+    /// Clears `slot` from the tree for as long as it is still `worker`'s. Returns false
+    /// once a removal has unmapped it; that removal sweeps the rest before releasing it.
+    pub(super) fn clear_rank_slot(&self, worker: WorkerWithDpRank, slot: Slot) -> bool {
+        self.sweep_slots(&SlotSet::from_iter([slot]), |_, table| {
+            table.slot_of(worker) == Some(slot)
+        })
+    }
+
+    /// Removes `target`'s ranks: drops their lookups on this lane and, with `sweep_tree`,
+    /// releases their slots. A released slot is unmapped first, so later events for the
+    /// rank start over with a new slot, then swept out of the tree and freed.
+    ///
+    /// `ThreadPoolIndexer` removes a whole worker by sending this to every lane without
+    /// `sweep_tree` and then to one lane with it; the rank keeps its slot until that sweep.
+    pub(super) fn remove_worker_coverage(
+        &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        target: WorkerRemovalTarget,
+        sweep_tree: bool,
+    ) {
+        self.erase_lane_lookups(lookup, target);
         if !sweep_tree {
             return;
         }
 
+        let slots = self.slots.unmap(target);
+        if !slots.is_empty() {
+            // Events on other lanes that resolved a slot before the unmap may still be
+            // writing its bits; let them finish so the sweep below sees every bit.
+            wait_for_pinned_threads();
+            self.sweep_slots(&slots.iter().copied().collect(), |_, _| true);
+            self.slots.release(slots);
+        }
+        // A removal on another lane may have unmapped some of these ranks first; return
+        // only once its sweep has dropped their coverage too.
+        self.slots.wait_for_release(target);
+    }
+
+    /// Clears `slots` from every node reachable from the root or an anchor, stopping
+    /// with `false` as soon as `proceed` rejects a node. `proceed` gets the slot table
+    /// current under the pin that stays held while the node is cleared, so a check
+    /// against it holds back the release of any slot it sees mapped.
+    pub(super) fn sweep_slots(
+        &self,
+        slots: &SlotSet,
+        mut proceed: impl FnMut(&SharedNode, &SlotTable) -> bool,
+    ) -> bool {
         let mut queue = VecDeque::new();
         self.root.push_children_into(&mut queue);
         let anchor_roots: Vec<_> = self
@@ -253,15 +332,22 @@ impl ConcurrentRadixTreeCompressed {
             .collect();
         queue.extend(anchor_roots);
 
-        let mut seen = FxHashSet::<usize>::default();
+        // No visited set: the tree has no cycles and clearing a node twice is harmless.
+        // Deduplicating by address would be unsound, because a node cleared and dropped
+        // here can be freed and its address reused by a split suffix carrying the slots.
+        let mut guard = crossbeam_epoch::pin();
+        let mut visited = 0usize;
         while let Some(node) = queue.pop_front() {
-            let ptr = Arc::as_ptr(&node) as usize;
-            if !seen.insert(ptr) {
-                continue;
+            // Let the epoch advance during long sweeps.
+            if visited.is_multiple_of(64) {
+                guard.repin();
             }
-
-            let children = node.remove_target_and_snapshot_children(target);
-            queue.extend(children);
+            visited += 1;
+            if !proceed(&node, self.slots.table(&guard)) {
+                return false;
+            }
+            queue.extend(node.remove_slots_and_snapshot_children(slots));
         }
+        true
     }
 }

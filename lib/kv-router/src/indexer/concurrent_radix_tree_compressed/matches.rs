@@ -11,9 +11,9 @@ impl ConcurrentRadixTreeCompressed {
     /// [`LocalBlockHash`]es, returning both overlap scores and the last matched
     /// `ExternalSequenceBlockHash` per worker (used for lower-tier continuation).
     ///
-    /// Workers in `full_edge_workers` are tracked in the `active` set and continue
-    /// into children. Workers in `worker_cutoffs` are scored at the node where their
-    /// cutoff falls short and are never propagated into children.
+    /// Ranks with full-edge coverage are tracked in the `active` slot set and continue
+    /// into children. Ranks with a cutoff are scored at the node where their cutoff
+    /// falls short and are never propagated into children.
     pub fn find_match_details_impl(
         &self,
         sequence: &[LocalBlockHash],
@@ -57,13 +57,13 @@ impl ConcurrentRadixTreeCompressed {
         let mut kv_transfer_chain =
             retain_kv_transfer_chain.then(|| Vec::with_capacity(sequence.len()));
 
-        let walk_result = {
+        {
             let MatchDetails {
                 overlap_scores: ref mut scores,
                 ref mut last_matched_hashes,
                 kv_transfer_candidates: _,
             } = details;
-            Self::walk_match_path(
+            self.walk_match_path(
                 next_child,
                 &sequence,
                 early_exit,
@@ -71,10 +71,9 @@ impl ConcurrentRadixTreeCompressed {
                 Some(last_matched_hashes),
                 kv_transfer_chain.as_mut(),
                 guard,
-            )
-        };
+            );
+        }
 
-        Self::record_surviving_details(&mut details, &walk_result);
         if let Some(block_hashes) = kv_transfer_chain {
             details.retain_kv_transfer_candidates(block_hashes);
         }
@@ -82,10 +81,13 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     /// Walks from `next_child` borrowing each node under `guard` rather than cloning its
-    /// `Arc`, so the walk touches no shared reference counts. The caller pins once for the
-    /// whole walk and keeps the first node alive for `'g`.
+    /// `Arc`, so the walk touches no shared reference counts, and scores every rank it
+    /// matched, including the ranks still active at the end of the walk. The caller pins
+    /// once for the whole walk and keeps the first node alive for `'g`.
     #[cfg_attr(feature = "profile", inline(never))]
+    #[allow(clippy::too_many_arguments)]
     fn walk_match_path<'g, S: HashSequence>(
+        &self,
         mut next_child: Option<&'g Node>,
         sequence: &S,
         early_exit: bool,
@@ -95,9 +97,10 @@ impl ConcurrentRadixTreeCompressed {
         >,
         mut kv_transfer_chain: Option<&mut Vec<ExternalSequenceBlockHash>>,
         guard: &'g Guard,
-    ) -> MatchWalkResult {
-        let mut active: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
-        let mut active_count: usize = 0;
+    ) {
+        // The slot table loaded under the walk's pin maps every bit the walk sees.
+        let table = self.slots.table(guard);
+        let mut active = SlotSet::default();
         let mut matched_depth: u32 = 0;
         let mut seq_pos: usize = 0;
         let mut first_node = true;
@@ -122,8 +125,8 @@ impl ConcurrentRadixTreeCompressed {
                     first_node,
                     prev_depth: matched_depth,
                     prev_edge_last_hash,
+                    table,
                     active: &mut active,
-                    active_count,
                     scores,
                     last_matched_hashes: last_matched_hashes.as_deref_mut(),
                     kv_transfer_chain: kv_transfer_chain.as_deref_mut(),
@@ -132,7 +135,7 @@ impl ConcurrentRadixTreeCompressed {
             );
             let edge_len = outcome.edge_len;
             let edge_match_len = outcome.edge_match_len;
-            active_count = outcome.active_count;
+            let active_count = outcome.active_count;
             next_child = outcome.next_child;
             prev_edge_last_hash = outcome.prev_edge_last_hash;
             if first_node {
@@ -152,28 +155,13 @@ impl ConcurrentRadixTreeCompressed {
             }
         }
 
-        MatchWalkResult {
-            active,
-            matched_depth,
-            prev_edge_last_hash,
-        }
-    }
-
-    fn record_surviving_details(details: &mut MatchDetails, walk_result: &MatchWalkResult) {
-        for worker in &walk_result.active {
-            details
-                .overlap_scores
-                .scores
-                .insert(*worker, walk_result.matched_depth);
-            if let Some(hash) = walk_result.prev_edge_last_hash {
-                details.last_matched_hashes.insert(*worker, hash);
+        for worker in active.iter().filter_map(|slot| table.owner(slot)) {
+            scores.scores.insert(worker, matched_depth);
+            if let Some(last_matched_hashes) = last_matched_hashes.as_deref_mut()
+                && let Some(hash) = prev_edge_last_hash
+            {
+                last_matched_hashes.insert(worker, hash);
             }
-        }
-    }
-
-    fn record_surviving_scores(scores: &mut OverlapScores, walk_result: &MatchWalkResult) {
-        for worker in &walk_result.active {
-            scores.scores.insert(*worker, walk_result.matched_depth);
         }
     }
 
@@ -195,7 +183,7 @@ impl ConcurrentRadixTreeCompressed {
             .first()
             .and_then(|&local_hash| self.root.child_ref(local_hash, &guard));
         let sequence = SliceHashSequence(sequence);
-        let walk_result = Self::walk_match_path(
+        self.walk_match_path(
             next_child,
             &sequence,
             early_exit,
@@ -204,7 +192,6 @@ impl ConcurrentRadixTreeCompressed {
             None,
             &guard,
         );
-        Self::record_surviving_scores(&mut scores, &walk_result);
         scores
     }
 }

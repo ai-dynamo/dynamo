@@ -30,8 +30,22 @@ impl ConcurrentRadixTreeCompressed {
         op: KvCacheStoreData,
         id: u64,
         counters: Option<&PreBoundEventCounters>,
+        guard: &Guard,
     ) -> Result<(), KvCacheEventError> {
-        lookup.entry(worker).or_default();
+        let slot = self.slots.acquire(worker, guard).inspect_err(|_| {
+            tracing::warn!(
+                worker_id = worker.worker_id.to_string(),
+                dp_rank = worker.dp_rank,
+                id,
+                "No free coverage slot; skipping store operation"
+            );
+        })?;
+        let worker = EventWorker {
+            rank: worker,
+            slot,
+            table: self.slots.table(guard),
+        };
+        lookup.entry(worker.rank).or_default();
 
         let parent_resolution = self.resolve_store_parent(lookup, worker, &op, id)?;
         let outcome = self.insert_for_resolved_parent(lookup, worker, parent_resolution, &op)?;
@@ -43,7 +57,7 @@ impl ConcurrentRadixTreeCompressed {
     fn resolve_store_parent(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         op: &KvCacheStoreData,
         id: u64,
     ) -> Result<StoreParentResolution, KvCacheEventError> {
@@ -60,7 +74,7 @@ impl ConcurrentRadixTreeCompressed {
     fn resolve_explicit_store_parent(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         parent_hash: ExternalSequenceBlockHash,
         op: &KvCacheStoreData,
         id: u64,
@@ -74,7 +88,7 @@ impl ConcurrentRadixTreeCompressed {
             let Some(plan) = node.plan_store_parent_edge(parent_hash, &op.blocks) else {
                 continue;
             };
-            let edge_action = node.apply_store_parent_edge_plan(worker, plan, &op.blocks);
+            let edge_action = node.apply_store_parent_edge_plan(worker.slot, plan, &op.blocks);
 
             match edge_action {
                 ParentEdgeAction::Stale => continue,
@@ -86,7 +100,7 @@ impl ConcurrentRadixTreeCompressed {
                 }
                 ParentEdgeAction::InsertFromParent(split_data) => {
                     if let Some(split) = split_data {
-                        self.apply_split_lookup(lookup, split);
+                        self.apply_split_lookup(lookup, worker.table, &node, split);
                     }
                     return Ok(StoreParentResolution::InsertFrom {
                         parent_is_anchor: self.is_anchor_node(parent_hash, &node),
@@ -100,7 +114,7 @@ impl ConcurrentRadixTreeCompressed {
     fn lookup_store_parent_node(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         parent_hash: ExternalSequenceBlockHash,
         op: &KvCacheStoreData,
         id: u64,
@@ -119,8 +133,8 @@ impl ConcurrentRadixTreeCompressed {
         }
 
         tracing::warn!(
-            worker_id = worker.worker_id.to_string(),
-            dp_rank = worker.dp_rank,
+            worker_id = worker.rank.worker_id.to_string(),
+            dp_rank = worker.rank.dp_rank,
             id,
             parent_hash = ?op.parent_hash,
             num_blocks = op.blocks.len(),
@@ -132,17 +146,17 @@ impl ConcurrentRadixTreeCompressed {
     fn reject_uncovered_store_parent(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         node: &SharedNode,
         parent_hash: ExternalSequenceBlockHash,
         id: u64,
     ) -> Result<(), KvCacheEventError> {
-        let Some(uncovered) = node.reject_uncovered_parent(worker, parent_hash) else {
+        let Some(uncovered) = node.reject_uncovered_parent(worker.slot, parent_hash) else {
             return Ok(());
         };
         tracing::warn!(
-            worker_id = worker.worker_id.to_string(),
-            dp_rank = worker.dp_rank,
+            worker_id = worker.rank.worker_id.to_string(),
+            dp_rank = worker.rank.dp_rank,
             id,
             parent_hash = ?parent_hash,
             pos = uncovered.pos,
@@ -150,9 +164,9 @@ impl ConcurrentRadixTreeCompressed {
             "Stale parent: worker no longer covers parent_hash; rejecting store"
         );
 
-        let wl = lookup.get_mut(&worker).unwrap();
+        let wl = lookup.get_mut(&worker.rank).unwrap();
         wl.remove(&parent_hash);
-        self.release_hash(worker, parent_hash);
+        self.release_hash(worker.rank, parent_hash);
         Err(KvCacheEventError::ParentBlockNotFound)
     }
 
@@ -160,7 +174,7 @@ impl ConcurrentRadixTreeCompressed {
     fn insert_for_resolved_parent(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         parent_resolution: StoreParentResolution,
         op: &KvCacheStoreData,
     ) -> Result<StoreInsertOutcome, KvCacheEventError> {
@@ -195,13 +209,13 @@ impl ConcurrentRadixTreeCompressed {
     fn finish_with_lookup_update(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         blocks: &[KvCacheStoredBlockData],
         node: &SharedNode,
         duplicate_store: bool,
     ) -> StoreInsertOutcome {
-        let wl = lookup.get_mut(&worker).unwrap();
-        let lookup_changed = self.update_lookup_for_blocks(worker, wl, blocks, node);
+        let wl = lookup.get_mut(&worker.rank).unwrap();
+        let lookup_changed = self.update_lookup_for_blocks(worker.rank, wl, blocks, node);
 
         StoreInsertOutcome {
             duplicate_store: duplicate_store && !lookup_changed,
@@ -211,14 +225,14 @@ impl ConcurrentRadixTreeCompressed {
     fn finish_after_split_lookup(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         finish: SplitLookupFinish<'_>,
     ) -> StoreInsertOutcome {
-        self.apply_split_lookup(lookup, finish.split);
+        self.apply_split_lookup(lookup, worker.table, finish.prefix_node, finish.split);
 
-        let wl = lookup.get_mut(&worker).unwrap();
-        self.update_lookup_for_blocks(worker, wl, finish.prefix_blocks, finish.prefix_node);
-        self.update_lookup_for_blocks(worker, wl, finish.tail_blocks, finish.tail_node);
+        let wl = lookup.get_mut(&worker.rank).unwrap();
+        self.update_lookup_for_blocks(worker.rank, wl, finish.prefix_blocks, finish.prefix_node);
+        self.update_lookup_for_blocks(worker.rank, wl, finish.tail_blocks, finish.tail_node);
 
         StoreInsertOutcome {
             duplicate_store: false,
@@ -240,7 +254,7 @@ impl ConcurrentRadixTreeCompressed {
     fn child_or_insert_remaining(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         cursor: StoreParentCursor<'_>,
         remaining: &[KvCacheStoredBlockData],
     ) -> Result<StoreInsertStep, KvCacheEventError> {
@@ -257,8 +271,8 @@ impl ConcurrentRadixTreeCompressed {
                     self.resolve_lookup(lookup, worker, hash, LookupRepairDirection::TowardTail)
                 else {
                     tracing::warn!(
-                        worker_id = worker.worker_id.to_string(),
-                        dp_rank = worker.dp_rank,
+                        worker_id = worker.rank.worker_id.to_string(),
+                        dp_rank = worker.rank.dp_rank,
                         parent_hash = ?hash,
                         num_blocks = remaining.len(),
                         "Stale parent hash could not be resolved; rejecting store"
@@ -282,9 +296,10 @@ impl ConcurrentRadixTreeCompressed {
             // Parent hashes can point inside a compressed edge. Before attaching a
             // child, try to reuse that existing suffix or split at the parent.
             if let Some(edge_plan) = cursor.parent.plan_store_parent_edge(parent_hash, remaining) {
-                let edge_action = cursor
-                    .parent
-                    .apply_store_parent_edge_plan(worker, edge_plan, remaining);
+                let edge_action =
+                    cursor
+                        .parent
+                        .apply_store_parent_edge_plan(worker.slot, edge_plan, remaining);
                 match edge_action {
                     ParentEdgeAction::Stale => {
                         return Ok(StoreInsertStep::RetryParent {
@@ -302,7 +317,7 @@ impl ConcurrentRadixTreeCompressed {
                         )));
                     }
                     ParentEdgeAction::InsertFromParent(Some(split)) => {
-                        self.apply_split_lookup(lookup, split);
+                        self.apply_split_lookup(lookup, worker.table, cursor.parent, split);
                         return Ok(StoreInsertStep::RetryParent {
                             parent: cursor.parent.clone(),
                             parent_is_anchor: cursor.parent_is_anchor,
@@ -320,7 +335,7 @@ impl ConcurrentRadixTreeCompressed {
             // the node method revalidates the shape and appends only if the
             // parent is still the covered tail leaf.
             match cursor.parent.try_extend_leaf_with_version(
-                worker,
+                worker.slot,
                 parent_hash,
                 remaining,
                 shape_version,
@@ -344,14 +359,14 @@ impl ConcurrentRadixTreeCompressed {
             }
         }
 
-        let new_node = Arc::new(Node::from_blocks_for_worker(remaining, worker));
+        let new_node = Arc::new(Node::from_blocks_for_slot(remaining, worker.slot));
         if let Some(parent_hash) = cursor.last_ext_hash
             && !cursor.parent_is_anchor
         {
             // Allocation can race with another writer leaving the parent
             // extendable. Recheck extension once before publishing a child.
             match cursor.parent.try_extend_leaf_with_version(
-                worker,
+                worker.slot,
                 parent_hash,
                 remaining,
                 shape_version,
@@ -393,7 +408,7 @@ impl ConcurrentRadixTreeCompressed {
     fn insert_into_child(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         child: &SharedNode,
         remaining: &[KvCacheStoredBlockData],
         duplicate_store: bool,
@@ -412,8 +427,8 @@ impl ConcurrentRadixTreeCompressed {
                 // of the compressed edge, or the store diverges and must split
                 // the edge.
                 if scan.match_len == remaining.len() {
-                    let Some(coverage_changed) = child.cover_prefix_for_worker_with_version(
-                        worker,
+                    let Some(coverage_changed) = child.cover_prefix_with_version(
+                        worker.slot,
                         scan.match_len,
                         scan.shape_version,
                     ) else {
@@ -431,9 +446,9 @@ impl ConcurrentRadixTreeCompressed {
                 let tail = &remaining[scan.match_len..];
                 debug_assert!(!tail.is_empty());
 
-                let tail_candidate = Arc::new(Node::from_blocks_for_worker(tail, worker));
+                let tail_candidate = Arc::new(Node::from_blocks_for_slot(tail, worker.slot));
                 let SplitStoreOutcome::Done { split, tail_node } = child.split_for_store_tail(
-                    worker,
+                    worker.slot,
                     scan.match_len,
                     tail[0].tokens_hash,
                     tail_candidate,
@@ -457,7 +472,8 @@ impl ConcurrentRadixTreeCompressed {
             // The whole child edge matched. Mark this worker as covering it,
             // update lookup for that edge, then continue with the unmatched
             // suffix.
-            let Some(promoted) = child.promote_to_full_with_version(worker, scan.shape_version)
+            let Some(promoted) =
+                child.promote_to_full_with_version(worker.slot, scan.shape_version)
             else {
                 continue;
             };
@@ -465,9 +481,9 @@ impl ConcurrentRadixTreeCompressed {
                 duplicate_store = false;
             }
 
-            let wl = lookup.get_mut(&worker).unwrap();
+            let wl = lookup.get_mut(&worker.rank).unwrap();
             let lookup_changed =
-                self.update_lookup_for_blocks(worker, wl, &remaining[..scan.edge_len], child);
+                self.update_lookup_for_blocks(worker.rank, wl, &remaining[..scan.edge_len], child);
             if lookup_changed {
                 duplicate_store = false;
             }
@@ -484,7 +500,7 @@ impl ConcurrentRadixTreeCompressed {
     fn insert_blocks_from(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         parent: &SharedNode,
         parent_is_anchor: bool,
         seed_hash: Option<ExternalSequenceBlockHash>,
@@ -556,6 +572,8 @@ impl ConcurrentRadixTreeCompressed {
         seed_hash: ExternalSequenceBlockHash,
         blocks: &[KvCacheStoredBlockData],
     ) -> Result<StoreInsertOutcome, KvCacheEventError> {
+        let guard = crossbeam_epoch::pin();
+        let worker = self.event_worker_for_test(worker, &guard);
         self.insert_blocks_from(lookup, worker, parent, false, Some(seed_hash), blocks)
     }
 }
