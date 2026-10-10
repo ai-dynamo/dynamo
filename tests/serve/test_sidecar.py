@@ -146,7 +146,9 @@ sidecar_configs = {
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
         },
-        request_payloads=[],
+        request_payloads=_aggregated_payloads(
+            VllmMetricsChecker(port_env="VLLM_RS_HTTP_PORT"),
+        ),
     ),
     "sglang_aggregated": EngineConfig(
         name="sglang_aggregated",
@@ -166,7 +168,13 @@ sidecar_configs = {
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "SGLANG_MAX_NEW_TOKENS_LIMIT": "0",
         },
-        request_payloads=[],
+        request_payloads=_aggregated_payloads(
+            SGLangMetricsChecker(
+                port_env="SGLANG_HTTP_PORT",
+                minimum_context_length=CANCELLATION_CONTEXT_LEN,
+                minimum_kv_capacity=SGLANG_CANCELLATION_KV_TOKENS,
+            ),
+        ),
     ),
     "trtllm_aggregated": EngineConfig(
         name="trtllm_aggregated",
@@ -253,7 +261,11 @@ sidecar_configs = {
         health_check_workers=True,
         health_check_worker_count=2,
         env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
-        request_payloads=[],
+        request_payloads=_disaggregated_payloads(
+            prefill_metrics=VllmMetricsChecker(port_env="VLLM_PREFILL_HTTP_PORT"),
+            decode_metrics=VllmMetricsChecker(port_env="VLLM_DECODE_HTTP_PORT"),
+            transfer_metrics=VllmMetricsChecker(port_env="VLLM_DECODE_HTTP_PORT"),
+        ),
     ),
     "sglang_disaggregated": EngineConfig(
         name="sglang_disaggregated",
@@ -276,7 +288,11 @@ sidecar_configs = {
         health_check_workers=True,
         health_check_worker_count=2,
         env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
-        request_payloads=[],
+        request_payloads=_disaggregated_payloads(
+            prefill_metrics=SGLangMetricsChecker(port_env="SGLANG_PREFILL_HTTP_PORT"),
+            decode_metrics=SGLangMetricsChecker(port_env="SGLANG_DECODE_HTTP_PORT"),
+            transfer_metrics=SGLangMetricsChecker(port_env="SGLANG_PREFILL_HTTP_PORT"),
+        ),
     ),
 }
 
@@ -295,7 +311,6 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
         num_engine_ports, start_port=DynamoPortRange.SERVE.value
     ) as engine_ports:
         engine_env = {}
-        payloads = config.request_payloads
         if layout == "disaggregated":
             monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
             monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
@@ -331,48 +346,22 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
                     engine_ports[4]
                 )
 
-            if backend in ("vllm", "sglang"):
-                prefill_url = f"http://127.0.0.1:{engine_env[f'{backend.upper()}_PREFILL_HTTP_PORT']}/metrics"
-                decode_url = f"http://127.0.0.1:{engine_env[f'{backend.upper()}_DECODE_HTTP_PORT']}/metrics"
-                if backend == "vllm":
-                    prefill_metrics = VllmMetricsChecker(prefill_url)
-                    decode_metrics = VllmMetricsChecker(decode_url)
-                    transfer_metrics = decode_metrics
-                else:
-                    prefill_metrics = SGLangMetricsChecker(prefill_url)
-                    decode_metrics = SGLangMetricsChecker(decode_url)
-                    transfer_metrics = prefill_metrics
-                payloads = _disaggregated_payloads(
-                    prefill_metrics=prefill_metrics,
-                    decode_metrics=decode_metrics,
-                    transfer_metrics=transfer_metrics,
-                )
         elif backend in ("vllm", "sglang"):
             namespace = f"sidecar-agg-{generate_random_suffix()}"
             monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
             monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
-            metrics_url = f"http://127.0.0.1:{engine_ports[0]}/metrics"
-            if backend == "vllm":
-                metrics = VllmMetricsChecker(metrics_url)
-                http_port_env = "VLLM_RS_HTTP_PORT"
-            else:
-                metrics = SGLangMetricsChecker(
-                    metrics_url,
-                    minimum_context_length=CANCELLATION_CONTEXT_LEN,
-                    minimum_kv_capacity=SGLANG_CANCELLATION_KV_TOKENS,
-                )
-                http_port_env = "SGLANG_HTTP_PORT"
+            http_port_env = (
+                "VLLM_RS_HTTP_PORT" if backend == "vllm" else "SGLANG_HTTP_PORT"
+            )
             engine_env = {
                 "DYN_NAMESPACE": namespace,
                 http_port_env: str(engine_ports[0]),
                 f"{backend.upper()}_GRPC_PORT": str(engine_ports[1]),
             }
-            payloads = _aggregated_payloads(metrics)
         yield dataclasses.replace(
             config,
             frontend_port=dynamo_dynamic_ports.frontend_port,
             env={**config.env, **engine_env},
-            request_payloads=payloads,
         )
 
 
