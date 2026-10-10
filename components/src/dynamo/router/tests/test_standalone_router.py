@@ -65,7 +65,7 @@ def load_standalone_router_handler():
     previous = {name: sys.modules.get(name) for name in stubs}
     sys.modules.update(stubs)
     try:
-        module_path = Path(__file__).parents[1] / "__main__.py"
+        module_path = Path(__file__).parents[1] / "main.py"
         spec = importlib.util.spec_from_file_location(
             "standalone_router_main", module_path
         )

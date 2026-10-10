@@ -751,6 +751,22 @@ glibc allocator.
   volume with an initContainer or use a custom image.
 </Note>
 
+<ParamField path="DYN_JEMALLOC" type="boolean" default="false">
+  Preload jemalloc into the process. Accepts `1`, `true`, or `yes` (case-insensitive). At startup,
+  the entry point looks up the library with `ctypes.util.find_library("jemalloc")`, adds it to the
+  front of `LD_PRELOAD`, and re-executes itself once. Child processes inherit the preload. If
+  `LD_PRELOAD` already names a `libjemalloc` library, the process starts without re-executing. If
+  the library is not found or the re-execution fails, the process prints a warning and continues
+  with the default allocator.
+
+  The lookup searches the dynamic linker cache and may not find a library copied into a shared
+  volume; set `LD_PRELOAD` to the copied path instead.
+
+  The same variable applies to the standalone router (`python -m dynamo.router`) and the standalone
+  KV indexer (`python -m dynamo.indexer`). The frontend also accepts `DYN_FRONTEND_JEMALLOC` with
+  the same values and preloads jemalloc when either variable is enabled.
+</ParamField>
+
 <ParamField path="LD_PRELOAD" type="string" default="unset">
   Preload jemalloc for the frontend process. The library path depends on the container architecture:
 
