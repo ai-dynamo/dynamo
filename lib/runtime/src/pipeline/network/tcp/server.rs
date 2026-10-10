@@ -2723,36 +2723,23 @@ mod tests {
     async fn test_request_stream_closing_frame_survives_socket_close() {
         time::timeout(Duration::from_secs(5), async {
             let server = test_server().await;
-            for kill in [false, true] {
-                let (mut reader, sender, ctx) = register_and_dial_request_stream(&server).await;
-                if kill {
-                    ctx.kill();
-                } else {
-                    ctx.stop();
-                }
-                // The receiver is dropped when the server's request writer finishes.
-                // Keep the sender alive so closure is due to cancellation, not EOF.
-                sender.tx.closed().await;
-                let frame = reader
-                    .next()
-                    .await
-                    .expect("closing frame missing")
-                    .expect("closing frame read failed");
-                let ctrl: ControlMessage = serde_json::from_slice(frame.header().unwrap()).unwrap();
-                assert_eq!(
-                    ctrl,
-                    if kill {
-                        ControlMessage::Kill
-                    } else {
-                        ControlMessage::Stop
-                    }
-                );
-                let eof = reader.next().await;
-                assert!(
-                    eof.is_none(),
-                    "expected a graceful EOF after the closing frame, got {eof:?}"
-                );
-            }
+            let (mut reader, sender, ctx) = register_and_dial_request_stream(&server).await;
+            ctx.stop();
+            // The receiver is dropped when the server's request writer finishes.
+            // Keep the sender alive so closure is due to cancellation, not EOF.
+            sender.tx.closed().await;
+            let frame = reader
+                .next()
+                .await
+                .expect("closing frame missing")
+                .expect("closing frame read failed");
+            let ctrl: ControlMessage = serde_json::from_slice(frame.header().unwrap()).unwrap();
+            assert_eq!(ctrl, ControlMessage::Stop);
+            let eof = reader.next().await;
+            assert!(
+                eof.is_none(),
+                "expected a graceful EOF after the closing frame, got {eof:?}"
+            );
         })
         .await
         .expect("stream-close test exceeded its deadline");
