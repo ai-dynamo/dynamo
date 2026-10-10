@@ -21,6 +21,7 @@ use crate::protocols::common::extensions::{
 
 pub mod aggregator;
 mod delta;
+pub(crate) mod tool_call_merge;
 pub mod tool_parser_v2;
 pub(crate) mod unified_parser;
 
