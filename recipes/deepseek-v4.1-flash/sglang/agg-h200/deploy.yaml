@@ -1,0 +1,212 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSeek-V4.1-Flash on SGLang, aggregated. One worker, TP4, 4x H200 (sm_90).
+# KV-aware routing, 512K context. DSpark speculative decoding is OFF.
+#
+# This is the Hopper counterpart to agg-gb200. The deltas are not preferences --
+# each one is a configuration that fails outright on H200 if left at the GB200
+# value. See the notes on each flag.
+#
+# Do not set the attention, MoE, or GEMM backend flags. SGLang resolves them for
+# this model. A hand-set backend flag selects a slower fallback.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepseek-v41-flash-sglang-h200-agg-sglang-config
+data:
+  worker.yaml: |-
+    model-path: deepseek-ai/DeepSeek-V4.1-Flash
+    served-model-name: deepseek-ai/DeepSeek-V4.1-Flash
+    trust-remote-code: true
+    tp-size: 4
+    ep-size: 4
+    # Not tunable: SGLang forces page_size=256 for DSV4 on CUDA and asserts
+    # page_size % 128 == 0. The worker registers this as its KV block size, so
+    # the frontend's router picks it up automatically.
+    page-size: 256
+    # 1M does not fit on 4x H200. Weights alone are 119.83 GB of the ~141 GB
+    # per GPU; 512K is what the remaining KV budget supports at TP4.
+    context-length: 524288
+    # OPPOSITE of vLLM's --gpu-memory-utilization. This reserves weights + KV
+    # pool only; CUDA graphs are captured from what is left OUTSIDE it. Too high
+    # -> OOM during graph capture. Too low -> RuntimeError at pool sizing.
+    # 0.8 (the GB200 value) does not hold the weights on H200.
+    # Re-tune only from BOTH log lines, which move in opposite directions:
+    #   Memory pool end. avail mem=...
+    #   Capturing batches (bs=N avail_mem=...)
+    mem-fraction-static: 0.92
+    # MUST be pinned. Left unset, deepseek_v4_hook forces 256, whose SWA pool
+    # (~15.8 GB) exceeds the entire KV budget at this mem-fraction and sizing
+    # fails. SWA cost is roughly N*656 + 2*chunked_prefill_size +
+    # swa_prefix_tails*384 tokens; measured 32 -> 2.30 GB, 64 -> 3.57 GB,
+    # 256 -> 15.78 GB. If sizing still fails, step down to 48 then 32 rather
+    # than reaching for mem-fraction-static.
+    max-running-requests: 64
+    chunked-prefill-size: 4096
+    # DSpark is intentionally absent. The draft head costs roughly 2 GB/GPU of
+    # weights plus a per-token KV scale (3 nextn layers over 40), and the verify
+    # batch widens every captured graph by the block size, which pushes the
+    # transient capture workspace past what is left on a 141 GB card at this
+    # context length. Aggregated 4x H200 serves without it.
+    # The native parser gates guided decoding. Dynamo builds the response from
+    # --dyn-reasoning-parser. Both are needed.
+    reasoning-parser: auto
+    enable-metrics: true
+    watchdog-timeout: 3600
+    host: 0.0.0.0
+    port: 30000
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v41-flash-sglang-h200-agg
+spec:
+  backendFramework: sglang
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+              imagePullPolicy: IfNotPresent
+              command: [python3, -m, dynamo.frontend]
+              args:
+                - --http-port
+                - "8000"
+                # Index from the workers' real KV events (stored/removed blocks)
+                # rather than the router's own estimate of what it dispatched.
+                - --router-kv-events
+                # Any temperature routes requests away from their cached prefix.
+                - --router-temperature
+                - "0.0"
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: DYN_ROUTER_MODE
+                  value: kv
+              ports:
+                - name: http
+                  containerPort: 8000
+                  protocol: TCP
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 8Gi
+    - name: Worker
+      type: worker
+      # One worker fills 4x H200. With a single worker the KV router indexes
+      # events but has nowhere else to route; scale to 2 (8x H200) for routing
+      # to do any work.
+      replicas: 1
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          terminationGracePeriodSeconds: 60
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+              imagePullPolicy: IfNotPresent
+              command: [python3, -m, dynamo.sglang]
+              args:
+                - --config
+                - /etc/sglang/worker.yaml
+                # The KV router scores workers from these events.
+                - --kv-events-config
+                - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+                - --dyn-reasoning-parser
+                - deepseek_v41
+                - --dyn-tool-call-parser
+                - deepseek_v41
+                - --dyn-enable-structural-tag
+                # Below max-running-requests on purpose: larger batches simply
+                # run without a captured graph.
+                - --cuda-graph-max-bs-decode
+                - "32"
+                # The cap alone still captures ~20 sizes and OOM'd on H200. The
+                # retained graphs are tiny (all six total ~0.36 GB) -- the OOM is
+                # TRANSIENT capture workspace, so what matters is avail_mem at
+                # capture START. Pinning the set is what makes capture fit.
+                # Each size is its own argument; one string fails to parse.
+                - --cuda-graph-bs
+                - "1"
+                - "2"
+                - "4"
+                - "8"
+                - "16"
+                - "32"
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: HF_HOME
+                  value: /shared-model-cache
+                # Without these two, every start pays minutes of DeepGEMM JIT.
+                - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+                  value: "0"
+                - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
+                  value: "1"
+                # Thinking is off by default. Then reasoning_content is empty.
+                - name: SGLANG_DEFAULT_THINKING
+                  value: "true"
+                # Keep --enable-metrics on, but turn the forward-pass publisher
+                # off. It crashes this model on a null seq_lens_cpu.
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+                # Block hashes are compared ACROSS replicas. Unpinned, Python
+                # salts str hashes per process and the router index is noise.
+                # Harmless at replicas: 1, required above it.
+                - name: PYTHONHASHSEED
+                  value: "0"
+              ports:
+                - name: system
+                  containerPort: 9090
+                  protocol: TCP
+                - name: kv-events
+                  containerPort: 5557
+                  protocol: TCP
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 64Gi
+                  ephemeral-storage: 64Gi
+                  nvidia.com/gpu: "4"
+                limits:
+                  cpu: "16"
+                  memory: 128Gi
+                  nvidia.com/gpu: "4"
+              # Weight load dominates cold start; allow up to 3h before the
+              # kubelet gives up (measured ~17 min from a shared RWX volume).
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 10
+                timeoutSeconds: 2
+                failureThreshold: 1080
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 5
+                timeoutSeconds: 2
+                failureThreshold: 3
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+                - name: sglang-config
+                  mountPath: /etc/sglang
+                  readOnly: true
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+            - name: sglang-config
+              configMap:
+                name: deepseek-v41-flash-sglang-h200-agg-sglang-config
