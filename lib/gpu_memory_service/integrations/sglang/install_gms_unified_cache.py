@@ -24,7 +24,6 @@ def _enabled() -> bool:
 def _unsupported_execution_modes(config) -> list[str]:
     reasons = []
     numeric_modes = (
-        ("tensor parallelism (requires the TP agreement integration)", ("tp_size",)),
         ("data parallelism", ("dp_size",)),
         ("pipeline parallelism", ("pp_size",)),
         ("decode context parallelism", ("dcp_size",)),
@@ -61,8 +60,6 @@ def _validate(ctx) -> None:
     if ctx.enable_hierarchical_cache:
         reasons.append("hierarchical cache")
     params = ctx.params
-    if int(getattr(params, "tp_world_size", 1) or 1) > 1:
-        reasons.append("tensor parallelism (requires the TP agreement integration)")
     reasons.extend(_unsupported_execution_modes(getattr(ctx, "server_args", ctx)))
     allocator = params.token_to_kv_pool_allocator
     if not hasattr(allocator, "_gms_kv_leases_by_page"):
