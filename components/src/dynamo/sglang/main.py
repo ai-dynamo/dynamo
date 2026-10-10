@@ -200,7 +200,12 @@ async def worker(argv: list[str] | None = None):
 
 
 def main():
-    uvloop.run(worker())
+    try:
+        uvloop.run(worker())
+    except asyncio.CancelledError:
+        # Cancellation here is a normal shutdown; a non-zero exit reads as a crash
+        # to K8s, so error-initiated shutdowns force their own at the failure site.
+        logger.info("Worker cancelled; shutdown complete")
 
 
 if __name__ == "__main__":
