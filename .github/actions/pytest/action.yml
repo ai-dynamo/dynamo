@@ -170,6 +170,23 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
+        # Datadog Test Optimization. pytest runs inside the container launched
+        # below, so the ddtrace env has to be forwarded explicitly. ddtrace
+        # itself is already in the image (container/Dockerfile.test), so there
+        # is nothing to install. Skipped entirely when DD_API_KEY is unset, in
+        # which case the docker run is unchanged.
+        if [[ -n "${DD_API_KEY:-}" ]]; then
+          for v in DD_SERVICE DD_ENV DD_TAGS DD_API_KEY DD_SITE \
+                   DD_CIVISIBILITY_ENABLED DD_CIVISIBILITY_AGENTLESS_ENABLED \
+                   DD_CIVISIBILITY_ITR_ENABLED \
+                   DD_CIVISIBILITY_AUTO_INSTRUMENTATION_PROVIDER \
+                   JOB_CHECK_RUN_ID; do
+            [[ -n "${!v:-}" ]] && DOCKER_ENV_FLAGS+=(--env "${v}=${!v}")
+          done
+          PYTEST_CMD="${PYTEST_CMD} --ddtrace"
+          echo "📡 Datadog Test Optimization enabled for this run"
+        fi
+
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --shm-size=200m \
@@ -301,6 +318,23 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
+
+        # Datadog Test Optimization. pytest runs inside the container launched
+        # below, so the ddtrace env has to be forwarded explicitly. ddtrace
+        # itself is already in the image (container/Dockerfile.test), so there
+        # is nothing to install. Skipped entirely when DD_API_KEY is unset, in
+        # which case the docker run is unchanged.
+        if [[ -n "${DD_API_KEY:-}" ]]; then
+          for v in DD_SERVICE DD_ENV DD_TAGS DD_API_KEY DD_SITE \
+                   DD_CIVISIBILITY_ENABLED DD_CIVISIBILITY_AGENTLESS_ENABLED \
+                   DD_CIVISIBILITY_ITR_ENABLED \
+                   DD_CIVISIBILITY_AUTO_INSTRUMENTATION_PROVIDER \
+                   JOB_CHECK_RUN_ID; do
+            [[ -n "${!v:-}" ]] && DOCKER_ENV_FLAGS+=(--env "${v}=${!v}")
+          done
+          PYTEST_CMD="${PYTEST_CMD} --ddtrace"
+          echo "📡 Datadog Test Optimization enabled for this run"
+        fi
         if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
           DOCKER_ENV_FLAGS+=(--env "COVERAGE_FILE=/workspace/test-results/.coverage")
           DOCKER_ENV_FLAGS+=(--env "PYTHONPATH=/workspace/components/src:/workspace/lib/bindings/python/src")
