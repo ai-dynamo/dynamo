@@ -381,57 +381,15 @@ jobs:
         if: ${{ inputs.target == 'frontend' }}
         shell: bash
         env:
-          ECR_HOSTNAME: ${{ vars.ECR_REGISTRY }}
-          IMAGE_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          EPP_IMAGE_REPO: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}/dynamo-epp
+          EPP_SOURCE_SHA: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          DOCKER_PROXY: ${{ vars.ECR_REGISTRY }}/dockerhub/
+          NO_CACHE: ${{ inputs.no_cache }}
           AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
           SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
         timeout-minutes: 60
-        run: |
-          set -x
-          EPP_REPOSITORY="${{ env.IMAGE_REPOSITORY }}/dynamo-epp"
-          EPP_IMAGE_REPO="${{ env.ECR_HOSTNAME }}/${EPP_REPOSITORY}"
-          EPP_IMAGE_TAG="${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}"
-          EPP_IMAGE_REF="${EPP_REPOSITORY}:${EPP_IMAGE_TAG}"
-          echo "epp_image_uri=${{ env.ECR_HOSTNAME }}/${EPP_IMAGE_REF}" >> $GITHUB_OUTPUT
-
-          CACHE_ARGS=""
-          if [[ "${{ inputs.no_cache }}" == "true" ]]; then
-            CACHE_ARGS+="--no-cache "
-          else
-            # Content-addressed cache tag: key the registry :cache on a hash of
-            # the Rust EPP Dockerfile so Dockerfile changes land in a fresh
-            # cache namespace.
-            EPP_CACHE_KEY="$(sha256sum deploy/inference-gateway/ext-proc/Dockerfile | cut -c1-12)"
-            EPP_CACHE_REF="${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache-${EPP_CACHE_KEY}"
-            CACHE_ARGS+="--cache-from type=registry,ref=${EPP_CACHE_REF} "
-            if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-              CACHE_ARGS+="--cache-to type=registry,ref=${EPP_CACHE_REF},mode=max "
-            fi
-          fi
-
-          # Enable sccache to match the runtime image build path
-          # (.github/actions/docker-remote-build). The runner pod injects
-          # AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN via IRSA; the Makefile
-          # forwards them to BuildKit as --secret mounts when both are set.
-          # If IRSA is unavailable, sccache will fail to start inside the
-          # container and the build proceeds without cache (never with a
-          # stale one) -- same fallback as the wheel_builder Rust steps.
-          SCCACHE_MAKE_ARGS=""
-          if [ -n "${SCCACHE_S3_BUCKET:-}" ] \
-              && [ -n "${AWS_WEB_IDENTITY_TOKEN_FILE:-}" ] \
-              && [ -f "${AWS_WEB_IDENTITY_TOKEN_FILE}" ] \
-              && [ -n "${AWS_ROLE_ARN:-}" ]; then
-            SCCACHE_MAKE_ARGS="USE_SCCACHE=true SCCACHE_BUCKET=${SCCACHE_S3_BUCKET} SCCACHE_REGION=${AWS_DEFAULT_REGION}"
-          else
-            echo "::warning::sccache prerequisites missing (bucket or IRSA token); EPP Rust build will run without sccache"
-          fi
-
-          make -C deploy/inference-gateway/ext-proc image-multiarch-push \
-            IMAGE_REPO="${EPP_IMAGE_REPO}" \
-            GIT_TAG="${EPP_IMAGE_TAG}" \
-            DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/" \
-            ${SCCACHE_MAKE_ARGS} \
-            EXTRA_BUILD_ARGS="${CACHE_ARGS}"
+        # Reuses an EPP image built from the same inputs when one exists.
+        run: .github/scripts/build_epp_image.sh
       - name: Refresh BuildKit builder (For Frontend Only)
         if: ${{ inputs.target == 'frontend' }}
         uses: $/.github/actions/builder-refresher
