@@ -21,7 +21,6 @@ use anyhow;
 use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
 use dynamo_llm::block_manager::layout::LayoutType;
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
-use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 pub trait Worker: Send + Sync {
@@ -54,7 +53,7 @@ pub trait Worker: Send + Sync {
 }
 
 pub struct KvConnectorWorker {
-    _drt: Option<Arc<DistributedRuntime>>,
+    _drt: Option<crate::DistributedRuntimeRef>,
     kvbm_worker: OnceLock<KvbmWorker>,
     connector: WorkerSchedulerClient,
     transfer_client: TransferSchedulerClient,
@@ -79,7 +78,10 @@ pub struct KvConnectorWorker {
 }
 
 impl KvConnectorWorker {
-    fn new(drt: Option<Arc<DistributedRuntime>>, vllm_worker_id: String) -> anyhow::Result<Self> {
+    fn new(
+        drt: Option<crate::DistributedRuntimeRef>,
+        vllm_worker_id: String,
+    ) -> anyhow::Result<Self> {
         let runtime = get_current_tokio_handle();
 
         let (scheduler, worker_client, transfer_client) =
@@ -481,7 +483,7 @@ impl PyKvConnectorWorker {
     #[new]
     #[pyo3(signature = (py_drt, vllm_worker_id))]
     pub fn new(py_drt: Option<PyObject>, vllm_worker_id: String) -> PyResult<Self> {
-        let drt: Option<Arc<DistributedRuntime>> = Python::with_gil(|py| {
+        let drt: Option<crate::DistributedRuntimeRef> = Python::with_gil(|py| {
             if let Some(obj) = py_drt {
                 extract_distributed_runtime_from_obj(py, obj)
             } else {

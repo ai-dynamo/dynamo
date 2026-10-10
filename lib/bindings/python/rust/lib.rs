@@ -14,18 +14,13 @@ use pyo3::IntoPyObjectExt;
 #[cfg(feature = "custom-policy")]
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
-use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
 use rs::pipeline::network::Ingress;
-use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
 use std::thread::sleep;
-use std::{
-    fmt::Display,
-    sync::{Arc, Weak},
-};
+use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::Instrument;
 
@@ -1568,21 +1563,6 @@ impl DistributedRuntime {
         };
         self.inner.system_health().lock().set_health_status(status);
         Ok(())
-    }
-
-    // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
-    // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
-    // TODO: Create a separate crate "dynamo-python" so that all binding crates can import
-    // from it and share the same crate path. This will allow PyO3 to automatically
-    // recognize that both bindings use the same PyClass.
-    #[pyo3(name = "to_capsule")]
-    fn to_capsule<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
-        let arc: Arc<rs::DistributedRuntime> = Arc::new(self.inner.clone());
-        let weak: Weak<rs::DistributedRuntime> = Arc::downgrade(&arc);
-
-        let name = CString::new("dynamo.runtime.weak").expect("valid capsule name");
-
-        PyCapsule::new(py, weak, Some(name))
     }
 }
 
