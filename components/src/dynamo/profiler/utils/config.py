@@ -211,12 +211,28 @@ def break_arguments(args: list[str] | str | None) -> list[str]:
     return ans
 
 
+def _is_flag(token: object) -> bool:
+    """True when ``token`` starts a new argument rather than being a value.
+
+    Long form only, matching the guard already used in the TensorRT-LLM
+    modifier. A bare ``-`` prefix would misread negative values such as
+    ``--max-model-len -1``.
+    """
+    return isinstance(token, str) and token.startswith("--")
+
+
 def remove_valued_arguments(args: list[str], key: str) -> list[str]:
-    """Remove a valued argument (e.g., --key value) from the arguments list if exists."""
+    """Remove a valued argument (e.g., --key value) from the arguments list if exists.
+
+    Only the value is consumed with the key. A following token that is itself a
+    flag belongs to another argument, so a key left without a value takes just
+    itself rather than eating its neighbour.
+    """
     if key in args:
         idx = args.index(key)
-        if idx + 1 < len(args):
-            del args[idx : idx + 2]
+        del args[idx]
+        if idx < len(args) and not _is_flag(args[idx]):
+            del args[idx]
 
     return args
 
@@ -234,7 +250,9 @@ def remove_all_argument_occurrences(args: list[str], arg_name: str) -> list[str]
     while index < len(args):
         arg = args[index]
         if arg == arg_name:
-            index += 2 if index + 1 < len(args) else 1
+            index += 1
+            if index < len(args) and not _is_flag(args[index]):
+                index += 1
             continue
         if isinstance(arg, str) and arg.startswith(f"{arg_name}="):
             index += 1
