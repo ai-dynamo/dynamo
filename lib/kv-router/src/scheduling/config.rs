@@ -1261,6 +1261,18 @@ impl KvRouterConfig {
             .and_then(super::policy_config::RouterPolicyConfig::request_classifier))
     }
 
+    /// Return the custom KV-hint policy configuration from `router_policy_config`, if any.
+    pub fn kv_hint_policy_config(
+        &self,
+    ) -> Result<
+        Option<&crate::plugins::kv_hint::KvHintPolicyConfig>,
+        super::policy_config::RouterPolicyConfigError,
+    > {
+        Ok(self
+            .loaded_policy_config()?
+            .and_then(super::policy_config::RouterPolicyConfig::kv_hint_policy))
+    }
+
     /// Return one configured custom worker-selection instance, if any.
     ///
     /// `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides the role-specific YAML selections. The
