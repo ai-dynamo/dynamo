@@ -16,11 +16,13 @@ use crate::protocols::openai::{
 };
 use crate::request_trace::{
     AgentContextTraceState, RequestReplayMetrics, SharedFinishReasonMetadata,
+    SharedOutputSequenceHashCapture,
 };
 
 struct RequestTraceRequestEndState {
     request_tracker: Arc<RequestTracker>,
     replay_metrics: Arc<RequestReplayMetrics>,
+    output_sequence_hash_capture: Option<SharedOutputSequenceHashCapture>,
 }
 
 pub(crate) struct RequestEndTraceState {
@@ -122,6 +124,10 @@ fn build_request_end_trace_state_for_policy(
 
     let request = RequestTraceRequestEndState {
         request_tracker,
+        output_sequence_hash_capture: super::output_sequence_hash_capture(
+            &common_request.token_ids,
+            &replay_metrics,
+        ),
         replay_metrics,
     };
 
@@ -138,18 +144,20 @@ impl RequestEndTraceState {
         let Some(request_state) = self.request.take() else {
             return;
         };
+        let mut replay_metrics = super::into_owned_replay_metrics(request_state.replay_metrics);
+        if let Some(capture) = request_state.output_sequence_hash_capture {
+            replay_metrics.output_sequence_hashes = capture.lock().unwrap().sequence_hashes();
+        }
         if let Some(agent_state) = self.agent.take() {
             let (agent_context, mut metrics) =
                 super::request_metrics_from_agent_state(agent_state, self.request_id.clone());
-            metrics.replay = Some(super::into_owned_replay_metrics(
-                request_state.replay_metrics,
-            ));
+            metrics.replay = Some(replay_metrics);
             super::record::emit_agent_request_end(agent_context, metrics);
         } else {
             super::record::emit_request_end(
                 self.request_id.clone(),
                 &request_state.request_tracker,
-                super::into_owned_replay_metrics(request_state.replay_metrics),
+                replay_metrics,
             );
         }
     }
@@ -164,6 +172,15 @@ impl Drop for RequestEndTraceState {
             self.emit();
         }
     }
+}
+
+pub(crate) fn output_sequence_hash_capture_handle(
+    trace_state: &Option<RequestEndTraceState>,
+) -> Option<SharedOutputSequenceHashCapture> {
+    trace_state
+        .as_ref()
+        .and_then(|state| state.request.as_ref())
+        .and_then(|request| request.output_sequence_hash_capture.clone())
 }
 
 pub(crate) fn finish_reason_metadata_handle(
@@ -287,7 +304,9 @@ mod tests {
                         trace_block_size: 2,
                         input_length: 2,
                         input_sequence_hashes: vec![11],
+                        output_sequence_hashes: Vec::new(),
                     }),
+                    output_sequence_hash_capture: None,
                 }),
                 request_id: request_id.to_string(),
                 request_context: context.clone(),
@@ -380,6 +399,47 @@ mod tests {
             request_only.input_sequence_hashes,
             repeated.input_sequence_hashes
         );
+    }
+
+    #[test]
+    fn output_hashes_are_emitted_on_completion_and_cancellation() {
+        BUS.init(64);
+        let mut receiver = BUS.subscribe();
+        for cancelled in [false, true] {
+            let request = preprocessed_request(SamplingOptions::default());
+            let tracker = Some(Arc::new(RequestTracker::new()));
+            let context = Context::new(());
+            let request_id = context.id().to_string();
+            let mut state = Some(
+                build_request_end_trace_state_for_policy(&request, &tracker, &context, 2, true)
+                    .unwrap(),
+            );
+            let capture = output_sequence_hash_capture_handle(&state).unwrap();
+            capture.lock().unwrap().record(&[4, 5]);
+            if cancelled {
+                context.context().kill();
+            } else {
+                state.as_mut().unwrap().emit();
+            }
+            drop(state);
+            let records = drain_request_records(&mut receiver, &request_id);
+            assert_eq!(records.len(), 1);
+            let replay = records[0]
+                .request
+                .as_ref()
+                .unwrap()
+                .replay
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                replay.input_sequence_hashes,
+                super::super::replay::input_sequence_hashes(&[1, 2, 3], 2)
+            );
+            assert_eq!(
+                replay.output_sequence_hashes,
+                super::super::replay::input_sequence_hashes(&[1, 2, 3, 4, 5], 2)[1..]
+            );
+        }
     }
 
     #[test]
