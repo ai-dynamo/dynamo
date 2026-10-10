@@ -158,23 +158,40 @@ pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String, String)> 
         }
     };
 
-    let container_statuses = match pod
-        .status
-        .as_ref()
-        .and_then(|s| s.container_statuses.as_ref())
-    {
-        Some(statuses) => statuses,
-        None => return vec![],
-    };
-
-    container_statuses
-        .iter()
-        .filter(|cs| cs.ready)
-        .map(|cs| {
-            let target = KubeDiscoveryTarget::Container(pod_name.to_string(), cs.name.clone());
+    ready_container_names(pod)
+        .map(|name| {
+            let target = KubeDiscoveryTarget::Container(pod_name.to_string(), name.to_string());
             (target.instance_id(), target.cr_name(), pod_uid.clone())
         })
         .collect()
+}
+
+/// Ready container names, including native sidecars (init containers with
+/// `restartPolicy: Always`). Plain init containers are skipped.
+pub fn ready_container_names(pod: &Pod) -> impl Iterator<Item = &str> + '_ {
+    let status = pod.status.as_ref();
+    let containers = status
+        .and_then(|s| s.container_statuses.as_deref())
+        .unwrap_or_default();
+    let sidecars = status
+        .and_then(|s| s.init_container_statuses.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .filter(|cs| is_native_sidecar(pod, &cs.name));
+    containers
+        .iter()
+        .chain(sidecars)
+        .filter(|cs| cs.ready)
+        .map(|cs| cs.name.as_str())
+}
+
+fn is_native_sidecar(pod: &Pod, name: &str) -> bool {
+    pod.spec
+        .as_ref()
+        .and_then(|s| s.init_containers.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .any(|c| c.name == name && c.restart_policy.as_deref() == Some("Always"))
 }
 
 /// Pod information extracted from environment.
@@ -259,6 +276,88 @@ impl PodInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_openapi::api::core::v1::{Container, ContainerStatus, PodSpec, PodStatus};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+    fn status(name: &str, ready: bool) -> ContainerStatus {
+        ContainerStatus {
+            name: name.to_string(),
+            ready,
+            ..Default::default()
+        }
+    }
+
+    fn init_container(name: &str, restart_policy: Option<&str>) -> Container {
+        Container {
+            name: name.to_string(),
+            restart_policy: restart_policy.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// `runtime` is a native sidecar, `setup` a completed plain init container.
+    fn sidecar_pod(main_ready: bool, sidecar_ready: bool) -> Pod {
+        Pod {
+            metadata: ObjectMeta {
+                name: Some("worker-0".to_string()),
+                uid: Some("uid-0".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                init_containers: Some(vec![
+                    init_container("setup", None),
+                    init_container("runtime", Some("Always")),
+                ]),
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                container_statuses: Some(vec![status("main", main_ready)]),
+                init_container_statuses: Some(vec![
+                    status("setup", true),
+                    status("runtime", sidecar_ready),
+                ]),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn test_ready_container_names_includes_native_sidecars() {
+        let pod = sidecar_pod(true, true);
+        let names: Vec<&str> = ready_container_names(&pod).collect();
+        assert_eq!(names, vec!["main", "runtime"]);
+    }
+
+    #[test]
+    fn test_ready_container_names_skips_unready() {
+        let pod = sidecar_pod(true, false);
+        assert_eq!(ready_container_names(&pod).collect::<Vec<_>>(), ["main"]);
+        let pod = sidecar_pod(false, true);
+        assert_eq!(ready_container_names(&pod).collect::<Vec<_>>(), ["runtime"]);
+    }
+
+    #[test]
+    fn test_ready_container_names_empty_without_status() {
+        assert_eq!(ready_container_names(&Pod::default()).count(), 0);
+    }
+
+    #[test]
+    fn test_extract_ready_containers_registers_native_sidecar() {
+        let pod = sidecar_pod(true, true);
+        let entries = extract_ready_containers(&pod);
+        let sidecar = KubeDiscoveryTarget::Container("worker-0".into(), "runtime".into());
+        assert_eq!(entries.len(), 2);
+        assert!(entries.contains(&(
+            sidecar.instance_id(),
+            sidecar.cr_name(),
+            "uid-0".to_string()
+        )));
+        assert!(entries.contains(&(
+            hash_pod_name("worker-0"),
+            "worker-0".to_string(),
+            "uid-0".to_string()
+        )));
+    }
 
     #[test]
     fn test_pod_mode_backward_compat() {
