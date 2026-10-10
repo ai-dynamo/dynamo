@@ -42,7 +42,7 @@ spec:
         # separate pod network namespace.
         initContainers:
         - name: sglang-engine
-          image: lmsysorg/sglang:v0.5.19
+          image: lmsysorg/sglang:v0.5.21
           restartPolicy: Always
           startupProbe:
             exec:

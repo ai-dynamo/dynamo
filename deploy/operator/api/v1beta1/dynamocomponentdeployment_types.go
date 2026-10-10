@@ -47,6 +47,8 @@ const (
 )
 
 // DynamoComponentDeploymentSpec defines the desired state of a DynamoComponentDeployment.
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx')",message="standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 type DynamoComponentDeploymentSpec struct {
 	// backendFramework specifies the backend framework.
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
@@ -64,14 +66,21 @@ type DynamoComponentDeploymentSpec struct {
 // v1alpha1 (resources, envs, envFromSecret, livenessProbe, readinessProbe,
 // volumeMounts, annotations, labels, extraPodMetadata, extraPodSpec) are
 // replaced with a single `podTemplate` field holding a native
-// `corev1.PodTemplateSpec`. The operator injects its defaults into the
-// container named `"main"` and merges user overrides using strategic-merge-by-name
-// semantics. Users can add sidecars, init containers, and pod-level configuration
-// directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
+// `corev1.PodTemplateSpec`. By default, the operator injects its defaults into
+// `podTemplate.spec.containers[name=main]` and merges user overrides using
+// strategic-merge-by-name semantics. In Dynamo sidecar mode, Dynamo defaults target
+// `podTemplate.spec.initContainers[name=runtime]` instead. Users can add sidecars,
+// init containers, and pod-level configuration directly in `podTemplate` without
+// any `extraPodSpec`-style escape hatch. Container paths are relative to the component spec.
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
-// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (!has(self.replicas) && has(self.type) && self.type == 'lpx') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)",message="type is immutable after it is set"
+// +kubebuilder:validation:XValidation:rule="!has(self.lpx) || (has(self.type) && self.type == 'lpx')",message="lpx may only be set when type is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx') || has(self.lpx)",message="lpx is required when type is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx') || !has(self.podTemplate)",message="LPX Pod templates belong to roles"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx' && has(self.replicas) && self.replicas < 1)",message="replicas must be positive when type is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx' && has(self.scalingAdapter))",message="scalingAdapter is not supported when type is lpx"
+// +kubebuilder:validation:XValidation:rule="(has(self.type) && self.type == 'lpx') || !has(self.roles) || !self.roles.exists(r, has(r.podTemplate)) || (!has(self.podTemplate) && self.roles.all(r, has(r.podTemplate)))",message="use either component podTemplate or complete role podTemplates"
 type DynamoComponentDeploymentSharedSpec struct {
 	// providerOverride configures the primary Grove unit representing this DGD
 	// component. With apiVersion `grove.io/v1alpha1`, target is
@@ -104,15 +113,21 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// port mapping, frontend detection, planner RBAC, and the pod label
 	// `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are
 	// first-class values, users can set them directly.
+	//
+	// The DGD-only "lpx" type is experimental, requires the operator's
+	// lpx.enabled setting, and may change incompatibly.
 	// +optional
 	ComponentType ComponentType `json:"type,omitempty"`
 
-	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
-	// main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
-	// no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
-	// parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for
-	// example "1.4.0". It does not change the image. Setting or changing an override that resolves to
-	// version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in
+	// podTemplate.spec.containers[name=main].image by default, or
+	// podTemplate.spec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present.
+	// With role PodTemplates, it applies to the main image in every selected template.
+	// DGD admission requires it when any selected runtime image has no parseable semantic-version tag;
+	// controller-generated DCDs may omit it.
+	// Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical
+	// MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to
+	// version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
@@ -123,15 +138,27 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
-	// podTemplate defines the component's Pod configuration. New components must
-	// include a container named "main" with a non-empty image. Existing components
-	// created without a podTemplate may remain unchanged. The operator merges
-	// defaults into the main container.
-	// For DGD components whose main image tag is not a Dynamo semantic version,
+	// podTemplate defines the complete Pod configuration shared by every role. It
+	// is mutually exclusive with roles[].podTemplate. New components using this template must
+	// include podTemplate.spec.containers[name=main] with a non-empty image. Existing components
+	// created without a podTemplate may remain unchanged.
+	// By default the operator merges Dynamo defaults into podTemplate.spec.containers[name=main].
+	// Declaring podTemplate.spec.initContainers[name=runtime] activates Dynamo sidecar mode:
+	// podTemplate.spec.containers[name=main] runs the user-configured engine, and
+	// podTemplate.spec.initContainers[name=runtime] receives Dynamo env, identity,
+	// system port, and probe defaults.
+	// Users must declare podTemplate.spec.initContainers[name=runtime]; the operator merges defaults into it but does not create it. It must have a non-empty
+	// image and restartPolicy: Always.
+	// This mode supports worker, prefill, and decode components only. Multinode,
+	// enabled checkpoint, GPU memory service, and failover are rejected because
+	// they are not currently supported in this mode. Support for these features
+	// is planned for a future release.
+	// Graph-level env applies to podTemplate.spec.containers[name=main] and
+	// podTemplate.spec.initContainers[name=runtime]; compilationCache and shared memory
+	// remain on podTemplate.spec.containers[name=main]. All other containers are
+	// user-managed and must specify their required fields, including image.
+	// For DGD components whose runtime image tag is not a Dynamo semantic version,
 	// set runtimeVersionOverride explicitly.
-	//
-	// All other containers are user-managed sidecars and must specify their
-	// required fields, including image.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
@@ -151,11 +178,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// gang-scheduled, and 2) when violating minAvailable replicas triggers gang
 	// termination.
 	//
-	// For Grove-backed DynamoGraphDeployment components, minAvailable defaults to
-	// 1 when omitted and is immutable after creation. Positive replica counts must
-	// be greater than or equal to minAvailable. Replicas may be scaled to 0 as a
-	// special scale-to-zero state; minAvailable remains configured but is not
-	// enforced again until replicas is scaled back to a positive value.
+	// Deprecated: use providerOverride.value.spec.minAvailable for a standalone
+	// Grove PodClique, or providerOverride.value.minAvailable for a scaling group.
+	// The effective minimum is immutable after creation; moving the same value
+	// to the new form is supported without changing the update strategy.
+	// Grove uses RollingRecreate unless a strategy annotation explicitly overrides it.
+	// New Grove deployments default the provider-native form to 1. Scale-to-zero
+	// preserves the minimum until replicas becomes positive again.
 	//
 	// For non-Grove deployments, setting this field will result in a validation error.
 	// +kubebuilder:validation:Minimum=1
@@ -172,7 +201,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// leader and one worker role. Admission defaults omitted replicas to 1 for
 	// leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
 	// preserves the implicit multinode role layout.
+	//
+	// LPX components each require an agent role. A DGD may contain independent
+	// LPX components, each with its own conductor role, or a shared draft and
+	// target pair with a conductor role only on the target. Every LPX role
+	// requires its own podTemplate.
 	// +optional
+	// +kubebuilder:validation:MaxItems=2
 	// +listType=map
 	// +listMapKey=name
 	Roles []ComponentRoleSpec `json:"roles,omitempty"`
@@ -207,16 +242,24 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 
-	// frontendSidecar optionally designates a container in
-	// `podTemplate.spec.containers` as the frontend sidecar. The value must
-	// match the `name` of a container in that list; the operator merges its
+	// lpx holds LPX integration configuration. Only meaningful when
+	// `type` is `lpx`.
+	//
+	// Experimental: requires the operator's lpx.enabled setting and may change incompatibly.
+	// +optional
+	LPX *LPXConfig `json:"lpx,omitempty"`
+
+	// frontendSidecar optionally designates a container in each selected PodTemplate
+	// as the frontend sidecar. The value must match the `name` of a container in the
+	// component-level podTemplate, or in every role podTemplate when those are used.
+	// The operator merges its
 	// frontend-sidecar defaults (auto-generated Dynamo env vars, ports,
-	// health probes) into that container the same way it merges into `"main"`.
+	// health probes) into that container the same way it merges into
+	// `podTemplate.spec.containers[name=main]`.
 	// The full container definition (image, args, envFrom, env) lives in
 	// `podTemplate` -- this eliminates the redundant `image`, `args`,
 	// `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.
-	// The validation webhook rejects values that do not match any container
-	// name in `podTemplate.spec.containers`.
+	// The validation webhook rejects values that do not match the selected templates.
 	// +optional
 	FrontendSidecar *string `json:"frontendSidecar,omitempty"`
 
@@ -237,10 +280,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// experimental groups opt-in preview features whose API shape and
 	// behavior may change in breaking ways between v1beta1 releases,
 	// including disappearing without a name-preserving graduation path.
-	// In v1beta1 this block holds `gpuMemoryService` and `failover` (which
-	// remain tightly coupled -- failover requires GMS -- and are expected to
-	// evolve together as the DRA-based GPU sharing story matures), and
-	// `checkpoint` (whose API shape is still settling). Fields here are
+	// In v1beta1 this block holds `gpuMemoryService` and `failover` (which remain
+	// tightly coupled -- failover requires GMS -- and
+	// are expected to evolve together as the DRA-based GPU sharing story
+	// matures); and `checkpoint` (whose API shape is still settling). Fields here are
 	// explicitly NOT covered by the normal v1beta1 deprecation policy; do not
 	// depend on them for production workloads.
 	// +optional

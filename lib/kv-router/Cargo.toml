@@ -59,6 +59,7 @@ zeroize = { workspace = true }
 
 # dependencies
 crossbeam-queue = "0.3"
+crossbeam-utils = "0.8"
 flume = "0.12.0"
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
@@ -103,8 +104,9 @@ harness = false
 [[bench]]
 name = "worker_selection"
 harness = false
+required-features = ["bench"]
 
 [[bench]]
 name = "selection_core"
 harness = false
-required-features = ["standalone-selection"]
+required-features = ["standalone-selection", "bench"]

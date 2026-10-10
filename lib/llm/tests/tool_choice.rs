@@ -43,7 +43,9 @@ fn drive_moved_jail(
             a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                 inner,
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             })
         })
 }
@@ -70,6 +72,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -519,7 +522,9 @@ fn make_text_chunk(
             service_tier: None,
         },
         nvext: None,
+        prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 
@@ -662,7 +667,9 @@ async fn apply_structural_tag_jail_with_parser_and_choice(
         a.data.map(|inner| NvCreateChatCompletionStreamResponse {
             inner,
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         })
     })
     .collect()
