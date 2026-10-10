@@ -387,7 +387,7 @@ impl ArenaIndex {
                 if !snap.sealed() {
                     return Some(Plan::Forward(None));
                 }
-                return Some(Plan::Forward(runs.forward_for(snap.forwards, pos.off)?));
+                return Some(Plan::Forward(runs.forward_for(snap.forwards, pos.off - 1)?));
             }
             let columns = runs.columns(snap)?;
             let (len, off) = (snap.len as usize, pos.off as usize);
@@ -670,8 +670,7 @@ impl ArenaIndex {
         let outcome = match self.runs.claim_child(parent, snap, key, (child, child_gen)) {
             super::runs::Claim::Claimed => Inserted::Claimed,
             super::runs::Claim::Exists(id, generation) => Inserted::Exists(id, generation),
-            super::runs::Claim::Replan => Inserted::Replan,
-            super::runs::Claim::Locked => {
+            super::runs::Claim::Replan | super::runs::Claim::Locked => {
                 let Some(locked) = self.runs.lock(pos.run, pos.generation) else {
                     self.runs.discard(child, child_gen, frees);
                     return Ok(Placed::Restart);
@@ -1275,4 +1274,121 @@ fn sole_whole_in_attempt(
             }
         })?;
     Some(mine && !others)
+}
+
+// A placement whose cut point equals an earlier split point of a run that has since split
+// again must forward from the position before the cut, not the cut itself.
+#[cfg(test)]
+mod forwarding_tests {
+    use super::super::runs::Frees;
+    use super::super::slots::Slot;
+    use super::*;
+    use crate::protocols::compute_seq_hash_for_block;
+    use crate::test_utils::{router_event, stored_blocks_with_sequence_hashes};
+
+    fn locals(chain: &[u64]) -> Vec<LocalBlockHash> {
+        chain.iter().copied().map(LocalBlockHash).collect()
+    }
+
+    fn store(worker: WorkerWithDpRank, chain: &[u64], from: usize, to: usize) -> RouterEvent {
+        let hashes = compute_seq_hash_for_block(&locals(&chain[..to]));
+        router_event(
+            worker.worker_id,
+            0,
+            worker.dp_rank,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: from
+                    .checked_sub(1)
+                    .map(|i| ExternalSequenceBlockHash(hashes[i])),
+                start_position: None,
+                blocks: stored_blocks_with_sequence_hashes(
+                    &locals(&chain[from..to]),
+                    &hashes[from..to],
+                ),
+            }),
+        )
+    }
+
+    fn split_at_cutoff(
+        index: &ArenaIndex,
+        run: RunId,
+        generation: u32,
+        cut: u32,
+        first_slot: usize,
+    ) {
+        let mut frees = Frees::default();
+        {
+            let locked = index.runs.lock(run, generation).expect("run is live");
+            for s in 0..PARTIAL_CAP as usize + 1 {
+                index
+                    .runs
+                    .set_cutoff(
+                        &locked,
+                        Slot::from_index(first_slot + s),
+                        cut,
+                        &mut frees,
+                        false,
+                    )
+                    .unwrap();
+            }
+            index.split_median(&locked, &mut frees).unwrap();
+            assert_eq!(locked.snap().len, cut, "the run split at the median cutoff");
+        }
+        index.runs.flush(&mut frees);
+    }
+
+    #[test]
+    fn stale_cut_point_at_an_earlier_split_point() {
+        let index = ArenaIndex::new();
+        let x: Vec<u64> = (1..=20).collect();
+        let a = WorkerWithDpRank::new(1, 0);
+        let q = WorkerWithDpRank::new(2, 0);
+        index.apply_event_inline(store(a, &x, 0, 20)).unwrap();
+        index.apply_event_inline(store(q, &x, 0, 10)).unwrap();
+        let hashes = compute_seq_hash_for_block(&locals(&x));
+        let cell = index.pool.cells.get(&q).unwrap().clone();
+        let entry = cell
+            .data
+            .lock()
+            .map
+            .get(ExternalSequenceBlockHash(hashes[0]))
+            .unwrap();
+        // Q's placement has advanced to cut point (R, 10): it holds R[0..10) and is about to
+        // place a block that diverges from x[10]. Before its next plan, other ranks' partial
+        // holdings split R at 10 and then at 5.
+        split_at_cutoff(&index, entry.run, entry.generation, 10, 200);
+        split_at_cutoff(&index, entry.run, entry.generation, 5, 300);
+        let mut y = x[..10].to_vec();
+        y.push(999);
+        let event = store(q, &y, 10, 11);
+        let KvCacheEventData::Stored(op) = event.event.data else {
+            unreachable!()
+        };
+        let guard = crossbeam_epoch::pin();
+        let slot = index.slots.acquire(q, &guard).unwrap();
+        let mut st = cell.data.lock();
+        let mut frees = Frees::default();
+        let cut_point = Pos {
+            run: entry.run,
+            generation: entry.generation,
+            off: 10,
+        };
+        let placed = index.place(
+            &mut st,
+            slot,
+            cut_point,
+            &op.blocks,
+            op.parent_hash,
+            &mut frees,
+        );
+        drop(st);
+        index.runs.flush(&mut frees);
+        assert!(placed.is_ok(), "a valid placement failed: {placed:?}");
+        // The same store applied fresh resolves its parent and succeeds.
+        let fresh = index.apply_event_inline(store(q, &y, 10, 11));
+        assert!(
+            fresh.is_ok(),
+            "the same store as a fresh event failed: {fresh:?}"
+        );
+    }
 }
