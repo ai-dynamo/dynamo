@@ -96,7 +96,7 @@ python -m dynamo.frontend \
 
 Migration is off by default and has request-shape limitations. See [Request Migration](../../kubernetes/fault-tolerance/request-migration.md) before relying on it for rollout continuity.
 
-For bursty workloads, configure [Request Rejection](../../kubernetes/fault-tolerance/request-rejection.md) so the frontend returns HTTP 529 when every eligible worker exceeds the selected load threshold. The framework can then retry under its own attempt and sample-acceptance policy instead of allowing queueing delay to grow without a bound. Rejection is also off by default.
+For bursty workloads, configure [Request Rejection](../../kubernetes/fault-tolerance/request-rejection.md) so the frontend returns HTTP 429 when every eligible worker exceeds the selected load threshold. The framework can then retry under its own attempt and sample-acceptance policy instead of allowing queueing delay to grow without a bound. Rejection is also off by default.
 
 ## Measure Useful Work
 

@@ -73,8 +73,10 @@ pub(crate) fn record_failure(error: &DynamoError) {
 
 /// Check whether an error chain indicates the request was rejected.
 pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
-    // Both overload flavors are client-visible rejections (HTTP 529). They differ
-    // only in whether migration may retry elsewhere.
+    // Both overload flavors are capacity rejections. They differ only in whether
+    // migration may retry elsewhere. HTTP status is chosen by the protocol layer:
+    // a terminal router admission refusal is 429, and worker or engine overload
+    // stays on the configured overload status.
     const REJECTION: &[DynamoErrorType] = &[
         DynamoErrorType::ResourceExhausted,
         DynamoErrorType::WorkerOverloaded,
@@ -105,6 +107,31 @@ pub(super) fn queue_deadline_error<'a>(
         current = error.source();
     }
     None
+}
+
+/// A terminal router refusal: a policy-class [`QueueRejection`](dynamo_kv_router::scheduling::QueueRejection)
+/// or a pool exhaustion stamped `router.admission_rejected`.
+///
+/// Checked before semantic classification. That reason is a valid
+/// `CapacityExhausted`, so the generic overload policy would otherwise answer
+/// with the configured overload status.
+pub(super) fn router_admission_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if error
+            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .is_some()
+        {
+            return true;
+        }
+        if let Some(error) = error.downcast_ref::<DynamoError>()
+            && error.reason().as_str() == "router.admission_rejected"
+        {
+            return true;
+        }
+        current = error.source();
+    }
+    false
 }
 
 /// Check whether an error chain indicates that no backend worker is available

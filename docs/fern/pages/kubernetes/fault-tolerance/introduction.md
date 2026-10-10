@@ -18,7 +18,7 @@ Most production deployments need both. Request fault tolerance keeps individual 
 These behaviors operate at the request boundary: an incoming request, an in-flight generation, or a client connection.
 
 - **[Request Migration](request-migration.md)** — Recovers an in-flight generation when a worker fails mid-request by moving the request to another healthy worker. **Off by default** — enable it when you want best-effort continuity for long-running generations.
-- **[Request Rejection](request-rejection.md)** — Rejects new requests with HTTP 529 when every worker is too busy, so clients can retry instead of adding queueing delay for everyone. **Off by default** — enable it when you want explicit overload behavior.
+- **[Request Rejection](request-rejection.md)** — Rejects new requests with HTTP 429 when every worker is too busy, so clients can retry instead of adding queueing delay for everyone. **Off by default** — enable it when you want explicit overload behavior.
 - **[Request Cancellation](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md)** — Stops frontend and runtime work when the client disconnects. This is a built-in runtime behavior and does not require workload configuration.
 
 ## Worker Fault Tolerance

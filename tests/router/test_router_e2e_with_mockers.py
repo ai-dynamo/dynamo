@@ -132,7 +132,7 @@ ROUTER_DISAGG_OVERLOAD_529_CASES = (
     pytest.param(
         {
             # A single prefill worker is sufficient to verify overloaded -> no
-            # free prefill worker -> 529. Registered worker types make the model
+            # free prefill worker -> 429. Registered worker types make the model
             # list only after the prefill router activates, so frontend readiness
             # already gates on prefill registration.
             "num_prefill": 1,
@@ -638,9 +638,9 @@ def test_mocker_kv_router_overload_529(
     monkeypatch,
     overload_config,
 ):
-    """Test that KV router returns 529 when mocker workers are overloaded."""
+    """Test that KV router returns 429 when mocker workers are overloaded."""
     monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
-    logger.info("Starting mocker KV router overload test for 529 status")
+    logger.info("Starting mocker KV router overload test for 429 status")
     mocker_args = {
         "speedup_ratio": 0.01,
         "block_size": 4,  # Smaller block size
@@ -655,7 +655,7 @@ def test_mocker_kv_router_overload_529(
         # Get unique port for this test
         frontend_port = allocate_frontend_ports(request, 1)[0]
 
-        # Run overload 529 test
+        # Run overload 429 test
         _test_router_overload_529(
             engine_workers=mockers,
             block_size=4,  # Match the mocker's block size
@@ -1245,7 +1245,7 @@ def test_mocker_disagg_router_overload_529(
     monkeypatch,
     overload_case,
 ):
-    """Disaggregated load shedding: clients get 529 when the gated pool is busy.
+    """Disaggregated load shedding: clients get 429 when the gated pool is busy.
 
     - prefill-tokens: a low ``--active-prefill-tokens-threshold`` must gate the
       PREFILL pool. This was previously a silent no-op in disagg (the
@@ -1255,7 +1255,7 @@ def test_mocker_disagg_router_overload_529(
       DECODE pool (the path that already worked).
     """
     monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
-    logger.info("Starting disagg mocker router overload 529 test")
+    logger.info("Starting disagg mocker router overload 429 test")
 
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
@@ -1573,7 +1573,7 @@ def test_busy_threshold_endpoint(
     TODO: This doesn't actually test any e2e rejection for now. A proper test would:
     1. Set a very low threshold
     2. Send enough requests to exceed the threshold
-    3. Verify that subsequent requests are rejected with 529
+    3. Verify that subsequent requests are rejected with 429
 
     For now, this test only verifies the endpoint is accessible and returns valid responses.
     """
