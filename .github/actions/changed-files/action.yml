@@ -58,6 +58,9 @@ outputs:
   trtllm:
     description: 'Whether trtllm files changed'
     value: ${{ steps.filter.outputs.trtllm_any_modified }}
+  trtllm_disagg_router:
+    description: 'Whether the audited TRT disaggregation change class needs its router case'
+    value: ${{ steps.report.outputs.trtllm_disagg_router }}
   triton:
     description: 'Whether triton files changed'
     value: ${{ steps.filter.outputs.triton_any_modified }}

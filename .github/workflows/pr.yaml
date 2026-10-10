@@ -42,6 +42,7 @@ jobs:
       sglang_runtime: ${{ vars.FORCE_FULL_CI == 'true' || steps.changes.outputs.sglang_runtime != 'false' }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
       trtllm_runtime: ${{ vars.FORCE_FULL_CI == 'true' || steps.changes.outputs.trtllm_runtime != 'false' }}
+      trtllm_disagg_router: ${{ steps.changes.outputs.trtllm_disagg_router }}
       triton: ${{ steps.changes.outputs.triton }}
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
@@ -957,7 +958,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and trtllm and gpu_2
+      gpu_test_markers: ${{ needs.changed-files.outputs.trtllm_disagg_router == 'true' && 'trtllm and gpu_2 and (pre_merge or trtllm_disagg_router)' || 'pre_merge and trtllm and gpu_2' }}
       gpu_test_timeout_minutes: 60
     secrets: inherit
 

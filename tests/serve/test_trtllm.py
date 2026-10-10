@@ -299,6 +299,8 @@ trtllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.trtllm,
             pytest.mark.nightly,
+            pytest.mark.trtllm_disagg_router,
+            pytest.mark.requested_trtllm_kv_tokens(2592),
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,

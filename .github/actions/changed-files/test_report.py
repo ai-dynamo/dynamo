@@ -285,6 +285,46 @@ class ChangedFilesTests(unittest.TestCase):
                 )
                 self.assertEqual(eval(expression, {"__builtins__": {}}), expected)
 
+    def test_trt_router_selection_is_limited_to_the_audited_change_class(self):
+        # Regression: a loose path match could add unrelated nightly cases or
+        # lose the launcher case; check the actual action's selection output.
+        paths = [
+            "examples/backends/trtllm/launch/disagg.sh",
+            "examples/backends/trtllm/launch/disagg_router.sh",
+            "tests/serve/test_trtllm.py",
+        ]
+        cases = [([path], "true") for path in paths] + [(paths, "true")]
+        cases += [
+            ([], "false"),
+            ([paths[0], "tests/serve/common.py"], "false"),
+            ([paths[0], "examples/common/gpu_utils.sh"], "false"),
+            (["examples/backends/trtllm/launch/disagg_same_gpu.sh"], "false"),
+        ]
+        for files, expected in cases:
+            status = {
+                f"all_{name}_files.json": "[]"
+                for name in (
+                    "added",
+                    "copied",
+                    "deleted",
+                    "renamed",
+                    "type_changed",
+                    "unmerged",
+                    "unknown",
+                )
+            }
+            status["all_modified_files.json"] = json.dumps(files)
+            status["all_all_changed_and_modified_files.json"] = json.dumps(files)
+            for outputs, result_expected in ((status, expected), ({}, "false")):
+                with self.subTest(files=files, outputs=outputs):
+                    result = self.run_report(
+                        {"all": files, "trtllm": files}, extra_outputs=outputs
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        result.outputs["trtllm_disagg_router"], result_expected
+                    )
+
     def test_empty_change_set_passes(self):
         result = self.run_report({"all": [], "planner_gym": []})
         self.assertEqual(result.returncode, 0, result.stderr)
