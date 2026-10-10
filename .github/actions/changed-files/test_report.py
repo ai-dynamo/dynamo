@@ -172,6 +172,7 @@ class ChangedFilesTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.outputs["sglang_runtime"], expected)
                 self.assertEqual(result.outputs["trtllm_runtime"], "true")
+                self.assertEqual(result.outputs["vllm_runtime"], "true")
 
     def test_operator_admission_retains_unlisted_and_mixed_inputs(self):
         # Regression: additions in the audited operator class were rejected;
@@ -234,6 +235,7 @@ class ChangedFilesTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.outputs["sglang_runtime"], expected)
                 self.assertEqual(result.outputs["trtllm_runtime"], expected)
+                self.assertEqual(result.outputs["vllm_runtime"], expected)
 
     def test_runtime_gate_defaults_full_and_supports_force_full(self):
         workflow = yaml.safe_load(
@@ -249,6 +251,10 @@ class ChangedFilesTests(unittest.TestCase):
             ("trtllm", "false", "true", True),
             ("trtllm", "", "", True),
             ("trtllm", "true", "", True),
+            ("vllm", "false", "", False),
+            ("vllm", "false", "true", True),
+            ("vllm", "", "", True),
+            ("vllm", "true", "", True),
         ):
             output = jobs["changed-files"]["outputs"][f"{backend}_runtime"]
             expression = output.removeprefix("${{").removesuffix("}}")
@@ -266,6 +272,8 @@ class ChangedFilesTests(unittest.TestCase):
                     "core",
                     "sglang",
                     "trtllm",
+                    "vllm",
+                    "sample",
                     "deploy",
                     "run_multigpu_tests",
                 ):

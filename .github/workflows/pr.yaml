@@ -36,6 +36,7 @@ jobs:
       deploy: ${{ steps.changes.outputs.deploy }}
       dgdr: ${{ steps.changes.outputs.dgdr }}
       vllm: ${{ steps.changes.outputs.vllm }}
+      vllm_runtime: ${{ vars.FORCE_FULL_CI == 'true' || steps.changes.outputs.vllm_runtime != 'false' }}
       sglang: ${{ steps.changes.outputs.sglang }}
       # Set repository variable FORCE_FULL_CI=true to bypass runtime admission.
       sglang_runtime: ${{ vars.FORCE_FULL_CI == 'true' || steps.changes.outputs.sglang_runtime != 'false' }}
@@ -802,7 +803,12 @@ jobs:
   vllm-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
+    if: |
+      needs.changed-files.outputs.vllm_runtime != 'false' &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.sample == 'true')
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -834,6 +840,7 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
     if: |
+      needs.changed-files.outputs.vllm_runtime != 'false' &&
       needs.changed-files.outputs.run_multigpu_tests == 'true' &&
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.vllm == 'true' ||
