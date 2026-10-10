@@ -26,10 +26,39 @@ mod ports;
 mod scripted_chat_engine;
 
 use http_harness::{
-    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture, parse_json_sse,
+    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture,
+    parse_responses_sse,
 };
 
 const ENV: [(&str, Option<&str>); 1] = [(DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))];
+
+#[tokio::test]
+async fn responses_sse_requires_terminal_event_without_trailers() {
+    for terminal in [
+        "response.completed",
+        "response.incomplete",
+        "response.failed",
+    ] {
+        let body = format!("event: {terminal}\ndata: {{\"type\":\"{terminal}\"}}\n\n");
+        assert!(parse_responses_sse(&body).await.is_ok());
+        for trailer in [
+            "data: [DONE]\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+        ] {
+            assert!(
+                parse_responses_sse(&format!("{body}{trailer}"))
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    assert!(parse_responses_sse("").await.is_err());
+    assert!(
+        parse_responses_sse("event: response.created\ndata: {\"type\":\"response.created\"}\n\n")
+            .await
+            .is_err()
+    );
+}
 
 /// Unsupported tool definitions return HTTP 400 before backend dispatch for both
 /// unary and streaming requests, including mixed tools and namespace members.
@@ -187,7 +216,7 @@ async fn disallowed_streamed_function_call_kills_backend_context() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
         assert!(events.iter().any(|event| event.event == "response.failed"));
@@ -251,7 +280,7 @@ async fn colliding_namespace_tools_round_trip_through_http() {
                 let response = post_responses(&svc, &body).await;
                 assert_eq!(response.status(), reqwest::StatusCode::OK);
                 let response_body = if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap()).await.unwrap();
+                    let events = parse_responses_sse(&response.text().await.unwrap()).await.unwrap();
                     for kind in ["response.output_item.added", "response.output_item.done"] {
                         let call = events.iter().find(|event| event.event == kind
                             && event.data["item"]["type"] == "function_call").unwrap();
@@ -371,7 +400,7 @@ async fn request_metadata_is_preserved_for_unary_and_streaming_responses() {
                 let expected_response_metadata =
                     request_metadata.clone().unwrap_or_else(|| json!({}));
                 if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap())
+                    let events = parse_responses_sse(&response.text().await.unwrap())
                         .await
                         .unwrap();
                     assert_streamed_response_metadata(&events, &expected_response_metadata);
@@ -457,8 +486,7 @@ async fn streaming_text_baseline() {
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let raw = response.text().await.unwrap();
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
-        let events = parse_json_sse(&raw).await.unwrap();
+        let events = parse_responses_sse(&raw).await.unwrap();
         insta::assert_json_snapshot!(
             "responses_streaming_text",
             canonicalize(serde_json::to_value(events).unwrap())
@@ -522,7 +550,7 @@ async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
         let text_done_position = event_position(&events, "response.output_text.done");
@@ -595,7 +623,7 @@ async fn empty_first_arguments_do_not_finish_function_call_early() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
 
@@ -702,8 +730,7 @@ async fn finish_signal_publishes_function_call_before_usage_tail() {
         }
 
         let raw = parser.into_body().expect("response SSE was not UTF-8");
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
-        let events = parse_json_sse(&raw).await.unwrap();
+        let events = parse_responses_sse(&raw).await.unwrap();
         assert_eq!(
             events
                 .iter()
@@ -748,7 +775,7 @@ async fn parallel_function_calls_preserve_identity_and_arguments() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
 
