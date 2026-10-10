@@ -16,7 +16,28 @@ _DEFAULT_GRACE_PERIOD_SECS = 5.0
 _DEFAULT_DRAIN_TIMEOUT_SECS = 30.0
 _DEFAULT_CLEANUP_TIMEOUT_SECS = 30.0
 _GRACE_PERIOD_ENV = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"
+_FAST_FAILOVER_EXIT_ENV = "DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM"
 _shutdown_started = asyncio.Event()
+
+
+def is_shutdown_in_progress() -> bool:
+    return _shutdown_started.is_set()
+
+
+def fast_failover_exit_enabled() -> bool:
+    value = os.getenv(_FAST_FAILOVER_EXIT_ENV)
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def failover_unregister_timeout_secs() -> float:
+    try:
+        return max(
+            0.0, float(os.getenv("DYN_GMS_FAILOVER_UNREGISTER_TIMEOUT_SECS", "5"))
+        )
+    except ValueError:
+        return 5.0
 
 
 def get_grace_period_seconds() -> float:
@@ -65,6 +86,33 @@ async def _unregister_endpoints(endpoints: Iterable) -> None:
             )
 
 
+def _consume_detached_unregister_result(task: asyncio.Task[None]) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except BaseException:
+        logger.debug("Detached discovery unregister failed", exc_info=True)
+
+
+async def _unregister_endpoints_bounded(endpoints: Iterable, *, timeout: float) -> bool:
+    # Endpoint unregister is control-plane cleanup and cannot mutate shared KV.
+    # It is safe to cancel and detach at the hard failover deadline.
+    task = asyncio.create_task(_unregister_endpoints(endpoints))
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError:
+        task.cancel()
+        task.add_done_callback(_consume_detached_unregister_result)
+        raise
+    if not done:
+        task.cancel()
+        task.add_done_callback(_consume_detached_unregister_result)
+        return False
+    task.result()
+    return True
+
+
 async def graceful_shutdown_with_discovery(
     runtime: DistributedRuntime,
     endpoints: Iterable,
@@ -105,7 +153,22 @@ async def graceful_shutdown_with_discovery(
         grace_period_s = get_grace_period_seconds()
 
     logger.info("Received shutdown signal; unregistering endpoints from discovery")
-    await _unregister_endpoints(list(endpoints))
+    # Failover mode bounds discovery removal so a wedged backend cannot prevent
+    # engine cleanup. It deliberately does not bypass cleanup with os._exit():
+    # descendant GPU writers must stop before the kernel flock is released.
+    fast_failover_exit = fast_failover_exit_enabled()
+    if fast_failover_exit:
+        unregister_timeout = failover_unregister_timeout_secs()
+        if not await _unregister_endpoints_bounded(
+            list(endpoints), timeout=unregister_timeout
+        ):
+            logger.warning(
+                "Discovery unregister did not complete within %.1fs; proceeding so "
+                "failover ownership is released promptly",
+                unregister_timeout,
+            )
+    else:
+        await _unregister_endpoints(list(endpoints))
 
     if grace_period_s > 0:
         logger.info("Grace period %.2fs before stopping endpoints", grace_period_s)

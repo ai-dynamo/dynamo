@@ -217,3 +217,30 @@ async def test_health_failure_during_worker_shutdown_stops_monitor(
     monitor._shutdown_engine.assert_not_called()
     monitor.runtime.shutdown.assert_not_called()
     exit_process.assert_not_called()
+
+
+async def test_engine_health_ignores_engine_dead_during_shutdown(mock_engine):
+    shutdown_event = asyncio.Event()
+    monitor = _make_monitor(mock_engine, shutdown_event)
+    mock_engine.check_health.side_effect = EngineDeadError(
+        RuntimeError("engine stopped")
+    )
+
+    with patch(
+        "dynamo.vllm.engine_monitor.is_shutdown_in_progress",
+        return_value=True,
+    ):
+        await asyncio.wait_for(monitor._check_engine_health(), timeout=1.0)
+
+    monitor.runtime.shutdown.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_engine_health_exits_when_shutdown_event_set(mock_engine):
+    shutdown_event = asyncio.Event()
+    shutdown_event.set()
+    monitor = _make_monitor(mock_engine, shutdown_event)
+
+    await asyncio.wait_for(monitor._check_engine_health(), timeout=1.0)
+
+    mock_engine.check_health.assert_not_called()
