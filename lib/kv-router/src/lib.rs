@@ -17,6 +17,7 @@ pub mod kv_hints;
 pub mod plugins;
 pub mod protocols;
 pub mod recovery;
+pub mod router_event_wire;
 pub mod scheduling;
 pub mod sequences;
 pub mod services;

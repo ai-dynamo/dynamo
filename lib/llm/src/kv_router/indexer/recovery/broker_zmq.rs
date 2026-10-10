@@ -8,13 +8,13 @@ use std::{
     time::Duration,
 };
 
-use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
+use dynamo_kv_router::{protocols::KV_EVENT_SUBJECT, router_event_wire::decode_router_event_batch};
 use dynamo_runtime::{
     component::Component,
     discovery::EventTransportKind,
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::{Codec, EventEnvelope, EventSubscriber},
+    transports::event_plane::{EventEnvelope, EventSubscriber},
 };
 use futures::future::join_all;
 use tokio::{
@@ -84,7 +84,7 @@ impl<T: RecoveryTarget> Clone for KvBatchConsumer<T> {
 
 impl<T: RecoveryTarget> PublisherBatchConsumer for KvBatchConsumer<T> {
     async fn consume(&self, publisher_id: u64, envelope: EventEnvelope) {
-        let events = match Codec::default().decode_payload::<Vec<RouterEvent>>(&envelope.payload) {
+        let events = match decode_router_event_batch(&envelope.payload) {
             Ok(events) => events,
             Err(error) => {
                 tracing::warn!(%error, publisher_id, "Failed to decode brokered-ZMQ KV payload");
