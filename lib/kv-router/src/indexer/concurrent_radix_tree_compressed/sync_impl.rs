@@ -22,7 +22,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         event_receiver: flume::Receiver<WorkerTask>,
         metrics: Option<Arc<KvIndexerMetrics>>,
     ) -> anyhow::Result<()> {
-        let mut lookup = FxHashMap::default();
+        let mut lookup = LaneLookup::default();
         let counters = metrics.as_ref().map(|m| m.prebind());
         let mut approximate_lru = ApproximateLruLane::default();
         #[cfg(feature = "bench")]
@@ -166,11 +166,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     let _ = _sender.send(Ok(Vec::new()));
                 }
                 WorkerTask::Stats(sender) => {
-                    let stats = WorkerLookupStats::from_worker_block_counts(
-                        lookup
-                            .iter()
-                            .map(|(worker, worker_lookup)| (*worker, worker_lookup.len())),
-                    );
+                    let stats = WorkerLookupStats::from_worker_block_counts(lookup.block_counts());
                     let _ = sender.send(stats);
                 }
                 WorkerTask::ContainsWorkerBlock {
@@ -178,9 +174,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     block_hash,
                     resp,
                 } => {
-                    let resident = lookup
-                        .get(&worker)
-                        .is_some_and(|worker_lookup| worker_lookup.contains_key(&block_hash));
+                    let resident = lookup.contains(worker, block_hash);
                     let _ = resp.send(resident);
                 }
                 WorkerTask::Flush(sender) => {

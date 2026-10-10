@@ -63,8 +63,15 @@ Each node contains:
 
 - `edge`: the compressed sequence of local and external block hashes.
 - `edge_index`: reverse lookup from `ExternalSequenceBlockHash` to position in
-  the edge. Removal uses this to find an evicted block in O(1) once it has the
-  node.
+  the edge. Removal uses this to find an evicted block once it has the node.
+  A position never moves: edges grow only at the tail, and a split truncates
+  them. Edges of at most 16 blocks keep no index and scan from the tail. Longer
+  edges keep an open-addressing table of `u32` positions that reads keys back
+  through `edge`, so it costs 5 to 11 bytes per block. Since the split prefix
+  never grows again, a split keeps its table in O(1) and lookups skip the
+  positions that moved to the suffix. The prefix rebuilds only when a table
+  half the size would fit, so its table is at most twice the size it needs
+  and the rebuilds cost O(blocks split off) over the node's lifetime.
 - `full`: workers that cover the full compressed edge, as one bit per rank slot
   (see [Rank Slots](#rank-slots)).
 - `cutoffs`: workers that cover only a prefix of the edge, keyed by slot. A
@@ -78,10 +85,17 @@ Each node contains:
 - `internal`: a sticky marker that becomes true once the node has had children.
   It remains true even if cleanup later removes every physical child, so the
   node is not reopened for leaf extension.
+- `anchor`: set only on synthetic branch anchors. They stay registered for the
+  tree's lifetime and never change their one-block edge, so the flag identifies a
+  store parent as an anchor without probing the anchor map.
 
-Worker lookup tables are not stored on nodes. Each event worker owns its own
-`WorkerLookup`, mapping external block hashes to the node that should contain
-that hash.
+Worker lookup tables are not stored on nodes. Each event lane owns a
+`LaneLookup` that maps, for each of its ranks, external block hashes to the node
+that should contain that hash. Entries name nodes by lane-local ids: the lane
+holds one `Arc` per distinct node its entries name and counts those entries
+locally, so storing or removing a block does not touch the node's shared
+reference count. Stale-leaf cleanup still sees every lane that names a node:
+such a node carries one extra strong reference per lane that names it.
 
 ## Store Paths
 
@@ -149,6 +163,14 @@ When a remove event arrives for worker `w` at edge position `i`:
   written before its full bit is cleared.
 - Worker lookup entries for the newly uncovered suffix are scrubbed eagerly.
 
+A remove event is applied in runs, each under one lock. A run starts at the node its
+first hash's lookup entry names, or the node [lookup repair](#lookup-repair) resolves
+that hash to, and takes the following hashes whose entries name that node. A hash
+whose entry names another node starts its own run, because that node holds the
+worker's coverage of it: once cleanup unlinks a subtree the lane still names, a
+partial restore can store some of its hashes on a new live node, and consuming them
+on the unlinked node would leave the live coverage behind.
+
 After the coverage update, removal may clear children only when no full-edge
 workers remain. Because `internal` is sticky, clearing those children does not
 make the node eligible for future leaf extension.
@@ -157,7 +179,7 @@ make the node eligible for future leaf extension.
 
 Cross-thread splits can make a worker lookup entry stale: the lookup still points
 at the old prefix node even though the requested external hash moved to the new
-suffix child. `resolve_lookup` handles this lazily:
+suffix child. Writers handle this lazily:
 
 ```text
 worker lookup says hash -> old node
@@ -165,6 +187,20 @@ old node no longer contains hash
 scan descendants for a node containing hash
 rewrite the useful covered range in the resolved node
 ```
+
+Remove and store-parent resolution do not probe the node before using a lookup
+entry. The locked operation they already run detects the miss: grouped removal
+returns nothing when the run's first hash is not in the edge, and the store's
+parent-coverage check reports the parent as missing. Grouped removal scans under
+an upgradable state read and upgrades only when a hit changes a cutoff (see
+[Full-Coverage Writes](#full-coverage-writes)), so a miss on a read-hot split
+prefix never blocks readers. Only then does `repair_stale` scan
+descendants, and the operation retries on the resolved node, not on the lookup
+entry: remove repair never rewrites the removed hash's own entry, and store
+repair leaves it untouched when the worker no longer covers the parent there.
+Re-reading the entry after repair would loop between the stale and resolved
+nodes. The stale-parent path inside child insertion still validates through
+`resolve_lookup`, because its entry may already point past the split.
 
 Store repair rewrites from the requested parent hash toward the worker's covered
 tail. Remove repair rewrites from the head toward the removed hash, excluding the
@@ -253,14 +289,16 @@ the state write lock:
 - It then sets the bit, unless it is already set. It takes the state write lock
   only when the node has cutoffs, to delete the worker's own stale cutoff, and it
   always sets the bit first, so readers never miss the worker.
+- A removal that drops a full worker from the whole edge clears its bit under the
+  exclusive shape gate it already holds, with only a read lock on the state. A
+  removal that leaves a partial cutoff upgrades that lock to the write lock and
+  publishes the cutoff before it clears the bit.
 
-Removals, splits, leaf extensions, sweeps, and cutoff changes keep the state
-write lock. A removal that leaves a partial cutoff publishes the cutoff before
-it clears the bit. Everything that moves bits between nodes, clears them, or
-demotes them to cutoffs holds the exclusive gate, which excludes every
-shared-gate promote. A reader may see a bit change between two hops or, past 64
-slots, between two words of one hop; each bit it sees is a coverage state that
-existed during the walk.
+Splits, leaf extensions, sweeps, and cutoff changes keep the state write lock.
+Everything that moves bits between nodes or demotes them to cutoffs holds the
+exclusive gate, which excludes every shared-gate promote. A reader may see a bit
+change between two hops or, past 64 slots, between two words of one hop; each
+bit it sees is a coverage state that existed during the walk.
 
 ### Rank Slots
 

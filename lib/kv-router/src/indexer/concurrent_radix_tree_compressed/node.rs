@@ -6,12 +6,12 @@ use std::sync::atomic::{self, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use crossbeam_epoch::Guard;
-use parking_lot::{RwLock, RwLockWriteGuard};
+use parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use rustc_hash::FxHashMap;
 
 use super::children::{ChildInsertResult, NodeChildren};
 use super::coverage::{FullCoverage, Slot, SlotSet, SlotTable};
-use super::state::CrtcNodeState;
+use super::state::{CrtcNodeState, RemoveOutcome};
 use super::types::*;
 use crate::protocols::*;
 
@@ -42,6 +42,9 @@ pub(super) struct Node {
     /// Sticky logical-internal marker. Once true, this node is treated as
     /// internal even if cleanup removes all physical children later.
     internal: AtomicBool,
+    /// Set only for synthetic branch anchors, which live in `anchor_nodes` for the
+    /// tree's lifetime and never change their single-block edge.
+    anchor: bool,
     /// Ranks covering the whole edge. Readers load the bits under the state read lock,
     /// so they see bits consistent with the edge. A bit is set under the shared shape
     /// gate (see `promote_full`) or with the state write lock held; a slot dropped from
@@ -75,10 +78,12 @@ impl Node {
         anchor_local_hash: LocalBlockHash,
         anchor_id: ExternalSequenceBlockHash,
     ) -> Self {
-        Self::childless(
+        let mut node = Self::childless(
             CrtcNodeState::new(vec![(anchor_local_hash, anchor_id)]),
             FullCoverage::default(),
-        )
+        );
+        node.anchor = true;
+        node
     }
 
     fn childless(state: CrtcNodeState, full: FullCoverage) -> Self {
@@ -91,6 +96,7 @@ impl Node {
             shape_gate: RwLock::new(()),
             shape_version: AtomicU64::new(0),
             internal: AtomicBool::new(internal),
+            anchor: false,
             full,
             has_cutoffs: AtomicBool::new(!state.cutoffs.is_empty()),
             state: RwLock::new(state),
@@ -211,6 +217,10 @@ impl Node {
         self.children.get(&local_hash)
     }
 
+    pub(super) fn is_anchor(&self) -> bool {
+        self.anchor
+    }
+
     pub(super) fn child_ref<'g>(
         &'g self,
         local_hash: LocalBlockHash,
@@ -224,17 +234,8 @@ impl Node {
         self.children.into_child_arcs()
     }
 
-    /// Number of leading `hashes` present in this node's edge, read under one lock.
-    pub(super) fn leading_edge_hash_count(&self, hashes: &[ExternalSequenceBlockHash]) -> usize {
-        let state = self.state.read();
-        hashes
-            .iter()
-            .take_while(|hash| state.edge_index.contains_key(hash))
-            .count()
-    }
-
     pub(super) fn contains_edge_hash(&self, hash: ExternalSequenceBlockHash) -> bool {
-        self.state.read().edge_index.contains_key(&hash)
+        self.state.read().contains_hash(hash)
     }
 
     #[cfg(test)]
@@ -419,7 +420,7 @@ impl Node {
         direction: LookupRepairDirection,
     ) -> Vec<ExternalSequenceBlockHash> {
         let state = self.state.read();
-        let Some(&pos) = state.edge_index.get(&hash) else {
+        let Some(pos) = state.position(hash) else {
             return Vec::new();
         };
         let cutoff = state.current_cutoff(&self.full, slot).min(state.edge.len());
@@ -437,18 +438,20 @@ impl Node {
         state.edge[range].iter().map(|&(_, hash)| hash).collect()
     }
 
-    pub(super) fn reject_uncovered_parent(
+    pub(super) fn parent_coverage(
         &self,
         slot: Slot,
         parent_hash: ExternalSequenceBlockHash,
-    ) -> Option<UncoveredParent> {
+    ) -> ParentCoverage {
         let _gate = self.shape_gate.read();
         let state = self.state.read();
-        let &pos = state.edge_index.get(&parent_hash)?;
+        let Some(pos) = state.position(parent_hash) else {
+            return ParentCoverage::Missing;
+        };
         if state.covers_pos(&self.full, slot, pos) {
-            return None;
+            return ParentCoverage::Covered;
         }
-        Some(UncoveredParent {
+        ParentCoverage::Uncovered(UncoveredParent {
             pos,
             cutoff: state.current_cutoff(&self.full, slot),
         })
@@ -460,7 +463,7 @@ impl Node {
         blocks: &[KvCacheStoredBlockData],
     ) -> Option<ParentEdgePlan> {
         self.with_shape_plan(|state, _children, shape_version| {
-            let &parent_pos = state.edge_index.get(&parent_hash)?;
+            let parent_pos = state.position(parent_hash)?;
 
             let action = if state.tail_hash_is(parent_hash) {
                 ParentEdgePlanAction::InsertFromParent
@@ -639,7 +642,7 @@ impl Node {
             if let Some(hash) = last_ext_hash
                 && !state.tail_hash_is(hash)
             {
-                if state.edge_index.contains_key(&hash) {
+                if state.contains_hash(hash) {
                     return ParentChildPlan::InteriorParent { shape_version };
                 }
                 return ParentChildPlan::StaleParent { hash };
@@ -701,36 +704,50 @@ impl Node {
         SplitLookupData { suffix }
     }
 
-    pub(super) fn remove_worker_for_hashes(
+    /// Removes `slot` from the leading run of `hashes` found in this edge, under one
+    /// exclusive shape gate. Returns how many hashes the run consumed and the newly uncovered
+    /// hashes, or `None` if the first hash is no longer in this edge.
+    pub(super) fn remove_worker_for_leading_hashes(
         &self,
         slot: Slot,
-        block_hashes: &[ExternalSequenceBlockHash],
-    ) -> Option<RemoveBatchOutcome> {
+        hashes: &[ExternalSequenceBlockHash],
+    ) -> Option<(usize, Vec<ExternalSequenceBlockHash>)> {
+        // The exclusive gate keeps every other writer off this node, so the run is read
+        // alongside readers, and only a cutoff change upgrades to the write lock.
         let _gate = self.shape_gate.write();
-        let mut state = self.write_state();
-        let mut min_match = None;
-        let mut unmatched_hashes = Vec::new();
+        let state = self.state.upgradable_read();
+        let mut min_match: Option<(usize, ExternalSequenceBlockHash)> = None;
+        let mut consumed = 0;
+        let mut last_pos = None;
 
-        for &hash in block_hashes {
-            match state.edge_index.get(&hash).copied() {
-                Some(pos) => {
-                    if min_match.is_none_or(|(min_pos, _)| pos < min_pos) {
-                        min_match = Some((pos, hash));
-                    }
-                }
-                None => unmatched_hashes.push(hash),
+        for &hash in hashes {
+            let Some(pos) = state.position_near(hash, last_pos) else {
+                break;
+            };
+            last_pos = Some(pos);
+            if min_match.is_none_or(|(min_pos, _)| pos < min_pos) {
+                min_match = Some((pos, hash));
             }
+            consumed += 1;
         }
 
         let (pos, block_hash) = min_match?;
-        let outcome = state.remove_worker_at_pos(&self.full, slot, pos, block_hash);
+        let outcome = if pos >= state.current_cutoff(&self.full, slot) {
+            RemoveOutcome {
+                stale_hashes: vec![block_hash],
+            }
+        } else if pos == 0 && self.full.contains(slot) {
+            state.drop_full_slot(&self.full, slot)
+        } else {
+            StateWriteGuard {
+                has_cutoffs: &self.has_cutoffs,
+                state: RwLockUpgradableReadGuard::upgrade(state),
+            }
+            .remove_worker_at_pos(&self.full, slot, pos, block_hash)
+        };
         let should_clear_children = self.full.is_empty();
-        drop(state);
         self.clear_children_if_unreachable(should_clear_children);
-        Some(RemoveBatchOutcome {
-            stale_hashes: outcome.stale_hashes,
-            unmatched_hashes,
-        })
+        Some((consumed, outcome.stale_hashes))
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
