@@ -13729,6 +13729,238 @@ mod tests {
         }
     }
 
+    // MiniMax M2 disabled thinking through the renderer adapter: prompt rendering,
+    // preprocessing, and tool-call postprocessing. The synthetic template spells
+    // out the stock generation block independently of the renderer's matcher.
+
+    const MINIMAX_OPEN_TAIL: &str = "]~b]ai\n<think>\n";
+    const MINIMAX_CLOSED_TAIL: &str = "]~b]ai\n<think>\n</think>\n";
+
+    const MINIMAX_M2_STYLE_TEMPLATE: &str = r"<minimax:tool_call>
+{%- for message in messages -%}
+{{- message.content ~ '\n' }}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{{- ']~b]ai' ~ '\n' ~ '<think>' ~ '\n' }}
+{%- endif -%}";
+
+    fn minimax_m2_test_preprocessor() -> OpenAIPreprocessor {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.reasoning_parser = Some("minimax_m2".to_string());
+        mdc.runtime_config.tool_call_parser = Some("minimax_m2".to_string());
+        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap())
+            .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
+        preprocessor.formatter = test_prompt_formatter(MINIMAX_M2_STYLE_TEMPLATE);
+        preprocessor
+    }
+
+    fn minimax_m2_named_choice() -> serde_json::Value {
+        serde_json::json!({"type": "function", "function": {"name": "calculate"}})
+    }
+
+    fn minimax_m2_request(
+        chat_template_kwargs: serde_json::Value,
+        tool_choice: Option<serde_json::Value>,
+    ) -> NvCreateChatCompletionRequest {
+        let mut request = serde_json::json!({
+            "model": "MiniMaxAI/MiniMax-M2.7",
+            "messages": [{"role": "user", "content": "Use the calculator tool for 937 * 18 + 42."}],
+            "max_tokens": 128,
+            "chat_template_kwargs": chat_template_kwargs,
+            "tools": [{"type": "function", "function": {
+                "name": "calculate",
+                "description": "Evaluate a mathematical expression.",
+                "parameters": {"type": "object", "properties": {
+                    "expression": {"type": "string"}
+                }, "required": ["expression"]}
+            }}]
+        });
+        if let Some(choice) = tool_choice {
+            request["tool_choice"] = choice;
+        }
+        serde_json::from_value(request).unwrap()
+    }
+
+    #[tokio::test]
+    async fn minimax_m2_disabled_thinking_closes_prompt_and_forwards_no_override() {
+        let preprocessor = minimax_m2_test_preprocessor();
+        let choices = [Some(minimax_m2_named_choice()), None];
+        for key in ["thinking", "enable_thinking"] {
+            for choice in &choices {
+                let mut request =
+                    minimax_m2_request(serde_json::json!({key: false}), choice.clone());
+                OpenAIPreprocessor::normalize_thinking_arg(
+                    &mut request,
+                    Some("minimax_m2"),
+                    Some("minimax_m2"),
+                );
+
+                let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+                assert!(
+                    prompt.as_str().ends_with(MINIMAX_CLOSED_TAIL),
+                    "{key}/{choice:?}: disabled thinking must close the empty block: {:?}",
+                    prompt.as_str()
+                );
+
+                let (mut prepared, _, injected) = preprocessor
+                    .preprocess_request(&request, None)
+                    .await
+                    .unwrap();
+                assert!(!injected, "{key}/{choice:?}");
+                assert!(
+                    prepared
+                        .extra_args
+                        .as_ref()
+                        .and_then(|args| args.get("reasoning_ended"))
+                        .is_none(),
+                    "{key}/{choice:?}: closed prompts do not forward reasoning_ended"
+                );
+                assert!(OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                    Some("minimax_m2"),
+                    request.chat_template_args.as_ref(),
+                ));
+
+                let forced = choice.is_some();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut prepared, injected)
+                    .unwrap();
+                let guided_json = prepared
+                    .sampling_options
+                    .guided_decoding
+                    .as_ref()
+                    .and_then(|g| g.json.as_ref());
+                assert_eq!(
+                    guided_json.is_some(),
+                    forced,
+                    "{key}/{choice:?}: forced choices install JSON guidance ({constraint:?})"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn minimax_m2_default_and_enabled_thinking_keep_open_prompt() {
+        let preprocessor = minimax_m2_test_preprocessor();
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!({"thinking": true}),
+            serde_json::json!({"enable_thinking": true}),
+        ] {
+            let request = minimax_m2_request(args.clone(), Some(minimax_m2_named_choice()));
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert!(
+                prompt.as_str().ends_with(MINIMAX_OPEN_TAIL),
+                "{args}: {:?}",
+                prompt.as_str()
+            );
+            assert!(!prompt.as_str().contains("</think>"));
+
+            let (prepared, _, injected) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            assert!(injected, "{args}");
+            assert_eq!(
+                prepared.extra_args.as_ref().unwrap()["reasoning_ended"],
+                false,
+                "{args}: opened prompts keep forwarding reasoning_ended=false"
+            );
+            assert!(!OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                Some("minimax_m2"),
+                request.chat_template_args.as_ref(),
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn minimax_m2_disabled_named_json_returns_tool_call() {
+        // Bare JSON becomes a named tool call with thinking disabled,
+        // both whole and fragmented across deltas.
+        let preprocessor = minimax_m2_test_preprocessor();
+        for fragmented in [false, true] {
+            let request = minimax_m2_request(
+                serde_json::json!({"thinking": false}),
+                Some(minimax_m2_named_choice()),
+            );
+            let pieces = if fragmented {
+                vec!["{\n  \"expression\":", " \"937 * 18 + 42\"\n}"]
+            } else {
+                vec!["{\n  \"expression\": \"937 * 18 + 42\"\n}"]
+            };
+            let mut chunks: Vec<_> = pieces
+                .iter()
+                .map(|piece| {
+                    let mut chunk = chat_stream_chunk(0, None);
+                    chunk.data.as_mut().unwrap().inner.choices[0].delta.content =
+                        Some(ChatCompletionMessageContent::Text(piece.to_string()));
+                    chunk
+                })
+                .collect();
+            let mut terminal = chat_stream_chunk(0, None);
+            terminal.data.as_mut().unwrap().inner.choices[0]
+                .delta
+                .content = None;
+            terminal.data.as_mut().unwrap().inner.choices[0].finish_reason =
+                Some(FinishReason::Stop);
+            chunks.push(terminal);
+
+            let output = preprocessor
+                .postprocessor_parsing_stream(stream::iter(chunks), &request, false, false)
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+
+            let mut arguments = String::new();
+            let mut name = String::new();
+            let mut finishes = Vec::new();
+            for item in output {
+                assert!(item.error.is_none(), "{item:?}");
+                let Some(data) = item.data else { continue };
+                for choice in data.inner.choices {
+                    if let Some(ChatCompletionMessageContent::Text(text)) = choice.delta.content {
+                        assert!(
+                            text.is_empty(),
+                            "fragmented={fragmented}: content leaked: {text}"
+                        );
+                    }
+                    assert!(
+                        choice
+                            .delta
+                            .reasoning_content
+                            .as_deref()
+                            .unwrap_or_default()
+                            .is_empty(),
+                        "fragmented={fragmented}: no reasoning with thinking disabled"
+                    );
+                    for call in choice.delta.tool_calls.unwrap_or_default() {
+                        if let Some(function) = call.function {
+                            name.push_str(function.name.as_deref().unwrap_or_default());
+                            arguments.push_str(function.arguments.as_deref().unwrap_or_default());
+                        }
+                    }
+                    if let Some(finish) = choice.finish_reason {
+                        finishes.push(finish);
+                    }
+                }
+            }
+            assert_eq!(name, "calculate", "fragmented={fragmented}");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                serde_json::json!({"expression": "937 * 18 + 42"}),
+                "fragmented={fragmented}"
+            );
+            assert_eq!(
+                finishes,
+                vec![FinishReason::ToolCalls],
+                "fragmented={fragmented}"
+            );
+        }
+    }
+
     fn assistant_only_request() -> NvCreateChatCompletionRequest {
         serde_json::from_value(serde_json::json!({
             "model": "test-model",
