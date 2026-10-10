@@ -40,6 +40,7 @@ jobs:
       # Set repository variable FORCE_FULL_CI=true to bypass runtime admission.
       sglang_runtime: ${{ vars.FORCE_FULL_CI == 'true' || steps.changes.outputs.sglang_runtime != 'false' }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
+      trtllm_runtime: ${{ vars.FORCE_FULL_CI == 'true' || steps.changes.outputs.trtllm_runtime != 'false' }}
       triton: ${{ steps.changes.outputs.triton }}
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
@@ -905,7 +906,11 @@ jobs:
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: |
+      needs.changed-files.outputs.trtllm_runtime != 'false' &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true')
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
@@ -930,6 +935,7 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
     if: |
+      needs.changed-files.outputs.trtllm_runtime != 'false' &&
       needs.changed-files.outputs.run_multigpu_tests == 'true' &&
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||

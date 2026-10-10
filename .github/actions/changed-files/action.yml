@@ -49,6 +49,9 @@ outputs:
   sglang_runtime:
     description: 'Whether standalone SGLang CPU/GPU tests are needed (fail full)'
     value: ${{ steps.report.outputs.sglang_runtime }}
+  trtllm_runtime:
+    description: 'Whether standalone TRT-LLM CPU/GPU tests are needed (fail full)'
+    value: ${{ steps.report.outputs.trtllm_runtime }}
   trtllm:
     description: 'Whether trtllm files changed'
     value: ${{ steps.filter.outputs.trtllm_any_modified }}
