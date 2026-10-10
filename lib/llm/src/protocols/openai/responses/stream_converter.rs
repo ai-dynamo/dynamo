@@ -17,14 +17,15 @@ use dynamo_protocols::types::responses::{
     AssistantRole, FunctionToolCall, IncompleteDetails, InputTokenDetails, Instructions,
     OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
     OutputTextContent, OutputTokenDetails, ReasoningItem, ReasoningItemContent,
-    ReasoningTextContent, Response, ResponseCompletedEvent, ResponseContentPartAddedEvent,
-    ResponseContentPartDoneEvent, ResponseCreatedEvent, ResponseError, ResponseErrorCode,
-    ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+    ReasoningTextContent, RefusalContent, Response, ResponseCompletedEvent,
+    ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
+    ResponseError, ResponseErrorCode, ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseIncompleteEvent,
     ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent, ResponseReasoningTextDeltaEvent,
-    ResponseReasoningTextDoneEvent, ResponseStreamEvent, ResponseTextDeltaEvent,
-    ResponseTextDoneEvent, ResponseTextParam, ResponseUsage, ServiceTierResponses, Status,
-    TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    ResponseReasoningTextDoneEvent, ResponseRefusalDeltaEvent, ResponseRefusalDoneEvent,
+    ResponseStreamEvent, ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam,
+    ResponseUsage, ServiceTierResponses, Status, TextResponseFormatConfiguration,
+    ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use serde::{
     Serialize,
@@ -49,12 +50,15 @@ pub struct ResponseStreamConverter {
     api_context: Option<ResponsesContext>,
     created_at: u64,
     sequence_number: u64,
-    // Text message tracking
+    // Message content tracking
     message_item_id: String,
     message_started: bool,
     message_output_index: u32,
     message_output_status: Option<OutputStatus>,
     accumulated_text: String,
+    accumulated_refusal: String,
+    text_content_index: Option<u32>,
+    refusal_content_index: Option<u32>,
     // Ordered reasoning spans; a new item opens when reasoning resumes after
     // a tool call.
     reasoning_items: Vec<ReasoningState>,
@@ -140,6 +144,9 @@ impl ResponseStreamConverter {
             message_output_index: 0,
             message_output_status: None,
             accumulated_text: String::new(),
+            accumulated_refusal: String::new(),
+            text_content_index: None,
+            refusal_content_index: None,
             reasoning_items: Vec::new(),
             active_reasoning_index: None,
             function_call_items: Vec::new(),
@@ -160,6 +167,42 @@ impl ResponseStreamConverter {
         let seq = self.sequence_number;
         self.sequence_number += 1;
         seq
+    }
+
+    fn append_message_part(
+        &mut self,
+        part: OutputContent,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) -> u32 {
+        if !self.message_started {
+            self.message_started = true;
+            self.message_output_index = self.next_output_index;
+            self.next_output_index += 1;
+            let added =
+                ResponseStreamEvent::ResponseOutputItemAdded(ResponseOutputItemAddedEvent {
+                    sequence_number: self.next_seq(),
+                    output_index: self.message_output_index,
+                    item: OutputItem::Message(OutputMessage {
+                        id: self.message_item_id.clone(),
+                        content: vec![],
+                        role: AssistantRole::Assistant,
+                        phase: None,
+                        status: OutputStatus::InProgress,
+                    }),
+                });
+            events.push(self.make_sse_event(&added));
+        }
+        let content_index = u32::from(self.text_content_index.is_some())
+            + u32::from(self.refusal_content_index.is_some());
+        let added = ResponseStreamEvent::ResponseContentPartAdded(ResponseContentPartAddedEvent {
+            sequence_number: self.next_seq(),
+            item_id: self.message_item_id.clone(),
+            output_index: self.message_output_index,
+            content_index,
+            part,
+        });
+        events.push(self.make_sse_event(&added));
+        content_index
     }
 
     fn append_reasoning_delta(
@@ -462,43 +505,21 @@ impl ResponseStreamConverter {
                 // reports that the answer exhausted the output budget.
                 self.append_active_reasoning_done_events(events, OutputStatus::Completed);
 
-                // Emit output_item.added + content_part.added on first text
-                if !self.message_started {
-                    self.message_started = true;
-                    self.message_output_index = self.next_output_index;
-                    let output_index = self.message_output_index;
-                    self.next_output_index += 1;
-
-                    let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
-                        ResponseOutputItemAddedEvent {
-                            sequence_number: self.next_seq(),
-                            output_index,
-                            item: OutputItem::Message(OutputMessage {
-                                id: self.message_item_id.clone(),
-                                content: vec![],
-                                role: AssistantRole::Assistant,
-                                phase: None,
-                                status: OutputStatus::InProgress,
-                            }),
-                        },
-                    );
-                    events.push(self.make_sse_event(&item_added));
-
-                    let part_added = ResponseStreamEvent::ResponseContentPartAdded(
-                        ResponseContentPartAddedEvent {
-                            sequence_number: self.next_seq(),
-                            item_id: self.message_item_id.clone(),
-                            output_index,
-                            content_index: 0,
-                            part: OutputContent::OutputText(OutputTextContent {
+                let content_index = match self.text_content_index {
+                    Some(index) => index,
+                    None => {
+                        let index = self.append_message_part(
+                            OutputContent::OutputText(OutputTextContent {
                                 text: String::new(),
                                 annotations: vec![],
                                 logprobs: Some(vec![]),
                             }),
-                        },
-                    );
-                    events.push(self.make_sse_event(&part_added));
-                }
+                            events,
+                        );
+                        self.text_content_index = Some(index);
+                        index
+                    }
+                };
 
                 // Emit text delta
                 self.accumulated_text.push_str(content);
@@ -507,11 +528,37 @@ impl ResponseStreamConverter {
                         sequence_number: self.next_seq(),
                         item_id: self.message_item_id.clone(),
                         output_index: self.message_output_index,
-                        content_index: 0,
+                        content_index,
                         delta: content.to_string(),
                         logprobs: Some(vec![]),
                     });
                 events.push(self.make_sse_event(&text_delta));
+            }
+
+            if let Some(refusal) = delta.refusal.as_deref().filter(|text| !text.is_empty()) {
+                self.append_active_reasoning_done_events(events, OutputStatus::Completed);
+                let content_index = match self.refusal_content_index {
+                    Some(index) => index,
+                    None => {
+                        let index = self.append_message_part(
+                            OutputContent::Refusal(RefusalContent {
+                                refusal: String::new(),
+                            }),
+                            events,
+                        );
+                        self.refusal_content_index = Some(index);
+                        index
+                    }
+                };
+                self.accumulated_refusal.push_str(refusal);
+                let delta = ResponseStreamEvent::ResponseRefusalDelta(ResponseRefusalDeltaEvent {
+                    sequence_number: self.next_seq(),
+                    item_id: self.message_item_id.clone(),
+                    output_index: self.message_output_index,
+                    content_index,
+                    delta: refusal.to_owned(),
+                });
+                events.push(self.make_sse_event(&delta));
             }
 
             // Handle tool call deltas
@@ -820,14 +867,34 @@ impl ResponseStreamConverter {
         self.output_with_status(self.output_status())
     }
 
+    fn message_content(&self) -> Vec<OutputMessageContent> {
+        let mut parts = Vec::with_capacity(2);
+        if let Some(index) = self.text_content_index {
+            parts.push((
+                index,
+                OutputMessageContent::OutputText(OutputTextContent {
+                    text: self.accumulated_text.clone(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                }),
+            ));
+        }
+        if let Some(index) = self.refusal_content_index {
+            parts.push((
+                index,
+                OutputMessageContent::Refusal(RefusalContent {
+                    refusal: self.accumulated_refusal.clone(),
+                }),
+            ));
+        }
+        parts.sort_unstable_by_key(|(index, _)| *index);
+        parts.into_iter().map(|(_, part)| part).collect()
+    }
+
     fn message_output(&self, output_status: OutputStatus) -> OutputMessage {
         OutputMessage {
             id: self.message_item_id.clone(),
-            content: vec![OutputMessageContent::OutputText(OutputTextContent {
-                text: self.accumulated_text.clone(),
-                annotations: vec![],
-                logprobs: Some(vec![]),
-            })],
+            content: self.message_content(),
             role: AssistantRole::Assistant,
             phase: None,
             status: self.message_output_status.unwrap_or(output_status),
@@ -890,29 +957,42 @@ impl ResponseStreamConverter {
             return;
         }
 
-        let text_done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
-            sequence_number: self.next_seq(),
-            item_id: self.message_item_id.clone(),
-            output_index: self.message_output_index,
-            content_index: 0,
-            text: self.accumulated_text.clone(),
-            logprobs: Some(vec![]),
-        });
-        events.push(self.make_sse_event(&text_done));
-
-        let part_done =
-            ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
+        for (index, content) in self.message_content().into_iter().enumerate() {
+            let content_index = index as u32;
+            let part = match content {
+                OutputMessageContent::OutputText(text) => {
+                    let done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
+                        sequence_number: self.next_seq(),
+                        item_id: self.message_item_id.clone(),
+                        output_index: self.message_output_index,
+                        content_index,
+                        text: text.text.clone(),
+                        logprobs: Some(vec![]),
+                    });
+                    events.push(self.make_sse_event(&done));
+                    OutputContent::OutputText(text)
+                }
+                OutputMessageContent::Refusal(refusal) => {
+                    let done = ResponseStreamEvent::ResponseRefusalDone(ResponseRefusalDoneEvent {
+                        sequence_number: self.next_seq(),
+                        item_id: self.message_item_id.clone(),
+                        output_index: self.message_output_index,
+                        content_index,
+                        refusal: refusal.refusal.clone(),
+                    });
+                    events.push(self.make_sse_event(&done));
+                    OutputContent::Refusal(refusal)
+                }
+            };
+            let done = ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
                 sequence_number: self.next_seq(),
                 item_id: self.message_item_id.clone(),
                 output_index: self.message_output_index,
-                content_index: 0,
-                part: OutputContent::OutputText(OutputTextContent {
-                    text: self.accumulated_text.clone(),
-                    annotations: vec![],
-                    logprobs: Some(vec![]),
-                }),
+                content_index,
+                part,
             });
-        events.push(self.make_sse_event(&part_done));
+            events.push(self.make_sse_event(&done));
+        }
 
         let item_done = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
             sequence_number: self.next_seq(),
@@ -1513,6 +1593,67 @@ mod tests {
         event: &ResponseStreamEvent,
     ) -> serde_json::Value {
         serde_json::from_str(&converter.serialize_event_data(event).unwrap()).unwrap()
+    }
+
+    #[rstest::rstest]
+    #[case::eof(None, OutputStatus::Completed, "response.completed")]
+    #[case::length(
+        Some(FinishReason::Length),
+        OutputStatus::Incomplete,
+        "response.incomplete"
+    )]
+    #[case::filtered(
+        Some(FinishReason::ContentFilter),
+        OutputStatus::Incomplete,
+        "response.incomplete"
+    )]
+    fn refusal_before_text_preserves_parts_and_terminal_status(
+        #[case] finish: Option<FinishReason>,
+        #[case] status: OutputStatus,
+        #[case] terminal: &str,
+    ) {
+        let expected_reason = match finish {
+            Some(FinishReason::Length) => Some("max_output_tokens"),
+            Some(FinishReason::ContentFilter) => Some("content_filter"),
+            _ => None,
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let mut chunk = text_chunk("");
+        chunk.inner.choices[0].delta.refusal = Some("Denied.".into());
+        conv.process_chunk(&chunk);
+        conv.process_chunk(&text_chunk("Explanation."));
+        if let Some(reason) = finish {
+            conv.process_chunk(&finish_chunk(reason));
+        }
+        let events = conv.emit_end_events();
+        assert_eq!(
+            event_types(&events),
+            [
+                "response.refusal.done",
+                "response.content_part.done",
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                terminal,
+            ]
+        );
+        let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+        assert_eq!(
+            serde_json::to_value(&response).unwrap()["incomplete_details"]["reason"],
+            serde_json::json!(expected_reason)
+        );
+        let output = conv.completed_output();
+        let OutputItem::Message(message) = &output[0] else {
+            panic!("expected message");
+        };
+        assert_eq!(message.status, status);
+        assert_eq!(
+            serde_json::to_value(&message.content).unwrap(),
+            serde_json::json!([
+                {"type":"refusal", "refusal":"Denied."},
+                {"type":"output_text", "text":"Explanation.", "annotations":[], "logprobs":[]},
+            ])
+        );
     }
 
     /// Parseable arguments remain open until an explicit tool-call finish reason.
