@@ -92,6 +92,9 @@ class BasePayload:
         """Return the request body for one repeat_count iteration."""
         return self.body
 
+    def bind_environment(self, env: dict[str, str]) -> None:
+        """Bind deployment-specific connection settings before requests run."""
+
     def before_request(self) -> None:
         """Prepare observations immediately before each HTTP request attempt."""
 
@@ -166,6 +169,9 @@ class HttpCancellationPayload(BasePayload):
     timeout: int = 30
     _before: float | None = field(default=None, init=False, repr=False)
     _completion_progress: float = field(default=0, init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        self.metrics.bind_environment(env)
 
     def before_request(self) -> None:
         if not self.http_stream or self.body.get("stream") is not True:
@@ -370,6 +376,14 @@ class KvTransferPayload(DisaggregatedChatPayload):
     decode_metrics: EngineMetrics = field(kw_only=True)
     transfer_metrics: EngineMetrics = field(kw_only=True)
     _transfer_before: float | None = field(default=None, init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        for metrics in (
+            self.prefill_metrics,
+            self.decode_metrics,
+            self.transfer_metrics,
+        ):
+            metrics.bind_environment(env)
 
     def before_request(self) -> None:
         self.prefill_metrics.wait_for_scheduler()
