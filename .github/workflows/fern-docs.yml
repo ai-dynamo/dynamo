@@ -659,13 +659,26 @@ jobs:
 
       - name: Comment preview URL on PR
         if: steps.ctx.outputs.is_main != 'true' && steps.preview.outputs.url != '' && startsWith(github.ref, 'refs/heads/pull-request/')
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PR_NUM="${GITHUB_REF##*/}"
-          gh pr comment "https://github.com/${{ github.repository }}/pull/${PR_NUM}" \
-            --edit-last --create-if-none \
-            --body "🌿 **Fern Docs Preview:** ${{ steps.preview.outputs.url }}/dev"
+          PREVIEW_URL: ${{ steps.preview.outputs.url }}
+        with:
+          script: |
+            const issue_number = Number(context.ref.split('/').pop());
+            const marker = '<!-- dynamo-fern-preview -->';
+            const body = `${marker}\n🌿 **Fern Docs Preview:** ${process.env.PREVIEW_URL}/dev`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number, per_page: 100,
+            });
+            // Match only the preview, including comments created before the marker existed.
+            const comment = comments.find(c => c.user?.login === 'github-actions[bot]' &&
+              c.user.type === 'Bot' && (c.body?.startsWith(marker) ||
+              c.body?.startsWith('🌿 **Fern Docs Preview:**')));
+            if (comment) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: comment.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number, body });
+            }
 
       ##########################################################################
       # PUSH AND PUBLISH - push changes to docs-website branch and publish docs
