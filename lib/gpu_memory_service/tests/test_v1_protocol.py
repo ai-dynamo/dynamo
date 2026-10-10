@@ -19,7 +19,10 @@ if not HAS_GMS:
 import msgspec
 from gpu_memory_service.v1.client.session import _GMSClientSession
 from gpu_memory_service.v1.protocol import (
+    ERROR_CLAIM_CONFLICT,
+    ErrorResponse,
     Message,
+    PersistentPoolErrorResponse,
     SuccessResponse,
     receive_message,
     send_message,
@@ -32,6 +35,32 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.timeout(10),
 ]
+
+
+@pytest.mark.parametrize("out_of_memory", [False, True])
+def test_ordinary_errors_remain_decodable_by_legacy_clients(out_of_memory):
+    class LegacyErrorResponse(
+        msgspec.Struct, tag="error_response", forbid_unknown_fields=True
+    ):
+        message: str
+        out_of_memory: bool = False
+
+    payload = msgspec.msgpack.encode(ErrorResponse("failure", out_of_memory))
+    decoded = msgspec.msgpack.decode(payload, type=LegacyErrorResponse)
+    assert decoded.message == "failure"
+    assert decoded.out_of_memory is out_of_memory
+    # Also retain compatibility in the opposite direction.
+    payload = msgspec.msgpack.encode(LegacyErrorResponse("old", out_of_memory))
+    assert msgspec.msgpack.decode(payload, type=Message) == ErrorResponse(
+        "old", out_of_memory
+    )
+
+
+def test_persistent_errors_use_separate_wire_tag():
+    error = PersistentPoolErrorResponse("busy", ERROR_CLAIM_CONFLICT)
+    payload = msgspec.msgpack.encode(error)
+    assert msgspec.msgpack.decode(payload)["type"] == "persistent_pool_error_response"
+    assert msgspec.msgpack.decode(payload, type=Message) == error
 
 
 def test_received_fd_is_cloexec_and_unexpected_fd_is_closed() -> None:
