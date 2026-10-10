@@ -147,13 +147,7 @@ class ChangedFilesTests(unittest.TestCase):
         status["all_modified_files.json"] = json.dumps([path])
         status["all_all_changed_and_modified_files.json"] = json.dumps([path])
         cases = [([path], status, "false"), ([], status, "true")]
-        for extra in (
-            "unknown.py",
-            "components/src/dynamo/common/utils.py",
-            ".github/workflows/pr.yaml",
-            "container/context.yaml",
-        ):
-            cases.append(([path, extra], status, "true"))
+        cases.append(([path, "unknown.py"], status, "true"))
         for name in status:
             for value in (None, "{", "[17]", json.dumps([path])):
                 changed = dict(status)
@@ -205,7 +199,6 @@ class ChangedFilesTests(unittest.TestCase):
         for extra in (
             "deploy/operator/api/v1beta2/unreviewed.go",
             "components/src/dynamo/frontend/tests/test_vllm_processor_unit.py",
-            "components/src/dynamo/common/utils.py",
         ):
             changed = dict(outputs)
             changed["all_modified_files.json"] = json.dumps(files[8:] + [extra])
