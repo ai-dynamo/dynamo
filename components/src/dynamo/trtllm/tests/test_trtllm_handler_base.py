@@ -29,6 +29,7 @@ from tensorrt_llm.llmapi.llm import SamplingParams
 from dynamo.common.backend.logprobs import extract_from_completion_output
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.request_handlers.handler_base import (
@@ -1026,6 +1027,65 @@ class TestGenerateLocally:
         handler._initiate_shutdown.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_decode_presubmit_error_aborts_prefill_session(self):
+        handler = self._make_handler()
+        handler.disaggregation_mode = DisaggregationMode.DECODE
+        handler.engine.llm.generate_async = MagicMock(
+            side_effect=ValueError("invalid sampling bounds")
+        )
+        handler.engine.abort = MagicMock()
+        disagg_params = SimpleNamespace(disagg_request_id=51420)
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(disagg_params, None, {})
+        )
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks == [
+            {
+                "finish_reason": {"error": "invalid sampling bounds"},
+                "token_ids": [],
+            }
+        ]
+        handler.engine.abort.assert_called_once_with(51420)
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_decode_presubmit_error_skips_abort_without_session_id(self):
+        handler = self._make_handler()
+        handler.disaggregation_mode = DisaggregationMode.DECODE
+        handler.engine.llm.generate_async = MagicMock(
+            side_effect=ValueError("invalid sampling bounds")
+        )
+        handler.engine.abort = MagicMock()
+        disagg_params = SimpleNamespace(disagg_request_id=None)
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(disagg_params, None, {})
+        )
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks[0]["finish_reason"] == {"error": "invalid sampling bounds"}
+        handler.engine.abort.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_bind_compatible_presubmit_type_error_is_request_local(self):
         handler = self._make_handler()
         error = TypeError("malformed inputs")
@@ -1934,3 +1994,50 @@ def test_trtllm_handler_matches_shared():
     )
     assert wrapper_lp == direct_lp
     assert wrapper_top == direct_top
+
+
+class TestTensorRTLLMEngineAbort:
+    """Pinned TensorRT-LLM exposes executor.abort_request, not LLM.abort."""
+
+    def _make_engine(self) -> TensorRTLLMEngine:
+        return TensorRTLLMEngine({"model": "dummy"})
+
+    def test_prefers_executor_abort_request(self):
+        engine = self._make_engine()
+        abort_request = MagicMock()
+        llm_abort = MagicMock()
+        engine._llm = SimpleNamespace(
+            _executor=SimpleNamespace(abort_request=abort_request),
+            abort=llm_abort,
+        )
+
+        engine.abort(51420)
+
+        abort_request.assert_called_once_with(51420)
+        llm_abort.assert_not_called()
+
+    def test_falls_back_to_llm_abort(self):
+        engine = self._make_engine()
+        llm_abort = MagicMock()
+        engine._llm = SimpleNamespace(_executor=None, abort=llm_abort)
+
+        engine.abort(7)
+
+        llm_abort.assert_called_once_with(7)
+
+    def test_missing_abort_api_is_noop(self):
+        engine = self._make_engine()
+        engine._llm = SimpleNamespace()
+
+        engine.abort(1)
+
+    def test_abort_failure_is_logged_and_reraised(self):
+        engine = self._make_engine()
+        engine._llm = SimpleNamespace(
+            _executor=SimpleNamespace(
+                abort_request=MagicMock(side_effect=RuntimeError("executor down"))
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="executor down"):
+            engine.abort(3)

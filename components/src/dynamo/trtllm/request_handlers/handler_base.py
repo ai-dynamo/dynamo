@@ -1333,6 +1333,19 @@ class HandlerBase(BaseGenerativeHandler):
                     type(e).__name__,
                     error_msg,
                 )
+                # If this is a DECODE request with a pending prefill KV handoff,
+                # attempt to abort the session to release blocks immediately.
+                if (
+                    self.disaggregation_mode == DisaggregationMode.DECODE
+                    and disaggregated_params is not None
+                    and disaggregated_params.disagg_request_id is not None
+                ):
+                    logging.debug(
+                        "DECODE: Request rejected before dispatch; aborting abandoned "
+                        "prefill session %s",
+                        disaggregated_params.disagg_request_id,
+                    )
+                    self.engine.abort(disaggregated_params.disagg_request_id)
                 yield {
                     "finish_reason": {"error": error_msg},
                     "token_ids": [],
