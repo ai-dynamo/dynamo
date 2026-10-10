@@ -18,11 +18,11 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
+dynamo-sidecar-common = { workspace = true }
 dynamo-vllm-sidecar = { path = "../../../sidecar/vllm" }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
-blake3 = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 prost-types-v14 = { workspace = true }
@@ -34,6 +34,8 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
+serde_json = { workspace = true }
 dynamo-llm = { path = "../../../llm", default-features = false }
 dynamo-kv-router = { workspace = true }
 dynamo-runtime = { workspace = true }

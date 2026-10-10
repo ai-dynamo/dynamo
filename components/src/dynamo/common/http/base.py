@@ -121,6 +121,7 @@ class HttpClient(abc.ABC):
         *,
         policy: Optional[UrlValidationPolicy] = None,
         max_bytes: Optional[int] = None,
+        read_timeout: Optional[float] = None,
     ) -> bytes:
         """Fetch ``url`` and return the response body.
 
@@ -134,6 +135,10 @@ class HttpClient(abc.ABC):
         Raises :class:`UrlValidationError` — it is a verdict on a
         client-supplied source, like the redirect cap below.
 
+        ``read_timeout`` set: raise :class:`HttpTimeoutError` when the server
+        sends nothing for that many seconds. ``timeout`` still bounds the
+        whole request. ``None`` sets no such limit.
+
         ``policy`` set: follow redirects manually and revalidate each
         hop against the policy via :func:`url_validator.validate_url`.
         This is the SSRF-safe path; raises :class:`UrlValidationError`
@@ -141,7 +146,9 @@ class HttpClient(abc.ABC):
         timeout includes validation and all redirect hops.
         """
         if policy is None:
-            return await self._fetch_simple(url, timeout, max_bytes=max_bytes)
+            return await self._fetch_simple(
+                url, timeout, max_bytes=max_bytes, read_timeout=read_timeout
+            )
         # One budget covers validation and every redirect hop. Each backend
         # call has its own timeout, which would otherwise restart at each hop.
         total = (
@@ -152,7 +159,7 @@ class HttpClient(abc.ABC):
         try:
             return await asyncio.wait_for(
                 self._fetch_with_revalidation(
-                    url, timeout, policy, max_bytes=max_bytes
+                    url, timeout, policy, max_bytes=max_bytes, read_timeout=read_timeout
                 ),
                 # Match aiohttp: None and non-positive totals disable the deadline.
                 timeout=total if total is not None and total > 0 else None,
@@ -169,6 +176,7 @@ class HttpClient(abc.ABC):
         policy: UrlValidationPolicy,
         *,
         max_bytes: Optional[int] = None,
+        read_timeout: Optional[float] = None,
     ) -> bytes:
         """Manual redirect loop with per-hop SSRF validation (backend-neutral)."""
         current = url
@@ -179,7 +187,11 @@ class HttpClient(abc.ABC):
             visited.append(current)
 
             body, redirect_to = await self._fetch_body_or_redirect(
-                current, timeout, max_bytes=max_bytes, policy=policy
+                current,
+                timeout,
+                max_bytes=max_bytes,
+                policy=policy,
+                read_timeout=read_timeout,
             )
 
             if redirect_to is None:
@@ -207,6 +219,7 @@ class HttpClient(abc.ABC):
         *,
         max_bytes: Optional[int] = None,
         policy: Optional[UrlValidationPolicy] = None,
+        read_timeout: Optional[float] = None,
     ) -> bytes:
         """Backend's native redirect-following GET (no SSRF policy applied).
 
@@ -223,6 +236,7 @@ class HttpClient(abc.ABC):
         *,
         max_bytes: Optional[int] = None,
         policy: Optional[UrlValidationPolicy] = None,
+        read_timeout: Optional[float] = None,
     ) -> tuple[bytes | None, str | None]:
         """Single hop with redirects disabled.
 

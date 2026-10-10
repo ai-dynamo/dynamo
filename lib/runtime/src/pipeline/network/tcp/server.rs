@@ -1144,7 +1144,9 @@ async fn tcp_listener(
         // the [`Prologue`]
         // there must be a second control message it indicate the other segment's generate method was successful
         // No timeout here: the worker sends the prologue only after generate() setup completes,
-        // which can take arbitrarily long (model load, queue delay, cold start).
+        // which can take arbitrarily long (model load, queue delay, cold start). When
+        // DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS is set, the frontend's request-plane
+        // dispatch bounds this wait instead, starting from the worker's ACK.
         let prologue = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
@@ -1454,6 +1456,16 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_no_env_vars_is_plaintext() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::build_tls_acceptor_no_env_vars_is_plaintext"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         // Also clear the client-CA var: ambient it would turn this into an error
         // (client CA without a server cert/key) instead of plaintext.
         temp_env::with_vars_unset(
@@ -1470,6 +1482,13 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_partial_config_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::build_tls_acceptor_partial_config_errors"),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
@@ -1493,6 +1512,13 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_both_paths_is_tls() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::build_tls_acceptor_both_paths_is_tls"),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         temp_env::with_vars(
             [
@@ -1505,6 +1531,16 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_with_client_ca_is_mtls() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::build_tls_acceptor_with_client_ca_is_mtls"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         // A client CA turns the response-stream server into an mTLS acceptor.
         let (cert, key) = self_signed_pair();
         temp_env::with_vars(
@@ -1522,6 +1558,16 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_client_ca_without_server_identity_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::build_tls_acceptor_client_ca_without_server_identity_errors"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, _key) = self_signed_pair();
         temp_env::with_vars(
             [

@@ -95,7 +95,7 @@ async def test_fetch_with_policy_returns_first_response(
 
     call_count = {"n": 0}
 
-    async def _fake(url, timeout, *, max_bytes=None, policy=None):
+    async def _fake(url, timeout, *, max_bytes=None, policy=None, read_timeout=None):
         call_count["n"] += 1
         return b"body-bytes", None
 
@@ -116,7 +116,7 @@ async def test_fetch_with_policy_follows_safe_redirect(
 
     hops: list[str] = []
 
-    async def _fake(url, timeout, *, max_bytes=None, policy=None):
+    async def _fake(url, timeout, *, max_bytes=None, policy=None, read_timeout=None):
         hops.append(url)
         if url == "https://example.com/x.png":
             return None, "https://example.com/final.png"
@@ -177,7 +177,10 @@ async def test_fetch_with_policy_total_timeout_spans_redirects(monkeypatch) -> N
     client._config.per_call_timeout_override = None
     hops = []
 
-    async def delayed_hop(url, timeout, *, max_bytes=None, policy=None):
+    async def delayed_hop(
+        url, timeout, *, max_bytes=None, policy=None, read_timeout=None
+    ):
+        assert read_timeout == 0.02
         # Each hop fits the per-request budget; the whole chain does not.
         hops.append(url)
         await advance_time(0.03)
@@ -187,7 +190,9 @@ async def test_fetch_with_policy_total_timeout_spans_redirects(monkeypatch) -> N
 
     monkeypatch.setattr(client, "_fetch_body_or_redirect", delayed_hop)
     with pytest.raises(mm_http.HttpTimeoutError):
-        await client.fetch_bytes("https://example.com/a", 0.05, policy=_PERMISSIVE)
+        await client.fetch_bytes(
+            "https://example.com/a", 0.05, policy=_PERMISSIVE, read_timeout=0.02
+        )
     assert hops == ["https://example.com/a", "https://example.com/b"]
 
 
@@ -200,7 +205,9 @@ async def test_fetch_with_policy_total_timeout_override_replaces_caller(
     client = AiohttpClient()
     client._config.per_call_timeout_override = override
 
-    async def delayed_body(url, timeout, *, max_bytes=None, policy=None):
+    async def delayed_body(
+        url, timeout, *, max_bytes=None, policy=None, read_timeout=None
+    ):
         await advance_time(0.03)
         return b"body", None
 
@@ -220,7 +227,7 @@ async def test_fetch_with_policy_blocks_redirect_to_private_ip(
 
     strict = UrlValidationPolicy(allow_private_ips=False)
 
-    async def _fake(url, timeout, *, max_bytes=None, policy=None):
+    async def _fake(url, timeout, *, max_bytes=None, policy=None, read_timeout=None):
         return None, "http://169.254.169.254/latest/meta-data/"
 
     with patch.object(client, "_fetch_body_or_redirect", _fake):
@@ -243,12 +250,34 @@ async def test_fetch_with_policy_enforces_redirect_limit(
         "https://example.com/d": "https://example.com/e",
     }
 
-    async def _fake(url, timeout, *, max_bytes=None, policy=None):
+    async def _fake(url, timeout, *, max_bytes=None, policy=None, read_timeout=None):
         return None, chain[url]
 
     with patch.object(client, "_fetch_body_or_redirect", _fake):
         with pytest.raises(UrlValidationError, match="Too many redirects"):
             await mm_http.fetch_bytes("https://example.com/a", 30.0, policy=_PERMISSIVE)
+
+
+@pytest.mark.parametrize("policy", [None, _PERMISSIVE], ids=["simple", "policy"])
+async def test_read_timeout_reaches_the_backend(policy) -> None:
+    client = mm_http.get_default_client()
+    seen = []
+
+    async def _simple(url, timeout, *, max_bytes=None, policy=None, read_timeout=None):
+        seen.append(read_timeout)
+        return b"body"
+
+    async def _hop(url, timeout, *, max_bytes=None, policy=None, read_timeout=None):
+        seen.append(read_timeout)
+        return b"body", None
+
+    with patch.object(client, "_fetch_simple", _simple), patch.object(
+        client, "_fetch_body_or_redirect", _hop
+    ):
+        await mm_http.fetch_bytes(
+            "https://example.com/x.png", 30.0, policy=policy, read_timeout=2.5
+        )
+    assert seen == [2.5]
 
 
 # --- Download cap (collect_capped) ---
