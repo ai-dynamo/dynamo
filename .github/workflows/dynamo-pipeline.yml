@@ -167,6 +167,27 @@ jobs:
           cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
 
+      - name: Run runtime health-check integration tests
+        env:
+          NATS_SERVER: nats://127.0.0.1:4222
+          # The health-check test helpers register QUIC response servers.
+          DYN_RESPONSE_PLANE: quic
+          SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          SCCACHE_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+        shell: bash
+        run: |
+          eval "$(/workspace/container/use-sccache.sh setup-env)"
+          # The test helper uses in-memory discovery and a real NATS connection.
+          nats_dir=$(mktemp -d)
+          nats-server -js -a 127.0.0.1 -p 4222 -m 8222 -sd "$nats_dir" &
+          nats_pid=$!
+          trap 'kill "$nats_pid"; wait "$nats_pid" || true; rm -rf "$nats_dir"' EXIT
+          curl --fail --silent --show-error --retry 30 --retry-delay 1 \
+            --retry-connrefused http://127.0.0.1:8222/healthz
+          # Enabling integration on dynamo-llm does not run dynamo-runtime's tests.
+          cargo test --locked -p dynamo-runtime --lib --features integration \
+            health_check:: -- --test-threads=1 --nocapture
+
   mypy:
     needs: image
     runs-on: prod-tester-amd-v2
