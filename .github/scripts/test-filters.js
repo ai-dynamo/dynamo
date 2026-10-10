@@ -125,6 +125,16 @@ const testCases = [
     desc: 'any docs/tests descendant triggers recipe check without core'
   },
   {
+    file: 'docs/fern/pages/recipes/_catalog/recipes/kimi-k3.yaml',
+    expect: { core: false, docs: true, examples: true },
+    desc: 'recipe catalog entry triggers the catalog validator in recipe check'
+  },
+  {
+    file: 'docs/fern/pages/recipes/feature-benchmarks/_catalog/schema.json',
+    expect: { core: false, docs: true, examples: true },
+    desc: 'benchmark catalog triggers the catalog validator in recipe check'
+  },
+  {
     file: 'deploy/operator/config/crd/bases/nvidia.com_dynamomodels.yaml',
     expect: { core: false, docs: false, examples: true, operator: true },
     desc: 'every operator CRD base triggers generated recipe OpenAPI checks'

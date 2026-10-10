@@ -431,7 +431,8 @@ Before submitting a recipe contribution, confirm that:
 - beta components retain the offline settings, backend workers retain the standard security context, and every container uses the catalog's exec form and image-pull policy;
 - probe ownership belongs to either the base or the optional `probes` Component, never both;
 - the target-cluster composition was rendered, checked with a server-side dry run, and exercised on its intended cluster;
-- matrix-backed changes pass `python3 scripts/kustomize-matrix.py check`; and
-- generated matrix files were regenerated, reviewed, and not hand-edited.
+- matrix-backed changes pass `python3 scripts/kustomize-matrix.py check`;
+- generated matrix files were regenerated, reviewed, and not hand-edited; and
+- every target in the recipe's catalog entry has a [lifecycle badge](../docs/fern/pages/recipes/_catalog/README.md#lifecycle-badges). Contributors outside NVIDIA use `community`.
 
 Static rendering, schema, and matrix checks do not prove runtime correctness or performance. Include the relevant target-cluster qualification when requesting review.

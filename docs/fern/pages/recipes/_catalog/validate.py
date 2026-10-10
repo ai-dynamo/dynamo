@@ -19,6 +19,12 @@ Checks, for BOTH catalogs:
      in the benchmark index; benchmark related_recipes ids exist in the recipe
      index (active OR deferred); benchmark promotion_candidate.deferred_recipe_id
      refers to a known recipe.
+  8. Every recipe target has a badge with the evidence it claims:
+     nvidia-optimized needs a benchmark asset and published performance;
+     nvidia-certified also needs a NIM Factory certification record; community
+     needs a named maintainer and must cover every target of the recipe.
+     Recipes listed in badge_backfill.yaml predate required badges and may
+     leave targets without one until they are backfilled.
 
 Exit code is non-zero on any failure.
 
@@ -475,6 +481,89 @@ def check_recipe_specific_image_ownership(entries):
     ERRORS.extend(_image_attribution.recipe_image_ownership_errors(entries))
 
 
+BADGES = ("nvidia-validated", "nvidia-optimized", "nvidia-certified", "community")
+CERTIFICATION_KEYS = ("source", "ref", "image", "date")
+BADGE_BACKFILL = os.path.join(RECIPES_CAT, "badge_backfill.yaml")
+
+
+def recipe_badge_errors(obj, label, pending=False):
+    """Return badge errors for each target of a recipe.
+
+    Every target needs a badge backed by its evidence. A recipe still listed
+    in badge_backfill.yaml (``pending``) may leave targets without one.
+    """
+    errors = []
+    targets = [t for t in obj.get("targets") or [] if isinstance(t, dict)]
+    for t in targets:
+        badge = t.get("badge")
+        where = "[%s] target %s" % (label, t.get("id"))
+        if badge is None:
+            if not pending:
+                errors.append(
+                    "%s needs a badge: one of %s" % (where, ", ".join(BADGES))
+                )
+            continue
+        if badge not in BADGES:
+            errors.append(
+                "%s badge must be one of %s, got %r" % (where, ", ".join(BADGES), badge)
+            )
+            continue
+        if badge in ("nvidia-optimized", "nvidia-certified"):
+            bench = t.get("benchmark")
+            basset = bench.get("asset") if isinstance(bench, dict) else None
+            perf = t.get("expected_performance")
+            published = isinstance(perf, dict) and perf.get("available") is True
+            if not basset or not os.path.isfile(resolve_repo_path(basset)):
+                errors.append("%s %s needs a benchmark asset" % (where, badge))
+            if not published:
+                errors.append(
+                    "%s %s needs expected_performance.available: true" % (where, badge)
+                )
+        if badge == "nvidia-certified":
+            cert = t.get("certification")
+            if not isinstance(cert, dict) or not all(
+                cert.get(k) for k in CERTIFICATION_KEYS
+            ):
+                errors.append(
+                    "%s nvidia-certified needs a certification record with %s"
+                    % (where, ", ".join(CERTIFICATION_KEYS))
+                )
+        elif "certification" in t:
+            errors.append(
+                "%s has a certification record but badge is %s" % (where, badge)
+            )
+    community = [t for t in targets if t.get("badge") == "community"]
+    if community:
+        if not obj.get("maintainer"):
+            errors.append("[%s] community badge needs a named maintainer" % label)
+        if len(community) != len(targets):
+            errors.append(
+                "[%s] community badge must apply to every target or none" % label
+            )
+    return errors
+
+
+def badge_backfill_errors(pending, entries):
+    """Return errors for recipe ids in badge_backfill.yaml.
+
+    The list only holds recipes that predate required badges, so an unknown id
+    or a recipe whose targets are all badged must leave the list.
+    """
+    errors = []
+    for rid in pending:
+        obj = entries.get(rid)
+        if not isinstance(obj, dict):
+            errors.append("[badge_backfill] unknown recipe id: %s" % rid)
+        elif all(
+            isinstance(t, dict) and t.get("badge") for t in obj.get("targets") or []
+        ):
+            errors.append(
+                "[badge_backfill] %s has a badge on every target; remove it from the list"
+                % rid
+            )
+    return errors
+
+
 def check_assets_benchmark(obj, label):
     for a in obj.get("arms") or []:
         if not isinstance(a, dict):
@@ -521,6 +610,11 @@ def main():
     check_internal_id(rec_entries, "recipes")
     check_internal_id(ben_entries, "benchmarks")
 
+    # 8. recipes still waiting for their badges
+    backfill = load_yaml(BADGE_BACKFILL) if os.path.isfile(BADGE_BACKFILL) else None
+    pending = list((backfill or {}).get("pending") or [])
+    ERRORS.extend(badge_backfill_errors(pending, rec_entries))
+
     # 4. schema validation + 5/6 path checks
     for fid, obj in sorted(rec_entries.items()):
         if not isinstance(obj, dict):
@@ -529,6 +623,8 @@ def main():
         validate_against_schema(obj, rec_schema, label)
         check_page(obj, label)
         check_assets_recipe(obj, label)
+        # 8. badges and their evidence
+        ERRORS.extend(recipe_badge_errors(obj, label, pending=fid in pending))
     check_recipe_specific_image_ownership(rec_entries)
 
     for fid, obj in sorted(ben_entries.items()):
