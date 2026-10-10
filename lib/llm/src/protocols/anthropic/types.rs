@@ -722,6 +722,29 @@ fn ends_on_a_finished_value(trimmed: &str) -> bool {
         || tail.ends_with("null")
 }
 
+/// Preserve a matched string stop without confusing token stops with delimiters.
+pub(super) fn anthropic_stop_fields(
+    finish_reason: &dynamo_protocols::types::FinishReason,
+    stop_reason: Option<&serde_json::Value>,
+) -> (AnthropicStopReason, Option<String>) {
+    use dynamo_protocols::types::FinishReason;
+
+    match finish_reason {
+        FinishReason::Stop => match stop_reason.and_then(serde_json::Value::as_str) {
+            Some(sequence) => (
+                AnthropicStopReason::StopSequence,
+                Some(sequence.to_string()),
+            ),
+            None => (AnthropicStopReason::EndTurn, None),
+        },
+        FinishReason::Length => (AnthropicStopReason::MaxTokens, None),
+        FinishReason::ToolCalls | FinishReason::FunctionCall => {
+            (AnthropicStopReason::ToolUse, None)
+        }
+        FinishReason::ContentFilter => (AnthropicStopReason::Refusal, None),
+    }
+}
+
 /// Convert a completed chat completion response into an Anthropic Messages response.
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
@@ -734,6 +757,7 @@ pub fn chat_completion_to_anthropic_response(
     let choice = chat_resp.inner.choices.into_iter().next();
     let mut content = Vec::new();
     let mut stop_reason = None;
+    let mut stop_sequence = None;
 
     if let Some(choice) = choice {
         // Only the token limit means that a call may have been cut off. The loop
@@ -744,14 +768,17 @@ pub fn chat_completion_to_anthropic_response(
             Some(dynamo_protocols::types::FinishReason::Length)
         );
 
-        // Map finish_reason
-        stop_reason = choice.finish_reason.map(|fr| match fr {
-            dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-            dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
-            dynamo_protocols::types::FinishReason::ToolCalls => AnthropicStopReason::ToolUse,
-            dynamo_protocols::types::FinishReason::ContentFilter => AnthropicStopReason::Refusal,
-            dynamo_protocols::types::FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
-        });
+        if let Some(finish_reason) = &choice.finish_reason {
+            let fields = anthropic_stop_fields(
+                finish_reason,
+                chat_resp
+                    .nvext
+                    .as_ref()
+                    .and_then(|ext| ext.get("stop_reason")),
+            );
+            stop_reason = Some(fields.0);
+            stop_sequence = fields.1;
+        }
 
         // Extract tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
@@ -854,7 +881,7 @@ pub fn chat_completion_to_anthropic_response(
         content,
         model: model.to_string(),
         stop_reason,
-        stop_sequence: None,
+        stop_sequence,
         usage,
     }
 }
@@ -862,6 +889,74 @@ pub fn chat_completion_to_anthropic_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unary_stop_sequence_metadata() {
+        for (finish, matched, expected_reason, expected_sequence) in [
+            (
+                "stop",
+                serde_json::json!("</answer>"),
+                "stop_sequence",
+                Some("</answer>"),
+            ),
+            (
+                "stop",
+                serde_json::json!("\n\nHuman:"),
+                "stop_sequence",
+                Some("\n\nHuman:"),
+            ),
+            ("stop", serde_json::json!(42), "end_turn", None),
+            ("length", serde_json::json!("</answer>"), "max_tokens", None),
+            (
+                "content_filter",
+                serde_json::json!("</answer>"),
+                "refusal",
+                None,
+            ),
+            (
+                "tool_calls",
+                serde_json::json!("</answer>"),
+                "tool_use",
+                None,
+            ),
+            (
+                "function_call",
+                serde_json::json!("</answer>"),
+                "tool_use",
+                None,
+            ),
+        ] {
+            let mut chat = serde_json::json!({
+                "id": "chatcmpl-test", "object": "chat.completion", "created": 0,
+                "model": "test-model", "choices": [{
+                    "index": 0, "finish_reason": finish,
+                    "message": {"role": "assistant", "content": "<answer>2 plus 3 is 5"}
+                }], "nvext": {"stop_reason": matched}
+            });
+            if expected_reason == "tool_use" {
+                chat["choices"][0]["message"]["tool_calls"] = serde_json::json!([{
+                    "id": "call-1", "type": "function",
+                    "function": {"name": "calculate", "arguments": "{}"}
+                }]);
+            }
+            let response = chat_completion_to_anthropic_response(
+                serde_json::from_value(chat).unwrap(),
+                "test-model",
+                None,
+            );
+            let response = serde_json::to_value(response).unwrap();
+            assert_eq!(
+                response["stop_reason"], expected_reason,
+                "{finish}: {matched}"
+            );
+            assert_eq!(
+                response["stop_sequence"],
+                serde_json::json!(expected_sequence),
+                "{finish}: {matched}"
+            );
+            assert!(response.get("nvext").is_none());
+        }
+    }
 
     #[test]
     fn test_simple_user_message_conversion() {
