@@ -37,6 +37,8 @@ mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
 request-trace-bench = []
 # S3 destination for the request-trace sink, reusing the existing object_store client.
 request-trace-s3 = []
+# Optional read-only Global View HTTP endpoints for POC inspection.
+global-view-diagnostics = ["dynamo-kv-router/global-view-diagnostics"]
 
 [[bench]]
 name = "tokenizer_simple"

@@ -18,6 +18,7 @@ metrics = ["dep:prometheus"]
 runtime-protocols = ["dep:dynamo-runtime"]
 bench = []
 profile = []
+global-view-diagnostics = ["dep:axum"]
 standalone-indexer = ["dep:axum", "dep:reqwest", "dep:zmq", "dep:chrono", "dep:tracing-appender"]
 standalone-slot-tracker = ["dep:axum", "dep:zmq"]
 standalone-selection = ["standalone-indexer", "dep:once_cell"]
@@ -53,6 +54,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 zmq = { version = "0.10", optional = true }
+url = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 zeroize = { workspace = true }

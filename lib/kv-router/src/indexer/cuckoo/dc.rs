@@ -41,7 +41,9 @@ pub struct DcCkfFormatIdentity {
 }
 
 impl DcCkfFormatIdentity {
-    pub(super) const fn new(seed: u64, bucket_count: usize) -> Self {
+    /// Construct from a validated CKF format. The consumer validates bucket
+    /// count again when its table is allocated.
+    pub const fn new(seed: u64, bucket_count: usize) -> Self {
         Self {
             format_version: FORMAT_VERSION,
             seed,
