@@ -8,6 +8,9 @@ use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
+use crate::plugins::worker_selection::experimental::{
+    KvTransferAction, KvTransferInput, KvTransferPolicy, with_kv_transfer_policy,
+};
 use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
@@ -469,10 +472,30 @@ async fn unreachable_remote_indexer_is_reported_not_ready() {
 async fn hint_fixture(
     configure: impl Fn(&mut WorkerRequest),
 ) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
+    hint_fixture_with_policy(
+        configure,
+        Arc::new(|config, role, _| {
+            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
+        }),
+    )
+    .await
+}
+
+async fn hint_fixture_with_policy(
+    configure: impl Fn(&mut WorkerRequest),
+    policy_factory: WorkerSelectionPolicyFactory,
+) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
     use crate::indexer::KvIndexerInterface;
     use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 
-    let core = local_core(test_config(true));
+    let core = SelectionCore::try_new_local(
+        test_config(true),
+        1,
+        CancellationToken::new(),
+        SelectionCacheConfig::default(),
+        policy_factory,
+    )
+    .expect("valid test config");
     for worker_id in [1, 2] {
         let mut request = worker_with_kv_events(worker_id);
         configure(&mut request);
@@ -558,6 +581,160 @@ async fn state_agent_workers_are_not_router_hint_sources() {
     // Worker 1 holds the prefix but reports through a state agent.
     let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
     assert!(response.kv_hint.is_none());
+}
+
+type KvTransferDecisions = Arc<parking_lot::Mutex<Vec<(WorkerWithDpRank, u32, u32)>>>;
+
+/// Records each fetch-hint decision and returns a fixed action.
+struct FixedKvTransferPolicy {
+    action: KvTransferAction,
+    decisions: KvTransferDecisions,
+}
+
+impl KvTransferPolicy for FixedKvTransferPolicy {
+    fn decide(&mut self, input: KvTransferInput<'_>) -> KvTransferAction {
+        self.decisions.lock().push((
+            input.target(),
+            input.local_prefix_blocks(),
+            input.source_prefix_blocks(),
+        ));
+        self.action
+    }
+}
+
+#[tokio::test]
+async fn kv_transfer_policy_controls_the_router_hint() {
+    for (action, expect_hint) in [
+        (KvTransferAction::Default, true),
+        (KvTransferAction::FetchFrom(0), true),
+        (KvTransferAction::Skip, false),
+        (KvTransferAction::FetchFrom(5), false),
+    ] {
+        let decisions = KvTransferDecisions::default();
+        let factory_decisions = Arc::clone(&decisions);
+        let factory: WorkerSelectionPolicyFactory = Arc::new(move |config, role, _| {
+            with_kv_transfer_policy(
+                crate::WorkerSelectionPolicy::reference(
+                    config.clone(),
+                    role.default_selector_label(),
+                ),
+                Box::new(FixedKvTransferPolicy {
+                    action,
+                    decisions: Arc::clone(&factory_decisions),
+                }),
+            )
+        });
+        let (core, _entry, tokens) = hint_fixture_with_policy(hint_capable, factory).await;
+
+        // Worker 1 holds both blocks; worker 2 holds none.
+        let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
+        assert_eq!(response.kv_hint.is_some(), expect_hint, "{action:?}");
+        assert_eq!(*decisions.lock(), vec![(WorkerWithDpRank::new(2, 0), 0, 2)]);
+
+        // No source beats worker 1's own prefix, so the policy is not consulted.
+        let response = reserve_pinned(&core, "to-worker-1", &tokens, 1).await;
+        assert!(response.kv_hint.is_none());
+        assert_eq!(decisions.lock().len(), 1);
+    }
+}
+
+type OfferedSources = Arc<parking_lot::Mutex<Vec<(Option<WorkerWithDpRank>, u32)>>>;
+
+/// Prefers a source in the selected worker's transfer domain, else keeps the router's choice.
+struct SameDomainPolicy {
+    offered: OfferedSources,
+}
+
+impl KvTransferPolicy for SameDomainPolicy {
+    fn decide(&mut self, input: KvTransferInput<'_>) -> KvTransferAction {
+        self.offered.lock().extend(
+            input
+                .sources()
+                .iter()
+                .map(|source| (source.worker(), source.prefix_blocks())),
+        );
+        let domain = |worker| {
+            input
+                .worker_metadata(worker)
+                .and_then(|metadata| metadata.kv_transfer_domain())
+        };
+        let Some(target_domain) = domain(input.target()) else {
+            return KvTransferAction::Default;
+        };
+        input
+            .sources()
+            .iter()
+            .position(|source| source.worker().and_then(domain) == Some(target_domain))
+            .map_or(KvTransferAction::Default, KvTransferAction::FetchFrom)
+    }
+}
+
+#[tokio::test]
+async fn kv_transfer_policy_chooses_among_sources() {
+    use crate::indexer::KvIndexerInterface;
+    use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+
+    let offered = OfferedSources::default();
+    let factory_offered = Arc::clone(&offered);
+    let factory: WorkerSelectionPolicyFactory = Arc::new(move |config, role, _| {
+        with_kv_transfer_policy(
+            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label()),
+            Box::new(SameDomainPolicy {
+                offered: Arc::clone(&factory_offered),
+            }),
+        )
+    });
+    let in_rack = |request: &mut WorkerRequest, rack: &str| {
+        hint_capable(request);
+        request.kv_transfer_domain = Some(rack.to_string());
+    };
+    // Worker 1 holds both blocks in rack b; worker 2 is the target in rack a.
+    let (core, entry, tokens) = hint_fixture_with_policy(
+        |request| {
+            in_rack(
+                request,
+                if request.worker_id == 1 {
+                    "rack-b"
+                } else {
+                    "rack-a"
+                },
+            )
+        },
+        factory,
+    )
+    .await;
+    // Worker 3 holds only the first block, in rack a.
+    let mut worker3 = worker_with_kv_events(3);
+    in_rack(&mut worker3, "rack-a");
+    core.upsert_worker(worker3).await.expect("worker upsert");
+    let hashes: Vec<u64> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
+        .into_iter()
+        .map(|hash| hash.0)
+        .collect();
+    entry
+        .indexer
+        .apply_event_routed(store_event(3, 0, 1, &[], &hashes[..1], StorageTier::Device))
+        .await
+        .unwrap();
+    if let Indexer::Single { primary, .. } = &entry.indexer {
+        let _ = primary.flush().await;
+    }
+
+    let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
+
+    // Both sources are offered, longest prefix first; the policy takes the same-rack one.
+    assert_eq!(
+        *offered.lock(),
+        vec![
+            (Some(WorkerWithDpRank::new(1, 0)), 2),
+            (Some(WorkerWithDpRank::new(3, 0)), 1),
+        ]
+    );
+    let hint = response.kv_hint.expect("hint from the chosen source");
+    let payload: KvSourceLocationsPayload =
+        serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap()).unwrap();
+    assert_eq!(payload.source_control_endpoint, "tcp://worker-3:9000");
+    assert_eq!(payload.block_hashes.len(), 1);
 }
 
 #[tokio::test]
@@ -3224,8 +3401,13 @@ fn hint_source_endpoint_follows_the_source_dp_rank() {
         ),
     )]);
     let candidates = hint_candidates(&[101, 102], vec![(WorkerWithDpRank::new(7, 1).into(), 2)]);
-    let hint =
-        transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+    let hint = transfer_hint_for_selection(
+        &configs,
+        WorkerWithDpRank::new(7, 0),
+        0,
+        Some(&candidates),
+        None,
+    );
     assert_eq!(
         hint.map(|payload| payload.source_control_endpoint),
         Some("tcp://127.0.0.1:23281".to_string())
@@ -3248,14 +3430,24 @@ fn hint_source_must_share_the_target_worker_type() {
         ],
     );
     // The longer decode prefix is skipped for a prefill target.
-    let prefill =
-        transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates))
-            .expect("prefill hint");
+    let prefill = transfer_hint_for_selection(
+        &configs,
+        WorkerWithDpRank::new(7, 0),
+        0,
+        Some(&candidates),
+        None,
+    )
+    .expect("prefill hint");
     assert_eq!(prefill.source_control_endpoint, "tcp://127.0.0.1:23281");
     assert_eq!(prefill.block_hashes.len(), 2);
-    let decode =
-        transfer_hint_for_selection(&configs, WorkerWithDpRank::new(10, 0), 0, Some(&candidates))
-            .expect("decode hint");
+    let decode = transfer_hint_for_selection(
+        &configs,
+        WorkerWithDpRank::new(10, 0),
+        0,
+        Some(&candidates),
+        None,
+    )
+    .expect("decode hint");
     assert_eq!(decode.source_control_endpoint, "tcp://127.0.0.1:23282");
     assert_eq!(decode.block_hashes.len(), 3);
 }
@@ -3308,8 +3500,13 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
             None,
         )],
     )));
-    let hint =
-        transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates))
-            .expect("hint");
+    let hint = transfer_hint_for_selection(
+        &configs,
+        WorkerWithDpRank::new(7, 0),
+        0,
+        Some(&candidates),
+        None,
+    )
+    .expect("hint");
     assert_eq!(hint.source_control_endpoint, "tcp://persistent-owner:23280");
 }
