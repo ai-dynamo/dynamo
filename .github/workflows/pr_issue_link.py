@@ -188,6 +188,20 @@ def repo_visible(repo: str, token: str) -> tuple[bool, bool]:
     return False, False
 
 
+def has_repo_write_permission(repo: str, username: str, token: str) -> bool:
+    """Trust a fork author only when GitHub confirms write access to this repo."""
+    status, body = http_json(
+        f"https://api.github.com/repos/{repo}/collaborators/{username}/permission",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    # Fail closed on missing permissions or API errors: an outside contributor
+    # must not be able to probe which private Linear issue IDs exist.
+    return status == 200 and body.get("permission") in {"write", "maintain", "admin"}
+
+
 def verify_linear_issue(identifier: str, api_key: str) -> tuple[bool, bool]:
     """Return (exists, api_ok)."""
     if not api_key:
@@ -230,10 +244,11 @@ def main() -> int:
     repo = os.environ.get("REPO", "").lower()
     head_repo = os.environ.get("PR_HEAD_REPO", repo)
     association = os.environ.get("PR_AUTHOR_ASSOCIATION", "").upper()
-    # Org authors keep Linear verification from forks; the fork gating
-    # below applies only to authors outside the org.
+    # author_association can say CONTRIBUTOR for a repository writer. GitHub's
+    # repository permission is authoritative for whether a fork author may
+    # submit a Linear reference for verification.
     trusted_author = association in {"OWNER", "MEMBER", "COLLABORATOR"}
-    is_untrusted_fork = head_repo.lower() != repo.lower() and not trusted_author
+    needs_permission_check = head_repo.lower() != repo.lower() and not trusted_author
     gh_token = os.environ.get("GITHUB_TOKEN", "")
     linear_key = os.environ.get("LINEAR_API_KEY", "")
     blocking_date = os.environ.get("BLOCKING_DATE", "2026-10-21")
@@ -354,6 +369,11 @@ def main() -> int:
         )
 
     all_linear_ids = sorted(linear_ids, key=lambda i: (i not in intent_linear, i))
+    is_untrusted_fork = needs_permission_check and not (
+        all_linear_ids
+        and not verified
+        and has_repo_write_permission(repo, author, gh_token)
+    )
     fork_linear_ids: list[str] = []
     decided_linear = False
     for identifier in all_linear_ids[:MAX_CANDIDATES]:
@@ -471,7 +491,7 @@ def main() -> int:
             [
                 "",
                 f"Linear references found ({', '.join(fork_linear_ids)}) cannot be",
-                "verified for fork PRs from outside the org; reference a GitHub",
+                "verified for fork PRs without repository write access; reference a GitHub",
                 "issue instead.",
             ]
             if fork_linear_ids
