@@ -21,13 +21,14 @@ use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use once_cell::sync::OnceCell;
 use std::ffi::OsStr;
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
 use thiserror::Error;
 use tmq::{
     AsZmqSocket, Context, Message, Multipart, SocketBuilder,
     publish::{Publish, publish},
-    subscribe::{Subscribe, subscribe},
 };
+use tokio::io::{Interest, unix::AsyncFd};
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::task::AbortOnDropHandle;
 
@@ -72,6 +73,9 @@ const ZMQ_SNDHWM: i32 = 100_000; // Send buffer: 100K messages
 const ZMQ_RCVHWM: i32 = 100_000; // Receive buffer: 100K messages
 const ZMQ_SNDTIMEOUT_MS: i32 = 0; // Send timeout: fail fast under pressure
 const ZMQ_RCVTIMEOUT_MS: i32 = 100; // Receive timeout: 100ms (avoids blocking forever)
+
+/// Messages a [`SubReceiver`] returns back to back before yielding to the scheduler.
+const SUB_RECV_BURST: usize = 64;
 
 const ZMQ_SOCKET_LIMIT_GUIDANCE: &str = "ZMQ could not create another socket. The process may have reached libzmq's ZMQ_MAX_SOCKETS limit or its file-descriptor limit. Reduce direct-ZMQ peers or raise the limit with `ulimit -n`. For routers with many direct-ZMQ KV publishers, increase `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB` (default: 1) to group more publisher endpoints per subscriber socket";
 const PROCESS_FD_LIMIT_GUIDANCE: &str = "The process reached its file-descriptor limit. Reduce open file descriptors or raise the limit with `ulimit -n`";
@@ -153,21 +157,18 @@ where
         .set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
 }
 
-fn configure_subscribe_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
-where
-    T: tmq::FromZmqSocket<T>,
-{
-    configure_subscribe_builder_with_hwm(builder, ZMQ_RCVHWM)
-}
-
-fn configure_subscribe_builder_with_hwm<T>(
-    builder: SocketBuilder<T>,
+fn open_sub_socket(
+    ctx: &Context,
+    endpoint: &str,
     rcvhwm: i32,
-) -> SocketBuilder<T>
-where
-    T: tmq::FromZmqSocket<T>,
-{
-    builder.set_rcvhwm(rcvhwm).set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
+    ipv6: bool,
+) -> zmq::Result<zmq::Socket> {
+    let socket = ctx.socket(zmq::SUB)?;
+    socket.set_rcvhwm(rcvhwm)?;
+    socket.set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)?;
+    socket.set_ipv6(ipv6)?;
+    socket.connect(endpoint)?;
+    Ok(socket)
 }
 
 /// Keeps a received ZMQ message alive for as long as any derived `Bytes` exists.
@@ -179,6 +180,98 @@ struct ZmqMessageOwner(Message);
 impl AsRef<[u8]> for ZmqMessageOwner {
     fn as_ref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+/// A ZMQ socket whose `ZMQ_FD` is registered with the Tokio reactor.
+struct ZmqFdSocket {
+    socket: zmq::Socket,
+    fd: RawFd,
+}
+
+impl AsRawFd for ZmqFdSocket {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd
+    }
+}
+
+/// Receives from a SUB socket by draining it with non-blocking reads.
+///
+/// tmq's SUB stream reads `ZMQ_EVENTS` before every message, and each read
+/// makes libzmq process its command mailbox with a `poll(2)` system call.
+/// This receiver instead reads with `DONTWAIT` until the socket reports
+/// `EAGAIN`, then reads `ZMQ_EVENTS` once before waiting on the
+/// edge-triggered `ZMQ_FD`, as libzmq requires after every receive. A message
+/// that arrives between the drain and the wait therefore still wakes the task.
+///
+/// `next` is cancel safe: it never holds a partial multipart across an await.
+/// Like tmq's stream, a pending `next` that is dropped leaves the task's waker
+/// registered, so a caller may poll a fresh `next` only after a wakeup.
+struct SubReceiver {
+    socket: AsyncFd<ZmqFdSocket>,
+    burst: usize,
+}
+
+impl SubReceiver {
+    fn new(socket: zmq::Socket) -> tmq::Result<Self> {
+        let fd = socket.get_fd()?;
+        let socket = AsyncFd::with_interest(ZmqFdSocket { socket, fd }, Interest::READABLE)?;
+        Ok(Self { socket, burst: 0 })
+    }
+
+    async fn next(&mut self) -> tmq::Result<Multipart> {
+        loop {
+            if self.burst >= SUB_RECV_BURST {
+                self.burst = 0;
+                tokio::task::yield_now().await;
+            }
+            if let Some(frames) = try_recv_multipart(self.get_socket())? {
+                self.burst += 1;
+                return Ok(frames);
+            }
+            self.burst = 0;
+            // A receive may consume the ZMQ_FD signal for a message that is
+            // still queued, so check the event state before waiting on the edge.
+            if self.get_socket().get_events()?.contains(zmq::POLLIN) {
+                continue;
+            }
+            // Clear before draining again: a signal raised during the drain
+            // sets readiness anew instead of being lost. Unlike `readable_mut`,
+            // whose future deregisters its waker on drop, `poll_read_ready_mut`
+            // leaves the waker registered when a pending `next` is dropped.
+            std::future::poll_fn(|cx| {
+                self.socket
+                    .poll_read_ready_mut(cx)
+                    .map_ok(|mut guard| guard.clear_ready())
+            })
+            .await?;
+        }
+    }
+}
+
+impl AsZmqSocket for SubReceiver {
+    fn get_socket(&self) -> &zmq::Socket {
+        &self.socket.get_ref().socket
+    }
+}
+
+/// Receives one queued multipart message, or `None` when the socket has none.
+fn try_recv_multipart(socket: &zmq::Socket) -> tmq::Result<Option<Multipart>> {
+    let mut frames = Multipart::default();
+    loop {
+        let mut frame = Message::new();
+        match socket.recv(&mut frame, zmq::DONTWAIT) {
+            Ok(()) => {
+                let more = frame.get_more();
+                frames.push_back(frame);
+                if !more {
+                    return Ok(Some(frames));
+                }
+            }
+            // libzmq delivers multipart messages atomically, so only the first frame can be absent.
+            Err(zmq::Error::EAGAIN) if frames.is_empty() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 
@@ -327,7 +420,7 @@ pub type ZmqWireStream =
 ///
 /// The caller must keep this value in one task. ZMQ SUB sockets are not thread-safe.
 pub struct DynamicZmqSubSocket {
-    socket: Subscribe,
+    socket: SubReceiver,
     expected_topic: Vec<u8>,
 }
 
@@ -357,7 +450,7 @@ impl DynamicZmqSubSocket {
     /// Receive and decode the next multipart message.
     pub async fn next(&mut self) -> Option<Result<ZmqWireMessage>> {
         loop {
-            let frames = match self.socket.next().await? {
+            let frames = match self.socket.next().await {
                 Ok(frames) => frames,
                 Err(error) => return Some(Err(error.into())),
             };
@@ -473,18 +566,18 @@ impl ValidatedZmqSource {
 }
 
 impl ZmqSubTransport {
-    fn connect_socket(endpoint: &str, topic: &str) -> Result<Subscribe> {
+    fn connect_socket(endpoint: &str, topic: &str) -> Result<SubReceiver> {
         Self::connect_socket_with_rcvhwm(endpoint, topic, ZMQ_RCVHWM)
     }
 
-    fn connect_socket_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Subscribe> {
+    fn connect_socket_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<SubReceiver> {
         anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
         let ctx = shared_zmq_context()?;
-        let socket = connect_tmq_socket(
-            configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm),
-            endpoint,
-        )?;
-        Ok(socket.subscribe(topic.as_bytes())?)
+        let ipv6 = ipv6_option_for(endpoint)?;
+        let socket = open_sub_socket(&ctx, endpoint, rcvhwm, ipv6)
+            .map_err(|error| map_socket_creation_error(error.into()))?;
+        socket.set_subscribe(topic.as_bytes())?;
+        SubReceiver::new(socket).map_err(map_socket_creation_error)
     }
 
     /// Create a new ZMQ subscriber by connecting to a single endpoint.
@@ -561,12 +654,12 @@ impl ZmqSubTransport {
         Self::single_consumer_stream(socket, topic)
     }
 
-    fn single_consumer_stream(mut socket: Subscribe, topic: &str) -> Result<ZmqWireStream> {
+    fn single_consumer_stream(mut socket: SubReceiver, topic: &str) -> Result<ZmqWireStream> {
         let expected_topic = topic.as_bytes().to_vec();
 
         let stream = stream! {
-            while let Some(result) = socket.next().await {
-                let frames = match result {
+            loop {
+                let frames = match socket.next().await {
                     Ok(frames) => frames,
                     Err(error) => {
                         yield Err(error.into());
@@ -603,11 +696,7 @@ impl ZmqSubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = shared_zmq_context()?;
-        let socket =
-            connect_tmq_socket(configure_subscribe_builder(subscribe(&ctx)), first_endpoint)?
-                .subscribe(topic.as_bytes())?;
-
+        let socket = Self::connect_socket(first_endpoint, topic)?;
         for endpoint in endpoints_iter {
             connect_zmq_socket(&socket, endpoint)?;
             tracing::debug!(endpoint = %endpoint, "ZMQ SUB connected to endpoint");
@@ -630,17 +719,12 @@ impl ZmqSubTransport {
     }
 
     fn start_socket_pump(
-        mut socket: Subscribe,
+        mut socket: SubReceiver,
         broadcast_tx: broadcast::Sender<Bytes>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             loop {
-                let Some(result) = socket.next().await else {
-                    tracing::info!("ZMQ socket stream ended");
-                    break;
-                };
-
-                let frames = match result {
+                let frames = match socket.next().await {
                     Ok(frames) => frames,
                     Err(error) => {
                         tracing::error!(error = %error, "ZMQ receive error in socket pump");
@@ -761,8 +845,270 @@ mod tests {
 
     use super::*;
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tmq::subscribe;
     use tokio::time::{Duration, timeout};
+
+    const ANCHOR_SEQUENCE: u64 = u64::MAX;
+
+    fn wire_identity(frames: Multipart, topic: &str) -> (u64, u64) {
+        let message = decode_multipart(frames, topic.as_bytes()).unwrap();
+        (message.publisher_id, message.sequence)
+    }
+
+    /// Publishes anchors until one arrives, so the subscription is live.
+    async fn await_subscription(
+        publisher: &ZmqPubTransport,
+        receiver: &mut SubReceiver,
+        topic: &str,
+    ) {
+        let anchor = encoded_event(topic, 1, ANCHOR_SEQUENCE);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                publisher.publish(topic, anchor.clone()).await.unwrap();
+                if let Ok(Ok(_)) = timeout(Duration::from_millis(25), receiver.next()).await {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("subscription should become live");
+    }
+
+    /// Discards queued messages and leaves the receiver drained to `EAGAIN`.
+    ///
+    /// Inproc publishes enqueue synchronously, so nothing is still in flight.
+    fn discard_queued(receiver: &mut SubReceiver) {
+        while try_recv_multipart(receiver.get_socket()).unwrap().is_some() {}
+        receiver.burst = 0;
+    }
+
+    async fn ready_inproc_receiver(name: &str, topic: &str) -> (ZmqPubTransport, SubReceiver) {
+        let endpoint = format!("inproc://dynamo-zmq-{name}-{}", std::process::id());
+        let (publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+        let mut receiver = ZmqSubTransport::connect_socket(&endpoint, topic).unwrap();
+        await_subscription(&publisher, &mut receiver, topic).await;
+        discard_queued(&mut receiver);
+        (publisher, receiver)
+    }
+
+    #[tokio::test]
+    async fn sub_receiver_drains_bursts_past_the_yield_bound_in_order() {
+        let topic = "drain-burst";
+        let (publisher, mut receiver) = ready_inproc_receiver("drain-burst", topic).await;
+        let count = 3 * SUB_RECV_BURST as u64 + 7;
+        for sequence in 0..count {
+            publisher
+                .publish(topic, encoded_event(topic, 1, sequence))
+                .await
+                .unwrap();
+        }
+
+        let yielded = Arc::new(AtomicBool::new(false));
+        let observer = tokio::spawn({
+            let yielded = yielded.clone();
+            async move { yielded.store(true, Ordering::SeqCst) }
+        });
+        for sequence in 0..count {
+            let frames = receiver.next().await.unwrap();
+            assert_eq!(wire_identity(frames, topic), (1, sequence));
+            if sequence == SUB_RECV_BURST as u64 {
+                assert!(
+                    yielded.load(Ordering::SeqCst),
+                    "a queued burst must not starve other tasks on this runtime"
+                );
+            }
+        }
+        observer.await.unwrap();
+        assert!(try_recv_multipart(receiver.get_socket()).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn sub_receiver_wakes_for_messages_that_arrive_after_a_drain() {
+        let topic = "drain-wakeup";
+        let (publisher, mut receiver) = ready_inproc_receiver("drain-wakeup", topic).await;
+        for sequence in 0..32 {
+            // Each round starts drained to EAGAIN, so libzmq's reader pipe is
+            // asleep and the next publish signals ZMQ_FD.
+            assert!(try_recv_multipart(receiver.get_socket()).unwrap().is_none());
+            let event = encoded_event(topic, 1, sequence);
+            let frames = match sequence % 4 {
+                // The message lands before the next receive arms ZMQ_FD.
+                0 => {
+                    publisher.publish(topic, event).await.unwrap();
+                    timeout(Duration::from_secs(1), receiver.next()).await
+                }
+                // Reading ZMQ_EVENTS consumes the signal, so ZMQ_FD stays quiet.
+                2 => {
+                    publisher.publish(topic, event).await.unwrap();
+                    assert!(
+                        receiver
+                            .get_socket()
+                            .get_events()
+                            .unwrap()
+                            .contains(zmq::POLLIN)
+                    );
+                    timeout(Duration::from_secs(1), receiver.next()).await
+                }
+                // The message lands while the receive waits on ZMQ_FD.
+                _ => {
+                    let publish = async {
+                        tokio::task::yield_now().await;
+                        publisher.publish(topic, event).await.unwrap();
+                    };
+                    let (frames, ()) =
+                        tokio::join!(timeout(Duration::from_secs(1), receiver.next()), publish);
+                    frames
+                }
+            };
+            let frames = frames.expect("receiver must wake for the message").unwrap();
+            assert_eq!(wire_identity(frames, topic), (1, sequence));
+        }
+    }
+
+    #[tokio::test]
+    async fn sub_receiver_keeps_the_waker_of_a_dropped_pending_receive() {
+        struct NotifyWaker(tokio::sync::Notify);
+        impl std::task::Wake for NotifyWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.notify_one();
+            }
+        }
+
+        let topic = "drain-dropped-poll";
+        let (publisher, mut receiver) = ready_inproc_receiver("drain-dropped-poll", topic).await;
+        for sequence in 0..8 {
+            let wake = Arc::new(NotifyWaker(tokio::sync::Notify::new()));
+            let waker = std::task::Waker::from(wake.clone());
+            let mut cx = std::task::Context::from_waker(&waker);
+            // Poll one receive to Pending and drop it, as a caller that polls
+            // a fresh `next` only after a wakeup does.
+            assert!(std::pin::pin!(receiver.next()).poll(&mut cx).is_pending());
+            publisher
+                .publish(topic, encoded_event(topic, 1, sequence))
+                .await
+                .unwrap();
+            timeout(Duration::from_secs(1), wake.0.notified())
+                .await
+                .expect("the dropped receive's waker must be woken");
+            let frames = timeout(Duration::from_secs(1), receiver.next())
+                .await
+                .expect("the woken receiver must have the message")
+                .unwrap();
+            assert_eq!(wire_identity(frames, topic), (1, sequence));
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::inproc_connect_before_bind("inproc")]
+    #[case::tcp_connect_after_bind("tcp://127.0.0.1:0")]
+    #[tokio::test]
+    async fn sub_receiver_delivers_every_message_after_a_slow_join(#[case] transport: &str) {
+        let topic = "drain-slow-joiner";
+        let (publisher, mut receiver) = if transport == "inproc" {
+            let endpoint = format!(
+                "inproc://dynamo-zmq-drain-slow-joiner-{}",
+                std::process::id()
+            );
+            let receiver = ZmqSubTransport::connect_socket(&endpoint, topic).unwrap();
+            let (publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+            (publisher, receiver)
+        } else {
+            let (publisher, endpoint) = ZmqPubTransport::bind(transport, topic).await.unwrap();
+            let receiver = ZmqSubTransport::connect_socket(&endpoint, topic).unwrap();
+            (publisher, receiver)
+        };
+        await_subscription(&publisher, &mut receiver, topic).await;
+
+        // Over TCP the I/O thread delivers asynchronously, so the receiver
+        // alternates between draining and waiting on ZMQ_FD.
+        let count = 2 * SUB_RECV_BURST as u64 + 1;
+        for sequence in 0..count {
+            publisher
+                .publish(topic, encoded_event(topic, 1, sequence))
+                .await
+                .unwrap();
+        }
+        timeout(Duration::from_secs(2), async {
+            let mut expected = 0;
+            while expected < count {
+                let frames = receiver.next().await.unwrap();
+                let (publisher_id, sequence) = wire_identity(frames, topic);
+                if sequence == ANCHOR_SEQUENCE {
+                    continue;
+                }
+                assert_eq!((publisher_id, sequence), (1, expected));
+                expected += 1;
+            }
+        })
+        .await
+        .expect("every message after the subscription is live should arrive");
+    }
+
+    #[tokio::test]
+    async fn dynamic_sub_socket_keeps_each_publisher_ordered_across_interleaved_bursts() {
+        let topic = "drain-interleaved";
+        let process = std::process::id();
+        let mut publishers = Vec::new();
+        for publisher_id in 1..=3_u64 {
+            let endpoint =
+                format!("inproc://dynamo-zmq-drain-interleaved-{process}-{publisher_id}");
+            let (publisher, endpoint) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+            publishers.push((publisher_id, publisher, endpoint));
+        }
+        let mut subscriber =
+            DynamicZmqSubSocket::connect_with_rcvhwm(&publishers[0].2, topic, ZMQ_RCVHWM).unwrap();
+        for (_, _, endpoint) in &publishers[1..] {
+            subscriber.add_endpoint(endpoint).unwrap();
+        }
+        let anchors = publishers
+            .iter()
+            .map(|(publisher_id, _, _)| encoded_event(topic, *publisher_id, ANCHOR_SEQUENCE))
+            .collect::<Vec<_>>();
+        let publications = publishers
+            .iter()
+            .zip(&anchors)
+            .map(|((_, publisher, _), anchor)| (publisher, anchor))
+            .collect::<Vec<_>>();
+        receive_publishers(&mut subscriber, topic, ANCHOR_SEQUENCE, 3, &publications).await;
+
+        // Interleave per-publisher chunks so the SUB fair queue switches pipes
+        // while each publisher still sends more than one drain burst.
+        let per_publisher = 2 * SUB_RECV_BURST as u64 + 5;
+        for chunk in (0..per_publisher).step_by(16) {
+            for (publisher_id, publisher, _) in &publishers {
+                for sequence in chunk..(chunk + 16).min(per_publisher) {
+                    publisher
+                        .publish(topic, encoded_event(topic, *publisher_id, sequence))
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+
+        let mut next_sequence = publishers
+            .iter()
+            .map(|(publisher_id, _, _)| (*publisher_id, 0))
+            .collect::<HashMap<_, _>>();
+        timeout(Duration::from_secs(2), async {
+            while next_sequence.values().any(|next| *next < per_publisher) {
+                let message = subscriber.next().await.unwrap().unwrap();
+                if message.sequence == ANCHOR_SEQUENCE {
+                    continue;
+                }
+                let next = next_sequence.get_mut(&message.publisher_id).unwrap();
+                assert_eq!(
+                    message.sequence, *next,
+                    "publisher {}",
+                    message.publisher_id
+                );
+                *next += 1;
+            }
+        })
+        .await
+        .expect("every interleaved message should arrive");
+    }
 
     #[test]
     fn emfile_errno_selects_source_specific_guidance() {
