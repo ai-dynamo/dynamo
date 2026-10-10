@@ -234,6 +234,16 @@ async fn run_with_router_plugins(
             ref chat_engine_factory,
             ref prefill_load_estimator,
         } => {
+            // Resolve the scope once so model discovery and the RL worker listing see the same
+            // namespaces. The suffix applies to a non-global namespace, as on workers.
+            let worker_suffix = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok();
+            let namespace_filter = NamespaceFilter::from_namespace_prefix_and_suffix(
+                model.namespace(),
+                model.namespace_prefix(),
+                worker_suffix.as_deref(),
+            );
+            http_service_builder =
+                http_service_builder.namespace_filter(Some(namespace_filter.clone()));
             // Pass the discovery client so the /health endpoint can query active instances
             http_service_builder =
                 http_service_builder.discovery(Some(distributed_runtime.discovery()));
@@ -243,11 +253,6 @@ async fn run_with_router_plugins(
             let migration_limit = model.migration_limit();
             let migration_max_seq_len = model.migration_max_seq_len();
             // Listen for models registering themselves, add them to HTTP service
-            // Create namespace filter from model configuration
-            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
-                model.namespace(),
-                model.namespace_prefix(),
-            );
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             let generate_engine_capabilities = http_service.generate_engine_capabilities();

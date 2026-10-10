@@ -29,6 +29,7 @@ use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
     RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
+use crate::namespace::NamespaceFilter;
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::{Context, Result};
@@ -816,6 +817,13 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     runtime: Option<Arc<DistributedRuntime>>,
 
+    /// The discovery scope the frontend resolved; the RL listener uses the same scope.
+    /// When unset and RL is enabled, it is resolved from `DYN_NAMESPACE`,
+    /// `DYN_NAMESPACE_PREFIX` and `DYN_NAMESPACE_WORKER_SUFFIX`. Without a prefix,
+    /// the builder uses an exact namespace, defaulting to `dynamo`.
+    #[builder(default = "None")]
+    namespace_filter: Option<NamespaceFilter>,
+
     /// Interval for SSE comment frames while a streaming response is idle.
     /// Defaults to `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` when not set explicitly.
     #[builder(setter(strip_option), default = "sse_keep_alive_from_env()")]
@@ -827,6 +835,14 @@ pub struct HttpServiceConfig {
     /// explicitly.
     #[builder(default = "BackendErrorCheck::from_env()")]
     streaming_backend_error_check: BackendErrorCheck,
+}
+
+fn namespace_filter_from_env() -> NamespaceFilter {
+    dynamo_rl::resolve_namespace_filter(
+        std::env::var("DYN_NAMESPACE").ok().as_deref(),
+        std::env::var("DYN_NAMESPACE_PREFIX").ok().as_deref(),
+        std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok().as_deref(),
+    )
 }
 
 fn default_rl_port() -> u16 {
@@ -1508,7 +1524,11 @@ impl HttpServiceConfigBuilder {
                      or enable_rl) but HttpServiceConfig.runtime is not set."
                 ));
             };
-            let router = super::openai::rl_router(drt.clone())?;
+            let namespace_filter = config
+                .namespace_filter
+                .clone()
+                .unwrap_or_else(namespace_filter_from_env);
+            let router = super::openai::rl_router(drt.clone(), namespace_filter)?;
             tracing::info!(
                 rl_port = config.rl_port,
                 "RL worker discovery enabled at /v1/rl/workers"
@@ -1923,6 +1943,93 @@ mod tests {
             "batch endpoint availability is fixed when the HTTP service is built"
         );
         assert!(enabled.state.flags.get(&EndpointType::Batch));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_rl_environment_fallback_keeps_exact_namespace() {
+        for (namespace, suffix, expected) in [
+            (None, None, "dynamo"),
+            (None, Some("worker"), "dynamo-worker"),
+            (Some("team-blue"), Some("blue"), "team-blue"),
+            (Some(""), None, ""),
+        ] {
+            temp_env::with_vars(
+                [
+                    ("DYN_NAMESPACE", namespace),
+                    ("DYN_NAMESPACE_PREFIX", None),
+                    ("DYN_NAMESPACE_WORKER_SUFFIX", suffix),
+                ],
+                || {
+                    let filter = namespace_filter_from_env();
+                    assert_eq!(filter, NamespaceFilter::Exact(expected.to_string()));
+                },
+            );
+        }
+    }
+
+    async fn rl_workers_scope(service: &HttpService) -> String {
+        use tower::ServiceExt;
+
+        let response = service
+            .rl_router
+            .clone()
+            .expect("RL router is mounted")
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/rl/workers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("RL request");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("RL response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("RL response JSON");
+        body["namespace"].as_str().expect("namespace").to_string()
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_rl_router_uses_builder_namespace_filter() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_NAMESPACE", None::<&str>),
+                ("DYN_NAMESPACE_PREFIX", Some("other")),
+                ("DYN_NAMESPACE_WORKER_SUFFIX", None),
+            ],
+            async {
+                let runtime = dynamo_runtime::Runtime::from_current().expect("runtime");
+                let drt = Arc::new(
+                    DistributedRuntime::new(
+                        runtime,
+                        dynamo_runtime::distributed::DistributedConfig::process_local(),
+                    )
+                    .await
+                    .expect("distributed runtime"),
+                );
+
+                let scoped = HttpService::builder()
+                    .enable_rl(true)
+                    .rl_port(0)
+                    .runtime(Some(drt.clone()))
+                    .namespace_filter(Some(NamespaceFilter::Prefix("myns".to_string())))
+                    .build()
+                    .unwrap();
+                assert_eq!(rl_workers_scope(&scoped).await, "myns");
+
+                let fallback = HttpService::builder()
+                    .enable_rl(true)
+                    .rl_port(0)
+                    .runtime(Some(drt))
+                    .build()
+                    .unwrap();
+                assert_eq!(rl_workers_scope(&fallback).await, "other");
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
