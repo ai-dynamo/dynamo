@@ -547,7 +547,7 @@ Most frontend latency and size histograms use log-spaced buckets, rounded to two
 | `dynamo_frontend_input_sequence_tokens` | `DYN_METRICS_INPUT_SEQUENCE` | `50.0` | `128000.0` | `12` | `130000` |
 | `dynamo_frontend_output_sequence_tokens` | `DYN_METRICS_OUTPUT_SEQUENCE` | `50.0` | `32000.0` | `10` | `32000` |
 | `dynamo_frontend_time_to_first_token_seconds` | `DYN_METRICS_TTFT` | `0.001` | `480.0` | `18` | `480` |
-| `dynamo_frontend_inter_token_latency_seconds` | `DYN_METRICS_ITL` | See below | See below | See below | `8` |
+| `dynamo_frontend_inter_token_latency_seconds` | `DYN_METRICS_ITL` | `0.001` | `80.0` | `20` | `80` |
 | `dynamo_frontend_embedding_latency_seconds` | `DYN_METRICS_EMBEDDING_LATENCY` | `0.001` | `10.0` | `14` | `10` |
 
 For example, to raise the output sequence ceiling from 32k tokens to 128k:
@@ -561,13 +561,17 @@ Rounding can move the top edge either way, so pick a `MAX` that is already two s
 
 `dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
 
-The inter-token latency histogram defaults to the same explicit boundaries as SGLang:
+Set `DYN_METRICS_ITL_BUCKETS` to an explicit, comma-separated list of ITL boundaries in seconds. The list must contain 1 to 512 finite, non-negative, strictly increasing values and be at most 16,384 bytes long. Boundaries are used as supplied, without logarithmic spacing or rounding.
 
-```text
-0.002,0.004,0.006,0.008,0.010,0.015,0.020,0.025,0.030,0.035,0.040,0.060,0.080,0.100,0.200,0.400,0.600,0.800,1.000,2.000,4.000,6.000,8.000
+For example, to use explicit boundaries for an SGLang deployment:
+
+```bash
+export DYN_METRICS_ITL_BUCKETS=0.002,0.004,0.006,0.008,0.010,0.015,0.020,0.025,0.030,0.035,0.040,0.060,0.080,0.100,0.200,0.400,0.600,0.800,1.000,2.000,4.000,6.000,8.000
 ```
 
-Set `DYN_METRICS_ITL_BUCKETS` to a comma-separated, strictly increasing list of finite, non-negative boundaries. This explicit list takes precedence over `DYN_METRICS_ITL_MIN`, `DYN_METRICS_ITL_MAX`, and `DYN_METRICS_ITL_COUNT`. If the explicit list is invalid, the frontend warns and uses the default list. When `DYN_METRICS_ITL_BUCKETS` is unset, setting any of the three older variables continues to generate log-spaced buckets for compatibility.
+The explicit list takes precedence over `DYN_METRICS_ITL_MIN`, `DYN_METRICS_ITL_MAX`, and `DYN_METRICS_ITL_COUNT`, including their deprecated names. If the list is invalid, the frontend warns and uses the default log-spaced ITL boundaries, ignoring the older settings. When `DYN_METRICS_ITL_BUCKETS` is unset, the existing log-spaced configuration and defaults remain unchanged, including the 80-second upper boundary.
+
+Matching frontend and backend bucket boundaries reduces differences in quantile interpolation. It does not make their ITL measurement boundaries or observed samples identical.
 
 A histogram's configuration is validated as a set: `MIN` must be above zero, below `MAX`, and `COUNT` must be between 1 and 512. If any part fails, the frontend warns and reverts **all three** values for that histogram together — setting `DYN_METRICS_ITL_MIN=100` against the default `MAX` of `80.0` also discards a perfectly valid `DYN_METRICS_ITL_COUNT=20`.
 
