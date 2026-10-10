@@ -201,6 +201,23 @@ repos:
       pass_filenames: false
       additional_dependencies:
         - pyyaml
+    - id: rust-doc-coverage
+      name: Rust doc comments on at least 80% of changed functions
+      entry: python3 scripts/check_rust_doc_coverage.py
+      language: python
+      files: \.rs$
+      pass_filenames: false
+      stages: [pre-commit]
+      additional_dependencies: &rust-doc-parser
+        - tree-sitter==0.25.2
+        - tree-sitter-rust==0.24.2
+    - id: rust-doc-coverage-selftest
+      name: Test staged Rust doc-comment coverage
+      entry: python3 -m unittest discover -s scripts -p test_rust_doc_coverage.py
+      language: python
+      files: ^(scripts/(check|test)_rust_doc_coverage\.py|\.pre-commit-config\.yaml)$
+      pass_filenames: false
+      additional_dependencies: *rust-doc-parser
     - id: check-action-pins
       name: GitHub Actions pinned to a commit SHA with a version comment
       entry: python3 scripts/check_action_pins.py
