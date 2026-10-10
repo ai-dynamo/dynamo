@@ -82,6 +82,9 @@ def _install_sglang_stubs(install_module):
     class _ReasoningParser:
         pass
 
+    class _KimiK3Detector:
+        pass
+
     _install_module(install_module, "sglang")
     _install_module(install_module, "sglang.srt")
     _install_module(install_module, "sglang.srt.entrypoints")
@@ -115,7 +118,21 @@ def _install_sglang_stubs(install_module):
         "sglang.srt.function_call.utils",
         get_json_schema_constraint=lambda *args, **kwargs: None,
     )
+    _install_module(
+        install_module,
+        "sglang.srt.function_call.kimik3_format",
+        RESPONSE_OPEN="<|open|>response<|sep|>",
+        RESPONSE_CLOSE="<|close|>response<|sep|>",
+    )
     _install_module(install_module, "sglang.srt.parser")
+    _install_module(
+        install_module,
+        "sglang.srt.parser.inkling_tokenizer",
+        CONTENT_TEXT="<|content_text|>",
+        CONTENT_INVOKE_TOOL_JSON="<|content_invoke_tool_json|>",
+        CONTENT_INVOKE_TOOL_TEXT="<|content_invoke_tool_text|>",
+        CONTENT_MODEL_END_SAMPLING="<|content_model_end_sampling|>",
+    )
     _install_module(
         install_module,
         "sglang.srt.parser.conversation",
@@ -131,6 +148,8 @@ def _install_sglang_stubs(install_module):
         install_module,
         "sglang.srt.parser.reasoning_parser",
         ReasoningParser=_ReasoningParser,
+        KimiK3Detector=_KimiK3Detector,
+        InklingDetector=type("InklingDetector", (), {}),
         GptOssDetector=_GptOssDetector,
     )
     _install_module(install_module, "sglang.srt.utils")
@@ -145,6 +164,7 @@ class _PostProcessor:
     locally_finished = False
     has_pending_stop_text = False
     local_stop_reason = None
+    reasoning_token_count = None
 
     def process_output(self, mapped_response):
         return {
