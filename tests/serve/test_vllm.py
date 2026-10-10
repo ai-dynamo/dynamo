@@ -21,7 +21,7 @@ from tests.serve.multimodal_profiles.vllm import (
     VLLM_MULTIMODAL_PROFILES,
     VLLM_TOPOLOGY_SCRIPTS,
 )
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
@@ -45,6 +45,7 @@ from tests.utils.payloads import (
     EmbeddingPayload,
     ToolCallingChatPayload,
 )
+from tests.utils.port_utils import reserved_ports
 
 logger = logging.getLogger(__name__)
 
@@ -836,7 +837,24 @@ vllm_configs = {
 @pytest.fixture(params=params_with_model_mark(vllm_configs))
 def vllm_config_test(request):
     """Fixture that provides different vLLM test configurations"""
-    return vllm_configs[request.param]
+    config = vllm_configs[request.param]
+    if config.script_name != "agg_lmcache_mp.sh":
+        yield config
+        return
+
+    # The script's `lmcache server` binds a ZMQ port and an HTTP port that
+    # default to the fixed 5555/8080. Any other listener on either port makes
+    # the server exit and the deployment fail. Reserve both ports until the
+    # deployment has been torn down.
+    with reserved_ports(2, DynamoPortRange.SERVE.value) as (zmq_port, http_port):
+        yield dataclasses.replace(
+            config,
+            env={
+                **config.env,
+                "LMCACHE_PORT": str(zmq_port),
+                "LMCACHE_HTTP_PORT": str(http_port),
+            },
+        )
 
 
 @pytest.mark.vllm
