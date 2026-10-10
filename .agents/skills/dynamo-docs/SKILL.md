@@ -449,6 +449,44 @@ git add docs/fern/pages docs/fern/index.yml docs/fern/docs.yml   # also recipes/
 git commit -s -m "docs: <add|update|move|remove> <page-title>"
 ```
 
+## Pull Request Handoff
+
+Creating or handing off a pull request is separate from committing and pushing a branch. Do it only
+when the user has requested or authorized the external contribution.
+
+1. Read the root `AGENTS.md` pull-request conventions and the current
+   `.github/pull_request_template.md`; satisfy both. Repository-wide requirements remain mandatory
+   when the template omits them.
+2. Confirm whether an active pull-request object exists for the head branch. A pushed branch and a
+   `/pull/new/<branch>` URL are not pull requests; never report either one as a created PR.
+3. When creating or updating the PR, complete every applicable template section and include explicit
+   `Summary` and `Validation` sections as required by the root `AGENTS.md`; do not assume `Overview`
+   substitutes for `Summary`. Remove instructional comments and unused alternatives, report the
+   validation actually run and its limitations, and do not invent a related issue.
+4. Query the submitted PR's verification fields explicitly:
+
+   ```bash
+   gh pr view <number-or-branch> --repo ai-dynamo/dynamo \
+     --json url,state,isDraft,body,baseRefName,headRefName,headRefOid,reviewDecision
+   ```
+
+   Confirm that `state` is `OPEN`, `isDraft` matches the intended draft or ready-for-review state, the
+   URL contains `/pull/<number>`, and the base, head branch, and commit are the intended ones. Confirm
+   that the submitted body contains explicit `Summary` and `Validation` sections, every other
+   applicable template section, and no template placeholders. If the PR is closed, reopen it when
+   appropriate or create a new PR; if it is merged, create a new PR for remaining changes or report
+   that no active PR exists. Never present an inactive PR as reviewable.
+5. Query the submitted PR's current checks:
+
+   ```bash
+   gh pr checks <number-or-branch> --repo ai-dynamo/dynamo
+   ```
+
+   Report the `reviewDecision` from step 4 and the current check states from this command.
+   `gh pr checks` exits nonzero when checks are pending or failing; treat that as state to report,
+   not as a query failure. Use the `pr-monitor` skill when CI diagnosis or continued monitoring is
+   requested.
+
 ## Debugging
 
 | Symptom | Fix |
