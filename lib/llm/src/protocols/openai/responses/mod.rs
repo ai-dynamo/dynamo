@@ -680,15 +680,12 @@ fn convert_input_items_to_messages(
                     // completions has no multimodal assistant slot, so collapse
                     // any structured content to text — same as the strict
                     // `MessageItem::Output` path.
-                    ResponseRole::Assistant => {
-                        let text = match &easy.content {
-                            EasyInputContent::Text(t) => t.clone(),
-                            EasyInputContent::ContentList(parts) => {
-                                convert_input_content_to_text(parts)
-                            }
-                        };
-                        pending.push_text(&text);
-                    }
+                    ResponseRole::Assistant => match &easy.content {
+                        EasyInputContent::Text(t) => pending.push_text(t),
+                        EasyInputContent::ContentList(parts) => {
+                            pending.push_text(&convert_input_content_to_text(parts));
+                        }
+                    },
                 }
             }
             InputItem::ItemReference(_) => {
