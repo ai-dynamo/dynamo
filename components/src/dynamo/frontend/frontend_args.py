@@ -534,8 +534,12 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help=(
                 "Dynamo namespace prefix for model discovery scoping. Discovers models from "
-                "namespaces starting with this prefix (e.g., 'ns' matches 'ns', 'ns-abc123', "
-                "'ns-def456'). Takes precedence over --namespace if both are specified."
+                "this namespace and hyphen-delimited suffixes by default: 'ns' matches 'ns', "
+                "'ns-abc123' and a separately named deployment 'ns-other', but not 'ns2'. "
+                "An empty prefix or 'dynamo' discovers every namespace, even in strict mode. "
+                "For other prefixes, DYN_NAMESPACE_PREFIX_STRICT=true limits suffixes "
+                "to operator worker generations. "
+                "Takes precedence over --namespace if both are specified."
             ),
         )
 
