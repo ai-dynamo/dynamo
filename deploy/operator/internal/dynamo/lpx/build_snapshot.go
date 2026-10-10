@@ -48,9 +48,11 @@ type BuildSnapshot struct {
 	ref           string
 	contentID     string
 	manifestBytes []byte
+	format        buildContractFormat
+	inventory     []string
 }
 
-// AcquireBuildSnapshot fences the required manifest-v2 compiler metadata with inventories
+// AcquireBuildSnapshot fences the selected compiler contract with inventories
 // and duplicate reads. The receiver must be non-nil and is not mutated.
 func (r *defaultModelRegistry) AcquireBuildSnapshot(ctx context.Context, id string) (*BuildSnapshot, error) {
 	// Bound all metadata RPCs for one snapshot acquisition.
@@ -67,18 +69,15 @@ func (r *defaultModelRegistry) AcquireBuildSnapshot(ctx context.Context, id stri
 		return nil, err
 	}
 
-	// Require the supported binary compiler manifest.
-	if _, present := slices.BinarySearch(pre, gbuildManifestV2CapnpFile); !present {
-		return nil, fmt.Errorf(
-			"%w: immutable build %q is missing %s",
-			ErrBuildSnapshotInconsistent,
-			refURL.String(),
-			gbuildManifestV2CapnpFile,
-		)
+	// Select the unique binary entry point before either bounded read.
+	format, err := selectBuildContract(pre)
+	if err != nil {
+		return nil, fmt.Errorf("%w: immutable build %q: %w", ErrBuildSnapshotInconsistent, refURL.String(), err)
 	}
-
-	// Capture the compiler manifest within the snapshot metadata budget.
-	manifestPath := gbuildManifestV2CapnpFile
+	manifestPath, err := format.filename()
+	if err != nil {
+		return nil, err
+	}
 	manifestData, readErr := r.readBuildFileBounded(ctx, refURL, manifestPath, maxBuildSnapshotMetadataBytes)
 	if readErr != nil {
 		if errors.Is(readErr, errBuildFileTooLarge) {
@@ -179,6 +178,8 @@ func (r *defaultModelRegistry) AcquireBuildSnapshot(ctx context.Context, id stri
 		ref:           refURL.String(),
 		contentID:     fmt.Sprintf("sha256:%x", hash.Sum(nil)),
 		manifestBytes: manifestData,
+		format:        format,
+		inventory:     pre,
 	}, nil
 }
 
@@ -197,21 +198,35 @@ func writeBuildSnapshotField(hash interface{ Write([]byte) (int, error) }, value
 type NormalizedBuildSnapshot struct {
 	contentID string
 	build     *Build
+	format    buildContractFormat
 }
 
 // normalizeBuildSnapshot validates and lowers a successfully acquired, non-nil
 // snapshot into its normalized build representation. The snapshot is not mutated.
 func normalizeBuildSnapshot(snapshot *BuildSnapshot) (NormalizedBuildSnapshot, error) {
-	// Decode and lower the required manifest-v2 compiler metadata.
-	manifest, err := decodeGbuildManifestV2(snapshot.manifestBytes)
+	// Decode only the selected contract; malformed split data cannot reach the legacy reader.
+	var build *Build
+	var err error
+	switch snapshot.format {
+	case buildContractManifestV2:
+		manifest, decodeErr := decodeGbuildManifestV2(snapshot.manifestBytes)
+		if decodeErr != nil {
+			return NormalizedBuildSnapshot{}, decodeErr
+		}
+		build, err = buildFromGbuildManifestV2(snapshot.ref, manifest)
+	case buildContractDeploymentV1:
+		deployment, decodeErr := decodeGbuildDeploymentV1(snapshot.manifestBytes)
+		if decodeErr != nil {
+			return NormalizedBuildSnapshot{}, decodeErr
+		}
+		build, err = buildFromGbuildDeploymentV1(snapshot.ref, deployment, snapshot.inventory)
+	default:
+		return NormalizedBuildSnapshot{}, fmt.Errorf("unsupported build contract format %d", snapshot.format)
+	}
 	if err != nil {
 		return NormalizedBuildSnapshot{}, err
 	}
-	build, err := buildFromGbuildManifestV2(snapshot.ref, manifest)
-	if err != nil {
-		return NormalizedBuildSnapshot{}, err
-	}
-	return NormalizedBuildSnapshot{contentID: snapshot.contentID, build: build}, nil
+	return NormalizedBuildSnapshot{contentID: snapshot.contentID, build: build, format: snapshot.format}, nil
 }
 
 func normalizeModelPath(path string) string {

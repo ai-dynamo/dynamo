@@ -8,8 +8,6 @@ package lpx
 import (
 	"fmt"
 	"math"
-	"sort"
-	"strings"
 
 	"capnproto.org/go/capnp/v3"
 	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
@@ -79,25 +77,8 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 	if err != nil {
 		return nil, err
 	}
-	// Reject an incomplete split-I/O batch before any runtime path consumes it.
-	if batchSize%int(ioFPGACount) != 0 {
-		return nil, fmt.Errorf(
-			"%s deployment.program.batchSize %d must be divisible by deployment.runtimeIo.ioFpgaCount %d",
-			gbuildManifestV2CapnpFile,
-			batchSize,
-			ioFPGACount,
-		)
-	}
-
-	// Reject incomplete client-owned transaction regions after endpoint splitting.
-	perEndpointBatchSize := batchSize / int(ioFPGACount)
-	if perEndpointBatchSize%int(ioFanoutFactor) != 0 {
-		return nil, fmt.Errorf(
-			"%s deployment.program.batchSize per endpoint %d must be divisible by deployment.runtimeIo.fanoutFactor %d",
-			gbuildManifestV2CapnpFile,
-			perEndpointBatchSize,
-			ioFanoutFactor,
-		)
+	if err := validateManifestBatchSize(gbuildManifestV2CapnpFile, batchSize, ioFPGACount, ioFanoutFactor); err != nil {
+		return nil, err
 	}
 	if !manifest.HasArtifacts() {
 		return nil, fmt.Errorf("%s is missing artifacts", gbuildManifestV2CapnpFile)
@@ -270,24 +251,7 @@ func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (BuildParti
 	if err != nil {
 		return BuildPartition{}, false, fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildManifestV2CapnpFile, ref.PartitionId(), err)
 	}
-	topology, err := detail.Topology()
-	if err != nil {
-		return BuildPartition{}, false, fmt.Errorf("reading %s LPU partition %d topology: %w", gbuildManifestV2CapnpFile, ref.PartitionId(), err)
-	}
-	path, err := detail.Path()
-	if err != nil {
-		return BuildPartition{}, false, fmt.Errorf("reading %s LPU partition %d path: %w", gbuildManifestV2CapnpFile, ref.PartitionId(), err)
-	}
-
-	// Topology names are opaque but must fit one runtime configuration line.
 	subject := fmt.Sprintf("%s LPU partition %d", gbuildManifestV2CapnpFile, ref.PartitionId())
-	if strings.TrimSpace(topology) == "" {
-		return BuildPartition{}, false, fmt.Errorf("%s topology must not be empty", subject)
-	}
-	if strings.ContainsAny(topology, "\x00\r\n") {
-		return BuildPartition{}, false, fmt.Errorf("%s topology must not contain NUL bytes or line breaks: %q", subject, topology)
-	}
-
 	programs, err := detail.Reserved4()
 	if err != nil || programs.List().Len() == 0 {
 		return BuildPartition{}, false, fmt.Errorf("%s programs are missing or invalid", subject)
@@ -302,27 +266,14 @@ func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (BuildParti
 		return BuildPartition{}, false, fmt.Errorf("%s reading chip architecture: %w", subject, err)
 	}
 
-	var partition BuildPartition
-	var compatible bool
 	switch architecture.Text() {
 	case chipArchHX:
-		partition, compatible, err = buildHXPartition(subject, topology, detail)
+		return buildLPUArtifact(gbuildManifestV2CapnpFile, ref.PartitionId(), detail, BuildFamilyHX)
 	case chipArchXT:
-		partition, err = buildXTPartition(subject, topology, detail)
+		return buildLPUArtifact(gbuildManifestV2CapnpFile, ref.PartitionId(), detail, BuildFamilyXT)
 	default:
 		return BuildPartition{}, false, fmt.Errorf("%s unsupported chip architecture %q", subject, architecture.Text())
 	}
-	if err != nil {
-		return BuildPartition{}, false, err
-	}
-
-	// Validate shared artifact fields once, after the selected geometry is accepted.
-	partition.PartPath, err = cleanManifestRelativeBuildPath(subject+" path", path)
-	if err != nil {
-		return BuildPartition{}, false, err
-	}
-	partition.SourcePartitionID = int(ref.PartitionId())
-	return partition, compatible, nil
 }
 
 func validateManifestV2PartSelect(artifacts manifestcapnpv2.ArtifactInfo, partitions []BuildPartition) error {
@@ -340,28 +291,15 @@ func validateManifestV2PartSelect(artifacts manifestcapnpv2.ArtifactInfo, partit
 	if selected.Len() == 0 {
 		return fmt.Errorf("%s artifacts.partSelect.partitions is empty", gbuildManifestV2CapnpFile)
 	}
-	selectedLPU := make(map[int]struct{}, len(partitions))
+	selectedIDs := make([]int, 0, selected.Len())
 	for index := 0; index < selected.Len(); index++ {
 		ref := selected.At(index)
 		if ref.DeviceType() != manifestcapnpv2.DeviceType_lpu {
 			continue
 		}
-		id := int(ref.PartitionId())
-		if _, duplicate := selectedLPU[id]; duplicate {
-			return fmt.Errorf("%s artifacts.partSelect has duplicate LPU partition id %d", gbuildManifestV2CapnpFile, id)
-		}
-		partitionIndex := sort.Search(len(partitions), func(i int) bool {
-			return partitions[i].SourcePartitionID >= id
-		})
-		if partitionIndex == len(partitions) || partitions[partitionIndex].SourcePartitionID != id {
-			return fmt.Errorf("%s artifacts.partSelect references unpackaged LPU partition id %d", gbuildManifestV2CapnpFile, id)
-		}
-		selectedLPU[id] = struct{}{}
+		selectedIDs = append(selectedIDs, int(ref.PartitionId()))
 	}
-	if len(selectedLPU) != len(partitions) {
-		return fmt.Errorf("%s artifacts.partSelect selects %d LPU partitions, but artifacts package %d", gbuildManifestV2CapnpFile, len(selectedLPU), len(partitions))
-	}
-	return nil
+	return validateSelectedLPUPartitions(gbuildManifestV2CapnpFile, "artifacts.partSelect", selectedIDs, partitions)
 }
 
 func runtimeTokenEmbeddingsPathFromManifestV2(artifacts manifestcapnpv2.ArtifactInfo) (string, error) {
