@@ -454,6 +454,51 @@ def test_sla_one_ready_worker_can_cancel_startup_without_division_by_zero(role):
     assert (decision.num_prefill if role == "prefill" else decision.num_decode) == 1
 
 
+@pytest.mark.parametrize(
+    "workers,expected",
+    [
+        # (pre-consolidation TTFT, post-consolidation check evaluable) per worker
+        ([(0.01, False)] * 3, None),
+        ([(None, False)] * 3, 2),
+        ([(0.01, True), (0.01, True), (None, False)], 2),
+    ],
+)
+def test_agg_unevaluable_prefill_check_holds_only_with_an_estimate(workers, expected):
+    config = PlannerConfig(
+        mode="agg",
+        optimization_target="sla",
+        enable_throughput_scaling=False,
+        enable_load_scaling=True,
+        served_model_name="test",
+        min_gpu_budget=-1,
+        max_gpu_budget=-1,
+    )
+    state = PlannerScalingState(config, _caps())
+    state.observe_worker_counts(WorkerCounts(ready_num_decode=3, expected_num_decode=3))
+    obs = _obs(ready=3)
+    fpms = list(obs.decode.values())
+    by_fpm = {id(fpm): worker for fpm, worker in zip(fpms, workers)}
+
+    def estimate(group, **kwargs):
+        ttft_s, evaluable = by_fpm[id(group[0])]
+        # Only the post-consolidation queries include queued decode.
+        if kwargs.get("include_queued_decode") and not evaluable:
+            return None
+        return ttft_s
+
+    regression = Mock()
+    regression.has_sufficient_data.return_value = True
+    regression.query_groups.return_value = [
+        (f"d{i}", [fpm]) for i, fpm in enumerate(fpms)
+    ]
+    regression.estimate_queued_prefill_time.side_effect = estimate
+    regression.estimate_scheduled_decode_itl.return_value = 0.001
+    state._agg_regression = regression
+
+    decision = state.advance_load(obs)
+    assert (decision.num_decode if decision else None) == expected
+
+
 def test_pending_peer_capacity_is_preserved_and_charged_to_budget():
     config = _config()
     config.min_gpu_budget = config.max_gpu_budget = 4
