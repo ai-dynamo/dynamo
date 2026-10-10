@@ -15,7 +15,8 @@ use super::{
     ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
     ContainsWorkerBlockRequest, DumpRequest, EventKind, FlushRequest, GetWorkersRequest,
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, MatchDetails, MatchDetailsRequest,
-    MatchRequest, PreBoundEventCounters, RadixTree, RoutingDecisionRequest, panic_payload_message,
+    MatchRequest, PreBoundEventCounters, RadixTree, RoutingDecisionRequest, WorkerLookupStats,
+    WorkerLookupStatsRequest, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
@@ -336,6 +337,9 @@ pub struct KvIndexer {
     remove_worker_dp_rank_tx: mpsc::Sender<(WorkerId, DpRank)>,
     /// A sender for get workers requests.
     get_workers_tx: mpsc::Sender<GetWorkersRequest>,
+    /// A sender for per-rank block count requests.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    worker_lookup_stats_tx: mpsc::Sender<WorkerLookupStatsRequest>,
     /// A sender for dump requests.
     dump_tx: mpsc::Sender<DumpRequest>,
     /// A sender for flush requests.
@@ -430,6 +434,8 @@ impl KvIndexer {
         let (remove_worker_dp_rank_tx, remove_worker_dp_rank_rx) =
             mpsc::channel::<(WorkerId, DpRank)>(16);
         let (get_workers_tx, get_workers_rx) = mpsc::channel::<GetWorkersRequest>(16);
+        let (worker_lookup_stats_tx, worker_lookup_stats_rx) =
+            mpsc::channel::<WorkerLookupStatsRequest>(16);
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
         let (flush_tx, flush_rx) = mpsc::channel::<FlushRequest>(16);
         let (routing_tx, mut routing_rx) = mpsc::channel::<RoutingDecisionRequest>(2048);
@@ -460,6 +466,7 @@ impl KvIndexer {
                     let mut remove_worker_rx = remove_worker_rx;
                     let mut remove_worker_dp_rank_rx = remove_worker_dp_rank_rx;
                     let mut get_workers_rx = get_workers_rx;
+                    let mut worker_lookup_stats_rx = worker_lookup_stats_rx;
                     let mut dump_rx = dump_rx;
                     let mut flush_rx = flush_rx;
                     let mut trie = delegate.map_or_else(RadixTree::new, RadixTree::new_with_delegate);
@@ -559,6 +566,10 @@ impl KvIndexer {
                                 let _ = get_workers_req.resp.send(workers);
                             }
 
+                            Some(stats_req) = worker_lookup_stats_rx.recv() => {
+                                let _ = stats_req.resp.send(trie.worker_lookup_stats());
+                            }
+
                             Some(dump_req) = dump_rx.recv() => {
                                 // NOTE: Dump requests use a separate channel from mutations, so the
                                 // actor may observe one while already-accepted mutations are still
@@ -656,6 +667,7 @@ impl KvIndexer {
             remove_worker_tx,
             remove_worker_dp_rank_tx,
             get_workers_tx,
+            worker_lookup_stats_tx,
             dump_tx,
             flush_tx,
             routing_tx,
@@ -773,6 +785,21 @@ impl KvIndexer {
     /// A `mpsc::Sender` for `GetWorkersRequest`s.
     pub fn get_workers_sender(&self) -> mpsc::Sender<GetWorkersRequest> {
         self.get_workers_tx.clone()
+    }
+
+    /// Distinct blocks the tree holds for each worker rank.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    pub(crate) async fn worker_lookup_stats(&self) -> Result<WorkerLookupStats, KvRouterError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_lookup_stats_tx
+            .send(WorkerLookupStatsRequest { resp: resp_tx })
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        // A request sent while the actor drops its receiver stays queued with resp_tx alive.
+        tokio::select! {
+            resp = resp_rx => resp.map_err(|_| KvRouterError::IndexerDroppedRequest),
+            _ = self.worker_lookup_stats_tx.closed() => Err(KvRouterError::IndexerOffline),
+        }
     }
 }
 

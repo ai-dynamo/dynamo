@@ -3,6 +3,7 @@
 
 //! Worker input groups, stored snapshots, and component-scoped borrowed views.
 
+use crate::indexer::ResidentBlockCounts;
 use crate::protocols::{SharedCacheHits, WorkerWithDpRank};
 use std::ops::BitOr;
 
@@ -66,6 +67,19 @@ impl<'a> WorkerCandidate<'a> {
         } else {
             None
         }
+    }
+
+    /// Blocks the router's indexer tracks for this worker rank, only when this component declared
+    /// RESIDENT_BLOCKS: device blocks from KV events, or the router's prediction in approximate
+    /// modes. Refreshed off the request path, unweighted, and not clamped to capacity; 0 also covers
+    /// ranks with no data yet. None means access was not requested or the host has no counts.
+    pub fn resident_blocks(self) -> Option<u64> {
+        if !self.inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
+            return None;
+        }
+        self.cache_snapshot
+            .resident_blocks
+            .map(|counts| counts.get(self.data.worker))
     }
 }
 
@@ -140,6 +154,9 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
+    /// Request per-rank counts of blocks the router's indexer tracks (routing predictions in
+    /// approximate modes). The frontend rejects RESIDENT_BLOCKS without CACHE.
+    pub const RESIDENT_BLOCKS: Self = Self(1 << 3);
     /// Request host-owned active-request counts.
     pub const OCCUPANCY: Self = Self(1 << 5);
     #[cfg(any(test, feature = "bench"))]
@@ -166,6 +183,8 @@ impl BitOr for WorkerInputs {
 pub(crate) struct CacheSnapshot<'a> {
     pub(crate) shared_hits: Option<&'a SharedCacheHits>,
     pub(crate) has_tier_matches: bool,
+    /// Loaded only when a component declared RESIDENT_BLOCKS.
+    pub(crate) resident_blocks: Option<&'a ResidentBlockCounts>,
 }
 
 /// Numeric cache row retained in host buffers between selections.
@@ -238,6 +257,7 @@ pub struct WorkerInputView<'a> {
     pub(crate) candidates: &'a [ScoredWorkerCandidate],
     pub(crate) cache: Option<WorkerCacheInputs<'a>>,
     pub(crate) load: Option<&'a [WorkerLoadInput]>,
+    pub(crate) resident_blocks: Option<&'a ResidentBlockCounts>,
 }
 
 impl CandidateData {
@@ -368,5 +388,14 @@ impl<'a> WorkerInputView<'a> {
     /// Return index-aligned active-load inputs when the picker requested them.
     pub fn load(self) -> Option<&'a [WorkerLoadInput]> {
         self.load
+    }
+
+    /// Return [`WorkerCandidate::resident_blocks`] for candidate `row` when the picker requested
+    /// [`WorkerInputs::RESIDENT_BLOCKS`], or None for an out-of-range row.
+    pub fn resident_blocks(self, row: usize) -> Option<u64> {
+        let counts = self.resident_blocks?;
+        self.candidates
+            .get(row)
+            .map(|candidate| counts.get(candidate.worker))
     }
 }

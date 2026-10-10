@@ -570,6 +570,12 @@ pub struct GetWorkersRequest {
     pub resp: oneshot::Sender<Vec<WorkerId>>,
 }
 
+/// A request for the number of blocks tracked for each worker rank
+pub(crate) struct WorkerLookupStatsRequest {
+    /// Channel to send the per-rank block counts
+    pub resp: oneshot::Sender<WorkerLookupStats>,
+}
+
 #[derive(Debug, Default)]
 pub struct WorkerLookupStats {
     pub worker_blocks: Vec<(WorkerWithDpRank, usize)>,

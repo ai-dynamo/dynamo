@@ -157,6 +157,11 @@ impl SelectionPolicySource {
                 !config.enable_session_prefix_index,
                 "enable_session_prefix_index requires the worker-selection policy to declare WorkerInputs::CACHE"
             );
+            // Resident block counts come from the indexer that CACHE starts.
+            anyhow::ensure!(
+                !prepared.inputs().contains(WorkerInputs::RESIDENT_BLOCKS),
+                "RESIDENT_BLOCKS requires the worker-selection policy to declare WorkerInputs::CACHE"
+            );
         }
         Ok(prepared)
     }
@@ -2227,6 +2232,22 @@ mod tests {
         }
     }
 
+    struct DeclaredInputsPicker(WorkerInputs);
+
+    impl WorkerPicker for DeclaredInputsPicker {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            self.0
+        }
+
+        fn pick(
+            &mut self,
+            _context: &WorkerSelectionContext<'_>,
+            _input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            unreachable!("capability construction test does not select a worker")
+        }
+    }
+
     fn fixed_policy(
         expected_shared_blocks: Option<u32>,
         worker: WorkerWithDpRank,
@@ -2457,6 +2478,24 @@ mod tests {
                 .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
                 .expect("CACHE allows indexer features even with zero scoring credit");
         }
+    }
+
+    #[tokio::test]
+    async fn resident_blocks_require_declared_cache_input() {
+        let config = KvRouterConfig::default();
+        let error = picker_policy(|| Box::new(DeclaredInputsPicker(WorkerInputs::RESIDENT_BLOCKS)))
+            .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
+            .err()
+            .expect("without CACHE there is no indexer to count blocks");
+        assert!(error.to_string().contains("RESIDENT_BLOCKS"));
+        assert!(error.to_string().contains("WorkerInputs::CACHE"));
+        picker_policy(|| {
+            Box::new(DeclaredInputsPicker(
+                WorkerInputs::RESIDENT_BLOCKS | WorkerInputs::CACHE,
+            ))
+        })
+        .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
+        .expect("CACHE starts the indexer the counts come from");
     }
 
     #[tokio::test]
