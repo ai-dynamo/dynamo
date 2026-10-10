@@ -64,6 +64,103 @@ pub struct VideoMetadata {
     pub(crate) sampled_timestamps: Vec<f64>,
 }
 
+struct SourceVideoTiming {
+    start_time_secs: f64,
+    duration_secs: f64,
+}
+
+fn get_source_timing_from_video_packets(
+    input_path: &str,
+    stream_index: usize,
+    stream_time_base: Rational,
+    frame_rate: f64,
+    total_frames: u64,
+) -> Result<SourceVideoTiming> {
+    // Packet timing requires reading to EOF. Keep that scan on a separate
+    // demuxer so decoding starts from a fresh context instead of seeking a
+    // Matroska stream after its longer audio track has been consumed.
+    let mut input = ffmpeg_next::format::input(input_path).map_err(video_open_error)?;
+    let mut first_pts = None;
+    let mut max_pts = None;
+    let mut max_packet_end = None;
+
+    for (stream, packet) in input.packets() {
+        if stream.index() != stream_index {
+            continue;
+        }
+
+        let Some(pts) = packet.pts() else {
+            continue;
+        };
+        first_pts = Some(first_pts.map_or(pts, |first_pts: i64| first_pts.min(pts)));
+        max_pts = Some(max_pts.map_or(pts, |max_pts: i64| max_pts.max(pts)));
+
+        if packet.duration() > 0 {
+            let packet_end = pts.saturating_add(packet.duration());
+            max_packet_end = Some(max_packet_end.map_or(packet_end, |max_packet_end: i64| {
+                max_packet_end.max(packet_end)
+            }));
+        }
+    }
+
+    let frame_count_duration = if frame_rate > 0.0 {
+        total_frames as f64 / frame_rate
+    } else {
+        0.0
+    };
+    let (Some(first_pts), Some(max_pts)) = (first_pts, max_pts) else {
+        return Ok(SourceVideoTiming {
+            start_time_secs: 0.0,
+            duration_secs: frame_count_duration,
+        });
+    };
+
+    let start_time_secs = Time::new(Some(first_pts), stream_time_base).as_secs() as f64;
+    let pts_duration =
+        Time::new(Some(max_pts.saturating_sub(first_pts)), stream_time_base).as_secs() as f64;
+    let packet_duration = max_packet_end
+        .map(|end| {
+            Time::new(Some(end.saturating_sub(first_pts)), stream_time_base).as_secs() as f64
+        })
+        .filter(|duration| *duration > 0.0);
+
+    Ok(SourceVideoTiming {
+        start_time_secs,
+        duration_secs: select_video_duration_secs(
+            pts_duration,
+            packet_duration,
+            frame_rate,
+            frame_count_duration,
+        ),
+    })
+}
+
+/// Selects packet or frame-count duration without overriding a valid PTS span.
+fn select_video_duration_secs(
+    pts_duration: f64,
+    packet_duration: Option<f64>,
+    frame_rate: f64,
+    frame_count_duration: f64,
+) -> f64 {
+    if pts_duration <= 0.0 {
+        // Collapsed/missing PTS do not describe the video's extent. Use the
+        // stronger available endpoint or frame-count estimate in that case.
+        return packet_duration
+            .unwrap_or_default()
+            .max(frame_count_duration);
+    }
+
+    packet_duration
+        .filter(|duration| *duration > pts_duration)
+        .unwrap_or_else(|| {
+            if frame_rate > 0.0 {
+                pts_duration + 1.0 / frame_rate
+            } else {
+                pts_duration
+            }
+        })
+}
+
 fn get_num_requested_frames(
     config: &VideoDecoder,
     duration_secs: f64,
@@ -95,6 +192,23 @@ fn get_num_requested_frames(
     );
 
     Ok(requested_frames)
+}
+
+fn check_max_alloc(width: u32, height: u32, requested_frames: u64, max_alloc: u64) -> Result<()> {
+    let requested_alloc = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|size| size.checked_mul(requested_frames))
+        .and_then(|size| size.checked_mul(3))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Video dimensions {requested_frames}x{width}x{height}x3 exceed max alloc {max_alloc}"
+            )
+        })?;
+    anyhow::ensure!(
+        requested_alloc <= max_alloc,
+        "Video dimensions {requested_frames}x{width}x{height}x3 exceed max alloc {max_alloc}"
+    );
+    Ok(())
 }
 
 fn get_target_times(
@@ -227,8 +341,7 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
     mem_file.add_seals(Seal::Write | Seal::Shrink | Seal::Grow)?;
     let fd_path = format!("/proc/self/fd/{}", mem_file.as_raw_fd());
     let mut input = ffmpeg_next::format::input(&fd_path).map_err(video_open_error)?;
-
-    let (stream_index, stream_time_base, source_duration, source_fps, total_frames, parameters) = {
+    let (stream_index, stream_time_base, stream_duration, source_fps, total_frames, parameters) = {
         let input_stream = input
             .streams()
             .best(ffmpeg_next::media::Type::Video)
@@ -242,18 +355,34 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
         (
             input_stream.index(),
             stream_time_base,
-            Time::new(Some(input_stream.duration()), stream_time_base).as_secs() as f64,
+            input_stream.duration(),
             (frame_rate.numerator() as f32 / frame_rate.denominator() as f32) as f64,
             input_stream.frames().max(0) as u64,
             input_stream.parameters(),
         )
     };
+    let source_timing = if stream_duration > 0 {
+        SourceVideoTiming {
+            start_time_secs: 0.0,
+            duration_secs: Time::new(Some(stream_duration), stream_time_base).as_secs() as f64,
+        }
+    } else {
+        get_source_timing_from_video_packets(
+            &fd_path,
+            stream_index,
+            stream_time_base,
+            source_fps,
+            total_frames,
+        )?
+    };
 
     // Duration and frame count come from file metadata and might be inaccurate.
-    let requested_frames =
-        get_num_requested_frames(config, source_duration, source_fps, total_frames)?;
-    let target_times = get_target_times(requested_frames, source_duration, source_fps)?;
-
+    let requested_frames = get_num_requested_frames(
+        config,
+        source_timing.duration_secs,
+        source_fps,
+        total_frames,
+    )?;
     let mut decoder_context = Context::new();
     decoder_context.set_time_base(stream_time_base);
     decoder_context.set_parameters(parameters)?;
@@ -269,10 +398,8 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
     );
 
     let max_alloc = config.limits.max_alloc.unwrap_or(u64::MAX);
-    anyhow::ensure!(
-        (width as u64) * (height as u64) * requested_frames * 3 <= max_alloc,
-        "Video dimensions {requested_frames}x{width}x{height}x3 exceed max alloc {max_alloc}"
-    );
+    check_max_alloc(width, height, requested_frames, max_alloc)?;
+    let target_times = get_target_times(requested_frames, source_timing.duration_secs, source_fps)?;
 
     let frame_size = width as usize * height as usize * 3;
     let mut all_frames = vec![0u8; requested_frames as usize * frame_size];
@@ -299,7 +426,7 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
                 Ok(()) => {
                     let timestamp =
                         match get_sample_timestamp(config, &decoded_frame, decoder_time_base)? {
-                            Some(timestamp) => timestamp,
+                            Some(timestamp) => timestamp - source_timing.start_time_secs,
                             None => continue,
                         };
                     if timestamp < target_times[*target_index].as_secs() as f64 {
@@ -393,7 +520,7 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
     let mut decoded: DecodedMediaData = array.try_into()?;
     decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Video(VideoMetadata {
         source_fps,
-        source_duration,
+        source_duration: source_timing.duration_secs,
         sampled_timestamps,
     }));
     Ok(decoded)
@@ -510,6 +637,30 @@ mod tests {
     }
 
     #[test]
+    fn test_select_video_duration_uses_frame_count_when_pts_collapse() {
+        assert_eq!(select_video_duration_secs(0.0, None, 2.0, 3.0), 3.0);
+        assert_eq!(select_video_duration_secs(0.0, Some(0.5), 2.0, 3.0), 3.0);
+    }
+
+    #[test]
+    fn test_select_video_duration_does_not_override_pts_extent_with_frame_rate_estimate() {
+        // A known variable-rate extent is more reliable than a contradictory
+        // stream frame-rate estimate.
+        assert_eq!(select_video_duration_secs(2.0, Some(2.25), 2.0, 10.0), 2.25);
+    }
+
+    #[test]
+    fn test_max_alloc_uses_checked_multiplication() {
+        assert!(check_max_alloc(224, 224, u64::MAX, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn test_max_alloc_checks_total_rgb_frame_bytes() {
+        assert!(check_max_alloc(2, 2, 10, 120).is_ok());
+        assert!(check_max_alloc(2, 2, 10, 119).is_err());
+    }
+
+    #[test]
     fn test_unsupported_codec_error_is_actionable() {
         // H.264 fixture: the in-tree FFmpeg decodes only VP8/VP9, so opening
         // must fail -- and with the re-encode guidance, not ffmpeg's bare
@@ -557,6 +708,76 @@ mod tests {
         assert_eq!(decoded.tensor_info.shape[2], width as usize);
         assert_eq!(decoded.tensor_info.shape[3], 3);
         assert_eq!(decoded.tensor_info.dtype, DataType::UINT8);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_decode_video_samples_relative_to_nonzero_stream_start() {
+        let path = format!(
+            "{}/tests/data/media/webm_nonzero_start_6.webm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|_| panic!("Failed to read test video: {}", path));
+        let decoder = VideoDecoder {
+            num_frames: Some(3),
+            ..Default::default()
+        };
+
+        let decoded = decoder
+            .decode(EncodedMediaData {
+                bytes,
+                b64_encoded: false,
+            })
+            .unwrap();
+
+        assert_eq!(decoded.tensor_info.shape, vec![3, 224, 224, 3]);
+        let Some(DecodedMediaMetadata::Video(metadata)) = decoded.tensor_info.metadata else {
+            panic!("missing video metadata");
+        };
+        assert!((metadata.source_duration - 3.0).abs() < 0.01);
+        assert_eq!(metadata.sampled_timestamps.len(), 3);
+        for (actual, expected) in metadata.sampled_timestamps.iter().zip([0.0, 1.5, 2.5]) {
+            assert!((actual - expected).abs() < 0.01);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_decode_video_uses_video_duration_when_audio_outlasts_video() {
+        let path = format!(
+            "{}/tests/data/media/webm_audio_outlasts_video_6.webm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|_| panic!("Failed to read test video: {}", path));
+        let decoder = VideoDecoder {
+            num_frames: Some(6),
+            ..Default::default()
+        };
+
+        let decoded = decoder
+            .decode(EncodedMediaData {
+                bytes,
+                b64_encoded: false,
+            })
+            .unwrap();
+
+        assert_eq!(decoded.tensor_info.shape, vec![6, 224, 224, 3]);
+        let Some(DecodedMediaMetadata::Video(metadata)) = decoded.tensor_info.metadata else {
+            panic!("missing video metadata");
+        };
+        assert!((metadata.source_duration - 3.0).abs() < 0.01);
+        assert!(
+            (metadata
+                .sampled_timestamps
+                .last()
+                .copied()
+                .unwrap_or_default()
+                - 2.5)
+                .abs()
+                < 0.01
+        );
     }
 
     #[test]
