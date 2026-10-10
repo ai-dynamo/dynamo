@@ -158,6 +158,7 @@ ci: &ci
   - '.github/filters.yaml'
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
+  - '.github/scripts/run_deepseek_v4_pro_smoke.sh'
   - '.github/scripts/route_buildkit.sh'
   - 'container/Dockerfile.test'
 
