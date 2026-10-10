@@ -19,7 +19,7 @@ flowchart LR
     Coordinator --> Registry[Collector registry]
     Registry --> Perf[Frontend Linux perf]
     Registry --> Torch[vLLM or SGLang torch controls]
-    Registry -. prepared provider .-> Nsight[Nsight or Nsight Cloud]
+    Registry --> Nsight[Prepared Nsight launches]
     Coordinator --> Validate[Artifact validator]
     Validate --> Manifest[Manifest with artifacts and OTel references]
 ```
@@ -32,7 +32,9 @@ flowchart LR
   The frontend builds it from configuration; discovery can supply it later.
 - `CollectorRegistry` selects trusted factories. `torch_profile` combines frontend
   Linux perf with selected workers' native torch controls. Linux perf can be
-  disabled by the operator, with the omission recorded in the manifest.
+  disabled by the operator, with the omission recorded in the manifest. `nsys`
+  uses frontend process NVTX ranges and selected workers' CUDA-profiler controls;
+  it never starts a runtime Nsight command or frontend perf collector.
 - `ClockSampler` probes selected workers' control-process epochs and estimates
   host offsets and uncertainty before and after capture. It does not change
   clocks, synchronize starts, or attest individual engine-rank clocks.
@@ -58,8 +60,18 @@ independent worker leases are deferred.
 Manifests retain OTel trace/request IDs and a reference to the existing telemetry
 backend. This does not require local OTLP archival or claim exhaustive coverage.
 Public routes, remote authentication, dynamic discovery, and storage transfer
-are deferred. Nsight requires a prepared launch/session and an installed registry
-provider; actual Nsight collection is not implemented.
+are deferred. Nsight requires separately prepared frontend/worker launches with
+repeat capture and automatic SQLite export. The embedded frontend opens and
+closes `ROI@app`; vLLM/SGLang controls dispatch to GPU execution processes.
+Only explicitly selected targets participate. The validator waits for new
+report/export pairs within each launch's dedicated output prefix, checks export
+metadata, SQLite integrity, required CPU/GPU activity, and transport hashes.
+Frontend CPU activity may consist of OS runtime events when host policy denies
+sampling/context switches; each report records those capabilities and diagnostics.
+GPU process counts can be checked against expected rank counts, but rank identities
+remain unattested. Export failure blocks new captures to avoid associating a late
+report with the next window. Frontend NVTX capture requires embedded hosting; a
+standalone host can control workers but cannot emit NVTX in the frontend.
 
 See the [administration README](../frontend/profiling/README.md) for configuration,
 HTTP requests, collector evidence, and hosting.

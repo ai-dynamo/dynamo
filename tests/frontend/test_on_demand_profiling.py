@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +23,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from dynamo.frontend.profiling import hosting
 from dynamo.frontend.profiling.hosting import host, profiling_coordinator
 from dynamo.frontend.profiling.http import application
-from dynamo.profiling import Coordinator, adapters, agent, collectors, errors
+from dynamo.profiling import Coordinator, adapters, agent, collectors, errors, nsys
 from dynamo.profiling.adapters import CollectorRegistry
 from dynamo.profiling.artifacts import SharedFilesystemValidator
 from dynamo.profiling.clock import estimate_offset
@@ -167,9 +168,9 @@ async def test_worker_only_plan_still_profiles_frontend_and_stop_is_concurrent(
     monkeypatch.setattr(
         adapters,
         "TorchCollector",
-        lambda worker, config: worker_collector
-        if worker.target_id == "worker"
-        else fast_worker,
+        lambda worker, config: (
+            worker_collector if worker.target_id == "worker" else fast_worker
+        ),
     )
     session = controller.submit(
         Plan("id", [Target("worker", "worker-epoch"), Target("second", "epoch")], 50)
@@ -810,3 +811,187 @@ async def test_native_recording_bounds_preserve_nanosecond_precision(tmp_path, c
         }
     else:
         assert bounds["status"] == "unknown"
+
+
+def nsys_report(path, activity="cpu", processes=1):
+    path.write_bytes(b"native-report-fixture")
+    with sqlite3.connect(path.with_suffix(".sqlite")) as conn:
+        conn.execute("CREATE TABLE META_DATA_EXPORT (name TEXT, value TEXT)")
+        conn.executemany(
+            "INSERT INTO META_DATA_EXPORT VALUES (?, ?)",
+            [("EXPORT_TIME", "0.01 sec"), ("EXPORT_PARAM_INPUT_FILE", path.name)],
+        )
+        if activity == "cpu":
+            conn.execute(
+                "CREATE TABLE COMPOSITE_EVENTS (start INTEGER, cpuCycles INTEGER, globalTid INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO COMPOSITE_EVENTS VALUES (1, 1, ?)", (os.getpid() << 24,)
+            )
+        else:
+            conn.execute("CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (globalPid INTEGER)")
+            conn.executemany(
+                "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?)",
+                [(pid,) for pid in range(processes)],
+            )
+
+
+@pytest.mark.asyncio
+async def test_nsys_repeated_client_capture_without_subprocess(tmp_path, monkeypatch):
+    pending = []
+    handles = []
+    prefix = str(tmp_path / "frontend")
+
+    def begin(**kwargs):
+        assert kwargs == {"message": "ROI", "domain": "app"}
+        handle = object()
+        handles.append(handle)
+        return handle
+
+    def end(handle):
+        assert handle is handles[-1]
+
+        async def export():
+            await asyncio.sleep(0.02)
+            nsys_report(tmp_path / f"frontend.{len(handles)}.nsys-rep")
+            if len(handles) == 1:
+                nsys_report(tmp_path / "frontend-other.1.nsys-rep")
+
+        pending.append(asyncio.create_task(export()))
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Nsight runtime control cannot invoke subprocesses")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    monkeypatch.setattr(nsys, "nvtx", SimpleNamespace(start_range=begin, end_range=end))
+    monkeypatch.setattr(nsys, "process_epoch", lambda pid: "epoch")
+    # Existing output from the same persistent launch cannot satisfy a new capture.
+    nsys_report(tmp_path / "frontend.0.nsys-rep")
+    coordinator = Coordinator(
+        Config(
+            "unused",
+            str(tmp_path / "sessions"),
+            frontend_perf_enabled=False,
+            nsys_frontend_output_prefix=prefix,
+            artifact_validation_timeout_s=2,
+        ),
+        RuntimeSnapshot(os.getpid(), "epoch", "host"),
+    )
+    async with TestClient(TestServer(application(coordinator))) as client:
+        for window in range(3):
+            response = await client.post(
+                "/admin/profiling/v1/sessions",
+                json={
+                    "client_request_id": str(window),
+                    "mode": "nsys",
+                    "duration_ms": 5000,
+                    "targets": [{"target_id": "frontend", "process_epoch": "epoch"}],
+                },
+            )
+            assert response.status == 202
+            session = coordinator.lookup((await response.json())["session_id"])
+            while session.state != "recording":
+                await asyncio.sleep(0)
+            await client.post(f"/admin/profiling/v1/sessions/{session.session_id}/stop")
+            await session.task
+            manifest = coordinator.manifest(session)
+            assert session.state == "completed", manifest
+            assert manifest["frontend"]["profiling_enabled"] is True
+            result = manifest["artifact_validation"][0]
+            assert result["status"] == "verified"
+            assert result["artifacts"][0]["location"].endswith(
+                f"frontend.{window+1}.nsys-rep"
+            )
+            assert (
+                result["artifacts"][0]["sha256"]
+                == hashlib.sha256(b"native-report-fixture").hexdigest()
+            )
+    await asyncio.gather(*pending)
+    assert len(handles) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+async def test_nsys_worker_uses_backend_controls(tmp_path, monkeypatch, backend):
+    requests = AsyncMock()
+    monkeypatch.setattr(TorchCollector, "_request", requests)
+    worker = Worker(
+        "decode",
+        "epoch",
+        backend,
+        "http://worker",
+        nsys_output_prefix=str(tmp_path / "worker"),
+    )
+    config = Config("unused", str(tmp_path), frontend_perf_enabled=True)
+    runtime = RuntimeSnapshot(123, "frontend", "host", [worker])
+    selected = nsys.nsys_collectors(
+        config,
+        runtime,
+        Plan("id", [Target("decode", "epoch")], 50, mode="nsys"),
+        tmp_path,
+    )
+    assert len(selected) == 1  # no implicit frontend/perf capture in Nsight mode
+    await selected[0].start()
+    await selected[0].stop()
+    assert requests.await_args_list[0].args == (
+        "start",
+        {"activities": ["CUDA_PROFILER"]} if backend == "sglang" else {},
+        config.start_timeout_s,
+    )
+    assert requests.await_args_list[1].args == ("stop", {}, config.finalize_timeout_s)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing_gpu",
+        "missing_rank",
+        "ambiguous",
+        "corrupt",
+        "incomplete",
+        "missing_cpu",
+    ],
+)
+async def test_nsys_rejects_incomplete_or_ambiguous_exports(tmp_path, defect):
+    path = tmp_path / "worker.1.nsys-rep"
+    nsys_report(path, "cpu" if defect == "missing_gpu" else "gpu")
+    if defect == "ambiguous":
+        nsys_report(tmp_path / "worker.2.nsys-rep", "gpu")
+    if defect == "incomplete":
+        with sqlite3.connect(path.with_suffix(".sqlite")) as conn:
+            conn.execute("DELETE FROM META_DATA_EXPORT WHERE name = 'EXPORT_TIME'")
+    if defect == "corrupt":
+        path.with_suffix(".sqlite").write_bytes(b"not a database")
+    result = await SharedFilesystemValidator().validate(
+        {
+            "collector": "nsys",
+            "output_prefix": str(tmp_path / "worker"),
+            "required_activity": (
+                "cpu_events" if defect == "missing_cpu" else "cuda_kernels"
+            ),
+            "expected_gpu_processes": 2 if defect == "missing_rank" else 1,
+            "previous_reports": [],
+        },
+        Config("unused", str(tmp_path), artifact_validation_timeout_s=0.03),
+    )
+    assert result["status"] in ("partial", "invalid")
+    assert result["error"]
+
+
+def test_vllm_nsight_launch_rejects_torch_plan(tmp_path):
+    worker = Worker(
+        "decode",
+        "epoch",
+        "vllm",
+        "http://worker",
+        nsys_output_prefix=str(tmp_path / "worker"),
+    )
+    coordinator = Coordinator(
+        Config("unused", str(tmp_path)),
+        RuntimeSnapshot(123, "frontend", "host", [worker]),
+    )
+    assert coordinator.targets()[1]["collectors"] == ["nsys"]
+    with pytest.raises(errors.Unsupported, match="separate launch"):
+        coordinator.submit(Plan("id", [Target("decode", "epoch")], 50))
+    assert not coordinator.sessions

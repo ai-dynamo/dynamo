@@ -140,7 +140,9 @@ await coordinator.close()
 The coordinator copies input snapshots and detaches manifest/inventory responses.
 Trusted registry factories return collectors with `start()`, `stop()`, and
 `evidence`; `ClockSampler` and `ArtifactValidator` are injectable protocols.
-Built-in `nsys` requests are rejected until a prepared-session provider is added.
+Built-in `nsys` requests require operator-configured prepared launches. Runtime
+control uses the same client API; it invokes NVTX or backend profiling functions
+without spawning Nsight CLI commands.
 See the [Nsight Operator architecture](https://docs.nvidia.com/nsight-operator/Architecture/index.html)
 and [user guide](https://docs.nvidia.com/nsight-operator/UserGuide/index.html).
 
@@ -151,3 +153,72 @@ and drains on shutdown. Run one host per socket:
 python -m dynamo.frontend.profiling --config /private/profiling/config.json \
   --frontend-pid "$FRONTEND_PID" --frontend-epoch "$FRONTEND_EPOCH"
 ```
+
+## Nsight collection
+
+Install `ai-dynamo[profiling]` for the optional frontend NVTX dependency. At
+process launch, prepare the frontend with CPU sampling, scheduling, OS runtime
+tracing, and NVTX capture. Prepare each independent worker replica separately
+with CUDA/NVTX tracing and CUDA-profiler capture. For vLLM, select its `cuda`
+profiler; for SGLang the adapter sends `activities: ["CUDA_PROFILER"]`.
+The backend must dispatch start/stop into its GPU execution processes. A vLLM
+launch configured for Nsight advertises only Nsight worker capture; Torch capture
+requires a separate vLLM launch with its Torch profiler configured.
+
+These are deployment launch options; client requests never execute them:
+
+```text
+frontend:
+  --trace=nvtx,osrt --sample=process-tree --cpuctxsw=process-tree
+  --capture-range=nvtx --nvtx-capture=ROI@app
+  --capture-range-end=repeat:100:async --export=sqlite
+worker:
+  --trace=cuda,nvtx,osrt
+  --capture-range=cudaProfilerApi
+  --capture-range-end=repeat:100:async --export=sqlite
+```
+
+Use an Nsight version supporting asynchronous repeat export; the frontend and
+workers continue running between windows. The deployment controls collectors,
+output paths, and the maximum number of windows. Configure a distinct, fresh
+absolute output prefix for every process-tree launch:
+
+```json
+{
+  "nsys_frontend_output_prefix": "/shared/run/frontend/frontend",
+  "workers": [{
+    "target_id": "decode-0",
+    "process_epoch": "<worker-control-epoch>",
+    "backend": "vllm",
+    "control_url": "http://worker:9090",
+    "nsys_output_prefix": "/shared/run/decode-0/worker",
+    "verify_runtime": true,
+    "expected_rank_ids": ["dp0_pp0_tp0_dcp0_ep0_rank0"]
+  }]
+}
+```
+
+These fields supplement the existing socket/output configuration. The prefix
+must match that launch's Nsight output setting, and its directory must be mounted
+in the coordinator. A single coordinator must own all capture triggers for those
+launches. Use `mode: "nsys"` in the existing client plan and select `frontend`
+explicitly when wanted; frontend perf is not implicit in this mode. An explicit
+client stop or the existing lease deadline closes the frontend range and sends
+worker stop requests concurrently.
+
+The coordinator waits for new `.nsys-rep`/`.sqlite` pairs, checks final export
+metadata, SQLite integrity, relevant activity, file stability, and SHA-256.
+Existing reports cannot satisfy another window. `verified` establishes the
+reported validation scope; it does not prove every configured event was collected.
+Frontend evidence requires CPU activity beyond NVTX and records missing samples,
+context switches, and Nsight diagnostics. Host policy may permit OS runtime
+tracing while denying CPU sampling. Worker evidence requires CUDA kernels and,
+when rank membership is configured, the matching GPU process count. Rank identities
+remain unattested; Nsight may combine a replica's ranks into one report.
+Native report bounds and host clock estimates are recorded separately.
+
+Frontend NVTX control requires the embedded host. A standalone coordinator can
+control workers, but needs a future IPC adapter to trigger frontend NVTX.
+Export failure blocks further admission until the operator reconciles the launch,
+preventing a late export from being assigned to a later capture. Report transfer
+and Nsight Cloud upload remain separate extensions.

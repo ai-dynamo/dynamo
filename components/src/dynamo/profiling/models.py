@@ -25,6 +25,8 @@ class Worker(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
     # Off preserves compatibility with images that only expose start/stop.
     verify_runtime: bool = False
     expected_rank_ids: list[str] = msgspec.field(default_factory=list)
+    # Unique report prefix of this replica's prepared Nsight launch.
+    nsys_output_prefix: str | None = None
 
 
 class Config(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
@@ -39,6 +41,9 @@ class Config(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
     lifecycle_evidence_location: str | None = None
     # Temporary operator override for environments that deny perf attachment.
     frontend_perf_enabled: bool = True
+    # Enables in-process NVTX capture; requires ai-dynamo[profiling] and a
+    # prepared CPU-only Nsight launch with automatic SQLite export.
+    nsys_frontend_output_prefix: str | None = None
     clock_probe_timeout_s: float = 1.0
     clock_probe_samples: int = 3
     artifact_validation_timeout_s: float = 120.0

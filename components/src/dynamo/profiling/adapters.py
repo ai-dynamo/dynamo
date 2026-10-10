@@ -11,6 +11,7 @@ import msgspec
 
 from .collectors import PerfCollector, TorchCollector
 from .models import Config, Plan, RuntimeSnapshot
+from .nsys import nsys_collectors
 
 
 class Collector(Protocol):
@@ -74,5 +75,5 @@ def torch_collectors(
 def default_registry() -> CollectorRegistry:
     registry = CollectorRegistry()
     registry.register("torch_profile", torch_collectors)
-    # An nsys provider must be explicitly installed and check prepared sessions.
+    registry.register("nsys", nsys_collectors)
     return registry

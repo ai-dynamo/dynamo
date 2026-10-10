@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from copy import deepcopy
@@ -84,6 +85,7 @@ class Coordinator:
         self.config = config
         self.runtime = runtime
         self.registry = registry if registry is not None else default_registry()
+        self.builtin_collectors = registry is None
         self.clock_sampler = (
             clock_sampler if clock_sampler is not None else WorkerClockSampler()
         )
@@ -108,16 +110,22 @@ class Coordinator:
             {
                 "target_id": "frontend",
                 "process_epoch": self.frontend_epoch,
-                "collectors": ["linux_perf"]
-                if self.config.frontend_perf_enabled
-                else [],
+                "collectors": (
+                    ["linux_perf"] if self.config.frontend_perf_enabled else []
+                )
+                + (["nsys"] if self.config.nsys_frontend_output_prefix else []),
                 "scope": "process_and_threads",
             },
             *[
                 {
                     "target_id": worker.target_id,
                     "process_epoch": worker.process_epoch,
-                    "collectors": ["torch_profiler"],
+                    "collectors": (
+                        []
+                        if worker.backend == "vllm" and worker.nsys_output_prefix
+                        else ["torch_profiler"]
+                    )
+                    + (["nsys"] if worker.nsys_output_prefix else []),
                     "scope": "engine_group",
                     "identity_verification": "control_process_epoch_required_at_start"
                     if worker.verify_runtime
@@ -132,9 +140,7 @@ class Coordinator:
         if not plan.client_request_id or len(plan.client_request_id) > 128:
             raise BadRequest("client_request_id must contain 1..128 characters")
         if not self.registry.supports(plan.mode):
-            raise Unsupported(
-                "nsys adapter is deferred; requires a prepared launch/session"
-            )
+            raise Unsupported("Collector mode is not installed")
         if not 0 < plan.duration_ms <= self.config.max_duration_ms:
             raise BadRequest("duration_ms exceeds configured capture budget")
         target_ids = [target.target_id for target in plan.targets]
@@ -146,6 +152,41 @@ class Coordinator:
                 raise BadRequest("Unknown target; use GET targets")
             if epochs[target.target_id] != target.process_epoch:
                 raise Conflict("Target process epoch does not match inventory")
+            if (
+                self.builtin_collectors
+                and plan.mode == "torch_profile"
+                and target.target_id != "frontend"
+            ):
+                worker = self.workers[target.target_id]
+                if worker.backend == "vllm" and worker.nsys_output_prefix:
+                    raise Unsupported(
+                        "This vLLM launch uses its CUDA profiler; Torch profiling requires a separate launch"
+                    )
+            if plan.mode == "nsys" and self.builtin_collectors:
+                prefix = (
+                    self.config.nsys_frontend_output_prefix
+                    if target.target_id == "frontend"
+                    else self.workers[target.target_id].nsys_output_prefix
+                )
+                if not prefix:
+                    raise Unsupported("Nsight requires a prepared launch/output prefix")
+                if not Path(prefix).is_absolute():
+                    raise Unsupported("Nsight output prefixes must be absolute")
+                if target.target_id == "frontend" and self.frontend_pid != os.getpid():
+                    raise Unsupported("NVTX frontend capture requires an embedded host")
+        if plan.mode == "nsys" and self.builtin_collectors:
+            prefixes = [
+                (
+                    self.config.nsys_frontend_output_prefix
+                    if target.target_id == "frontend"
+                    else self.workers[target.target_id].nsys_output_prefix
+                )
+                for target in plan.targets
+            ]
+            if len(set(prefixes)) != len(prefixes):
+                raise BadRequest(
+                    "Selected Nsight launches must have distinct output prefixes"
+                )
         if (
             plan.mode == "torch_profile"
             and not self.config.frontend_perf_enabled
@@ -208,7 +249,11 @@ class Coordinator:
                 "duration_semantics": "best_effort_lease_from_acceptance",
                 "startup_counts_toward_duration": True,
                 "synchronized_start": False,
-                "native_recording_bounds": "artifact_validation.artifacts.recording_bounds",
+                "native_recording_bounds": (
+                    "artifact_validation.recording_bounds"
+                    if session.plan.mode == "nsys"
+                    else "artifact_validation.artifacts.recording_bounds"
+                ),
                 "start_timeout_s": self.config.start_timeout_s,
                 "finalize_timeout_s": self.config.finalize_timeout_s,
                 "artifact_validation_timeout_s": self.config.artifact_validation_timeout_s,
@@ -216,10 +261,16 @@ class Coordinator:
             "frontend": {
                 "pid": self.frontend_pid,
                 "process_epoch": self.frontend_epoch,
-                "profiling_enabled": self.config.frontend_perf_enabled,
-                "omission_reason": None
-                if self.config.frontend_perf_enabled
-                else "disabled_by_operator_config",
+                "profiling_enabled": self.frontend_enabled(session),
+                "omission_reason": (
+                    None
+                    if self.frontend_enabled(session)
+                    else (
+                        "not_selected"
+                        if session.plan.mode == "nsys"
+                        else "disabled_by_operator_config"
+                    )
+                ),
             },
             "profiles": [collector.evidence for collector in session.collectors],
             "lifecycle_otel": {
@@ -257,6 +308,13 @@ class Coordinator:
             "errors": session.errors,
         }
         return deepcopy(manifest)
+
+    def frontend_enabled(self, session: Session) -> bool:
+        return (
+            any(target.target_id == "frontend" for target in session.plan.targets)
+            if session.plan.mode == "nsys"
+            else self.config.frontend_perf_enabled
+        )
 
     def persist(self, session: Session) -> None:
         pending = session.directory / "manifest.json.tmp"
@@ -397,6 +455,10 @@ class Coordinator:
                     {"target_id": collector.evidence.get("target_id"), **validation}
                 )
                 if validation["status"] in ("partial", "invalid"):
+                    if collector.evidence.get("collector") == "nsys":
+                        # An unfinished export could be misassociated with the
+                        # next window; require reconciliation before admitting it.
+                        self.cleanup_uncertain = True
                     session.errors.append(
                         f"{collector.evidence.get('target_id')}: artifacts {validation['status']}"
                     )

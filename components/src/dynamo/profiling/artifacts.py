@@ -15,6 +15,7 @@ from typing import Protocol
 import ijson
 
 from .models import Config
+from .nsys import validate_reports
 
 
 class ArtifactValidator(Protocol):
@@ -127,6 +128,8 @@ def inspect_trace(path: Path, config: Config, deadline: float) -> dict:
 
 class SharedFilesystemValidator:
     async def validate(self, evidence: dict, config: Config) -> dict:
+        if evidence.get("collector") == "nsys":
+            return await validate_reports(evidence, config)
         # Parsing can take seconds for native traces; never run it on the
         # frontend's serving loop. The reader enforces a cooperative deadline.
         return await asyncio.to_thread(self._validate, evidence.copy(), config)
