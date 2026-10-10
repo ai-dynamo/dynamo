@@ -657,13 +657,24 @@ async def test_prepare_snapshot_engine_rejects_dcp_before_warmup(monkeypatch):
     [
         {"dcp_size": 2, "attention_backend": "triton"},
         {"dcp_size": 1, "attention_backend": "fa3"},
-        {"dcp_size": 2, "attention_backend": "fa3", "use_mla_backend": lambda: True},
+        {
+            "dcp_size": 2,
+            "attention_backend": "flashinfer",
+            "use_mla_backend": lambda: True,
+        },
+        {
+            "dcp_size": 2,
+            "attention_backend": "fa3",
+            "disaggregation_mode": "prefill",
+            "use_mla_backend": lambda: True,
+        },
     ],
-    ids=["dcp-capable-backend", "dcp-disabled", "mla-model"],
+    ids=["dcp-capable-backend", "dcp-disabled", "mla-model", "mla-prefill-worker"],
 )
 async def test_parse_args_accepts_supported_dcp_configurations(
     monkeypatch, mock_sglang_cli, tmp_path, overrides
 ):
+    """Accept supported backends, disabled DCP, and MLA prefill-only workers."""
     server_args = _dcp_server_args_stub(**overrides)
     monkeypatch.setattr(
         "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
@@ -674,6 +685,129 @@ async def test_parse_args_accepts_supported_dcp_configurations(
 
     assert config.server_args is server_args
     assert config.use_resolved_server_args(server_args) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides, default_backend, expected_backend, automatic",
+    [
+        ({"attention_backend": "fa3"}, None, "fa3", False),
+        ({"decode_attention_backend": "fa4"}, None, "fa4", False),
+        ({"attention_backend": "flashmla"}, None, "flashmla", False),
+        # No backend passed: SGLang picks fa3 for MLA on Hopper.
+        ({}, "fa3", "fa3", True),
+    ],
+    ids=["explicit-fa3", "decode-fa4", "explicit-flashmla", "hopper-default-fa3"],
+)
+async def test_parse_args_rejects_mla_dcp_on_backend_without_dcp_decode(
+    monkeypatch,
+    mock_sglang_cli,
+    tmp_path,
+    overrides,
+    default_backend,
+    expected_backend,
+    automatic,
+):
+    """MLA DCP decode must reject a backend that returns no LSE before the engine.
+
+    Otherwise SGLang crashes at decode CUDA graph capture with
+    ``too many values to unpack (expected 2)``.
+    """
+    if automatic:
+        monkeypatch.setattr(
+            "dynamo.sglang._compat.sglang_get_default_attn_backend",
+            lambda *_: default_backend,
+        )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            dcp_size=2, use_mla_backend=lambda: True, **overrides
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path), **overrides)
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert f"decode attention backend '{expected_backend}'" in message
+    assert "--attention-backend flashinfer" in message
+    assert "--dcp-size 1" in message
+    assert ("automatically" in message) is automatic
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [{}, {"attention_backend": "dsa"}],
+    ids=["dsa-model-default", "explicit-dsa"],
+)
+async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
+    monkeypatch, mock_sglang_cli, tmp_path, overrides
+):
+    """SGLang overrides the default to dsa for DSA models, whose decode returns no LSE."""
+    # The platform default alone would accept; the DSA override must win.
+    monkeypatch.setattr(
+        "dynamo.sglang._compat.sglang_get_default_attn_backend",
+        lambda *_: "flashinfer",
+    )
+    hf_config = SimpleNamespace(
+        architectures=["DeepseekV32ForCausalLM"], index_topk=2048
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            dcp_size=2,
+            use_mla_backend=lambda: True,
+            get_model_config=lambda: SimpleNamespace(
+                is_multimodal=False, hf_config=hf_config
+            ),
+            **overrides,
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path), **overrides)
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "decode attention backend 'dsa'" in message
+    assert "Use --dcp-size 1." in message
+    assert "flashinfer" not in message
+    assert ("automatically" in message) is not overrides
+
+
+def _raise_runtime_error(*_):
+    """Simulate a model-config lookup failure during backend prediction."""
+    raise RuntimeError("model config unavailable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "default_backend",
+    ["flashinfer", None, _raise_runtime_error],
+    ids=["dcp-capable-default", "unknown-default", "default-lookup-fails"],
+)
+async def test_parse_args_accepts_mla_dcp_when_default_backend_is_not_known_bad(
+    monkeypatch, mock_sglang_cli, tmp_path, default_backend, caplog
+):
+    """Keep valid or unknown MLA defaults usable, warning if prediction fails."""
+    helper = (
+        default_backend if callable(default_backend) else lambda *_: default_backend
+    )
+    monkeypatch.setattr("dynamo.sglang._compat.sglang_get_default_attn_backend", helper)
+    server_args = _dcp_server_args_stub(dcp_size=2, use_mla_backend=lambda: True)
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    with caplog.at_level(logging.WARNING):
+        config = await parse_args(sys.argv[1:])
+
+    assert config.server_args is server_args
+    lookup_failed = default_backend is _raise_runtime_error
+    assert ("Could not predict SGLang's default" in caplog.text) is lookup_failed
 
 
 @pytest.mark.asyncio
