@@ -648,6 +648,7 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
+      dd_env: nightly
       framework: vllm
       profiles: '["agg", "agg_router_kv_approx"]'
       image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
@@ -663,6 +664,7 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
+      dd_env: nightly
       framework: sglang
       profiles: '["agg", "agg_logging", "agg_embed"]'
       image_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
@@ -678,6 +680,7 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
+      dd_env: nightly
       framework: trtllm
       profiles: '["agg"]'
       image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
@@ -809,6 +812,8 @@ jobs:
       - name: Run EFA deploy test
         uses: ./.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: nightly
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -897,6 +902,8 @@ jobs:
       - name: Run EFA deploy test
         uses: ./.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: nightly
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
