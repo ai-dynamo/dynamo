@@ -3,14 +3,18 @@
 
 """Unit tests for dynamo.common.lora.manager.get_lora_manager singleton."""
 
+import sys
 import threading
 import time
+import types
+from pathlib import Path
 
 import pytest
 
 from dynamo.common.lora import manager as manager_module
 from dynamo.common.lora.manager import get_lora_manager
 from dynamo.common.lora.once import OnceLock
+from dynamo.common.lora.runtime import RuntimeLoRAConfigurationError
 
 pytestmark = [
     pytest.mark.unit,
@@ -23,6 +27,33 @@ pytestmark = [
 def fresh_singleton(monkeypatch):
     """Reset the module-level OnceLock so each test starts with no cached manager."""
     monkeypatch.setattr(manager_module, "_lora_manager", OnceLock())
+
+
+@pytest.mark.parametrize(
+    "source", ["explicit", "DYN_LORA_PATH", "HOME", "USERPROFILE", "fallback"]
+)
+def test_cache_root_matches_downloader_without_home_lookup(
+    monkeypatch, tmp_path, source
+):
+    for name in ("DYN_LORA_PATH", "HOME", "USERPROFILE"):
+        monkeypatch.delenv(name, raising=False)
+    if source in ("DYN_LORA_PATH", "HOME", "USERPROFILE"):
+        monkeypatch.setenv(source, str(tmp_path))
+
+    def unavailable_home():
+        raise RuntimeError("home directory unavailable")
+
+    monkeypatch.setattr(Path, "home", unavailable_home)
+    monkeypatch.setattr(manager_module, "LoRADownloader", lambda path: object())
+    manager = manager_module.LoRAManager(tmp_path if source == "explicit" else None)
+    expected = (
+        tmp_path
+        if source in ("explicit", "DYN_LORA_PATH")
+        else (Path("/tmp") if source == "fallback" else tmp_path)
+        / ".cache"
+        / "dynamo_loras"
+    )
+    assert manager.cache_root == expected
 
 
 class TestGetLoraManagerSingleton:
@@ -78,6 +109,58 @@ class TestGetLoraManagerSingleton:
         assert second is not None
         assert isinstance(second, FlakyLoRAManager)
         assert attempts == 2
+
+    def test_explicit_manager_ignores_runtime_plugin_configuration(
+        self, fresh_singleton, monkeypatch
+    ):
+        monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
+        monkeypatch.setenv("DYN_LORA_ENABLED", "true")
+        monkeypatch.delenv("DYN_LORA_DOWNLOADER_PLUGIN", raising=False)
+
+        manager = get_lora_manager()
+
+        assert manager is not None
+        assert manager.runtime_lora_schemes == frozenset()
+
+    def test_runtime_loading_requires_master_lora_switch(
+        self, fresh_singleton, monkeypatch
+    ):
+        monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
+        monkeypatch.delenv("DYN_LORA_ENABLED", raising=False)
+
+        with pytest.raises(
+            RuntimeLoRAConfigurationError,
+            match="requires DYN_LORA_ENABLED",
+        ):
+            get_lora_manager(configure_runtime=True)
+
+    def test_runtime_loading_imports_and_registers_plugin(
+        self, fresh_singleton, monkeypatch, tmp_path
+    ):
+        module = types.ModuleType("test_manager_runtime_plugin")
+
+        class Resolver:
+            protocol_version = 2
+            schemes = frozenset({"wandb-artifact"})
+
+            async def resolve(self, *, source_uri, context):
+                return None
+
+        module.resolver = Resolver()
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        monkeypatch.setenv("DYN_LORA_ENABLED", "true")
+        monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
+        monkeypatch.setenv(
+            "DYN_LORA_DOWNLOADER_PLUGIN",
+            f"{module.__name__}:resolver",
+        )
+        monkeypatch.setenv("DYN_LORA_ALLOWED_SCHEMES", "wandb-artifact,s3")
+        monkeypatch.setenv("DYN_LORA_PATH", str(tmp_path))
+
+        manager = get_lora_manager(configure_runtime=True)
+
+        assert manager is not None
+        assert manager.runtime_lora_schemes == frozenset({"wandb-artifact"})
 
 
 class TestGetLoraManagerConcurrency:

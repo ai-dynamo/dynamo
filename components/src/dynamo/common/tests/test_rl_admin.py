@@ -7,6 +7,7 @@ import asyncio
 
 import pytest
 
+from dynamo.common.lora.manager import runtime_lora_enabled
 from dynamo.common.rl import (
     RLAdminValidationError,
     RLRouteRegistry,
@@ -154,6 +155,18 @@ def test_lora_unload_request_validation() -> None:
             raise AssertionError(f"expected validation error for lora_name={bad!r}")
 
 
+def test_runtime_adapter_names_are_reserved_for_new_loads() -> None:
+    runtime_name = "dyn-lora-0123456789abcdef0123456789abcdef"
+
+    with pytest.raises(RLAdminValidationError, match="reserved"):
+        require_lora_load_request(
+            {"lora_name": runtime_name, "source": {"uri": "file:///adapter"}}
+        )
+
+    with pytest.raises(RLAdminValidationError, match="reserved"):
+        require_lora_unload_request({"lora_name": runtime_name})
+
+
 def test_lora_load_request_rejects_non_string_fields() -> None:
     # lora_name / source.uri must be strings (no str() coercion of lists/dicts).
     for req in (
@@ -167,3 +180,31 @@ def test_lora_load_request_rejects_non_string_fields() -> None:
             pass
         else:
             raise AssertionError(f"expected validation error for {req!r}")
+
+
+def test_lora_load_request_rejects_runtime_delimiter_when_enabled(monkeypatch) -> None:
+    request = {
+        "lora_name": "base|adapter",
+        "source": {"uri": "file:///tmp/adapter"},
+    }
+
+    monkeypatch.delenv("DYN_LORA_RUNTIME_LOAD_ENABLED", raising=False)
+    assert require_lora_load_request(request) == (
+        "base|adapter",
+        "file:///tmp/adapter",
+    )
+
+    monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
+    with pytest.raises(RLAdminValidationError, match="reserved"):
+        require_lora_load_request(request)
+
+
+@pytest.mark.parametrize("value", ["true", "on", " true ", "false"])
+def test_lora_name_restriction_uses_runtime_enablement_parser(monkeypatch, value):
+    monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", value)
+    request = {"lora_name": "base|adapter", "source": {"uri": "file:///adapter"}}
+    if runtime_lora_enabled():
+        with pytest.raises(RLAdminValidationError, match="reserved"):
+            require_lora_load_request(request)
+    else:
+        assert require_lora_load_request(request) == ("base|adapter", "file:///adapter")
