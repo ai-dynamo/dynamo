@@ -182,7 +182,50 @@ impl DynamicSubscriber {
                         }
                     }
                     Ok(DiscoveryEvent::ModelTaintsUpdated(_)) => {}
-                    Ok(DiscoveryEvent::Resync(_)) => {}
+                    Ok(DiscoveryEvent::Resync(instances)) => {
+                        for (instance_id, endpoint) in
+                            Self::resync_publishers(instances, &zmq_topic)
+                        {
+                            let mut endpoints_guard = endpoints.write().await;
+                            if endpoints_guard.contains_key(&instance_id) {
+                                continue;
+                            }
+
+                            tracing::info!(
+                                endpoint = %endpoint,
+                                ?instance_id,
+                                "Connecting to ZMQ publisher from discovery resync"
+                            );
+                            let endpoint_cancel = CancellationToken::new();
+                            endpoints_guard.insert(
+                                instance_id.clone(),
+                                (endpoint.clone(), endpoint_cancel.clone()),
+                            );
+                            drop(endpoints_guard);
+
+                            let event_tx_clone = event_tx.clone();
+                            let zmq_topic_clone = zmq_topic.clone();
+                            let endpoints_clone = Arc::clone(&endpoints);
+                            let instance_id_clone = instance_id.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = Self::consume_endpoint_stream(
+                                    &endpoint,
+                                    &zmq_topic_clone,
+                                    event_tx_clone,
+                                    endpoint_cancel,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        endpoint = %endpoint,
+                                        error = %e,
+                                        "Error consuming ZMQ endpoint stream"
+                                    );
+                                }
+                                endpoints_clone.write().await.remove(&instance_id_clone);
+                            });
+                        }
+                    }
                     Ok(DiscoveryEvent::Removed(instance_id)) => {
                         let is_expected_topic = matches!(
                             &instance_id,
@@ -255,6 +298,19 @@ impl DynamicSubscriber {
             return Some(endpoint.clone());
         }
         None
+    }
+
+    fn resync_publishers(
+        instances: Vec<DiscoveryInstance>,
+        expected_topic: &str,
+    ) -> Vec<(DiscoveryInstanceId, String)> {
+        instances
+            .into_iter()
+            .filter_map(|instance| {
+                Self::extract_zmq_endpoint(&instance, expected_topic)
+                    .map(|endpoint| (instance.id(), endpoint))
+            })
+            .collect()
     }
 
     /// Consume events from a single endpoint and forward to the merged channel.
@@ -405,6 +461,21 @@ mod tests {
             DynamicSubscriber::extract_zmq_endpoint(&wrong_transport, "kv-events"),
             None
         );
+    }
+
+    #[test]
+    fn resync_preserves_all_matching_zmq_publishers() {
+        let instances = vec![
+            event_channel("kv-events", EventTransport::zmq("tcp://127.0.0.1:1")),
+            event_channel("kv-events", EventTransport::zmq("tcp://127.0.0.1:2")),
+            event_channel("kv-metrics", EventTransport::zmq("tcp://127.0.0.1:3")),
+        ];
+
+        let publishers = DynamicSubscriber::resync_publishers(instances, "kv-events");
+
+        assert_eq!(publishers.len(), 2);
+        assert_eq!(publishers[0].1, "tcp://127.0.0.1:1");
+        assert_eq!(publishers[1].1, "tcp://127.0.0.1:2");
     }
 
     #[tokio::test]
