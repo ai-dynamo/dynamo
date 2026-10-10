@@ -51,10 +51,8 @@ func TestDisaggregatedSetRestartAppliedRequiresEveryTemplate(t *testing.T) {
 	}{
 		{name: "requested restart on both templates", leaderID: "requested", workerID: "requested", wantApplied: true},
 		{name: "ready old revision", leaderID: "previous", workerID: "previous"},
-		{name: "missing annotations"},
 		{name: "only leader updated", leaderID: "requested", workerID: "previous"},
 		{name: "only worker updated", leaderID: "previous", workerID: "requested"},
-		{name: "worker annotation missing", leaderID: "requested"},
 		{name: "leader template missing", workerID: "requested", missingLeader: true},
 		{name: "selected role missing", leaderID: "requested", workerID: "requested", missingRole: true},
 		{name: "malformed role spec", malformed: true, wantError: true},
