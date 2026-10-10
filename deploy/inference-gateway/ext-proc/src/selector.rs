@@ -8,7 +8,9 @@
 //! active load across EPP replicas through [`crate::peer_discovery`].
 
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -71,87 +73,25 @@ pub struct Selector {
     /// Cancels the peer-discovery watch on drop. The `SelectionService`'s own
     /// `Drop` tears down its core + replica-sync tasks.
     cancel: CancellationToken,
+    /// Replication-bootstrap readiness: initial peer discovery plus KV-index
+    /// recovery, or authoritative no-peer bootstrap. Latched once initialized.
+    peer_ready: Option<Arc<AtomicBool>>,
+    /// Deferred peer KV-index recovery parameters (see [`PeerRecovery`]).
+    peer_recovery: Option<PeerRecovery>,
+}
+
+struct PeerRecovery {
+    client: Client,
+    namespace: String,
+    service_name: String,
+    sync_port: u16,
+    selection_http_port: Option<u16>,
+    self_ip: IpAddr,
+    /// Shared with the `/dump` endpoint: 503 until recovery/bootstrap done.
+    recovered: Arc<AtomicBool>,
 }
 
 impl Selector {
-    pub async fn new(
-        cfg: &EppStandaloneConfig,
-        policy_registry: WorkerSelectionPolicyRegistry,
-    ) -> Result<Self> {
-        let kv_router_config =
-            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
-        Self::new_with_kv_router_config(cfg, kv_router_config, policy_registry).await
-    }
-
-    async fn new_with_kv_router_config(
-        cfg: &EppStandaloneConfig,
-        kv_router_config: KvRouterConfig,
-        policy_registry: WorkerSelectionPolicyRegistry,
-    ) -> Result<Self> {
-        Self::validate_queueing_worker_capacity(cfg, &kv_router_config)?;
-
-        warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
-        let peer_replication = cfg.peer_replication.as_ref();
-        let peer_client = if peer_replication.is_some() {
-            Some(
-                Client::try_default()
-                    .await
-                    .context("building Kubernetes client for EPP peer replication")?,
-            )
-        } else {
-            None
-        };
-        if let (Some(peer_client), Some(peer_replication)) = (&peer_client, peer_replication) {
-            crate::peer_discovery::ensure_peer_service_exists(
-                peer_client.clone(),
-                &cfg.namespace,
-                &peer_replication.service_name,
-            )
-            .await?;
-        }
-
-        let mut builder = SelectionServiceBuilder::new(
-            kv_router_config,
-            WorkerType::Aggregated,
-            policy_registry.with_default_factory(dynamo_custom_policy_builtin::default_factory()),
-        )
-        .indexer_threads(cfg.selector_threads);
-        if let Some(peer_replication) = peer_replication {
-            builder = builder.replica_sync(peer_replication.sync_port, Vec::new());
-        }
-        if let Some(ttl) = cfg.session_affinity_ttl_secs {
-            builder = builder.session_affinity(
-                std::time::Duration::try_from_secs_f64(ttl)
-                    .context("invalid session affinity TTL")?,
-            );
-        }
-        let service = Arc::new(
-            builder
-                .build()
-                .await
-                .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
-        );
-        let cancel = CancellationToken::new();
-        if let (Some(peer_client), Some(peer_replication)) = (peer_client, peer_replication) {
-            crate::peer_discovery::spawn(
-                peer_client,
-                service.clone(),
-                &cfg.namespace,
-                &peer_replication.service_name,
-                peer_replication.sync_port,
-                peer_replication.pod_ip.clone(),
-                cancel.clone(),
-            )
-            .await?;
-        }
-        tracing::info!(
-            replicated = peer_replication.is_some(),
-            "Initialized in-process selection service"
-        );
-
-        Ok(Self { service, cancel })
-    }
-
     fn validate_queueing_worker_capacity(
         cfg: &EppStandaloneConfig,
         kv_router_config: &KvRouterConfig,
@@ -170,6 +110,167 @@ impl Selector {
         Ok(())
     }
 
+    pub async fn new(
+        cfg: &EppStandaloneConfig,
+        policy_registry: WorkerSelectionPolicyRegistry,
+    ) -> Result<Self> {
+        let kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+        Self::new_with_kv_router_config(cfg, kv_router_config, policy_registry).await
+    }
+
+    async fn new_with_kv_router_config(
+        cfg: &EppStandaloneConfig,
+        kv_router_config: KvRouterConfig,
+        policy_registry: WorkerSelectionPolicyRegistry,
+    ) -> Result<Self> {
+        Self::validate_queueing_worker_capacity(cfg, &kv_router_config)?;
+        warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
+
+        let cancel = CancellationToken::new();
+        let mut builder = SelectionServiceBuilder::new(
+            kv_router_config,
+            WorkerType::Aggregated,
+            policy_registry.with_default_factory(dynamo_custom_policy_builtin::default_factory()),
+        )
+        .indexer_threads(cfg.selector_threads);
+
+        // Resolve peer replication before building: the builder needs the sync port and defer flag.
+        let (peer_client, peer_self_ip) = if let Some(peer) = &cfg.peer_replication {
+            let client = Client::try_default()
+                .await
+                .context("building Kubernetes client for EPP peer replication")?;
+            crate::peer_discovery::ensure_peer_service_exists(
+                client.clone(),
+                &cfg.namespace,
+                &peer.service_name,
+            )
+            .await?;
+            let self_ip: IpAddr = peer
+                .pod_ip
+                .parse()
+                .context("POD_IP must be a valid IPv4 or IPv6 address")?;
+            builder = builder.replica_sync(peer.sync_port, Vec::new());
+            if peer.selection_http_port.is_some() {
+                builder = builder.defer_indexer_for_bootstrap();
+            }
+            (Some(client), Some(self_ip))
+        } else {
+            (None, None)
+        };
+
+        if let Some(ttl) = cfg.session_affinity_ttl_secs {
+            builder = builder.session_affinity(
+                std::time::Duration::try_from_secs_f64(ttl)
+                    .context("invalid session affinity TTL")?,
+            );
+        }
+        let service = Arc::new(
+            builder
+                .build()
+                .await
+                .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
+        );
+
+        let mut peer_recovery = None;
+        let peer_ready = if let (Some(peer), Some(client), Some(self_ip)) =
+            (&cfg.peer_replication, peer_client, peer_self_ip)
+        {
+            let recovered = Arc::new(AtomicBool::new(false));
+            if let Some(selection_http_port) = peer.selection_http_port {
+                crate::peer_http::spawn(
+                    service.clone(),
+                    selection_http_port,
+                    self_ip,
+                    cancel.clone(),
+                    recovered.clone(),
+                )
+                .await?;
+            } else {
+                crate::metrics::set_kv_recovery_state(crate::metrics::KV_RECOVERY_DISABLED);
+                tracing::warn!(
+                    service = %peer.service_name,
+                    "DYN_EPP_SELECTION_HTTP_PORT is not set; peer KV-index recovery is disabled, \
+                     but replica lifecycle synchronization remains active"
+                );
+            }
+            peer_recovery = Some(PeerRecovery {
+                client,
+                namespace: cfg.namespace.clone(),
+                service_name: peer.service_name.clone(),
+                sync_port: peer.sync_port,
+                selection_http_port: peer.selection_http_port,
+                self_ip,
+                recovered: recovered.clone(),
+            });
+            Some(recovered)
+        } else {
+            None
+        };
+
+        tracing::info!(
+            replicated = peer_ready.is_some(),
+            "Initialized in-process selection service"
+        );
+
+        Ok(Self {
+            service,
+            cancel,
+            peer_ready,
+            peer_recovery,
+        })
+    }
+
+    pub(crate) async fn run_bootstrap_recovery(&self) -> Result<()> {
+        let Some(recovery) = &self.peer_recovery else {
+            return Ok(());
+        };
+        let client = recovery.client.clone();
+        let service = self.service.clone();
+        let namespace = recovery.namespace.clone();
+        let service_name = recovery.service_name.clone();
+        let sync_port = recovery.sync_port;
+        let self_ip = recovery.self_ip.to_string();
+        let cancel = self.cancel.clone();
+        match recovery.selection_http_port {
+            Some(selection_http_port) => {
+                self.service
+                    .bootstrap_indexer(|| async move {
+                        crate::peer_discovery::spawn(
+                            client,
+                            service,
+                            &namespace,
+                            &service_name,
+                            sync_port,
+                            Some(selection_http_port),
+                            self_ip,
+                            cancel,
+                        )
+                        .await
+                    })
+                    .await?;
+            }
+            None => {
+                crate::peer_discovery::spawn(
+                    client,
+                    service,
+                    &namespace,
+                    &service_name,
+                    sync_port,
+                    None,
+                    self_ip,
+                    cancel,
+                )
+                .await?;
+            }
+        }
+        recovery.recovered.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn peer_ready(&self) -> Option<Arc<AtomicBool>> {
+        self.peer_ready.clone()
+    }
     /// Select a worker for a prompt and book its load in one operation. Takes the
     /// request by value so per-request fields are moved into the core request
     /// rather than cloned on the hot path.
@@ -264,7 +365,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use dynamo_kv_router::services::selection::{
-        CatalogReconciler, WorkerRequest, WorkerSelectionPolicyParameters,
+        CatalogReconciler, WorkerLifecycle, WorkerRequest, WorkerSelectionPolicyParameters,
     };
     use dynamo_kv_router::{
         WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
@@ -532,6 +633,68 @@ worker_selection:
             .expect("custom-policy reservation should be releasable");
     }
 
+    #[tokio::test]
+    async fn deferred_selection_service_completes_bootstrap() {
+        let service = SelectionServiceBuilder::new(
+            KvRouterConfig::default(),
+            WorkerType::Aggregated,
+            dynamo_custom_policy_builtin::default_registry(),
+        )
+        .indexer_threads(1)
+        .defer_indexer_for_bootstrap()
+        .build()
+        .await
+        .expect("deferred selection service should build");
+        service
+            .bootstrap_indexer(|| async { Ok(()) })
+            .await
+            .expect("deferred selection service should complete bootstrap");
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn malformed_kv_endpoint_does_not_block_deferred_bootstrap() {
+        let service = Arc::new(
+            SelectionServiceBuilder::new(
+                KvRouterConfig::default(),
+                WorkerType::Aggregated,
+                dynamo_custom_policy_builtin::default_registry(),
+            )
+            .indexer_threads(1)
+            .defer_indexer_for_bootstrap()
+            .build()
+            .await
+            .expect("deferred selection service should build"),
+        );
+        let mut registration = schedulable_registration(1);
+        registration
+            .kv_events_endpoints
+            .insert(0, "not-a-zmq-endpoint".to_string());
+
+        let record = service
+            .upsert_worker(registration)
+            .await
+            .expect("invalid listener endpoint should produce an incomplete catalog record");
+        assert_eq!(record.lifecycle, WorkerLifecycle::Incomplete);
+        assert!(
+            record
+                .not_schedulable_reasons
+                .iter()
+                .any(|reason| reason.contains("invalid kv_events endpoint")),
+            "unexpected reasons: {:?}",
+            record.not_schedulable_reasons
+        );
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.bootstrap_indexer(|| async { Ok(()) }),
+        )
+        .await
+        .expect("invalid endpoints must not leave a failed listener in the startup barrier")
+        .expect("bootstrap should complete without registered listeners");
+        service.shutdown().await;
+    }
+
     /// Item 1: a successful reserve books load, and the final free releases it.
     /// `free_reservation` is idempotent: a second free of the same id is a no-op
     /// success (matching a duplicate completion signal from the gateway).
@@ -708,6 +871,7 @@ worker_selection:
             service_name: "unreachable-peer-service".to_string(),
             pod_ip: "10.0.0.10".to_string(),
             sync_port: 9092,
+            selection_http_port: None,
         });
 
         let error = Selector::new_with_kv_router_config(
