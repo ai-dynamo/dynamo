@@ -4,6 +4,7 @@
 """Unit tests for SGLang multimodal embedding cache behavior."""
 
 import asyncio
+import gc
 import importlib
 import json
 from types import SimpleNamespace
@@ -236,6 +237,147 @@ def test_publish_cache_delta_delegates_to_publisher(
     cache_handler._publish_cache_delta(["a"], ["b"])
 
     assert publisher.last_call == (["a"], ["b"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cacheable_images", [1, 16])
+async def test_encode_with_cache_owns_only_admitted_item_storage(
+    cache_handler: MultimodalEncodeWorkerHandler, cacheable_images: int
+) -> None:
+    item_bytes = 4 * 4 * torch.tensor([], dtype=torch.float32).element_size()
+    cache = MultimodalEmbeddingCacheManager(capacity_bytes=4 * item_bytes)
+    cache_handler._embedding_cache = cache
+    expected = torch.arange(16 * 16, dtype=torch.float32).reshape(64, 4)
+    cache_handler.encoder.encode_mock.return_value = (
+        torch.tensor([[1, 2, 2]] * 16),
+        expected,
+        None,
+    )
+    keys = [f"image-{i}" if i < cacheable_images else None for i in range(16)]
+
+    result = await cache_handler._encode_with_cache(
+        [object() for _ in keys], keys, Modality.IMAGE
+    )
+    torch.testing.assert_close(result[1], expected)
+    del result
+    cache_handler.encoder.encode_mock.reset_mock(return_value=True)
+    gc.collect()
+
+    retained_storage = {}
+    for key in cache.keys():
+        entry = cache.get(key)
+        assert entry is not None
+        storage = entry.tensor.untyped_storage()
+        retained_storage[storage.data_ptr()] = storage.nbytes()
+        assert storage.nbytes() == item_bytes
+        index = int(key.removeprefix("image-"))
+        torch.testing.assert_close(entry.tensor, expected[index * 4 : (index + 1) * 4])
+    assert cache.keys() == [
+        f"image-{i}" for i in range(max(0, cacheable_images - 4), cacheable_images)
+    ]
+    assert sum(retained_storage.values()) == cache.stats["current_bytes"]
+    assert sum(retained_storage.values()) <= cache.stats["capacity_bytes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capacity_bytes, cache_key", [(32, "key"), (64, None)])
+async def test_encode_with_cache_does_not_clone_rejected_or_unkeyed_items(
+    cache_handler: MultimodalEncodeWorkerHandler,
+    monkeypatch,
+    capacity_bytes: int,
+    cache_key: str | None,
+) -> None:
+    cache_handler._embedding_cache = MultimodalEmbeddingCacheManager(capacity_bytes)
+    expected = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+    cache_handler.encoder.encode_mock.return_value = (
+        torch.tensor([[1, 2, 2]]),
+        expected,
+        None,
+    )
+    clone = Mock(side_effect=AssertionError("uncached item must not be copied"))
+    with monkeypatch.context() as context:
+        context.setattr(torch.Tensor, "clone", clone)
+        _, embeddings, _ = await cache_handler._encode_with_cache(
+            [object()], [cache_key], Modality.IMAGE
+        )
+    clone.assert_not_called()
+    torch.testing.assert_close(embeddings, expected)
+    assert cache_handler._embedding_cache.stats["current_bytes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_encode_with_cache_duplicate_key_retains_one_owned_item(
+    cache_handler: MultimodalEncodeWorkerHandler,
+) -> None:
+    cache_handler._embedding_cache = MultimodalEmbeddingCacheManager(32)
+    expected = torch.arange(16, dtype=torch.float32).reshape(8, 2)
+    cache_handler.encoder.encode_mock.return_value = (
+        torch.tensor([[1, 2, 2], [1, 2, 2]]),
+        expected,
+        None,
+    )
+    _, embeddings, _ = await cache_handler._encode_with_cache(
+        [object(), object()], ["same-image", "same-image"], Modality.IMAGE
+    )
+    torch.testing.assert_close(embeddings, expected)
+    cache = cache_handler._embedding_cache
+    assert cache.keys() == ["same-image"]
+    assert cache.stats["current_bytes"] == 32
+    entry = cache.get("same-image")
+    assert entry is not None
+    torch.testing.assert_close(entry.tensor, expected[4:])
+    assert entry.tensor.untyped_storage().nbytes() == 32
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("copy_fails", [False, True])
+async def test_encode_with_cache_evicts_before_copy_and_publishes_removals(
+    cache_handler: MultimodalEncodeWorkerHandler, monkeypatch, copy_fails: bool
+) -> None:
+    cache = MultimodalEmbeddingCacheManager(64)
+    cache_handler._embedding_cache = cache
+    cache.set("replace", CachedEmbedding(torch.ones(2, 2), image_grid_thw=[1, 1, 2]))
+    cache.set("evict", CachedEmbedding(torch.ones(6, 2), image_grid_thw=[1, 2, 3]))
+    publisher = Mock()
+    cache_handler._cache_publisher = publisher
+    expected = torch.arange(12, dtype=torch.float32).reshape(6, 2)
+    cache_handler.encoder.encode_mock.return_value = (
+        torch.tensor([[1, 2, 3]]),
+        expected,
+        None,
+    )
+    original_clone = torch.Tensor.clone
+    copy_error = MemoryError("embedding copy failed")
+    copies = []
+
+    def copy_after_eviction(tensor, **kwargs):
+        assert cache.keys() == []
+        assert cache.stats["current_bytes"] == 0
+        copies.append(tensor)
+        if copy_fails:
+            raise copy_error
+        return original_clone(tensor, **kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(torch.Tensor, "clone", copy_after_eviction)
+        # Another request can populate this key after our miss was prechecked.
+        encode = cache_handler._encode_with_cache(
+            [object()], ["replace"], Modality.IMAGE, prechecked_entries={0: None}
+        )
+        if copy_fails:
+            with pytest.raises(MemoryError) as raised:
+                await encode
+            assert raised.value is copy_error
+        else:
+            _, embeddings, _ = await encode
+    assert len(copies) == 1
+    if copy_fails:
+        assert cache.keys() == []
+        publisher.publish_delta.assert_called_once_with([], ["evict", "replace"])
+    else:
+        torch.testing.assert_close(embeddings, expected)
+        assert cache.keys() == ["replace"]
+        publisher.publish_delta.assert_called_once_with(["replace"], ["evict"])
 
 
 @pytest.mark.asyncio
