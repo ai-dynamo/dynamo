@@ -203,6 +203,67 @@ def test_radix_tree_thread_safety(
     ), f"Expected {expected_blocks_after_removal} block events after removal, got {len(blocks_after_removal)}"
 
 
+_RADIX_TREE_EXIT_DURING_CALL = """
+import json
+import sys
+import threading
+
+from dynamo.llm import RadixTree
+
+tree = RadixTree()
+
+
+def stored_event(i):
+    blocks = [{"block_hash": i, "tokens_hash": i}]
+    event = {"event_id": i, "data": {"stored": {"parent_hash": None, "blocks": blocks}}}
+    return json.dumps(event).encode()
+
+
+calls = {
+    "apply_event": lambda i: tree.apply_event(0, stored_event(i)),
+    "find_matches": lambda i: tree.find_matches([i]),
+    "remove_worker": lambda i: tree.remove_worker(0),
+    "clear_all_blocks": lambda i: tree.clear_all_blocks(0),
+}
+call = calls[sys.argv[1]]
+started = threading.Event()
+
+
+def loop():
+    i = 0
+    while True:
+        call(i)
+        i += 1
+        started.set()
+
+
+threading.Thread(target=loop, daemon=True).start()
+if not started.wait(5):
+    sys.exit("the first RadixTree call did not complete")
+"""
+
+
+@pytest.mark.timeout(60)  # subprocess wait is capped at 15 s per case
+@pytest.mark.parametrize(
+    "method", ["apply_event", "find_matches", "remove_worker", "clear_all_blocks"]
+)
+def test_radix_tree_call_in_daemon_thread_survives_interpreter_exit(method):
+    """The main thread exits while a daemon thread is inside a RadixTree call.
+
+    On Python before 3.13.8 this used to abort the process with "FATAL:
+    exception not rethrown" when the call re-took the GIL during interpreter
+    finalization.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", _RADIX_TREE_EXIT_DURING_CALL, method],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "FATAL" not in result.stderr
+
+
 @pytest.mark.skipif(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
