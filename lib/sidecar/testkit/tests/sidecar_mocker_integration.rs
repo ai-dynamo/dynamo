@@ -3,8 +3,10 @@
 
 use dynamo_backend_common::testing::mock_context;
 use dynamo_backend_common::{
-    BackendError, DynamoError, FinishReason, GenerateContext, LLMEngine, LLMEngineOutput,
+    BackendError, DisaggregationMode, DynamoError, FinishReason, GenerateContext, LLMEngine,
+    LLMEngineOutput, PreprocessedRequest,
 };
+use dynamo_llm::protocols::common::preprocessor::PrefillResult;
 use dynamo_sidecar_testkit::assert::{failure, terminal};
 use dynamo_sidecar_testkit::bounded;
 use dynamo_sidecar_testkit::control::{
@@ -13,10 +15,12 @@ use dynamo_sidecar_testkit::control::{
 };
 use dynamo_sidecar_testkit::fixtures::{Outputs, collect, request};
 use futures::{StreamExt, poll, stream::BoxStream};
+use serde_json::json;
 
 #[allow(dead_code)]
 mod support;
 
+use support::sglang::{self as sglang_fixture, http};
 use support::vllm as vllm_fixture;
 use support::{FixtureConfig, GenerateOpening, ProcessFixture, SidecarFixture, WireFixture};
 
@@ -743,6 +747,225 @@ async fn sglang_malformed_terminal_fails_then_recovers() {
         assert!(error.to_string().contains("missing finish_reason"));
         bounded("malformed RPC released", handle.wait(Event::Dropped)).await;
         healthy(&fixture, &engine, &control).await;
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
+
+fn http_request() -> PreprocessedRequest {
+    let mut req = request("mocker-model", vec![11, 22, 33], 2);
+    req.extra_args = Some(json!({"sglang_tito": {"sampling_params": {"max_new_tokens": 2}}}));
+    req
+}
+
+fn assert_http_completed(outputs: Outputs, request_id: &str) {
+    let outputs = outputs.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(outputs.len(), 2);
+    assert!(outputs[0].finish_reason.is_none());
+    assert_eq!(outputs[1].finish_reason, Some(FinishReason::Stop));
+    for (output, expected) in outputs.iter().zip(http::responses(request_id)) {
+        assert_eq!(
+            output.engine_data,
+            Some(json!({"sglang_response": expected}))
+        );
+    }
+}
+
+async fn http_checkpoint(
+    stream: &mut BoxStream<'static, Result<LLMEngineOutput, DynamoError>>,
+    handle: &RequestHandle<http::Adapter>,
+) -> Outputs {
+    let first = bounded("HTTP first response", stream.next()).await.unwrap();
+    assert!(first.as_ref().unwrap().finish_reason.is_none());
+    bounded("HTTP checkpoint", handle.wait(Event::Checkpoint)).await;
+    assert!(poll!(stream.next()).is_pending());
+    vec![first]
+}
+
+#[tokio::test]
+async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
+    bounded("HTTP cancellation phases and recovery", async {
+        let control = Controller::<http::Adapter>::default();
+        let mut fixture =
+            sglang_fixture::Fixture::start_http(control.clone(), FixtureConfig::default()).await;
+        let http = fixture.http();
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let mut aborted = Vec::new();
+        for is_before_headers in [true, false] {
+            for cancellation in [Cancellation::Explicit, Cancellation::ConsumerDrop] {
+                let ctx = mock_context();
+                let target = control.request(
+                    ctx.id(),
+                    if is_before_headers {
+                        RequestPlan {
+                            open: OpenAction::Hold,
+                            ..Default::default()
+                        }
+                    } else {
+                        after_token_responses(1, StreamAction::Continue)
+                    },
+                );
+                let mut stream = engine
+                    .generate(http_request(), GenerateContext::new(ctx.clone(), None))
+                    .await
+                    .unwrap();
+                let mut outputs = if is_before_headers {
+                    tokio::select! {
+                        _ = target.wait(Event::Received) => {},
+                        output = stream.next() => panic!("response arrived before headers: {output:?}"),
+                    }
+                    assert!(poll!(stream.next()).is_pending());
+                    Vec::new()
+                } else {
+                    http_checkpoint(&mut stream, &target).await
+                };
+                let tokens = target.tokens();
+                let survivor_ctx = mock_context();
+                let survivor_id = survivor_ctx.id().to_string();
+                let survivor = control.request(
+                    &survivor_id,
+                    after_token_responses(1, StreamAction::Continue),
+                );
+                let mut survivor_stream = engine
+                    .generate(http_request(), GenerateContext::new(survivor_ctx, None))
+                    .await
+                    .unwrap();
+                let mut survivor_outputs = http_checkpoint(&mut survivor_stream, &survivor).await;
+
+                if matches!(cancellation, Cancellation::Explicit) {
+                    ctx.stop_generating();
+                    outputs.push(bounded("HTTP cancelled response", stream.next()).await.unwrap());
+                    failure(outputs, &[], BackendError::Cancelled);
+                }
+                drop(stream);
+                http.wait_aborted(ctx.id()).await;
+                bounded("HTTP target transport released", target.wait(Event::Dropped)).await;
+                aborted.push(ctx.id().to_string());
+                assert_eq!(http.aborted_requests(), aborted);
+                assert_eq!(target.tokens(), tokens);
+                assert!(!survivor.reached(Event::Dropped));
+                assert!(poll!(survivor_stream.next()).is_pending());
+                survivor.release();
+                survivor_outputs.extend(survivor_stream.collect::<Outputs>().await);
+                assert_http_completed(survivor_outputs, &survivor_id);
+                bounded("HTTP survivor released", survivor.wait(Event::Dropped)).await;
+
+                let ctx = mock_context();
+                let id = ctx.id().to_string();
+                assert_http_completed(
+                    collect(&engine, http_request(), GenerateContext::new(ctx, None)).await,
+                    &id,
+                );
+                assert_eq!(http.aborted_requests(), aborted);
+            }
+        }
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn sglang_http_decode_cancellation_waits_for_transfer() {
+    bounded("HTTP decode transfer-safe cancellation", async {
+        let control = Controller::<http::Adapter>::default();
+        let mut fixture = sglang_fixture::Fixture::start_http(
+            control.clone(),
+            FixtureConfig {
+                disaggregation_mode: DisaggregationMode::Decode,
+                ..Default::default()
+            },
+        )
+        .await;
+        let http = fixture.http();
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let mut aborted = Vec::new();
+        for is_terminal_without_tokens in [false, true] {
+            for cancellation in [Cancellation::Explicit, Cancellation::ConsumerDrop] {
+                let ctx = mock_context();
+                let target = control.request(
+                    ctx.id(),
+                    RequestPlan {
+                        open: OpenAction::Hold,
+                        ..after_token_responses(1, StreamAction::Continue)
+                    },
+                );
+                let gate = http.hold_responses(
+                    ctx.id(),
+                    if is_terminal_without_tokens {
+                        vec![json!({"output_ids": [], "text": "", "meta_info": {"id": ctx.id(), "finish_reason": {"type": "length"}}})]
+                    } else {
+                        http::responses(ctx.id()).into()
+                    },
+                );
+                let mut req = http_request();
+                req.prefill_result = Some(PrefillResult {
+                    disaggregated_params: json!({
+                        "bootstrap_host": "127.0.0.1",
+                        "bootstrap_port": http.port(),
+                        "bootstrap_room": 1,
+                    }),
+                    prompt_tokens_details: None,
+                });
+                let (first_token_tx, first_token) = tokio::sync::watch::channel(false);
+                let mut stream = engine
+                    .generate(req, GenerateContext::new(ctx.clone(), Some(first_token_tx)))
+                    .await
+                    .unwrap();
+                tokio::select! {
+                    _ = target.wait(Event::Received) => {},
+                    output = stream.next() => panic!("response arrived before headers: {output:?}"),
+                }
+                assert!(poll!(stream.next()).is_pending());
+                if matches!(cancellation, Cancellation::Explicit) {
+                    ctx.stop_generating();
+                    failure(
+                        vec![bounded("HTTP decode cancellation", stream.next()).await.unwrap()],
+                        &[],
+                        BackendError::Cancelled,
+                    );
+                }
+                drop(stream);
+
+                for is_before_headers in [true, false] {
+                    if !is_before_headers {
+                        target.release();
+                        gate.wait_empty_response().await;
+                    }
+                    assert!(
+                        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+                            tokio::select! {
+                                _ = http.wait_aborted(ctx.id()) => panic!("decode aborted before transfer completed"),
+                                _ = target.wait(Event::Dropped) => panic!("decode transport dropped before transfer completed"),
+                            }
+                        })
+                        .await
+                        .is_err()
+                    );
+                    assert!(!*first_token.borrow());
+                }
+                gate.release();
+                if !is_terminal_without_tokens {
+                    http.wait_aborted(ctx.id()).await;
+                    assert!(*first_token.borrow());
+                    assert_eq!(target.tokens(), vec![101]);
+                    aborted.push(ctx.id().to_string());
+                }
+                bounded("HTTP decode transport released", target.wait(Event::Dropped)).await;
+                if is_terminal_without_tokens {
+                    assert!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            http.wait_aborted(ctx.id()),
+                        )
+                        .await
+                        .is_err()
+                    );
+                }
+                assert_eq!(http.aborted_requests(), aborted);
+            }
+        }
         finish(&mut fixture, &engine).await;
     })
     .await;

@@ -7,7 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_backend_common::{DisaggregationMode, LLMEngineOutput, PreprocessedRequest};
+use dynamo_llm::discovery::ModelWatcher;
+use dynamo_llm::entrypoint::RouterConfig;
+use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_llm::namespace::NamespaceFilter;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig};
@@ -175,6 +179,92 @@ impl Environment {
 impl Drop for Environment {
     fn drop(&mut self) {
         self.runtime.shutdown();
+    }
+}
+
+pub struct Frontend {
+    url: String,
+    client: reqwest::Client,
+    cancel: CancellationToken,
+    service: JoinHandle<anyhow::Result<()>>,
+    watcher: JoinHandle<()>,
+}
+
+impl Frontend {
+    pub async fn start(env: &Environment) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let service = HttpService::builder()
+            .host("127.0.0.1")
+            .port(address.port())
+            .enable_cmpl_endpoints(true)
+            .build()
+            .unwrap();
+        let watcher = Arc::new(ModelWatcher::new(
+            env.runtime.clone(),
+            service.state().manager_clone(),
+            RouterConfig {
+                router_mode: RouterMode::RoundRobin,
+                ..Default::default()
+            },
+            0,
+            None,
+            None,
+            None,
+            service.state().metrics_clone(),
+        ));
+        let discovery = env
+            .runtime
+            .discovery()
+            .list_and_watch(DiscoveryQuery::AllModels, Some(env.runtime.primary_token()))
+            .await
+            .unwrap();
+        let watched = watcher.clone();
+        let namespace = NamespaceFilter::Exact(env.namespace.clone());
+        let watcher_task = tokio::spawn(async move { watched.watch(discovery, namespace).await });
+        let cancel = CancellationToken::new();
+        let service = service.spawn_with_listener(cancel.clone(), listener).await;
+        bounded(
+            "HTTP frontend model discovery",
+            watcher.wait_for_chat_model(),
+        )
+        .await;
+        Self {
+            url: format!("http://{address}/v1/completions"),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            cancel,
+            service,
+            watcher: watcher_task,
+        }
+    }
+
+    pub fn generate(&self, model: &str, id: &str, is_streaming: bool) -> reqwest::RequestBuilder {
+        self.client
+            .post(&self.url)
+            .header("x-dynamo-request-id", id)
+            .json(&serde_json::json!({
+                "model": model, "prompt": "hello", "max_tokens": 3,
+                "stream": is_streaming, "temperature": 0, "ignore_eos": true,
+                "nvext": {"extra_fields": ["completion_token_ids"]},
+            }))
+    }
+
+    pub async fn shutdown(mut self) {
+        self.cancel.cancel();
+        bounded("HTTP frontend shutdown", &mut self.service)
+            .await
+            .unwrap()
+            .unwrap();
+        self.watcher.abort();
+        let _ = (&mut self.watcher).await;
+    }
+}
+
+impl Drop for Frontend {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.service.abort();
+        self.watcher.abort();
     }
 }
 

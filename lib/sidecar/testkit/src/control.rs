@@ -17,6 +17,7 @@ pub trait Protocol: Send + Sync + 'static {
     fn record_tokens(response: &Self::Response, tokens: &mut Vec<u32>) -> bool;
     fn is_terminal(response: &Self::Response) -> bool;
     fn injected_error(message: &'static str) -> Self::Error;
+    fn invalid_argument_error(message: &'static str) -> Self::Error;
 }
 
 #[derive(Clone, Copy, Default)]
@@ -24,6 +25,7 @@ pub enum OpenAction {
     #[default]
     Continue,
     Fail,
+    Reject,
     Hold,
 }
 
@@ -207,6 +209,11 @@ impl<P: Protocol> Controller<P> {
         match handle.0.plan.open {
             OpenAction::Continue => {}
             OpenAction::Fail => return Err(P::injected_error("injected open failure")),
+            OpenAction::Reject => {
+                return Err(P::invalid_argument_error(
+                    "injected native request rejection",
+                ));
+            }
             OpenAction::Hold => handle.0.release.notified().await,
         }
         Ok(OpenedRequest { handle, guard })
@@ -316,6 +323,10 @@ mod tests {
         }
 
         fn injected_error(message: &'static str) -> Self::Error {
+            message
+        }
+
+        fn invalid_argument_error(message: &'static str) -> Self::Error {
             message
         }
     }
