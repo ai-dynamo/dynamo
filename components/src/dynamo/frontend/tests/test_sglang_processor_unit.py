@@ -5890,6 +5890,124 @@ class TestChatTemplateKwargsForwarding:
         assert think.prompt_token_ids != no_think.prompt_token_ids
 
 
+class TestContinuationFlags:
+    @pytest.mark.parametrize(
+        "flags, add_prompt, continue_final",
+        [
+            ({}, True, False),
+            ({"add_generation_prompt": False}, False, False),
+            (
+                {
+                    "add_generation_prompt": False,
+                    "continue_final_message": True,
+                    "chat_template_kwargs": {
+                        "add_generation_prompt": True,
+                        "continue_final_message": False,
+                    },
+                },
+                False,
+                True,
+            ),
+            ({"chat_template_kwargs": {"add_generation_prompt": False}}, False, False),
+            (
+                {
+                    "add_generation_prompt": None,
+                    "continue_final_message": None,
+                    "chat_template_kwargs": {
+                        "add_generation_prompt": False,
+                        "continue_final_message": True,
+                    },
+                },
+                False,
+                True,
+            ),
+        ],
+    )
+    def test_rendered_prompt(self, tokenizer, flags, add_prompt, continue_final):
+        messages = [
+            {"role": "user", "content": "Count to three."},
+            {"role": "assistant", "content": "One, two,"},
+        ]
+        result = preprocess_chat_request(
+            {"model": MODEL, "messages": messages, **flags},
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+        expected = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=add_prompt,
+            continue_final_message=continue_final,
+            return_dict=False,
+        )
+        assert result.prompt_token_ids == expected
+        if continue_final:
+            assert tokenizer.decode(result.prompt_token_ids).endswith("One, two,")
+
+    @pytest.mark.parametrize(
+        "flags, reject",
+        [
+            ({"add_generation_prompt": False}, True),
+            (
+                {
+                    "add_generation_prompt": None,
+                    "chat_template_kwargs": {"add_generation_prompt": False},
+                },
+                True,
+            ),
+            ({"chat_template_args": {"continue_final_message": True}}, True),
+            (
+                {
+                    "add_generation_prompt": True,
+                    "continue_final_message": False,
+                    "chat_template_kwargs": {
+                        "add_generation_prompt": False,
+                        "continue_final_message": True,
+                    },
+                },
+                False,
+            ),
+        ],
+    )
+    def test_deepseek_v4_encoder_boundary(self, flags, reject, tokenizer):
+        tokenizer = copy.copy(tokenizer)
+        tokenizer.chat_template = None
+        expected = (
+            pytest.raises(PreprocessError, match="DeepSeek-V4 encoder")
+            if reject
+            else nullcontext()
+        )
+        with expected:
+            result = preprocess_chat_request(
+                {
+                    "model": "deepseek-ai/DeepSeek-V4-Pro",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    **flags,
+                },
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+            assert result.prompt_token_ids
+
+    def test_conflicting_effective_flags_are_client_errors(self, tokenizer):
+        with pytest.raises(
+            PreprocessError,
+            match="continue_final_message requires add_generation_prompt=false",
+        ):
+            preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "assistant", "content": "One, two,"}],
+                    "chat_template_args": {"continue_final_message": True},
+                },
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+
+
 class TestThinkingControlParity:  # FRONTEND.10
     # Keep SGLang's thinking kwargs aligned with the shared backend matrix.
     @pytest.mark.parametrize("case", THINKING_PARITY_CASES, ids=lambda case: case.name)
