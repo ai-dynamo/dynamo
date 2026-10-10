@@ -326,7 +326,7 @@ Kubernetes: `>=1.30.0-0`
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.14 |
-| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0-rc.1 |
+| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0-rc.2 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
 ## Values
@@ -410,6 +410,7 @@ Kubernetes: `>=1.30.0-0`
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
+| snapshot.pageBroker.enabled | bool | `true` | Enable PageBroker for checkpoint and restore. Uses the Snapshot chart's resource and transfer-buffer defaults. Set false to disable PageBroker. |
 
 ### LPX Integration
 
