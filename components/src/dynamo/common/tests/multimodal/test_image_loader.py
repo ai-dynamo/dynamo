@@ -612,6 +612,24 @@ def _assert_inline_reference_elided(caplog, encoded: str) -> None:
     assert all(len(record.getMessage()) < 512 for record in caplog.records)
 
 
+async def test_multi_picture_jpeg_loads_primary_frame(loader: ImageLoader) -> None:
+    primary = Image.new("RGB", (4, 3), color="red")
+    buf = BytesIO()
+    primary.save(
+        buf,
+        format="MPO",
+        save_all=True,
+        append_images=[Image.new("RGB", (2, 2), color="blue")],
+    )
+    encoded = base64.b64encode(buf.getvalue()).decode()
+
+    image = await loader.load_image(f"data:image/jpeg;base64,{encoded}")
+
+    assert image.mode == "RGB"
+    assert image.size == (4, 3)
+    assert image.getpixel((0, 0))[0] > 200
+
+
 async def test_unsupported_format_url_raises_415(loader: ImageLoader) -> None:
     """Fetching a URL that returns an unsupported image format (e.g. SVG) should raise
     HttpStatusError with status 415, not 500."""
