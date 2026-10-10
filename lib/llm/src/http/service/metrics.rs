@@ -479,6 +479,7 @@ pub fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
 }
 
 const MAX_BUCKET_COUNT: usize = 512;
+const MAX_BUCKET_LIST_BYTES: usize = MAX_BUCKET_COUNT * 32;
 
 fn validate_bucket_config(min: f64, max: f64, count: usize) -> bool {
     min.is_finite()
@@ -582,6 +583,46 @@ fn parse_bucket_config(
     }
 
     (min, max, count)
+}
+
+fn parse_bucket_list(value: &str) -> Option<Vec<f64>> {
+    if value.len() > MAX_BUCKET_LIST_BYTES {
+        return None;
+    }
+
+    let buckets = value
+        .split(',')
+        .map(|item| item.trim().parse::<f64>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+
+    if buckets.len() > MAX_BUCKET_COUNT
+        || buckets
+            .iter()
+            .any(|bucket| !bucket.is_finite() || *bucket < 0.0)
+        || buckets.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return None;
+    }
+
+    Some(buckets)
+}
+
+fn inter_token_latency_buckets(env: EnvLookup<'_>) -> Vec<f64> {
+    if let Some(value) = env(env_metrics::DYN_METRICS_ITL_BUCKETS) {
+        return parse_bucket_list(&value).unwrap_or_else(|| {
+            tracing::warn!(
+                env_var = env_metrics::DYN_METRICS_ITL_BUCKETS,
+                value_len = value.len(),
+                max_value_bytes = MAX_BUCKET_LIST_BYTES,
+                "Invalid explicit ITL histogram buckets, using defaults"
+            );
+            generate_log_buckets(0.001, 80.0, 20)
+        });
+    }
+
+    let (min, max, count) = parse_bucket_config(env, env_metrics::DYN_METRICS_ITL, 0.001, 80.0, 20);
+    generate_log_buckets(min, max, count)
 }
 
 /// State for metrics handler.
@@ -857,14 +898,16 @@ impl Metrics {
     ///
     /// ## Histogram Bucket Configuration
     ///
-    /// All histograms use log-spaced buckets rounded to 2 significant figures. Bucket configuration
-    /// can be customized via environment variables (MIN: minimum value, MAX: maximum value, COUNT: number of buckets):
+    /// Histograms use log-spaced buckets rounded to 2 significant figures unless noted otherwise.
+    /// Bucket configuration can be customized via environment variables (MIN: minimum value,
+    /// MAX: maximum value, COUNT: number of buckets):
     ///
     /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 512.0, 10)
     /// - `DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}` - Input sequence length histogram (defaults: 50.0, 128000.0, 12)
     /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
     /// - `DYN_METRICS_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
-    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 80.0, 20)
+    /// - `DYN_METRICS_ITL_BUCKETS` - Comma-separated inter-token latency bucket boundaries
+    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Log-spaced inter-token latency configuration (defaults: 0.001, 80.0, 20)
     /// - `DYN_METRICS_EMBEDDING_LATENCY_{MIN,MAX,COUNT}` - End-to-end `/v1/embeddings` latency histogram (defaults: 0.001, 10.0, 14)
     ///
     /// ## Model Configuration Metrics
@@ -1059,10 +1102,7 @@ impl Metrics {
         )
         .unwrap();
 
-        // Inter-token latency buckets: configurable via DYN_METRICS_ITL_{MIN,MAX,COUNT}
-        let (itl_min, itl_max, itl_count) =
-            parse_bucket_config(env, env_metrics::DYN_METRICS_ITL, 0.001, 80.0, 20);
-        let inter_token_latency_buckets = generate_log_buckets(itl_min, itl_max, itl_count);
+        let inter_token_latency_buckets = inter_token_latency_buckets(env);
 
         let inter_token_latency = HistogramVec::new(
             HistogramOpts::new(
@@ -2884,6 +2924,63 @@ mod tests {
                 0.0, 0.0018, 0.0033, 0.0059, 0.011, 0.02, 0.035, 0.064, 0.12, 0.21, 0.38, 0.69,
                 1.2, 2.3, 4.1, 7.4, 13.0, 24.0, 44.0, 80.0
             ],
+        );
+    }
+
+    #[test]
+    fn explicit_itl_buckets_take_precedence_over_log_config() {
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_BUCKETS", "0.01, 0.02, 0.05"),
+            ("DYN_METRICS_ITL_MIN", "1"),
+            ("DYN_METRICS_ITL_MAX", "10"),
+            ("DYN_METRICS_ITL_COUNT", "3"),
+        ]);
+        let registry = Registry::new();
+        let metrics = Metrics::build(None, &env);
+        metrics.register(&registry).unwrap();
+        metrics
+            .inter_token_latency
+            .with_label_values(&["m"])
+            .observe(0.03);
+
+        let bounds = bucket_upper_bounds(
+            &registry,
+            &format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::INTER_TOKEN_LATENCY_SECONDS
+            ),
+        );
+        assert_eq!(bounds, vec![0.01, 0.02, 0.05]);
+    }
+
+    #[test]
+    fn invalid_explicit_itl_buckets_fall_back_to_defaults() {
+        for value in [
+            "0.01,nope",
+            "0.01,NaN",
+            "-0.01,0.02",
+            "0.02,0.01",
+            "0.01,0.01",
+        ] {
+            let pairs = [
+                ("DYN_METRICS_ITL_BUCKETS", value),
+                ("DYN_METRICS_ITL_MAX", "30"),
+                ("DYN_METRICS_ITL_COUNT", "8"),
+            ];
+            let env = fake_env(&pairs);
+            assert_eq!(
+                inter_token_latency_buckets(&env),
+                generate_log_buckets(0.001, 80.0, 20)
+            );
+        }
+
+        let oversized_value = format!("{:>width$}", "0", width = MAX_BUCKET_LIST_BYTES + 1);
+        let pairs = [("DYN_METRICS_ITL_BUCKETS", oversized_value.as_str())];
+        let env = fake_env(&pairs);
+        assert_eq!(
+            inter_token_latency_buckets(&env),
+            generate_log_buckets(0.001, 80.0, 20)
         );
     }
 
