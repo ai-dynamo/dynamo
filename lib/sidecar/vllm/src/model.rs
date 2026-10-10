@@ -108,6 +108,10 @@ impl DiscoveredModel {
         Ok(())
     }
 
+    pub(crate) fn reasoning_parser(&self) -> Option<&str> {
+        self.identity.reasoning_parser.as_deref()
+    }
+
     pub(crate) fn rl_capabilities(&self) -> Option<&pb::RlCapabilities> {
         self.server.rl_capabilities.as_ref()
     }

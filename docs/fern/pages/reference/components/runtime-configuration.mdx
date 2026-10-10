@@ -13,7 +13,7 @@ subtitle: Field reference for the cross-cutting Dynamo runtime CLI flags and env
 
 ## How the config is loaded
 
-Unless a field is marked environment-only, it has both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — `--dyn-enable-structural-tag` sets it on, `--no-dyn-enable-structural-tag` sets it off.
+Unless a field is marked environment-only, it has both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — for example, `--enable-local-indexer` sets it on and `--no-enable-local-indexer` sets it off.
 
 <Card>
 <Tabs>
@@ -103,6 +103,20 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_DISCOVERY_BACKEND`
 </ParamField>
 
+<ParamField path="NATS_STARTUP_CONNECT_TIMEOUT_SECONDS" type="integer" default="120">
+  Maximum number of seconds that a process spends establishing its initial NATS connection. Applies
+  only to processes that connect to NATS. Dynamo retries DNS, I/O, and timeout failures with
+  exponential backoff from 1 second up to 5 seconds until this deadline; each attempt times out
+  after at most 5 seconds. Authentication, authorization, TLS, and invalid server address errors
+  fail immediately. Set a larger value when NATS can take longer to become available during
+  deployment startup or recovery; set a smaller value when the process should fail fast. On
+  Kubernetes, ensure the pod's startup probe allows at least this long. Values must be greater than
+  `0`. Zero or invalid values log a warning and fall back to `120`.
+
+  This setting does not affect reconnects after startup, which use a fixed 5-second
+  per-attempt timeout.
+</ParamField>
+
 <ParamField path="ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS" type="integer" default="120">
   Maximum number of seconds that an etcd discovery client spends establishing its initial
   connection and primary lease. Dynamo retries with exponential backoff until this deadline. Set a
@@ -146,9 +160,12 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 <ParamField path="DYN_TCP_RPC_HOST" type="string" default="auto-detected local address">
   Host for the TCP request-plane server. Accepts IPv4 and IPv6 literals, bracketed IPv6 literals,
   wildcards, and interface names, including aliases such as `eth0:1`. If unset or empty, Dynamo
-  selects the first usable non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6
-  loopback. On Unix, automatic selection excludes interfaces that are down. Dynamo trims surrounding
-  whitespace from configured hosts; a value containing only whitespace still fails server startup.
+  selects a usable non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6 loopback.
+  Within each family, it prefers the address the operating system uses for outbound traffic (on
+  Linux, the preferred source address of the route to an external address) when an up interface
+  carries it, and otherwise the first usable address in operating-system enumeration order. On Unix,
+  automatic selection excludes interfaces that are down. Dynamo trims surrounding whitespace from
+  configured hosts; a value containing only whitespace still fails server startup.
 
   For a named interface, Dynamo uses the same address selection order, restricted to that interface.
   It selects the first usable address in each category in operating-system enumeration order. An
@@ -207,7 +224,8 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   For an interface name, Dynamo selects the first usable IPv4 address, then IPv6. Dynamo trims
   whitespace and treats an empty value as unset. Unspecified addresses such as `0.0.0.0` and `::` are
   invalid, including IPv4-mapped wildcards such as `::ffff:0.0.0.0`. When unset, Dynamo selects a
-  usable non-loopback IPv4 address first, then IPv6. On Unix, automatic selection excludes down
+  usable non-loopback IPv4 address first, then IPv6, preferring the operating system's routed
+  source address as described for `DYN_TCP_RPC_HOST`. On Unix, automatic selection excludes down
   interfaces. If neither family has a usable non-loopback address, Dynamo selects IPv4 loopback,
   then IPv6 loopback, and falls back to `127.0.0.1` if neither is found. Remote subscribers cannot
   reach a loopback address. Automatic selection can choose an IPv4 link-local address or a bridge
@@ -278,26 +296,10 @@ address.
   Environment variable: `DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE`
 </ParamField>
 
-<ParamField path="--dyn-enable-structural-tag" type="boolean" default="false">
-  Enable structural tag guided decoding for tool calls. When enabled, configure activation scope and parameter schema strictness with `--dyn-structural-tag-scope` and `--dyn-structural-tag-schema`.
+<ParamField path="--dyn-structural-tag" type="boolean or JSON object" default="enabled">
+  Structural tags default to enabled with scope `always` and schema mode `auto` for regular workers. Pass `false` to disable optional guidance, or provide a JSON object for advanced options. Rust retains native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out. Native Rust sidecars retain their conservative default. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for configuration and backend compatibility limitations.
 
-  Environment variable: `DYN_ENABLE_STRUCTURAL_TAG`
-</ParamField>
-
-<ParamField path="--dyn-structural-tag-scope" type="string" default="auto">
-  Controls when structural tags are activated. `auto` activates them for required or named `tool_choice`, or when any tool has `strict=true` or `parallel_tool_calls` is false. `always` additionally activates them for `tool_choice=auto` without those conditions. `tool_choice=none` is unaffected by either setting. Only meaningful when `--dyn-enable-structural-tag` is set.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>always</Badge></span>
-
-  Environment variable: `DYN_STRUCTURAL_TAG_SCOPE`
-</ParamField>
-
-<ParamField path="--dyn-structural-tag-schema" type="string" default="auto">
-  Controls parameter schema strictness inside structural tags. `auto` applies the real parameter schema only to tools with `strict=true`, leaving all other tools syntactically constrained but schema-unconstrained. `strict` applies the real parameter schema to every tool. Only meaningful when `--dyn-enable-structural-tag` is set.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>strict</Badge></span>
-
-  Environment variable: `DYN_STRUCTURAL_TAG_SCHEMA`
+  Environment variable: `DYN_STRUCTURAL_TAG`
 </ParamField>
 
 <ParamField path="--custom-jinja-template" type="string" default="null">
@@ -342,6 +344,17 @@ address.
   local inhibition. The process reads this value once when the first client initializes; restart the
   process after changing it. Discovery updates remain authoritative, and direct dispatch bypasses the
   local inhibited set while the selected worker remains in discovery.
+</ParamField>
+
+<ParamField path="DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS" type="integer" default="0">
+  Seconds a frontend waits for a worker to establish its response stream after the worker
+  acknowledges a unary request. The timer starts at the acknowledgement, so waiting for local
+  admission, connecting, and sending does not count. It covers worker queueing and setup before the
+  response stream opens, and a worker that accepts requests but cannot connect back. Set it above the
+  worst-case time a healthy worker takes to start a response. On expiry the request fails with a
+  response timeout, or migrates when migration is enabled, and the worker is locally inhibited for
+  `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Set to `0` or leave unset to disable. Routers without fault
+  detection and bidirectional requests do not apply this timeout.
 </ParamField>
 
 ## Operations

@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 
@@ -29,6 +30,7 @@ import (
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -91,6 +93,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=clustertopologybindings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=disaggregatedset.x-k8s.io,resources=disaggregatedsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
@@ -163,6 +166,9 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	var compatibilityErrs []error
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
+		if snapshotFailoverErr := dynamo.ValidateSnapshotFailover(component, field.NewPath("spec", "components").Index(i), dynamoDeployment.Spec.BackendFramework).ToAggregate(); snapshotFailoverErr != nil {
+			compatibilityErrs = append(compatibilityErrs, snapshotFailoverErr)
+		}
 		for _, compatibilityErr := range checkpoint.ValidateCheckpointCompatibility(component.Experimental) {
 			compatibilityErrs = append(
 				compatibilityErrs,
@@ -249,6 +255,19 @@ func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, 
 		r.RuntimeConfig,
 		r.DockerSecretRetriever,
 	).deleteAutoCheckpointsForDGD(ctx, dynamoDeployment)
+}
+
+func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
+	oldDGD, oldOK := update.ObjectOld.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	newDGD, newOK := update.ObjectNew.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	if !oldOK || !newOK {
+		return false
+	}
+	annotationValue := func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, key string) string {
+		return strings.ToLower(dgd.GetAnnotations()[key])
+	}
+	return annotationValue(oldDGD, consts.KubeAnnotationEnableDisaggregatedSet) != annotationValue(newDGD, consts.KubeAnnotationEnableDisaggregatedSet) ||
+		annotationValue(oldDGD, consts.KubeAnnotationEnableGrove) != annotationValue(newDGD, consts.KubeAnnotationEnableGrove)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -357,6 +376,9 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		}))
+	}
+	if r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
+		ctrlBuilder = newDisaggregatedSetWatchSetup(mgr.GetClient()).addTo(ctrlBuilder)
 	}
 
 	// LPX child status can wake the DGD only when its controller is enabled.

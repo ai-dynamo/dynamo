@@ -15,8 +15,7 @@ use std::time::Duration;
 
 use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::local_model::runtime_config::{
-    DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagMode, StructuralTagSchemaMode,
-    StructuralTagScope, TOPOLOGY_TAINT_PREFIX,
+    DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagConfig, TOPOLOGY_TAINT_PREFIX,
 };
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder, update_model_taints};
 use dynamo_llm::model_type::{ModelInput, ModelType};
@@ -70,15 +69,25 @@ const MODEL_TAINT_UPDATE_ROUTE: &str = "update/model_taints";
 
 /// Per-worker transport configuration. Explicit values take precedence over
 /// environment defaults when the worker constructs its distributed runtime.
-#[derive(Clone, Debug, Default)]
+#[derive(clap::Args, Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeConfig {
     /// Discovery backend selector — e.g. `"etcd"`, `"kubernetes"`, `"file"`,
     /// `"mem"`. Maps to `DYN_DISCOVERY_BACKEND`.
+    #[arg(long, env = "DYN_DISCOVERY_BACKEND", value_parser = ["kubernetes", "etcd", "file", "mem"])]
     pub discovery_backend: Option<String>,
     /// Request-plane transport — e.g. `"tcp"`, `"nats"`. Maps to `DYN_REQUEST_PLANE`.
+    #[arg(long, env = "DYN_REQUEST_PLANE", value_parser = ["tcp", "nats"], ignore_case = true)]
     pub request_plane: Option<String>,
+    /// Response transport. Frontend and workers must use the same value.
+    /// Maps to `DYN_RESPONSE_PLANE`.
+    #[arg(long, env = "DYN_RESPONSE_PLANE", value_parser = ["tcp", "quic"])]
+    pub response_plane: Option<String>,
     /// Event-plane transport — `"nats"` or `"zmq"`. When `None` the runtime
-    /// derives a default from the discovery backend. Maps to `DYN_EVENT_PLANE`.
+    /// uses its default transport. Maps to `DYN_EVENT_PLANE`.
+    #[arg(long, env = "DYN_EVENT_PLANE", value_parser = [
+        clap::builder::PossibleValue::new("nats"),
+        clap::builder::PossibleValue::new("zmq").alias(""),
+    ])]
     pub event_plane: Option<String>,
 }
 
@@ -86,7 +95,31 @@ impl RuntimeConfig {
     pub fn has_overrides(&self) -> bool {
         self.discovery_backend.is_some()
             || self.request_plane.is_some()
+            || self.response_plane.is_some()
             || self.event_plane.is_some()
+    }
+
+    /// Resolve transport settings without changing the process environment.
+    pub fn to_distributed_config(
+        &self,
+    ) -> anyhow::Result<dynamo_runtime::distributed::DistributedConfig> {
+        use dynamo_runtime::pipeline::network::ResponsePlaneMode;
+
+        let mut config =
+            dynamo_runtime::distributed::DistributedConfig::from_settings_with_overrides(
+                self.discovery_backend.as_deref(),
+                self.request_plane.as_deref(),
+                self.event_plane.as_deref(),
+            )?;
+        config.response_plane = match self.response_plane.as_deref() {
+            Some("tcp") => Some(ResponsePlaneMode::Tcp),
+            Some("quic") => Some(ResponsePlaneMode::Quic),
+            Some(value) => {
+                anyhow::bail!("invalid response plane '{value}'; expected 'tcp' or 'quic'")
+            }
+            None => None,
+        };
+        Ok(config)
     }
 
     /// Apply each set field to the corresponding environment variable.
@@ -107,6 +140,9 @@ impl RuntimeConfig {
         }
         if let Some(ref value) = self.request_plane {
             set("DYN_REQUEST_PLANE", value);
+        }
+        if let Some(ref value) = self.response_plane {
+            set("DYN_RESPONSE_PLANE", value);
         }
         if let Some(ref value) = self.event_plane {
             set("DYN_EVENT_PLANE", value);
@@ -172,14 +208,10 @@ pub struct WorkerConfig {
     /// Python sets this via `--health-check-payload` / env; Rust-only
     /// engines leave it `None` and let `Worker` read the env directly.
     pub health_check_payload: Option<serde_json::Value>,
-    /// Structural tag guided decoding mode.
-    pub structural_tag_mode: StructuralTagMode,
-    /// Structural tag activation scope.
-    pub structural_tag_scope: StructuralTagScope,
-    /// Structural tag schema strictness.
-    pub structural_tag_schema: StructuralTagSchemaMode,
-    /// Runtime / transport overrides applied via env vars before the
-    /// `DistributedRuntime` is constructed.
+    /// Structural-tag guided-decoding policy. Presence enables structural tags.
+    pub structural_tag: Option<StructuralTagConfig>,
+    /// Runtime / transport overrides used when constructing the
+    /// `DistributedRuntime`.
     pub runtime: RuntimeConfig,
     /// When `true`, this worker declares an upstream `Encode` dependency in
     /// its topology `needs`. Meaningful only for `Prefill` and `Aggregated`
@@ -227,9 +259,9 @@ impl Default for WorkerConfig {
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
             health_check_payload: None,
-            structural_tag_mode: StructuralTagMode::Off,
-            structural_tag_scope: StructuralTagScope::Auto,
-            structural_tag_schema: StructuralTagSchemaMode::Auto,
+            // Native sidecars retain their conservative default; Python workers
+            // publish the deployment-facing On/Always policy explicitly.
+            structural_tag: None,
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,
             enable_rl: false,
@@ -608,18 +640,12 @@ impl Worker {
         let drt = match drt {
             Some(drt) => drt,
             None => {
-                let config =
-                    dynamo_runtime::distributed::DistributedConfig::from_settings_with_overrides(
-                        self.config.runtime.discovery_backend.as_deref(),
-                        self.config.runtime.request_plane.as_deref(),
-                        self.config.runtime.event_plane.as_deref(),
+                let config = self.config.runtime.to_distributed_config().map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::InvalidArgument),
+                        format!("distributed runtime config: {e}"),
                     )
-                    .map_err(|e| {
-                        err(
-                            ErrorType::Backend(BackendError::InvalidArgument),
-                            format!("distributed runtime config: {e}"),
-                        )
-                    })?;
+                })?;
                 let result = DistributedRuntime::new(runtime, config).await;
                 // A signal cancels DRT initialization through the runtime token.
                 // Preserve the clean pre-start shutdown contract before mapping
@@ -2177,9 +2203,7 @@ async fn build_local_model(
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
-        structural_tag_mode: config.structural_tag_mode,
-        structural_tag_scope: config.structural_tag_scope,
-        structural_tag_schema: config.structural_tag_schema,
+        structural_tag: config.structural_tag.clone(),
         enable_local_indexer,
         kv_state_endpoint: config.kv_state_endpoint.clone(),
         disaggregated_endpoint,
@@ -3530,6 +3554,7 @@ mod tests {
         let cfg = RuntimeConfig {
             discovery_backend: Some("file".to_string()),
             request_plane: Some("tcp".to_string()),
+            response_plane: Some("quic".to_string()),
             event_plane: Some("zmq".to_string()),
         };
 
@@ -3540,6 +3565,7 @@ mod tests {
             vec![
                 ("DYN_DISCOVERY_BACKEND".to_string(), "file".to_string()),
                 ("DYN_REQUEST_PLANE".to_string(), "tcp".to_string()),
+                ("DYN_RESPONSE_PLANE".to_string(), "quic".to_string()),
                 ("DYN_EVENT_PLANE".to_string(), "zmq".to_string()),
             ]
         );
@@ -3550,6 +3576,7 @@ mod tests {
         let cfg = RuntimeConfig {
             discovery_backend: Some("etcd".to_string()),
             request_plane: None,
+            response_plane: None,
             event_plane: None,
         };
 

@@ -27,10 +27,7 @@ use dynamo_backend_common::{
     PreprocessedRequest, RawEngine, RuntimeConfig as RsRuntimeConfig,
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
-use dynamo_llm::local_model::runtime_config::{
-    StructuralTagMode as RsStructuralTagMode, StructuralTagSchemaMode as RsStructuralTagSchemaMode,
-    StructuralTagScope as RsStructuralTagScope,
-};
+use dynamo_llm::local_model::runtime_config::StructuralTagConfig as RsStructuralTagConfig;
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
@@ -108,10 +105,7 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
-    let bootstrap = dynamo_sglang_sidecar::SglangSidecarEngine::try_from_args_async(cli_argv)
-        .map_err(sidecar_startup_to_pyerr)?;
-
-    py.allow_threads(move || dynamo_sidecar_common::run(bootstrap))
+    py.allow_threads(move || dynamo_sglang_sidecar::run(cli_argv))
         .map_err(sidecar_run_to_pyerr)
 }
 
@@ -388,17 +382,19 @@ pub struct RuntimeConfig {
 #[pymethods]
 impl RuntimeConfig {
     #[new]
-    #[pyo3(signature = (discovery_backend = None, request_plane = None, event_plane = None))]
+    #[pyo3(signature = (discovery_backend = None, request_plane = None, event_plane = None, *, response_plane = None))]
     fn new(
         discovery_backend: Option<String>,
         request_plane: Option<String>,
         event_plane: Option<String>,
+        response_plane: Option<String>,
     ) -> Self {
         Self {
             inner: RsRuntimeConfig {
                 discovery_backend,
                 request_plane,
                 event_plane,
+                response_plane,
             },
         }
     }
@@ -435,9 +431,7 @@ impl WorkerConfig {
         runtime = None,
         disaggregation_mode = DisaggregationMode::Aggregated,
         health_check_payload = None,
-        structural_tag_mode = "off".to_string(),
-        structural_tag_scope = "auto".to_string(),
-        structural_tag_schema = "auto".to_string(),
+        structural_tag = None,
         route_to_encoder = false,
         media_decoder = None,
         media_fetcher = None,
@@ -464,9 +458,7 @@ impl WorkerConfig {
         runtime: Option<RuntimeConfig>,
         disaggregation_mode: DisaggregationMode,
         health_check_payload: Option<PyObject>,
-        structural_tag_mode: String,
-        structural_tag_scope: String,
-        structural_tag_schema: String,
+        structural_tag: Option<&Bound<'_, PyDict>>,
         route_to_encoder: bool,
         media_decoder: Option<MediaDecoder>,
         media_fetcher: Option<MediaFetcher>,
@@ -499,33 +491,17 @@ impl WorkerConfig {
             }
             _ => None,
         };
-        let st_mode = match structural_tag_mode.as_str() {
-            "off" => RsStructuralTagMode::Off,
-            "on" => RsStructuralTagMode::On,
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Invalid structural_tag_mode: {other}. Expected 'off' or 'on'."
-                )));
-            }
-        };
-        let st_scope = match structural_tag_scope.as_str() {
-            "auto" => RsStructuralTagScope::Auto,
-            "always" => RsStructuralTagScope::Always,
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Invalid structural_tag_scope: {other}. Expected 'auto' or 'always'."
-                )));
-            }
-        };
-        let st_schema = match structural_tag_schema.as_str() {
-            "auto" => RsStructuralTagSchemaMode::Auto,
-            "strict" => RsStructuralTagSchemaMode::Strict,
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Invalid structural_tag_schema: {other}. Expected 'auto' or 'strict'."
-                )));
-            }
-        };
+        let structural_tag = structural_tag
+            .map(|config| -> anyhow::Result<_> {
+                let value = depythonize(config)?;
+                Ok(RsStructuralTagConfig::from_value_strict(value)?)
+            })
+            .transpose()
+            .map_err(|error| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid structural_tag config: {error}"
+                ))
+            })?;
         Ok(Self {
             inner: RsWorkerConfig {
                 namespace,
@@ -548,9 +524,7 @@ impl WorkerConfig {
                 metrics_labels,
                 disaggregation_mode: disaggregation_mode.into(),
                 health_check_payload,
-                structural_tag_mode: st_mode,
-                structural_tag_scope: st_scope,
-                structural_tag_schema: st_schema,
+                structural_tag,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
                 route_to_encoder,
                 // Python vLLM owns and serves its existing `.rl` endpoint.
