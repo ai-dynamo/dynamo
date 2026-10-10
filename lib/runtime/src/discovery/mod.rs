@@ -22,6 +22,8 @@ mod mock;
 pub use mock::{MockDiscovery, SharedMockRegistry};
 mod kv_store;
 pub use kv_store::KVStoreDiscovery;
+mod logical_id;
+pub use logical_id::{hash_logical_instance_key, logical_instance_id_from_env};
 
 mod kube;
 pub use kube::{KubeDiscoveryClient, hash_container_name, hash_pod_name};
@@ -1496,14 +1498,16 @@ pub(crate) fn reconcile_discovery_snapshot(
                 next.insert(id, retained);
             }
             Err(error) => {
-                tracing::error!(
+                // A different card under the same id is a new incarnation (a
+                // failover successor that took over a shared logical id).
+                tracing::info!(
                     ?id,
                     %error,
-                    "Rejecting immutable discovery model-card mutation"
+                    "Model card replaced under the same instance id"
                 );
-                if let Some(existing) = known.get(&id) {
-                    next.insert(id, existing.clone());
-                }
+                events.push(DiscoveryEvent::Removed(id.clone()));
+                events.push(DiscoveryEvent::Added(candidate.clone()));
+                next.insert(id, candidate);
             }
         }
     }

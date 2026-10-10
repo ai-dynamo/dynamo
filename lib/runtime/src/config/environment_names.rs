@@ -977,6 +977,17 @@ pub mod discovery {
 
     /// Kube discovery mode: "pod" (default) or "container" (each container registers independently)
     pub const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+
+    /// Explicit logical discovery instance id (decimal or 0x-prefixed hex).
+    ///
+    /// Processes sharing one id (a GMS primary and its warm shadow) publish
+    /// one worker identity: routers see a single instance whose address moves
+    /// to whichever process registers last.
+    pub const DYN_DISCOVERY_LOGICAL_INSTANCE_ID: &str = "DYN_DISCOVERY_LOGICAL_INSTANCE_ID";
+
+    /// Key hashed into the logical discovery instance id when no explicit id
+    /// is set. `$(VAR)` placeholders are expanded from the environment.
+    pub const DYN_DISCOVERY_LOGICAL_INSTANCE_KEY: &str = "DYN_DISCOVERY_LOGICAL_INSTANCE_KEY";
 }
 
 /// CUDA and GPU environment variables
@@ -1223,6 +1234,8 @@ mod tests {
             // Discovery
             discovery::DYN_DISCOVERY_BACKEND,
             discovery::DYN_KUBE_DISCOVERY_MODE,
+            discovery::DYN_DISCOVERY_LOGICAL_INSTANCE_ID,
+            discovery::DYN_DISCOVERY_LOGICAL_INSTANCE_KEY,
             // CUDA
             cuda::DYN_FATBIN_PATH,
             // Build

@@ -370,6 +370,63 @@ def record_active_discovery_lease(lease_id: int, lock_path: str | None = None) -
         )
 
 
+def _discovery_backend() -> str:
+    return os.environ.get("DYN_DISCOVERY_BACKEND", "etcd").strip().lower() or "etcd"
+
+
+_FILE_DISCOVERY_BUCKETS = ("v1/instances", "v1/mdc", "v1/event_channels")
+
+
+def _remove_file_discovery_records(instance_id: int) -> bool:
+    """File-backend equivalent of revoking the predecessor's etcd lease.
+
+    Every record of an engine is a file named by its percent-encoded key that
+    ends in (or, for LoRA model cards, contains) the engine's hex instance id.
+    Deletions take the bucket's mutation flock like the Rust FileStore, and
+    watchers see them at once (inotify) instead of after the 10 s TTL sweep.
+    """
+    import fcntl
+    from urllib.parse import unquote
+
+    root = Path(
+        os.environ.get("DYN_FILE_KV")
+        or os.path.join(os.environ.get("TMPDIR", "/tmp"), "dynamo_store_kv")
+    )
+    target = f"{int(instance_id):x}"
+    started = time.monotonic()
+    removed = 0
+    for bucket in _FILE_DISCOVERY_BUCKETS:
+        directory = root / bucket
+        try:
+            dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        except FileNotFoundError:
+            continue
+        try:
+            fcntl.flock(dirfd, fcntl.LOCK_EX)
+            for name in os.listdir(directory):
+                if name.startswith(".tmp"):
+                    continue
+                segments = unquote(name).split("/")
+                lora_card = bucket == "v1/mdc" and len(segments) > 4
+                if (segments[3] if lora_card else segments[-1]) != target:
+                    continue
+                try:
+                    os.unlink(directory / name)
+                    removed += 1
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.close(dirfd)
+    if removed:
+        logger.info(
+            "[GMS failover] removed %d predecessor file-discovery records of %x in %.1f ms",
+            removed,
+            instance_id,
+            (time.monotonic() - started) * 1000.0,
+        )
+    return removed > 0
+
+
 def _etcd_gateway_endpoint() -> str | None:
     backend = os.environ.get("DYN_DISCOVERY_BACKEND", "etcd").strip().lower()
     if backend not in {"", "etcd"}:
@@ -402,7 +459,11 @@ def revoke_predecessor_discovery_lease(
     except (FileNotFoundError, ValueError):
         return False
     if own_lease_id is not None and recorded == int(own_lease_id):
+        # Same id: a shared logical instance (DYN_DISCOVERY_LOGICAL_INSTANCE_KEY)
+        # whose records this engine takes over when it registers.
         return False
+    if _discovery_backend() == "file":
+        return _remove_file_discovery_records(recorded)
     endpoint = _etcd_gateway_endpoint()
     if endpoint is None:
         return False

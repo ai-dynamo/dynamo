@@ -25,6 +25,40 @@ const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
 const EVENT_SOURCES_BUCKET: &str = "v1/event_sources";
 const UPDATE_MODEL_TAINTS_MAX_ATTEMPTS: usize = 8;
 
+/// Replace a failover-cohort record under the shared logical id with ours.
+async fn take_over_cohort_record(
+    bucket: &dyn kv::Bucket,
+    key: &kv::Key,
+    instance: &DiscoveryInstance,
+) -> Result<()> {
+    let value: bytes::Bytes = serde_json::to_vec(instance)?.into();
+    for _ in 0..16 {
+        let Some(existing) = bucket.get(key).await? else {
+            match bucket.insert(key, value.clone(), 0).await? {
+                kv::StoreOutcome::Created(_) => return Ok(()),
+                kv::StoreOutcome::Exists(_) => continue,
+            }
+        };
+        if existing == value {
+            return Ok(());
+        }
+        // A successor's model card may differ from its predecessor's; watchers
+        // see a same-id card replacement as the card removed and re-added.
+        match bucket
+            .compare_and_replace(key, existing, value.clone())
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(%key, "Took over failover-cohort discovery record");
+                return Ok(());
+            }
+            Err(kv::StoreError::Retry) | Err(kv::StoreError::MissingKey(_)) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    anyhow::bail!("could not take over failover-cohort discovery record {key}")
+}
+
 async fn update_model_taints_in_bucket(
     bucket: &dyn kv::Bucket,
     key: &kv::Key,
@@ -66,6 +100,8 @@ async fn update_model_taints_in_bucket(
 pub struct KVStoreDiscovery {
     store: Arc<kv::Manager>,
     cancel_token: CancellationToken,
+    /// Identity shared by a failover cohort (see `DYN_DISCOVERY_LOGICAL_INSTANCE_KEY`).
+    logical_instance_id: Option<u64>,
 }
 
 impl KVStoreDiscovery {
@@ -73,7 +109,17 @@ impl KVStoreDiscovery {
         Self {
             store: Arc::new(store),
             cancel_token,
+            logical_instance_id: None,
         }
+    }
+
+    /// Publish under a logical instance id shared with the rest of a failover
+    /// cohort instead of this process's store connection id. The member that
+    /// registers last (the current failover-lock owner) takes over the shared
+    /// records, so routers see one instance whose address moves.
+    pub fn with_logical_instance_id(mut self, logical_instance_id: Option<u64>) -> Self {
+        self.logical_instance_id = logical_instance_id;
+        self
     }
 
     /// Build the key path for an endpoint (relative to bucket, not absolute)
@@ -295,13 +341,18 @@ impl KVStoreDiscovery {
                             }
                             Ok(None) => vec![],
                             Err(error) => {
-                                tracing::error!(
+                                // Model cards are immutable per instance id, so a
+                                // different card under the same id is a new
+                                // incarnation (a failover successor taking over a
+                                // shared logical id): retire the old card first.
+                                tracing::info!(
                                     key = %kv.key_str(),
                                     ?id,
                                     %error,
-                                    "Rejecting immutable discovery model-card mutation"
+                                    "Model card replaced under the same instance id"
                                 );
-                                vec![]
+                                known_instances.insert(id.clone(), instance.clone());
+                                vec![DiscoveryEvent::Removed(id), DiscoveryEvent::Added(instance)]
                             }
                         }
                     }
@@ -400,7 +451,8 @@ impl Discovery for KVStoreDiscovery {
     }
 
     fn instance_id(&self) -> u64 {
-        self.store.connection_id()
+        self.logical_instance_id
+            .unwrap_or_else(|| self.store.connection_id())
     }
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
@@ -549,6 +601,17 @@ impl Discovery for KVStoreDiscovery {
             key_path,
             outcome
         );
+
+        if self.logical_instance_id.is_some()
+            && !is_event_source
+            && matches!(outcome, kv::StoreOutcome::Exists(_))
+        {
+            // A cohort member's record under the shared id: it belongs to a
+            // fenced predecessor, because only the failover-lock owner
+            // registers. Take it over so the instance's address moves here.
+            take_over_cohort_record(bucket.as_ref(), &key, &instance).await?;
+            return Ok(instance);
+        }
 
         if is_model && matches!(outcome, kv::StoreOutcome::Exists(_)) {
             let existing = bucket.get(&key).await?.ok_or_else(|| {
@@ -1157,6 +1220,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failover_cohort_shares_one_instance_whose_address_moves() {
+        let root = tempfile::tempdir().unwrap();
+        let cancel = CancellationToken::new();
+        let primary = KVStoreDiscovery::new(
+            kv::Manager::file(cancel.clone(), root.path()),
+            cancel.clone(),
+        )
+        .with_logical_instance_id(Some(0x2a));
+        let shadow = KVStoreDiscovery::new(
+            kv::Manager::file(cancel.clone(), root.path()),
+            cancel.clone(),
+        )
+        .with_logical_instance_id(Some(0x2a));
+        let router = KVStoreDiscovery::new(
+            kv::Manager::file(cancel.clone(), root.path()),
+            cancel.clone(),
+        );
+        let spec = |address: &str| DiscoverySpec::Endpoint {
+            namespace: "ns".to_string(),
+            component: "backend".to_string(),
+            endpoint: "generate".to_string(),
+            device_type: None,
+            request_plane_codec: None,
+            transport: TransportType::Nats(address.to_string()),
+        };
+        let addresses = |instances: Vec<DiscoveryInstance>| {
+            instances
+                .into_iter()
+                .map(|instance| match instance {
+                    DiscoveryInstance::Endpoint(inst) => {
+                        (inst.instance_id, format!("{:?}", inst.transport))
+                    }
+                    _ => panic!("expected an endpoint"),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let old = primary.register(spec("primary")).await.unwrap();
+        assert_eq!(primary.instance_id(), 0x2a);
+        // The successor (failover-lock owner) takes over the shared record.
+        shadow.register(spec("shadow")).await.unwrap();
+        let listed = addresses(router.list(DiscoveryQuery::AllEndpoints).await.unwrap());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].0, 0x2a);
+        assert!(listed[0].1.contains("shadow"), "{listed:?}");
+
+        // The fenced predecessor's late unregister or shutdown must not remove it.
+        primary.unregister(old).await.unwrap();
+        primary.store.shutdown();
+        let listed = addresses(router.list(DiscoveryQuery::AllEndpoints).await.unwrap());
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].1.contains("shadow"), "{listed:?}");
+        cancel.cancel();
+    }
+
+    #[tokio::test]
     async fn test_kv_store_discovery_list() {
         let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
@@ -1384,6 +1503,65 @@ mod tests {
             }),
             model_suffix: None,
         }
+    }
+
+    async fn next_event(stream: &mut DiscoveryStream) -> DiscoveryEvent {
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cohort_successor_card_replaces_the_predecessor_card() {
+        let root = tempfile::tempdir().unwrap();
+        let cancel = CancellationToken::new();
+        let cohort = || {
+            KVStoreDiscovery::new(
+                kv::Manager::file(cancel.clone(), root.path()),
+                cancel.clone(),
+            )
+            .with_logical_instance_id(Some(0x2a))
+        };
+        let (primary, shadow) = (cohort(), cohort());
+        let router = KVStoreDiscovery::new(
+            kv::Manager::file(cancel.clone(), root.path()),
+            cancel.clone(),
+        );
+        let mut stream = router
+            .list_and_watch(
+                DiscoveryQuery::EndpointModels {
+                    namespace: "ns".to_string(),
+                    component: "worker".to_string(),
+                    endpoint: "generate".to_string(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        contract::expect_empty_snapshot(&mut stream).await;
+        primary.register(model_spec("primary")).await.unwrap();
+        assert!(matches!(
+            next_event(&mut stream).await,
+            DiscoveryEvent::Added(_)
+        ));
+        // A successor's card differs beyond taints; it still takes over the
+        // shared id, and the router sees one card retired and one added.
+        let mut spec = model_spec("primary");
+        if let DiscoverySpec::Model { card_json, .. } = &mut spec {
+            card_json["runtime_config"]["total_kv_blocks"] = serde_json::json!(4096);
+        }
+        shadow.register(spec).await.unwrap();
+        let removed = next_event(&mut stream).await;
+        assert!(matches!(removed, DiscoveryEvent::Removed(_)), "{removed:?}");
+        let DiscoveryEvent::Added(DiscoveryInstance::Model { card_json, .. }) =
+            next_event(&mut stream).await
+        else {
+            panic!("expected the successor's card");
+        };
+        assert_eq!(card_json["runtime_config"]["total_kv_blocks"], 4096);
+        cancel.cancel();
     }
 
     struct AlwaysConflictingBucket {
