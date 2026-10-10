@@ -41,7 +41,8 @@ BLOCK_SIZE="${BLOCK_SIZE:-16}"            # Must match vLLM backend KV block siz
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.40}"  # Split GPU between 2 workers
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"   # Reduced for 2 workers on 1 GPU
 NUM_WORKERS="${NUM_WORKERS:-2}"          # Number of backend workers
-# --single-gpu / SINGLE_GPU: Packs all workers onto GPU 0 for functional
+# --single-gpu / SINGLE_GPU: Packs all workers onto one GPU (the inherited
+# CUDA_VISIBLE_DEVICES, else GPU 0) for functional
 # testing on machines with a single GPU.  Reduces performance by sharing
 # GPU memory between workers.
 SINGLE_GPU="${SINGLE_GPU:-false}"
@@ -178,7 +179,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     KV_EVENTS_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + i - 1)))
 
     if [[ "${SINGLE_GPU}" == "true" ]]; then
-        GPU_ID=0
+        GPU_ID=$(inherited_gpu_id)
     else
         GPU_ID=$((i - 1))
     fi
