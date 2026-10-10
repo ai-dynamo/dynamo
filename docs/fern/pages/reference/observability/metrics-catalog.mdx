@@ -269,6 +269,8 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 `dynamo_component_router_*` histograms and counters for aggregate request-level statistics. On the frontend, exposed at `/metrics` on the HTTP port; on the standalone router, exposed on `DYN_SYSTEM_PORT`. Populated per-request when `--router-mode kv` is active; registered with zero values in non-KV modes.
 
+The time-to-first-token, inter-token latency, input and output sequence length, and KV hit rate histograms are labeled by `phase` (`aggregated`, `prefill`, or `decode`) and `model`, so one frontend that routes several models or both disaggregated pools exports a separate series for each model and pool. These series appear after the first request for that model and pool is routed. To get the combined series, aggregate with `sum without (phase, model)`.
+
 <ParamField path="dynamo_component_router_requests_started_total" type="counter">
   Requests admitted by the router scheduler.
 </ParamField>
@@ -278,11 +280,11 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_time_to_first_token_seconds" type="histogram">
-  Time to first token in seconds.
+  Time to first token in seconds. Labeled by `phase` and `model`.
 </ParamField>
 
 <ParamField path="dynamo_component_router_inter_token_latency_seconds" type="histogram">
-  Average inter-token latency in seconds.
+  Average inter-token latency in seconds. Labeled by `phase` and `model`.
 </ParamField>
 
 <ParamField path="dynamo_component_router_input_sequence_tokens" type="histogram">
@@ -290,11 +292,11 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_output_sequence_tokens" type="histogram">
-  Output sequence length in tokens.
+  Output sequence length in tokens. Labeled by `phase` and `model`.
 </ParamField>
 
 <ParamField path="dynamo_component_router_kv_hit_rate" type="histogram">
-  Predicted KV cache hit rate at routing time (0.0–1.0).
+  Predicted KV cache hit rate at routing time (0.0–1.0). Labeled by `phase` and `model`.
 </ParamField>
 
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
