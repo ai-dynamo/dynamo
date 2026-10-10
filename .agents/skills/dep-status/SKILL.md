@@ -67,7 +67,7 @@ gh issue list --repo ai-dynamo/dynamo \
 
 ```bash
 gh issue list --repo ai-dynamo/dynamo \
-  --search 'DEP <keyword> label:"dep:draft","dep:under-review","dep:approved","dep:implementing","dep:done"' \
+  --search 'DEP <keyword> label:"dep:draft","dep:under-review","dep:approved","dep:implementing","dep:completed"' \
   --json number,title,labels,state
 ```
 
@@ -76,7 +76,7 @@ gh issue list --repo ai-dynamo/dynamo \
 ```bash
 gh issue list --repo ai-dynamo/dynamo \
   --state closed \
-  --search 'label:"dep:done","dep:deferred","dep:rejected","dep:replaced"' \
+  --search 'label:"dep:completed","dep:deferred","dep:superseeded"' \
   --json number,title,labels,assignees,closedAt
 ```
 
