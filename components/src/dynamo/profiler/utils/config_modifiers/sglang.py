@@ -16,6 +16,7 @@ from dynamo.profiler.utils.config import (
     get_component_name_by_type,
     get_main_container,
     get_worker_component_from_config,
+    remove_all_argument_occurrences,
     remove_valued_arguments,
     set_argument_value,
     set_unique_argument_value,
@@ -361,16 +362,13 @@ class SGLangConfigModifier(BaseConfigModifier):
             cfg, backend="sglang", sub_component_type=component_type
         )
 
-        # Set up resources with multinode configuration
-        setup_worker_component_resources(worker_service, tep_size, num_gpus_per_node)
-
         # Get and validate args
         args = validate_and_get_worker_args(worker_service, backend="sglang")
 
         # 1. Set --tp=tep_size, if not present add it
-        args = set_argument_value(args, "--tp", str(tep_size))
-        args = remove_valued_arguments(args, "--tp-size")
-        args = remove_valued_arguments(args, "--tensor-parallel-size")
+        args = set_unique_argument_value(args, "--tp", str(tep_size))
+        args = remove_all_argument_occurrences(args, "--tp-size")
+        args = remove_all_argument_occurrences(args, "--tensor-parallel-size")
 
         # 2. Set --ep=tep_size, if not present add it
         args = set_argument_value(args, "--ep", str(tep_size))
@@ -387,6 +385,8 @@ class SGLangConfigModifier(BaseConfigModifier):
             args.remove("--enable-dp-attention")
 
         get_main_container(worker_service).args = args
+        # Derive multinode placement from the updated parallelism arguments.
+        setup_worker_component_resources(worker_service, tep_size, num_gpus_per_node)
         return cfg.model_dump()
 
     @classmethod
@@ -402,16 +402,13 @@ class SGLangConfigModifier(BaseConfigModifier):
             cfg, backend="sglang", sub_component_type=component_type
         )
 
-        # Set up resources with multinode configuration
-        setup_worker_component_resources(worker_service, dep_size, num_gpus_per_node)
-
         # Get and validate args
         args = validate_and_get_worker_args(worker_service, backend="sglang")
 
         # 1. Set --tp=dep_size
-        args = set_argument_value(args, "--tp", str(dep_size))
-        args = remove_valued_arguments(args, "--tp-size")
-        args = remove_valued_arguments(args, "--tensor-parallel-size")
+        args = set_unique_argument_value(args, "--tp", str(dep_size))
+        args = remove_all_argument_occurrences(args, "--tp-size")
+        args = remove_all_argument_occurrences(args, "--tensor-parallel-size")
 
         # 2. Set --dp=dep_size (data parallelism across experts)
         args = set_argument_value(args, "--dp", str(dep_size))
@@ -428,6 +425,8 @@ class SGLangConfigModifier(BaseConfigModifier):
         args = remove_valued_arguments(args, "--expert-parallel-size")
 
         get_main_container(worker_service).args = args
+        # Derive multinode placement from the updated parallelism arguments.
+        setup_worker_component_resources(worker_service, dep_size, num_gpus_per_node)
         return cfg.model_dump()
 
     @classmethod
