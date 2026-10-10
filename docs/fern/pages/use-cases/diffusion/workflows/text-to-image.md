@@ -72,6 +72,7 @@ curl -s http://localhost:8000/v1/chat/completions \
 
 ## See Also
 
+- [Cosmos3 Nano example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/omni/cosmos3/README.md) — experimental image and video serving, with explicit guardrail configuration
 - [Text-to-Image with SGLang](text-to-image.md#sglang)
 - [Text-to-Image with TensorRT-LLM](text-to-image.md#tensorrt-llm)
 - [Disaggregated Serving](../../../developer-guide/knowledge-base/modular-components/backends/vllm/vllm-omni-disaggregated-serving.md) — GLM-Image (2-stage text-to-image)

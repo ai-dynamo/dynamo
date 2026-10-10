@@ -10,7 +10,7 @@ import os
 import re
 import sys
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 
 import huggingface_hub
 from vllm.transformers_utils.repo_utils import get_model_path
@@ -58,6 +58,7 @@ class OmniDiffusionKwargs:
     enable_cache_dit_summary: Optional[bool] = None
     enable_cpu_offload: Optional[bool] = None
     task_type: Optional[str] = None
+    model_config: Optional[dict[str, Any]] = None
     lora_path: Optional[list[str]] = None
     diffusion_attention_backend: Optional[str] = None
     fastvideo_vsa_topk: Optional[int] = None
@@ -204,6 +205,19 @@ class OmniArgGroup(ArgGroup):
             default=None,
             env_value_type=parse_bool,
             help="Enable CPU offloading for diffusion models to reduce GPU memory usage.",
+        )
+        add_argument(
+            g,
+            flag_name="--no-guardrails",
+            env_var="DYN_OMNI_NO_GUARDRAILS",
+            default=False,
+            arg_type=None,
+            env_value_type=parse_bool,
+            action="store_true",
+            help=(
+                "Disable model guardrails (e.g. Cosmos3) in aggregated Omni workers. "
+                "Omit to preserve the native model's guardrail configuration."
+            ),
         )
         add_argument(
             g,
@@ -443,6 +457,7 @@ class OmniConfig(DynamoRuntimeConfig):
 
     stage_configs_path: Optional[str] = None
     default_video_fps: int = 16
+    no_guardrails: bool = False
 
     # Nested structs — each group of fields has a clear destination
     diffusion: OmniDiffusionKwargs = dataclasses.field(
@@ -481,6 +496,11 @@ class OmniConfig(DynamoRuntimeConfig):
                 if hasattr(args, f.name)
             },
         )
+        if config.no_guardrails:
+            config.diffusion.model_config = {
+                **(config.diffusion.model_config or {}),
+                "guardrails": False,
+            }
         config.parallel = dataclasses.replace(
             OmniParallelKwargs(),
             **{
@@ -530,6 +550,12 @@ class OmniConfig(DynamoRuntimeConfig):
         if self.realtime and (self.stage_id is not None or self.omni_router):
             raise ValueError(
                 "--realtime cannot be combined with --stage-id or --omni-router"
+            )
+        if self.no_guardrails and (
+            self.stage_id is not None or self.omni_router or self.realtime
+        ):
+            raise ValueError(
+                "--no-guardrails is only supported by aggregated Omni workers"
             )
 
 
