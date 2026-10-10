@@ -205,19 +205,8 @@ class UrlValidationPolicy:
         )
 
 
-async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
-    """Check ``url`` against ``policy`` and return it unchanged if it passes.
-
-    ``https://`` and ``data:`` always pass. ``http://`` needs
-    ``allow_http=True``. Anything else is rejected outright.
-
-    For URLs with a hostname, we resolve it here (off the event loop via
-    ``loop.getaddrinfo``) and check the resulting IPs against the blocked
-    ranges. This catches obvious DNS rebinding but not an attacker who
-    changes their answer between this lookup and the client's actual connect.
-
-    Raises ``UrlValidationError`` on any policy violation.
-    """
+def _validate_url_without_dns(url: str, policy: UrlValidationPolicy) -> str | None:
+    """Check URL syntax and literal policy; return a hostname needing DNS."""
     if not url:
         raise UrlValidationError("URL is empty")
 
@@ -242,7 +231,7 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
                 f"To raise the limit, set {DYN_MM_MAX_DATA_URL_MB} (in megabytes) "
                 "on both the frontend and the workers."
             )
-        return url
+        return None
 
     # Every message below is surfaced to the caller (the diffusion handlers
     # turn it into a 400 body) and logged, so nothing client-supplied goes in
@@ -276,9 +265,29 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     else:
         if not policy.allow_private_ips and is_blocked_ip(host):
             raise UrlValidationError(f"IP literal '{host}' is in a blocked range")
-        return url
+        return None
 
     if policy.allow_private_ips:
+        return None
+
+    return host
+
+
+async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
+    """Check ``url`` against ``policy`` and return it unchanged if it passes.
+
+    ``https://`` and ``data:`` always pass. ``http://`` needs
+    ``allow_http=True``. Anything else is rejected outright.
+
+    For URLs with a hostname, we resolve it here (off the event loop via
+    ``loop.getaddrinfo``) and check the resulting IPs against the blocked
+    ranges. This catches obvious DNS rebinding but not an attacker who
+    changes their answer between this lookup and the client's actual connect.
+
+    Raises ``UrlValidationError`` on any policy violation.
+    """
+    host = _validate_url_without_dns(url, policy)
+    if host is None:
         return url
 
     loop = asyncio.get_running_loop()
@@ -381,6 +390,20 @@ async def validate_media_url(url: str, policy: UrlValidationPolicy) -> str:
         return resolved.as_uri()
 
     return await validate_url(url, policy)
+
+
+async def prepare_media_url(url: str, policy: UrlValidationPolicy) -> str:
+    """Normalize a media source before a policy-protected HTTP fetch.
+
+    HTTP(S) syntax, scheme and literal-IP checks run without DNS. Callers must
+    fetch remote bytes through ``fetch_bytes(policy=policy)`` so hostname
+    resolution and redirect validation share that fetch's total deadline.
+    Local paths and data URIs retain ``validate_media_url`` validation.
+    """
+    if urlparse(url).scheme.lower() in ("http", "https"):
+        _validate_url_without_dns(url, policy)
+        return url
+    return await validate_media_url(url, policy)
 
 
 async def validate_media_reference(reference: str, policy: UrlValidationPolicy) -> str:

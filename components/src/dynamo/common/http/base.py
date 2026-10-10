@@ -142,15 +142,32 @@ class HttpClient(abc.ABC):
         ``policy`` set: follow redirects manually and revalidate each
         hop against the policy via :func:`url_validator.validate_url`.
         This is the SSRF-safe path; raises :class:`UrlValidationError`
-        if any hop fails or the chain exceeds ``_MAX_REDIRECTS``.
+        if any hop fails or the chain exceeds ``_MAX_REDIRECTS``. The total
+        timeout includes validation and all redirect hops.
         """
         if policy is None:
             return await self._fetch_simple(
                 url, timeout, max_bytes=max_bytes, read_timeout=read_timeout
             )
-        return await self._fetch_with_revalidation(
-            url, timeout, policy, max_bytes=max_bytes, read_timeout=read_timeout
+        # One budget covers validation and every redirect hop. Each backend
+        # call has its own timeout, which would otherwise restart at each hop.
+        total = (
+            self._config.per_call_timeout_override
+            if self._config.per_call_timeout_override is not None
+            else timeout
         )
+        try:
+            return await asyncio.wait_for(
+                self._fetch_with_revalidation(
+                    url, timeout, policy, max_bytes=max_bytes, read_timeout=read_timeout
+                ),
+                # Match aiohttp: None and non-positive totals disable the deadline.
+                timeout=total if total is not None and total > 0 else None,
+            )
+        except asyncio.TimeoutError as exc:
+            raise HttpTimeoutError(
+                f"Timeout loading {describe_media_source(url)}"
+            ) from exc
 
     async def _fetch_with_revalidation(
         self,

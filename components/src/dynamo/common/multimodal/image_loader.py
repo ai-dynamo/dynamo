@@ -28,7 +28,7 @@ from ..http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
     describe_media_source,
-    validate_media_url,
+    prepare_media_url,
 )
 from .media_source import decode_data_uri
 from .shared_image_cache import SharedImageCache, SharedImageCacheStats
@@ -399,7 +399,7 @@ class ImageLoader:
             raise ValueError(
                 "Invalid image source scheme: local file access is not allowed"
             )
-        normalized_url = await validate_media_url(image_url, self._url_policy)
+        normalized_url = await prepare_media_url(image_url, self._url_policy)
         parsed_url = urlsplit(normalized_url)
 
         if parsed_url.scheme in ("http", "https"):
