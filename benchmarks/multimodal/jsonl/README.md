@@ -119,3 +119,15 @@ aiperf profile \
 
 Note: the JSONL contains actual content (text + image references), not token
 counts. Do not pass `--isl` — it only applies to synthetic data generation.
+
+For vLLM cached-input transport, generate with `--uuid` or enrich an existing
+dataset without changing its workload:
+
+```bash
+python -m benchmarks.multimodal.jsonl.add_image_uuids input.jsonl input_uuid.jsonl
+aiperf profile --endpoint-type chat --uuid-and-strip \
+  --input-file input_uuid.jsonl --custom-dataset-type single_turn ...
+```
+
+The first use of an image UUID in a session carries its content. Later uses
+carry the same UUID with empty image data, avoiding duplicate request bytes.
