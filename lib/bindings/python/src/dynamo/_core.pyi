@@ -1486,10 +1486,10 @@ class HttpService:
                 raised by an engine generator before its first ``yield`` maps to
                 the same HTTP error response as it does for a non-streaming
                 request. When False (the default), the service inherits
-                ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``: unset or ``0``, it commits
-                HTTP 200 without waiting and such an error arrives as an SSE
-                error frame; set to a positive number of milliseconds, it waits
-                that long and still maps an error that arrives inside the
+                ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``: unset, it waits up to
+                100 ms and maps an error that arrives inside that window; ``0``
+                commits HTTP 200 without waiting, so such an error arrives as an
+                SSE error frame; a positive number of milliseconds sets the
                 window. True overrides the variable with an unbounded wait.
         """
         ...

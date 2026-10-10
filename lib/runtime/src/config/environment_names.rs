@@ -494,11 +494,12 @@ pub mod llm {
     /// for the ability to surface `Backend(InvalidArgument)` and other
     /// request-validation errors as HTTP 4xx instead of an SSE error frame.
     ///
-    /// Default: unset → peek disabled (matches pre-fix behavior; all errors
-    /// surface as SSE frames post-HTTP-200). Set to a value ≥ observed
-    /// request-parse / admission p99 latency to opt in — request-validation
-    /// errors within the window surface as HTTP 4xx; anything past the window
-    /// stays as an SSE error frame. Setting to `0` also disables the peek.
+    /// Default: unset → 100ms. The peek returns as soon as the first
+    /// non-annotation event arrives, so a healthy stream pays
+    /// `min(time-to-first-event, 100ms)` rather than a fixed delay.
+    /// Request-validation errors within the window surface as HTTP 4xx;
+    /// anything past the window stays as an SSE error frame. Set to `0` to
+    /// disable the peek and commit HTTP 200 immediately.
     ///
     /// Read once when the HTTP service is built. A policy supplied through
     /// `HttpServiceConfigBuilder::streaming_backend_error_check` replaces it.
