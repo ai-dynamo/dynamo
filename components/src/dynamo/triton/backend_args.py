@@ -13,7 +13,7 @@ from tritonserver import RateLimitMode as TritonRateLimitMode
 from dynamo.common.configuration.utils import add_argument
 from dynamo.triton.args import Config, DynamoArgGroup
 
-_TASK_CHOICES = ("tensor", "classify")
+_TASK_CHOICES = ("tensor", "classify", "embed")
 
 
 def _enum_arg(enum_cls, flag: str) -> Callable[[str], object]:
@@ -411,10 +411,9 @@ class DynamoTritonArgGroup(DynamoArgGroup):
             default="tensor",
             choices=_TASK_CHOICES,
             help=(
-                "Endpoint the worker advertises. 'tensor' (default) serves "
-                "raw Dynamo tensor inference; 'classify' serves OpenAI "
-                "/v1/classify by translating requests to a BYTES text tensor "
-                "and reading an FP32 probability output."
+                "Endpoint the worker advertises: 'tensor' (default, raw "
+                "Dynamo tensor inference), 'classify' (/v1/classify), "
+                "or 'embed' (/v1/embeddings)."
             ),
         )
         add_argument(
@@ -440,6 +439,20 @@ class DynamoTritonArgGroup(DynamoArgGroup):
                 "config.pbtxt; required when the model declares more than "
                 "one FP32 output."
             ),
+        )
+        add_argument(
+            endpoint_group,
+            flag_name="--embed-input-name",
+            env_var="DYN_TRITON_EMBED_INPUT_NAME",
+            default=None,
+            help="Input tensor name for --task embed; auto-detect when omitted.",
+        )
+        add_argument(
+            endpoint_group,
+            flag_name="--embed-output-name",
+            env_var="DYN_TRITON_EMBED_OUTPUT_NAME",
+            default=None,
+            help="Output tensor name for --task embed; auto-detect when omitted.",
         )
 
 
@@ -485,6 +498,8 @@ class DynamoTritonConfig(Config):
     task: str
     classify_input_name: Optional[str]
     classify_output_name: Optional[str]
+    embed_input_name: Optional[str]
+    embed_output_name: Optional[str]
 
     def validate(self) -> None:
         if hasattr(super(), "validate"):
@@ -501,8 +516,8 @@ class DynamoTritonConfig(Config):
                 f"--task must be one of {list(_TASK_CHOICES)}, got {self.task!r}"
             )
 
-        # Classify-only overrides don't make sense on the tensor path; reject
-        # them early so an operator who typoed `--task tensor` doesn't spend
+        # Per-task overrides don't make sense on other paths; reject them
+        # early so an operator who typoed `--task tensor` doesn't spend
         # startup wondering why their name overrides are ignored.
         if self.task != "classify" and (
             self.classify_input_name is not None
@@ -511,6 +526,13 @@ class DynamoTritonConfig(Config):
             raise ValueError(
                 "--classify-input-name and --classify-output-name are only "
                 "valid with --task classify"
+            )
+        if self.task != "embed" and (
+            self.embed_input_name is not None or self.embed_output_name is not None
+        ):
+            raise ValueError(
+                "--embed-input-name and --embed-output-name are only "
+                "valid with --task embed"
             )
 
         if self.backend_directory is not None and not os.path.isdir(
@@ -549,7 +571,13 @@ class DynamoTritonConfig(Config):
 # rather than a Triton server option. They must be excluded from
 # to_server_options() so tritonserver.Server(**opts) doesn't reject them.
 _NON_TRITON_SERVER_FIELDS = frozenset(
-    ("task", "classify_input_name", "classify_output_name")
+    (
+        "task",
+        "classify_input_name",
+        "classify_output_name",
+        "embed_input_name",
+        "embed_output_name",
+    )
 )
 
 

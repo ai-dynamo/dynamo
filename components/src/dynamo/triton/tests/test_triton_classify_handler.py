@@ -482,6 +482,14 @@ class TestClassify:
         with pytest.raises(ValueError, match="received 2 prompts"):
             _run(handler, {"input": ["a", "b"]})
 
+    def test_batch_larger_than_max_batch_size_rejected(self) -> None:
+        # A batchable model with max_batch_size=2 receiving 3 prompts must
+        # 400 at the handler; otherwise Triton returns a shape-mismatch
+        # server error for the [3, 1] tensor.
+        _, handler = _make_handler(max_batch_size=2)
+        with pytest.raises(ValueError, match="accepts at most 2 prompts"):
+            _run(handler, {"input": ["a", "b", "c"]})
+
 
 # ---------------------------------------------------------------------------
 # Dispatch & validation
