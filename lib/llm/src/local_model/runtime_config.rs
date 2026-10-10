@@ -179,6 +179,21 @@ pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_towe
 /// to the other engine.
 pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 
+/// Worker-advertised support for the OpenAI `vllm_xargs` request field, which
+/// token-input vLLM workers merge into `SamplingParams.extra_args`.
+///
+/// Other backends, text-input workers and older vLLM workers would drop the
+/// field, so the frontend routes `vllm_xargs` requests only to WorkerSets
+/// whose every member, and every prefill peer, advertises this.
+pub const VLLM_XARGS_CAPABILITY: &str = "vllm_xargs";
+
+/// Capabilities a request can require of the specific workers serving it.
+///
+/// These flags are not part of the MDC checksum, so WorkerSet members can
+/// disagree on them during a rolling upgrade; the frontend tracks them per
+/// committed member instead of trusting the representative card.
+pub(crate) const REQUEST_CAPABILITIES: &[&str] = &[VLLM_XARGS_CAPABILITY];
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

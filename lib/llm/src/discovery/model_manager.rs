@@ -110,6 +110,10 @@ pub enum ModelManagerError {
 
     #[error("Model already exists: {0}")]
     ModelAlreadyExists(String),
+
+    /// The model is served, but no worker advertises a capability the request needs.
+    #[error("Model {model} has no workers supporting `{capability}`")]
+    CapabilityUnsupported { model: String, capability: String },
 }
 
 /// Sentinel label value used in frontend Prometheus metrics for requests
@@ -730,6 +734,7 @@ impl ModelManager {
             .worker_type
             .map_or("unspecified", |worker_type| worker_type.as_str());
 
+        describe_members(&worker_set, members.iter().map(|(key, card)| (key, card)));
         let worker_set = Arc::new(worker_set);
         self.get_or_create_model(&primary)
             .add_worker_set(worker_set_key.to_string(), worker_set.clone());
@@ -876,6 +881,7 @@ impl ModelManager {
             .collect::<HashMap<_, _>>();
         let lora_before = self.lora_projection_locked();
 
+        describe_members(&worker_set, &members);
         if replacing_worker_set {
             let primary_model = self.get_or_create_model(&primary);
             if let Some(displaced_worker_set) = primary_model.get_worker_set(&worker_set_key) {
@@ -1505,6 +1511,7 @@ impl ModelManager {
     pub fn get_chat_completions_engine_with_parsing(
         &self,
         model: &str,
+        required_capability: Option<&str>,
     ) -> Result<
         (
             OpenAIChatCompletionsStreamingEngine,
@@ -1517,12 +1524,13 @@ impl ModelManager {
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_parsing()
+            .get_chat_engine_with_parsing(required_capability)
     }
 
     pub fn get_completions_engine_with_parsing(
         &self,
         model: &str,
+        required_capability: Option<&str>,
     ) -> Result<
         (
             OpenAICompletionsStreamingEngine,
@@ -1535,7 +1543,7 @@ impl ModelManager {
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_completions_engine_with_parsing()
+            .get_completions_engine_with_parsing(required_capability)
     }
 
     pub fn get_generate_engine_with_parsing(
@@ -2805,6 +2813,31 @@ fn has_required_kv_transfer_policy(configs: &HashMap<WorkerId, ModelRuntimeConfi
     })
 }
 
+/// Describe a group's committed members to its WorkerSet's capability tracker.
+///
+/// The controller calls the committing host before admitting a newcomer and
+/// after withdrawing a departed worker, so every admitted worker is described.
+fn describe_members<'a>(
+    worker_set: &WorkerSet,
+    members: impl IntoIterator<Item = (&'a String, &'a ModelDeploymentCard)>,
+) {
+    let Some(capabilities) = worker_set.member_capabilities() else {
+        return;
+    };
+    let described = members
+        .into_iter()
+        .map(|(key, card)| ModelCardInstanceId::from_path(key).map(|mcid| (mcid.instance_id, card)))
+        .collect::<Result<Vec<_>, _>>();
+    match described {
+        Ok(members) => capabilities.replace(members),
+        Err(error) => {
+            // Fail closed: an unidentified member may be any admitted worker.
+            tracing::warn!(%error, "Discovery group member has no instance identity");
+            capabilities.replace(std::iter::empty());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2822,7 +2855,7 @@ mod tests {
     use crate::model_card::ModelDeploymentCard;
     use crate::{
         discovery::{KvEventSource, KvSourceStatus},
-        local_model::runtime_config::ModelRuntimeConfig,
+        local_model::runtime_config::{ModelRuntimeConfig, VLLM_XARGS_CAPABILITY},
     };
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
@@ -3915,6 +3948,7 @@ mod tests {
             generation: 1,
             card: Arc::new(card),
             admitted_ids: tokio::sync::watch::channel(Vec::new()).1,
+            member_capabilities: Default::default(),
         });
         if role != WorkerType::Decode {
             return (worker_set, None, None);
@@ -4086,6 +4120,154 @@ mod tests {
         Arc::new(crate::engines::StreamingEngineAdapter::new(
             crate::engines::make_echo_engine(),
         ))
+    }
+
+    fn role_card(
+        worker_type: crate::worker_type::WorkerType,
+        vllm_xargs: bool,
+    ) -> ModelDeploymentCard {
+        use crate::worker_type::WorkerType;
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.worker_type = Some(worker_type);
+        card.needs = match worker_type {
+            WorkerType::Decode => vec![vec![WorkerType::Prefill]],
+            WorkerType::Prefill => vec![vec![WorkerType::Decode]],
+            _ => Vec::new(),
+        };
+        if vllm_xargs {
+            card.runtime_config
+                .set_engine_specific(VLLM_XARGS_CAPABILITY, true)
+                .unwrap();
+        }
+        card
+    }
+
+    fn role_member(
+        worker_type: crate::worker_type::WorkerType,
+        instance_id: u64,
+        vllm_xargs: bool,
+    ) -> (String, ModelDeploymentCard) {
+        let key = ModelCardInstanceId {
+            namespace: "deployment".into(),
+            component: worker_type.as_str().into(),
+            endpoint: "generate".into(),
+            instance_id,
+            model_suffix: None,
+        }
+        .to_path();
+        (key, role_card(worker_type, vllm_xargs))
+    }
+
+    /// Commit a discovery group whose WorkerSet tracks member capabilities and,
+    /// unless it is a prefill set, serves chat.
+    fn commit_role_group(manager: &ModelManager, members: Vec<(String, ModelDeploymentCard)>) {
+        let card = members[0].1.clone();
+        let worker_type = card.worker_type.unwrap();
+        let mut worker_set = WorkerSet::new("deployment".into(), card.mdcsum().to_string(), card);
+        if worker_type != crate::worker_type::WorkerType::Prefill {
+            worker_set.chat_engine = Some(make_chat_engine());
+        }
+        worker_set.track_member_capabilities();
+        manager
+            .commit_discovery_group(
+                worker_type.as_str(),
+                worker_type.as_str(),
+                worker_set,
+                members,
+                Vec::new(),
+            )
+            .unwrap();
+    }
+
+    fn vllm_xargs_route(manager: &ModelManager) -> Result<(), ModelManagerError> {
+        manager
+            .get_chat_completions_engine_with_parsing("model", Some(VLLM_XARGS_CAPABILITY))
+            .map(drop)
+    }
+
+    #[test]
+    fn vllm_xargs_requires_every_worker_set_member() {
+        use crate::worker_type::WorkerType::Aggregated;
+        let upgraded = role_member(Aggregated, 1, true);
+        let older = role_member(Aggregated, 2, false);
+        assert_eq!(
+            upgraded.1.mdcsum(),
+            older.1.mdcsum(),
+            "the capability must not split WorkerSets during a rolling upgrade"
+        );
+
+        for members in [
+            vec![upgraded.clone(), older.clone()],
+            vec![older.clone(), upgraded.clone()],
+        ] {
+            let manager = ModelManager::new();
+            commit_role_group(&manager, members);
+            assert!(matches!(
+                vllm_xargs_route(&manager),
+                Err(ModelManagerError::ModelUnavailable(_))
+            ));
+            assert!(
+                manager
+                    .get_chat_completions_engine_with_parsing("model", None)
+                    .is_ok(),
+                "mixed-version members keep serving ordinary requests"
+            );
+
+            let group = Aggregated.as_str();
+            manager
+                .replace_discovery_group(group, None, vec![upgraded.clone()], Vec::new())
+                .unwrap();
+            assert!(vllm_xargs_route(&manager).is_ok());
+
+            manager
+                .replace_discovery_group(
+                    group,
+                    None,
+                    vec![upgraded.clone(), older.clone()],
+                    Vec::new(),
+                )
+                .unwrap();
+            assert!(matches!(
+                vllm_xargs_route(&manager),
+                Err(ModelManagerError::ModelUnavailable(_))
+            ));
+
+            manager
+                .replace_discovery_group(group, None, vec![older.clone()], Vec::new())
+                .unwrap();
+            assert!(matches!(
+                vllm_xargs_route(&manager),
+                Err(ModelManagerError::CapabilityUnsupported { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn vllm_xargs_requires_capable_prefill_peers() {
+        use crate::worker_type::WorkerType::{Decode, Prefill};
+        let manager = ModelManager::new();
+        commit_role_group(&manager, vec![role_member(Decode, 1, true)]);
+        commit_role_group(&manager, vec![role_member(Prefill, 2, false)]);
+
+        assert!(matches!(
+            vllm_xargs_route(&manager),
+            Err(ModelManagerError::ModelUnavailable(_))
+        ));
+        assert!(
+            manager
+                .get_chat_completions_engine_with_parsing("model", None)
+                .is_ok()
+        );
+
+        manager
+            .replace_discovery_group(
+                Prefill.as_str(),
+                None,
+                vec![role_member(Prefill, 3, true)],
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(vllm_xargs_route(&manager).is_ok());
     }
 
     #[test]

@@ -9,7 +9,7 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{ModelManager, ModelWatcher},
+    discovery::{MemberCapabilities, ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
@@ -150,6 +150,7 @@ fn validate_router_mode_for_lora(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preprocessed_backend_engine(
     router: LlmPushRouter,
     router_mode: RouterMode,
@@ -158,6 +159,7 @@ fn preprocessed_backend_engine(
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
     load_context: Arc<RoutingLoadContext>,
+    member_capabilities: Option<Arc<MemberCapabilities>>,
 ) -> anyhow::Result<Arc<RoutingHost>> {
     // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
     // the fail-fast check in `build_preprocessed_routing`). After this, the Direct and advanced
@@ -173,27 +175,24 @@ fn preprocessed_backend_engine(
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
+            RoutingHost::new_with_load_context_and_coordinator(
                 router,
                 chooser,
                 load_context,
                 affinity,
-            ))
+            )
         }
         _ => {
             let lora = model_manager
                 .lora_filter_for(endpoint_id)
                 .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
-            Arc::new(RoutingHost::new_builtin_with_capabilities(
-                router,
-                load_context,
-                affinity,
-                lora,
-            )?)
+            RoutingHost::new_builtin_with_capabilities(router, load_context, affinity, lora)?
         }
     };
 
-    Ok(routing_host)
+    Ok(Arc::new(
+        routing_host.with_member_capabilities(member_capabilities),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -219,6 +218,7 @@ pub async fn build_preprocessed_routing(
         enable_multimodal_cache_indexer,
         session_affinity_ttl_secs,
         SessionAffinityMode::Hard,
+        None,
     )
     .await
 }
@@ -235,6 +235,7 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
     session_affinity_mode: SessionAffinityMode,
+    member_capabilities: Option<Arc<MemberCapabilities>>,
 ) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
@@ -303,6 +304,7 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         &endpoint_id,
         affinity,
         load_context,
+        member_capabilities,
     )?;
     if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
         prefill_router

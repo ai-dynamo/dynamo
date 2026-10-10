@@ -29,6 +29,7 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
+    discovery::MemberCapabilities,
     kv_router::{KvRouter, metrics::RouterRequestMetrics, to_worker_selection_session_context},
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
@@ -300,6 +301,11 @@ pub struct RoutingHost {
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
+    /// Request capabilities of the routed WorkerSet's committed members. Engine
+    /// selection only admits fully capable sets, but a worker lacking a
+    /// capability can be admitted after a request was selected and before it
+    /// is dispatched. Unset for hosts outside discovery-managed WorkerSets.
+    member_capabilities: Option<Arc<MemberCapabilities>>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
     /// Compatibility construction paths that predate routing load ownership leave this unset.
@@ -447,6 +453,7 @@ impl RoutingHost {
             affinity,
             hosted_occupancy: None,
             lora: None,
+            member_capabilities: None,
             routing_context: load_context,
         }
     }
@@ -530,8 +537,44 @@ impl RoutingHost {
                     load_estimator,
                     selector,
                 }),
+            member_capabilities: None,
             routing_context: Some(load_context),
         })
+    }
+
+    /// Refuse dispatches to workers that lack a capability the request needs.
+    pub(crate) fn with_member_capabilities(
+        mut self,
+        member_capabilities: Option<Arc<MemberCapabilities>>,
+    ) -> Self {
+        self.member_capabilities = member_capabilities;
+        self
+    }
+
+    /// Fail closed rather than let `worker_id` silently drop request options
+    /// it does not support.
+    fn ensure_worker_capability(
+        &self,
+        request: &PreprocessedRequest,
+        worker_id: u64,
+    ) -> Result<(), Error> {
+        let Some(member_capabilities) = self.member_capabilities.as_deref() else {
+            return Ok(());
+        };
+        let Some(capability) = request.required_worker_capability() else {
+            return Ok(());
+        };
+        if member_capabilities.worker_supports(worker_id, capability) {
+            return Ok(());
+        }
+        Err(anyhow::anyhow!(
+            DynamoError::builder()
+                .error_type(ErrorType::Unavailable)
+                .message(format!(
+                    "selected worker {worker_id} does not support `{capability}`"
+                ))
+                .build()
+        ))
     }
 
     pub fn required_worker_inputs(&self) -> WorkerInputs {

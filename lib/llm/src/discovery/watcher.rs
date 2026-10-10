@@ -468,12 +468,14 @@ impl ModelWatcher {
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation.clone());
+        let member_capabilities = worker_set.track_member_capabilities();
         worker_set.set_topology_target(super::CommittedWorkerSetTarget {
             endpoint: endpoint.clone(),
             group: spec.key.id(),
             generation: spec.generation,
             card: Arc::new(card.clone()),
             admitted_ids,
+            member_capabilities: member_capabilities.clone(),
         });
         worker_set.set_instance_watcher(instance_watcher);
 
@@ -683,6 +685,7 @@ impl ModelWatcher {
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
                         router_config.session_affinity_mode,
+                        Some(member_capabilities.clone()),
                     )
                     .await
                     .context("build_preprocessed_routing")?,
