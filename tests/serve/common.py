@@ -6,6 +6,7 @@
 import dataclasses
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -323,6 +324,37 @@ TEST_ONLY_PIP_ENV_KEY = "DYN_TEST_ONLY_PIP_INSTALL"
 # though every parametrized deployment (and each retry) calls the installer.
 _test_only_pip_targets: dict[str, str] = {}
 
+# Enough of pip's output to carry a resolver or transport failure, bounded so a
+# backtracking resolve cannot put megabytes into an exception message.
+_PIP_OUTPUT_LIMIT = 4000
+
+# Any userinfo in a URL pip echoes, not just the ``user:password`` form. A
+# token-only index such as ``https://<token>@host/simple`` is valid and carries
+# the whole secret before the ``@``, so matching only the colon form copies it
+# verbatim into the exception. pip already masks the password half of a
+# user:password index it prints, but CI supplies PIP_INDEX_URL from a secret,
+# so this does not depend on that staying true.
+_URL_CREDENTIALS = re.compile(r"(//)[^/\s@]+@")
+
+
+def _describe_pip_failure(proc: "subprocess.CompletedProcess[str]") -> str:
+    """Render pip's output for an exception message: redacted and bounded.
+
+    Bounded head-and-tail rather than head-only: pip prints its banner first and
+    its ``ERROR:`` lines last, so truncating from the front keeps the banner and
+    drops the reason.
+    """
+    text = _URL_CREDENTIALS.sub(r"\1****@", (proc.stdout or "") + (proc.stderr or ""))
+    text = text.strip()
+    if not text:
+        return "<pip produced no output>"
+    if len(text) <= _PIP_OUTPUT_LIMIT:
+        return text
+    marker = f"\n... ({len(text)} chars total, middle elided) ...\n"
+    budget = _PIP_OUTPUT_LIMIT - len(marker)
+    head = budget // 3
+    return f"{text[:head]}{marker}{text[-(budget - head):]}"
+
 
 def _install_test_only_packages(
     config: EngineConfig, extra_env: Optional[Dict[str, str]] = None
@@ -349,7 +381,11 @@ def _install_test_only_packages(
             " ".join(packages),
         )
         try:
-            subprocess.run(
+            # Captured rather than inherited: under pytest the inherited streams
+            # are swallowed and never rendered, so a failure reached the caller
+            # as a bare CalledProcessError naming only the argv -- no resolver
+            # message, no index, no HTTP status. Carry it in the exception.
+            proc = subprocess.run(
                 [
                     sys.executable,
                     "-m",
@@ -360,8 +396,14 @@ def _install_test_only_packages(
                     "--no-deps",
                     *packages,
                 ],
-                check=True,
+                capture_output=True,
+                text=True,
             )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"Installing test-only package(s) {' '.join(packages)} failed "
+                    f"(pip exit {proc.returncode}):\n{_describe_pip_failure(proc)}"
+                )
         except Exception:
             shutil.rmtree(target, ignore_errors=True)
             raise
