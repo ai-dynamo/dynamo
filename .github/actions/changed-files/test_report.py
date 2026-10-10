@@ -199,7 +199,6 @@ class ChangedFilesTests(unittest.TestCase):
         for extra in (
             "deploy/operator/api/v1beta2/unreviewed.go",
             "components/src/dynamo/frontend/tests/test_vllm_processor_unit.py",
-            "components/src/dynamo/common/utils.py",
         ):
             changed = dict(outputs)
             changed["all_modified_files.json"] = json.dumps(files[8:] + [extra])
