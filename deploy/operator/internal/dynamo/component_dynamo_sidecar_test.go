@@ -135,7 +135,7 @@ func TestNativeSidecarRendering(t *testing.T) {
 				PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}, Labels: map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"}}, Spec: corev1.PodSpec{
 					Containers: []corev1.Container{engine, {Name: "frontend", Image: "frontend:1.5.0", Env: []corev1.EnvVar{{Name: "ETCD_ENDPOINTS", Value: "frontend-etcd:2379"}}}},
 					InitContainers: []corev1.Container{{Name: "setup", Image: "setup:latest"}, {
-						Name: "runtime", Image: "runtime:1.5.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+						Name: "runtime", Image: "runtime.example/runtime:1.5.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 						Env:          []corev1.EnvVar{{Name: "GLOBAL", Value: "runtime"}, {Name: "NATS_TLS_CA_CERT_PATH", Value: "/runtime/ca.crt"}, {Name: commonconsts.EnvKvTransferEnforcement, Value: "preferred"}},
 						StartupProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}}},
 					}},
@@ -168,7 +168,7 @@ func TestNativeSidecarRendering(t *testing.T) {
 			require.Equal(t, "http://etcd:2379", env["ETCD_ENDPOINTS"])
 			require.Equal(t, "/certs/tls.crt", env["DYN_TCP_TLS_CERT_PATH"])
 			require.Equal(t, "/runtime/ca.crt", env["NATS_TLS_CA_CERT_PATH"])
-			require.ElementsMatch(t, []string{"vllm/vllm-openai:latest", "frontend:1.5.0", "setup:latest", "runtime:1.5.0"}, secrets.images)
+			require.ElementsMatch(t, []string{"docker.io", "docker.io", "docker.io", "runtime.example"}, secrets.registries)
 			require.Equal(t, []corev1.LocalObjectReference{{Name: "runtime-pull-secret"}}, pod.ImagePullSecrets)
 			require.Equal(t, string(componentType), env[commonconsts.DynamoComponentEnvVar])
 			require.Equal(t, "runtime", env["GLOBAL"])
@@ -317,12 +317,12 @@ func TestRuntimeContainerModeTransitions(t *testing.T) {
 	}
 }
 
-// nativeSidecarSecretsRetriever records every image lookup and only grants the runtime image a secret.
-type nativeSidecarSecretsRetriever struct{ images []string }
+// nativeSidecarSecretsRetriever records registry lookups and grants the runtime registry a secret.
+type nativeSidecarSecretsRetriever struct{ registries []string }
 
-func (r *nativeSidecarSecretsRetriever) GetSecrets(namespace, image string) ([]string, error) {
-	r.images = append(r.images, image)
-	if image == "runtime:1.5.0" {
+func (r *nativeSidecarSecretsRetriever) GetSecrets(namespace, registry string) ([]string, error) {
+	r.registries = append(r.registries, registry)
+	if registry == "runtime.example" {
 		return []string{"runtime-pull-secret"}, nil
 	}
 	return nil, nil
