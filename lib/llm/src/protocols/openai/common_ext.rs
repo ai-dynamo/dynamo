@@ -112,6 +112,21 @@ pub struct CommonExt {
     pub continue_final_message: Option<bool>,
 }
 
+/// Schema-only view of common extensions for the chat endpoint.
+///
+/// The runtime type remains `CommonExt`. Its shared schema omits these two
+/// fields because completions rejects them; the chat request must expose them.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub(crate) struct ChatCommonExt {
+    #[serde(flatten)]
+    common: CommonExt,
+    /// Append the assistant generation prompt after the last message.
+    add_generation_prompt: Option<bool>,
+    /// Continue the final message rather than starting a new assistant turn.
+    continue_final_message: Option<bool>,
+}
+
 pub(crate) fn extract_guided_decoding_options(
     request: &impl CommonExtProvider,
 ) -> anyhow::Result<Option<GuidedDecodingOptions>> {

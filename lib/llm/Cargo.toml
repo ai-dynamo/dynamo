@@ -85,7 +85,7 @@ dynamo-tokens = { workspace = true }
 # workspace
 anyhow = { workspace = true }
 arc-swap = "1.9.1"
-dynamo-protocols = { workspace = true }
+dynamo-protocols = { workspace = true, features = ["protocol-schema"] }
 dynamo-parsers = { workspace = true }
 dynamo-parsers-v2 = { workspace = true }
 async-stream = { workspace = true }
@@ -169,7 +169,7 @@ indicatif = { version = "0.18.0", optional = true }
 axum = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { workspace = true }
-utoipa = { version = "5.3", features = ["axum_extras"] }
+utoipa = { version = "5.3", features = ["axum_extras", "rc_schema"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 
