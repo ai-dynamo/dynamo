@@ -171,11 +171,12 @@ impl MigrationState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .last_error
             .clone()?;
-        let (error_type, message) = if match_error_chain(
+        let promotes_worker_overload = match_error_chain(
             &last_error,
             &[ErrorType::WorkerOverloaded],
             &[ErrorType::ResourceExhausted],
-        ) {
+        );
+        let (error_type, message) = if promotes_worker_overload {
             (
                 ErrorType::ResourceExhausted,
                 "all eligible workers rejected the request as overloaded",
@@ -186,12 +187,18 @@ impl MigrationState {
                 "no untried eligible worker remains after migration",
             )
         };
-        Some(
-            DynamoError::builder()
-                .error_type(error_type)
-                .message(message)
-                .build(),
-        )
+        let error = DynamoError::builder()
+            .error_type(error_type)
+            .message(message);
+        let error = if promotes_worker_overload {
+            error.reason(
+                dynamo_runtime::error::ErrorReason::new("router.admission_rejected")
+                    .expect("registered router admission reason"),
+            )
+        } else {
+            error
+        };
+        Some(error.build())
     }
 
     pub(crate) fn take_request_lifecycle(&self) -> Option<Box<RequestLifecycle>> {
@@ -977,6 +984,25 @@ mod tests {
 
     fn le_bytes(ids: &[TokenIdType]) -> Vec<u8> {
         ids.iter().flat_map(|id| id.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn exhausted_worker_overload_is_router_admission_rejected() {
+        let state = MigrationState::default();
+        state.record_failure(
+            1,
+            Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::WorkerOverloaded)
+                    .message("selected worker is overloaded")
+                    .build(),
+            ),
+        );
+        let error = state
+            .exhausted_error()
+            .expect("worker overload should exhaust the eligible pool");
+        assert_eq!(error.error_type(), ErrorType::ResourceExhausted);
+        assert_eq!(error.reason().as_str(), "router.admission_rejected");
     }
 
     #[test]

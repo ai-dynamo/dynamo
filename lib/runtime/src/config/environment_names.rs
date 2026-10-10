@@ -383,12 +383,14 @@ pub mod llm {
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
-    /// HTTP status code returned when the frontend rejects a request because
-    /// all workers are overloaded. Defaults to 529 ("Site is overloaded"); set
-    /// to 503 for Service Unavailable retry semantics. Status codes from 200
-    /// through 999 are accepted; an informational value from 100 through 199,
-    /// an unparseable value, or an out-of-range value falls back to 529. The
-    /// value is read and cached on first use.
+    /// HTTP status code returned when a selected worker or the engine is
+    /// overloaded. Defaults to 529 ("Site is overloaded"); set to 503 for
+    /// Service Unavailable retry semantics. Status codes from 200 through 999
+    /// are accepted; an informational value from 100 through 199, an
+    /// unparseable value, or an out-of-range value falls back to 529. The
+    /// value is read and cached on first use. Router admission refusals (a
+    /// full policy queue, or every eligible worker overloaded) are HTTP 429
+    /// and do not use this variable.
     pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
 
     /// Emit an SSE comment at this interval while a streaming response has no

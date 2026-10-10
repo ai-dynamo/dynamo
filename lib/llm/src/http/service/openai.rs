@@ -824,21 +824,6 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
-        if let Some(rejection) = find_queue_rejection_in_chain(err.as_ref()) {
-            let code = overload_status_code();
-            record_local_failure(ErrorClass::CapacityExhausted);
-            return (
-                code,
-                Json(ErrorMessage {
-                    message: rejection.to_string(),
-                    error_type: map_error_code_to_error_type(code),
-                    code: code.as_u16(),
-                    details: serde_json::to_value(rejection).ok().map(Box::new),
-                    metric_error_type: None,
-                }),
-            );
-        }
-
         if let Some(error) = super::metrics::queue_deadline_error(err.as_ref()) {
             super::metrics::record_failure(error);
             let code = StatusCode::TOO_MANY_REQUESTS;
@@ -850,6 +835,28 @@ impl ErrorMessage {
                     code: code.as_u16(),
                     details: None,
                     metric_error_type: Some(ErrorType::Cancelled),
+                }),
+            );
+        }
+
+        if super::metrics::router_admission_rejected(err.as_ref()) {
+            record_local_failure(ErrorClass::CapacityExhausted);
+            let code = StatusCode::TOO_MANY_REQUESTS;
+            let (message, details) = match find_queue_rejection_in_chain(err.as_ref()) {
+                Some(rejection) => (
+                    rejection.to_string(),
+                    serde_json::to_value(rejection).ok().map(Box::new),
+                ),
+                None => ("Service temporarily overloaded".to_string(), None),
+            };
+            return (
+                code,
+                Json(ErrorMessage {
+                    message,
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
+                    details,
+                    metric_error_type: None,
                 }),
             );
         }
@@ -869,7 +876,7 @@ impl ErrorMessage {
             return response;
         }
 
-        // Check for ResourceExhausted anywhere in the error chain → HTTP 529
+        // Worker or engine overload. Router admission refusals returned above.
         if super::metrics::request_was_rejected(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Overloaded,
@@ -7565,7 +7572,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_rejection_maps_to_structured_http_529() {
+    fn queue_rejection_maps_to_structured_http_429() {
         use dynamo_kv_router::scheduling::{QueueLimitKind, QueueRejection};
 
         let rejection = QueueRejection {
@@ -7577,9 +7584,9 @@ mod tests {
         let response =
             ErrorMessage::from_anyhow(anyhow::Error::new(rejection), BACKUP_ERROR_MESSAGE);
 
-        assert_eq!(response.0.as_u16(), 529);
-        assert_eq!(response.1.code, 529);
-        assert_eq!(response.1.error_type, "Overloaded");
+        assert_eq!(response.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.1.code, 429);
+        assert_eq!(response.1.error_type, "Too Many Requests");
         assert_eq!(
             response.1.details.as_deref(),
             Some(&serde_json::json!({
@@ -7589,6 +7596,29 @@ mod tests {
                 "limit": 1024,
             }))
         );
+    }
+
+    #[test]
+    fn scheduler_admission_rejection_maps_to_http_429() {
+        use dynamo_kv_router::scheduling::KvSchedulerError;
+
+        let error = crate::kv_router::scheduler_error_for_test(
+            KvSchedulerError::AllEligibleWorkersOverloaded,
+        );
+        assert_eq!(
+            error
+                .downcast_ref::<dynamo_runtime::error::DynamoError>()
+                .expect("pool exhaustion should be a DynamoError")
+                .reason()
+                .as_str(),
+            "router.admission_rejected"
+        );
+
+        let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.1.code, 429);
+        assert_eq!(response.1.error_type, "Too Many Requests");
+        assert_eq!(response.1.message, "Service temporarily overloaded");
     }
 
     #[test]

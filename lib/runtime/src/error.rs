@@ -118,7 +118,8 @@ pub enum ErrorClass {
     ResourceExhausted,
     /// One selected worker is out of capacity while others may still have room.
     /// Distinct from [`Self::ResourceExhausted`] so a request whose routing
-    /// constraints permit reassignment can migrate; both surface as HTTP 529.
+    /// constraints permit reassignment can migrate. Worker overload stays on
+    /// the configured overload status, HTTP 529 by default.
     WorkerOverloaded,
     /// No backend worker is currently available to handle the request.
     Unavailable,
@@ -421,9 +422,10 @@ impl ErrorReason {
             | "request.deadline_exceeded"
             | "router.queue_deadline_exceeded" => Some(ErrorClass::DeadlineExceeded),
             "request.cancelled" | "backend.cancelled" => Some(ErrorClass::Cancelled),
-            "capacity.pool_exhausted" | "capacity.worker_overloaded" | "capacity.exhausted" => {
-                Some(ErrorClass::CapacityExhausted)
-            }
+            "capacity.pool_exhausted"
+            | "capacity.worker_overloaded"
+            | "capacity.exhausted"
+            | "router.admission_rejected" => Some(ErrorClass::CapacityExhausted),
             "backend.unknown" => Some(ErrorClass::Internal),
             "backend.protocol" => Some(ErrorClass::BackendProtocol),
             "request.unauthenticated" => Some(ErrorClass::Unauthenticated),

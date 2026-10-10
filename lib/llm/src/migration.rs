@@ -82,6 +82,7 @@ const MIGRATION_BLOCKING_REASONS: &[&str] = &[
     "backend.cancelled",
     "capacity.exhausted",
     "capacity.pool_exhausted",
+    "router.admission_rejected",
 ];
 
 fn blocks_migration(reason: &ErrorReason) -> bool {
@@ -836,6 +837,7 @@ mod tests {
             ),
             (ErrorType::ResourceExhausted, "capacity.pool_exhausted"),
             (ErrorType::CapacityExhausted, "capacity.exhausted"),
+            (ErrorType::ResourceExhausted, "router.admission_rejected"),
         ] {
             let worker_error = DynamoError::builder()
                 .error_type(error_type)
@@ -1467,6 +1469,11 @@ mod tests {
             (
                 ErrorClass::CapacityExhausted,
                 "capacity.pool_exhausted",
+                false,
+            ),
+            (
+                ErrorClass::CapacityExhausted,
+                "router.admission_rejected",
                 false,
             ),
             (ErrorClass::Unavailable, "transport.disconnected", true),

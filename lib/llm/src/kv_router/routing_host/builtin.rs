@@ -135,6 +135,10 @@ impl RoutingHost {
             return Err(anyhow::anyhow!(
                 DynamoError::builder()
                     .error_type(ErrorType::ResourceExhausted)
+                    .reason(
+                        dynamo_runtime::error::ErrorReason::new("router.admission_rejected")
+                            .expect("registered router admission reason"),
+                    )
                     .message(format!(
                         "All eligible LoRA workers are overloaded (lora={lora_name})"
                     ))

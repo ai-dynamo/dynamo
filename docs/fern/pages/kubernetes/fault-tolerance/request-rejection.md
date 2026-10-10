@@ -2,13 +2,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Rejection
-subtitle: Configure independent load thresholds that shed traffic with HTTP 529 before worker latency or memory use becomes unsafe.
+subtitle: Configure independent load thresholds that shed traffic with HTTP 429 before worker latency or memory use becomes unsafe.
 ---
 
 Request rejection (load shedding) rejects new requests when every eligible worker is overloaded,
 rather than accepting work that could exhaust GPU memory or degrade latency for in-flight requests.
-Dynamo returns **HTTP 529** for overload by default so clients can distinguish an available but busy
-service from **HTTP 503**, which indicates that the service is unavailable.
+A router admission refusal is **HTTP 429** with OpenAI `error.type` `Too Many Requests`. That
+covers a full policy-class queue and a pool where every eligible worker is overloaded. **HTTP 529**
+remains the worker and engine overload signal, still controlled by `DYN_HTTP_OVERLOAD_STATUS_CODE`,
+so clients can distinguish a router refusal from a busy worker and from **HTTP 503**, which indicates
+that the service is unavailable. Rejection metrics stay in the overload class.
 
 Rejection is **off by default**. Each threshold is independently opt-in: setting one numeric threshold
 enables only that check. You do not need `--admission-control`; that compatibility flag is ignored.
@@ -132,7 +135,8 @@ Optional. A worker can independently cap concurrent engine work and queue only a
 ```
 
 When all `N` engine slots and the overflow queue are full, the worker rejects the request and the
-Frontend returns HTTP 529 when migration is disabled or its retry attempts do not find capacity.
+Frontend returns HTTP 529 (the configured overload status) when migration is disabled or its retry
+attempts do not find capacity.
 With a positive `--migration-limit`, an unpinned request using in-process KV routing retries on another
 eligible worker first. Split or standalone routing uses global overload and fault state, so its
 retry is best-effort and can select the same worker again.
@@ -158,7 +162,7 @@ curl -s http://localhost:8000/metrics \
 
 Generate enough load to exceed the configured threshold, then confirm:
 
-- The client receives HTTP 529.
+- The client receives HTTP 429 with `error.type` `Too Many Requests`.
 - `dynamo_frontend_model_rejection_total` increases for the affected `model` and `endpoint`.
 - Worker-side hard-cap tests increase `dynamo_rejection_request_total` when both the engine and queue
   are full.
@@ -172,7 +176,7 @@ For all metric fields and labels, see
 
 ## Troubleshoot Decode-Block Rejection
 
-If decode-block load does not produce HTTP 529 responses:
+If decode-block load does not produce HTTP 429 responses:
 
 1. Confirm that `GET /busy_threshold` shows a numeric `active_decode_blocks_threshold` for the model.
 2. Confirm that the Frontend started with `--router-mode kv`.
@@ -199,8 +203,9 @@ thresholds and worker-load events; it does not require that internal router trac
 
 ## Configure Client Retries
 
-Retry HTTP 529 responses with exponential backoff and jitter. Do not retry every HTTP 503 as if it
-were overload; 503 indicates that Dynamo currently has no available service path.
+Retry HTTP 429 router admission refusals with exponential backoff and jitter. HTTP 529 is a worker
+or engine overload and uses the same retry. Do not retry every HTTP 503 as if it were overload; 503
+indicates that Dynamo currently has no available service path.
 
 ```python
 import random
@@ -210,17 +215,18 @@ import time
 def send_with_retry(request, max_retries=5):
     for attempt in range(max_retries):
         response = send_request(request)
-        if response.status_code != 529:
+        if response.status_code not in (429, 529):
             return response
         wait_time = min(60, (2**attempt) + random.uniform(0, 1))
         time.sleep(wait_time)
     raise RuntimeError("maximum retries exceeded")
 ```
 
-If an existing client only understands 503 retry semantics, set
+If an existing client only understands 503 retry semantics for worker or engine overload, set
 `DYN_HTTP_OVERLOAD_STATUS_CODE=503` on the Frontend. The variable accepts values from 200 through
 999. Informational values from 100 through 199, invalid values, and out-of-range values fall back to
-529. The value is read and cached on first use.
+529. The value is read and cached on first use. It does not change router admission refusals, which
+stay HTTP 429.
 
 ## Related Documentation
 

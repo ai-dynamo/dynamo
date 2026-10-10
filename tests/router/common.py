@@ -1481,7 +1481,7 @@ def _probe_overload_529_and_assert(
     test_payload: dict,
     max_tokens: int,
 ):
-    """Send staggered streaming requests until the router rejects with 529.
+    """Send staggered streaming requests until the router rejects with 429.
 
     Shared core for the aggregated and disaggregated overload tests. The caller
     is responsible for starting the frontend with the desired thresholds and
@@ -1489,16 +1489,16 @@ def _probe_overload_529_and_assert(
 
     Sends unique (shuffled) prompts 0.1s apart until the router rejects, then
     asserts:
-    1. At least one request is rejected with 529 (the threshold gates the pool)
+    1. At least one request is rejected with 429 (the threshold gates the pool)
     2. No other status codes appear
-    3. The frontend ``model_rejection_total`` metric increases by the 529 count
+    3. The frontend ``model_rejection_total`` metric increases by the 429 count
 
     Successes are not required: a single overload-shaped request can exceed the
-    threshold before dispatch, so an all-529 burst is a valid outcome.
+    threshold before dispatch, so an all-429 burst is a valid outcome.
     """
     url = f"http://localhost:{frontend_port}/v1/chat/completions"
     model_name = test_payload.get("model", "")
-    # Read after readiness because its retries can contribute unrelated 529s.
+    # Read after readiness because its retries can contribute unrelated rejections.
     initial_rejection_count = _get_frontend_rejection_metric(
         frontend_port, model_name, "chat_completions"
     )
@@ -1507,7 +1507,7 @@ def _probe_overload_529_and_assert(
         "max_tokens": max_tokens,
     }
 
-    logger.info("Launching streaming requests until the router returns 529...")
+    logger.info("Launching streaming requests until the router returns 429...")
 
     async def exhaust_resources_and_verify_529():
         stop_event = asyncio.Event()
@@ -1527,10 +1527,10 @@ def _probe_overload_529_and_assert(
                             await stop_event.wait()
                             return status
 
-                        if status == 529:
+                        if status == 429:
                             stop_event.set()
                             body = await response.text()
-                            logger.info("Request %s got expected 529: %s", req_id, body)
+                            logger.info("Request %s got expected 429: %s", req_id, body)
                             return status
 
                         body = await response.text()
@@ -1571,11 +1571,11 @@ def _probe_overload_529_and_assert(
                     try:
                         await asyncio.wait_for(stop_event.wait(), timeout=10)
                     except asyncio.TimeoutError:
-                        logger.error("Timed out waiting for overload 529")
+                        logger.error("Timed out waiting for overload 429")
             finally:
                 stop_event.set()
                 # Statuses are recorded when headers arrive, so cancelling a task
-                # that is still draining its body cannot drop an observed 529.
+                # that is still draining its body cannot drop an observed 429.
                 done, pending = await asyncio.wait(tasks, timeout=5)
                 for task in pending:
                     task.cancel()
@@ -1589,11 +1589,11 @@ def _probe_overload_529_and_assert(
 
     # Count outcomes
     num_succeeded = sum(1 for s in results if s == 200)
-    num_rejected = sum(1 for s in results if s == 529)
-    num_other = sum(1 for s in results if s not in (200, 529))
+    num_rejected = sum(1 for s in results if s == 429)
+    num_other = sum(1 for s in results if s not in (200, 429))
 
     logger.info(
-        "Results: %s succeeded, %s rejected (529), %s other",
+        "Results: %s succeeded, %s rejected (429), %s other",
         num_succeeded,
         num_rejected,
         num_other,
@@ -1602,7 +1602,7 @@ def _probe_overload_529_and_assert(
     # Assert minimum thresholds
     assert (
         num_other == 0
-    ), f"Expected only 200 or 529 responses, but got {num_other} other"
+    ), f"Expected only 200 or 429 responses, but got {num_other} other"
     assert num_rejected > 0, f"Expected at least 1 rejection, but got {num_rejected}"
 
     # Verify rejection metrics from frontend /metrics endpoint
@@ -1614,7 +1614,7 @@ def _probe_overload_529_and_assert(
     )
 
     logger.info(
-        "Successfully verified overload 529: %s rejected, %s succeeded, metrics match",
+        "Successfully verified overload 429: %s rejected, %s succeeded, metrics match",
         num_rejected,
         num_succeeded,
     )
@@ -1632,15 +1632,15 @@ def _test_router_overload_529(
     router_queue_threshold: float | str | None = None,
     max_tokens: int = 50,
 ):
-    """Test that 529 is returned when all workers are busy, and verify rejection metrics.
+    """Test that 429 is returned when all workers are busy, and verify rejection metrics.
 
     Assumes engine_workers are already initialized. This function manages router lifecycle.
     Uses limited resources to intentionally trigger the overload condition.
 
     Sends staggered requests (0.1s apart) to exhaust worker resources, then verifies:
-    1. Every observed response is either 200 or 529
-    2. At least one request is rejected with 529 (worker busy)
-    3. The frontend model_rejection_total increase matches the observed 529 count
+    1. Every observed response is either 200 or 429
+    2. At least one request is rejected with 429 (worker busy)
+    3. The frontend model_rejection_total increase matches the observed 429 count
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -1701,7 +1701,7 @@ def _test_disagg_router_overload_529(
     store_backend: str = "etcd",
     request_plane: str = "nats",
 ):
-    """Verify disaggregated load-shedding: clients get 529 when the gated pool is busy.
+    """Verify disaggregated load-shedding: clients get 429 when the gated pool is busy.
 
     Assumes the prefill and decode workers are already running (kept alive by the
     caller); this function owns the frontend (router) lifecycle. Registered
@@ -1718,11 +1718,11 @@ def _test_disagg_router_overload_529(
       threshold disabled. Gates the decode pool.
 
     In both cases the shared probe asserts that some requests succeed, some are
-    rejected with 529, and the rejection metric matches.
+    rejected with 429, and the rejection metric matches.
 
     Raises:
-        AssertionError: If no 529 is observed (the threshold did not gate the
-        pool) or if any non-200/529 status appears.
+        AssertionError: If no 429 is observed (the threshold did not gate the
+        pool) or if any non-200/429 status appears.
     """
     with KVRouterProcess(
         request=request,
@@ -1738,7 +1738,7 @@ def _test_disagg_router_overload_529(
         min_initial_workers=decode_workers.num_workers,
     ):
         logger.info(
-            "Starting disagg KV router frontend on port %s for overload 529 test",
+            "Starting disagg KV router frontend on port %s for overload 429 test",
             frontend_port,
         )
         frontend_url = f"http://localhost:{frontend_port}"
@@ -1775,7 +1775,7 @@ def _test_router_threshold_none_disables_rejection(
     Assumes engine_workers are already initialized. This function manages router lifecycle.
     Starts the frontend with literal CLI "None" values for all three threshold knobs,
     verifies the /busy_threshold API reports nulls, then sends overload-shaped traffic and
-    confirms no request is rejected with 529 and the frontend rejection metric stays at 0.
+    confirms no request is rejected and the frontend rejection metric stays at 0.
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -3413,7 +3413,7 @@ def _test_busy_threshold_endpoint(
     TODO: This doesn't actually test any e2e rejection for now. A proper test would:
     1. Set a very low threshold
     2. Send enough requests to exceed the threshold
-    3. Verify that subsequent requests are rejected with 529
+    3. Verify that subsequent requests are rejected with 429
 
     For now, this test only verifies the endpoint is accessible and returns valid responses.
 

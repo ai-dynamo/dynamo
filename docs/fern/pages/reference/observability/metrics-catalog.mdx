@@ -137,14 +137,14 @@ Metrics for [request migration](../../kubernetes/fault-tolerance/request-migrati
 
 ### Cancellation and rejection
 
-Counters for requests that end early: [cancellations](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md) (the client or frontend aborts an in-flight request) and [rejections](../../kubernetes/fault-tolerance/request-rejection.md) (the Frontend sheds load with HTTP 529 by default when all workers are busy). The worker-side counterparts are under [Component metrics](#component-metrics).
+Counters for requests that end early: [cancellations](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md) (the client or frontend aborts an in-flight request) and [rejections](../../kubernetes/fault-tolerance/request-rejection.md) (the Frontend sheds load with HTTP 429 when all workers are busy). Worker and engine overload stays HTTP 529 by default. The worker-side counterparts are under [Component metrics](#component-metrics).
 
 <ParamField path="dynamo_frontend_model_cancellation_total" type="counter">
   Total request cancellations detected by the frontend (client disconnect or stream close). Labeled by `model`, `endpoint` (the API route — `chat_completions`, `completions`, `embeddings`, …), and [`request_type`](metric-labels.mdx#metric-specific-labels) (`unary` or `stream`).
 </ParamField>
 
 <ParamField path="dynamo_frontend_model_rejection_total" type="counter">
-  Total overload responses surfaced to the client as HTTP 529 by default. Incremented for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. Labeled by `model` and `endpoint` (the API route).
+  Total overload responses. Incremented for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. A router admission refusal is HTTP 429. Worker and engine overload uses the configured status, HTTP 529 by default. Labeled by `model` and `endpoint` (the API route).
 </ParamField>
 
 ### Per-worker load and timing gauges

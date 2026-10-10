@@ -61,6 +61,7 @@ pub(crate) const MIGRATION_SENSITIVE_ERROR_REASONS: &[&str] = &[
     "backend.cancelled",
     "capacity.exhausted",
     "capacity.pool_exhausted",
+    "router.admission_rejected",
 ];
 
 /// Whether any link of `err`'s chain carries a migration-sensitive reason.
