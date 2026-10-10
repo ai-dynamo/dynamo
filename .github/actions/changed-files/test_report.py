@@ -40,8 +40,10 @@ class ChangedFilesTests(unittest.TestCase):
                 (output_dir / f"{name}_all_modified_files.json").write_text(file_data)
             for name, value in (extra_outputs or {}).items():
                 (output_dir / name).write_text(value)
+            github_output = root / "github-output"
             env = {
                 **os.environ,
+                "GITHUB_OUTPUT": str(github_output),
                 "ACTION_PATH": str(ACTION_DIR),
                 "CHANGED_FILES_DIR": str(output_dir),
                 "BASE_SHA": "$(touch base-sha-injected)",
@@ -55,6 +57,16 @@ class ChangedFilesTests(unittest.TestCase):
                 timeout=10,
                 check=False,
             )
+            completed.outputs = (
+                dict(
+                    line.split("=", 1)
+                    for line in github_output.read_text().splitlines()
+                )
+                if github_output.exists()
+                else {}
+            )
+            if github_output.exists():
+                github_output.unlink()
             self.assertEqual(list(root.iterdir()), [output_dir], completed.stdout)
             return completed
 
@@ -114,6 +126,82 @@ class ChangedFilesTests(unittest.TestCase):
         result = self.run_report({"all": ["unclaimed.py"], "planner_gym": []})
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('"unclaimed.py"', result.stdout)
+
+    def test_runtime_admission_requires_verified_isolated_modifications(self):
+        # Regression: uncertain status or a shared input could silently omit an
+        # affected backend's tests; exercise the real action output boundary.
+        path = "components/src/dynamo/frontend/tests/test_vllm_processor_unit.py"
+        status = {
+            f"all_{name}_files.json": "[]"
+            for name in (
+                "added",
+                "copied",
+                "deleted",
+                "renamed",
+                "type_changed",
+                "unmerged",
+                "unknown",
+            )
+        }
+        status["all_modified_files.json"] = json.dumps([path])
+        status["all_all_changed_and_modified_files.json"] = json.dumps([path])
+        cases = [([path], status, "false"), ([], status, "true")]
+        for extra in (
+            "unknown.py",
+            "components/src/dynamo/common/utils.py",
+            ".github/workflows/pr.yaml",
+            "container/context.yaml",
+        ):
+            cases.append(([path, extra], status, "true"))
+        for name in status:
+            for value in (None, "{", "[17]", json.dumps([path])):
+                changed = dict(status)
+                if value is None:
+                    del changed[name]
+                else:
+                    changed[name] = value
+                if changed == status:
+                    continue
+                cases.append(([path], changed, "true"))
+        for files, outputs, expected in cases:
+            with self.subTest(files=files, outputs=outputs):
+                result = self.run_report(
+                    {"all": files, "core": files}, extra_outputs=outputs
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.outputs["sglang_runtime"], expected)
+
+    def test_runtime_gate_defaults_full_and_supports_force_full(self):
+        workflow = yaml.safe_load(
+            (ACTION_DIR.parents[1] / "workflows/pr.yaml").read_text()
+        )
+        jobs = workflow["jobs"]
+        output = jobs["changed-files"]["outputs"]["sglang_runtime"]
+        for value, force, expected in (
+            ("false", "", False),
+            ("false", "true", True),
+            ("", "", True),
+            ("true", "", True),
+        ):
+            expression = output.removeprefix("${{").removesuffix("}}")
+            expression = expression.replace("vars.FORCE_FULL_CI", repr(force))
+            expression = expression.replace(
+                "steps.changes.outputs.sglang_runtime", repr(value)
+            )
+            required = eval(expression.replace("||", "or"), {"__builtins__": {}})
+            for job in ("sglang-test", "sglang-multi-gpu-test"):
+                condition = jobs[job]["if"].replace(
+                    "needs.changed-files.outputs.sglang_runtime",
+                    repr(str(required).lower()),
+                )
+                for name in ("core", "sglang", "deploy", "run_multigpu_tests"):
+                    condition = condition.replace(
+                        f"needs.changed-files.outputs.{name}", repr("true")
+                    )
+                expression = (
+                    " ".join(condition.split()).replace("&&", "and").replace("||", "or")
+                )
+                self.assertEqual(eval(expression, {"__builtins__": {}}), expected)
 
     def test_empty_change_set_passes(self):
         result = self.run_report({"all": [], "planner_gym": []})
