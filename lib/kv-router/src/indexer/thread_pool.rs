@@ -4,7 +4,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, AtomicUsize},
     },
     thread::JoinHandle,
@@ -16,6 +16,7 @@ use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
 use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
+use super::worker_receiver::{OrderedTask, WorkerTaskReceiver};
 use super::{
     ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation,
     ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
@@ -27,7 +28,7 @@ use super::{
     EventCompletionBuffer, EventCompletionWriter, ObservationError, ObservationSeal,
     ObservedEnqueueReceipt, ThreadPoolObservationPlan, ThreadPoolObservationSnapshot,
 };
-use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
+use crate::indexer::pruning::{ApproximateTtlTask, BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
 use crate::scheduling::AttemptId;
 use dynamo_tokens::SequenceHash;
@@ -73,7 +74,7 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
 
     /// Channels to send tasks to worker threads (one per thread).
     /// Sending `WorkerTask::Terminate` signals the thread to shut down.
-    worker_event_channels: Vec<flume::Sender<WorkerTask>>,
+    worker_event_channels: Vec<WorkerTaskSender>,
 
     /// Number of worker threads.
     num_workers: usize,
@@ -99,8 +100,78 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     observation_active: AtomicBool,
 }
 
+/// Keep private retention envelopes out of the public worker protocol.
+#[derive(Clone)]
+enum WorkerTaskSender {
+    Direct(flume::Sender<WorkerTask>),
+    Retained {
+        sender: flume::Sender<OrderedTask>,
+        legacy_queue: Arc<OnceLock<flume::Sender<WorkerTask>>>,
+    },
+}
+
+enum WorkerInput {
+    Direct(flume::Receiver<WorkerTask>),
+    Retained(WorkerTaskReceiver),
+}
+
+impl WorkerTaskSender {
+    fn send(&self, task: WorkerTask) -> Result<(), KvRouterError> {
+        match self {
+            Self::Direct(sender) => sender.send(task).map_err(|_| KvRouterError::IndexerOffline),
+            Self::Retained { sender, .. } => sender
+                .send(OrderedTask::Task(task))
+                .map_err(|_| KvRouterError::IndexerOffline),
+        }
+    }
+
+    fn send_ttl(&self, task: ApproximateTtlTask) -> Result<(), KvRouterError> {
+        let Self::Retained { sender, .. } = self else {
+            unreachable!("TTL requires a retained lane")
+        };
+        sender
+            .send(OrderedTask::Ttl(task))
+            .map_err(|_| KvRouterError::IndexerOffline)
+    }
+
+    fn send_removal(
+        &self,
+        task: WorkerTask,
+        manager: Option<WorkerPruneManager>,
+    ) -> Result<(), KvRouterError> {
+        if let Some(manager) = manager {
+            let Self::Retained { sender, .. } = self else {
+                unreachable!("TTL requires a retained lane")
+            };
+            sender
+                .send(OrderedTask::Removal { task, manager })
+                .map_err(|_| KvRouterError::IndexerOffline)
+        } else {
+            self.send(task)
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Direct(sender) => sender.len(),
+            Self::Retained {
+                sender,
+                legacy_queue,
+            } => sender.len() + legacy_queue.get().map_or(0, flume::Sender::len),
+        }
+    }
+
+    #[cfg(test)]
+    fn is_disconnected(&self) -> bool {
+        match self {
+            Self::Direct(sender) => sender.is_disconnected(),
+            Self::Retained { sender, .. } => sender.is_disconnected(),
+        }
+    }
+}
+
 struct ThreadPoolLruSink {
-    sender: flume::Sender<WorkerTask>,
+    sender: WorkerTaskSender,
     fallback_prune_manager: WorkerPruneManager,
 }
 
@@ -271,8 +342,24 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let worker_assignment_count = Arc::new(AtomicUsize::new(0));
         let synthetic_event_id = Arc::new(AtomicU64::new(0));
         for worker_idx in 0..num_workers {
-            let (event_sender, event_receiver) = flume::unbounded::<WorkerTask>();
-            worker_event_senders.push(event_sender);
+            let (sender, input) = if prune_config.is_some() {
+                let (sender, receiver) = flume::unbounded();
+                let receiver = WorkerTaskReceiver::retained(receiver);
+                (
+                    WorkerTaskSender::Retained {
+                        sender,
+                        legacy_queue: receiver.legacy_queue(),
+                    },
+                    WorkerInput::Retained(receiver),
+                )
+            } else {
+                let (sender, receiver) = flume::unbounded();
+                (
+                    WorkerTaskSender::Direct(sender),
+                    WorkerInput::Direct(receiver),
+                )
+            };
+            worker_event_senders.push(sender);
 
             let backend = Arc::clone(&backend);
             let metrics = metrics.clone();
@@ -281,7 +368,13 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                 // This is observability, not recovery: if the worker panics, log
                 // through tracing and then preserve the panic for join().
                 let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if let Err(error) = backend.worker(event_receiver, metrics) {
+                    let result = match input {
+                        WorkerInput::Direct(receiver) => backend.worker(receiver, metrics),
+                        WorkerInput::Retained(receiver) => {
+                            backend.worker_with_retention(receiver, metrics)
+                        }
+                    };
+                    if let Err(error) = result {
                         tracing::error!(
                             worker_thread_index = worker_idx,
                             ?error,
@@ -807,7 +900,9 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             self.num_workers,
         );
 
-        if let Err(error) = self.worker_event_channels[thread_idx].send(task) {
+        if let Err(error) =
+            self.worker_event_channels[thread_idx].send_removal(task, self.prune_manager.clone())
+        {
             tracing::error!(
                 worker_id = worker.worker_id,
                 dp_rank = worker.dp_rank,
@@ -848,11 +943,14 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         // before this barrier completes belong to the retiring source and may be removed.
         let (resp_tx, resp_rx) = oneshot::channel();
         self.worker_event_channels[0]
-            .send(WorkerTask::RemoveWorker {
-                worker_id,
-                sweep_tree: true,
-                resp: resp_tx,
-            })
+            .send_removal(
+                WorkerTask::RemoveWorker {
+                    worker_id,
+                    sweep_tree: true,
+                    resp: resp_tx,
+                },
+                self.prune_manager.clone(),
+            )
             .map_err(|_| KvRouterError::IndexerOffline)?;
         resp_rx
             .await
@@ -911,38 +1009,29 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     }
 
     fn enqueue_prune_removes(
-        worker_event_channels: &[flume::Sender<WorkerTask>],
+        worker_event_channels: &[WorkerTaskSender],
         worker_assignments: &DashMap<WorkerWithDpRank, usize, FxBuildHasher>,
         worker_assignment_count: &AtomicUsize,
         num_workers: usize,
         synthetic_event_id: &AtomicU64,
+        prune_manager: &WorkerPruneManager,
         entries: Vec<BlockEntry>,
     ) {
-        let mut by_worker: BTreeMap<WorkerWithDpRank, BTreeSet<ExternalSequenceBlockHash>> =
-            BTreeMap::new();
+        let mut by_worker: BTreeMap<WorkerWithDpRank, Vec<BlockEntry>> = BTreeMap::new();
         for entry in entries {
-            by_worker.entry(entry.worker).or_default().insert(entry.key);
+            by_worker.entry(entry.worker).or_default().push(entry);
         }
 
-        for (worker, hashes) in by_worker {
+        for (worker, entries) in by_worker {
             let event_id = Self::next_synthetic_event_id(synthetic_event_id);
-            let event = RouterEvent::new(
-                worker.worker_id,
-                KvCacheEvent {
-                    event_id,
-                    data: KvCacheEventData::Removed(KvCacheRemoveData {
-                        block_hashes: hashes.into_iter().collect(),
-                    }),
-                    dp_rank: worker.dp_rank,
-                },
-            );
+            let task = ApproximateTtlTask::remove(prune_manager.clone(), worker, entries, event_id);
             let thread_idx = Self::get_or_assign_thread_idx(
                 worker_assignments,
                 worker_assignment_count,
                 worker,
                 num_workers,
             );
-            if let Err(error) = worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
+            if let Err(error) = worker_event_channels[thread_idx].send_ttl(task) {
                 tracing::warn!(
                     thread_idx,
                     ?error,
@@ -954,7 +1043,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
 
     fn spawn_prune_pump(
         prune_manager: WorkerPruneManager,
-        worker_event_channels: Vec<flume::Sender<WorkerTask>>,
+        worker_event_channels: Vec<WorkerTaskSender>,
         worker_assignments: Arc<DashMap<WorkerWithDpRank, usize, FxBuildHasher>>,
         worker_assignment_count: Arc<AtomicUsize>,
         num_workers: usize,
@@ -982,6 +1071,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                                     &worker_assignment_count,
                                     num_workers,
                                     &synthetic_event_id,
+                                    &prune_manager,
                                     entries,
                                 );
                             }
@@ -1057,18 +1147,17 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
 
         let (resp_tx, resp_rx) = oneshot::channel();
         self.worker_event_channels[thread_idx]
-            .send(WorkerTask::EventWithAck {
+            .send_ttl(ApproximateTtlTask::store(
+                prune_manager.clone(),
                 event,
-                resp: resp_tx,
-            })
+                prune_entries,
+                resp_tx,
+            ))
             .map_err(|_| KvRouterError::IndexerOffline)?;
 
-        let applied = resp_rx
+        resp_rx
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
-        if applied {
-            prune_manager.insert_worker_block_entries(worker, prune_entries);
-        }
         Ok(())
     }
 
@@ -1283,10 +1372,6 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
-        if let Some(prune_manager) = &self.prune_manager {
-            prune_manager.remove_worker(worker_id);
-        }
-
         if let Err(error) = self.remove_worker_across_lanes_and_wait(worker_id).await {
             tracing::error!(worker_id, %error, "Failed to remove worker across mutation lanes");
         }
@@ -1303,10 +1388,6 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
                 tracing::error!(worker_id, dp_rank, %error, "Failed to reset approximate LRU rank");
             }
             return;
-        }
-
-        if let Some(prune_manager) = &self.prune_manager {
-            prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
         }
 
         let worker = WorkerWithDpRank::new(worker_id, dp_rank);
@@ -1333,10 +1414,6 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
                 .await;
         }
 
-        if let Some(prune_manager) = &self.prune_manager {
-            prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
-        }
-
         let worker = WorkerWithDpRank::new(worker_id, dp_rank);
         let thread_idx = Self::get_or_assign_thread_idx(
             &self.worker_assignments,
@@ -1345,11 +1422,14 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             self.num_workers,
         );
         self.worker_event_channels[thread_idx]
-            .send(WorkerTask::RemoveWorkerDpRank {
-                worker_id,
-                dp_rank,
-                sweep_tree: true,
-            })
+            .send_removal(
+                WorkerTask::RemoveWorkerDpRank {
+                    worker_id,
+                    dp_rank,
+                    sweep_tree: true,
+                },
+                self.prune_manager.clone(),
+            )
             .map_err(|_| KvRouterError::IndexerOffline)?;
 
         self.flush_worker_lane_and_wait(worker).await
@@ -1460,6 +1540,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
                 &self.worker_assignment_count,
                 self.num_workers,
                 &self.synthetic_event_id,
+                prune_manager,
                 entries,
             );
             self.flush().await;
@@ -1472,6 +1553,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
                 &self.worker_assignment_count,
                 self.num_workers,
                 &self.synthetic_event_id,
+                prune_manager,
                 entries,
             );
             if has_entries {
@@ -1515,6 +1597,779 @@ mod tests {
         worker: WorkerWithDpRank,
     ) -> Option<usize> {
         indexer.worker_assignments.get(&worker).map(|entry| *entry)
+    }
+
+    fn positional_with_delegate(
+        delegate: Arc<dyn crate::indexer::KvIndexerDelegate>,
+    ) -> crate::indexer::positional::PositionalIndexer {
+        crate::indexer::positional::PositionalIndexer::new_with_delegate(
+            1,
+            crate::indexer::positional::SearchMode::Strided,
+            delegate,
+        )
+    }
+
+    /// A downstream-style backend using only the original public worker API.
+    /// Its exhaustive match and removal constructors intentionally reject API
+    /// additions. It supports TTL events without implementing private LRU tasks.
+    struct LegacyIndexer {
+        blocks: Mutex<
+            rustc_hash::FxHashMap<
+                WorkerWithDpRank,
+                rustc_hash::FxHashMap<ExternalSequenceBlockHash, LocalBlockHash>,
+            >,
+        >,
+        delegate: Arc<dyn crate::indexer::KvIndexerDelegate>,
+    }
+
+    impl LegacyIndexer {
+        fn new_with_delegate(delegate: Arc<dyn crate::indexer::KvIndexerDelegate>) -> Self {
+            Self {
+                blocks: Mutex::default(),
+                delegate,
+            }
+        }
+
+        fn apply(&self, event: RouterEvent) {
+            let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+            let mut blocks = self.blocks.lock().unwrap();
+            match event.event.data {
+                KvCacheEventData::Stored(stored) => {
+                    for block in stored.blocks {
+                        self.delegate.on_create(block.block_hash);
+                        blocks
+                            .entry(worker)
+                            .or_default()
+                            .insert(block.block_hash, block.tokens_hash);
+                    }
+                }
+                KvCacheEventData::Removed(removed) => {
+                    if let Some(blocks) = blocks.get_mut(&worker) {
+                        for hash in removed.block_hashes {
+                            blocks.remove(&hash);
+                        }
+                    }
+                }
+                KvCacheEventData::Cleared => {
+                    blocks.remove(&worker);
+                }
+            }
+        }
+    }
+
+    impl SyncIndexer for LegacyIndexer {
+        fn worker(
+            &self,
+            events: flume::Receiver<WorkerTask>,
+            _metrics: Option<Arc<KvIndexerMetrics>>,
+        ) -> anyhow::Result<()> {
+            while let Ok(task) = events.recv() {
+                match task {
+                    WorkerTask::Event(event) => self.apply(event),
+                    WorkerTask::EventWithAck { event, resp } => {
+                        self.apply(event);
+                        let _ = resp.send(true);
+                    }
+                    WorkerTask::ApproximateLru(_) => anyhow::bail!("LRU unsupported"),
+                    #[cfg(feature = "bench")]
+                    WorkerTask::InstallObservation { .. }
+                    | WorkerTask::ObservedEvent { .. }
+                    | WorkerTask::SealObservation(_)
+                    | WorkerTask::HarvestObservation(_) => anyhow::bail!("observation unsupported"),
+                    WorkerTask::Anchor { .. } => anyhow::bail!("anchors unsupported"),
+                    WorkerTask::RemoveWorker {
+                        worker_id,
+                        sweep_tree,
+                        resp,
+                    } => {
+                        // Keep construction source-compatible as well as matching.
+                        let WorkerTask::RemoveWorker { resp, .. } = (WorkerTask::RemoveWorker {
+                            worker_id,
+                            sweep_tree,
+                            resp,
+                        }) else {
+                            unreachable!()
+                        };
+                        self.blocks
+                            .lock()
+                            .unwrap()
+                            .retain(|worker, _| worker.worker_id != worker_id);
+                        let _ = resp.send(());
+                    }
+                    WorkerTask::RemoveWorkerDpRank {
+                        worker_id,
+                        dp_rank,
+                        sweep_tree,
+                    } => {
+                        let _ = WorkerTask::RemoveWorkerDpRank {
+                            worker_id,
+                            dp_rank,
+                            sweep_tree,
+                        };
+                        self.blocks
+                            .lock()
+                            .unwrap()
+                            .remove(&WorkerWithDpRank::new(worker_id, dp_rank));
+                    }
+                    WorkerTask::CleanupStaleChildren => {}
+                    WorkerTask::DumpEvents(resp) => {
+                        let _ = resp.send(Ok(Vec::new()));
+                    }
+                    WorkerTask::Stats(resp) => {
+                        let _ = resp.send(WorkerLookupStats::from_worker_block_counts(
+                            self.blocks
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .map(|(worker, blocks)| (*worker, blocks.len())),
+                        ));
+                    }
+                    WorkerTask::ContainsWorkerBlock {
+                        worker,
+                        block_hash,
+                        resp,
+                    } => {
+                        let _ = resp.send(
+                            self.blocks
+                                .lock()
+                                .unwrap()
+                                .get(&worker)
+                                .is_some_and(|blocks| blocks.contains_key(&block_hash)),
+                        );
+                    }
+                    WorkerTask::Flush(resp) => {
+                        let _ = resp.send(());
+                    }
+                    WorkerTask::Terminate => break,
+                }
+            }
+            Ok(())
+        }
+
+        fn find_matches(&self, sequence: &[LocalBlockHash], _early_exit: bool) -> OverlapScores {
+            let mut result = OverlapScores::default();
+            for (worker, blocks) in self.blocks.lock().unwrap().iter() {
+                let matched = sequence
+                    .iter()
+                    .take_while(|hash| blocks.values().any(|stored| stored == *hash))
+                    .count();
+                if matched > 0 {
+                    result.scores.insert(*worker, matched as u32);
+                }
+            }
+            result
+        }
+    }
+
+    struct FailingWorker(&'static str);
+
+    struct ExitingRetentionWorker(Option<bool>);
+
+    impl SyncIndexer for ExitingRetentionWorker {
+        fn worker(
+            &self,
+            _events: flume::Receiver<WorkerTask>,
+            _metrics: Option<Arc<KvIndexerMetrics>>,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("retention must use the inline receiver")
+        }
+
+        fn worker_with_retention(
+            &self,
+            mut events: WorkerTaskReceiver,
+            _metrics: Option<Arc<KvIndexerMetrics>>,
+        ) -> anyhow::Result<()> {
+            let WorkerTask::EventWithAck { resp, .. } = events.recv()? else {
+                anyhow::bail!("expected a store");
+            };
+            if let Some(applied) = self.0 {
+                let _ = resp.send(applied);
+            }
+            // Return before the next recv: the receiver must settle a ready ack
+            // from Drop, including when its original caller was cancelled.
+            Ok(())
+        }
+
+        fn find_matches(&self, _sequence: &[LocalBlockHash], _early_exit: bool) -> OverlapScores {
+            OverlapScores::default()
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::applied(Some(true))]
+    #[case::rejected(Some(false))]
+    #[case::unacknowledged(None)]
+    #[tokio::test]
+    async fn ttl_inline_receiver_settles_an_ack_on_early_worker_return(
+        #[case] applied: Option<bool>,
+        #[values(false, true)] cancelled: bool,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let indexer = ThreadPoolIndexer::new_with_pruning(
+                ExitingRetentionWorker(applied),
+                1,
+                16,
+                PruneConfig::default(),
+            );
+            let hashes = [LocalBlockHash(1)];
+            let sequence = crate::protocols::compute_seq_hash_for_block(&hashes);
+            let mut request = Box::pin(indexer.record_ttl_fallback_hashes(
+                WorkerWithDpRank::new(7, 0),
+                &hashes,
+                &sequence,
+            ));
+            let result = futures_util::poll!(request.as_mut());
+            if cancelled {
+                drop(request);
+            } else {
+                let result = match result {
+                    std::task::Poll::Ready(result) => result,
+                    std::task::Poll::Pending => request.await,
+                };
+                assert_eq!(result.is_ok(), applied.is_some());
+            }
+            while !indexer.worker_event_channels[0].is_disconnected() {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                indexer
+                    .prune_manager
+                    .as_ref()
+                    .unwrap()
+                    .drain_due_and_pending(
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(300)
+                    )
+                    .len(),
+                usize::from(applied == Some(true))
+            );
+        })
+        .await
+        .expect("inline receiver early return timed out");
+    }
+
+    impl SyncIndexer for FailingWorker {
+        fn worker(
+            &self,
+            events: flume::Receiver<WorkerTask>,
+            _metrics: Option<Arc<KvIndexerMetrics>>,
+        ) -> anyhow::Result<()> {
+            while let Ok(task) = events.recv() {
+                match task {
+                    WorkerTask::Event(_) if self.0 == "idle_exit" => return Ok(()),
+                    WorkerTask::EventWithAck { resp, .. } => match self.0 {
+                        "panic" => panic!("injected backend failure"),
+                        "error" => anyhow::bail!("injected backend error"),
+                        "dropped_ack" => drop(resp),
+                        _ => unreachable!(),
+                    },
+                    WorkerTask::Terminate => break,
+                    _ => anyhow::bail!("unexpected task"),
+                }
+            }
+            Ok(())
+        }
+
+        fn find_matches(&self, _sequence: &[LocalBlockHash], _early_exit: bool) -> OverlapScores {
+            OverlapScores::default()
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::panic("panic")]
+    #[case::error("error")]
+    #[case::dropped_ack("dropped_ack")]
+    #[case::idle_exit("idle_exit")]
+    fn ttl_legacy_adapter_releases_waiters_and_joins_after_backend_failure(
+        #[case] failure: &'static str,
+    ) {
+        // Run the single-thread runtime behind an OS-thread deadline: a broken
+        // synchronous Drop cannot be interrupted by a timer on the blocked runtime.
+        let (done, result) = flume::bounded(1);
+        let thread = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let indexer = ThreadPoolIndexer::new_with_pruning(
+                        FailingWorker(failure),
+                        1,
+                        16,
+                        PruneConfig::default(),
+                    );
+                    let worker = WorkerWithDpRank::new(7, 0);
+                    if failure == "idle_exit" {
+                        indexer.apply_event(make_store_event(7, &[1])).await;
+                        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                            while !indexer.worker_event_channels[0].is_disconnected() {
+                                tokio::task::yield_now().await;
+                            }
+                        })
+                        .await
+                        .unwrap();
+                    }
+                    let result = indexer
+                        .process_routing_decision_with_hashes(
+                            worker,
+                            vec![LocalBlockHash(1)],
+                            vec![1],
+                        )
+                        .await;
+                    if failure == "idle_exit" {
+                        assert!(matches!(result, Err(KvRouterError::IndexerOffline)));
+                    } else {
+                        assert!(matches!(result, Err(KvRouterError::IndexerDroppedRequest)));
+                    }
+                    assert!(
+                        indexer
+                            .prune_manager
+                            .as_ref()
+                            .unwrap()
+                            .drain_due_and_pending(
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(300)
+                            )
+                            .is_empty()
+                    );
+                    drop(indexer);
+                });
+            done.send(()).unwrap();
+        });
+        result
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        thread.join().unwrap();
+    }
+
+    #[rstest::rstest]
+    #[case::drop(false)]
+    #[case::shutdown(true)]
+    fn ttl_workers_join_on_a_single_thread_runtime(#[case] explicit_shutdown: bool) {
+        let (done, result) = flume::bounded(1);
+        let thread = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let indexer = ThreadPoolIndexer::new_with_pruning(
+                        ConcurrentRadixTreeCompressed::new(),
+                        2,
+                        16,
+                        PruneConfig::default(),
+                    );
+                    indexer.apply_event(make_store_event(7, &[1])).await;
+                    if explicit_shutdown {
+                        indexer.shutdown();
+                    }
+                    drop(indexer);
+                });
+            done.send(()).unwrap();
+        });
+        result
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        thread.join().unwrap();
+    }
+
+    // Pause one real mutation worker at a delegate callback, so a test can
+    // deterministically enqueue a store and a removal before its ack is read.
+    struct MutationGate {
+        hash: ExternalSequenceBlockHash,
+        entered: flume::Sender<()>,
+        release: flume::Receiver<()>,
+    }
+
+    impl crate::indexer::KvIndexerDelegate for MutationGate {
+        fn on_create(&self, hash: ExternalSequenceBlockHash) {
+            if hash == self.hash {
+                let _ = self.entered.send(());
+                // Bound the gate even if the test panics before releasing it.
+                let _ = self.release.recv_timeout(std::time::Duration::from_secs(5));
+            }
+        }
+
+        fn on_remove(&self, _hash: ExternalSequenceBlockHash) {}
+    }
+
+    fn gated_ttl_indexer<T: SyncIndexer>(
+        ttl: std::time::Duration,
+        make_backend: impl FnOnce(Arc<dyn crate::indexer::KvIndexerDelegate>) -> T,
+    ) -> (ThreadPoolIndexer<T>, flume::Receiver<()>, flume::Sender<()>) {
+        let (entered_tx, entered_rx) = flume::bounded(1);
+        let (release_tx, release_rx) = flume::bounded(1);
+        let hash = crate::protocols::compute_seq_hash_for_block(&[LocalBlockHash(999)])[0];
+        let backend = make_backend(Arc::new(MutationGate {
+            hash: ExternalSequenceBlockHash(hash),
+            entered: entered_tx,
+            release: release_rx,
+        }));
+        let indexer = ThreadPoolIndexer::new_with_pruning(backend, 1, 16, PruneConfig { ttl });
+        // Tests deliver expired batches explicitly to control their FIFO position.
+        indexer.prune_pump_cancel.as_ref().unwrap().cancel();
+        (indexer, entered_rx, release_tx)
+    }
+
+    fn enqueue_expired<T: SyncIndexer>(indexer: &ThreadPoolIndexer<T>, entries: Vec<BlockEntry>) {
+        ThreadPoolIndexer::<T>::enqueue_prune_removes(
+            &indexer.worker_event_channels,
+            &indexer.worker_assignments,
+            &indexer.worker_assignment_count,
+            indexer.num_workers,
+            &indexer.synthetic_event_id,
+            indexer.prune_manager.as_ref().unwrap(),
+            entries,
+        );
+    }
+
+    #[tokio::test]
+    async fn ttl_legacy_queue_depth_includes_forwarded_backend_tasks() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (indexer, entered, release) = gated_ttl_indexer(
+                std::time::Duration::from_secs(60),
+                LegacyIndexer::new_with_delegate,
+            );
+            indexer.apply_event(make_store_event(99, &[999])).await;
+            entered.recv_async().await.unwrap();
+            for key in 0..16 {
+                indexer.apply_event(make_store_event(7, &[key])).await;
+            }
+            let WorkerTaskSender::Retained {
+                sender,
+                legacy_queue,
+            } = &indexer.worker_event_channels[0]
+            else {
+                unreachable!()
+            };
+            while !sender.is_empty() || legacy_queue.get().unwrap().len() != 16 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(indexer.worker_event_channels[0].len(), 16);
+            release.send(()).unwrap();
+            indexer.flush().await;
+        })
+        .await
+        .expect("legacy queue observation timed out");
+    }
+
+    #[rstest::rstest]
+    #[case::compressed(ConcurrentRadixTreeCompressed::new_with_delegate)]
+    #[case::positional(positional_with_delegate)]
+    #[case::lower_tier(crate::indexer::LowerTierIndexer::new_with_delegate)]
+    #[case::legacy(LegacyIndexer::new_with_delegate)]
+    #[tokio::test]
+    async fn ttl_refresh_fences_a_remove_queued_before_its_store_ack_is_read<T: SyncIndexer>(
+        #[case] make_backend: fn(Arc<dyn crate::indexer::KvIndexerDelegate>) -> T,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let ttl = std::time::Duration::from_millis(100);
+            let (indexer, entered, release) = gated_ttl_indexer(ttl, make_backend);
+            let manager = indexer.prune_manager.as_ref().unwrap();
+            let mut ready = manager.subscribe_ready();
+            let worker = WorkerWithDpRank::new(7, 0);
+            let hashes = [LocalBlockHash(1)];
+            let sequence_hashes = crate::protocols::compute_seq_hash_for_block(&hashes);
+            indexer
+                .record_ttl_fallback_hashes(worker, &hashes, &sequence_hashes)
+                .await
+                .unwrap();
+            ready.changed().await.unwrap();
+            // Wait for the real TTL notification, then control subsequent expiry
+            // delivery explicitly; no timing-sensitive wall-clock sleep is needed.
+            manager.shutdown();
+            let expired = manager.drain_pending_removes();
+            assert_eq!(expired.len(), 1);
+
+            indexer.apply_event(make_store_event(99, &[999])).await;
+            entered.recv_async().await.unwrap();
+            let mut refresh =
+                Box::pin(indexer.record_ttl_fallback_hashes(worker, &hashes, &sequence_hashes));
+            assert!(futures_util::poll!(refresh.as_mut()).is_pending());
+            enqueue_expired(&indexer, expired);
+            release.send(()).unwrap();
+            // Store and old remove both run before the caller can register TTL.
+            indexer.flush().await;
+            refresh.await.unwrap();
+            assert_score(&indexer, &[1], worker, 1).await;
+
+            // The refresh must still expire normally under its own timer.
+            let expired = manager.drain_due_and_pending(tokio::time::Instant::now() + ttl * 2);
+            assert_eq!(expired.len(), 1);
+            enqueue_expired(&indexer, expired);
+            indexer.flush().await;
+            assert_no_scores(&indexer, &[1]).await;
+        })
+        .await
+        .expect("TTL worker regression timed out");
+    }
+
+    #[rstest::rstest]
+    #[case::compressed(ConcurrentRadixTreeCompressed::new_with_delegate)]
+    #[case::positional(positional_with_delegate)]
+    #[case::lower_tier(crate::indexer::LowerTierIndexer::new_with_delegate)]
+    #[case::legacy(LegacyIndexer::new_with_delegate)]
+    #[tokio::test]
+    async fn ttl_store_keeps_expiry_when_its_ack_receiver_is_cancelled<T: SyncIndexer>(
+        #[case] make_backend: fn(Arc<dyn crate::indexer::KvIndexerDelegate>) -> T,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let ttl = std::time::Duration::from_secs(60);
+            let (indexer, entered, release) = gated_ttl_indexer(ttl, make_backend);
+            let manager = indexer.prune_manager.as_ref().unwrap();
+            manager.shutdown();
+            let worker = WorkerWithDpRank::new(7, 0);
+            let hashes = [LocalBlockHash(1)];
+            let sequence_hashes = crate::protocols::compute_seq_hash_for_block(&hashes);
+            indexer.apply_event(make_store_event(99, &[999])).await;
+            entered.recv_async().await.unwrap();
+            let mut store =
+                Box::pin(indexer.record_ttl_fallback_hashes(worker, &hashes, &sequence_hashes));
+            assert!(futures_util::poll!(store.as_mut()).is_pending());
+            drop(store);
+            release.send(()).unwrap();
+            indexer.flush().await;
+            assert_score(&indexer, &[1], worker, 1).await;
+
+            let expired = manager.drain_due_and_pending(tokio::time::Instant::now() + ttl * 2);
+            assert_eq!(
+                expired.len(),
+                1,
+                "applied store must retain its expiry after caller cancellation"
+            );
+            enqueue_expired(&indexer, expired);
+            indexer.flush().await;
+            assert_no_scores(&indexer, &[1]).await;
+        })
+        .await
+        .expect("TTL worker regression timed out");
+    }
+
+    #[tokio::test]
+    async fn ttl_failed_refresh_does_not_revoke_the_previous_expiration() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let ttl = std::time::Duration::from_millis(100);
+            let (indexer, _, _) =
+                gated_ttl_indexer(ttl, ConcurrentRadixTreeCompressed::new_with_delegate);
+            let manager = indexer.prune_manager.as_ref().unwrap();
+            let mut ready = manager.subscribe_ready();
+            let worker = WorkerWithDpRank::new(7, 0);
+            let hashes = [LocalBlockHash(1)];
+            let sequence_hashes = crate::protocols::compute_seq_hash_for_block(&hashes);
+            indexer
+                .record_ttl_fallback_hashes(worker, &hashes, &sequence_hashes)
+                .await
+                .unwrap();
+            ready.changed().await.unwrap();
+            manager.shutdown();
+            let expired = manager.drain_pending_removes();
+            assert_eq!(expired.len(), 1);
+
+            let mut event =
+                ThreadPoolIndexer::<ConcurrentRadixTreeCompressed>::stored_event_for_hashes(
+                    worker,
+                    &hashes,
+                    &sequence_hashes,
+                    10,
+                );
+            let KvCacheEventData::Stored(ref mut stored) = event.event.data else {
+                unreachable!()
+            };
+            stored.parent_hash = Some(ExternalSequenceBlockHash(999));
+            let (response, result) = oneshot::channel();
+            indexer.worker_event_channels[0]
+                .send_ttl(ApproximateTtlTask::store(
+                    manager.clone(),
+                    event,
+                    expired.clone(),
+                    response,
+                ))
+                .unwrap();
+            assert!(
+                !result.await.unwrap(),
+                "missing parent must reject the store"
+            );
+
+            enqueue_expired(&indexer, expired);
+            indexer.flush().await;
+            assert_no_scores(&indexer, &[1]).await;
+            assert!(
+                manager
+                    .drain_due_and_pending(tokio::time::Instant::now() + ttl * 2)
+                    .is_empty()
+            );
+        })
+        .await
+        .expect("TTL worker regression timed out");
+    }
+
+    #[tokio::test]
+    async fn ttl_remove_cannot_erase_a_new_lru_incarnation() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let ttl = std::time::Duration::from_millis(100);
+            let indexer = ThreadPoolIndexer::new_with_metrics_and_approximate_retention(
+                ConcurrentRadixTreeCompressed::new(),
+                1,
+                16,
+                None,
+                Some(ApproximateRetentionConfig::Lru {
+                    fallback_ttl: PruneConfig { ttl },
+                }),
+            );
+            indexer.prune_pump_cancel.as_ref().unwrap().cancel();
+            let manager = indexer.prune_manager.as_ref().unwrap();
+            let mut ready = manager.subscribe_ready();
+            let worker = WorkerWithDpRank::new(7, 0);
+            let hashes = [LocalBlockHash(1)];
+            let sequence_hashes = crate::protocols::compute_seq_hash_for_block(&hashes);
+            let blocks = vec![crate::indexer::ApproximateLruBlock {
+                local_hash: hashes[0],
+                sequence_hash: sequence_hashes[0],
+            }];
+            let first = 1;
+            indexer
+                .set_approximate_lru_capacity(worker, first, None)
+                .await
+                .unwrap();
+            let lease = indexer
+                .begin_approximate_lru_request(worker, first, AttemptId::new(1))
+                .unwrap();
+            lease.acquire(blocks.clone(), 0).await.unwrap();
+            ready.changed().await.unwrap();
+            manager.shutdown();
+            let expired = manager.drain_pending_removes();
+            assert_eq!(expired.len(), 1);
+
+            let second = 2;
+            indexer
+                .set_approximate_lru_capacity(worker, second, Some(2))
+                .await
+                .unwrap();
+            let lease = indexer
+                .begin_approximate_lru_request(worker, second, AttemptId::new(2))
+                .unwrap();
+            lease.acquire(blocks, 0).await.unwrap();
+            enqueue_expired(&indexer, expired);
+            indexer.flush().await;
+            assert_score(&indexer, &[1], worker, 1).await;
+            assert_eq!(
+                indexer.approximate_lru_stats().await.unwrap().active_blocks,
+                1
+            );
+        })
+        .await
+        .expect("TTL worker regression timed out");
+    }
+
+    #[rstest::rstest]
+    #[case::whole_worker(true)]
+    #[case::rank_reset(false)]
+    #[tokio::test]
+    async fn ttl_remove_cannot_erase_content_restored_after_reset(#[case] whole_worker: bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let ttl = std::time::Duration::from_millis(100);
+            let (indexer, _, _) =
+                gated_ttl_indexer(ttl, ConcurrentRadixTreeCompressed::new_with_delegate);
+            let manager = indexer.prune_manager.as_ref().unwrap();
+            let mut ready = manager.subscribe_ready();
+            let worker = WorkerWithDpRank::new(7, 0);
+            let hashes = [LocalBlockHash(1)];
+            let sequence_hashes = crate::protocols::compute_seq_hash_for_block(&hashes);
+            indexer
+                .record_ttl_fallback_hashes(worker, &hashes, &sequence_hashes)
+                .await
+                .unwrap();
+            ready.changed().await.unwrap();
+            manager.shutdown();
+            let expired = manager.drain_pending_removes();
+            assert_eq!(expired.len(), 1);
+
+            if whole_worker {
+                indexer.remove_worker(worker.worker_id).await;
+            } else {
+                indexer
+                    .reset_worker_dp_rank_and_wait(worker.worker_id, worker.dp_rank)
+                    .await
+                    .unwrap();
+            }
+            // Event-driven content restored after reset has no TTL ownership.
+            indexer
+                .apply_event(make_store_event(worker.worker_id, &[1]))
+                .await;
+            indexer.flush().await;
+            enqueue_expired(&indexer, expired);
+            indexer.flush().await;
+            assert_score(&indexer, &[1], worker, 1).await;
+            assert!(
+                manager
+                    .drain_due_and_pending(tokio::time::Instant::now() + ttl * 2)
+                    .is_empty()
+            );
+        })
+        .await
+        .expect("TTL worker regression timed out");
+    }
+
+    #[rstest::rstest]
+    #[case::compressed(ConcurrentRadixTreeCompressed::new_with_delegate)]
+    #[case::positional(positional_with_delegate)]
+    #[case::lower_tier(crate::indexer::LowerTierIndexer::new_with_delegate)]
+    #[case::legacy(LegacyIndexer::new_with_delegate)]
+    #[tokio::test]
+    async fn ttl_store_queued_before_reset_cannot_leave_a_timer<T: SyncIndexer>(
+        #[case] make_backend: fn(Arc<dyn crate::indexer::KvIndexerDelegate>) -> T,
+        #[values("worker", "rank", "rank_reset")] reset: &str,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let ttl = std::time::Duration::from_secs(60);
+            let (indexer, entered, release) = gated_ttl_indexer(ttl, make_backend);
+            let manager = indexer.prune_manager.as_ref().unwrap();
+            manager.shutdown();
+            let worker = WorkerWithDpRank::new(7, 0);
+            let hashes = [LocalBlockHash(1)];
+            let sequence_hashes = crate::protocols::compute_seq_hash_for_block(&hashes);
+            indexer.apply_event(make_store_event(99, &[999])).await;
+            entered.recv_async().await.unwrap();
+            let mut store =
+                Box::pin(indexer.record_ttl_fallback_hashes(worker, &hashes, &sequence_hashes));
+            assert!(futures_util::poll!(store.as_mut()).is_pending());
+            let mut removal = Box::pin(async {
+                match reset {
+                    "worker" => indexer.remove_worker(worker.worker_id).await,
+                    "rank" => {
+                        indexer
+                            .remove_worker_dp_rank(worker.worker_id, worker.dp_rank)
+                            .await;
+                    }
+                    "rank_reset" => {
+                        indexer
+                            .reset_worker_dp_rank_and_wait(worker.worker_id, worker.dp_rank)
+                            .await
+                            .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+            });
+            let pending = futures_util::poll!(removal.as_mut()).is_pending();
+            release.send(()).unwrap();
+            store.await.unwrap();
+            if pending {
+                removal.await;
+            }
+            indexer.flush().await;
+            assert_no_scores(&indexer, &[1]).await;
+
+            // The retired store must not later expire unrelated event-driven
+            // content restored under the same worker and block identity.
+            indexer
+                .apply_event(make_store_event(worker.worker_id, &[1]))
+                .await;
+            indexer.flush().await;
+            let expired = manager.drain_due_and_pending(tokio::time::Instant::now() + ttl * 2);
+            enqueue_expired(&indexer, expired);
+            indexer.flush().await;
+            assert_score(&indexer, &[1], worker, 1).await;
+        })
+        .await
+        .expect("TTL worker reset regression timed out");
     }
 
     #[derive(Clone, Copy)]
