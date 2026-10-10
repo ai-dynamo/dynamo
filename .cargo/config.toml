@@ -18,4 +18,11 @@ rustflags = ["-C", "target-cpu=neoverse-n1", "-C", "force-frame-pointers=yes", "
 # which breaks Docker builds and bundles a .so into the Python wheel.
 [env]
 PCRE2_SYS_STATIC = "1"
+# zmq-sys builds a vendored libzmq through zeromq-src, which writes an empty platform.hpp, so on
+# Linux every libzmq mailbox signaler falls back to a unix socketpair. Select the eventfd signaler
+# that libzmq's own CMake and autotools builds pick on Linux; EFD_CLOEXEC keeps the eventfds out of
+# exec'd children like the FD_CLOEXEC the socketpair path sets. cc appends these target-specific
+# flags to any CXXFLAGS already set, and other C++ builds ignore the defines.
+CXXFLAGS_x86_64_unknown_linux_gnu = "-DZMQ_HAVE_EVENTFD -DZMQ_HAVE_EVENTFD_CLOEXEC"
+CXXFLAGS_aarch64_unknown_linux_gnu = "-DZMQ_HAVE_EVENTFD -DZMQ_HAVE_EVENTFD_CLOEXEC"
 
