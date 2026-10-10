@@ -19,6 +19,9 @@ request-only even though the native export includes response schemas.
 Native `/openapi.json` still contains explicit dependency import slots;
 composition does not modify the running frontend.
 
+For a concrete pinned backend, see the
+[vLLM acquisition and assessment recipe](../../lib/llm/docs/dynamo-vllm-protocol-assessment.md).
+
 ## Installation
 
 On a Linux validation host, install the pinned Python requirements and

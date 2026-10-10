@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Packaging stage: supply a generate-frontend-openapi binary built from the
+# recorded source/lockfile on Linux. Record both build and binary hashes.
+ARG RUNTIME_IMAGE=ubuntu@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+FROM ${RUNTIME_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6
+ARG SOURCE_REVISION
+ARG SOURCE_STATE_DIGEST
+ARG RUN_ID
+ARG TRACK_BRANCH
+ARG BUILD_TIMESTAMP
+LABEL org.opencontainers.image.source="https://github.com/ai-dynamo/dynamo" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_TIMESTAMP}" \
+      validation.source-state="${SOURCE_STATE_DIGEST}" \
+      validation.run-id="${RUN_ID}" \
+      validation.track="${TRACK_BRANCH}" \
+      validation.purpose="Dynamo frontend HTTP OpenAPI acquisition without workers"
+COPY generate-frontend-openapi /usr/local/bin/generate-frontend-openapi
+USER 65534:65534
+STOPSIGNAL SIGINT
+ENTRYPOINT ["/usr/local/bin/generate-frontend-openapi"]
+CMD ["--serve", "0.0.0.0:8000"]
