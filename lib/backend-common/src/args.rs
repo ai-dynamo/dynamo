@@ -28,6 +28,9 @@ use crate::disagg::DisaggregationMode;
 /// ```
 #[derive(Args, Clone, Debug)]
 pub struct CommonArgs {
+    #[command(flatten)]
+    pub runtime: crate::RuntimeConfig,
+
     /// Dynamo namespace for discovery routing. `DYN_NAMESPACE_WORKER_SUFFIX`
     /// is appended as `-{suffix}` unless it is empty or already present.
     #[arg(
@@ -126,6 +129,31 @@ mod tests {
     struct TestArgs {
         #[command(flatten)]
         common: CommonArgs,
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn runtime_environment_values_remain_compatible() {
+        temp_env::with_vars(
+            [
+                ("DYN_DISCOVERY_BACKEND", Some("mem")),
+                ("DYN_REQUEST_PLANE", Some("TCP")),
+                ("DYN_RESPONSE_PLANE", None),
+                ("DYN_EVENT_PLANE", Some("")),
+            ],
+            || {
+                let args = TestArgs::try_parse_from(["test"]).unwrap();
+                let config = args.common.runtime.to_distributed_config().unwrap();
+                assert_eq!(
+                    config.request_plane,
+                    dynamo_runtime::distributed::RequestPlaneMode::Tcp
+                );
+                assert_eq!(
+                    config.event_transport_kind,
+                    dynamo_runtime::discovery::EventTransportKind::Zmq
+                );
+            },
+        );
     }
 
     #[test]

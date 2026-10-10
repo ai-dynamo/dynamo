@@ -9,7 +9,7 @@ use dynamo_backend_common::{
     DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
     PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
 };
-use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
+use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
 use dynamo_trtllm_mocker::{MockerServerConfig, ServerMode, TrtllmMockerService};
 use dynamo_trtllm_sidecar::TrtllmSidecarEngine;
 use dynamo_trtllm_sidecar::proto::control_server::ControlServer;
@@ -28,7 +28,7 @@ struct RunningServer {
 }
 
 impl RunningServer {
-    async fn start(mode: ServerMode, engine_args: MockEngineArgs) -> Self {
+    async fn start(mode: ServerMode, engine_args: MockerConfig) -> Self {
         Self::start_with(
             MockerServerConfig {
                 mode,
@@ -41,7 +41,7 @@ impl RunningServer {
         .await
     }
 
-    async fn start_with(config: MockerServerConfig, engine_args: MockEngineArgs) -> Self {
+    async fn start_with(config: MockerServerConfig, engine_args: MockerConfig) -> Self {
         let service = TrtllmMockerService::new(config, engine_args).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -82,17 +82,19 @@ impl Drop for RunningServer {
     }
 }
 
-fn fast_engine_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .engine_type(EngineType::Trtllm)
-        .block_size(4)
-        .num_gpu_blocks(4096)
-        .max_num_seqs(Some(64))
-        .max_num_batched_tokens(Some(1024))
-        .speedup_ratio(0.0)
-        .dp_size(1)
-        .build()
-        .unwrap()
+fn fast_engine_args() -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": EngineType::Trtllm,
+            "block_size": 4,
+            "num_gpu_blocks": 4096,
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 1024,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap()
 }
 
 /// `--model-path` is mandatory and becomes `GenerateRequest.model`. The server
@@ -162,7 +164,15 @@ async fn collect(
 
 #[tokio::test]
 async fn sidecar_streams_mocker_tokens_logprobs_and_usage() {
-    let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
+    let server = RunningServer::start_with(
+        MockerServerConfig {
+            context_length: 4_096,
+            is_request_recording_enabled: true,
+            ..Default::default()
+        },
+        fast_engine_args(),
+    )
+    .await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     // Starting at all proves Control.GetModelInfo returned a usable context
     // length; the sidecar refuses to start otherwise.
@@ -190,7 +200,10 @@ async fn sidecar_streams_mocker_tokens_logprobs_and_usage() {
         sent.response.as_ref().unwrap().return_output_logprobs,
         Some(true)
     );
-    assert!(sent.extra.is_none());
+    assert_eq!(
+        sent.extra.as_ref().unwrap().fields["detokenize"].kind,
+        Some(prost_types::value::Kind::BoolValue(false))
+    );
 
     assert_eq!(outputs.len(), 4);
     let (deltas, terminal) = outputs.split_at(3);
@@ -243,8 +256,26 @@ async fn sidecar_start_does_not_check_the_served_model_name() {
 /// the decode server verifies the payload arrived byte-for-byte.
 #[tokio::test]
 async fn prefill_handoff_round_trips_through_a_decode_server() {
-    let prefill_server = RunningServer::start(ServerMode::Prefill, fast_engine_args()).await;
-    let decode_server = RunningServer::start(ServerMode::Decode, fast_engine_args()).await;
+    let prefill_server = RunningServer::start_with(
+        MockerServerConfig {
+            mode: ServerMode::Prefill,
+            context_length: 4_096,
+            is_request_recording_enabled: true,
+            ..Default::default()
+        },
+        fast_engine_args(),
+    )
+    .await;
+    let decode_server = RunningServer::start_with(
+        MockerServerConfig {
+            mode: ServerMode::Decode,
+            context_length: 4_096,
+            is_request_recording_enabled: true,
+            ..Default::default()
+        },
+        fast_engine_args(),
+    )
+    .await;
     let prefill = sidecar(&prefill_server.endpoint, DisaggregationMode::Prefill).await;
     let decode = sidecar(&decode_server.endpoint, DisaggregationMode::Decode).await;
     prefill.start(0).await.unwrap();
@@ -274,7 +305,7 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
             .is_none()
     );
 
-    let handoff = prefill_output.disaggregated_params.clone().unwrap();
+    let mut handoff = prefill_output.disaggregated_params.clone().unwrap();
     assert!(
         handoff["session_id"]
             .as_str()
@@ -286,10 +317,25 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     assert_eq!(handoff["dp_rank"], 0);
     // Opaque attributes the sidecar cannot interpret must survive verbatim.
     assert!(handoff["attributes"]["mocker_request_id"].is_string());
-    assert!(handoff["attributes"]["mocker_first_gen_tokens"].is_array());
+    assert!(handoff["attributes"]["first_gen_tokens"].is_array());
     // A whole double must arrive as an integer, a fractional one unrounded.
     assert_eq!(handoff["attributes"]["mocker_prompt_tokens"], 4);
     assert_eq!(handoff["attributes"]["mocker_ttft_ms"], 12.5);
+
+    let first_token = handoff["attributes"]["first_gen_tokens"][0]
+        .as_u64()
+        .unwrap();
+    let first_logprobs = &handoff["attributes"]["first_gen_log_probs"][0];
+    assert_eq!(first_logprobs.as_array().unwrap().len(), 2);
+    assert_eq!(first_logprobs[0][0], first_token);
+    assert_eq!(first_logprobs[0][2], 1);
+    // The engine can sample outside top-N; all values must come from the handoff.
+    handoff["attributes"]["first_gen_log_probs"] = serde_json::json!([[
+        [first_token, -0.4242, 3],
+        [first_token + 1, -0.25, 1],
+        [first_token + 2, -0.5, 2],
+        [first_token + 3, -0.7, null],
+    ]]);
 
     let mut decode_request = request(3);
     decode_request.prefill_result = Some(PrefillResult {
@@ -298,6 +344,25 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     });
     let outputs = collect(&decode, decode_request).await;
     assert_eq!(outputs.len(), 4);
+    assert_eq!(outputs[0].log_probs.as_deref(), Some(&[-0.4242][..]));
+    let candidates = &outputs[0].top_logprobs.as_ref().unwrap()[0];
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(
+        (
+            candidates[0].token_id,
+            candidates[0].logprob,
+            candidates[0].rank
+        ),
+        ((first_token + 1) as u32, -0.25, 1)
+    );
+    assert_eq!(
+        (
+            candidates[1].token_id,
+            candidates[1].logprob,
+            candidates[1].rank
+        ),
+        ((first_token + 2) as u32, -0.5, 2)
+    );
     assert_eq!(
         outputs.last().unwrap().finish_reason,
         Some(FinishReason::Length)
@@ -321,11 +386,7 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
 fn handoff_first_token(session: &dynamo_trtllm_sidecar::proto::KvSessionRef) -> Option<u32> {
     use prost_types::value::Kind;
     let attributes = session.attributes_struct.as_ref()?;
-    let Some(Kind::ListValue(list)) = attributes
-        .fields
-        .get("mocker_first_gen_tokens")?
-        .kind
-        .as_ref()
+    let Some(Kind::ListValue(list)) = attributes.fields.get("first_gen_tokens")?.kind.as_ref()
     else {
         return None;
     };
@@ -378,16 +439,18 @@ async fn decode_rejects_a_handoff_with_a_dropped_opaque_field() {
 async fn dropping_the_sidecar_stream_cancels_mocker_work() {
     let server = RunningServer::start(
         ServerMode::Aggregated,
-        MockEngineArgs::builder()
-            .engine_type(EngineType::Trtllm)
-            .block_size(4)
-            .num_gpu_blocks(4096)
-            .max_num_seqs(Some(64))
-            .max_num_batched_tokens(Some(1024))
-            .speedup_ratio(0.1)
-            .dp_size(1)
-            .build()
-            .unwrap(),
+        MockerConfig::from_value(serde_json::json!({
+            "dp_size": 1,
+            "engine": {
+                "backend": EngineType::Trtllm,
+                "block_size": 4,
+                "num_gpu_blocks": 4096,
+                "max_num_seqs": 64,
+                "max_num_batched_tokens": 1024,
+                "speedup_ratio": 0.1
+            }
+        }))
+        .unwrap(),
     )
     .await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
@@ -418,16 +481,18 @@ async fn dropping_the_sidecar_stream_cancels_mocker_work() {
 async fn capacity_rejection_surfaces_as_a_sidecar_error() {
     let server = RunningServer::start(
         ServerMode::Aggregated,
-        MockEngineArgs::builder()
-            .engine_type(EngineType::Trtllm)
-            .block_size(4)
-            .num_gpu_blocks(1)
-            .max_num_seqs(Some(8))
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(0.0)
-            .dp_size(1)
-            .build()
-            .unwrap(),
+        MockerConfig::from_value(serde_json::json!({
+            "dp_size": 1,
+            "engine": {
+                "backend": EngineType::Trtllm,
+                "block_size": 4,
+                "num_gpu_blocks": 1,
+                "max_num_seqs": 8,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 0.0
+            }
+        }))
+        .unwrap(),
     )
     .await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
@@ -472,16 +537,18 @@ async fn capacity_rejection_surfaces_as_a_sidecar_error() {
 async fn sidecar_abort_cancels_the_mocker_request() {
     let server = RunningServer::start(
         ServerMode::Aggregated,
-        MockEngineArgs::builder()
-            .engine_type(EngineType::Trtllm)
-            .block_size(4)
-            .num_gpu_blocks(4096)
-            .max_num_seqs(Some(64))
-            .max_num_batched_tokens(Some(1024))
-            .speedup_ratio(0.1)
-            .dp_size(1)
-            .build()
-            .unwrap(),
+        MockerConfig::from_value(serde_json::json!({
+            "dp_size": 1,
+            "engine": {
+                "backend": EngineType::Trtllm,
+                "block_size": 4,
+                "num_gpu_blocks": 4096,
+                "max_num_seqs": 64,
+                "max_num_batched_tokens": 1024,
+                "speedup_ratio": 0.1
+            }
+        }))
+        .unwrap(),
     )
     .await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;

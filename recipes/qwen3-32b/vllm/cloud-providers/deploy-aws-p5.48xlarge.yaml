@@ -72,7 +72,7 @@ spec:
           - -lc
           env:
           - name: KV_TRANSFER_CONFIG
-            value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
           - name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC
             value: "true"
           - name: DYN_KVBM_NIXL_BACKEND_UCX
@@ -219,7 +219,7 @@ spec:
           - -lc
           env:
           - name: KV_TRANSFER_CONFIG
-            value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
           - name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC
             value: "true"
           - name: DYN_KVBM_NIXL_BACKEND_UCX

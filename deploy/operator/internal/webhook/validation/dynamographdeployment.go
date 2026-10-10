@@ -70,6 +70,8 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	grovePathway            bool
 	grovePathwayRequirement string
 	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	groveUpdateStrategy     grovev1alpha1.UpdateStrategyType
+	oldGroveUpdateStrategy  grovev1alpha1.UpdateStrategyType
 }
 
 // Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
@@ -202,6 +204,22 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		hasIntraPodFailover(&dgd.Spec),
 	)...)
 
+	// Validate desired strategy intent; admission has no observed PCS rollout state.
+	updateStrategy, err := dynamo.ResolveGroveUpdateStrategy(dgd, nil)
+	if err != nil {
+		// The metadata validator reports an invalid annotation at its exact path.
+		updateStrategy = nil
+	}
+
+	// Compare desired strategy intent to suppress repeated warnings on unrelated updates.
+	oldStrategy := grovev1alpha1.RollingRecreateStrategy
+	if oldDGD != nil {
+		resolved, oldErr := dynamo.ResolveGroveUpdateStrategy(oldDGD, nil)
+		if oldErr == nil {
+			oldStrategy = k8sptr.Deref(resolved, grovev1alpha1.RollingRecreateStrategy)
+		}
+	}
+
 	groveEnabled := features.MustGateFrom(v.ctx).Enabled(features.Grove)
 	grovePathway, grovePathwayRequirement := grovePathwayForDynamoGraphDeployment(groveEnabled, dgd)
 	workloadProvider := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]
@@ -215,6 +233,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
 		oldComponents:           oldComponents,
+		groveUpdateStrategy:     k8sptr.Deref(updateStrategy, grovev1alpha1.RollingRecreateStrategy),
+		oldGroveUpdateStrategy:  oldStrategy,
 	}
 	if grovePathway {
 		specOpts.pcsName = dynamo.PCSNameForDGD(
@@ -256,17 +276,11 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 			`must be "mp" or "ray"`,
 		))
 	}
-	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists &&
-		value != string(grovev1alpha1.RollingRecreateStrategy) &&
-		value != string(grovev1alpha1.OnDeleteStrategy) {
-		allErrs = append(allErrs, field.NotSupported(
-			annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy),
-			value,
-			[]string{
-				string(grovev1alpha1.RollingRecreateStrategy),
-				string(grovev1alpha1.OnDeleteStrategy),
-			},
-		))
+	// Parse strategy annotations with the same value set used by the renderer.
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists {
+		if _, err := dynamo.ParseGroveUpdateStrategy(value); err != nil {
+			allErrs = append(allErrs, field.NotSupported(annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy), value, dynamo.SupportedGroveUpdateStrategies()))
+		}
 	}
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; exists && value != "pod" && value != "container" {
 		allErrs = append(allErrs, field.NotSupported(
@@ -342,6 +356,23 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	if len(spec.Components) == 0 {
 		allErrs = append(allErrs, field.Required(componentsPath, "must have at least one component"))
 	}
+	// Keep availability defaulting consistent while migrating the graph to its native minimum form.
+	hasLegacyMinimum := false
+	for i := range spec.Components {
+		hasLegacyMinimum = hasLegacyMinimum || spec.Components[i].MinAvailable != nil
+	}
+	if hasLegacyMinimum {
+		for i := range spec.Components {
+			component := &spec.Components[i]
+			if component.ProviderOverride == nil {
+				continue
+			}
+			if _, native := provideroverride.GroveMinAvailable(component.ProviderOverride.Value.Raw); native {
+				allErrs = append(allErrs, field.Forbidden(componentsPath.Index(i).Child("providerOverride", "value"), "cannot mix provider-native minAvailable with deprecated component minAvailable; migrate all components together"))
+			}
+		}
+	}
+
 	components := componentsByName(spec.Components)
 	hasLPXComponent := lpxComponentCount > 0
 	for i := range spec.Components {
@@ -414,6 +445,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
 		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
+		allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(component, componentPath, spec.BackendFramework)...)
 
 		// Allow existing LPX components to survive disablement without accepting new or changed specs.
 		allErrs = append(allErrs, lpxComponentGateErrors(
@@ -429,8 +461,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				providerOverridesSupported:        true,
 				workloadProvider:                  opts.workloadProvider,
 				oldComponent:                      opts.oldComponents[component.ComponentName],
+				groveUpdateStrategy:               opts.groveUpdateStrategy,
+				groveStrategyChanged:              opts.oldGroveUpdateStrategy != opts.groveUpdateStrategy,
 			},
 		)...)
+	}
+	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Beta1) {
+		allErrs = append(allErrs, validateRolePodTemplatesPlannerRuntime(spec, fldPath)...)
 	}
 
 	// Validate conductor requirements on the converted graph.
@@ -777,8 +814,23 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMetaUpdate(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
+	newOrigin, newOriginExists := newObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
+	oldOrigin, oldOriginExists := oldObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
 	newProvider, newProviderExists := newObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
 	oldProvider, oldProviderExists := oldObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
+
+	// Keep creation provenance immutable, including whether it exists at all.
+	if newOriginExists != oldOriginExists || newOrigin != oldOrigin {
+		var invalidValue any
+		if newOriginExists {
+			invalidValue = newOrigin
+		}
+		allErrs = append(allErrs, field.Invalid(
+			annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
+			invalidValue,
+			apivalidation.FieldImmutableErrorMsg,
+		))
+	}
 
 	// Reserve the initial legacy-provider materialization for the configured operator identity.
 	if !oldProviderExists && newProviderExists && v.operatorPrincipal != "" &&
@@ -858,7 +910,6 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 	}
 
 	canModifyReplicas := v.userInfo != nil && internalwebhook.CanModifyDGDReplicas(v.operatorPrincipal, *v.userInfo)
-	const validateGPUMemoryServiceNewState = true // DGD updates do not run the stateless new-state traversal.
 	componentsPath := fldPath.Child("components")
 	for i := range newSpec.Components {
 		newComponent := &newSpec.Components[i]
@@ -879,6 +930,10 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			componentsPath.Index(i).Child("multinode"),
 		)...)
 
+		// The stateless DGD validation run before this update traversal validates
+		// every complete role template. The legacy update path has only one
+		// component-level resource shape.
+		validateGPUMemoryServiceNewState := !dynamo.HasRolePodTemplates(newComponent)
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent,
 			oldComponent,
@@ -955,13 +1010,25 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpe
 	}
 
 	if oldHasPowerLimit {
-		// Keep the Planner's remaining cached per-replica power inputs stable.
+		// Keep the Planner's cached main-container GPU input stable.
 		newNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(newComponent, fldPath)
 		oldNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(oldComponent, fldPath)
 		if !newNumberOfGPUs.equal(oldNumberOfGPUs) {
 			allErrs = append(allErrs, field.Invalid(
 				newNumberOfGPUs.path,
 				newNumberOfGPUs.invalidValue(),
+				apivalidation.FieldImmutableErrorMsg,
+			))
+			return allErrs
+		}
+
+		// Keep auxiliary-container GPU allocations used by the cached per-replica cost stable.
+		newPodGPUs, newErr := effectivePodGPUCountV1Beta1(v.ctx, newComponent, fldPath)
+		oldPodGPUs, oldErr := effectivePodGPUCountV1Beta1(v.ctx, oldComponent, fldPath)
+		if newErr == nil && oldErr == nil && !newPodGPUs.equal(oldPodGPUs) {
+			allErrs = append(allErrs, field.Invalid(
+				newPodGPUs.path,
+				newPodGPUs.invalidValue(),
 				apivalidation.FieldImmutableErrorMsg,
 			))
 		}

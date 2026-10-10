@@ -134,6 +134,11 @@ const testCases = [
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
   },
+  {
+    file: 'components/src/dynamo/aisimulate/output/dgd/adapter.py',
+    expect: { core: false, planner: true },
+    desc: 'AISimulate Dynamo adapter triggers planner validation'
+  },
 
   // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
   {

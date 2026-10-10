@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -58,7 +59,6 @@ func TestValidateCheckpointCompatibility(t *testing.T) {
 			},
 			wantErrs: []string{
 				checkpointInterPodCompatibilityMessage,
-				checkpointFailoverCompatibilityMessage,
 			},
 		},
 	}
@@ -292,6 +292,14 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 						ClaimName: "capture-dgd-model-cache",
 					}},
 				})
+			},
+			backend: "vllm",
+			gmsMode: "disabled",
+		},
+		{
+			name: "CUDA shared-memory support",
+			mutate: func(template *corev1.PodTemplateSpec) {
+				template.Annotations = map[string]string{consts.CUDASharedMemorySupportAnnotation: "enabled"}
 			},
 			backend: "vllm",
 			gmsMode: "disabled",

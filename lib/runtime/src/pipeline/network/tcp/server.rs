@@ -37,10 +37,11 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use super::{
     CallHomeHandshake, ControlMessage, PendingConnections, RegisteredStream, StreamOptions,
-    StreamReceiver, StreamSender, TcpStreamConnectionInfo, TwoPartCodec,
+    StreamReceiver, StreamSender, TcpStreamConnectionInfo, TwoPartCodec, bind_listener,
 };
 use crate::discovery::EndpointInstanceId;
 use crate::engine::AsyncEngineContext;
+use crate::error::{DynamoError, ErrorType};
 use crate::pipeline::{
     PipelineError,
     network::{
@@ -107,6 +108,7 @@ struct RequestedRecvConnection {
     /// Capacity of the per-stream mpsc buffer between the socket task and the
     /// engine consumer; carried from the registration [`StreamOptions`].
     send_buffer_count: usize,
+    defer_cancellation_until_prologue: bool,
 }
 
 /// Build the per-stream data-plane mpsc channel that bridges the socket task
@@ -574,6 +576,7 @@ impl ResponseService for TcpStreamServer {
                 connection: pending_recver_tx,
                 cancellation: tokio_util::sync::CancellationToken::new(),
                 send_buffer_count: options.send_buffer_count,
+                defer_cancellation_until_prologue: options.defer_cancellation_until_prologue,
             };
 
             let cleanup_subject = receiver_subject.clone();
@@ -838,8 +841,7 @@ async fn tcp_listener(
     tls_acceptor: Option<TlsAcceptor>,
     read_tx: tokio::sync::oneshot::Sender<Result<SocketAddr>>,
 ) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
+    let listener = bind_listener(addr)
         .map_err(|e| anyhow::anyhow!("Failed to start TcpListender on {}: {}", addr, e));
 
     let listener = match listener {
@@ -1119,7 +1121,7 @@ async fn tcp_listener(
         subject: String,
         state: Arc<Mutex<State>>,
         mut reader: FramedRead<BoxRead, TwoPartCodec>,
-        writer: FramedWrite<BoxWrite, TwoPartCodec>,
+        mut writer: FramedWrite<BoxWrite, TwoPartCodec>,
     ) -> Result<()> {
         let response_stream = TcpStreamServer::take_response_stream(&state, &subject).ok_or_else(|| {
             error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject)
@@ -1133,31 +1135,50 @@ async fn tcp_listener(
         // unwrap response_stream
         let RequestedRecvConnection {
             context,
-            connection,
+            mut connection,
             cancellation,
             send_buffer_count,
+            defer_cancellation_until_prologue,
         } = response_stream;
 
         // the [`Prologue`]
         // there must be a second control message it indicate the other segment's generate method was successful
         // No timeout here: the worker sends the prologue only after generate() setup completes,
-        // which can take arbitrarily long (model load, queue delay, cold start).
-        let prologue: Result<TwoPartMessage> = tokio::select! {
+        // which can take arbitrarily long (model load, queue delay, cold start). When
+        // DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS is set, the frontend's request-plane
+        // dispatch bounds this wait instead, starting from the worker's ACK.
+        let prologue = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
-                // The worker may still be alive after leaving discovery; send Kill.
                 cancel_response_handshake(connection, Some(registration_guard), writer).await;
                 return Ok(());
             }
-            item = reader.next() => {
-                match item {
-                    Some(Ok(message)) => Ok(message),
-                    Some(Err(err)) => Err(err.into()),
-                    None => Err(error!("Connection closed without a ControlMessage")),
-                }
+            _ = context.killed(), if !defer_cancellation_until_prologue => Err(ControlMessage::Kill),
+            _ = connection.closed() => Err(ControlMessage::Kill),
+            _ = context.stopped(), if !defer_cancellation_until_prologue => Err(ControlMessage::Stop),
+            prologue = reader.next() => Ok(prologue),
+        };
+        let prologue = match prologue {
+            Ok(prologue) => {
+                prologue.ok_or(error!("Connection closed without a ControlMessage"))??
+            }
+            Err(control) => {
+                drop(registration_guard);
+                let message = "Request cancelled before response stream was established";
+                let error = DynamoError::builder()
+                    .error_type(ErrorType::Cancelled)
+                    .message(message)
+                    .build();
+                let _ = connection.send(Err(StreamPrologueError::new(message, error)));
+                writer
+                    .send(TwoPartMessage::from_header(
+                        serde_json::to_vec(&control)?.into(),
+                    ))
+                    .await?;
+                writer.close().await?;
+                return Ok(());
             }
         };
-        let prologue = prologue?;
 
         // deserialize prologue
         let prologue = match prologue.into_message_type() {
@@ -1435,6 +1456,16 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_no_env_vars_is_plaintext() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::build_tls_acceptor_no_env_vars_is_plaintext"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         // Also clear the client-CA var: ambient it would turn this into an error
         // (client CA without a server cert/key) instead of plaintext.
         temp_env::with_vars_unset(
@@ -1451,6 +1482,13 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_partial_config_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::build_tls_acceptor_partial_config_errors"),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
@@ -1474,6 +1512,13 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_both_paths_is_tls() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::build_tls_acceptor_both_paths_is_tls"),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         temp_env::with_vars(
             [
@@ -1486,6 +1531,16 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_with_client_ca_is_mtls() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::build_tls_acceptor_with_client_ca_is_mtls"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         // A client CA turns the response-stream server into an mTLS acceptor.
         let (cert, key) = self_signed_pair();
         temp_env::with_vars(
@@ -1503,6 +1558,16 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_client_ca_without_server_identity_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::build_tls_acceptor_client_ca_without_server_identity_errors"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, _key) = self_signed_pair();
         temp_env::with_vars(
             [
@@ -2837,6 +2902,91 @@ mod tests {
             result.is_ok(),
             "concurrent response registration and call-home timed out"
         );
+    }
+
+    #[tokio::test]
+    async fn test_response_stream_cancellation_before_prologue() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_INSECURE", None),
+                ("DYN_TCP_TLS_CLIENT_CERT_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_KEY_PATH", None),
+            ],
+            async {
+                let server = test_server().await;
+                for action in [Some(ControlMessage::Stop), Some(ControlMessage::Kill), None] {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        let context = Context::new(()).context();
+                        let options = StreamOptions::builder()
+                            .context(context.clone())
+                            .enable_request_stream(false)
+                            .enable_response_stream(true)
+                            .build()
+                            .unwrap();
+                        let pending = server.register(options).await;
+                        let (connection_info, stream_provider) =
+                            pending.recv_stream.unwrap().into_parts();
+                        let worker_context = Context::with_id_and_metadata(
+                            (),
+                            context.id().to_string(),
+                            Default::default(),
+                        )
+                        .context();
+                        let sender = TcpClient::create_response_stream(
+                            worker_context.clone(),
+                            connection_info,
+                            None,
+                        )
+                        .await
+                        .unwrap();
+
+                        let stream_provider = match action {
+                            Some(ControlMessage::Stop) => {
+                                context.stop_generating();
+                                Some(stream_provider)
+                            }
+                            Some(ControlMessage::Kill) => {
+                                context.kill();
+                                Some(stream_provider)
+                            }
+                            None => {
+                                drop(stream_provider);
+                                assert!(!context.is_stopped());
+                                None
+                            }
+                            Some(ControlMessage::Sentinel) => unreachable!(),
+                        };
+                        if let Some(stream_provider) = stream_provider {
+                            let failure = match stream_provider.await.unwrap() {
+                                Err(failure) => failure,
+                                Ok(_) => {
+                                    panic!("cancellation must not establish a response stream")
+                                }
+                            };
+                            assert_eq!(
+                                failure.typed_error.as_ref().map(|error| error.error_type()),
+                                Some(ErrorType::Cancelled)
+                            );
+                        }
+                        worker_context.stopped().await;
+                        sender.tx.closed().await;
+                        assert_eq!(
+                            worker_context.is_killed(),
+                            action != Some(ControlMessage::Stop)
+                        );
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("cancellation before prologue timed out: {action:?}")
+                    });
+                }
+            },
+        )
+        .await;
     }
 
     /// A worker that refuses a request before producing any response bytes must
