@@ -86,7 +86,7 @@ impl ConcurrentRadixTreeCompressed {
                 }
                 ParentEdgeAction::InsertFromParent(split_data) => {
                     if let Some(split) = split_data {
-                        self.apply_split_lookup(lookup, split);
+                        self.apply_split_lookup(lookup, &node, split);
                     }
                     return Ok(StoreParentResolution::InsertFrom {
                         parent_is_anchor: self.is_anchor_node(parent_hash, &node),
@@ -214,7 +214,7 @@ impl ConcurrentRadixTreeCompressed {
         worker: WorkerWithDpRank,
         finish: SplitLookupFinish<'_>,
     ) -> StoreInsertOutcome {
-        self.apply_split_lookup(lookup, finish.split);
+        self.apply_split_lookup(lookup, finish.prefix_node, finish.split);
 
         let wl = lookup.get_mut(&worker).unwrap();
         self.update_lookup_for_blocks(worker, wl, finish.prefix_blocks, finish.prefix_node);
@@ -302,7 +302,7 @@ impl ConcurrentRadixTreeCompressed {
                         )));
                     }
                     ParentEdgeAction::InsertFromParent(Some(split)) => {
-                        self.apply_split_lookup(lookup, split);
+                        self.apply_split_lookup(lookup, cursor.parent, split);
                         return Ok(StoreInsertStep::RetryParent {
                             parent: cursor.parent.clone(),
                             parent_is_anchor: cursor.parent_is_anchor,

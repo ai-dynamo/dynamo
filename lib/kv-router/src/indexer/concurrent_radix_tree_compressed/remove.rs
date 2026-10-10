@@ -68,7 +68,10 @@ impl ConcurrentRadixTreeCompressed {
                 LookupRepairDirection::TowardHead,
             ) {
                 Some(node) => {
-                    let end = index + 1 + node.leading_edge_hash_count(&block_hashes[index + 1..]);
+                    let grouped = lookup.get(&worker).map_or(0, |worker_lookup| {
+                        node.leading_edge_hash_count(&block_hashes[index + 1..], worker_lookup)
+                    });
+                    let end = index + 1 + grouped;
                     self.apply_removed_group(lookup, worker, &node, &block_hashes[index..end], id);
                     index = end;
                 }
@@ -168,6 +171,7 @@ impl ConcurrentRadixTreeCompressed {
                             self.repair_lookup_for_resolved_node(
                                 lookup,
                                 block_hash,
+                                &cur_node,
                                 &resolved,
                                 LookupRepairDirection::TowardHead,
                             );
