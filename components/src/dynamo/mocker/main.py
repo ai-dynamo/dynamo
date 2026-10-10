@@ -15,6 +15,7 @@ import uvloop
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.utils.fd_limit import raise_fd_limit
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import EngineType, EntrypointArgs, fetch_model, make_engine, run_input
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -285,4 +286,5 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
 
 
 def main():
+    raise_fd_limit()
     uvloop.run(worker())
