@@ -4,7 +4,6 @@
 #
 # Disaggregated serving through four vLLM native-gRPC sidecars with KV-aware routing.
 # Requires four GPUs and a vLLM build that exposes KV-event source discovery.
-# See ../README.md for the validated vLLM/vllm-rs source state.
 
 set -e
 
