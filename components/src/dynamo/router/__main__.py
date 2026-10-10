@@ -81,13 +81,15 @@ class StandaloneRouterHandler:
             logger.error(f"Failed to initialize KvRouter: {e}")
             raise
 
-    async def generate(self, request):
+    async def generate(self, request, context=None):
         """
         Generate tokens using the KV-aware router.
 
         Routes a PreprocessedRequest-shaped request to the best worker and streams back
         its LLMEngineOutput responses unchanged, so fields this router does not inspect
         (multimodal data, KV hints, agent context, ...) survive the hop.
+        The inbound context is forwarded into the Rust router so request identity,
+        cancellation, and tracing survive the Python boundary.
         """
         if self.kv_router is None:
             logger.error("KvRouter not initialized - cannot process request")
@@ -101,7 +103,8 @@ class StandaloneRouterHandler:
             preprocessed_request["routing"] = {"dp_rank": dp_rank}
 
         async for worker_output in await self.kv_router.generate_from_request(
-            preprocessed_request
+            preprocessed_request,
+            context=context,
         ):
             yield worker_output
 
