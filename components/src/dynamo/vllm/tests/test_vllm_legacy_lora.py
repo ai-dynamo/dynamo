@@ -224,6 +224,43 @@ async def test_hot_swap_rejects_paused_adapter_with_active_request(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_hot_swap_rolls_back_when_cache_reset_is_declined(monkeypatch):
+    handler = _make_prefill_handler()
+    handler.config.disaggregation_mode = DisaggregationMode.AGGREGATED
+    old_info = LoRAInfo(id=123, path="/cache/old")
+    handler._lora_state.loaded_loras = {"adapterA": old_info}
+    handler._engine_loaded_loras = {"adapterA"}
+    handler.engine_client.reset_prefix_cache.return_value = False
+    manager = SimpleNamespace(
+        download_lora=AsyncMock(
+            return_value={"status": "success", "local_path": "/cache/new"}
+        )
+    )
+    monkeypatch.setenv("DYN_LORA_HOTSWAP_ENABLED", "true")
+    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(handlers_mod, "lora_name_to_id", lambda _name: 123)
+
+    results = [
+        result
+        async for result in handler.load_lora(
+            {"lora_name": "adapterA", "source": {"uri": "file:///adapter"}}
+        )
+    ]
+
+    assert results[-1]["status"] == "error"
+    assert "KV blocks are still in use" in results[-1]["message"]
+    handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
+    assert handler.engine_client.remove_lora.await_count == 2
+    assert handler.engine_client.add_lora.await_count == 2
+    new_request = handler.engine_client.add_lora.await_args_list[0].args[0]
+    restored_request = handler.engine_client.add_lora.await_args_list[1].args[0]
+    assert new_request.lora_path == "/cache/new"
+    assert restored_request.lora_path == "/cache/old"
+    assert handler._lora_state.loaded_loras["adapterA"] == old_info
+    assert handler._engine_loaded_loras == {"adapterA"}
+
+
+@pytest.mark.asyncio
 async def test_unload_rejects_paused_adapter_with_active_request(monkeypatch):
     handler = _make_prefill_handler()
     handler._paused = True
