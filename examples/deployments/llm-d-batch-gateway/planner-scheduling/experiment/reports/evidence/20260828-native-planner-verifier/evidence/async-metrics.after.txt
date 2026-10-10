@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+llm_d_async_async_broker_backlog{pool_name="dynamo-batch",queue_id="dynamo-batch",queue_name="llm-d-async:requests:dynamo-batch"} 0
+llm_d_async_async_dispatched_requests_total{pool_name="dynamo-batch",queue_id="dynamo-batch",queue_name="llm-d-async:requests:dynamo-batch"} 500
+llm_d_async_async_drain_limit_rps{pool_name="dynamo-batch"} 5
+llm_d_async_async_inflight_requests{pool_name="dynamo-batch",queue_id="dynamo-batch",queue_name="llm-d-async:requests:dynamo-batch"} 0
+llm_d_async_async_queue_depth{pool_name="dynamo-batch",queue_id="dynamo-batch",queue_name="llm-d-async:requests:dynamo-batch"} 0
+llm_d_async_async_successful_requests_total{pool_name="dynamo-batch",queue_id="dynamo-batch",queue_name="llm-d-async:requests:dynamo-batch"} 500
