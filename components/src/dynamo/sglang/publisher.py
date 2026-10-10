@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
+    get_extra_metric_prefixes,
     register_engine_metrics_callback,
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
@@ -517,12 +518,13 @@ def setup_prometheus_registry(
     registry = CollectorRegistry()
     multiprocess.MultiProcessCollector(registry)
 
-    # Register callback for SGLang metrics (sglang:* prefixed)
+    # Register callback for SGLang metrics (sglang:* prefixed, plus any extra
+    # prefixes from DYN_EXTRA_METRIC_PREFIXES)
     # Auto-label injection: hierarchy labels are added automatically
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
         registry=registry,
-        metric_prefix_filters=["sglang:"],
+        metric_prefix_filters=["sglang:", *get_extra_metric_prefixes()],
         namespace_name=config.dynamo_args.namespace,
         component_name=config.dynamo_args.component,
         endpoint_name=config.dynamo_args.endpoint,
