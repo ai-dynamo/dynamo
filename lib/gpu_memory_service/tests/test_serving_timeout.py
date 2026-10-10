@@ -81,6 +81,7 @@ def test_applies_default_and_tracked_process_groups(monkeypatch):
 
     monkeypatch.setattr(dist, "is_available", lambda: True)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_backend", lambda group=None: "nccl")
     monkeypatch.setattr(
         c10d,
         "_set_pg_timeout",
@@ -116,6 +117,7 @@ def test_reapply_tightens_newly_created_process_group(monkeypatch):
 
     monkeypatch.setattr(dist, "is_available", lambda: True)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_backend", lambda group=None: "nccl")
     monkeypatch.setattr(
         c10d, "_set_pg_timeout", lambda timeout, group: calls.append((timeout, group))
     )
@@ -144,3 +146,35 @@ def test_missing_private_timeout_api_is_noop(monkeypatch):
 
     assert serving_timeout.apply_serving_collective_timeout(2.0) is False
     assert serving_timeout._applied is False
+
+
+def test_skips_gloo_control_plane_groups(monkeypatch):
+    import torch.distributed as dist
+    from torch.distributed import distributed_c10d as c10d
+
+    nccl_group = object()
+    gloo_group = object()
+    calls = []
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        dist,
+        "get_backend",
+        lambda group=None: "gloo" if group is None or group is gloo_group else "nccl",
+    )
+    monkeypatch.setattr(
+        c10d, "_set_pg_timeout", lambda timeout, group: calls.append(group)
+    )
+    monkeypatch.setattr(
+        c10d,
+        "_world",
+        SimpleNamespace(
+            pg_map={
+                gloo_group: ("gloo", object()),
+                nccl_group: ("nccl", object()),
+            }
+        ),
+    )
+
+    assert serving_timeout.apply_serving_collective_timeout(2.0) is True
+    assert calls == [nccl_group]

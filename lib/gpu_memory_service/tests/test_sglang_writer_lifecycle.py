@@ -14,7 +14,9 @@ from pathlib import Path
 
 import pytest
 from gpu_memory_service.integrations.common.process_lifecycle import (
+    WriterCohortRetired,
     arm_parent_death_signal,
+    retire_writer_cohort,
 )
 from gpu_memory_service.integrations.sglang import writer_lifecycle as lifecycle
 
@@ -24,6 +26,7 @@ pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux writer fe
 @pytest.fixture(autouse=True)
 def isolated_cohort(tmp_path, monkeypatch):
     monkeypatch.setenv("FAILOVER_LOCK_PATH", str(tmp_path / "failover.lock"))
+    monkeypatch.delenv("GMS_SGLANG_WRITER_COHORT_PATH", raising=False)
     monkeypatch.setattr(lifecycle, "_boot", None)
     descriptors = []
     monkeypatch.setattr(lifecycle, "_writer_fds", descriptors)
@@ -133,6 +136,15 @@ def _fake_scheduler():
     return "scheduler"
 
 
+def test_retired_scheduler_group_rejects_late_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr(lifecycle, "arm_parent_death_signal", lambda **kwargs: None)
+    guard = tmp_path / "retired"
+    guard.touch()
+    asyncio.run(retire_writer_cohort(guard))
+    with pytest.raises(WriterCohortRetired):
+        lifecycle.run_guarded_scheduler(os.getppid(), str(guard), _fake_scheduler)
+
+
 def test_engine_uses_picklable_guarded_scheduler_entry():
     class Engine:
         run_scheduler_process_func = staticmethod(_fake_scheduler)
@@ -146,6 +158,19 @@ def test_engine_uses_picklable_guarded_scheduler_entry():
     assert entry.args[0] == os.getpid()
     assert entry.args[2] is _fake_scheduler
     assert engine.server_args == "args"
+    assert os.environ["GMS_SGLANG_WRITER_COHORT_PATH"] == entry.args[1]
+
+
+def test_guarded_scheduler_exports_cohort_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(lifecycle, "arm_parent_death_signal", lambda **kwargs: None)
+    guard = tmp_path / "scheduler-cohort"
+    guard.touch()
+
+    assert lifecycle.run_guarded_scheduler(
+        os.getppid(),
+        str(guard),
+        lambda: os.environ["GMS_SGLANG_WRITER_COHORT_PATH"],
+    ) == str(guard)
 
 
 def test_cancelled_fence_does_not_publish_successor():
@@ -170,3 +195,4 @@ def test_cancelled_fence_does_not_publish_successor():
 
         asyncio.run(verify())
         assert (directory / "active").read_text() == previous
+        assert predecessor.read_bytes() == b"", "cancellation must not retire admission"

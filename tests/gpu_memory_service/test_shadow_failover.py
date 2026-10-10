@@ -9,6 +9,7 @@ import re
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from gpu_memory_service.server.fsm import ServerState
@@ -108,16 +109,65 @@ def _kill_process_group(process: ManagedProcess) -> None:
         logger.warning("kill process group: no PID available")
         return
 
+    fault_signal = os.environ.get("GMS_TEST_FAULT_SIGNAL", "KILL").strip().upper()
+    if fault_signal == "ABRT":
+        # Deliver the catchable signal to leaves before the launcher. The CUDA
+        # worker can then report and stop while its parent is still alive; the
+        # final launcher signal releases its failover lock. Races with exiting
+        # descendants are expected and harmless.
+        pending = [pid]
+        descendants = []
+        while pending:
+            parent = pending.pop()
+            try:
+                children = [
+                    int(item)
+                    for item in Path(
+                        f"/proc/{parent}/task/{parent}/children"
+                    ).read_text().split()
+                ]
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+            descendants.extend(children)
+            pending.extend(children)
+        for child in reversed(descendants):
+            try:
+                os.kill(child, signal.SIGABRT)
+            except ProcessLookupError:
+                pass
+        time.sleep(0.02)
+        try:
+            os.kill(pid, signal.SIGABRT)
+        except ProcessLookupError:
+            pass
+        return
+    if fault_signal != "KILL":
+        raise ValueError("GMS_TEST_FAULT_SIGNAL must be KILL or ABRT")
+
     # SGLang and vLLM may place GPU workers in child process groups. Killing
     # only the launcher's group can leave those workers and the stale backend
     # alive, which is unlike a pod/container crash and can route requests to a
     # dead cohort after the shadow is ready. Snapshot and SIGKILL the complete
     # descendant tree to emulate that containment boundary locally.
-    terminate_process_tree(pid, logger, immediate_kill=True, timeout=2)
+    # A crash trigger must not include process-reaping latency in the measured
+    # failover interval. ``timeout=0`` still snapshots and SIGKILLs the complete
+    # descendant tree; it only skips the two blocking wait phases. Managed
+    # process teardown reaps the already-signalled processes after assertions.
+    terminate_process_tree(pid, logger, immediate_kill=True, timeout=0)
 
 
 def _kill_launcher_only(process: ManagedProcess) -> None:
-    """Crash only the engine parent, leaving child cleanup to the runtime."""
+    """Crash the launcher, or exercise the opt-in catchable-crash interlock.
+
+    The default deliberately kills only the parent and leaves orphan cleanup to
+    the runtime.  MPS qualification is a different fault model: the registered
+    CUDA child must still be alive when GMS asks MPS to terminate it.  Deliver
+    ABRT leaf-first in that explicit mode, then signal the launcher last so its
+    failover lock is released.
+    """
+    if os.environ.get("GMS_TEST_FAULT_SIGNAL", "KILL").strip().upper() == "ABRT":
+        _kill_process_group(process)
+        return
     pid = process.get_pid()
     assert pid is not None, "engine launcher has no PID"
     os.kill(pid, signal.SIGKILL)
@@ -383,7 +433,10 @@ def test_gms_authoritative_hbm_failover_vllm(
             == primary_output
         )
 
-        _kill_process_group(primary)
+        # The default deliberately kills only the launcher. The explicit MPS
+        # qualification mode instead ABRTs live CUDA descendants leaf-first so
+        # terminate_client can establish a capability-grade proof.
+        _kill_launcher_only(primary)
         with DaemonClient(manager.kv_directory_socket) as directory:
             _entries, _epoch, writer = _wait_for_directory_writer(
                 directory, manager.kv_directory_manifest, "engine-1", timeout=30.0

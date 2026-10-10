@@ -88,14 +88,16 @@ def test_publish_worker_survives_a_failing_mutation():
             )
             directory._start_mutation_worker_locked()
             directory._mutation_condition.notify()
-        assert directory.flush_deferred(timeout=5.0) is True
+        with pytest.raises(RuntimeError, match="mutations failed"):
+            directory.flush_deferred(timeout=5.0)
 
         # A failed batch is a safe miss for every item in it. The worker must
         # remain available for the next independent mutation.
         directory._defer_mutation(
             "publish", [{"content_hash": b"c", "engine_id": "engine", "slot_ids": [3]}]
         )
-        assert directory.flush_deferred(timeout=5.0) is True
+        with pytest.raises(RuntimeError, match="mutations failed"):
+            directory.flush_deferred(timeout=5.0)
         assert calls == [
             [
                 {"content_hash": b"a", "engine_id": "engine", "slot_ids": [1]},
@@ -232,7 +234,7 @@ def test_deferred_publish_owns_nested_metadata(tmp_path, monkeypatch):
     assert queued["ranges"] == [[0, 0, 16]]
 
 
-def test_pipelined_publish_sends_before_return_and_validates_ack(tmp_path):
+def test_pipelined_publish_copies_before_return_and_validates_ack(tmp_path):
     directory = ContentDirectory(
         str(tmp_path / "unused.sock"),
         engine="test",
@@ -277,13 +279,73 @@ def test_pipelined_publish_sends_before_return_and_validates_ack(tmp_path):
     }
     try:
         assert directory.publish_deferred([item]) == 1
-        assert sent[0]["items"][0]["slot_ids"] == [1]
         item["slot_ids"][0] = 9
-        assert sent[0]["items"][0]["slot_ids"] == [1]
         assert directory.flush_deferred(timeout=1.0)
+        assert sent[0]["items"][0]["slot_ids"] == [1]
         assert directory._pipeline_committed == 1
+        assert directory._pipeline_pending_items == 0
     finally:
         directory.close()
+
+
+def test_pipelined_publish_never_waits_for_socket_send(tmp_path):
+    directory = ContentDirectory(
+        str(tmp_path / "unused.sock"), engine="test", block_size=16, mode="shadow"
+    )
+    release_send = threading.Event()
+    entered_send = threading.Event()
+
+    class Client:
+        def send_request(self, _message):
+            entered_send.set()
+            assert release_send.wait(2.0)
+
+        def receive_response(self):
+            return {"ok": True, "published": 1, "rejected_stale_writer": False}
+
+        def close(self):
+            release_send.set()
+
+    directory._pipeline_client = Client()
+    directory._view_epoch = 4
+    directory._view_current_writer = True
+    item = {
+        "content_hash": b"h",
+        "engine_id": "e",
+        "slot_ids": [1],
+        "generations": [2],
+        "tier": "hbm",
+    }
+    try:
+        started = __import__("time").monotonic()
+        assert directory.publish_deferred([item]) == 1
+        assert __import__("time").monotonic() - started < 0.05
+        assert entered_send.wait(1.0)
+        release_send.set()
+        assert directory.flush_deferred(timeout=1.0)
+    finally:
+        release_send.set()
+        directory.close()
+
+
+def test_pipelined_publish_rejects_queue_overflow_without_blocking(tmp_path):
+    directory = ContentDirectory(
+        str(tmp_path / "unused.sock"), engine="test", block_size=16, mode="shadow"
+    )
+    directory._max_pending_items = 1
+    directory._view_epoch = 4
+    directory._view_current_writer = True
+    directory._pipeline_expected.append((1, {}, 1))
+    directory._pipeline_pending_items = 1
+    item = {
+        "content_hash": b"h",
+        "engine_id": "e",
+        "slot_ids": [1],
+        "generations": [2],
+        "tier": "hbm",
+    }
+    with pytest.raises(RuntimeError, match="capacity exceeded"):
+        directory._pipeline_publish([item])
 
 
 def test_pipelined_mixed_publish_uses_accepted_count(tmp_path):
@@ -385,6 +447,7 @@ def test_pipelined_publish_fails_closed_after_stale_writer_ack(tmp_path):
         assert directory.publish_deferred([item]) == 1
         with pytest.raises(RuntimeError, match="pipeline failed"):
             directory.flush_deferred(timeout=1.0)
+        assert directory._pipeline_pending_items == 0
         with pytest.raises(RuntimeError, match="pipeline failed"):
             directory.publish_deferred([item])
     finally:
@@ -423,8 +486,10 @@ def test_pipelined_publish_fails_closed_after_send_error(tmp_path):
         "tier": "hbm",
     }
     try:
-        with pytest.raises(BrokenPipeError, match="partial write"):
-            directory.publish_deferred([item])
+        assert directory.publish_deferred([item]) == 1
+        with pytest.raises(RuntimeError, match="pipeline failed") as failure:
+            directory.flush_deferred(timeout=1.0)
+        assert isinstance(failure.value.__cause__, BrokenPipeError)
         assert client.closed
         assert directory._pipeline_client is None
         assert directory._pipeline_stop

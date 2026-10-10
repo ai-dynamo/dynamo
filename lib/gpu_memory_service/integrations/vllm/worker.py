@@ -30,9 +30,6 @@ from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path, is_scratch_kv_enabled
 from gpu_memory_service.common.vmm import get_vmm_device_type
 from gpu_memory_service.integrations.common import patch_empty_cache
-from gpu_memory_service.integrations.common.process_lifecycle import (
-    arm_parent_death_signal,
-)
 from gpu_memory_service.integrations.common.utils import (
     env_enabled_by_default,
     get_gms_lock_mode,
@@ -63,6 +60,10 @@ from gpu_memory_service.integrations.vllm.startup import (
     install_and_verify_kv_failover_hooks,
 )
 from gpu_memory_service.integrations.vllm.utils import configure_gms_worker_logging
+from gpu_memory_service.integrations.vllm.writer_lifecycle import (
+    join_writer_cohort_process,
+    writer_cohort_required,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,10 +185,15 @@ class GMSWorker(_BaseWorker):
         from vllm.platforms import current_platform
 
         if shared_kv_enabled():
-            # The leader owns the failover flock, but this subprocess performs
-            # CUDA writes. Couple their lifetimes before opening shared KV so a
-            # leader-only crash cannot leave an orphaned physical writer.
-            arm_parent_death_signal()
+            # Join the kernel-visible writer cohort before opening shared KV.
+            # PDEATHSIG accelerates cleanup; the cohort guard excludes CPU
+            # submitters. Neither is by itself proof of GPU completion.
+            if os.environ.get("GMS_VLLM_WRITER_COHORT_PATH"):
+                join_writer_cohort_process()
+            elif writer_cohort_required():
+                raise RuntimeError(
+                    "vLLM failover worker started without a writer cohort"
+                )
 
         # Set CUDA device first. Do not mutate self.local_rank here; the parent
         # Worker will apply the same DP adjustment during super().init_device().
@@ -198,6 +204,19 @@ class GMSWorker(_BaseWorker):
         current_platform.set_device(
             torch.device(f"{get_vmm_device_type().value}:{device}")
         )
+        cohort = os.environ.get("GMS_VLLM_WRITER_COHORT_PATH")
+        crash_interlock_fd = None
+        if cohort:
+            from gpu_memory_service.integrations.common.gpu_quiescence import (
+                register_gpu_client,
+            )
+
+            crash_interlock_fd = register_gpu_client(
+                backend_name="vllm",
+                device=device,
+                cohort=cohort,
+                rank=max(0, int(self.local_rank)),
+            )
 
         # Establish weights GMS connection (so MemorySnapshot can query committed bytes).
         # Lock type is determined by model_loader_extra_config, set upstream by
@@ -228,6 +247,15 @@ class GMSWorker(_BaseWorker):
 
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
+        if crash_interlock_fd is not None:
+            from gpu_memory_service.integrations.common.gpu_quiescence import (
+                arm_gpu_crash_interlock,
+            )
+
+            arm_gpu_crash_interlock(
+                crash_interlock_fd,
+                backend_name="vllm",
+            )
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -429,6 +457,30 @@ class GMSWorker(_BaseWorker):
                 engine_id,
                 shared_kv_enabled(),
             )
+            if shared_kv_enabled():
+                from gpu_memory_service.integrations.common.gpu_quiescence import (
+                    gms_mps_provider_enabled,
+                    prove_predecessor_gpu_quiescence_sync,
+                )
+
+                if gms_mps_provider_enabled("vllm"):
+                    proof = prove_predecessor_gpu_quiescence_sync(
+                        backend_name="vllm",
+                        predecessor_cohort=None,
+                        device=self._gms_device,
+                    )
+                    if not proof.quiesced:
+                        raise RuntimeError(
+                            "GMS refused persistent KV remap without local GPU "
+                            f"quiescence proof: {proof.detail}"
+                        )
+                    logger.info(
+                        "[GMS] vLLM local GPU quiescence proven before KV remap "
+                        "provider=%s elapsed_ms=%.2f detail=%s",
+                        proof.provider,
+                        proof.elapsed_ms,
+                        proof.detail,
+                    )
             kv_manager.connect(RequestedLockType.RW_PERSISTENT)
             kv_manager.remap_persistent_vas(engine_id, shared=shared_kv_enabled())
             logger.info("[GMS] vLLM KV wake_up remap done")

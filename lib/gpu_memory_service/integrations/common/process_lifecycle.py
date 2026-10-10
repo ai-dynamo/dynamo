@@ -5,12 +5,57 @@
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
+import fcntl
 import os
 import signal
 import sys
+from pathlib import Path
 
 _PR_SET_PDEATHSIG = 1
+
+
+class WriterCohortRetired(RuntimeError):
+    """A late child attempted to enter a fenced writer generation."""
+
+
+def acquire_writer_guard(path: Path) -> int:
+    """Join an open cohort, returning a descriptor held until process exit.
+
+    Check retirement *under* the shared lock. The successor writes the tombstone
+    under an exclusive lock, so a child either joins before retirement and is
+    included in the fence, or fails before it can initialize CUDA/shared KV.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        if os.pread(fd, 1, 0):
+            raise WriterCohortRetired("GMS writer cohort is retired")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+async def retire_writer_cohort(path: Path) -> None:
+    """Exclude current and future CPU submitters; NOT a CUDA completion fence.
+
+    Never unlink/recreate the inode: a delayed opener must see its tombstone.
+    Cancellation while waiting leaves admission and ownership unchanged.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                await asyncio.sleep(0.01)
+        if os.pwrite(fd, b"R", 0) != 1:
+            raise OSError("could not retire GMS writer cohort")
+    finally:
+        os.close(fd)
 
 
 def arm_parent_death_signal(

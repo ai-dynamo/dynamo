@@ -523,7 +523,7 @@ def test_headless_rank_fences_itself_when_leader_acknowledgements_stop(monkeypat
     captured["on_leader_lost"](0, "liveness-timeout")
     import signal
 
-    assert killed == [(os.getpid(), signal.SIGTERM)]
+    assert killed == [(os.getpid(), signal.SIGKILL)]
 
 
 def test_rl_logprobs_force_converts_raw_mode():
@@ -2576,6 +2576,10 @@ async def test_gms_preinit_lock_starts_liveness_before_engine_setup(monkeypatch)
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence", fence
     )
+    monkeypatch.setattr(
+        "gpu_memory_service.integrations.vllm.writer_lifecycle.prepare_writer_cohort",
+        lambda: events.append("cohort"),
+    )
 
     acquired, fenced = await factory._maybe_acquire_failover_lock_before_init(
         runtime, config
@@ -2584,6 +2588,7 @@ async def test_gms_preinit_lock_starts_liveness_before_engine_setup(monkeypatch)
     assert acquired is lock
     assert fenced is True
     assert events == [
+        "cohort",
         ("health", True),
         "acquire",
         ("fence", "engine-0-pre-init"),
@@ -2612,6 +2617,11 @@ async def test_gms_preinitialized_standby_starts_liveness_before_engine_setup(
         lambda handler, config: monitored.append((handler, config)),
     )
     config = SimpleNamespace(gms_shadow_mode=True)
+    prepared = []
+    monkeypatch.setattr(
+        "gpu_memory_service.integrations.vllm.writer_lifecycle.prepare_writer_cohort",
+        lambda: prepared.append(True),
+    )
 
     acquired, fenced = await factory._maybe_acquire_failover_lock_before_init(
         SimpleNamespace(), config
@@ -2619,6 +2629,7 @@ async def test_gms_preinitialized_standby_starts_liveness_before_engine_setup(
 
     assert acquired is None
     assert fenced is False
+    assert prepared == [True]
     assert monitored == [(None, config)]
 
 
@@ -2720,7 +2731,7 @@ async def test_gms_preinit_lock_owner_starts_rank_liveness_monitor(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gms_rank_loss_aborts_active_stream_before_sigterm(monkeypatch):
+async def test_gms_rank_loss_fences_engine_core_before_owner_exit(monkeypatch):
     import asyncio
     import signal
 
@@ -2737,9 +2748,17 @@ async def test_gms_rank_loss_aborts_active_stream_before_sigterm(monkeypatch):
         def start(self):
             pass
 
-    killed = []
+    events = []
     shutdown_event = asyncio.Event()
-    handler = SimpleNamespace(shutdown_event=shutdown_event)
+
+    class EngineCore:
+        def shutdown(self, *, timeout):
+            events.append(("engine_core_shutdown", timeout))
+
+    handler = SimpleNamespace(
+        shutdown_event=shutdown_event,
+        engine_client=SimpleNamespace(engine_core=EngineCore()),
+    )
     config = SimpleNamespace(
         gms_shadow_mode=True, engine_args=SimpleNamespace(nnodes=2)
     )
@@ -2754,7 +2773,7 @@ async def test_gms_rank_loss_aborts_active_stream_before_sigterm(monkeypatch):
     monkeypatch.setattr(rank_liveness, "RankLivenessMonitor", Monitor)
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.os.kill",
-        lambda pid, sig: killed.append((pid, sig)),
+        lambda pid, sig: events.append(("kill", pid, sig)),
     )
 
     factory._maybe_start_rank_liveness_monitor(handler, config)
@@ -2762,7 +2781,10 @@ async def test_gms_rank_loss_aborts_active_stream_before_sigterm(monkeypatch):
 
     await asyncio.sleep(0)
     assert shutdown_event.is_set()
-    assert killed == [(os.getpid(), signal.SIGTERM)]
+    assert events == [
+        ("engine_core_shutdown", 0),
+        ("kill", os.getpid(), signal.SIGKILL),
+    ]
 
 
 @pytest.mark.asyncio

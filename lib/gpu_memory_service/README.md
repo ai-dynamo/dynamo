@@ -221,7 +221,7 @@ This ensures the "new writer gets fresh allocations" workflow can wait for memor
 - Any non-OOM CUDA VMM failure on either client or server is fatal and exits the process.
 - On the server, an untrusted client connection is isolated to that connection: transport loss and response-send failures unwind the connection state, and only server invariant violations or CUDA failures kill the server.
 - Runtime-state `allocation_count` and `allocations_cleared` report server-owned allocation handles only. Imported handles in other processes can still keep VRAM alive after the server clears its own layout state.
-- GMS *does not* prove that a disconnected or already-submitted writer has no in-flight GPU work left on the device. The mitigation in this design is that new RW layouts use fresh allocations and may wait for memory reclamation before allocation succeeds.
+- GMS by itself does not prove that a disconnected writer has no in-flight GPU work. The engine writer-cohort guard excludes CPU submitters: each participating process holds a shared kernel lock, and a successor acquires it exclusively and permanently retires that cohort before promotion. Delayed children cannot reopen a retired cohort. This lock does **not** establish completion of queued GPU work; CUDA driver cleanup can outlive file-lock release. Abrupt-crash reuse of predecessor-writable pages still needs a validated GPU-quiescence contract. Without one, deployments requiring this guarantee must use fresh allocations or quarantine those pages. A fixed delay, heartbeat loss, or absence of traffic is not a completion fence.
 
 ---
 
@@ -592,7 +592,20 @@ Under the hood, pausing calls `unmap_all_vas()` + `abort()` to release GPU memor
 
 Tensor pointers remain valid because the original virtual addresses are preserved.
 
-This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim the memory after the primary is killed. The mutable KV cache always moves through a fresh RW layout in its own GMS tag before it is reallocated.
+This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim memory after the primary exits. Two KV modes have different recovery semantics:
+
+- Without persistent KV leases and the content directory, mutable KV starts a fresh RW layout on resume.
+- With persistent KV leases and an authoritative content directory, daemon-owned HBM allocations survive process exit. Recovery requires generation-matching, completed, sealed records and protection against outstanding readers/writers. The writer-cohort fence excludes CPU submitters; it does not independently establish GPU quiescence (see Guarantees above). Directory publication follows engine worker completion. Enqueueing publication is not daemon acknowledgement: a crash before acknowledgement can leave a safe cache miss.
+
+The vLLM writer-group admission protocol checks a leader-only lifetime lock,
+not merely the existence of a boot marker. Both the leader and headless ranks
+must use the same protocol version and lock-capable shared directory; restart
+the complete TP cohort when upgrading it. Children use their launch-time
+multiprocessing parent identity for parent-death protection. Direct `fork` and
+`spawn` are supported; launchers without a direct, verifiable parent relationship
+fail closed instead of arming against an unrelated reaper.
+
+Persistent KV recovers cache bytes and native block/page identities, not arbitrary request scheduler or sampler state. The current vLLM integration can reuse prefixes published after worker completion; it does not promise to continue an interrupted request at its exact token boundary. Request replay recomputes any missing or unpublished suffix.
 
 ### Configuration via `model_loader_extra_config`
 
