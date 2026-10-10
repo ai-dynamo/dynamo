@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
@@ -176,8 +176,8 @@ enum SchedulerCleanupTarget {
 
 #[derive(Debug)]
 enum AdmissionLifecycleState {
-    Unarmed { request_id: String },
-    Pending { request_id: String },
+    Unarmed,
+    Pending,
     Booking(SchedulerBookingDescriptor),
     Disarmed,
 }
@@ -188,32 +188,29 @@ struct AdmissionLifecycleTransfer {
 }
 
 enum AdmissionLifecycleCleanup {
-    Pending { request_id: String },
+    Pending,
     Booking(SchedulerBookingDescriptor),
 }
 
 impl AdmissionLifecycleTransfer {
-    fn new(request_id: String) -> Self {
+    fn new() -> Self {
         Self {
-            state: Mutex::new(AdmissionLifecycleState::Unarmed { request_id }),
+            state: Mutex::new(AdmissionLifecycleState::Unarmed),
         }
     }
 
     fn arm_pending(&self) {
         let mut state = self.state.lock();
-        let AdmissionLifecycleState::Unarmed { request_id } = &*state else {
-            return;
-        };
-        *state = AdmissionLifecycleState::Pending {
-            request_id: request_id.clone(),
-        };
+        if matches!(*state, AdmissionLifecycleState::Unarmed) {
+            *state = AdmissionLifecycleState::Pending;
+        }
     }
 
     fn arm_booking(&self, booking: SchedulerBookingDescriptor) {
         let mut state = self.state.lock();
         if matches!(
             *state,
-            AdmissionLifecycleState::Unarmed { .. } | AdmissionLifecycleState::Pending { .. }
+            AdmissionLifecycleState::Unarmed | AdmissionLifecycleState::Pending
         ) {
             *state = AdmissionLifecycleState::Booking(booking);
         }
@@ -226,12 +223,8 @@ impl AdmissionLifecycleTransfer {
     fn cleanup_target(&self) -> Option<AdmissionLifecycleCleanup> {
         let mut state = self.state.lock();
         let cleanup = match &*state {
-            AdmissionLifecycleState::Unarmed { .. } | AdmissionLifecycleState::Disarmed => None,
-            AdmissionLifecycleState::Pending { request_id } => {
-                Some(AdmissionLifecycleCleanup::Pending {
-                    request_id: request_id.clone(),
-                })
-            }
+            AdmissionLifecycleState::Unarmed | AdmissionLifecycleState::Disarmed => None,
+            AdmissionLifecycleState::Pending => Some(AdmissionLifecycleCleanup::Pending),
             AdmissionLifecycleState::Booking(booking) => {
                 Some(AdmissionLifecycleCleanup::Booking(booking.clone()))
             }
@@ -243,7 +236,7 @@ impl AdmissionLifecycleTransfer {
     fn is_armed(&self) -> bool {
         matches!(
             *self.state.lock(),
-            AdmissionLifecycleState::Pending { .. } | AdmissionLifecycleState::Booking(_)
+            AdmissionLifecycleState::Pending | AdmissionLifecycleState::Booking(_)
         )
     }
 }
@@ -951,13 +944,11 @@ impl<
         &self,
         request_id: Option<&str>,
     ) -> Option<Box<RequestLifecycleLease>> {
-        let request_id = request_id?;
+        request_id?;
         Some(Box::new(RequestLifecycleLease {
             cleanup: Arc::clone(&self.cleanup),
             actor_tx: self.admission_tx.clone(),
-            transfer: Some(Arc::new(AdmissionLifecycleTransfer::new(
-                request_id.to_string(),
-            ))),
+            transfer: Some(Arc::new(AdmissionLifecycleTransfer::new())),
         }))
     }
 
@@ -1297,13 +1288,15 @@ impl<
 
         let mut made_ready = false;
         let mut removed_ready_head = false;
-        let mut unmanaged_request_ids = HashSet::new();
+        // Keep each Arc alive through the sweep so its address cannot be reused.
+        // Pending cleanup owns this lifecycle, not a later request with the same ID.
+        let mut pending_lifecycles = FxHashMap::default();
         for cleanup in dirty {
             match cleanup.target {
                 SchedulerCleanupTarget::AdmissionLifecycle(transfer) => {
                     let result = match transfer.cleanup_target() {
-                        Some(AdmissionLifecycleCleanup::Pending { request_id }) => {
-                            unmanaged_request_ids.insert(request_id);
+                        Some(AdmissionLifecycleCleanup::Pending) => {
+                            pending_lifecycles.insert(Arc::as_ptr(&transfer), transfer);
                             Ok(())
                         }
                         Some(AdmissionLifecycleCleanup::Booking(booking)) => self
@@ -1369,15 +1362,13 @@ impl<
                 }
             }
         }
-        if !unmanaged_request_ids.is_empty() {
+        if !pending_lifecycles.is_empty() {
             for class_index in 0..self.profile.classes().len() {
                 let (removed, class_head_removed) =
                     self.pending.take_if_in_class(class_index, |queued| {
-                        queued
-                            .request
-                            .mode
-                            .tracked_request_id()
-                            .is_some_and(|request_id| unmanaged_request_ids.contains(request_id))
+                        queued.lifecycle_transfer.as_ref().is_some_and(|transfer| {
+                            pending_lifecycles.contains_key(&Arc::as_ptr(transfer))
+                        })
                     });
                 removed_ready_head |= class_head_removed;
                 for entry in removed {
@@ -2007,7 +1998,7 @@ mod tests {
 
     #[test]
     fn admission_lifecycle_cleanup_upgrades_to_the_exact_booking() {
-        let transfer = AdmissionLifecycleTransfer::new("retryable-request".to_string());
+        let transfer = AdmissionLifecycleTransfer::new();
         transfer.arm_pending();
         let booking = SchedulerBookingDescriptor {
             request_id: "retryable-request".to_string(),
@@ -3461,6 +3452,103 @@ policy_classes:
                 .unwrap();
             slots.assert_completely_drained(Instant::now());
         }
+    }
+
+    #[rstest::rstest]
+    #[case::expired(true)]
+    #[case::cancelled(false)]
+    #[tokio::test(start_paused = true)]
+    async fn pending_cleanup_cannot_remove_a_reused_request_id(#[case] expired: bool) {
+        let (queue, slots) = make_queue(1, 16, 64, Some(0.0));
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let old_lease = queue.new_request_lifecycle_lease(Some("reused")).unwrap();
+        let (mut old, old_rx) = make_request("reused", 64);
+        old.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: "reused".to_owned(),
+        };
+        let mut old_rx = Some(old_rx);
+        let ingress_at = Instant::now();
+        let mut classified = queue.build_classify_request(&old, ingress_at);
+        if expired {
+            classified.set_due_at(ingress_at + Duration::from_secs(1));
+        }
+        let old_lease = queue
+            .enqueue_admitted_with_block_hashes_and_lease(
+                old,
+                None,
+                Some(old_lease),
+                None,
+                Some(classified),
+                ingress_at,
+            )
+            .await
+            .unwrap();
+        assert_eq!(queue.pending_count(), 1);
+        if expired {
+            assert!(matches!(
+                old_rx.take().unwrap().await.unwrap(),
+                Err(KvSchedulerError::DeadlineExceeded)
+            ));
+            assert_eq!(queue.pending_count(), 0);
+        }
+
+        // A full admission channel makes destructor cleanup use the side
+        // queue. Its lifecycle has ended before the replacement is enqueued.
+        let mut permits = queue
+            .admission_tx
+            .reserve_many(queue.admission_tx.max_capacity())
+            .await
+            .unwrap();
+        drop(old_rx);
+        drop(old_lease);
+        let new_lease = queue.new_request_lifecycle_lease(Some("reused")).unwrap();
+        let (mut new, mut new_rx) = make_request("reused", 64);
+        new.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: "reused".to_owned(),
+        };
+        let queue_metadata = queue.default_queue_metadata(&new, Instant::now());
+        let (ack_tx, ack_rx) = oneshot::channel();
+        permits.next().unwrap().send(AdmissionCommand::Enqueue {
+            request: new,
+            attempt_tx: None,
+            block_hashes: None,
+            queue_metadata,
+            lease: Some(new_lease),
+            ack_tx,
+        });
+        // Keep a second command queued so the actor does not drain the side
+        // queue until after accepting the replacement pending lifecycle.
+        let (probe, _probe_rx) = make_request("probe", 64);
+        let (resp_tx, resp_rx) = oneshot::channel();
+        permits
+            .next()
+            .unwrap()
+            .send(AdmissionCommand::SelectWithoutAdmission {
+                request: probe,
+                resp_tx,
+            });
+        drop(permits);
+        let new_lease = ack_rx.await.unwrap().unwrap();
+        resp_rx.await.unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), 64);
+        let stats = queue.class_queue_stats(0).unwrap();
+        assert_eq!(stats.pending_count, 1);
+        assert_eq!(stats.pending_isl_tokens, 64);
+        assert_eq!(stats.rejected_due_time_passed_total, u64::from(expired));
+        assert!(matches!(
+            new_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        slots.free(&"active".to_owned(), Instant::now()).unwrap();
+        queue.update().await;
+        new_rx.await.unwrap().unwrap();
+        let booking = new_lease.commit().unwrap();
+        slots.free(&booking.request_id, Instant::now()).unwrap();
+        slots.assert_completely_drained(Instant::now());
     }
 
     #[tokio::test]
