@@ -3,11 +3,12 @@
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Error, Result};
 use futures::{stream, stream::StreamExt};
+use tokio::time::sleep;
 
 use crate::{
     http::service::metrics::Metrics,
@@ -31,7 +32,7 @@ use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, PipelineOperator,
     ResponseStream, ServerStreamingEngine, SingleIn, async_trait, attach_first_response_guard,
-    network::egress::route_span::{RouteTraceContext, attach_route_trace_context, error_type_name},
+    network::egress::route_span::{RouteTraceContext, attach_route_trace_context, error_type_from_chain, error_type_name},
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -131,20 +132,58 @@ pub(crate) fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
     migratable_error_in_chain(err).is_some()
 }
 
-/// Whether a worker-scoped failure can be retried without violating an explicit route.
-///
-/// The phase is read after the failed attempt because disaggregated routing updates the
-/// shared request tracker as it moves from prefill to decode. Session affinity does not
-/// populate these explicit routing fields, so an invalidated affinity binding remains
-/// eligible for migration.
-fn is_migratable_for_request(
-    request: &PreprocessedRequest,
-    err: &(dyn StdError + 'static),
-) -> bool {
-    if !is_migratable(err) {
-        return false;
-    }
+const DYN_MIGRATION_FAILOVER_WAIT_MS: &str = "DYN_MIGRATION_FAILOVER_WAIT_MS";
+const DYN_HTTP_MODEL_FAILOVER_WAIT_MS: &str = "DYN_HTTP_MODEL_FAILOVER_WAIT_MS";
+const DYN_MIGRATION_FAILOVER_POLL_MS: &str = "DYN_MIGRATION_FAILOVER_POLL_MS";
+const DEFAULT_FAILOVER_POLL_MS: u64 = 50;
 
+fn migration_failover_wait() -> Duration {
+    static WAIT: OnceLock<Duration> = OnceLock::new();
+    *WAIT.get_or_init(|| {
+        std::env::var(DYN_MIGRATION_FAILOVER_WAIT_MS)
+            .or_else(|_| std::env::var(DYN_HTTP_MODEL_FAILOVER_WAIT_MS))
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or_default()
+    })
+}
+
+fn failover_poll_from_value(value: Option<&str>) -> Duration {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(DEFAULT_FAILOVER_POLL_MS))
+}
+
+fn migration_failover_poll() -> Duration {
+    static POLL: OnceLock<Duration> = OnceLock::new();
+    *POLL.get_or_init(|| {
+        let value = std::env::var(DYN_MIGRATION_FAILOVER_POLL_MS).ok();
+        failover_poll_from_value(value.as_deref())
+    })
+}
+
+async fn wait_for_failover_poll(
+    context: &Arc<dyn AsyncEngineContext>,
+    delay: Duration,
+) -> Result<()> {
+    tokio::select! {
+        _ = sleep(delay) => Ok(()),
+        _ = context.stopped() => Err(DynamoError::builder()
+            .error_type(ErrorType::Cancelled)
+            .message(format!("Context id {} stopped during failover wait", context.id()))
+            .build()
+            .into()),
+    }
+}
+
+fn is_failover_unavailable(err: &(dyn StdError + 'static), failover_wait: Duration) -> bool {
+    !failover_wait.is_zero() && error::match_error_chain(err, &[ErrorType::Unavailable], &[])
+}
+
+fn request_allows_migration(request: &PreprocessedRequest) -> bool {
     let allows_phase = |phase| match explicit_target(request, phase) {
         Ok(None) => true,
         Ok(Some(target)) => {
@@ -176,6 +215,19 @@ fn is_migratable_for_request(
 
     let phase = tracker.phase();
     allows_phase(phase)
+}
+
+/// Whether a worker-scoped failure can be retried without violating an explicit route.
+///
+/// The phase is read after the failed attempt because disaggregated routing updates the
+/// shared request tracker as it moves from prefill to decode. Session affinity does not
+/// populate these explicit routing fields, so an invalidated affinity binding remains
+/// eligible for migration.
+fn is_migratable_for_request(
+    request: &PreprocessedRequest,
+    err: &(dyn StdError + 'static),
+) -> bool {
+    is_migratable(err) && request_allows_migration(request)
 }
 
 pub struct Migration {
@@ -303,6 +355,22 @@ impl MigrationEvent {
     }
 }
 
+/// Kill an uncommitted dispatch context when its future fails or is dropped.
+/// Failed discovery polls are never linked to the parent; only a successful
+/// response stream is linked, so cleanup does not require a detachable trait API.
+struct AttemptContextGuard {
+    child: Arc<dyn AsyncEngineContext>,
+    established: bool,
+}
+
+impl Drop for AttemptContextGuard {
+    fn drop(&mut self) {
+        if !self.established {
+            self.child.kill();
+        }
+    }
+}
+
 struct RetryManager<Resp>
 where
     Resp: Data + HasTokenIds,
@@ -329,6 +397,7 @@ where
     completed_tokens: usize,
     /// Failure that caused the next physical dispatch to be a migration retry.
     pending_migration: Option<MigrationCause>,
+    failover_wait: Duration,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -412,6 +481,7 @@ where
             next_attempt: 0,
             completed_tokens: 0,
             pending_migration: None,
+            failover_wait: migration_failover_wait(),
         };
         slf.new_stream(None).await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
@@ -504,6 +574,9 @@ where
             self.abort_request_lifecycle(error.as_ref());
             return Err(error);
         }
+        let failover_deadline = migration_event
+            .as_ref()
+            .map(|_| Instant::now() + self.failover_wait);
         while self.retries_left > 0 {
             self.retries_left -= 1;
             // Once any chunks have arrived from a previous attempt, stamp
@@ -533,7 +606,10 @@ where
             if let Some(session_affinity) = self.session_affinity.as_ref() {
                 request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
             }
-            self.context.link_child(request.context());
+            let mut attempt_guard = AttemptContextGuard {
+                child: request.context(),
+                established: false,
+            };
             if self.context.is_stopped() || self.context.is_killed() {
                 if let Some(cause) = migration {
                     tracing::info!(
@@ -586,7 +662,34 @@ where
             if !source_guards.is_empty() {
                 attach_first_response_guard(&mut request, Arc::new(source_guards));
             }
-            let response_stream = self.next_generate.generate(request).await;
+            let mut response_stream = tokio::select! {
+                response = self.next_generate.generate(request) => response,
+                _ = self.context.stopped() => Err(DynamoError::builder()
+                    .error_type(ErrorType::Cancelled)
+                    .message(format!(
+                        "Context id {} stopped during worker dispatch",
+                        self.context.id()
+                    ))
+                    .build()
+                    .into()),
+            };
+            if response_stream.is_ok() {
+                self.context.link_child(attempt_guard.child.clone());
+                if self.context.is_stopped() || self.context.is_killed() {
+                    attempt_guard.child.kill();
+                    response_stream = Err(DynamoError::builder()
+                        .error_type(ErrorType::Cancelled)
+                        .message(format!(
+                            "Context id {} stopped during worker dispatch",
+                            self.context.id()
+                        ))
+                        .build()
+                        .into());
+                } else {
+                    attempt_guard.established = true;
+                }
+            }
+            drop(attempt_guard);
             match response_stream {
                 Ok(next_stream) => {
                     self.record_migration_outcome(
@@ -597,12 +700,43 @@ where
                     self.next_stream = Some(next_stream);
                     return Ok(());
                 }
-                Err(err) if is_migratable_for_request(&self.request, err.as_ref()) => {
-                    let Some(migration_error) = migratable_error_in_chain(err.as_ref()) else {
-                        tracing::warn!(error = %err, "Migration eligibility had no semantic error");
-                        return Err(err);
-                    };
-                    let reason = migration_error.error_type();
+                Err(err)
+                    if is_migratable_for_request(&self.request, err.as_ref())
+                        || (migration_event.is_some()
+                            && request_allows_migration(&self.request)
+                            && is_failover_unavailable(err.as_ref(), self.failover_wait)) =>
+                {
+                    let reason = error_type_from_chain(err.as_ref());
+                    if matches!(reason, ErrorType::Unavailable)
+                        && failover_deadline.is_some_and(|deadline| Instant::now() < deadline)
+                    {
+                        // A warm replacement can register shortly after the old
+                        // endpoint disappears. Waiting here preserves the
+                        // migration budget and avoids exposing that control-plane
+                        // interval to an already-streaming client.
+                        self.retries_left += 1;
+                        self.pending_migration = Some(MigrationCause {
+                            reason,
+                            from_worker_id: route_trace.selected_worker_id(),
+                            attempt: route_trace.attempt(),
+                        });
+                        let remaining = failover_deadline
+                            .expect("checked above")
+                            .saturating_duration_since(Instant::now());
+                        if let Err(err) = wait_for_failover_poll(
+                            &self.context,
+                            std::cmp::min(migration_failover_poll(), remaining),
+                        )
+                        .await
+                        {
+                            self.record_migration_outcome(
+                                migration_event.as_ref(),
+                                frontend_service::migration_outcome::CANCELLED,
+                            );
+                            return Err(err);
+                        }
+                        continue;
+                    }
                     if migration_event.is_none() {
                         migration_event = Some(MigrationEvent::new(
                             frontend_service::migration_type::NEW_REQUEST,
@@ -792,6 +926,220 @@ mod tests {
     use tokio::sync::mpsc;
 
     const TEST_MODEL: &str = "test-model";
+
+    #[tokio::test]
+    async fn dropped_dispatch_future_kills_unlinked_attempt() {
+        let child: Arc<dyn AsyncEngineContext> = Arc::new(Controller::new("request".into()));
+        let mut dispatch = Box::pin({
+            let child = child.clone();
+            async move {
+                let guard = AttemptContextGuard {
+                    child,
+                    established: false,
+                };
+                std::future::pending::<()>().await;
+                drop(guard);
+            }
+        });
+        assert!(futures::poll!(&mut dispatch).is_pending());
+        drop(dispatch);
+        assert!(child.is_killed());
+        assert_eq!(Arc::strong_count(&child), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_dispatches_do_not_retain_child_contexts() {
+        const FAILED_POLLS: u32 = 1024;
+        #[derive(Default)]
+        struct DiscoveryGapEngine {
+            children: std::sync::Mutex<Vec<std::sync::Weak<dyn AsyncEngineContext>>>,
+        }
+        #[async_trait]
+        impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+            for DiscoveryGapEngine
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let child = request.context();
+                let mut children = self.children.lock().unwrap();
+                children.push(Arc::downgrade(&child));
+                if children.len() <= FAILED_POLLS as usize {
+                    return Err(migratable_error(ErrorType::WorkerUnavailable).into());
+                }
+                Ok(ResponseStream::new(Box::pin(stream::empty()), child))
+            }
+        }
+
+        let engine = Arc::new(DiscoveryGapEngine::default());
+        let root = Arc::new(Controller::new("discovery-gap".into()));
+        let manager = RetryManager::build(
+            root.clone(),
+            BTreeMap::new(),
+            create_mock_request(5),
+            engine.clone(),
+            FAILED_POLLS,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(manager.next_attempt, FAILED_POLLS + 1);
+        let children = engine.children.lock().unwrap();
+        assert!(
+            children[..FAILED_POLLS as usize]
+                .iter()
+                .all(|child| child.upgrade().is_none())
+        );
+        let active = children.last().unwrap().upgrade().unwrap();
+        assert!(!active.is_stopped());
+        root.stop();
+        assert!(active.is_stopped());
+        root.kill();
+        assert!(active.is_killed());
+    }
+
+    #[tokio::test]
+    async fn parent_cancellation_reaches_unlinked_pending_dispatch() {
+        struct PendingEngine {
+            started: tokio::sync::Notify,
+            child: std::sync::Mutex<Option<std::sync::Weak<dyn AsyncEngineContext>>>,
+        }
+        #[async_trait]
+        impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+            for PendingEngine
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let child = request.context();
+                *self.child.lock().unwrap() = Some(Arc::downgrade(&child));
+                self.started.notify_one();
+                child.stopped().await;
+                Err(migratable_error(ErrorType::Cancelled).into())
+            }
+        }
+        let engine = Arc::new(PendingEngine {
+            started: tokio::sync::Notify::new(),
+            child: std::sync::Mutex::new(None),
+        });
+        let root = Arc::new(Controller::new("cancel-dispatch".into()));
+        let dispatch = RetryManager::build(
+            root.clone(),
+            BTreeMap::new(),
+            create_mock_request(5),
+            engine.clone(),
+            1,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        );
+        let cancel = async {
+            engine.started.notified().await;
+            root.stop();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(dispatch, cancel)
+        })
+        .await
+        .expect("cancellation must reach the pending attempt");
+        assert!(
+            matches!(result, Err(ref err) if error_type_from_chain(err.as_ref()) == ErrorType::Cancelled)
+        );
+        assert!(
+            engine
+                .child
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .upgrade()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_cancellation_interrupts_retry_manager_failover_poll() {
+        struct FailoverGapEngine {
+            calls: AtomicU32,
+            retry_started: tokio::sync::Notify,
+        }
+
+        #[async_trait]
+        impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+            for FailoverGapEngine
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Ok(ResponseStream::new(
+                        Box::pin(stream::empty()),
+                        request.context(),
+                    ));
+                }
+                self.retry_started.notify_one();
+                Err(migratable_error(ErrorType::Unavailable).into())
+            }
+        }
+
+        let engine = Arc::new(FailoverGapEngine {
+            calls: AtomicU32::new(0),
+            retry_started: tokio::sync::Notify::new(),
+        });
+        let root = Arc::new(Controller::new("cancel-failover-poll".into()));
+        let mut manager = RetryManager::build(
+            root.clone(),
+            BTreeMap::new(),
+            create_mock_request(5),
+            engine.clone(),
+            1,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        manager.failover_wait = Duration::from_secs(60);
+
+        let cancel = async {
+            engine.retry_started.notified().await;
+            root.stop();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(
+                manager.new_stream(Some(MigrationEvent::new(
+                    frontend_service::migration_type::ONGOING_REQUEST,
+                ))),
+                cancel,
+            )
+        })
+        .await
+        .expect("parent cancellation must interrupt the production failover poll");
+
+        assert!(
+            matches!(result, Err(ref err) if error_type_from_chain(err.as_ref()) == ErrorType::Cancelled)
+        );
+    }
+
+    #[test]
+    fn failover_poll_rejects_zero_and_invalid_values() {
+        let default = Duration::from_millis(DEFAULT_FAILOVER_POLL_MS);
+        assert_eq!(failover_poll_from_value(None), default);
+        assert_eq!(failover_poll_from_value(Some("0")), default);
+        assert_eq!(failover_poll_from_value(Some("invalid")), default);
+        assert_eq!(
+            failover_poll_from_value(Some("17")),
+            Duration::from_millis(17)
+        );
+    }
 
     fn migration_duration_count(metrics: &Metrics, migration_type: &str, outcome: &str) -> u64 {
         metrics.get_migration_duration_sample_count(TEST_MODEL, migration_type, outcome)
