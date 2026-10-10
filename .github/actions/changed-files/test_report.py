@@ -242,27 +242,38 @@ class ChangedFilesTests(unittest.TestCase):
             (ACTION_DIR.parents[1] / "workflows/pr.yaml").read_text()
         )
         jobs = workflow["jobs"]
-        for backend, value, force, expected in (
-            ("sglang", "false", "", False),
-            ("sglang", "false", "true", True),
-            ("sglang", "", "", True),
-            ("sglang", "true", "", True),
-            ("trtllm", "false", "", False),
-            ("trtllm", "false", "true", True),
-            ("trtllm", "", "", True),
-            ("trtllm", "true", "", True),
-            ("vllm", "false", "", False),
-            ("vllm", "false", "true", True),
-            ("vllm", "", "", True),
-            ("vllm", "true", "", True),
+        for backend, value, force, trt_router, multigpu, expected in (
+            ("sglang", "false", "", "false", "true", False),
+            ("sglang", "false", "true", "false", "true", True),
+            ("sglang", "", "", "false", "true", True),
+            ("sglang", "true", "", "false", "true", True),
+            ("trtllm", "false", "", "false", "true", False),
+            ("trtllm", "false", "true", "false", "true", True),
+            ("trtllm", "", "", "false", "true", True),
+            ("trtllm", "true", "", "false", "true", True),
+            ("vllm", "false", "", "false", "true", False),
+            ("vllm", "false", "true", "false", "true", True),
+            ("vllm", "", "", "false", "true", True),
+            ("vllm", "true", "", "false", "true", True),
+            ("sglang", "false", "", "true", "true", False),
+            ("sglang", "false", "true", "true", "true", True),
+            ("sglang", "false", "", "true", "false", True),
+            ("sglang", "false", "", "true", "", True),
         ):
             output = jobs["changed-files"]["outputs"][f"{backend}_runtime"]
             expression = output.removeprefix("${{").removesuffix("}}")
             expression = expression.replace("vars.FORCE_FULL_CI", repr(force))
+            expression = expression.replace("vars.RUN_MULTIGPU_TESTS", repr(multigpu))
+            expression = expression.replace(
+                "steps.changes.outputs.trtllm_disagg_router", repr(trt_router)
+            )
             expression = expression.replace(
                 f"steps.changes.outputs.{backend}_runtime", repr(value)
             )
-            required = eval(expression.replace("||", "or"), {"__builtins__": {}})
+            required = eval(
+                expression.replace("||", "or").replace("&&", "and"),
+                {"__builtins__": {}},
+            )
             for job in (f"{backend}-test", f"{backend}-multi-gpu-test"):
                 condition = jobs[job]["if"].replace(
                     f"needs.changed-files.outputs.{backend}_runtime",
@@ -298,6 +309,13 @@ class ChangedFilesTests(unittest.TestCase):
             ([], "false"),
             ([paths[0], "tests/serve/common.py"], "false"),
             ([paths[0], "examples/common/gpu_utils.sh"], "false"),
+            (
+                [
+                    paths[0],
+                    "components/src/dynamo/frontend/tests/test_vllm_processor_unit.py",
+                ],
+                "false",
+            ),
             (["examples/backends/trtllm/launch/disagg_same_gpu.sh"], "false"),
         ]
         for files, expected in cases:
@@ -323,6 +341,10 @@ class ChangedFilesTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(
                         result.outputs["trtllm_disagg_router"], result_expected
+                    )
+                    self.assertEqual(
+                        result.outputs["sglang_runtime"],
+                        "false" if result_expected == "true" else "true",
                     )
 
     def test_empty_change_set_passes(self):

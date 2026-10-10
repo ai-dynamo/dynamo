@@ -45,6 +45,7 @@ TRTLLM_DISAGG_CHANGE_CLASS = {
 # union classes: mixed changes require the existing full runtime selection.
 SGLANG_UNRELATED_CHANGE_CLASSES = (
     {"components/src/dynamo/frontend/tests/test_vllm_processor_unit.py"},
+    TRTLLM_DISAGG_CHANGE_CLASS,
 )
 
 
