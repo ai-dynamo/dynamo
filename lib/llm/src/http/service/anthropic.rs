@@ -903,8 +903,18 @@ async fn anthropic_messages(
             );
         });
 
+        // Anthropic limits valid tool blocks after input validation. Keep the
+        // original constraint on the backend request and parsing context.
+        let aggregation_options = if anthropic_ctx
+            .as_ref()
+            .is_some_and(|ctx| ctx.disable_parallel_tool_use)
+        {
+            parsing_options.clone().with_parallel_tool_calls(None)
+        } else {
+            parsing_options.clone()
+        };
         let chat_response =
-            NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
+            NvCreateChatCompletionResponse::from_annotated_stream(stream, aggregation_options)
                 .await
                 .map_err(|error| {
                     let error_type = if super::metrics::request_was_cancelled(&error) {

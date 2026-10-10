@@ -221,24 +221,21 @@ impl AnthropicStreamConverter {
         let last_call = self.tool_call_states.len().checked_sub(1);
 
         let mut has_emitted = self.tool_call_states.iter().any(|call| call.has_emitted);
-        let call_limit = if self
+        let single_tool = self
             .api_context
             .as_ref()
-            .is_some_and(|ctx| ctx.disable_parallel_tool_use)
-        {
-            usize::from(!has_emitted)
-        } else {
-            usize::MAX
-        };
+            .is_some_and(|ctx| ctx.disable_parallel_tool_use);
 
         for (call_index, tool_call) in self
             .tool_call_states
             .iter_mut()
             .enumerate()
             .filter(|(_, tool_call)| tool_call.is_emit_ready())
-            .take(call_limit)
             .filter(|(_, tool_call)| !tool_call.has_emitted && (is_final || tool_call.needs_flush))
         {
+            if single_tool && has_emitted {
+                break;
+            }
             let raw: String = tool_call
                 .argument_fragments
                 .iter()
@@ -249,7 +246,15 @@ impl AnthropicStreamConverter {
             // the block and discard the fragments that follow, so leave it pending and
             // let the final drain decide.
             if !is_final && raw.is_empty() {
+                if single_tool {
+                    break;
+                }
                 continue;
+            }
+            let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw);
+            // Keep an earlier incomplete call pending; it may still become valid.
+            if single_tool && !is_final && parsed.as_ref().is_err_and(|error| error.is_eof()) {
+                break;
             }
             tool_call.needs_flush = false;
             let arguments_are_valid = if raw.is_empty() {
@@ -258,7 +263,7 @@ impl AnthropicStreamConverter {
                 // the name. Keep the terminal rule aligned with the unary converter.
                 !(truncated && Some(call_index) == last_call)
             } else {
-                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw).is_ok()
+                parsed.is_ok()
             };
             let repair =
                 is_final && truncated && Some(call_index) == last_call && !arguments_are_valid;
@@ -1256,6 +1261,58 @@ mod tests {
         assert_eq!(values[0]["delta"]["stop_reason"], "tool_use");
         assert_eq!(values[0]["usage"]["output_tokens"], 9);
         assert_eq!(values[1]["type"], "message_stop");
+    }
+
+    #[test]
+    fn test_single_valid_tool_limit_survives_multiple_flushes() {
+        let mut conv = AnthropicStreamConverter::with_context(
+            "test-model".into(),
+            0,
+            AnthropicContext {
+                disable_parallel_tool_use: true,
+                ..Default::default()
+            },
+        );
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call_0"),
+            Some("invalid"),
+            Some("[]"),
+        ));
+        conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call_1"),
+            Some("valid"),
+            Some("{}"),
+        ));
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        let names: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.data {
+                AnthropicStreamEvent::ContentBlockStart {
+                    content_block: AnthropicResponseContentBlock::ToolUse { name, .. },
+                    ..
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["valid"]);
+        let later = conv.process_chunk_tagged(&tool_call_chunk(
+            2,
+            Some("call_2"),
+            Some("later"),
+            Some("{}"),
+        ));
+        assert!(later.is_empty());
+        events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert!(events.is_empty());
+        events.extend(conv.emit_end_events_tagged());
+        assert!(
+            events.iter().all(|event| !matches!(
+                &event.data,
+                AnthropicStreamEvent::ContentBlockStart { .. }
+            ))
+        );
     }
 
     #[rstest::rstest]
