@@ -12,7 +12,12 @@ use dynamo_llm::protocols::common::{preprocessed_mm_identifier, preprocessed_mm_
 use serde::{Deserialize, de::DeserializeOwned};
 
 use crate::client;
-use crate::json::{json_to_struct, struct_to_json};
+use dynamo_sidecar_common::{json_to_struct_v14, struct_to_json_v14};
+
+/// Payload names and peer, used only to name the source in codec errors.
+const PEER: &str = "vLLM";
+const KV_TRANSFER_PARAMS: &str = "kv_transfer_params";
+const EC_TRANSFER_PARAMS: &str = "ec_transfer_params";
 use crate::proto as pb;
 
 const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
@@ -72,7 +77,7 @@ pub(crate) fn build_generate_request(
     request_id: String,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    let request = normalize_response_options(request)?;
+    let mut request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
     validate_multimodal_cache_uuids(&request)?;
     // Legacy envelopes may only carry controls preserved by the typed request.
@@ -137,7 +142,7 @@ pub(crate) fn build_generate_request(
         None
     };
     let raw_media = if has_raw_media_metadata {
-        build_media(&request, forwarded_image_uuids.as_deref())?
+        build_media(&mut request, forwarded_image_uuids.as_deref())?
     } else {
         Vec::new()
     };
@@ -202,10 +207,10 @@ pub(crate) fn build_generate_request(
     if mode.is_encode()
         && media
             .iter()
-            .any(|item| item.modality() != pb::Modality::Image)
+            .any(|item| !matches!(item.modality(), pb::Modality::Image | pb::Modality::Video))
     {
         return Err(client::invalid_argument(
-            "encode requests support image media only",
+            "encode requests support image and video media only",
         ));
     }
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
@@ -529,6 +534,17 @@ fn consume_preprocessed_mm_routing_hashes(
     }
     Ok(Some(hashes))
 }
+
+/// The frontend adds these for vLLM's structured-output reasoning gate, which
+/// the gRPC proto cannot carry. Drop them only when vLLM runs no reasoning
+/// parser, so nothing reads them.
+pub(crate) fn consume_reasoning_parser_args(extra_args: &mut Option<serde_json::Value>) {
+    if let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
+        extra.remove("reasoning_parser_kwargs");
+        extra.remove("reasoning_ended");
+    }
+}
+
 fn consume_redundant_nvext(
     extra_args: &mut Option<serde_json::Value>,
     cache_namespace: Option<&str>,
@@ -597,11 +613,11 @@ fn strip_multimodal_prompt_token_ids(prefill_result: &mut Option<PrefillResult>)
     }
 }
 
-fn media_source(modality: &str, source: &str) -> Result<pb::media_item::Source, DynamoError> {
+fn media_source(modality: &str, source: String) -> Result<pb::media_item::Source, DynamoError> {
     if source.starts_with("data:") {
-        Ok(pb::media_item::Source::DataUri(source.to_string()))
+        Ok(pb::media_item::Source::DataUri(source))
     } else if source.starts_with("http://") || source.starts_with("https://") {
-        Ok(pb::media_item::Source::Url(source.to_string()))
+        Ok(pb::media_item::Source::Url(source))
     } else {
         Err(client::invalid_argument(format!(
             "vLLM gRPC {modality} input must use an http://, https://, or data: URI"
@@ -693,10 +709,10 @@ fn validate_media_uuid(uuid: &str) -> Result<(), DynamoError> {
 }
 
 fn build_media(
-    request: &PreprocessedRequest,
+    request: &mut PreprocessedRequest,
     forwarded_uuids: Option<&[String]>,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
-    let Some(media_by_modality) = request.multi_modal_data.as_ref() else {
+    let Some(media_by_modality) = request.multi_modal_data.take() else {
         if request
             .multi_modal_uuids
             .as_ref()
@@ -727,7 +743,7 @@ fn build_media(
         let uuids = request
             .multi_modal_uuids
             .as_ref()
-            .and_then(|by_modality| by_modality.get(key));
+            .and_then(|by_modality| by_modality.get(&key));
         if let Some(uuids) = uuids
             && uuids.len() != items.len()
         {
@@ -748,10 +764,10 @@ fn build_media(
             )));
         }
 
-        for (index, item) in items.iter().enumerate() {
+        for (index, item) in items.into_iter().enumerate() {
             let source = match item {
-                MultimodalData::Url(url) => media_source(key, url.as_str())?,
-                MultimodalData::RawUrl(source) => media_source(key, source)?,
+                MultimodalData::Url(url) => media_source(&key, url.into())?,
+                MultimodalData::RawUrl(source) => media_source(&key, source)?,
                 MultimodalData::Decoded(_) => {
                     return Err(client::invalid_argument(
                         "vLLM sidecar cannot dereference pre-decoded RDMA media; configure URL passthrough",
@@ -1116,8 +1132,12 @@ fn build_kv_parameters(
         cache_salt: cache_salt
             .map(|cache_salt| format!("{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"))
             .unwrap_or_default(),
-        kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
-        ec_transfer_params: ec_transfer_params.map(json_to_struct).transpose()?,
+        kv_transfer_params: kv_transfer_params
+            .map(|value| json_to_struct_v14(value, KV_TRANSFER_PARAMS))
+            .transpose()?,
+        ec_transfer_params: ec_transfer_params
+            .map(|value| json_to_struct_v14(value, EC_TRANSFER_PARAMS))
+            .transpose()?,
     })
 }
 
@@ -1183,17 +1203,6 @@ fn validate_request(
     if mode.is_encode() && !has_media {
         return Err(client::invalid_argument(
             "encode requests require multimodal media",
-        ));
-    }
-    if mode.is_encode()
-        && request.multi_modal_data.as_ref().is_some_and(|media| {
-            media
-                .iter()
-                .any(|(modality, items)| modality != IMAGE_URL_KEY && !items.is_empty())
-        })
-    {
-        return Err(client::invalid_argument(
-            "encode requests support image media only",
         ));
     }
     if mode.is_encode() && request.encoder_result.is_some() {
@@ -1262,6 +1271,8 @@ pub(crate) struct ResponseState {
     output_logprobs: Option<u32>,
     expect_prompt_logprobs: bool,
     prompt_info: Option<pb::PromptInfo>,
+    user_stop_token_ids: Vec<u32>,
+    hidden_stop_token_ids: Vec<u32>,
 }
 
 impl ResponseState {
@@ -1278,6 +1289,16 @@ impl ResponseState {
             output_logprobs: request.output_options.logprobs,
             expect_prompt_logprobs: request.output_options.prompt_logprobs.is_some(),
             prompt_info: None,
+            user_stop_token_ids: request
+                .stop_conditions
+                .stop_token_ids
+                .clone()
+                .unwrap_or_default(),
+            hidden_stop_token_ids: request
+                .stop_conditions
+                .stop_token_ids_hidden
+                .clone()
+                .unwrap_or_default(),
         }
     }
 
@@ -1392,10 +1413,17 @@ impl ResponseState {
                 ));
             }
         });
-        mapped.stop_reason = finish.stop_reason.map(|reason| match reason {
-            pb::finish_info::StopReason::StopTokenId(id)
-            | pb::finish_info::StopReason::EosTokenId(id) => StopReason::Int(i64::from(id)),
-            pb::finish_info::StopReason::StopString(value) => StopReason::String(value),
+        mapped.stop_reason = finish.stop_reason.and_then(|reason| match reason {
+            pb::finish_info::StopReason::StopTokenId(id) => {
+                (!self.hidden_stop_token_ids.contains(&id)
+                    || self.user_stop_token_ids.contains(&id))
+                .then_some(StopReason::Int(i64::from(id)))
+            }
+            pb::finish_info::StopReason::EosTokenId(id) => self
+                .user_stop_token_ids
+                .contains(&id)
+                .then_some(StopReason::Int(i64::from(id))),
+            pb::finish_info::StopReason::StopString(value) => Some(StopReason::String(value)),
         });
         mapped.completion_usage = Some(usage(self.prompt_tokens, completion_tokens));
         if self.mode.is_encode() {
@@ -1416,7 +1444,7 @@ impl ResponseState {
             }
             let params = finish
                 .ec_transfer_params
-                .map(struct_to_json)
+                .map(|value| struct_to_json_v14(value, PEER, EC_TRANSFER_PARAMS))
                 .transpose()?
                 .and_then(|value| value.as_object().cloned())
                 .ok_or_else(|| {
@@ -1424,7 +1452,14 @@ impl ResponseState {
                 })?;
             return Ok(Some(LLMEngineOutput::encode_terminal(params)));
         }
-        mapped.disaggregated_params = finish.kv_transfer_params.map(struct_to_json).transpose()?;
+        if self.mode.is_prefill() && reason == pb::finish_info::FinishReason::Aborted {
+            self.attach_prompt_data(&mut mapped);
+            return Ok(Some(mapped));
+        }
+        mapped.disaggregated_params = finish
+            .kv_transfer_params
+            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS))
+            .transpose()?;
         if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
                 "prefill terminal is missing kv_transfer_params",
@@ -1623,15 +1658,7 @@ fn normalize_logprob(logprob: f32) -> f64 {
 }
 
 #[cfg(test)]
-mod candidate_tests {
-    use super::{pb, top_n_candidates};
+mod request_tests;
 
-    #[test]
-    fn full_vocabulary_logprobs_select_all_candidates() {
-        let candidates = top_n_candidates(u32::MAX).expect("map full vocabulary");
-        assert_eq!(
-            candidates.select,
-            Some(pb::candidate_tokens::Select::All(true))
-        );
-    }
-}
+#[cfg(test)]
+mod response_tests;

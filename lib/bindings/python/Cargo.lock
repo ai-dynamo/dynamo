@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.202609270000000058"
+version = "0.13.0-dev.202610060000000067"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99962e31b088bcf6c8cce4cb71a55facadafc08f6e50d6fee3f76bd7d738cbec"
+checksum = "baa4fe3c1314053a9e439cd7a7595aec5fb2b22af0ae43d48687179846e7ed32"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -285,9 +285,9 @@ checksum = "4288f83726785267c6f2ef073a3d83dc3f9b81464e9f99898240cced85fce35a"
 
 [[package]]
 name = "async-openai"
-version = "0.41.1"
+version = "0.42.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3007014661d5b98168b7b6f1014147bce8b1362a194783543eeb9f6117a20be9"
+checksum = "63077bf55857e6963effefb5f28134c40cc2ee68bc176cc601bbdeb070017fba"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -468,9 +468,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.17.0"
+version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ec2f1fc3ec205783a5da9a7e6c1509cc69dedf09a1949e412c1e18469326d00"
+checksum = "b281d307588d634de920874890732659e2e7672f72b5e10e81badc1a8a83621e"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -478,14 +478,15 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.41.0"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2f9779ce85b93ab6170dd940ad0169b5766ff848247aff13bb788b832fe3f4"
+checksum = "9bff6c3b54fad79a2e60b8102caf565819711497c1f5f092f49508e2f5c31b27"
 dependencies = [
  "cc",
  "cmake",
  "dunce",
  "fs_extra",
+ "pkg-config",
 ]
 
 [[package]]
@@ -1242,9 +1243,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.64"
+version = "1.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dad887fd958be91b5098c0248def011f4523ab786cd411be668777e55063501f"
+checksum = "a3eb0f42d6c360dc3f8a821f6bf2fdea7f72bfd36b3076eb0e6d1e9e0752fff4"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -2157,6 +2158,7 @@ dependencies = [
  "blake3",
  "chrono",
  "crossbeam-queue",
+ "crossbeam-utils",
  "dashmap",
  "derive_builder",
  "dynamo-kv-hashing",
@@ -2262,6 +2264,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "parking_lot",
+ "percent-encoding",
  "prometheus",
  "prost 0.13.5",
  "rand 0.9.4",
@@ -2321,7 +2324,6 @@ dependencies = [
  "blake3",
  "bytes",
  "dashmap",
- "derive_builder",
  "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-tokens",
@@ -2346,9 +2348,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "9.0.0"
+version = "10.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e316d4d0f5082257f1629ca61973eafc17cee3e6ee0c24f7a55a61beeff40d97"
+checksum = "1564d5bbb66372f478df3f9158df8071b45c523ca4e07b4f82a4ac257038c962"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2357,6 +2359,7 @@ dependencies = [
  "futures",
  "num-traits",
  "openai-harmony",
+ "percent-encoding",
  "regex",
  "rustpython-ruff_python_ast",
  "rustpython-ruff_python_parser",
@@ -2369,13 +2372,13 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.5.3"
+version = "0.7.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3dba2a81c6382dc217fb4caa2b5b03a7e80d5bda6694a3c002ee9eeefa84336"
+checksum = "f43e47b6a68353cc04d4dfe19c69414a5884c9963b72c68937d019998c5ef72e"
 dependencies = [
  "anyhow",
- "num-traits",
  "openai-harmony",
+ "percent-encoding",
  "regex",
  "serde",
  "serde_json",
@@ -2386,9 +2389,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "6.1.0"
+version = "8.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ef02e31ca224ca8db24b88a990b7db3eb2b99c77697b0d8ae44feaa32709e38"
+checksum = "aca812fe988abff693c44c158147bae058f3051c0585570c2d59cf61d1253e5b"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2449,9 +2452,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "5.4.0"
+version = "8.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06464b1deb9b6e185476e2e4280cbbbc5f16d0d6fd8732ff8b5732d43ec0567b"
+checksum = "9dc3c1f04389ad78e3f9dad14360a191c27f3e3f574aba108b9986f5592cfea3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2496,7 +2499,6 @@ dependencies = [
  "bytes",
  "chrono",
  "crossbeam-queue",
- "cudarc",
  "dashmap",
  "derive-getters",
  "derive_builder",
@@ -2519,6 +2521,7 @@ dependencies = [
  "nix 0.30.1",
  "notify",
  "nuid",
+ "nvtx",
  "once_cell",
  "opentelemetry",
  "opentelemetry-appender-tracing",
@@ -2568,12 +2571,15 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
+ "prost-types 0.13.5",
  "rand 0.9.4",
  "reqwest 0.12.28",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-util",
@@ -2587,10 +2593,16 @@ dependencies = [
 name = "dynamo-sidecar-common"
 version = "1.6.0"
 dependencies = [
+ "anyhow",
  "clap",
  "dynamo-backend-common",
+ "dynamo-runtime",
  "futures",
+ "prost-types 0.13.5",
+ "prost-types 0.14.4",
+ "serde_json",
  "tokio",
+ "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
  "tracing",
@@ -2599,9 +2611,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.9.1"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd9116db4a17d4ac186a13719b1eea8b41669cec2d95c8c93363869c9163c8aa"
+checksum = "b2bee9c4bcbcb9c498d03199d4ec6738cc0a9f861463074369fc3f7352539e44"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2647,6 +2659,8 @@ dependencies = [
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-util",
@@ -2983,9 +2997,9 @@ dependencies = [
 
 [[package]]
 name = "ffmpeg-next"
-version = "8.1.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7c4bd5ab1ac61f29c634df1175d350ded29cf74c3c6d4f7030431a5ae3c7d5d"
+checksum = "6380599799e175191eb7ffe82c97f36a2a90a36cbc54c738a903e5287d7f516a"
 dependencies = [
  "bitflags 2.13.0",
  "ffmpeg-sys-next",
@@ -2994,9 +3008,9 @@ dependencies = [
 
 [[package]]
 name = "ffmpeg-sys-next"
-version = "8.1.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a314bc0e022a33a99567ed4bd2576bd58ffd8fcff7891c29194cfecc26a62547"
+checksum = "9b939bf79dd5949412a4b81cfe21a07f48ea21b47fcbb5f57816c8c2de5ae30b"
 dependencies = [
  "bindgen 0.72.1",
  "cc",
@@ -3041,9 +3055,9 @@ dependencies = [
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.9"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "fixedbitset"
@@ -5096,9 +5110,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-client"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56f80d83a885aff05ce27544fec671fa9c166535e4a76b88f369b02be0ff88ca"
+checksum = "2d5ea46d6a1be36ff6d52ab9ac1f08ed90c52342d697d2c349c5c5ca9881bfa8"
 dependencies = [
  "anyhow",
  "clap",
@@ -5117,9 +5131,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-common"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b929b0c7d8515819f7858d809620afdee4cb2e37cdefc328cbbfd1f3466c698"
+checksum = "e19ac9f6a3c3fb57a33c5478c9487d1eb274fd88fc6a6c955dd84db368f3ba0d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5557,6 +5571,15 @@ name = "number_prefix"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
+
+[[package]]
+name = "nvtx"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad2e855e8019f99e4b94ac33670eb4e4f570a2e044f3749a0b2c7f83b841e52c"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "objc2"
@@ -7463,9 +7486,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.40"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -7537,9 +7560,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -9676,9 +9699,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "video-rs"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2633ec4c2a8aeb7c0e970f75ba99122a75841e9f7b34d5225366d0e61a870a8c"
+checksum = "aa25096b140b3015e39eb6db66a9dfd0d326a6e3cf952d848f5997c0e9546e53"
 dependencies = [
  "ffmpeg-next",
  "tracing",

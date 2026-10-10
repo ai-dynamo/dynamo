@@ -88,6 +88,7 @@ areas:
   - components/src/dynamo/trtllm/utils/
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
+  - lib/mocker/servers/trtllm/
   - lib/sidecar/trtllm/
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
@@ -190,6 +191,7 @@ areas:
   - benchmarks/omni/
   - components/src/dynamo/common/multimodal/
   - examples/custom_encoder/
+  - examples/nemotron_speech_cascaded_pipeline/
   - components/src/dynamo/trtllm/multimodal/
   - components/src/dynamo/vllm/multimodal_handlers/
   - components/src/dynamo/vllm/multimodal_utils/
@@ -207,6 +209,7 @@ areas:
 - label: planner
   github_team: '@ai-dynamo/dynamo-planner-codeowners'
   path_globs:
+  - components/src/dynamo/aisimulate/
   - components/src/dynamo/global_planner/
   - components/src/dynamo/global_planner/tests/
   - components/src/dynamo/planner/
@@ -221,6 +224,7 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - examples/power-aware-budget/
+  - gyms/planner-gym/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
@@ -241,6 +245,7 @@ areas:
   - lib/sidecar/dynamo-sidecar
   - lib/sidecar/README.md
   - lib/sidecar/common/
+  - lib/sidecar/testkit/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
@@ -423,14 +428,19 @@ areas:
   - deploy/utils/manifests/
   - deploy/utils/tests/
   - examples/deployments/
+  - examples/gpu-sharing/
   - tests/deploy/
+- label: lpx
+  github_team: '@ai-dynamo/dynamo-lpx-codeowners'
+  path_globs:
+  - deploy/operator/internal/controller/lpx/
+  - deploy/operator/internal/dynamo/lpx/
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
   - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
   - components/src/dynamo/common/tests/test_snapshot*
-  - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/gms/
   - lib/gpu_memory_service/
@@ -454,6 +464,7 @@ areas:
   path_globs:
   - components/src/dynamo/tokenspeed/
   - components/src/dynamo/tokenspeed/tests/
+  - examples/backends/tokenspeed/
 - label: rl
   github_team: '@ai-dynamo/dynamo-rl-codeowners'
   path_globs:
@@ -858,6 +869,10 @@ shared:
   owners:
   - performance
   - planner
+- glob: components/src/dynamo/aisimulate/output/dgd/
+  owners:
+  - planner
+  - operator
 - glob: components/src/dynamo/planner/connectors/kubernetes.py
   owners:
   - planner
@@ -947,10 +962,18 @@ shared:
   owners:
   - operator
   - planner
-- glob: deploy/operator/internal/gpu/discovery.go
+- glob: deploy/operator/internal/controller/lpx/
   owners:
   - operator
-  - observability
+  - lpx
+- glob: deploy/operator/internal/dynamo/lpx/
+  owners:
+  - operator
+  - lpx
+- glob: deploy/**/*lpx*
+  owners: [operator]
+- glob: deploy/helm/**/*lpx*
+  owners: [operator, lpx]
 - glob: deploy/operator/internal/controller/*checkpoint*
   owners:
   - operator
@@ -1056,10 +1079,22 @@ shared:
   owners:
   - performance
   - backend-sglang
+- glob: lib/mocker/servers/trtllm/
+  owners:
+  - performance
+  - backend-trtllm
 - glob: lib/runtime/src/nvtx.rs
   owners:
   - runtime
   - performance
+- glob: lib/sidecar/testkit/tests/support/vllm.rs
+  owners:
+  - runtime
+  - backend-vllm
+- glob: lib/sidecar/testkit/tests/support/sglang.rs
+  owners:
+  - runtime
+  - backend-sglang
 - glob: tests/deploy/
   owners:
   - ops
