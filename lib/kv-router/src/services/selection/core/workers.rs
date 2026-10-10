@@ -8,6 +8,8 @@ use std::collections::HashSet;
 
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
+use crate::indexer::RESIDENT_BLOCK_COUNTS_POLL_INTERVAL;
+use crate::plugins::worker_selection::WorkerInputs;
 use crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 impl SelectionCore {
@@ -324,7 +326,7 @@ impl SelectionCore {
                         block_size,
                     ))
                 });
-                let selector = (self.worker_selection_policy_factory)(
+                let mut selector = (self.worker_selection_policy_factory)(
                     &self.kv_router_config,
                     self.worker_type,
                     key.as_ref(),
@@ -333,6 +335,17 @@ impl SelectionCore {
                     .kv_router_config
                     .policy_profile(Some(&key.model_name))
                     .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
+                // Poll this partition's indexer only for a policy that reads the counts.
+                if selector
+                    .declared_inputs()
+                    .contains(WorkerInputs::RESIDENT_BLOCKS)
+                    && let Some(counts) = indexer.spawn_resident_block_counts_poller(
+                        RESIDENT_BLOCK_COUNTS_POLL_INTERVAL,
+                        self.cancel_token.child_token(),
+                    )
+                {
+                    selector = selector.with_resident_block_counts(counts);
+                }
                 let scheduler = LocalScheduler::new(
                     slots,
                     workers_rx,

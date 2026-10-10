@@ -734,6 +734,79 @@ fn capturing_policy_factory() -> (
     (factory, observed)
 }
 
+/// Picker that records the resident block count of row 0 and takes it.
+struct ResidentBlocksRecorder {
+    observed: Arc<parking_lot::Mutex<Vec<Option<u64>>>>,
+}
+
+impl crate::scheduling::selector::WorkerPicker for ResidentBlocksRecorder {
+    fn required_worker_inputs(&self) -> crate::scheduling::selector::WorkerInputs {
+        crate::scheduling::selector::WorkerInputs::CACHE
+            | crate::scheduling::selector::WorkerInputs::RESIDENT_BLOCKS
+    }
+
+    fn pick(
+        &mut self,
+        _context: &crate::scheduling::selector::WorkerSelectionContext<'_>,
+        input: crate::scheduling::selector::WorkerInputView<'_>,
+    ) -> Result<usize, crate::scheduling::WorkerSelectionPolicyError> {
+        self.observed.lock().push(input.resident_blocks(0));
+        Ok(0)
+    }
+}
+
+#[tokio::test]
+async fn declaring_policy_reads_polled_resident_blocks() {
+    let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let factory_observed = Arc::clone(&observed);
+    let factory: WorkerSelectionPolicyFactory = Arc::new(move |config, worker_type, _partition| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type.as_str(),
+            Vec::new(),
+            Box::new(ResidentBlocksRecorder {
+                observed: Arc::clone(&factory_observed),
+            }),
+        )
+    });
+    let core = core_with(
+        test_config(true),
+        SelectionHost::default(),
+        Some(factory),
+        WorkerType::Aggregated,
+        None,
+    );
+    core.upsert_worker(worker_with_kv_events(1))
+        .await
+        .expect("worker upsert");
+    let entry = core.entry(&default_key()).expect("entry");
+    entry
+        .indexer
+        .apply_event_routed(store_event(
+            1,
+            0,
+            1,
+            &[],
+            &[11, 12, 13],
+            StorageTier::Device,
+        ))
+        .await
+        .unwrap();
+
+    // The partition's poller publishes in the background, so select until the count arrives.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            core.select(select_request()).await.expect("select");
+            if observed.lock().last() == Some(&Some(3)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a declaring policy should read the polled count");
+}
+
 type SharedCacheCalls = Arc<parking_lot::Mutex<Vec<(Vec<u32>, u32, Option<String>)>>>;
 
 /// Shared cache that reports every block as a hit and records each query.

@@ -370,7 +370,7 @@ Each worker policy is constructed once per routing partition. An empty bundle re
 
 Worker identity and ordinary request metadata are always available. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
 
-Routing cache resources start only if a component requests `CACHE`. `serve_indexer` and `enable_session_prefix_index` also require `CACHE`.
+Routing cache resources start only if a component requests `CACHE`. `serve_indexer` and `enable_session_prefix_index` also require `CACHE`, and the frontend rejects `RESIDENT_BLOCKS` without `CACHE`.
 
 ### Request Context
 
@@ -446,12 +446,15 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
+| `RESIDENT_BLOCKS` | `resident_blocks()` | Blocks the router's indexer tracks for the worker rank, including cached blocks no running request uses; refreshed at most every 100 ms and not clamped to capacity |
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
 A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
 
 `WorkerCandidate::preferred_taint_multiplier()` and `ScoredWorkerCandidate::preferred_taint_multiplier()` return the optional cost multiplier from preferred routing constraints. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading the multiplier. Without that declaration, the component receives `None`, even when another component requested the multiplier. Exact hard-pinned requests also do not materialize it. Required routing constraints remain host-enforced eligibility rules.
+
+`WorkerCandidate::resident_blocks()` and `WorkerInputView::resident_blocks(row)` return how many blocks the router's indexer tracks for the worker rank, including cached blocks no running request uses; use `LOAD` for work in flight. The router refreshes the counts off the request path at most every 100 ms, later while the indexer is backlogged, so they miss routing decisions made since the last refresh. Every component sees the same counts during one selection. With KV events, the count is the device-tier blocks the indexer currently tracks from engine events. With approximate routing, it is the blocks routed to the rank within the TTL, or the distinct full blocks the LRU cache policy retains, which leaves out its partial tail blocks and duplicate copies. The count is unweighted and not clamped to `total_kv_blocks`. A rank with no tracked blocks reads `0`, including a rank the indexer has no data for yet, such as a worker whose first KV events have not arrived. A component that did not request `WorkerInputs::RESIDENT_BLOCKS` receives `None`, and so does every component before the first refresh completes, with a remote indexer, or after the indexer stops answering. The frontend rejects a policy that requests `RESIDENT_BLOCKS` without `CACHE`, because the counts come from the indexer that `CACHE` starts. With KV events every router replica sees the same counts; with approximate routing each replica counts only the requests it routed.
 
 ## Link the Policy Into Dynamo
 

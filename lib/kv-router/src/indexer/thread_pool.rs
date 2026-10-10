@@ -599,6 +599,38 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         WorkerLookupStats::from_worker_block_counts(worker_blocks)
     }
 
+    /// Like [`Self::worker_lookup_stats`], but fails if an event thread is gone, so a caller
+    /// never mistakes a dead thread's ranks for empty ones. Each rank lives on one thread.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    pub(crate) async fn try_worker_lookup_stats(&self) -> Result<WorkerLookupStats, KvRouterError> {
+        let mut receivers = Vec::with_capacity(self.worker_event_channels.len());
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            channel
+                .send(WorkerTask::Stats(resp_tx))
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            receivers.push(resp_rx);
+        }
+        let mut worker_blocks = Vec::new();
+        for (channel, mut receiver) in self.worker_event_channels.iter().zip(receivers) {
+            // A lane that dies with this request queued neither answers nor drops it, since our
+            // own senders keep the queue alive, so check for the dead lane while waiting.
+            let stats = loop {
+                match tokio::time::timeout(std::time::Duration::from_millis(50), &mut receiver)
+                    .await
+                {
+                    Ok(reply) => break reply.map_err(|_| KvRouterError::IndexerDroppedRequest)?,
+                    Err(_) if channel.is_disconnected() => {
+                        return Err(KvRouterError::IndexerOffline);
+                    }
+                    Err(_) => {}
+                }
+            };
+            worker_blocks.extend(stats.worker_blocks);
+        }
+        Ok(WorkerLookupStats { worker_blocks })
+    }
+
     pub async fn get_workers(&self) -> Vec<WorkerId> {
         self.worker_lookup_stats()
             .await
@@ -1574,6 +1606,27 @@ mod tests {
         indexer.flush().await;
         assert_score(&indexer, &[10], rank0, 1).await;
         assert_score(&indexer, &[20], rank1, 1).await;
+    }
+
+    #[tokio::test]
+    async fn strict_stats_fail_when_a_lane_dies_with_the_request_queued() {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        // Keep lane 0 busy so the stats request queues behind its Terminate.
+        for block in 0..20_000u64 {
+            indexer
+                .apply_event(make_store_event_with_dp_rank(7, &[block, block + 1], 0))
+                .await;
+        }
+        indexer.worker_event_channels[0]
+            .send(WorkerTask::Terminate)
+            .unwrap();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            indexer.try_worker_lookup_stats(),
+        )
+        .await
+        .expect("a dead lane must not hang the read");
+        assert!(read.is_err());
     }
 
     #[tokio::test]

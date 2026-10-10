@@ -24,6 +24,8 @@ Declare `WorkerInputs::CACHE` to read cache data through `candidate.cache()` (fi
 
 Preferred routing taints are optional candidate metadata. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading `preferred_taint_multiplier()` from a candidate; otherwise, that component receives `None`, even if another component requested it. Exact hard-pinned requests also do not materialize it. Required routing taints remain Dynamo eligibility rules.
 
+Declare `WorkerInputs::RESIDENT_BLOCKS` to read `resident_blocks()` from a candidate, or `input.resident_blocks(row)` in a picker. It returns how many blocks the router's indexer tracks for that worker rank, including cached blocks no running request uses, refreshed in the background. Without the declaration, before the first refresh, or with a remote indexer, it returns `None`. The frontend also requires `CACHE` when a policy requests `RESIDENT_BLOCKS`.
+
 ## Pick a Starting Point
 
 | Crate | Use it for |

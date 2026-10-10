@@ -15,8 +15,8 @@ use crate::config::{ApproximateCachePolicyKind, KvRouterConfig};
 use crate::indexer::{
     ApproximateLruIncarnation, ApproximateLruStats, ApproximateRetentionConfig, KvIndexer,
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers, LowerTierQueryOptions,
-    MatchDetails, RoutingDecisionHashes, SyncIndexer, TieredMatchDetails, TieredMatchProvider,
-    record_unsupported_residency_event,
+    MatchDetails, ResidentBlockCounts, ResidentBlockCountsHandle, RoutingDecisionHashes,
+    SyncIndexer, TieredMatchDetails, TieredMatchProvider, record_unsupported_residency_event,
 };
 use crate::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEventData, LocalBlockHash, OverlapScores,
@@ -870,6 +870,62 @@ impl Indexer {
             Self::Remote { .. } | Self::None => Ok(ApproximateLruStats::default()),
         }
     }
+
+    /// Distinct blocks the primary holds for each worker rank, or `None` without a
+    /// local primary. The read queues behind pending events, so keep it off the
+    /// request path.
+    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+    async fn resident_block_counts(&self) -> Result<Option<ResidentBlockCounts>, KvRouterError> {
+        let stats = match self {
+            Self::Single { primary, .. } => primary.worker_lookup_stats().await?,
+            Self::Concurrent { primary, .. } => primary.try_worker_lookup_stats().await?,
+            Self::Remote { .. } | Self::None => return Ok(None),
+        };
+        Ok(Some(stats.into()))
+    }
+
+    /// Republish [`Self::resident_block_counts`] every `interval` until `cancel` fires or the
+    /// primary stops answering, then withdraw them. `None` without a local primary.
+    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+    pub(crate) fn spawn_resident_block_counts_poller(
+        &self,
+        interval: Duration,
+        cancel: CancellationToken,
+    ) -> Option<ResidentBlockCountsHandle> {
+        if !matches!(self, Self::Single { .. } | Self::Concurrent { .. }) {
+            return None;
+        }
+        let handle = ResidentBlockCountsHandle::default();
+        let published = handle.clone();
+        let indexer = self.clone();
+        tokio::spawn(async move {
+            let poll = async {
+                let mut ticks = tokio::time::interval(interval);
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    ticks.tick().await;
+                    match indexer.resident_block_counts().await {
+                        Ok(Some(counts)) => published.publish(counts),
+                        Ok(None) => return,
+                        Err(error) => {
+                            // Debug: the indexer logs its own failure, and an ordinary shutdown
+                            // can stop the indexer before this task's cancel fires.
+                            tracing::debug!(%error, "Stopped publishing resident block counts");
+                            return;
+                        }
+                    }
+                }
+            };
+            // Biased, so a cancel that races a read failed by the same shutdown wins.
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {}
+                _ = poll => {}
+            }
+            published.clear();
+        });
+        Some(handle)
+    }
 }
 
 #[async_trait]
@@ -1298,6 +1354,12 @@ mod tests {
             );
             let flat = indexer.find_matches(sequence).await.unwrap();
             assert_eq!(flat.scores.get(&worker).copied(), Some(2));
+            let counts = indexer.resident_block_counts().await.unwrap().unwrap();
+            assert_eq!(
+                counts.get(worker),
+                2,
+                "{num_threads} thread(s): routed prefix"
+            );
 
             // The recorded prefix is dumped like any other primary state, so a
             // recovering peer inherits it.
@@ -1580,6 +1642,112 @@ mod tests {
                 "clear metric mismatch for {num_threads} indexer thread(s)"
             );
         }
+    }
+
+    async fn wait_until(mut done: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !done() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("condition not reached");
+    }
+
+    #[tokio::test]
+    async fn resident_block_counts_track_each_rank() {
+        use crate::protocols::compute_seq_hash_for_block;
+        use crate::test_utils::make_store_event_with_dp_rank;
+
+        for num_threads in [1, 4] {
+            let indexer = create_indexer(16, num_threads);
+            for event in [
+                make_store_event_with_dp_rank(1, &[1, 2, 3], 0),
+                // A repeated store must not count its blocks twice.
+                make_store_event_with_dp_rank(1, &[1, 2, 3], 0),
+                make_store_event_with_dp_rank(1, &[1, 2], 1),
+                make_store_event_with_dp_rank(2, &[1], 0),
+            ] {
+                indexer.apply_event(event).await;
+            }
+            let chain = [LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)];
+            let tail = ExternalSequenceBlockHash(compute_seq_hash_for_block(&chain)[2]);
+            indexer
+                .apply_event(crate::test_utils::remove_event(1, 1, 0, vec![tail]))
+                .await;
+            flush(&indexer).await;
+
+            let counts = indexer.resident_block_counts().await.unwrap().unwrap();
+            let held = |worker_id, dp_rank| counts.get(WorkerWithDpRank::new(worker_id, dp_rank));
+            assert_eq!(
+                [held(1, 0), held(1, 1), held(2, 0), held(3, 0)],
+                [2, 2, 1, 0],
+                "{num_threads} indexer thread(s)"
+            );
+
+            indexer.remove_worker_dp_rank(1, 1).await;
+            flush(&indexer).await;
+            let counts = indexer.resident_block_counts().await.unwrap().unwrap();
+            let held = |worker_id, dp_rank| counts.get(WorkerWithDpRank::new(worker_id, dp_rank));
+            assert_eq!(
+                [held(1, 0), held(1, 1)],
+                [2, 0],
+                "{num_threads} indexer thread(s)"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resident_block_counts_poller_publishes_then_withdraws() {
+        let indexer = create_indexer(16, 4);
+        let cancel = CancellationToken::new();
+        let handle = indexer
+            .spawn_resident_block_counts_poller(Duration::from_millis(5), cancel.clone())
+            .expect("a local primary has counts to poll");
+        let worker = WorkerWithDpRank::new(1, 0);
+        // Store only after the first publish, so seeing it takes a later poll.
+        wait_until(|| handle.load().is_some()).await;
+        indexer
+            .apply_event(crate::test_utils::make_store_event_with_dp_rank(
+                1,
+                &[1, 2],
+                0,
+            ))
+            .await;
+        wait_until(|| handle.load().is_some_and(|counts| counts.get(worker) == 2)).await;
+
+        cancel.cancel();
+        wait_until(|| handle.load().is_none()).await;
+    }
+
+    #[tokio::test]
+    async fn resident_block_counts_poller_withdraws_when_the_primary_stops() {
+        for num_threads in [1, 4] {
+            let indexer = create_indexer(16, num_threads);
+            let handle = indexer
+                .spawn_resident_block_counts_poller(
+                    Duration::from_millis(5),
+                    CancellationToken::new(),
+                )
+                .expect("a local primary has counts to poll");
+            wait_until(|| handle.load().is_some()).await;
+            match &indexer {
+                Indexer::Single { primary, .. } => primary.shutdown(),
+                Indexer::Concurrent { primary, .. } => primary.shutdown(),
+                Indexer::Remote { .. } | Indexer::None => unreachable!(),
+            }
+            // A dead primary reads as None, not as a frozen or all-zero snapshot.
+            wait_until(|| handle.load().is_none()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn resident_block_counts_need_a_local_primary() {
+        let indexer = Indexer::None;
+        assert!(indexer.resident_block_counts().await.unwrap().is_none());
+        let poller = indexer
+            .spawn_resident_block_counts_poller(Duration::from_millis(5), CancellationToken::new());
+        assert!(poller.is_none());
     }
 }
 
