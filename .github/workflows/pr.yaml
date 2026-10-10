@@ -38,7 +38,6 @@ jobs:
       vllm: ${{ steps.changes.outputs.vllm }}
       vllm_runtime: ${{ vars.FORCE_FULL_CI == 'true' || steps.changes.outputs.vllm_runtime != 'false' }}
       sglang: ${{ steps.changes.outputs.sglang }}
-      # Set repository variable FORCE_FULL_CI=true to bypass runtime admission.
       sglang_runtime: ${{ vars.FORCE_FULL_CI == 'true' || steps.changes.outputs.sglang_runtime != 'false' || (steps.changes.outputs.trtllm_disagg_router == 'true' && vars.RUN_MULTIGPU_TESTS != 'true') }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
       trtllm_runtime: ${{ vars.FORCE_FULL_CI == 'true' || steps.changes.outputs.trtllm_runtime != 'false' }}
