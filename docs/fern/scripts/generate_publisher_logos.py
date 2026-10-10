@@ -99,6 +99,7 @@ SOURCES: dict[str, str] = {
     "Spheron": "www.spheron.network",
     "Together AI": "www.together.ai",
     "VAST Data": "www.vastdata.com",
+    "Viettel Cloud": "viettelcloud.vn",
     "Vultr": "www.vultr.com",
     "WEKA": "www.weka.io",
     "dstack": "dstack.ai",
