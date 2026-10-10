@@ -211,7 +211,13 @@ class GMSWorker(_BaseWorker):
         return available
 
     def _determine_available_memory_before_gms_publish(self) -> int:
+        """Use vLLM for explicit KV sizes; otherwise measure scratch-KV capacity."""
         if not is_scratch_kv_enabled():
+            return super().determine_available_memory()
+
+        if self.cache_config.kv_cache_memory_bytes:
+            # An explicit KV size is a constant, not a measurement: delegating
+            # keeps a GMS writer and a GMS importer on the same layout.
             return super().determine_available_memory()
 
         import vllm.envs as envs
