@@ -27,6 +27,34 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Source340 needs the reproducible Node24 patch; no lockfile exception is allowed.
+  PR340_SOURCE_CHECK: |
+    import hashlib, json, os, pathlib, subprocess
+    source = "8e9457620f44e0cfc0aa4bb87fc7341f7758118f"
+    def git(*args):
+        return subprocess.check_output(["git", *args])
+    assert os.environ["HOOK_SOURCE_SHA"] == source
+    assert git("rev-parse", "HEAD").decode().strip() == source
+    for tool, expected in (("node", "v24.13.0"), ("npm", "11.6.2")):
+        actual = subprocess.check_output([tool, "--version"]).decode().strip()
+        print(json.dumps({"tool": tool, "expected": expected, "actual": actual}), flush=True)
+        assert actual == expected
+    assert not git("ls-files", "--others", "--exclude-standard").strip()
+    subprocess.run(["git", "diff", "--exit-code", "HEAD", "--", ".",
+                    ":!packages/k8s/tests/test-kind.yaml"], check=True)
+    kind = "packages/k8s/tests/test-kind.yaml"
+    assert not git("diff", "--summary", "HEAD", "--", kind).strip()
+    original = git("show", source + ":" + kind)
+    actual = pathlib.Path(kind).read_bytes()
+    assert actual in (original, original.replace(b"{{PATHTOREPO}}", os.getcwd().encode()))
+    paths = [".github/workflows/build.yaml", "package.json", "package-lock.json"]
+    paths += sorted(str(path) for path in pathlib.Path("packages").glob("*/package*.json"))
+    for path in paths:
+        original = git("show", source + ":" + path)
+        actual = pathlib.Path(path).read_bytes()
+        print(json.dumps({"path": path, "original_sha256": hashlib.sha256(original).hexdigest(),
+                          "actual_sha256": hashlib.sha256(actual).hexdigest()}), flush=True)
+        assert actual == original
   HOOK_SOURCE_SHA: ${{ inputs.source == 'base' && 'd4731a43a2fe1a4d4f7ea24dc515a1a120a065c8' || inputs.source == 'timings' && '73d34cbebe8e647813e67f7fc768d2771b39aa06' || inputs.source == 'file-chmod' && '46faf02ef2fda46002c4ac3f8a51d3f2a1621a5c' || inputs.source == 'pr340' && '8e9457620f44e0cfc0aa4bb87fc7341f7758118f' || inputs.source == 'metadata-stat' && '15238c0d1d1dfa70811540518994bb435bc64787' || '' }}
   HOOK_WORKFLOW_SHA256: ${{ inputs.source == 'pr340' && '1f1ae324b183fed6fcd2486fb8bf33e483d51ab3c2322e9d8c9b2b9a83ffba35' || 'ac9df6264ddbc8b58faf58215ac2622cbe1999ab5cc6d3bd2d8a243b880af63a' }}
   EXPECTED_WRAPPER_HEAD: ${{ inputs.expected_head }}
@@ -54,7 +82,8 @@ jobs:
             d4731a43a2fe1a4d4f7ea24dc515a1a120a065c8|73d34cbebe8e647813e67f7fc768d2771b39aa06|46faf02ef2fda46002c4ac3f8a51d3f2a1621a5c|8e9457620f44e0cfc0aa4bb87fc7341f7758118f|15238c0d1d1dfa70811540518994bb435bc64787) ;;
             *) echo 'Source is outside the frozen allowlist' >&2; exit 1 ;;
           esac
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - id: source_checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           repository: actions/runner-container-hooks
           ref: ${{ env.HOOK_SOURCE_SHA }}
@@ -73,8 +102,11 @@ jobs:
           sha256sum .github/workflows/build.yaml package*.json packages/*/package*.json
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
         with:
-          node-version: 24
+          node-version: ${{ inputs.source == 'pr340' && '24.13.0' || '24' }}
           package-manager-cache: false  # No shared cache reads or writes.
+      - name: Verify source340 tools and pristine source
+        if: inputs.source == 'pr340'
+        run: python3 -I -c "$PR340_SOURCE_CHECK"
       - run: node --version && npm --version
         name: Log Node and npm versions
         if: inputs.source != 'pr340'
@@ -82,14 +114,23 @@ jobs:
         name: Install dependencies
       - run: npm run bootstrap
         name: Bootstrap the packages
+      - name: Verify source340 after bootstrap
+        if: inputs.source == 'pr340'
+        run: python3 -I -c "$PR340_SOURCE_CHECK"
       - run: npm run build-all
         name: Build packages
+      - name: Verify source340 after build
+        if: inputs.source == 'pr340'
+        run: python3 -I -c "$PR340_SOURCE_CHECK"
       - run: npm run format-check
         name: Check formatting
       - name: Check linter
         run: |
           npm run lint
           git diff --exit-code -- . ':!packages/k8s/tests/test-kind.yaml'
+      - name: Verify source340 after validation
+        if: always() && !cancelled() && inputs.source == 'pr340' && steps.source_checkout.outcome == 'success'
+        run: python3 -I -c "$PR340_SOURCE_CHECK"
 
   docker-tests:
     name: Docker Hook Tests
@@ -97,7 +138,8 @@ jobs:
     timeout-minutes: 60
     needs: format-and-lint
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - id: source_checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           repository: actions/runner-container-hooks
           ref: ${{ env.HOOK_SOURCE_SHA }}
@@ -116,8 +158,11 @@ jobs:
           sha256sum .github/workflows/build.yaml package*.json packages/*/package*.json
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
         with:
-          node-version: 24
+          node-version: ${{ inputs.source == 'pr340' && '24.13.0' || '24' }}
           package-manager-cache: false  # No shared cache reads or writes.
+      - name: Verify source340 tools and pristine source
+        if: inputs.source == 'pr340'
+        run: python3 -I -c "$PR340_SOURCE_CHECK"
       - run: node --version && npm --version
         name: Log Node and npm versions
         if: inputs.source != 'pr340'
@@ -125,10 +170,19 @@ jobs:
         name: Install dependencies
       - run: npm run bootstrap
         name: Bootstrap the packages
+      - name: Verify source340 after bootstrap
+        if: inputs.source == 'pr340'
+        run: python3 -I -c "$PR340_SOURCE_CHECK"
       - run: npm run build-all
         name: Build packages
+      - name: Verify source340 after build
+        if: inputs.source == 'pr340'
+        run: python3 -I -c "$PR340_SOURCE_CHECK"
       - name: Run Docker tests
         run: npm run test --prefix packages/docker
+      - name: Verify source340 after validation
+        if: always() && !cancelled() && inputs.source == 'pr340' && steps.source_checkout.outcome == 'success'
+        run: python3 -I -c "$PR340_SOURCE_CHECK"
 
   k8s-tests:
     name: Kubernetes Hook Tests
@@ -136,7 +190,8 @@ jobs:
     timeout-minutes: 60
     needs: format-and-lint
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - id: source_checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           repository: actions/runner-container-hooks
           ref: ${{ env.HOOK_SOURCE_SHA }}
@@ -155,8 +210,11 @@ jobs:
           sha256sum .github/workflows/build.yaml package*.json packages/*/package*.json
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
         with:
-          node-version: 24
+          node-version: ${{ inputs.source == 'pr340' && '24.13.0' || '24' }}
           package-manager-cache: false  # No shared cache reads or writes.
+      - name: Verify source340 tools and pristine source
+        if: inputs.source == 'pr340'
+        run: python3 -I -c "$PR340_SOURCE_CHECK"
       - run: sed -i "s|{{PATHTOREPO}}|$(pwd)|" packages/k8s/tests/test-kind.yaml
         name: Setup kind cluster yaml config
       - uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3  # v1.12.0
@@ -169,7 +227,16 @@ jobs:
         name: Install dependencies
       - run: npm run bootstrap
         name: Bootstrap the packages
+      - name: Verify source340 after bootstrap
+        if: inputs.source == 'pr340'
+        run: python3 -I -c "$PR340_SOURCE_CHECK"
       - run: npm run build-all
         name: Build packages
+      - name: Verify source340 after build
+        if: inputs.source == 'pr340'
+        run: python3 -I -c "$PR340_SOURCE_CHECK"
       - name: Run Kubernetes tests
         run: npm run test --prefix packages/k8s
+      - name: Verify source340 after validation
+        if: always() && !cancelled() && inputs.source == 'pr340' && steps.source_checkout.outcome == 'success'
+        run: python3 -I -c "$PR340_SOURCE_CHECK"
