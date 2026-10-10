@@ -5551,6 +5551,7 @@ def test_kvwarm_native_grid_numbering_preserves_each_execution(
         stub._bench_decode_capture_sizes = []
         stub._bench_decode_cudagraph_mode = "NONE"
         stub._bench_cudagraph_capture_sizes = []
+        stub._bench_vocab_size = 0
         config = KVCacheConfig(
             num_blocks=num_blocks,
             kv_cache_tensors=[],
@@ -5577,6 +5578,7 @@ def test_kvwarm_native_grid_numbering_preserves_each_execution(
         stub._fpm_dp_rank = rank
         stub._bench_active_req_ids = set()
         stub._bench_current_point = None
+        stub._bench_results = []
         stub._bench_drain_pending = False
         stub._bench_phase = _BenchPhase.DECODE_SWEEP
         stub._bench_start_timing = lambda: None
