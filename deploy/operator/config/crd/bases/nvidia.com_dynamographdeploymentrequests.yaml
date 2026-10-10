@@ -9507,6 +9507,420 @@ spec:
       storage: true
       subresources:
         status: {}
+    - additionalPrinterColumns:
+        - jsonPath: .spec.modelRef.name
+          name: Model
+          type: string
+        - jsonPath: .status.activeRunRef.name
+          name: Active Run
+          type: string
+        - jsonPath: .status.conditions[?(@.type=="Accepted")].status
+          name: Accepted
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1beta2
+      schema:
+        openAPIV3Schema:
+          description: DynamoGraphDeploymentRequest is the Schema for replay-backed deployment searches.
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+              properties:
+                backends:
+                  description: Backends lists one or more inference backends searched by Sweeper and used by generated candidates.
+                  items:
+                    description: Backend identifies an inference backend searched by Sweeper and used by generated candidates.
+                    enum:
+                      - vllm
+                      - sglang
+                      - trtllm
+                    type: string
+                  minItems: 1
+                  type: array
+                hardware:
+                  description: Hardware bounds the accelerator configurations evaluated by the search.
+                  properties:
+                    gpu:
+                      description: GPU describes accelerator identity and the maximum allocation per candidate.
+                      properties:
+                        budget:
+                          description: Budget is the maximum total number of GPUs one candidate may use.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        sku:
+                          description: SKU identifies the accelerator using the Sweeper hardware catalog name.
+                          minLength: 1
+                          type: string
+                      required:
+                        - budget
+                        - sku
+                      type: object
+                  required:
+                    - gpu
+                  type: object
+                modelRef:
+                  description: ModelRef identifies the model whose deployment configurations are evaluated.
+                  properties:
+                    name:
+                      description: Name identifies the model in the syntax accepted by the selected backend.
+                      minLength: 1
+                      type: string
+                    revision:
+                      description: Revision pins repository contents. Backends that do not support revisions reject this field.
+                      type: string
+                  required:
+                    - name
+                  type: object
+                objective:
+                  description: Objective defines scalar optimization or a multi-objective Pareto search.
+                  properties:
+                    metric:
+                      description: Metric is the scalar target when mode is optimize.
+                      enum:
+                        - throughput
+                        - throughputPerGpu
+                        - throughputPerUser
+                        - e2eLatency
+                        - goodput
+                        - goodputPerGpu
+                      type: string
+                    metrics:
+                      description: |-
+                        Metrics lists two or more scalar targets when mode is pareto. Sweeper uses
+                        its default pair when omitted.
+                      items:
+                        description: ObjectiveMetric is a metric optimized by Sweeper.
+                        enum:
+                          - throughput
+                          - throughputPerGpu
+                          - throughputPerUser
+                          - e2eLatency
+                          - goodput
+                          - goodputPerGpu
+                        type: string
+                      minItems: 2
+                      type: array
+                    mode:
+                      description: Mode is optimize or pareto.
+                      enum:
+                        - optimize
+                        - pareto
+                      type: string
+                    sla:
+                      description: SLA defines per-request latency bounds used to calculate goodput.
+                      properties:
+                        e2eMs:
+                          description: E2EMs is an alternative end-to-end bound in milliseconds.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                        itlMs:
+                          description: ITLMs is the Inter-Token Latency bound in milliseconds.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                        ttftMs:
+                          description: TTFTMs is the Time To First Token bound in milliseconds.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                      type: object
+                      x-kubernetes-validations:
+                        - message: specify either e2eMs or both ttftMs and itlMs
+                          rule: 'has(self.e2eMs) ? (!has(self.ttftMs) && !has(self.itlMs)) : (has(self.ttftMs) && has(self.itlMs))'
+                  required:
+                    - mode
+                  type: object
+                  x-kubernetes-validations:
+                    - message: optimize requires metric; pareto accepts only metrics
+                      rule: (self.mode == 'optimize' && has(self.metric) && !has(self.metrics)) || (self.mode == 'pareto' && !has(self.metric))
+                recommendation:
+                  description: Recommendation controls bounded projection into DGDC resources.
+                  properties:
+                    maxCandidates:
+                      default: 5
+                      description: MaxCandidates is the maximum number of DGDCs owned by one run. It does not limit internal trials.
+                      format: int32
+                      minimum: 1
+                      type: integer
+                  type: object
+                search:
+                  description: Search configures current Sweeper run control and implementation-owned dimensions.
+                  properties:
+                    budget:
+                      description: Budget maps directly to Sweeper's current SweepConfig.
+                      properties:
+                        candidatesPerRound:
+                          description: |-
+                            CandidatesPerRound is the target number of successful unique replay configurations
+                            in one branch round. When omitted, Sweeper uses ParallelEvaluations.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        maxEvaluationDuration:
+                          description: MaxEvaluationDuration is the timeout for one candidate replay.
+                          type: string
+                        maxRounds:
+                          description: MaxRounds is the maximum number of optimizer barrier rounds per resolved deployment-mode branch.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        parallelEvaluations:
+                          description: ParallelEvaluations is the replay worker-process fan-out.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                      required:
+                        - maxRounds
+                        - parallelEvaluations
+                      type: object
+                    parameters:
+                      description: |-
+                        Parameters contains current Sweeper fields whose nested schema is not copied into the CRD.
+                        The installed Sweeper validates it before evaluating candidates.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                  required:
+                    - budget
+                  type: object
+                workload:
+                  description: Workload defines exactly one traffic model used for every candidate evaluation.
+                  properties:
+                    static:
+                      description: Static defines one of Sweeper's synthetic workload shapes.
+                      properties:
+                        concurrency:
+                          description: Concurrency is a fixed closed-loop in-flight request cap.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        isl:
+                          description: ISL is the input sequence length in tokens.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        kvLoadRatio:
+                          description: |-
+                            KVLoadRatio derives concurrency from candidate KV capacity. A two-value range
+                            is supported only for a Pareto objective.
+                          items:
+                            type: number
+                          maxItems: 2
+                          minItems: 1
+                          type: array
+                        numRequestRatio:
+                          description: NumRequestRatio sets request count relative to the selected load.
+                          minimum: 1
+                          type: number
+                        osl:
+                          description: OSL is the output sequence length in tokens.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        requestRate:
+                          description: RequestRate is a fixed open-loop arrival rate in requests per second.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                      required:
+                        - isl
+                        - numRequestRatio
+                        - osl
+                      type: object
+                      x-kubernetes-validations:
+                        - message: exactly one of requestRate, concurrency, or kvLoadRatio must be specified
+                          rule: '(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) == 1'
+                    trace:
+                      description: Trace replays requests from an artifact.
+                      properties:
+                        format:
+                          default: mooncake
+                          description: Format identifies the trace decoder.
+                          minLength: 1
+                          type: string
+                        replay:
+                          description: Replay configures current Sweeper controls for a decoded trace.
+                          properties:
+                            arrivalSpeedupRatio:
+                              default: 1
+                              description: ArrivalSpeedupRatio multiplies the recorded request-arrival rate. 1.0 preserves it.
+                              exclusiveMinimum: true
+                              minimum: 0
+                              type: number
+                            concurrency:
+                              description: Concurrency changes trace replay to closed loop and ignores recorded timestamps.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                          type: object
+                        source:
+                          description: Source identifies exactly one trace artifact.
+                          properties:
+                            pvc:
+                              description: PVC reads the artifact from a PersistentVolumeClaim in the DGDR namespace.
+                              properties:
+                                claimName:
+                                  description: ClaimName is the PersistentVolumeClaim containing the trace.
+                                  minLength: 1
+                                  type: string
+                                path:
+                                  description: Path is the trace path relative to the root of the claim.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - claimName
+                                - path
+                              type: object
+                            uri:
+                              description: URI identifies an object-storage location supported by the DGDR integration.
+                              minLength: 1
+                              type: string
+                          type: object
+                          x-kubernetes-validations:
+                            - message: exactly one of pvc or uri must be specified
+                              rule: has(self.pvc) != has(self.uri)
+                      required:
+                        - source
+                      type: object
+                  type: object
+                  x-kubernetes-validations:
+                    - message: exactly one of trace or static must be specified
+                      rule: has(self.trace) != has(self.static)
+              required:
+                - backends
+                - hardware
+                - modelRef
+                - objective
+                - search
+                - workload
+              type: object
+            status:
+              description: DynamoGraphDeploymentRequestStatus represents reconciliation of persistent search intent.
+              properties:
+                activeRunRef:
+                  description: ActiveRunRef identifies the one non-terminal run.
+                  properties:
+                    name:
+                      default: ""
+                      description: |-
+                        Name of the referent.
+                        This field is effectively required, but due to backwards compatibility is
+                        allowed to be empty. Instances of this type with an empty value here are
+                        almost certainly wrong.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                conditions:
+                  description: Conditions reports reconciliation of the persistent request, not run execution outcomes.
+                  items:
+                    description: Condition contains details for one aspect of the current state of this API Resource.
+                    properties:
+                      lastTransitionTime:
+                        description: |-
+                          lastTransitionTime is the last time the condition transitioned from one status to another.
+                          This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                        format: date-time
+                        type: string
+                      message:
+                        description: |-
+                          message is a human readable message indicating details about the transition.
+                          This may be an empty string.
+                        maxLength: 32768
+                        type: string
+                      observedGeneration:
+                        description: |-
+                          observedGeneration represents the .metadata.generation that the condition was set based upon.
+                          For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                          with respect to the current state of the instance.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      reason:
+                        description: |-
+                          reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                          Producers of specific condition types may define expected values and meanings for this field,
+                          and whether the values are considered a guaranteed API.
+                          The value should be a CamelCase string.
+                          This field may not be empty.
+                        maxLength: 1024
+                        minLength: 1
+                        pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                        type: string
+                      status:
+                        description: status of the condition, one of True, False, Unknown.
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                        type: string
+                      type:
+                        description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                        maxLength: 316
+                        pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                        type: string
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - type
+                  x-kubernetes-list-type: map
+                observedGeneration:
+                  description: ObservedGeneration is the most recent DGDR generation accepted by the controller.
+                  format: int64
+                  type: integer
+                recentRunRefs:
+                  description: RecentRunRefs identifies retained terminal runs in newest-first order.
+                  items:
+                    description: |-
+                      LocalObjectReference contains enough information to let you locate the
+                      referenced object inside the same namespace.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  type: array
+              type: object
+          required:
+            - spec
+          type: object
+      served: false
+      storage: false
+      subresources:
+        status: {}
   conversion:
     strategy: Webhook
     webhook:
