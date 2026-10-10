@@ -171,6 +171,12 @@ async def worker(argv: list[str] | None = None) -> None:
         argv = sys.argv[1:]
     config = await parse_args_with_model_fetch(argv)
 
+    # Propagate --model-express-url to MODEL_EXPRESS_URL early, before the model
+    # prefetch below. The Rust hub fetch_model() reads that env var and falls back
+    # to localhost:8001 when it is absent, so the CLI flag alone would be ignored.
+    if config.model_express_url:
+        os.environ["MODEL_EXPRESS_URL"] = config.model_express_url
+
     embedding_process_child = is_embedding_process_child()
     if config.embedding_worker_processes > 1 and os.environ.get(
         "DYN_SNAPSHOT_CONTROL_DIR"

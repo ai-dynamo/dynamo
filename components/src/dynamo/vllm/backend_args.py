@@ -286,8 +286,9 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--model-express-url",
             env_var="MODEL_EXPRESS_URL",
             default=None,
-            help="DEPRECATED: accepted for compatibility with older ModelExpress "
-            "manifests. The vLLM ModelExpress plugin reads its own configuration.",
+            help="ModelExpress server URL used when prefetching the model "
+            "(non-ModelExpress load formats). With --load-format=mx the vLLM "
+            "ModelExpress plugin reads its own configuration instead.",
         )
 
         # GMS (GPU Memory Service) shadow mode
