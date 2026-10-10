@@ -671,6 +671,39 @@ def test_variance_spans_both_queues():
     assert q.var_prefill_length == pytest.approx(10000.0)
 
 
+@pytest.mark.core
+def test_queued_variance_preserves_welford_for_large_lengths():
+    base = 1 << 40
+    prefill_values = [base, base + 1, base + 3]
+    decode_values = [base + 5, base + 7, base + 11]
+    prefill = instrumented_scheduler_module.WelfordAccumulator()
+    decode = instrumented_scheduler_module.WelfordAccumulator()
+    for value in prefill_values:
+        prefill.add(value)
+    for value in decode_values:
+        decode.add(value)
+
+    queued = _run_compute_queued(
+        waiting=[
+            _make_request(RequestStatus.WAITING, prefill_values[0]),
+            _make_request(RequestStatus.PREEMPTED, 1, decode_values[0]),
+        ],
+        skipped_waiting=[
+            _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, value)
+            for value in prefill_values[1:]
+        ]
+        + [
+            _make_request(RequestStatus.WAITING_FOR_REMOTE_KVS, 1, value)
+            for value in decode_values[1:]
+        ],
+    )
+    assert queued.num_prefill_requests == queued.num_decode_requests == 3
+    assert queued.sum_prefill_tokens == sum(prefill_values)
+    assert queued.sum_decode_kv_tokens == sum(decode_values)
+    assert queued.var_prefill_length == prefill.variance()
+    assert queued.var_decode_kv_tokens == decode.variance()
+
+
 def test_dp_rank_prefers_data_parallel_index():
     """External DP + dense model: vLLM resets ``data_parallel_rank`` to 0 in
     every child but keeps ``data_parallel_index`` as the true global rank.
