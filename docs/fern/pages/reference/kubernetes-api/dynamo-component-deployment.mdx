@@ -264,6 +264,14 @@ The operator injects Dynamo environment variables, identity, transport TLS, syst
 
 Both containers use the existing environment merge behavior: merged entries are sorted by name and de-duplicated, with container-level values overriding graph-level values and runtime defaults. The operator origin version does not change this behavior. Backend-specific additions retain their existing placement; for example, `VLLM_CACHE_ROOT` is appended to the engine environment after merging.
 
+Backend inference and vLLM prefill LoRA fallback classification use the `runtime` launch. The operator recognizes the literal `dynamo-vllm-sidecar` executable, including quoted paths in shell wrappers, as vLLM. If the launch is hidden in the image entrypoint or requires shell expansion, set `backendFramework` explicitly for backend inference and compilation-cache defaults. This setting does not enable LoRA fallback classification: that requires an identifiable vLLM command in the Pod spec. Compilation-cache defaults apply to the engine.
+
+Planner status takes component identity from the runtime. Python launches can supply a qualified `--endpoint`; native sidecars use `--component` or a literal `DYN_COMPONENT` environment value. Model identity comes from the runtime's model flags, falling back to the engine's `--served-model-name`, `--model-name`, `--model`, or `--model-path` flags. The native vLLM sidecar has no model flags, so an engine's explicit model flag remains available in status. Positional models such as `vllm-rs serve <model>` and model metadata discovered over gRPC are not projected. When neither container supplies a model flag, `servedModelName` remains absent and Planner workflows requiring it remain unsupported.
+
+<Warning>
+Upgrading the operator can roll existing sidecar workers whose backend was previously undetected. Review the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#native-sidecar-backend-inference) before upgrading.
+</Warning>
+
 This mode supports `worker`, `prefill`, and `decode` components. Multinode, enabled checkpoint, GPU memory service, and failover are rejected because they are not currently supported in this mode. Support for these features is planned for a future release. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
 
 The same convention applies to `v1alpha1` through `spec.extraPodSpec.initContainers[name=runtime]`. Conversion preserves the live init-container list. Adding, renaming, or removing `spec.podTemplate.spec.initContainers[name=runtime]` changes the mode and can trigger a worker rollout. Reserve this name for the Dynamo runtime; rename unrelated init containers before upgrading the operator.

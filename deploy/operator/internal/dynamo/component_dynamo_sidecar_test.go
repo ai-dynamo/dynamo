@@ -18,6 +18,137 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+// TestNativeSidecarBackendFramework separates runtime detection from the engine
+// launch and rejects false positives and conflicting explicit configuration.
+func TestNativeSidecarBackendFramework(t *testing.T) {
+	cases := []struct {
+		name     string
+		module   string
+		command  []string
+		explicit string
+		want     BackendFramework
+		wantErr  string
+	}{
+		{name: "vllm", module: "dynamo.vllm.sidecar", want: BackendFrameworkVLLM},
+		{name: "native vllm executable", command: []string{"dynamo-vllm-sidecar"}, want: BackendFrameworkVLLM},
+		{name: "shell-wrapped native vllm executable", command: []string{"/bin/sh", "-c", "exec /usr/local/bin/dynamo-vllm-sidecar --grpc-endpoint 127.0.0.1:50051"}, want: BackendFrameworkVLLM},
+		{name: "quoted executable", command: []string{"/bin/sh", "-c", `exec "dynamo-vllm-sidecar" --grpc-endpoint 127.0.0.1:50051`}, want: BackendFrameworkVLLM},
+		{name: "quoted absolute executable without exec", command: []string{"/bin/sh", "-c", `"/usr/local/bin/dynamo-vllm-sidecar" --grpc-endpoint 127.0.0.1:50051`}, want: BackendFrameworkVLLM},
+		{name: "dynamic shell expansion is not evaluated", command: []string{"/bin/sh", "-c", "exec $(command -v dynamo-vllm-sidecar)"}, want: BackendFrameworkNoop},
+		{name: "configuration path is not an executable", command: []string{"python3", "-m", "dynamo.sglang", "--config-dir", "/etc/dynamo-vllm-sidecar"}, want: BackendFrameworkSGLang},
+		{name: "native sglang executable remains undetected", command: []string{"dynamo-sglang-sidecar"}, want: BackendFrameworkNoop},
+		{name: "native trtllm executable remains undetected", command: []string{"dynamo-trtllm-sidecar"}, want: BackendFrameworkNoop},
+		{name: "mixed native and Python backends", command: []string{"sh", "-c", "dynamo-vllm-sidecar && python3 -m dynamo.sglang"}, wantErr: "multiple backend frameworks"},
+		{name: "different executable suffix", command: []string{"dynamo-vllm-sidecar-helper"}, want: BackendFrameworkNoop},
+		{name: "sglang", module: "dynamo.sglang.sidecar", want: BackendFrameworkSGLang},
+		{name: "trtllm", module: "dynamo.trtllm.sidecar", want: BackendFrameworkTRTLLM},
+		{name: "conflicting explicit backend", module: "dynamo.vllm.sidecar", explicit: "sglang", wantErr: "backend framework mismatch"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Configure an independent engine launch and a native Dynamo runtime")
+			runtime := corev1.Container{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Command: tc.command}
+			if tc.module != "" {
+				runtime.Command = []string{"python3"}
+				runtime.Args = []string{"-m", tc.module}
+			}
+			component := v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers:     []corev1.Container{{Name: commonconsts.MainContainerName, Image: "engine:latest", Command: []string{"vllm-rs"}, Args: []string{"serve", "model"}}},
+					InitContainers: []corev1.Container{{Name: "setup", Image: "setup:latest"}, runtime},
+				}},
+			}
+			original := component.DeepCopy()
+			dgd := &v1beta1.DynamoGraphDeployment{Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: tc.explicit}}
+			dcd := &v1beta1.DynamoComponentDeployment{Spec: v1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: component, BackendFramework: tc.explicit,
+			}}
+
+			t.Log("Resolve both graph and standalone component backends without changing authored containers")
+			graphBackend, graphErr := getBackendFrameworkFromComponent(&component, dgd)
+			componentBackend, componentErr := GetBackendFrameworkFromDynamoComponent(dcd)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, graphErr, tc.wantErr)
+				require.ErrorContains(t, componentErr, tc.wantErr)
+			} else {
+				require.NoError(t, graphErr)
+				require.NoError(t, componentErr)
+				require.Equal(t, tc.want, graphBackend)
+				require.Equal(t, tc.want, componentBackend)
+			}
+			require.Equal(t, original, &component)
+			require.Equal(t, original, &dcd.Spec.DynamoComponentDeploymentSharedSpec)
+		})
+	}
+}
+
+// TestNativeSidecarCompilationCacheBackendDetection applies inferred vLLM cache
+// defaults to the engine in both graph and standalone component rendering.
+func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
+	for _, mountPath := range []string{"", "/cache"} {
+		t.Run("mount="+mountPath, func(t *testing.T) {
+			t.Log("Configure a vLLM sidecar without an explicit backend")
+			component := v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: mountPath},
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers:     []corev1.Container{{Name: commonconsts.MainContainerName, Image: "engine:latest", Command: []string{"vllm-rs"}, Args: []string{"serve", "model"}}},
+					InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Command: []string{"dynamo-vllm-sidecar"}, Args: []string{"--grpc-endpoint", "127.0.0.1:50051"}}},
+				}},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "test"},
+				Spec:       v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
+			}
+			original := dgd.DeepCopy()
+
+			t.Log("Materialize a graph child with the inferred runtime backend")
+			children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+			require.NoError(t, err)
+			require.Len(t, children, 1)
+			require.Equal(t, string(BackendFrameworkVLLM), children["worker"].Spec.BackendFramework)
+			require.Equal(t, original, dgd)
+
+			t.Log("Verify inferred and explicit vLLM produce the same worker generation")
+			inferredHash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			explicit := dgd.DeepCopy()
+			explicit.Spec.BackendFramework = "vllm"
+			explicitHash, err := ComputeDGDWorkersSpecHash(explicit)
+			require.NoError(t, err)
+			require.Equal(t, explicitHash, inferredHash)
+			require.Equal(t, original, dgd)
+
+			t.Log("Render an independent standalone DCD so graph inference cannot mask controller detection")
+			dcd := &v1beta1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "test"},
+				Spec:       v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: component},
+			}
+			originalDCD := dcd.DeepCopy()
+			pod, err := GenerateBasePodSpecForController(dcd, nil, &configv1alpha1.OperatorConfiguration{}, RoleMain, commonconsts.MultinodeDeploymentTypeGrove, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+			require.NoError(t, err)
+			require.Equal(t, originalDCD, dcd)
+
+			t.Log("Apply the vLLM cache defaults to the engine while preserving both launches")
+			engine, runtime := pod.Containers[0], pod.InitContainers[0]
+			wantMount := mountPath
+			if wantMount == "" {
+				wantMount = commonconsts.DefaultVLLMCacheMountPoint
+			}
+			cacheMount := corev1.VolumeMount{Name: "cache", MountPath: wantMount}
+			require.Contains(t, engine.VolumeMounts, cacheMount)
+			require.Equal(t, wantMount, envVarsToMap(engine.Env)["VLLM_CACHE_ROOT"])
+			require.NotContains(t, runtime.VolumeMounts, cacheMount)
+			require.NotContains(t, envVarsToMap(runtime.Env), "VLLM_CACHE_ROOT")
+			require.Equal(t, component.PodTemplate.Spec.Containers[0].Command, engine.Command)
+			require.Equal(t, component.PodTemplate.Spec.Containers[0].Args, engine.Args)
+			require.Equal(t, component.PodTemplate.Spec.InitContainers[0].Command, runtime.Command)
+			require.Equal(t, component.PodTemplate.Spec.InitContainers[0].Args, runtime.Args)
+		})
+	}
+}
+
 func TestNativeSidecarEnvironmentIgnoresOrigin(t *testing.T) {
 	const currentOrigin = "1.6.0"
 	const legacyOrigin = "1.5.0"

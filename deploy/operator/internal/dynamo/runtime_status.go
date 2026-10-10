@@ -27,25 +27,47 @@ type ComponentRuntimeStatus struct {
 
 // ResolveComponentRuntimeStatus projects Planner-relevant runtime facts from
 // the fully rendered serving Pod without exposing PodTemplate structure to the
-// Planner.
+// Planner. A nil PodSpec has no runtime identity; nil annotations have no power limit.
 func ResolveComponentRuntimeStatus(
 	podSpec *corev1.PodSpec,
 	annotations map[string]string,
 ) ComponentRuntimeStatus {
 	status := ComponentRuntimeStatus{}
-	main := mainContainerFromPodSpec(podSpec)
-	if main != nil {
-		tokens := shellCommandLineTokens(main.Command, main.Args)
-		status.ServedModelName = firstFlagValue(
-			tokens,
-			"--served-model-name",
-			"--model-name",
-			"--model",
-			"--model-path",
-		)
+
+	// Runtime identity belongs to the sidecar when the engine runs independently.
+	runtime := GetDynamoContainerFromPodSpec(podSpec)
+	if runtime != nil {
+		tokens := shellCommandLineTokens(runtime.Command, runtime.Args)
+		modelFlags := []string{"--served-model-name", "--model-name", "--model", "--model-path"}
+		status.ServedModelName = firstFlagValue(tokens, modelFlags...)
+
+		// Native sidecars discover models over gRPC. Preserve any model identity
+		// explicitly configured on the engine until registered metadata is projected.
+		if status.ServedModelName == "" && runtime.Name == commonconsts.RuntimeContainerName {
+			for _, container := range podSpec.Containers {
+				if container.Name == commonconsts.MainContainerName {
+					status.ServedModelName = firstFlagValue(shellCommandLineTokens(container.Command, container.Args), modelFlags...)
+					break
+				}
+			}
+		}
+
+		// Python backends encode the component in a qualified endpoint.
 		if endpoint := firstFlagValue(tokens, "--endpoint"); endpoint != "" {
 			if componentName, ok := runtimeComponentFromEndpoint(endpoint); ok {
 				status.RuntimeComponentName = componentName
+			}
+		}
+
+		// Native sidecars use a bare endpoint and a separate component flag/env.
+		if status.RuntimeComponentName == "" && runtime.Name == commonconsts.RuntimeContainerName {
+			status.RuntimeComponentName = firstFlagValue(tokens, "--component")
+			if status.RuntimeComponentName == "" {
+				for _, env := range runtime.Env {
+					if env.Name == commonconsts.DynamoComponentEnvVar && env.ValueFrom == nil && !strings.Contains(env.Value, "$(") {
+						status.RuntimeComponentName = env.Value
+					}
+				}
 			}
 		}
 	}
@@ -91,18 +113,6 @@ func ResolveGroveComponentRuntimeStatuses(
 		)
 	}
 	return statuses
-}
-
-func mainContainerFromPodSpec(podSpec *corev1.PodSpec) *corev1.Container {
-	if podSpec == nil {
-		return nil
-	}
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i]
-		}
-	}
-	return nil
 }
 
 func shellCommandLineTokens(command, args []string) []string {

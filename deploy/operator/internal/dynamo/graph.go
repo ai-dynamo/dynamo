@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
+	"path"
 	"regexp"
 	"slices"
 	"sort"
@@ -3303,19 +3304,35 @@ func GetDGDPreservedAlphaPVCs(dgd *v1beta1.DynamoGraphDeployment) []v1alpha1.PVC
 // DetectBackendFrameworkFromArgs detects the backend framework from command/args.
 func DetectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
 	// Combine command and args to search through all parts
-	allParts := append(command, args...)
+	allParts := slices.Concat(command, args)
 	fullCommand := strings.Join(allParts, " ")
 
-	// Pattern to match python -m dynamo.{backend}.something
 	patterns := map[BackendFramework]*regexp.Regexp{
 		BackendFrameworkVLLM:   regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.vllm[^|&;]*`),
 		BackendFrameworkSGLang: regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.sglang[^|&;]*`),
 		BackendFrameworkTRTLLM: regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.trtllm[^|&;]*`),
 	}
 
+	// Match literal launch positions, not argument values that happen to name the
+	// binary. Tokenization handles quoted paths without evaluating shell expansion.
+	tokens := shellCommandLineTokens(command, args)
+	nativeVLLM := false
+	for i, token := range tokens {
+		if path.Base(token) != "dynamo-vllm-sidecar" {
+			continue
+		}
+		if i == 0 || tokens[i-1] == "exec" || tokens[i-1] == "&&" ||
+			tokens[i-1] == "||" || tokens[i-1] == ";" || tokens[i-1] == "|" ||
+			(i >= 2 && tokens[i-1] == "-c" && isShellExecutable(tokens[i-2])) {
+			nativeVLLM = true
+			break
+		}
+	}
+
+	// Retain mixed-backend rejection for native and Python launches alike.
 	var detected []BackendFramework
 	for framework, pattern := range patterns {
-		if pattern.MatchString(fullCommand) {
+		if pattern.MatchString(fullCommand) || (framework == BackendFrameworkVLLM && nativeVLLM) {
 			detected = append(detected, framework)
 		}
 	}
@@ -3411,9 +3428,9 @@ func determineBackendFrameworkForComponent(
 		effective.Roles = nil
 
 		var command, args []string
-		if main := GetMainContainer(effective); main != nil {
-			command = main.Command
-			args = main.Args
+		if runtime := GetDynamoContainer(effective); runtime != nil {
+			command = runtime.Command
+			args = runtime.Args
 		}
 		framework, err := determineBackendFramework(
 			string(component.ComponentType),
@@ -3504,11 +3521,11 @@ func GenerateBasePodSpecForController(
 
 	numberOfNodes := componentSpec.GetNumberOfNodes()
 
-	// Determine backend framework using hybrid approach
+	// Detect from the Dynamo launch, which belongs to runtime in native-sidecar mode.
 	var command, args []string
-	if main := GetMainContainer(componentSpec); main != nil {
-		command = main.Command
-		args = main.Args
+	if runtime := GetDynamoContainer(componentSpec); runtime != nil {
+		command = runtime.Command
+		args = runtime.Args
 	}
 	backendFramework, err := determineBackendFramework(
 		string(componentSpec.ComponentType),
