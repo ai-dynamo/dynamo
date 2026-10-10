@@ -96,6 +96,8 @@ GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
 # Per-worker DYN_SYSTEM_PORT{i} and DYN_VLLM_KV_EVENT_PORT{i} come from the test
 # harness for parallel runs; standalone runs fall back to the script's port bases.
+# Under DYN_MANAGED_PORTS, worker i uses spare DYN_SYSTEM_PORT{NUM_WORKERS+i} as --nccl-port;
+# SGLang's own free-port probe races torch.distributed's bind (sporadic EADDRINUSE).
 WORKER_PORTS=()
 KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
@@ -109,7 +111,16 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
 
     KV_EVENTS_CONFIG="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENTS_PORT}\"}"
 
-    echo "--- launching SGLang worker $i (GPU=${GPU_ID}, system_port=${WORKER_PORT}, kv_events=tcp://*:${KV_EVENTS_PORT}) ---"
+    NCCL_PORT="sglang-default"
+    NCCL_PORT_ARGS=()
+    NCCL_PORT_VAR="DYN_SYSTEM_PORT$((NUM_WORKERS + i))"
+    if [[ -n "${DYN_MANAGED_PORTS:-}" && "${!NCCL_PORT_VAR:-}" =~ ^[0-9]+$ ]] \
+        && (( 10#${!NCCL_PORT_VAR} != 0 )); then
+        NCCL_PORT="${!NCCL_PORT_VAR}"
+        NCCL_PORT_ARGS=(--nccl-port "${NCCL_PORT}")
+    fi
+
+    echo "--- launching SGLang worker $i (GPU=${GPU_ID}, system_port=${WORKER_PORT}, kv_events=tcp://*:${KV_EVENTS_PORT}, nccl_port=${NCCL_PORT}) ---"
     env "${COMMON_ENV[@]}" \
         "DYN_SYSTEM_PORT=${WORKER_PORT}" \
         "CUDA_VISIBLE_DEVICES=${GPU_ID}" \
@@ -124,6 +135,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --kv-events-config "${KV_EVENTS_CONFIG}" \
         --enable-metrics \
         --disable-piecewise-cuda-graph \
+        ${NCCL_PORT_ARGS[@]+"${NCCL_PORT_ARGS[@]}"} \
         ${GPU_MEM_ARGS} ${SGLANG_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
 done
 
