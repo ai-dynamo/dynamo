@@ -30,7 +30,8 @@ use super::selector::{WorkerSelectionInput, WorkerSelector};
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
-    SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
+    SchedulingContext, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    WorkerAvailabilityProvider,
 };
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
@@ -47,6 +48,32 @@ pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 mod capacity;
 
 const ADMISSION_CHANNEL_CAPACITY: usize = 65_536;
+
+fn selected_rank_cached_blocks(
+    tier_overlap_blocks: &TierOverlapBlocks,
+    selected_worker: WorkerWithDpRank,
+) -> u32 {
+    let blocks = [
+        &tier_overlap_blocks.device,
+        &tier_overlap_blocks.host_pinned,
+        &tier_overlap_blocks.disk,
+    ]
+    .into_iter()
+    .map(|tier| tier.get(&selected_worker).copied().unwrap_or(0))
+    .fold(0usize, usize::saturating_add);
+
+    u32::try_from(blocks).unwrap_or(u32::MAX)
+}
+
+fn selected_cached_tokens(
+    isl_tokens: usize,
+    selected_cached_blocks: u32,
+    block_size: u32,
+) -> usize {
+    (selected_cached_blocks as usize)
+        .saturating_mul(block_size as usize)
+        .min(isl_tokens)
+}
 
 struct ClassQueueCounters {
     pending_count: AtomicUsize,
@@ -1743,6 +1770,10 @@ impl<
 
         let target_cached_prefix_blocks =
             target_cached_prefix_blocks(request, selected.selection.worker);
+        let selected_cached_blocks = selected_rank_cached_blocks(
+            &request.overlap.tier_overlap_blocks,
+            selected.selection.worker,
+        );
         let response = SchedulingResponse {
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
@@ -1769,7 +1800,7 @@ impl<
 
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            selected.selection.cached_tokens,
+            selected_cached_blocks,
             request.track_prefill_tokens,
         );
 
@@ -1871,13 +1902,18 @@ impl<
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
-        cached_tokens: usize,
+        selected_cached_blocks: u32,
         track_prefill_tokens: bool,
     ) -> Option<PrefillLoadHint> {
         if !track_prefill_tokens {
             return None;
         }
 
+        // Selection discounts lower-tier hits because transfer is slower than
+        // a device hit. Active prefill accounting must not carry that discount:
+        // host/disk-resident tokens are transfer work, not GPU prefill compute.
+        let cached_tokens =
+            selected_cached_tokens(isl_tokens, selected_cached_blocks, self.block_size);
         let effective_isl = effective_prefill_tokens(isl_tokens, cached_tokens);
         if effective_isl == 0 {
             return None;
@@ -2653,6 +2689,26 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
+    }
+
+    #[test]
+    fn selected_rank_cached_blocks_uses_only_selected_dp_rank() {
+        let selected = WorkerWithDpRank::new(7, 0);
+        let other_rank = WorkerWithDpRank::new(7, 1);
+        let mut tiers = TierOverlapBlocks::default();
+        tiers.device.insert(selected, 2);
+        tiers.host_pinned.insert(selected, 3);
+        tiers.disk.insert(selected, 5);
+        tiers.device.insert(other_rank, 1_000);
+
+        assert_eq!(selected_rank_cached_blocks(&tiers, selected), 10);
+        assert_eq!(selected_rank_cached_blocks(&tiers, other_rank), 1_000);
+    }
+
+    #[test]
+    fn selected_cached_tokens_excludes_all_selected_tiers_from_compute() {
+        let cached_tokens = selected_cached_tokens(1_024, 48, 16);
+        assert_eq!(effective_prefill_tokens(1_024, cached_tokens), 256);
     }
 
     #[tokio::test]
