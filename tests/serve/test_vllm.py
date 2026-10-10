@@ -842,10 +842,8 @@ def vllm_config_test(request):
         yield config
         return
 
-    # The script's `lmcache server` binds a ZMQ port and an HTTP port that
-    # default to the fixed 5555/8080. Any other listener on either port makes
-    # the server exit and the deployment fail. Reserve both ports until the
-    # deployment has been torn down.
+    # `lmcache server` exits if its ZMQ or HTTP port (default 5555/8080) is
+    # taken, so hold both until the deployment is torn down.
     with reserved_ports(2, DynamoPortRange.SERVE.value) as (zmq_port, http_port):
         yield dataclasses.replace(
             config,
