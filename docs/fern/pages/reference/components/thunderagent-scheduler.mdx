@@ -58,6 +58,53 @@ Programs are keyed by the normalized `session_id`. Use the canonical headers def
 
 Requests without session identity bypass program admission and pause/resume.
 
+## Shared Prefix Accounting in the Builtin Policy
+
+The builtin `thunderagent` request classifier in `dynamo.frontend` supports
+opt-in `shared_prefix_budget` accounting. It is disabled by default. Enable it
+in the router policy file passed to `--router-policy-config`:
+
+```yaml
+request_classifier:
+  type: thunderagent
+  parameters:
+    shared_prefix_budget: true
+worker_selection:
+  aggregated: thunderagent
+  instances:
+    - name: thunderagent
+      type: thunderagent
+      parameters: {}
+```
+
+Within one frontend classifier, confirmed exact full-block prefixes are counted
+once per Worker and DP rank. A program becomes a sharing source after actual
+`Sent`. Pending requests remain fully charged. Private suffixes, the configured
+per-program buffer, and a fixed growth reserve of 256 tokens remain separate charges.
+For members with different acting/reasoning weights, each shared block retains
+the largest applicable rounded member charge. Absent tracking hashes receive
+full accounting.
+
+Session requests must supply a hard Worker/DP destination, for example through
+`X-Dynamo-Worker-Instance-ID` and `X-Dynamo-DP-Rank`. A model-serving
+`X-Dynamo-Session-Final: true` request must refer to an existing program, contain
+one input token and have a verified backend output cap of one token. Its target
+Worker retains `1 + buffer_per_program + 256` tokens until completion, abort or
+cancellation; the default charge is 357. If that Worker lacks headroom, the final
+waits.
+
+To pin a known-session final to a surviving Worker after loss, leave
+`--router-session-affinity-ttl-secs` and
+`DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` unset. An existing affinity binding rejects
+an explicit target that differs from its bound Worker. Hard request pins still
+select the destination when affinity is disabled, and ThunderAgent keeps its
+session bookkeeping independently.
+
+This option changes logical program accounting. Physical KV occupancy and
+prefix-cache residency remain engine observations. The initial supported path
+is a single frontend using aggregated routing; cross-Frontend accounting is
+outside this scope.
+
 ## Scheduler Logs
 
 The scheduler emits pause-side and resume-side summaries at INFO level.

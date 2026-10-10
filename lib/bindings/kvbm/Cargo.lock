@@ -2081,8 +2081,10 @@ version = "1.6.0"
 dependencies = [
  "async-trait",
  "dynamo-kv-router",
+ "dynamo-runtime",
  "fastrand",
  "parking_lot",
+ "rustc-hash 2.1.2",
  "serde",
  "thiserror 2.0.18",
  "tokio",
