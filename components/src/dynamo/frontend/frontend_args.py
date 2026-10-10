@@ -31,6 +31,19 @@ from dynamo.common.configuration.utils import (
 from . import __version__
 
 _U32_MAX = 2**32 - 1
+
+
+class _AppendReplacingDefault(argparse.Action):
+    """``append`` whose first CLI value replaces the env-derived default
+    instead of extending it."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        items = getattr(namespace, self.dest)
+        if items is self.default:
+            items = []
+        setattr(namespace, self.dest, [*items, values])
+
+
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
 
 
@@ -220,6 +233,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
+    forward_routes: list[str]
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
@@ -253,6 +267,12 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             mode_flag = "--interactive" if self.interactive else "--kserve-grpc-server"
             raise ValueError(
                 "--frontend-route-extension is only supported by the HTTP frontend, "
+                f"so it cannot be combined with {mode_flag}"
+            )
+        if self.forward_routes and (self.interactive or self.kserve_grpc_server):
+            mode_flag = "--interactive" if self.interactive else "--kserve-grpc-server"
+            raise ValueError(
+                "--forward-route is only supported by the HTTP frontend, "
                 f"so it cannot be combined with {mode_flag}"
             )
         if self.migration_limit < 0 or self.migration_limit > _U32_MAX:
@@ -631,6 +651,22 @@ class FrontendArgGroup(ArgGroup):
                 "'dynamo.frontend.routes' entry-point group, or a 'module:function' "
                 "path. May be repeated. DYN_FRONTEND_ROUTE_EXTENSIONS accepts "
                 "whitespace-separated values."
+            ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--forward-route",
+            env_var="DYN_HTTP_FORWARD_ROUTES",
+            default=[],
+            dest="forward_routes",
+            action=_AppendReplacingDefault,
+            help=(
+                "Reverse-proxy a path prefix to an upstream HTTP server, as "
+                "PREFIX=URL (e.g. /v1/custom=http://127.0.0.1:8080). Requests "
+                "no built-in route matches are forwarded with their method, "
+                "query, headers, and body. May be repeated; replaces "
+                "DYN_HTTP_FORWARD_ROUTES, which accepts whitespace-separated values."
             ),
         )
 

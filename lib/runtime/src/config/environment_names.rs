@@ -377,6 +377,11 @@ pub mod llm {
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
+    /// Path prefixes the frontend reverse-proxies to upstream HTTP servers:
+    /// whitespace-separated `PREFIX=URL` entries, e.g.
+    /// `/v1/custom=http://127.0.0.1:8080`. Built-in routes take precedence.
+    pub const DYN_HTTP_FORWARD_ROUTES: &str = "DYN_HTTP_FORWARD_ROUTES";
+
     /// Listen backlog of the frontend HTTP/HTTPS socket (default 4096).
     pub const DYN_HTTP_LISTEN_BACKLOG: &str = "DYN_HTTP_LISTEN_BACKLOG";
 
@@ -1134,6 +1139,7 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_HTTP_FORWARD_ROUTES,
             llm::DYN_HTTP_LISTEN_BACKLOG,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,

@@ -36,6 +36,7 @@ use dynamo_runtime::metrics::MetricsHierarchy;
 #[derive(Default)]
 pub struct HttpFrontend {
     frontend_route_extensions: Vec<FrontendRouteExtension>,
+    forward_routes: Option<Vec<String>>,
     plugins: RouterPlugins,
 }
 
@@ -56,6 +57,13 @@ impl HttpFrontend {
         frontend_route_extensions: Vec<FrontendRouteExtension>,
     ) -> Self {
         self.frontend_route_extensions = frontend_route_extensions;
+        self
+    }
+
+    /// Reverse-proxy path prefixes to upstream servers (`PREFIX=URL` entries).
+    /// `None` falls back to `DYN_HTTP_FORWARD_ROUTES`.
+    pub fn forward_routes(mut self, forward_routes: Option<Vec<String>>) -> Self {
+        self.forward_routes = forward_routes;
         self
     }
 
@@ -126,6 +134,7 @@ impl HttpFrontend {
             distributed_runtime,
             engine_config,
             self.frontend_route_extensions,
+            self.forward_routes,
             plugins,
         )
         .await;
@@ -162,6 +171,7 @@ async fn run_with_router_plugins(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
+    forward_routes: Option<Vec<String>>,
     plugins: RouterPluginBuilder,
 ) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
@@ -227,6 +237,7 @@ async fn run_with_router_plugins(
     for extension in frontend_route_extensions {
         http_service_builder = http_service_builder.add_frontend_route_extension_arc(extension);
     }
+    http_service_builder = http_service_builder.forward_routes(forward_routes);
 
     let http_service = match engine_config {
         EngineConfig::Dynamic {

@@ -17,6 +17,7 @@ use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
+use super::forward::ForwardRoutes;
 use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
@@ -75,23 +76,49 @@ struct UnmatchedRouteState {
     /// Base path of the Anthropic Messages API, or `None` when those endpoints
     /// are disabled and every miss belongs to the OpenAI surface.
     anthropic_path: Option<Arc<str>>,
+    forward_routes: Option<Arc<ForwardRoutes>>,
+    /// Counts forwarded responses as inflight, and ends forwarded streams and
+    /// tunnels once shutdown has drained.
+    service: Arc<State>,
 }
 
-/// Returns a protocol-compatible JSON `404` error response for an
-/// unmatched route.
+/// Forwards the request when a configured prefix covers it; otherwise
+/// returns a protocol-compatible JSON `404` error response.
 ///
 /// Requests under the configured Anthropic Messages path receive an Anthropic
 /// error envelope. All other requests receive an OpenAI-compatible envelope.
 async fn unmatched_route_fallback(
     axum::extract::State(state): axum::extract::State<UnmatchedRouteState>,
-    method: axum::http::Method,
-    uri: axum::http::Uri,
+    request: axum::extract::Request,
 ) -> axum::response::Response {
+    let request = match &state.forward_routes {
+        Some(routes) if routes.covers(request.uri().path()) => {
+            // Admit forwarded work like inference: not while draining, and
+            // close the race with a drain that starts after the first check.
+            if !state.service.is_ready() {
+                return super::openai::ErrorMessage::_service_unavailable().into_response();
+            }
+            let permit = state.service.acquire_inflight();
+            if !state.service.is_ready() {
+                drop(permit);
+                return super::openai::ErrorMessage::_service_unavailable().into_response();
+            }
+            match routes
+                .forward(request, state.service.stopping_token().clone(), permit)
+                .await
+            {
+                Ok(response) => return response,
+                Err(request) => request,
+            }
+        }
+        _ => request,
+    };
+    let (method, uri) = (request.method(), request.uri());
     match state.anthropic_path.as_deref() {
         Some(path) if path_within_namespace(uri.path(), path) => {
-            super::anthropic::unmatched_route_response(&method, &uri)
+            super::anthropic::unmatched_route_response(method, uri)
         }
-        _ => super::openai::unmatched_route_response(&method, &uri).into_response(),
+        _ => super::openai::unmatched_route_response(method, uri).into_response(),
     }
 }
 
@@ -324,6 +351,9 @@ pub struct ServiceObserver {
     stage: AtomicU8,
     inflight_inference: AtomicU64,
     inflight_zero: Notify,
+    /// Cancelled on entering `Stopping`, after inflight bodies drained or the
+    /// graceful shutdown timeout expired.
+    stopping: CancellationToken,
 }
 
 impl Default for ServiceObserver {
@@ -332,6 +362,7 @@ impl Default for ServiceObserver {
             stage: AtomicU8::new(ServiceStage::Ready.as_u8()),
             inflight_inference: AtomicU64::new(0),
             inflight_zero: Notify::new(),
+            stopping: CancellationToken::new(),
         }
     }
 }
@@ -373,6 +404,7 @@ impl ServiceObserver {
         );
         self.stage
             .store(ServiceStage::Stopping.as_u8(), Ordering::Release);
+        self.stopping.cancel();
     }
 
     /// Track one admitted inference response body.
@@ -602,6 +634,12 @@ impl State {
         self.service_observer.acquire_inflight()
     }
 
+    /// Cancelled once shutdown has drained (or timed out); unlike
+    /// [`Self::cancel_token`], it does not fire when shutdown begins.
+    pub fn stopping_token(&self) -> &CancellationToken {
+        &self.service_observer.stopping
+    }
+
     pub fn inflight_count(&self) -> u64 {
         self.service_observer.inflight_count()
     }
@@ -743,6 +781,11 @@ pub struct HttpServiceConfig {
     /// Each extension is invoked with a read-only [`FrontendExtensionContext`].
     #[builder(default)]
     frontend_route_extensions: Vec<FrontendRouteExtension>,
+
+    /// Path prefixes reverse-proxied to upstream servers, as `PREFIX=URL`
+    /// entries. `None` falls back to `DYN_HTTP_FORWARD_ROUTES`.
+    #[builder(default)]
+    forward_routes: Option<Vec<String>>,
 
     #[builder(default = "false")]
     enable_chat_endpoints: bool,
@@ -1478,7 +1521,8 @@ impl HttpServiceConfigBuilder {
 
         // Return protocol-compatible JSON errors for unmatched routes. Register this router
         // outside `track_inflight_inference` so unmatched requests do not acquire an
-        // inference permit or return `503` while the service is draining.
+        // inference permit or return `503` while the service is draining; requests a
+        // forward route covers do their own admission in `unmatched_route_fallback`.
         let unmatched_router = axum::Router::new()
             .fallback(unmatched_route_fallback)
             .with_state(UnmatchedRouteState {
@@ -1487,6 +1531,9 @@ impl HttpServiceConfigBuilder {
                         .unwrap_or_else(|_| super::anthropic::DEFAULT_MESSAGES_PATH.to_string())
                         .into()
                 }),
+                forward_routes: ForwardRoutes::from_config(config.forward_routes.as_deref())?
+                    .map(Arc::new),
+                service: state.clone(),
             })
             .layer(
                 // Use the inference span maker so 404s retain method, URI, and request ID
@@ -2111,6 +2158,140 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         (port, state, handle)
+    }
+
+    #[tokio::test]
+    async fn test_forwarded_stream_is_tracked_inflight() {
+        use futures::StreamExt;
+
+        let release = Arc::new(Notify::new());
+        let released = release.clone();
+        let upstream = axum::Router::new().route(
+            "/v1/custom/stream",
+            axum::routing::get(move || async move {
+                let first = futures::stream::once(async { Ok::<_, std::io::Error>("first") });
+                let last = futures::stream::once(async move {
+                    released.notified().await;
+                    Ok::<_, std::io::Error>("last")
+                });
+                Body::from_stream(first.chain(last))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let (port, state, handle) = spawn_service(|builder| {
+            builder.forward_routes(Some(vec![format!("/v1/custom=http://{upstream_addr}")]))
+        })
+        .await;
+        let mut resp = reqwest::get(format!("http://localhost:{port}/v1/custom/stream"))
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(&resp.chunk().await.unwrap().unwrap()[..], b"first");
+        assert_eq!(
+            state.inflight_count(),
+            1,
+            "open forwarded stream counts as inflight"
+        );
+
+        release.notify_one();
+        assert_eq!(&resp.chunk().await.unwrap().unwrap()[..], b"last");
+        assert!(resp.chunk().await.unwrap().is_none());
+        assert!(
+            state
+                .wait_inflight_zero_or_timeout(Duration::from_secs(5))
+                .await,
+            "finished forwarded stream releases its permit"
+        );
+
+        handle.abort();
+    }
+
+    /// The service shares the runtime's token, as the frontend entrypoint wires
+    /// it, so the stream must outlive that token's cancellation.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_shutdown_drains_forwarded_stream_then_ends_it() {
+        use futures::StreamExt;
+
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("2"))],
+            async move {
+                // An event stream that never ends on its own.
+                let upstream = axum::Router::new().route(
+                    "/v1/custom/events",
+                    axum::routing::get(|| async {
+                        let first =
+                            futures::stream::once(async { Ok::<_, std::io::Error>("connected") });
+                        Body::from_stream(first.chain(futures::stream::pending()))
+                    }),
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let upstream_addr = listener.local_addr().unwrap();
+                tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+                let runtime = CancellationToken::new();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let service = HttpService::builder()
+                    .port(port)
+                    .cancel_token(Some(runtime.clone()))
+                    .forward_routes(Some(vec![format!("/v1/custom=http://{upstream_addr}")]))
+                    .build()
+                    .unwrap();
+                let handle = tokio::spawn({
+                    let runtime = runtime.clone();
+                    async move { service.run_with_listener(runtime, listener).await }
+                });
+
+                let mut resp = reqwest::get(format!("http://localhost:{port}/v1/custom/events"))
+                    .await
+                    .expect("request failed");
+                assert_eq!(&resp.chunk().await.unwrap().unwrap()[..], b"connected");
+
+                let started = std::time::Instant::now();
+                runtime.cancel();
+                let ended = tokio::time::timeout(Duration::from_secs(10), resp.chunk()).await;
+                let held = started.elapsed();
+                assert!(ended.is_ok(), "the stream must end after the drain window");
+                assert!(
+                    held >= Duration::from_millis(1500),
+                    "the stream must be held through the drain window, ended after {held:?}"
+                );
+                handle.await.unwrap().unwrap();
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_draining_refuses_new_forwarded_requests() {
+        // Never contacted: admission is refused before forwarding.
+        let (port, state, handle) = spawn_service(|builder| {
+            builder.forward_routes(Some(vec!["/v1/custom=http://127.0.0.1:1".to_string()]))
+        })
+        .await;
+        state.start_draining();
+
+        let client = reqwest::Client::new();
+        let forwarded = client
+            .get(format!("http://localhost:{port}/v1/custom/events"))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(forwarded.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.inflight_count(), 0);
+
+        let unmatched = client
+            .get(format!("http://localhost:{port}/v1/unknown"))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(unmatched.status(), reqwest::StatusCode::NOT_FOUND);
+
+        handle.abort();
     }
 
     async fn spawn_default_service() -> (u16, tokio::task::JoinHandle<()>) {
