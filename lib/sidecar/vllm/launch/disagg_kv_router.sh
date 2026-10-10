@@ -4,7 +4,6 @@
 #
 # Disaggregated serving through four vLLM native-gRPC sidecars with KV-aware routing.
 # Requires four GPUs and a vLLM build that exposes KV-event source discovery.
-# See ../README.md for the validated vLLM/vllm-rs source state.
 
 set -e
 
@@ -35,6 +34,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to all four managed vLLM engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                              Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  DYN_HTTP_PORT                      Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1                   First decode sidecar port (default: 8081)"
@@ -72,6 +72,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+resolve_sidecar vllm SIDECAR_CMD
+
 trap dynamo_exit_trap EXIT
 
 export PYTHONHASHSEED=0
@@ -108,7 +110,8 @@ if [[ -z "$GPU_MEM_ARGS" ]]; then
     GPU_MEM_ARGS="--kv-cache-memory-bytes $DEFAULT_KV_CACHE_BYTES --gpu-memory-utilization 0.01"
 fi
 
-KV_TRANSFER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+KV_TRANSFER_CONFIG_PREFILL='{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+KV_TRANSFER_CONFIG_DECODE='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
 KV_EVENTS_CONFIG_1="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL1_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
 KV_EVENTS_CONFIG_2="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL2_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
 
@@ -131,11 +134,12 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_DECODE1_HTTP_PORT" \
     --grpc-port "$VLLM_DECODE1_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --block-size "$VLLM_BLOCK_SIZE" \
-    --kv-transfer-config "$KV_TRANSFER_CONFIG" \
+    --kv-transfer-config "$KV_TRANSFER_CONFIG_DECODE" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
@@ -147,11 +151,12 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_DECODE2_HTTP_PORT" \
     --grpc-port "$VLLM_DECODE2_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --block-size "$VLLM_BLOCK_SIZE" \
-    --kv-transfer-config "$KV_TRANSFER_CONFIG" \
+    --kv-transfer-config "$KV_TRANSFER_CONFIG_DECODE" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
@@ -163,11 +168,12 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_PREFILL1_HTTP_PORT" \
     --grpc-port "$VLLM_PREFILL1_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --block-size "$VLLM_BLOCK_SIZE" \
-    --kv-transfer-config "$KV_TRANSFER_CONFIG" \
+    --kv-transfer-config "$KV_TRANSFER_CONFIG_PREFILL" \
     --kv-events-config "$KV_EVENTS_CONFIG_1" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
@@ -180,33 +186,34 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_PREFILL2_HTTP_PORT" \
     --grpc-port "$VLLM_PREFILL2_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --block-size "$VLLM_BLOCK_SIZE" \
-    --kv-transfer-config "$KV_TRANSFER_CONFIG" \
+    --kv-transfer-config "$KV_TRANSFER_CONFIG_PREFILL" \
     --kv-events-config "$KV_EVENTS_CONFIG_2" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${VLLM_HOST}:${VLLM_DECODE1_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${VLLM_HOST}:${VLLM_DECODE2_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT3:-8083}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${VLLM_HOST}:${VLLM_PREFILL1_GRPC_PORT}" \
     --component prefill \
     --disaggregation-mode prefill &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT4:-8084}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${VLLM_HOST}:${VLLM_PREFILL2_GRPC_PORT}" \
     --component prefill \
     --disaggregation-mode prefill &

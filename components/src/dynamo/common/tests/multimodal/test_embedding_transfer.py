@@ -6,7 +6,7 @@
 import asyncio
 import logging
 import time
-from random import randint
+from random import Random, randint
 
 import pytest
 import torch
@@ -155,6 +155,69 @@ class TestNixlReadEmbeddingTransfer:
 
 @pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)
 class TestRingBuffer:
+    def test_does_not_wrap_twice_over_live_buffers(self):
+        ring_buffer = RingBuffer(16)
+        first, _ = ring_buffer.get_buffer(12)
+        tail, tail_tensor = ring_buffer.get_buffer(2)
+        tail_tensor.fill_(2)
+        ring_buffer.release_buffer(first)
+        head, head_tensor = ring_buffer.get_buffer(10)
+        head_tensor.fill_(3)
+
+        # Only [10, 12) is available before the oldest live tail allocation.
+        # Wrapping again would reuse [0, 8), which belongs to head_tensor.
+        rejected, tensor = ring_buffer.get_buffer(8)
+        assert rejected is None
+        assert tensor is None
+        assert tail_tensor.tolist() == [2] * 2
+        assert head_tensor.tolist() == [3] * 10
+
+        gap, gap_tensor = ring_buffer.get_buffer(2)
+        assert gap is not None
+        assert gap_tensor.storage_offset() == 10
+        gap_tensor.fill_(4)
+        assert head_tensor.tolist() == [3] * 10
+        assert tail_tensor.tolist() == [2] * 2
+
+        for buffer_id in (tail, gap, head):
+            ring_buffer.release_buffer(buffer_id)
+        full, tensor = ring_buffer.get_buffer(16)
+        assert full is not None
+        assert tensor.numel() == 16
+        ring_buffer.release_buffer(full)
+
+    def test_variable_size_allocations_do_not_overlap_live_views(self):
+        rng = Random(0)
+        ring_buffer = RingBuffer(32)
+        live = {}
+        for _ in range(500):
+            if live and rng.random() < 0.4:
+                buffer_id = rng.choice(list(live))
+                ring_buffer.release_buffer(buffer_id)
+                del live[buffer_id]
+            else:
+                buffer_id, tensor = ring_buffer.get_buffer(rng.randint(1, 32))
+                if buffer_id is None:
+                    assert tensor is None
+                    continue
+                tensor.fill_(buffer_id % 127)
+                live[buffer_id] = tensor
+                intervals = sorted(
+                    (view.storage_offset(), view.storage_offset() + view.numel())
+                    for view in live.values()
+                )
+                assert all(
+                    left[1] <= right[0] for left, right in zip(intervals, intervals[1:])
+                )
+                for live_id, view in live.items():
+                    assert view.tolist() == [live_id % 127] * view.numel()
+        for buffer_id in live:
+            ring_buffer.release_buffer(buffer_id)
+        buffer_id, tensor = ring_buffer.get_buffer(32)
+        assert buffer_id is not None
+        assert tensor.numel() == 32
+        ring_buffer.release_buffer(buffer_id)
+
     def test_simple(self):
         buffer_size = 128
         ring_buffer = RingBuffer(buffer_size)

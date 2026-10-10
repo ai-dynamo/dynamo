@@ -1,14 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt::Display, sync::LazyLock};
+use std::{borrow::Cow, fmt::Display, sync::LazyLock};
 
+use dynamo_protocols::types::{
+    ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
+};
 use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
+use serde_json::Value;
 
-use super::common_ext::{CommonExtProvider, extract_guided_decoding_options};
-use super::tools::{ToolChoiceError, validate_openai_tool_choice};
+use super::{
+    common_ext::{CommonExt, CommonExtProvider, extract_guided_decoding_options},
+    tools::{ToolChoiceError, validate_openai_tool_choice},
+};
 
 //
 // Hyperparameter Contraints
@@ -111,6 +117,22 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "bad_words_token_ids",
     "logprob_token_ids",
 ];
+
+/// Treat null passthrough fields as omitted while preserving unknown fields for validation.
+pub(super) fn deserialize_extra_fields<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    let mut fields =
+        std::collections::HashMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    fields
+        .retain(|key, value| !value.is_null() || !PASSTHROUGH_EXTRA_FIELDS.contains(&key.as_str()));
+    Ok(fields)
+}
 
 static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS));
@@ -229,6 +251,34 @@ pub fn validate_response_format(
             Ok(())
         }
     }
+}
+
+/// Reject multiple independent constraints on assistant output.
+pub fn validate_response_format_conflicts(
+    response_format: &Option<dynamo_protocols::types::ResponseFormat>,
+    common: &CommonExt,
+) -> Result<(), anyhow::Error> {
+    use dynamo_protocols::types::ResponseFormat;
+
+    let has_response_format_constraint = response_format
+        .as_ref()
+        .is_some_and(|format| !matches!(format, ResponseFormat::Text));
+    let has_explicit_guided_decoding = common.guided_json.is_some()
+        || common.guided_regex.is_some()
+        || common
+            .guided_choice
+            .as_ref()
+            .is_some_and(|choices| !choices.is_empty())
+        || common.guided_grammar.is_some();
+
+    if has_response_format_constraint && has_explicit_guided_decoding {
+        anyhow::bail!(
+            "`response_format` cannot be used together with `guided_json`, `guided_regex`, \
+             `guided_choice`, or `guided_grammar`"
+        );
+    }
+
+    Ok(())
 }
 
 /// Validates the temperature parameter
@@ -538,6 +588,102 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
     Ok(())
 }
 
+pub(crate) fn validated_effective_tools(
+    request: &CreateChatCompletionRequest,
+) -> Result<Cow<'_, [ChatCompletionTool]>, anyhow::Error> {
+    let dynamic_tools = request
+        .dynamic_system_tools()
+        .enumerate()
+        .map(|(index, tool)| normalize_dynamic_system_tool(tool, index))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let tools = if dynamic_tools.is_empty() {
+        Cow::Borrowed(request.tools.as_deref().unwrap_or_default())
+    } else {
+        let mut tools = request.tools.clone().unwrap_or_default();
+        tools.extend(dynamic_tools);
+        Cow::Owned(tools)
+    };
+
+    validate_tools(&Some(tools.as_ref()))?;
+    Ok(tools)
+}
+
+fn normalize_dynamic_system_tool(
+    tool: &Value,
+    index: usize,
+) -> Result<ChatCompletionTool, anyhow::Error> {
+    let object = tool.as_object().ok_or_else(|| {
+        anyhow::anyhow!("dynamic system tool at index {index} must be a JSON object")
+    })?;
+    let function = match (object.get("type"), object.get("function")) {
+        (Some(Value::String(kind)), Some(Value::Object(function))) if kind == "function" => {
+            function
+        }
+        (Some(kind), _) if kind.as_str() != Some("function") => {
+            anyhow::bail!("dynamic system tool at index {index} must have type=\"function\"");
+        }
+        (Some(_), _) => {
+            anyhow::bail!(
+                "dynamic system tool at index {index} with type=\"function\" needs a function object"
+            );
+        }
+        (None, Some(_)) => {
+            anyhow::bail!(
+                "dynamic system tool at index {index} with a function field needs type=\"function\""
+            );
+        }
+        (None, None) => object,
+    };
+
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("dynamic system tool at index {index} needs a non-empty string name")
+        })?;
+    let description = optional_dynamic_string(function.get("description"), "description", index)?;
+    let parameters = match function.get("parameters") {
+        None | Some(Value::Null) => None,
+        Some(parameters @ Value::Object(_)) => Some(parameters.clone()),
+        Some(_) => {
+            anyhow::bail!(
+                "dynamic system tool at index {index} parameters must be a JSON Schema object"
+            );
+        }
+    };
+    let strict = match function.get("strict") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(strict)) => Some(*strict),
+        Some(_) => {
+            anyhow::bail!("dynamic system tool at index {index} strict must be a boolean");
+        }
+    };
+
+    Ok(ChatCompletionTool {
+        r#type: ChatCompletionToolType::Function,
+        function: FunctionObject {
+            name: name.to_string(),
+            description,
+            parameters,
+            strict,
+        },
+    })
+}
+
+fn optional_dynamic_string(
+    value: Option<&Value>,
+    field: &str,
+    index: usize,
+) -> Result<Option<String>, anyhow::Error> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => anyhow::bail!("dynamic system tool at index {index} {field} must be a string"),
+    }
+}
+
 /// Validates tools array
 pub fn validate_tools(
     tools: &Option<&[dynamo_protocols::types::ChatCompletionTool]>,
@@ -589,6 +735,7 @@ pub fn validate_tools(
                 tool.function.name,
             );
         }
+        super::strict_schema::validate_strict_function(&tool.function)?;
     }
     Ok(())
 }
@@ -940,6 +1087,61 @@ mod tests {
         HashMap::from([("experimental_field".to_string(), json!("value"))])
     }
 
+    fn explicit_guided_decoding_options() -> Vec<CommonExt> {
+        vec![
+            CommonExt {
+                guided_json: Some(json!({"type": "object"})),
+                ..Default::default()
+            },
+            CommonExt {
+                guided_regex: Some("[a-z]+".to_string()),
+                ..Default::default()
+            },
+            CommonExt {
+                guided_choice: Some(vec!["yes".to_string(), "no".to_string()]),
+                ..Default::default()
+            },
+            CommonExt {
+                guided_grammar: Some("root ::= 'yes'".to_string()),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn structured_response_format_rejects_explicit_guided_decoding() {
+        let response_format = Some(dynamo_protocols::types::ResponseFormat::JsonObject);
+
+        for common in explicit_guided_decoding_options() {
+            let error = validate_response_format_conflicts(&response_format, &common).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "`response_format` cannot be used together with `guided_json`, `guided_regex`, \
+                 `guided_choice`, or `guided_grammar`"
+            );
+        }
+    }
+
+    #[test]
+    fn text_response_format_allows_explicit_guided_decoding() {
+        let response_format = Some(dynamo_protocols::types::ResponseFormat::Text);
+
+        for common in explicit_guided_decoding_options() {
+            validate_response_format_conflicts(&response_format, &common).unwrap();
+        }
+    }
+
+    #[test]
+    fn empty_guided_choice_does_not_conflict_with_response_format() {
+        let response_format = Some(dynamo_protocols::types::ResponseFormat::JsonObject);
+        let common = CommonExt {
+            guided_choice: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        validate_response_format_conflicts(&response_format, &common).unwrap();
+    }
+
     #[test]
     fn validate_chat_template_args_rejects_nested_chat_template() {
         let args = HashMap::from([(
@@ -970,6 +1172,88 @@ mod tests {
 
         let err = validate_response_format(&Some(response_format)).unwrap_err();
         assert!(err.to_string().contains("schema` is required"));
+    }
+
+    #[test]
+    fn null_passthrough_fields_are_omitted_from_chat_and_completion_requests() {
+        use crate::engines::ValidateRequest;
+        use crate::protocols::common::extensions::request_cache_salt;
+        use crate::protocols::openai::{
+            OpenAIStopConditionsProvider, chat_completions::NvCreateChatCompletionRequest,
+            completions::NvCreateCompletionRequest,
+        };
+
+        let mut payload = json!({"model": "test-model"});
+        for field in PASSTHROUGH_EXTRA_FIELDS {
+            payload[field] = serde_json::Value::Null;
+        }
+
+        let mut chat_payload = payload.clone();
+        chat_payload["messages"] = json!([{"role": "user", "content": "hello"}]);
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(chat_payload).unwrap();
+        ValidateRequest::validate(&chat).unwrap();
+        assert!(chat.unsupported_fields.is_empty());
+        assert_eq!(chat.get_stop_token_ids(), None);
+        assert_eq!(request_cache_salt(&chat), None);
+
+        payload["prompt"] = json!("hello");
+        let completion: NvCreateCompletionRequest = serde_json::from_value(payload).unwrap();
+        ValidateRequest::validate(&completion).unwrap();
+        assert!(completion.unsupported_fields.is_empty());
+        assert_eq!(completion.get_stop_token_ids(), None);
+        assert_eq!(request_cache_salt(&completion), None);
+
+        let unknown_null: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "experimental_field": null,
+        }))
+        .unwrap();
+        assert_eq!(
+            unknown_null.unsupported_fields.get("experimental_field"),
+            Some(&serde_json::Value::Null)
+        );
+        let err = ValidateRequest::validate(&unknown_null).unwrap_err();
+        assert!(err.to_string().contains("experimental_field"));
+    }
+
+    #[test]
+    fn extra_field_deserialization_preserves_non_null_values() {
+        #[derive(serde::Deserialize)]
+        struct ExtraFields {
+            #[serde(flatten, deserialize_with = "deserialize_extra_fields")]
+            fields: HashMap<String, serde_json::Value>,
+        }
+
+        let fields: ExtraFields = serde_json::from_value(json!({
+            "cache_salt": "tenant",
+            "stop_token_ids": [],
+            "detokenize": false,
+            "allowed_token_ids": [1],
+            "bad_words_token_ids": [[2]],
+            "logprob_token_ids": [3],
+        }))
+        .unwrap();
+        validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap();
+        assert_eq!(fields.fields.len(), PASSTHROUGH_EXTRA_FIELDS.len());
+        assert_eq!(fields.fields["detokenize"], json!(false));
+        assert_eq!(fields.fields["stop_token_ids"], json!([]));
+
+        for (field, bad) in [
+            ("cache_salt", json!(7)),
+            ("stop_token_ids", json!([null])),
+            ("detokenize", json!(0)),
+            ("allowed_token_ids", json!([-1])),
+            ("bad_words_token_ids", json!([1])),
+            ("logprob_token_ids", json!(["1"])),
+            ("experimental_field", json!({"nested": null})),
+        ] {
+            let fields: ExtraFields = serde_json::from_value(json!({field: bad})).unwrap();
+            assert_eq!(fields.fields[field], bad);
+            let err =
+                validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap_err();
+            assert!(err.to_string().contains(field), "{err}");
+        }
     }
 
     #[test]

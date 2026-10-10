@@ -20,6 +20,15 @@ pub use dynamo_kv_router::services::selection::affinity::{
 pub type LlmResponse =
     crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>;
 
+/// The binding key for the subagents of one parent session.
+///
+/// The `\u{1}` prefix cannot appear in an HTTP header value, so no client can claim this key as
+/// its own session id; the constant length keeps a long parent id from overflowing the limit.
+pub(crate) fn subagent_group_affinity_id(parent_session_id: &str) -> String {
+    let digest = blake3::hash(parent_session_id.as_bytes());
+    format!("\u{1}sg:{}", digest.to_hex())
+}
+
 pub(crate) async fn create_affinity_coordinator(
     ttl: Option<Duration>,
     mode: SessionAffinityMode,

@@ -3,17 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Two aggregated vLLM native-gRPC sidecars behind Dynamo's KV-aware router.
-# Requires two GPUs and a vLLM build that exposes KV-event source discovery.
-# See ../README.md for the validated vLLM/vllm-rs source state.
+# Requires a vLLM build that exposes KV-event source discovery.
 
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/gpu_utils.sh"
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -35,6 +33,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to both managed vLLM engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                       Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  VLLM_WORKER1_GPU            First GPU assignment (default: 0)"
             echo "  VLLM_WORKER2_GPU            Second GPU assignment (default: 1)"
@@ -60,6 +59,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar vllm SIDECAR_CMD
 
 trap dynamo_exit_trap EXIT
 
@@ -92,7 +93,7 @@ KV_EVENTS_CONFIG_1="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":
 KV_EVENTS_CONFIG_2="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_WORKER2_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching vLLM Native-gRPC Sidecars with KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT" \
+print_launch_banner "Launching vLLM Native-gRPC Sidecars with KV Routing (2 workers)" "$MODEL" "$HTTP_PORT" \
     "Worker 1: GPU ${VLLM_WORKER1_GPU}, gRPC ${VLLM_HOST}:${VLLM_WORKER1_GRPC_PORT}, KV events tcp://*:${VLLM_WORKER1_KV_EVENT_PORT}" \
     "Worker 2: GPU ${VLLM_WORKER2_GPU}, gRPC ${VLLM_HOST}:${VLLM_WORKER2_GRPC_PORT}, KV events tcp://*:${VLLM_WORKER2_KV_EVENT_PORT}"
 
@@ -107,6 +108,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_WORKER1_HTTP_PORT" \
     --grpc-port "$VLLM_WORKER1_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
@@ -122,6 +124,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_WORKER2_HTTP_PORT" \
     --grpc-port "$VLLM_WORKER2_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
@@ -131,11 +134,11 @@ vllm-rs serve "$MODEL" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT1" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${VLLM_HOST}:${VLLM_WORKER1_GRPC_PORT}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT2" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${VLLM_HOST}:${VLLM_WORKER2_GRPC_PORT}" &
 
 wait_any_exit

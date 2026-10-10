@@ -199,7 +199,7 @@ def test_endpoint_overrides_with_prefill_worker(mock_vllm_cli):
         "--disaggregation-mode",
         "prefill",
         "--kv-transfer-config",
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
     )
     config = parse_args()
     assert config.namespace == "custom"
@@ -237,10 +237,28 @@ def test_removed_multimodal_role_flags_are_rejected(flag, mock_vllm_cli):
 # --connector removal tests
 
 
-def test_connector_nixl_raises_error_with_migration_hint(mock_vllm_cli):
-    """Test that --connector nixl raises ValueError with --kv-transfer-config hint."""
+def test_connector_nixl_raises_error_without_mode(mock_vllm_cli):
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "nixl")
     with pytest.raises(ValueError, match="--connector is no longer supported"):
+        parse_args()
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_role"),
+    [("prefill", "kv_producer"), ("decode", "kv_consumer")],
+)
+def test_connector_nixl_migration_hint_uses_disaggregation_role(
+    mock_vllm_cli, mode, expected_role
+):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--connector",
+        "nixl",
+        "--disaggregation-mode",
+        mode,
+    )
+    with pytest.raises(ValueError, match=f'"kv_role": "{expected_role}"'):
         parse_args()
 
 
@@ -294,18 +312,20 @@ def test_prefill_worker_without_kv_transfer_config_raises(mock_vllm_cli):
 
 def test_connector_to_kv_transfer_json_single():
     """Test _connector_to_kv_transfer_json returns valid JSON for a single connector."""
-    result = json.loads(_connector_to_kv_transfer_json(["nixl"]))
-    assert result == {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+    result = json.loads(_connector_to_kv_transfer_json(["nixl"], "kv_producer"))
+    assert result == {"kv_connector": "NixlConnector", "kv_role": "kv_producer"}
 
 
 def test_connector_to_kv_transfer_json_multi():
     """Test _connector_to_kv_transfer_json wraps multiple connectors in PdConnector."""
-    result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"]))
+    result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"], "kv_consumer"))
     assert result["kv_connector"] == "PdConnector"
+    assert result["kv_role"] == "kv_both"
     nested = result["kv_connector_extra_config"]["connectors"]
-    nested_names = [c["kv_connector"] for c in nested]
-    assert "DynamoConnector" in nested_names
-    assert "NixlConnector" in nested_names
+    assert {c["kv_connector"]: c["kv_role"] for c in nested} == {
+        "DynamoConnector": "kv_both",
+        "NixlConnector": "kv_consumer",
+    }
 
 
 # _uses_nixl_connector / _uses_dynamo_connector tests
@@ -326,7 +346,7 @@ def _make_engine_cfg(kv_connector=None, extra_config=None):
 _PD_KVBM_NIXL = {
     "connectors": [
         {"kv_connector": "DynamoConnector", "kv_role": "kv_both"},
-        {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
+        {"kv_connector": "NixlConnector", "kv_role": "kv_producer"},
     ]
 }
 
@@ -577,6 +597,15 @@ def test_should_register_model_fetch_weights_for_default_load_format():
 def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
     from dynamo.vllm import main as vllm_main
 
+    # Isolate NIXL env so allow_nixl_telemetry_capture() cannot leak into later tests.
+    for var in (
+        "NIXL_TELEMETRY_ENABLE",
+        "NIXL_TELEMETRY_EXPORTER",
+        "NIXL_TELEMETRY_DIR",
+        "NIXL_TELEMETRY_PROMETHEUS_PORT",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
     class FakeModelConfig:
         def get_diff_sampling_param(self):
             return {"temperature": 0.7}
@@ -666,7 +695,7 @@ def test_disaggregation_mode_prefill(mock_vllm_cli):
         "--disaggregation-mode",
         "prefill",
         "--kv-transfer-config",
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
     )
     config = parse_args()
     assert config.disaggregation_mode == DisaggregationMode.PREFILL
@@ -951,15 +980,19 @@ class TestBenchmarkConfig:
         assert config._benchmark_additional_config == {
             "mode": "prefill",
             "randomize_kda_state": False,
+            "hybrid_live_state": False,
             "warmup_iterations": 2,
             "output_path": str(output),
             "timeout": 900,
+            "max_batch_size": None,
             "prefill_max_new_token_samples": 64,
             "prefill_max_kv_read_token_samples": 16,
             "decode_max_kv_read_token_samples": 128,
             "decode_max_batch_size_samples": 128,
             "prefix_max_batch_size_samples": 3,
             "collect_imbalanced": False,
+            "worker_extension_installed": True,
+            "cudagraph_metrics_auto_enabled": True,
         }
 
     def test_random_kda_config_selects_worker_and_reaches_scheduler(
@@ -1313,8 +1346,8 @@ class TestBenchmarkGrid:
             assert ctx_len <= total_kv
 
 
-def test_build_sampling_params_attaches_kv_hint_message():
-    from dynamo.vllm.handlers import build_sampling_params
+def test_build_vllm_kv_hints_constructs_envelope():
+    from dynamo.vllm.handlers import _build_vllm_kv_hints
 
     source_locations_payload = {
         "source_control_endpoint": "tcp://127.0.0.1:23280",
@@ -1329,156 +1362,46 @@ def test_build_sampling_params_attaches_kv_hint_message():
                 "action_type": "kv.fetch",
                 "action_version": "1.0",
                 "payload": source_locations_payload,
-            },
+            }
         ],
     }
-    request = {
-        "token_ids": [1, 2, 3],
-        "sampling_options": {},
-        "stop_conditions": {},
-        "output_options": {},
-        "kv_hint": kv_hint,
-    }
+    action_type = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
+    envelope_type = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
 
-    default_sampling_params = {
-        "extra_args": {
-            "kv_transfer_params": {"internal": "kept"},
-            "other_internal": "kept",
-        }
-    }
+    with patch(
+        "dynamo.vllm.handlers._vllm_kv_hints_types",
+        return_value=(action_type, envelope_type),
+    ):
+        envelope = _build_vllm_kv_hints({"kv_hint": kv_hint})
 
-    sp = build_sampling_params(request, default_sampling_params=default_sampling_params)
-
-    assert default_sampling_params == {
-        "extra_args": {
-            "kv_transfer_params": {"internal": "kept"},
-            "other_internal": "kept",
-        }
-    }
-    assert sp.extra_args == {
-        "kv_transfer_params": {
-            "internal": "kept",
-            "kv_hint": kv_hint,
-        },
-        "other_internal": "kept",
-    }
-
-
-@pytest.mark.parametrize(
-    "kv_transfer_params",
-    [
-        {"do_remote_decode": False, "transfer_id": "prefill-1"},
-        {"do_remote_decode": True, "remote_engine_id": "prefill-a"},
-    ],
-)
-def test_update_kv_transfer_params_preserves_kv_hint_only(kv_transfer_params):
-    from dynamo.vllm.handlers import _update_kv_transfer_params
-
-    request_kv_hint = {
-        "protocol_version": "0.1",
-        "message_id": "msg-request",
-        "actions": [],
-    }
-    stale_kv_hint = {
-        "protocol_version": "0.1",
-        "message_id": "msg-stale",
-        "actions": [],
-    }
-    sampling_params = SimpleNamespace(
-        extra_args={
-            "kv_transfer_params": {
-                "kv_hint": request_kv_hint,
-                "untrusted_connector_param": "dropped",
-            }
-        }
-    )
-    kv_transfer_params = {**kv_transfer_params, "kv_hint": stale_kv_hint}
-
-    _update_kv_transfer_params(
-        sampling_params, kv_transfer_params, preserve_kv_hint=True
-    )
-
-    assert sampling_params.extra_args["kv_transfer_params"] == {
-        **{key: value for key, value in kv_transfer_params.items() if key != "kv_hint"},
-        "kv_hint": request_kv_hint,
-    }
-
-
-def test_update_kv_transfer_params_drops_existing_kv_hint_by_default():
-    from dynamo.vllm.handlers import _update_kv_transfer_params
-
-    kv_hint = {
-        "protocol_version": "0.1",
-        "message_id": "msg-request",
-        "actions": [],
-    }
-    sampling_params = SimpleNamespace(
-        extra_args={"kv_transfer_params": {"kv_hint": kv_hint}}
-    )
-
-    _update_kv_transfer_params(sampling_params, {"transfer_id": "prefill-1"})
-
-    assert sampling_params.extra_args["kv_transfer_params"] == {
-        "transfer_id": "prefill-1"
-    }
-
-
-def test_update_kv_transfer_params_drops_replacement_kv_hint():
-    from dynamo.vllm.handlers import _update_kv_transfer_params
-
-    stale_kv_hint = {
-        "protocol_version": "0.1",
-        "message_id": "msg-stale",
-        "actions": [],
-    }
-    sampling_params = SimpleNamespace(extra_args={})
-
-    _update_kv_transfer_params(
-        sampling_params,
-        {
-            "transfer_id": "prefill-1",
-            "kv_hint": stale_kv_hint,
-        },
-    )
-
-    assert sampling_params.extra_args["kv_transfer_params"] == {
-        "transfer_id": "prefill-1"
-    }
+    assert envelope.protocol_version == "0.1"
+    assert envelope.message_id == "msg-123"
+    assert len(envelope.actions) == 1
+    assert envelope.actions[0].action_id == "a1"
+    assert envelope.actions[0].action_type == "kv.fetch"
+    assert envelope.actions[0].action_version == "1.0"
+    assert envelope.actions[0].payload == source_locations_payload
 
 
 def test_update_kv_transfer_params_copies_extra_args_before_mutating():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    kv_hint = {
-        "protocol_version": "0.1",
-        "message_id": "msg-request",
-        "actions": [],
-    }
     shared_extra_args = {
-        "kv_transfer_params": {
-            "kv_hint": kv_hint,
-            "internal": "kept-in-default",
-        },
+        "kv_transfer_params": {"internal": "kept-in-default"},
         "other_internal": "kept",
     }
     sampling_params = SimpleNamespace(extra_args=shared_extra_args)
 
-    _update_kv_transfer_params(
-        sampling_params, {"transfer_id": "prefill-1"}, preserve_kv_hint=True
-    )
+    _update_kv_transfer_params(sampling_params, {"transfer_id": "prefill-1"})
 
     assert shared_extra_args == {
-        "kv_transfer_params": {
-            "kv_hint": kv_hint,
-            "internal": "kept-in-default",
-        },
+        "kv_transfer_params": {"internal": "kept-in-default"},
         "other_internal": "kept",
     }
     assert sampling_params.extra_args is not shared_extra_args
     assert sampling_params.extra_args == {
         "kv_transfer_params": {
             "transfer_id": "prefill-1",
-            "kv_hint": kv_hint,
         },
         "other_internal": "kept",
     }
@@ -1495,6 +1418,51 @@ def test_build_sampling_params_maps_max_thinking_tokens():
     }
     sp = build_sampling_params(request, default_sampling_params={})
     assert sp.thinking_token_budget == 1024
+
+
+def _token_request(**sampling_options):
+    return {
+        "token_ids": [1, 2, 3],
+        "sampling_options": sampling_options,
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+
+@pytest.mark.parametrize("text_mode", [False, True], ids=["token-mode", "text-mode"])
+@pytest.mark.parametrize(
+    ("temperature", "expected"),
+    [
+        (0.0, (0.0, 1.0, 0, 0.0)),
+        # vLLM raises 0 < temperature < 0.01 to 0.01, so this is not greedy.
+        (1e-6, (0.01, 0.8, 20, 0.05)),
+    ],
+    ids=["greedy", "tiny-temperature"],
+)
+def test_build_sampling_params_applies_vllm_post_init_after_overlays(
+    text_mode, temperature, expected
+):
+    from dynamo.vllm.handlers import build_sampling_params, build_sampling_params_openai
+
+    defaults = {"top_p": 0.8, "top_k": 20, "min_p": 0.05}
+    if text_mode:
+        sp = build_sampling_params_openai({"temperature": temperature}, defaults)
+    else:
+        sp = build_sampling_params(
+            _token_request(temperature=temperature), default_sampling_params=defaults
+        )
+    assert (sp.temperature, sp.top_p, sp.top_k, sp.min_p) == expected
+
+
+def test_build_sampling_params_rejects_out_of_range_greedy_values():
+    from vllm.exceptions import VLLMValidationError
+
+    from dynamo.vllm.handlers import build_sampling_params
+
+    with pytest.raises(VLLMValidationError, match="top_p"):
+        build_sampling_params(
+            _token_request(temperature=0.0, top_p=0.0), default_sampling_params={}
+        )
 
 
 @pytest.mark.parametrize(
@@ -1676,6 +1644,8 @@ def _make_dynamo_config(**overrides):
         "fpm_trace": False,
         "benchmark_mode": None,
         "benchmark_randomize_kda_state": False,
+        "benchmark_hybrid_live_state": False,
+        "benchmark_max_batch_size": None,
         "benchmark_warmup_iterations": 5,
         "benchmark_output_path": "/tmp/benchmark_results.json",
         "benchmark_timeout": 900,
@@ -1973,6 +1943,159 @@ class TestForwardPassMetricsActivation:
         assert "Benchmark mode: auto-enabling InstrumentedScheduler" not in caplog.text
 
 
+@pytest.mark.parametrize("benchmark_mode", [None, "prefill", "decode", "agg"])
+@pytest.mark.parametrize("initial_metrics", [False, True])
+def test_cuda_graph_dispatch_metrics_enabled_only_for_benchmark(
+    benchmark_mode, initial_metrics
+):
+    dynamo_cfg = _make_dynamo_config(benchmark_mode=benchmark_mode)
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=initial_metrics
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert engine_cfg.cudagraph_metrics is (
+        True if benchmark_mode is not None else initial_metrics
+    )
+
+
+def test_benchmark_cudagraph_metrics_auto_enabled_is_recorded_for_restore():
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=False
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert engine_cfg.cudagraph_metrics is True
+    bench = dynamo_cfg._benchmark_additional_config
+    assert bench["cudagraph_metrics_auto_enabled"] is True
+
+
+def test_benchmark_cudagraph_metrics_user_enabled_is_left_alone_and_not_recorded():
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=True
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert engine_cfg.cudagraph_metrics is True
+    bench = dynamo_cfg._benchmark_additional_config
+    assert "cudagraph_metrics_auto_enabled" not in bench
+
+
+@pytest.mark.parametrize(
+    "gc_policy, configured, expected",
+    [
+        (
+            None,
+            "",
+            "dynamo.vllm.benchmark_worker_extension.FpmBenchmarkWorkerExtension",
+        ),
+        ("freeze", "", "dynamo.vllm.gc_policy.FpmGcWorkerExtension"),
+        (None, "user.Extension", "user.Extension"),
+    ],
+)
+def test_benchmark_cudagraph_metrics_restore_reaches_workers_by_extension(
+    monkeypatch, gc_policy, configured, expected
+):
+    if gc_policy is None:
+        monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    else:
+        monkeypatch.setenv("DYN_FPM_GC_POLICY", gc_policy)
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=False, worker_extension_cls=configured
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    # Both Dynamo classes provide the restore method; a user's class is kept.
+    assert engine_cfg.worker_extension_cls == expected
+    bench = dynamo_cfg._benchmark_additional_config
+    assert bench["cudagraph_metrics_auto_enabled"] is True
+
+
+@pytest.mark.parametrize(
+    "gc_policy, configured, installed, user_class",
+    [
+        pytest.param(None, "", True, None, id="benchmark-extension-injected"),
+        pytest.param("freeze", "", True, None, id="gc-extension-injected"),
+        pytest.param(
+            None, "user.Extension", False, "user.Extension", id="users-own-class"
+        ),
+        pytest.param(
+            None,
+            "dynamo.vllm.benchmark_worker_extension.FpmBenchmarkWorkerExtension",
+            True,
+            None,
+            id="benchmark-extension-named-by-the-user",
+        ),
+        pytest.param(
+            "freeze",
+            "dynamo.vllm.gc_policy.FpmGcWorkerExtension",
+            True,
+            None,
+            id="gc-extension-named-by-the-user",
+        ),
+    ],
+)
+def test_benchmark_cudagraph_metrics_worker_extension_installed_is_recorded(
+    monkeypatch, gc_policy, configured, installed, user_class
+):
+    """The launcher calls the model workers by name only when the class they
+    load is one of Dynamo's; for a user's own class it records which one."""
+    if gc_policy is None:
+        monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    else:
+        monkeypatch.setenv("DYN_FPM_GC_POLICY", gc_policy)
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=False, worker_extension_cls=configured
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    bench = dynamo_cfg._benchmark_additional_config
+    assert bench["worker_extension_installed"] is installed
+    assert bench.get("user_worker_extension_cls") == user_class
+
+
+def test_benchmark_cudagraph_metrics_user_enabled_still_gets_the_worker_extension(
+    monkeypatch,
+):
+    """The engine probe needs the extension in every benchmark run, not only
+    when Dynamo turned cudagraph_metrics on."""
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=True, worker_extension_cls=""
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert engine_cfg.worker_extension_cls == (
+        "dynamo.vllm.benchmark_worker_extension.FpmBenchmarkWorkerExtension"
+    )
+    bench = dynamo_cfg._benchmark_additional_config
+    assert "cudagraph_metrics_auto_enabled" not in bench
+    assert bench["worker_extension_installed"] is True
+
+
+def test_benchmark_cudagraph_metrics_absent_option_is_not_recorded():
+    """A vLLM without the option: nothing is enabled, so nothing is restored."""
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert not hasattr(engine_cfg, "cudagraph_metrics")
+    bench = dynamo_cfg._benchmark_additional_config
+    assert "cudagraph_metrics_auto_enabled" not in bench
+
+
 class TestEmbeddingWorkerFlag:
     """Parsing + validation for --embedding-worker."""
 
@@ -2053,7 +2176,7 @@ class TestEmbeddingWorkerFlag:
             "--disaggregation-mode",
             "prefill",
             "--kv-transfer-config",
-            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+            '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
         )
         with pytest.raises(ValueError, match="--embedding-worker is only valid"):
             parse_args()

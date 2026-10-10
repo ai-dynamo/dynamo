@@ -489,6 +489,23 @@ async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatc
     assert metrics_task.cancelled()
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        ("tcp://*:5557", "127.0.0.1"),
+        ("tcp://0.0.0.0:5557", "127.0.0.1"),
+        ("tcp://[::]:5557", "127.0.0.1"),
+        ("tcp://192.0.2.10:5557", "2001:db8::7"),
+    ],
+)
+def test_kv_event_connect_ip_uses_loopback_for_wildcard_binds(
+    monkeypatch, endpoint, expected
+):
+    monkeypatch.setattr(publisher_mod, "get_local_ip_auto", lambda: "2001:db8::7")
+
+    assert publisher_mod.kv_event_connect_ip(endpoint) == expected
+
+
 def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     calls = []
 
@@ -610,6 +627,56 @@ def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):
         "tcp://127.0.0.1:5560",
     ]
     publisher.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("layout", "expected_ranks"),
+    [
+        ({"dp_size": 4}, [0, 1, 2, 3]),
+        ({"attn_dp_size": 8, "nnodes": 2, "node_rank": 1}, [4, 5, 6, 7]),
+        # A scale joiner's one-rank group must still relay its own rank.
+        ({"ep_join_mode": "scale", "nnodes": 2, "node_rank": 1}, [0]),
+    ],
+    ids=["pure-dp", "attn-dp-multinode", "elastic-ep-scale-joiner"],
+)
+def test_init_fpm_relay_follows_local_dp_rank_bounds(
+    monkeypatch, layout, expected_ranks
+):
+    relayed = []
+
+    class FakeFpmEventRelay:
+        def __init__(self, *, endpoint, zmq_endpoint):
+            relayed.append(zmq_endpoint)
+
+    monkeypatch.setattr("dynamo.llm.FpmEventRelay", FakeFpmEventRelay, raising=False)
+    server_args = SimpleNamespace(
+        forward_pass_metrics_ipc_name="ipc:///tmp/fpm",
+        dp_size=1,
+        nnodes=1,
+        node_rank=0,
+    )
+    for key, value in layout.items():
+        setattr(server_args, key, value)
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+        ),
+        config=SimpleNamespace(
+            server_args=server_args,
+            dynamo_args=SimpleNamespace(
+                enable_local_indexer=False,
+                kv_state_endpoint=None,
+                use_kv_events=False,
+            ),
+        ),
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+
+    relays = publisher.init_fpm_relay()
+
+    assert len(relays) == len(expected_ranks)
+    assert relayed == [f"ipc:///tmp/fpm.{rank}" for rank in expected_ranks]
 
 
 def test_init_kv_event_publish_uses_effective_kv_event_setting():

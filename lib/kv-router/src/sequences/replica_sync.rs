@@ -13,6 +13,7 @@ use super::multi_worker::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequencePublisher, SequenceSubscriber,
 };
 use super::prompt_registry::WorkerLoadSnapshot;
+use super::single::PrefillCompletion;
 use crate::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
     MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
@@ -300,21 +301,25 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let Some(&idx) = table.index.get(&current.worker) else {
                     return;
                 };
-                let load = {
+                let (completion, load) = {
                     let mut seq = table.slots[idx].sequences.write();
-                    if !seq.mark_prefill_completed(&request_id, decay_now) {
+                    let completion = seq.mark_prefill_completed(&request_id, decay_now);
+                    if completion == PrefillCompletion::Unchanged {
                         return;
                     }
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry
                         .replace_worker_load_state(current.worker, load);
-                    load
+                    (completion, load)
                 };
                 drop(table);
+                effects.record_worker_load(current.worker, load, false);
+                if completion == PrefillCompletion::PhaseChanged {
+                    return;
+                }
                 if let Some(observer) = self.replica_request_lease_observer() {
                     observer.progressed(&booking);
                 }
-                effects.record_worker_load(current.worker, load, false);
                 effects.wake_scheduler = true;
             }
         }
@@ -324,12 +329,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let decay_now = Instant::now();
         let mut scheduler_loads = Vec::with_capacity(effects.worker_loads.len());
         for (worker, pending) in effects.worker_loads.drain() {
+            // Every applied change refreshes the load gauges; only shared load is republished.
+            let snapshot =
+                self.observe_worker_load_snapshot(worker, pending.latest_load, decay_now);
             if pending.publish {
-                scheduler_loads.push(self.observe_worker_load_snapshot(
-                    worker,
-                    pending.latest_load,
-                    decay_now,
-                ));
+                scheduler_loads.push(snapshot);
             }
         }
         if !scheduler_loads.is_empty() {

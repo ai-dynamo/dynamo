@@ -4,23 +4,43 @@
 """Unit tests for worker_factory.py"""
 
 import asyncio
+import copy
 import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
+from dynamo.vllm.args import Config
+from dynamo.vllm.benchmark_worker_extension import FpmBenchmarkWorkerExtension
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.instrumented_scheduler import (
+    ENV_FPM_BENCHMARK_OUTPUT_PATH,
+    ENV_FPM_WORKER_ID,
+    InstrumentedScheduler,
+    benchmark_content_point_key,
+)
 from dynamo.vllm.worker_factory import (
+    CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS,
+    ENGINE_PROBE_TIMEOUT_SECONDS,
+    FPM_SET_WORKER_ID_METHOD_NAME,
     EngineSetupResult,
     SnapshotEngineSetupResult,
     WorkerFactory,
+    _attach_engine_resolved,
     _await_benchmark_then_restore_workers,
+    _benchmark_engine_identity,
+    _benchmark_worker_probe_path,
     _DecodeWorkerLifecycle,
     _merge_benchmark_rank_results,
+    _register_request_cache_metrics,
+    _restore_benchmark_workers,
     _stop_worker_gc_policy,
+    _sync_fpm_worker_id,
+    _sync_fpm_worker_id_or_shutdown,
     _wait_and_load_benchmark,
 )
 
@@ -66,6 +86,45 @@ def _make_factory(**overrides) -> WorkerFactory:
     }
     defaults.update(overrides)
     return WorkerFactory(**defaults)
+
+
+def test_register_request_cache_metrics_includes_multimodal_image_loader():
+    endpoint = Mock()
+    embedding_cache = object()
+    image_loader = object()
+    handler = SimpleNamespace(
+        embedding_cache_manager=embedding_cache,
+        _multimodal_request_processor=SimpleNamespace(image_loader=image_loader),
+    )
+    config = SimpleNamespace(
+        enable_multimodal=True,
+        served_model_name="served-model",
+        model="source-model",
+        component="backend",
+    )
+
+    with (
+        patch(
+            "dynamo.vllm.worker_factory.register_embedding_cache_metrics"
+        ) as register_embedding,
+        patch(
+            "dynamo.vllm.worker_factory.register_image_loader_metrics"
+        ) as register_image,
+    ):
+        _register_request_cache_metrics(endpoint, handler, config)
+
+    register_embedding.assert_called_once_with(
+        endpoint=endpoint,
+        cache=embedding_cache,
+        model_name="served-model",
+        component_name="backend",
+    )
+    register_image.assert_called_once_with(
+        endpoint=endpoint,
+        loader=image_loader,
+        model_name="served-model",
+        component_name="backend",
+    )
 
 
 def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
@@ -1114,21 +1173,32 @@ class TestPrefillRegistrationContract:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lora_enabled", [True, False])
-async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
+@pytest.mark.parametrize("snapshot_mode", [True, False])
+async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
     lora_enabled: bool,
+    snapshot_mode: bool,
 ) -> None:
     engine_client = Mock()
-    vllm_config = Mock(additional_config={})
+    vllm_config = Mock(
+        additional_config={},
+        cache_config=SimpleNamespace(num_gpu_blocks=96),
+    )
     engine_tuple: EngineSetupResult = (
         engine_client,
         vllm_config,
         Mock(),
-        "/tmp/prom",
+        str(tmp_path / "prometheus"),
         Mock(),
     )
+    stat_logger = Mock()
+    snapshot_engine: SnapshotEngineSetupResult | None = (
+        (engine_tuple, stat_logger) if snapshot_mode else None
+    )
+    setup_vllm_engine = Mock(return_value=engine_tuple)
     factory = WorkerFactory(
-        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_vllm_engine_fn=setup_vllm_engine,
         setup_kv_event_publisher_fn=Mock(return_value=None),
         register_vllm_model_fn=AsyncMock(),
         setup_fpm_relay_fn=Mock(return_value=None),
@@ -1154,6 +1224,13 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
 
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (3, 2)
+    )
+    stat_logger_factory = Mock(return_value=stat_logger)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory", stat_logger_factory
     )
 
     endpoints: dict[str, Mock] = {}
@@ -1187,7 +1264,25 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
         config,
         asyncio.Event(),
         shutdown_endpoints,
+        snapshot_engine=snapshot_engine,
     )
+
+    if snapshot_mode:
+        stat_logger_factory.assert_not_called()
+        setup_vllm_engine.assert_not_called()
+        stat_logger.bind_endpoint.assert_called_once_with(
+            endpoints["dyn.prefill.generate"]
+        )
+    else:
+        stat_logger_factory.assert_called_once_with(
+            endpoint=endpoints["dyn.prefill.generate"]
+        )
+        setup_vllm_engine.assert_called_once_with(
+            config, stat_logger, fpm_worker_id="cid"
+        )
+        stat_logger.bind_endpoint.assert_not_called()
+    stat_logger.set_num_gpu_blocks_all.assert_called_once_with(48)
+    stat_logger.init_publish.assert_called_once_with()
 
     lifecycle_names = {
         "dyn.prefill.load_lora",
@@ -1202,6 +1297,454 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
     else:
         assert lifecycle_names.isdisjoint(endpoints)
         assert len(shutdown_endpoints) == 3
+
+
+# ---------------------------------------------------------------------------
+# _sync_fpm_worker_id: parent -> restored EngineCore child
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_config(scheduler_cls=InstrumentedScheduler) -> SimpleNamespace:
+    """A restored ``VllmConfig`` whose snapshot captured ``scheduler_cls``.
+
+    ``shutdown_timeout`` is read by ``_DecodeWorkerLifecycle.cleanup()`` when a
+    restore fails, so it has to be present on the decode path.
+    """
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(get_scheduler_cls=lambda: scheduler_cls),
+        shutdown_timeout=5.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_invokes_engine_core_utility():
+    """The parent reaches the restored child through the EngineCore utility RPC.
+
+    This is the only channel available: the child was created before the
+    runtime existed, so it inherited an environment with no worker id and
+    never re-reads it.
+    """
+    call_utility_async = AsyncMock()
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(call_utility_async=call_utility_async)
+    )
+
+    await _sync_fpm_worker_id(engine_client, _snapshot_config(), "8465209922961459")
+
+    call_utility_async.assert_awaited_once_with(
+        FPM_SET_WORKER_ID_METHOD_NAME, "8465209922961459"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_fails_the_restore_when_the_child_rejects_it():
+    """A rejected sync fails the restore instead of degrading to a warning.
+
+    Swallowing it leaves both child-side identity fields empty, the FPM
+    subscriber drops every sample from the replica, and the planner's
+    ``_reconcile_fpm_worker_count`` abandons each scaling decision — the
+    ``worker_count_mismatch`` bug this fix exists to remove, arriving through a
+    second door. Better to fail before the worker registers than to advertise a
+    replica the planner cannot see.
+    """
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(
+            call_utility_async=AsyncMock(
+                side_effect=Exception(
+                    "Call to set_fpm_worker_id method failed: 'EngineCoreProc' "
+                    "object has no attribute 'set_fpm_worker_id'"
+                )
+            )
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="invisible to the planner"):
+        await _sync_fpm_worker_id(engine_client, _snapshot_config(), "8465209922961459")
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_is_bounded_when_the_rpc_never_answers(monkeypatch):
+    """``call_utility_async()`` awaits its future with no deadline of its own.
+
+    An EngineCore rank that stops answering would otherwise hang the restore
+    here — before endpoint registration, with nothing in the logs to point at.
+    Expiry takes the same fail-restore path as any other sync failure.
+    """
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.FPM_SET_WORKER_ID_TIMEOUT_SECONDS", 0.01
+    )
+    rpc_was_cancelled = asyncio.Event()
+
+    async def never_answers(*_args, **_kwargs) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            rpc_was_cancelled.set()
+            raise
+
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(call_utility_async=never_answers)
+    )
+
+    with pytest.raises(RuntimeError, match="Timed out"):
+        await _sync_fpm_worker_id(engine_client, _snapshot_config(), "8465209922961459")
+
+    # wait_for() cancels the pending RPC on expiry; a leaked task would keep the
+    # ZMQ future alive for the life of the process.
+    assert rpc_was_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_skips_a_snapshot_without_the_instrumented_scheduler():
+    """Snapshot mode is independent of FPM mode.
+
+    A snapshot captured with vLLM's own scheduler has no FPM publisher to
+    retarget, and its child raises on the utility. Now that a rejection is
+    fatal, such a restore must never make the call at all.
+    """
+    call_utility_async = AsyncMock()
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(call_utility_async=call_utility_async)
+    )
+
+    await _sync_fpm_worker_id(
+        engine_client, _snapshot_config(AsyncScheduler), "8465209922961459"
+    )
+
+    call_utility_async.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_syncs_a_subclass_of_the_instrumented_scheduler():
+    """``--scheduler-cls`` may name a subclass; it still carries the publisher."""
+
+    class _Derived(InstrumentedScheduler):
+        pass
+
+    call_utility_async = AsyncMock()
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(call_utility_async=call_utility_async)
+    )
+
+    await _sync_fpm_worker_id(
+        engine_client, _snapshot_config(_Derived), "8465209922961459"
+    )
+
+    call_utility_async.assert_awaited_once_with(
+        FPM_SET_WORKER_ID_METHOD_NAME, "8465209922961459"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_fails_on_an_unresolvable_scheduler_class():
+    """The EngineCore resolved this class at build time, so failing here is fatal."""
+
+    def raises() -> type:
+        raise ImportError("No module named 'user.scheduler'")
+
+    call_utility_async = AsyncMock()
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(call_utility_async=call_utility_async)
+    )
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(get_scheduler_cls=raises)
+    )
+
+    with pytest.raises(ImportError, match="user.scheduler"):
+        await _sync_fpm_worker_id(engine_client, vllm_config, "8465209922961459")
+
+    call_utility_async.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# The production restore call sites: realtime, decode, prefill
+# ---------------------------------------------------------------------------
+
+# Each entry is the worker-creation method and the disaggregation mode that
+# reaches it. Every one of them unpacks a snapshot and must sync the identity.
+_RESTORE_PATHS = {
+    "decode": ("_create_decode_worker", DisaggregationMode.DECODE),
+    "prefill": ("_create_prefill_worker", DisaggregationMode.PREFILL),
+    "realtime": ("_create_realtime_worker", DisaggregationMode.AGGREGATED),
+}
+
+_RESTORED_ENDPOINT_ID = "cid-4242"
+
+
+class _ReachedRegistration(Exception):
+    """Raised by the stubbed ``register_vllm_model``: proof a path got that far."""
+
+
+def _restore_snapshot_engine(
+    scheduler_cls: type = InstrumentedScheduler,
+    call_utility_async=None,
+) -> tuple[SnapshotEngineSetupResult, Mock]:
+    """A snapshot engine whose utility RPC and shutdown are recorded."""
+    engine_client = Mock(get_supported_tasks=AsyncMock(return_value=("realtime",)))
+    engine_client.engine_core.call_utility_async = (
+        call_utility_async if call_utility_async is not None else AsyncMock()
+    )
+    vllm_config = Mock(shutdown_timeout=5.0, additional_config={})
+    vllm_config.scheduler_config.get_scheduler_cls.return_value = scheduler_cls
+    vllm_config.cache_config.block_size = 16
+    vllm_config.cache_config.num_gpu_blocks = 1024
+    vllm_config.parallel_config.data_parallel_size = 1
+    vllm_config.parallel_config.data_parallel_rank = 0
+    vllm_config.parallel_config.data_parallel_size_local = 1
+    vllm_config.model_config.max_model_len = 4096
+    engine_setup: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        None,
+        Mock(),
+    )
+    return (engine_setup, Mock()), engine_client
+
+
+async def _enter_restore_path(
+    path: str,
+    snapshot_engine: SnapshotEngineSetupResult | None,
+    register: AsyncMock,
+    endpoint: Mock,
+    setup_vllm_engine: Mock | None = None,
+) -> None:
+    """Run one worker-creation path; it ends in ``register`` or the error under test."""
+    method_name, mode = _RESTORE_PATHS[path]
+    factory = _make_factory(
+        register_vllm_model_fn=register,
+        setup_vllm_engine_fn=setup_vllm_engine or Mock(),
+    )
+    factory._maybe_create_failover_metrics = Mock(return_value=None)  # type: ignore[method-assign]
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+    config = _make_config(
+        disaggregation_mode=mode,
+        namespace="dyn",
+        component="backend",
+        endpoint="generate",
+        model="m",
+        served_model_name="m",
+        enable_rl=False,
+        enable_multimodal=False,
+        frontend_decoding=False,
+        use_vllm_tokenizer=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+        endpoint_types="chat,completions",
+    )
+    await getattr(factory, method_name)(
+        runtime,
+        config,
+        asyncio.Event(),
+        [],
+        snapshot_engine=snapshot_engine,
+    )
+
+
+@pytest.fixture
+def restore_path_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub what each path calls between the sync and registration."""
+    monkeypatch.setenv(ENV_FPM_WORKER_ID, "")
+
+    async def _noop(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory.StatLoggerFactory", Mock())
+    for handler_cls in (
+        "PrefillWorkerHandler",
+        "DecodeWorkerHandler",
+        "RealtimeHandler",
+        "RealtimeTranscriptionHandler",
+    ):
+        monkeypatch.setattr(
+            f"dynamo.vllm.worker_factory.{handler_cls}",
+            Mock(return_value=Mock(embedding_cache_manager=None)),
+        )
+    for payload_cls in ("VllmHealthCheckPayload", "VllmPrefillHealthCheckPayload"):
+        monkeypatch.setattr(
+            f"dynamo.vllm.worker_factory.{payload_cls}",
+            Mock(return_value=Mock(to_dict=Mock(return_value={}))),
+        )
+    monkeypatch.setattr(
+        WorkerFactory, "_maybe_get_encode_worker_client", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(WorkerFactory, "_maybe_wait_for_failover_lock", AsyncMock())
+    monkeypatch.setattr(WorkerFactory, "register_engine_routes", Mock())
+
+
+def _restored_endpoint() -> Mock:
+    return Mock(
+        connection_id=Mock(return_value=_RESTORED_ENDPOINT_ID),
+        first_token_source=AsyncMock(),
+    )
+
+
+def _assert_not_served(endpoint: Mock) -> None:
+    endpoint.serve_endpoint.assert_not_called()
+    endpoint.serve_bidirectional_endpoint.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", sorted(_RESTORE_PATHS))
+async def test_every_restore_path_syncs_the_endpoint_id_before_registration(
+    path: str, restore_path_stubs, monkeypatch
+):
+    """Each restore path syncs the endpoint id, and does so before registering."""
+    order: list[str] = []
+    call_utility_async = AsyncMock(side_effect=lambda *_: order.append("sync"))
+    snapshot, _engine_client = _restore_snapshot_engine(
+        call_utility_async=call_utility_async
+    )
+
+    def reach_registration(*_args, **_kwargs):
+        order.append("register")
+        raise _ReachedRegistration
+
+    with pytest.raises(_ReachedRegistration):
+        await _enter_restore_path(
+            path,
+            snapshot,
+            AsyncMock(side_effect=reach_registration),
+            _restored_endpoint(),
+        )
+
+    call_utility_async.assert_awaited_once_with(
+        FPM_SET_WORKER_ID_METHOD_NAME, _RESTORED_ENDPOINT_ID
+    )
+    assert order == ["sync", "register"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", sorted(_RESTORE_PATHS))
+async def test_restore_without_instrumented_scheduler_registers_without_sync(
+    path: str, restore_path_stubs, monkeypatch
+):
+    """A snapshot without InstrumentedScheduler skips the sync and still registers."""
+    snapshot, engine_client = _restore_snapshot_engine(scheduler_cls=AsyncScheduler)
+    register = AsyncMock(side_effect=_ReachedRegistration)
+
+    with pytest.raises(_ReachedRegistration):
+        await _enter_restore_path(path, snapshot, register, _restored_endpoint())
+
+    engine_client.engine_core.call_utility_async.assert_not_awaited()
+    register.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", sorted(_RESTORE_PATHS))
+async def test_cold_start_registers_without_syncing_the_fpm_worker_id(
+    path: str, restore_path_stubs, monkeypatch
+):
+    """Cold start reads the id from the environment, so it registers without a sync."""
+    (engine_setup, _stat_logger), engine_client = _restore_snapshot_engine()
+    register = AsyncMock(side_effect=_ReachedRegistration)
+
+    with pytest.raises(_ReachedRegistration):
+        await _enter_restore_path(
+            path,
+            None,
+            register,
+            _restored_endpoint(),
+            setup_vllm_engine=Mock(return_value=engine_setup),
+        )
+
+    engine_client.engine_core.call_utility_async.assert_not_awaited()
+    register.assert_awaited_once()
+
+
+async def _never_answers(*_args, **_kwargs) -> None:
+    await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", sorted(_RESTORE_PATHS))
+@pytest.mark.parametrize(
+    ("failure", "match"),
+    [
+        ("rejected", "invisible to the planner"),
+        ("timeout", "Timed out"),
+        ("unresolvable", "user.scheduler"),
+    ],
+)
+async def test_failed_sync_fails_the_restore_before_registration_and_shuts_down_the_engine(
+    path: str, failure: str, match: str, restore_path_stubs, monkeypatch
+):
+    """A failed sync blocks registration and shuts the engine down once."""
+    if failure == "timeout":
+        monkeypatch.setattr(
+            "dynamo.vllm.worker_factory.FPM_SET_WORKER_ID_TIMEOUT_SECONDS", 0.01
+        )
+        call_utility_async = _never_answers
+    else:
+        call_utility_async = AsyncMock(
+            side_effect=Exception(
+                "Call to set_fpm_worker_id method failed: scheduler is "
+                "Scheduler, not InstrumentedScheduler"
+            )
+        )
+    snapshot, engine_client = _restore_snapshot_engine(
+        call_utility_async=call_utility_async
+    )
+    expected_error: type[Exception] = RuntimeError
+    if failure == "unresolvable":
+        engine_setup, _stat_logger = snapshot
+        vllm_config = engine_setup[1]
+        vllm_config.scheduler_config.get_scheduler_cls.side_effect = ImportError(
+            "No module named 'user.scheduler'"
+        )
+        expected_error = ImportError
+    register = AsyncMock(side_effect=_ReachedRegistration)
+    endpoint = _restored_endpoint()
+
+    with pytest.raises(expected_error, match=match):
+        await _enter_restore_path(path, snapshot, register, endpoint)
+
+    register.assert_not_awaited()
+    _assert_not_served(endpoint)
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_sync_or_shutdown_keeps_the_sync_error_when_shutdown_also_fails(
+    caplog,
+):
+    """A failing shutdown is logged; the sync error is what propagates."""
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(
+            call_utility_async=AsyncMock(side_effect=Exception("rejected"))
+        ),
+        shutdown=Mock(side_effect=RuntimeError("engine already dead")),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError, match="invisible to the planner"):
+            await _sync_fpm_worker_id_or_shutdown(
+                engine_client, _snapshot_config(), "8465209922961459"
+            )
+
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    assert "Failed to shut down the restored engine" in caplog.text
+
+
+def test_fpm_utility_name_matches_the_installed_method():
+    """The caller's method name must match what the scheduler module installs.
+
+    The two sides live in different modules and are linked only by this
+    string. A rename on either side would otherwise fail silently at runtime,
+    surfacing as an ``AttributeError`` folded into the utility's
+    ``failure_message`` long after deploy.
+    """
+    from vllm.v1.engine.core import EngineCore
+
+    import dynamo.vllm.instrumented_scheduler  # noqa: F401  installs the patch
+
+    assert hasattr(EngineCore, FPM_SET_WORKER_ID_METHOD_NAME)
 
 
 @pytest.mark.asyncio
@@ -1802,6 +2345,42 @@ async def test_decode_call_site_stops_workers_when_benchmark_wait_raises(
 
 
 @pytest.mark.asyncio
+async def test_encode_registration_preserves_ngc_identity_across_local_caches(tmp_path):
+    model = "ngc://example/team/model:1"
+    for worker in ("encoder-a", "encoder-b"):
+        config = Config()
+        config.namespace = "dynamo"
+        config.component = "encoder"
+        config.endpoint = "generate"
+        config.model = model
+        config.served_model_name = "public-model"
+        config.engine_args = SimpleNamespace(model=str(tmp_path / worker / "model"))
+        config.embedding_transfer_mode = "nixl"
+        config.frontend_decoding = False
+        config.multimodal_embedding_cache_capacity_gb = 0.0
+        endpoint = Mock(serve_endpoint=AsyncMock())
+        runtime = Mock(endpoint=Mock(return_value=endpoint))
+        handler = Mock(async_init=AsyncMock())
+        register = AsyncMock()
+
+        with (
+            patch(
+                "dynamo.vllm.worker_factory.EncodeWorkerHandler", return_value=handler
+            ),
+            patch("dynamo.vllm.worker_factory.register_model", register),
+            patch("dynamo.vllm.worker_factory.register_image_loader_metrics"),
+            patch("dynamo.vllm.worker_factory.register_model_taint_route"),
+        ):
+            await _make_factory()._create_multimodal_encode_worker(
+                runtime, config, asyncio.Event(), []
+            )
+
+        register.assert_awaited_once()
+        assert register.await_args.args[3] == model
+        assert register.await_args.kwargs["model_name"] == "public-model"
+
+
+@pytest.mark.asyncio
 class TestEncodeWorkerEmbeddingCacheCapacity:
     """The encode worker gets its cache capacity from the configured flag.
 
@@ -1835,12 +2414,12 @@ class TestEncodeWorkerEmbeddingCacheCapacity:
             multimodal_embedding_cache_capacity_gb=capacity_gb,
         )
 
-        with patch(
-            "dynamo.vllm.worker_factory.EncodeWorkerHandler", return_value=handler
-        ) as handler_cls, patch(
-            "dynamo.vllm.worker_factory.register_model", AsyncMock()
-        ), patch(
-            "dynamo.vllm.worker_factory.register_model_taint_route"
+        with (
+            patch(
+                "dynamo.vllm.worker_factory.EncodeWorkerHandler", return_value=handler
+            ) as handler_cls,
+            patch("dynamo.vllm.worker_factory.register_model", AsyncMock()),
+            patch("dynamo.vllm.worker_factory.register_model_taint_route"),
         ):
             await _make_factory()._create_multimodal_encode_worker(
                 runtime, config, asyncio.Event(), []
@@ -1898,3 +2477,2379 @@ async def test_random_state_stop_failure_still_restores_gc(monkeypatch):
             {"randomize_kda_state": True}, Mock(), client
         )
     stop_gc.assert_awaited_once_with(client)
+
+
+# --------------------------------------------------------------------------
+# Engine provenance (AIC-1950)
+# --------------------------------------------------------------------------
+
+
+def _engine_block(dp_rank: int, backend: str | None = None) -> dict:
+    """Minimal engine block shaped like the one the scheduler writes."""
+    return {
+        "attention": {
+            "backend_requested": backend,
+            "backend_resolved": None,
+            "resolution": "pending_worker_probe",
+        },
+        "parallel": {"data_parallel_rank": dp_rank, "tensor_parallel_size": 4},
+        "versions": {"vllm": "0.28.0"},
+        "resolved": None,
+        "resolution": "pending_worker_probe",
+    }
+
+
+def _engine_rank_payload(dp_rank: int, engine: dict | None) -> dict:
+    """A two-rank-group rank artifact with optional engine provenance."""
+    return _engine_rank_payload_group(dp_rank, engine, size=2)
+
+
+def _engine_rank_payload_group(dp_rank: int, engine: dict | None, size: int) -> dict:
+    """An N-rank-group rank artifact with optional engine provenance."""
+    point = {"benchmark_id": 1, "point_type": "prefill"}
+    # Scaled the same way as results[0].fpms[0] below, so a rank's own local
+    # result matches its own copy of the synchronized group at every rank,
+    # not just rank 0.
+    rank_results = [
+        {
+            "dp_rank": r,
+            "fpms": [{"counter_id": 1, "dp_rank": r, "wall_time": 0.01 * (r + 1)}],
+        }
+        for r in range(size)
+    ]
+    group_wall_time = 0.01 * size
+    payload: dict = {
+        "schema_version": 2,
+        "artifact_type": "rank",
+        "valid": True,
+        "run_id": "run-1",
+        "grid_digest": "grid-1",
+        "timing": {
+            "started_at": "2026-09-19T12:00:00Z",
+            "completed_at": "2026-09-19T12:00:10Z",
+            "benchmark_elapsed_seconds": 10.0,
+            "measured_iteration_seconds": group_wall_time,
+        },
+        "dp": {"rank": dp_rank, "size": size},
+        "coverage": {
+            "expected_points": 1,
+            "completed_points": 1,
+            "skipped_points": 0,
+        },
+        "results": [
+            {
+                "point": point,
+                "fpms": [
+                    {
+                        "counter_id": 1,
+                        "dp_rank": dp_rank,
+                        "wall_time": 0.01 * (dp_rank + 1),
+                    }
+                ],
+            }
+        ],
+        "iteration_groups": [
+            {
+                "benchmark_id": 1,
+                "point": point,
+                "expected_dp_ranks": list(range(size)),
+                "complete": True,
+                "wall_time": group_wall_time,
+                "rank_results": rank_results,
+            }
+        ],
+        "skipped_points": [],
+    }
+    if engine is not None:
+        payload["engine"] = engine
+    return payload
+
+
+def test_benchmark_engine_identity_strips_rank_and_probe_fields():
+    identity = _benchmark_engine_identity({"engine": _engine_block(3, "FLASH_ATTN")})
+
+    assert identity == {
+        "attention": {"backend_requested": "FLASH_ATTN"},
+        "parallel": {"tensor_parallel_size": 4},
+        "versions": {"vllm": "0.28.0"},
+    }
+    assert _benchmark_engine_identity({}) is None
+
+
+def test_merge_copies_engine_provenance_and_clears_the_rank(tmp_path):
+    merged = _merge_benchmark_rank_results(
+        [
+            (0, tmp_path / "rank0.json", _engine_rank_payload(0, _engine_block(0))),
+            (1, tmp_path / "rank1.json", _engine_rank_payload(1, _engine_block(1))),
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert merged["engine"]["parallel"]["tensor_parallel_size"] == 4
+    # Per-rank in a document that describes every rank would be a lie.
+    assert merged["engine"]["parallel"]["data_parallel_rank"] is None
+    assert merged["engine"]["versions"] == {"vllm": "0.28.0"}
+    assert "capture_errors" not in merged["engine"]
+
+
+def test_merge_rejects_engine_provenance_mismatch(tmp_path):
+    with pytest.raises(RuntimeError, match="engine provenance mismatch"):
+        _merge_benchmark_rank_results(
+            [
+                (
+                    0,
+                    tmp_path / "rank0.json",
+                    _engine_rank_payload(0, _engine_block(0, "FLASH_ATTN")),
+                ),
+                (
+                    1,
+                    tmp_path / "rank1.json",
+                    _engine_rank_payload(1, _engine_block(1, "FLASHINFER")),
+                ),
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+def test_merge_engine_provenance_mismatch_with_absent_vs_none_key_still_raises(
+    tmp_path,
+):
+    """A top-level engine key present-with-None on one rank and absent on
+    the other makes every key's .get() comparison agree (None either way),
+    even though the two identity dicts are still != as a whole (one has the
+    key, one doesn't): the generator that looks for the differing field is
+    empty. Before the fix this raised IndexError instead of the descriptive
+    RuntimeError (M1)."""
+    engine_0 = _engine_block(0, "FLASH_ATTN")
+    engine_0["extra"] = None
+    engine_1 = _engine_block(1, "FLASH_ATTN")  # no "extra" key at all
+
+    with pytest.raises(RuntimeError, match="engine provenance mismatch"):
+        _merge_benchmark_rank_results(
+            [
+                (0, tmp_path / "rank0.json", _engine_rank_payload(0, engine_0)),
+                (1, tmp_path / "rank1.json", _engine_rank_payload(1, engine_1)),
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+def test_merge_carries_engine_capture_error_without_raising(tmp_path, caplog):
+    """A rank whose engine capture raised (``_bench_capture_engine`` fails
+    soft into ``capture_error``, AIC-1950 Task 1) must not fail the whole
+    merge: its FPM numbers are still trustworthy even though its engine
+    provenance is not. The failure is carried into the merged document
+    instead of being compared for identity."""
+    caplog.set_level(logging.WARNING)
+    # A real capture failure yields a partially filled block -- whatever
+    # sub-blocks _bench_capture_engine built before the exception -- plus
+    # capture_error, not just the marker in isolation.
+    partial_capture = {
+        "attention": {
+            "backend_requested": "FLASHINFER",
+            "backend_resolved": None,
+            "resolution": "pending_worker_probe",
+        },
+        "capture_error": "hf_config missing",
+    }
+
+    merged = _merge_benchmark_rank_results(
+        [
+            (0, tmp_path / "rank0.json", _engine_rank_payload(0, _engine_block(0))),
+            (1, tmp_path / "rank1.json", _engine_rank_payload(1, partial_capture)),
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert merged["engine"]["capture_errors"] == {"1": "hf_config missing"}
+    # The reference rank (0) captured fine; its fields still come through.
+    assert merged["engine"]["parallel"]["tensor_parallel_size"] == 4
+    assert "engine provenance" in caplog.text
+
+
+def test_merge_carries_engine_provenance_missing_on_one_rank_only(tmp_path, caplog):
+    """A rank with no ``engine`` block at all (e.g. an older worker image)
+    is handled the same way as a capture failure: recorded, not raised."""
+    caplog.set_level(logging.WARNING)
+
+    merged = _merge_benchmark_rank_results(
+        [
+            (0, tmp_path / "rank0.json", _engine_rank_payload(0, _engine_block(0))),
+            (1, tmp_path / "rank1.json", _engine_rank_payload(1, None)),
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert merged["engine"]["capture_errors"] == {"1": "missing engine block"}
+    assert "engine provenance" in caplog.text
+
+
+def test_merge_ignores_probe_filled_engine_fields(tmp_path):
+    """Rank artifacts rewritten by earlier builds carry probe fields; they
+    must not fail the merge."""
+    probed = _engine_block(1)
+    probed["resolved"] = {"attention_backends": {"layer.0": "FLASHINFER_MLA"}}
+    probed["resolution"] = "worker_probe"
+    probed["resolved_scope"] = "representative_worker"
+    probed["worker_probe"] = {"responses": [{"dp_rank": 1}]}
+    probed["attention"].update(
+        backend_resolved="FLASHINFER_MLA",
+        mla_prefill_backend_resolved="TrtllmRaggedMLAPrefill",
+        resolution="worker_probe_partial",
+    )
+
+    merged = _merge_benchmark_rank_results(
+        [
+            (0, tmp_path / "rank0.json", _engine_rank_payload(0, _engine_block(0))),
+            (1, tmp_path / "rank1.json", _engine_rank_payload(1, probed)),
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert merged["engine"]["resolved"] is None
+
+
+def test_merge_still_rejects_mismatch_with_one_degraded_rank_present(tmp_path):
+    """One degraded rank must not switch the identity check off for the
+    ranks that did capture: two clean ranks on different attention backends
+    must still raise even though a third rank's capture failed."""
+    with pytest.raises(RuntimeError, match="engine provenance mismatch"):
+        _merge_benchmark_rank_results(
+            [
+                (
+                    0,
+                    tmp_path / "rank0.json",
+                    _engine_rank_payload_group(0, _engine_block(0, "FLASH_ATTN"), 3),
+                ),
+                (
+                    1,
+                    tmp_path / "rank1.json",
+                    _engine_rank_payload_group(1, _engine_block(1, "FLASHINFER"), 3),
+                ),
+                (
+                    2,
+                    tmp_path / "rank2.json",
+                    _engine_rank_payload_group(2, {"capture_error": "boom"}, 3),
+                ),
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+def test_merge_reseeds_engine_from_first_clean_rank_when_reference_degraded(
+    tmp_path, caplog
+):
+    """When the merge's reference rank (``rank_data[0]``) is itself
+    degraded, the provenance another rank did capture must not be lost: the
+    merged engine block is reseeded from the first rank whose capture
+    succeeded, not just left as the degraded reference's own (missing or
+    partial) block."""
+    caplog.set_level(logging.WARNING)
+
+    merged = _merge_benchmark_rank_results(
+        [
+            (0, tmp_path / "rank0.json", _engine_rank_payload(0, None)),
+            (1, tmp_path / "rank1.json", _engine_rank_payload(1, _engine_block(1))),
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert merged["engine"]["parallel"]["tensor_parallel_size"] == 4
+    assert merged["engine"]["parallel"]["data_parallel_rank"] is None
+    assert merged["engine"]["versions"] == {"vllm": "0.28.0"}
+    assert merged["engine"]["capture_errors"] == {"0": "missing engine block"}
+    assert "engine provenance" in caplog.text
+
+
+def test_merge_without_engine_provenance_is_unchanged(tmp_path, caplog):
+    """No rank capturing an ``engine`` block at all (e.g. a pre-Task-1
+    artifact) is not a degraded run: the merge stays byte-for-byte backward
+    compatible, with no ``engine`` key and no warning."""
+    caplog.set_level(logging.WARNING)
+
+    merged = _merge_benchmark_rank_results(
+        [
+            (0, tmp_path / "rank0.json", _engine_rank_payload(0, None)),
+            (1, tmp_path / "rank1.json", _engine_rank_payload(1, None)),
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert "engine" not in merged
+    assert "measurement_protocol" not in merged
+    assert "engine provenance" not in caplog.text
+
+
+def _measurement_rank_payloads() -> list[dict]:
+    """Two ranks retain distinct prompt hashes and their unreduced samples."""
+    payloads = [_engine_rank_payload(rank, None) for rank in range(2)]
+    for rank, payload in enumerate(payloads):
+        payload["measurement_protocol"] = {
+            "schema_version": 1,
+            "content_identity": "coordinate_rank_slot_v1",
+            "content_seed": "0",
+            "synthetic_content": "random",
+            "synthetic_pool_tag": "",
+            "prompt_hash_encoding": "uint32_le",
+            "independent_repetitions": 1,
+            "timing_metric": "scheduler_wall_time",
+            "input_evidence_scope": "injected_prompt_token_ids",
+            "unobserved": [
+                "sampled_continuation_token_ids",
+                "kv_cache_tensors",
+                "recurrent_state_tensors",
+                "execution_history_equivalence",
+            ],
+            "preparation": {
+                "warmup_iterations": 5,
+                "prefill_real_seed": False,
+                "decode_real_kv_warmup": True,
+                "giant_kv_threshold": 1000000,
+                "giant_kv_repeats": 3,
+            },
+        }
+        group = payload["iteration_groups"][0]
+        group["point"].update(
+            point_type="decode", batch_size=2, total_kv_read_tokens=512
+        )
+        for rank_result in group["rank_results"]:
+            result_rank = rank_result["dp_rank"]
+            fpm = rank_result["fpms"][0]
+            fpm["benchmark_measurement"] = {
+                "schema_version": 1,
+                "point_key": benchmark_content_point_key(group["point"]),
+                "dp_rank": result_rank,
+                "prompts": {
+                    "status": "recorded",
+                    "sha256": str(result_rank) * 64,
+                    "requests": [
+                        {
+                            "slot": 0,
+                            "num_tokens": 256,
+                            "sha256": str(result_rank + 2) * 64,
+                        }
+                    ],
+                },
+                "preparation": {
+                    "grid_digest": "grid-1",
+                    "completed_points_before": 0,
+                    "kv_seed_regime": "real_kv",
+                },
+                "expected_internal_samples": 4,
+                "raw_fpms": [
+                    {**fpm, "wall_time": wall_time}
+                    for wall_time in (
+                        0.05,
+                        fpm["wall_time"] - 0.002,
+                        fpm["wall_time"],
+                        0.5,
+                    )
+                ],
+                "estimate": {
+                    "method": "adjacent_upper_median",
+                    "raw_sample_indices": [1, 2, 3],
+                },
+            }
+        payload["results"][0]["fpms"] = copy.deepcopy(
+            group["rank_results"][rank]["fpms"]
+        )
+    return payloads
+
+
+def test_merge_preserves_rank_specific_inputs_and_all_raw_samples(tmp_path):
+    payloads = _measurement_rank_payloads()
+    merged = _merge_benchmark_rank_results(
+        [
+            (rank, tmp_path / f"rank{rank}.json", data)
+            for rank, data in enumerate(payloads)
+        ],
+        tmp_path / "merged.json",
+    )
+    # Serialization and merging must preserve all internal timing samples.
+    on_disk = json.loads(json.dumps(merged))
+    assert on_disk["measurement_protocol"] == payloads[0]["measurement_protocol"]
+    assert on_disk["iteration_groups"] == payloads[0]["iteration_groups"]
+    for rank, source in enumerate(payloads):
+        expected = source["results"][0]["fpms"][0]["benchmark_measurement"]
+        actual = on_disk["results"][rank]["fpms"][0]["benchmark_measurement"]
+        assert actual == expected
+        assert actual["prompts"]["sha256"] == str(rank) * 64
+        assert [sample["wall_time"] for sample in actual["raw_fpms"]][-1] == 0.5
+    merged["results"][0]["fpms"][0]["benchmark_measurement"]["raw_fpms"].clear()
+    assert (
+        len(payloads[0]["results"][0]["fpms"][0]["benchmark_measurement"]["raw_fpms"])
+        == 4
+    )
+
+
+def test_merge_preserves_unavailable_prompt_evidence(tmp_path):
+    payload = _measurement_rank_payloads()[0]
+    evidence = payload["iteration_groups"][0]["rank_results"][1]["fpms"][0][
+        "benchmark_measurement"
+    ]
+    evidence["prompts"] = {"status": "unavailable", "sha256": None, "requests": []}
+    merged = _merge_benchmark_rank_results(
+        [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+    )
+    assert merged["results"][1]["fpms"][0]["benchmark_measurement"] == evidence
+    assert (
+        merged["measurement_protocol"]["unobserved"]
+        == payload["measurement_protocol"]["unobserved"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [("content_seed", "1"), ("timing_metric", "cuda_event"), ("schema_version", 2)],
+)
+def test_merge_rejects_different_measurement_protocols(tmp_path, field, changed):
+    payloads = _measurement_rank_payloads()
+    payloads[1]["measurement_protocol"][field] = changed
+    with pytest.raises(RuntimeError, match="measurement protocol mismatch"):
+        _merge_benchmark_rank_results(
+            [
+                (rank, tmp_path / f"rank{rank}.json", data)
+                for rank, data in enumerate(payloads)
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+@pytest.mark.parametrize("missing_rank", [0, 1])
+def test_merge_rejects_mixed_legacy_and_protocol_artifacts(tmp_path, missing_rank):
+    payloads = _measurement_rank_payloads()
+    del payloads[missing_rank]["measurement_protocol"]
+    with pytest.raises(RuntimeError, match="measurement protocol mismatch"):
+        _merge_benchmark_rank_results(
+            [
+                (rank, tmp_path / f"rank{rank}.json", data)
+                for rank, data in enumerate(payloads)
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+@pytest.mark.parametrize("protocol", [None, {}, {"schema_version": 2}])
+def test_merge_rejects_invalid_measurement_protocol(tmp_path, protocol):
+    payloads = _measurement_rank_payloads()
+    for payload in payloads:
+        payload["measurement_protocol"] = protocol
+    with pytest.raises(RuntimeError, match="invalid measurement protocol"):
+        _merge_benchmark_rank_results(
+            [
+                (rank, tmp_path / f"rank{rank}.json", data)
+                for rank, data in enumerate(payloads)
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+def test_merge_rejects_measurement_evidence_without_protocol(tmp_path):
+    payloads = _measurement_rank_payloads()
+    for payload in payloads:
+        del payload["measurement_protocol"]
+    with pytest.raises(
+        RuntimeError, match="measurement evidence has no shared protocol"
+    ):
+        _merge_benchmark_rank_results(
+            [
+                (rank, tmp_path / f"rank{rank}.json", data)
+                for rank, data in enumerate(payloads)
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+def test_merge_rejects_missing_measurement_evidence_from_remote_rank(tmp_path):
+    payload = _measurement_rank_payloads()[0]
+    # A node-local merge still sees every global rank through its synchronized group.
+    del payload["iteration_groups"][0]["rank_results"][1]["fpms"][0][
+        "benchmark_measurement"
+    ]
+    with pytest.raises(RuntimeError, match="measurement evidence missing or invalid"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+@pytest.mark.parametrize("field", ["point_key", "dp_rank", "grid_digest"])
+def test_merge_rejects_measurement_identity_mismatch(tmp_path, field):
+    payload = _measurement_rank_payloads()[0]
+    evidence = payload["iteration_groups"][0]["rank_results"][1]["fpms"][0][
+        "benchmark_measurement"
+    ]
+    if field == "grid_digest":
+        evidence["preparation"][field] = "another-grid"
+    else:
+        evidence[field] = "another-point" if field == "point_key" else 0
+    with pytest.raises(
+        RuntimeError,
+        match="measurement (identity mismatch|evidence missing or invalid)",
+    ):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+def test_merge_rejects_changed_local_raw_measurements(tmp_path):
+    payloads = _measurement_rank_payloads()
+    evidence = payloads[1]["results"][0]["fpms"][0]["benchmark_measurement"]
+    evidence["raw_fpms"][-1]["wall_time"] = 0.02
+    with pytest.raises(
+        RuntimeError, match="local result differs from synchronized group"
+    ):
+        _merge_benchmark_rank_results(
+            [
+                (rank, tmp_path / f"rank{rank}.json", data)
+                for rank, data in enumerate(payloads)
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+def test_merge_rejects_stale_evidence_shared_by_every_rank(tmp_path):
+    payload = _measurement_rank_payloads()[0]
+    # Both ranks still agree on their old key, but it describes another point.
+    payload["iteration_groups"][0]["point"]["total_kv_read_tokens"] = 1024
+    with pytest.raises(RuntimeError, match="measurement identity mismatch"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+def _execution_rank_payloads() -> list[dict]:
+    payloads = _measurement_rank_payloads()
+    for rank, payload in enumerate(payloads):
+        payload["measurement_protocol"]["execution_evidence"] = {
+            "schema_version": 1,
+            "sample_field": "benchmark_sample",
+            "warmup_field": "warmup_evidence",
+            "forward_index_scope": "rank_process",
+            "timing_clock": "process_local_monotonic",
+            "cudagraph_source": "ModelRunnerOutput.cudagraph_stats",
+        }
+        payload["warmup_evidence"] = {
+            "status": "recorded",
+            "records": [
+                {
+                    "kind": "global",
+                    "requested_shape": {"prompt_tokens": 32 + rank},
+                    "status": "completed",
+                    "validation": {"status": "not_performed", "reason": None},
+                    "forward_index_start": 0,
+                    "forward_index_end": 5,
+                    "completed_points_before": 0,
+                    "observed_forward_count": 5,
+                    "first_scheduled_requests": None,
+                    "last_scheduled_requests": None,
+                }
+            ],
+        }
+        group = payload["iteration_groups"][0]
+        for result in group["rank_results"]:
+            measurement = result["fpms"][0]["benchmark_measurement"]
+            measurement["preparation"]["warmup_records_before"] = 1
+            for index, raw in enumerate(measurement["raw_fpms"]):
+                start = result["dp_rank"] * 1000.0 + index
+                raw["benchmark_sample"] = {
+                    "sample_index": index,
+                    "forward_index": 10 + index,
+                    "timing": {
+                        "basis": "inter_output" if index else "schedule_to_output",
+                        "start_monotonic": start,
+                        "end_monotonic": start + raw["wall_time"],
+                    },
+                    "cudagraph": {
+                        "status": "observed",
+                        "runtime_mode": "CUDAGraphMode.FULL",
+                        "num_unpadded_tokens": 2,
+                        "num_padded_tokens": 4,
+                        "num_paddings": 2,
+                    },
+                }
+        payload["results"][0]["fpms"] = copy.deepcopy(
+            group["rank_results"][rank]["fpms"]
+        )
+    return payloads
+
+
+def test_merge_preserves_execution_samples_and_each_ranks_warmup_ledger(tmp_path):
+    payloads = _execution_rank_payloads()
+    merged = _merge_benchmark_rank_results(
+        [
+            (rank, tmp_path / f"rank{rank}.json", data)
+            for rank, data in enumerate(payloads)
+        ],
+        tmp_path / "merged.json",
+    )
+
+    on_disk = json.loads(json.dumps(merged))
+    assert "warmup_evidence" not in on_disk
+    for rank, source in enumerate(payloads):
+        assert on_disk["rank_warmup_evidence"][str(rank)] == source["warmup_evidence"]
+        actual = on_disk["results"][rank]["fpms"][0]["benchmark_measurement"]
+        assert actual == source["results"][0]["fpms"][0]["benchmark_measurement"]
+    on_disk["rank_warmup_evidence"]["0"]["records"].clear()
+    assert payloads[0]["warmup_evidence"]["records"]
+
+
+def test_merge_records_missing_remote_warmup_history_without_losing_raw_observations(
+    tmp_path,
+):
+    payload = _execution_rank_payloads()[0]
+    remote = payload["iteration_groups"][0]["rank_results"][1]["fpms"][0]
+    sample = remote["benchmark_measurement"]["raw_fpms"][0]["benchmark_sample"]
+    sample["cudagraph"] = {
+        "status": "unavailable",
+        "runtime_mode": None,
+        "num_unpadded_tokens": None,
+        "num_padded_tokens": None,
+        "num_paddings": None,
+    }
+    sample["timing"]["start_monotonic"] = None
+
+    merged = _merge_benchmark_rank_results(
+        [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+    )
+
+    assert merged["results"][1]["fpms"][0] == remote
+    assert merged["rank_warmup_evidence"]["1"] == {
+        "status": "unavailable",
+        "records": [],
+        "reason": "rank_artifact_not_loaded",
+    }
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("dp_rank",), 0),
+        (("counter_id",), 99),
+        (("benchmark_sample", "sample_index"), 1),
+        (("benchmark_sample", "forward_index"), -1),
+        (("benchmark_sample", "timing", "end_monotonic"), 100.0),
+        (("benchmark_sample", "timing", "basis"), "cuda_events"),
+        (("benchmark_sample", "cudagraph", "status"), "unavailable"),
+        (("benchmark_sample", "cudagraph", "num_padded_tokens"), 1),
+        (("benchmark_sample", "cudagraph", "num_paddings"), 0),
+    ],
+)
+def test_merge_rejects_contradictory_raw_execution_evidence(tmp_path, path, value):
+    payload = _execution_rank_payloads()[0]
+    raw = payload["iteration_groups"][0]["rank_results"][1]["fpms"][0][
+        "benchmark_measurement"
+    ]["raw_fpms"][0]
+    target = raw
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    with pytest.raises(RuntimeError, match="execution evidence is invalid"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+@pytest.mark.parametrize("indices", [[1, 2, 99], [1, 1], [0, 1, 2, 3]])
+def test_merge_rejects_contradictory_reduction_inputs(tmp_path, indices):
+    payload = _execution_rank_payloads()[0]
+    measurement = payload["iteration_groups"][0]["rank_results"][1]["fpms"][0][
+        "benchmark_measurement"
+    ]
+    measurement["estimate"]["raw_sample_indices"] = indices
+
+    with pytest.raises(RuntimeError, match="execution evidence is invalid"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+def test_merge_rejects_warmup_reference_beyond_recorded_history(tmp_path):
+    payload = _execution_rank_payloads()[0]
+    evidence = payload["iteration_groups"][0]["rank_results"][0]["fpms"][0][
+        "benchmark_measurement"
+    ]
+    evidence["preparation"]["warmup_records_before"] = 2
+
+    with pytest.raises(RuntimeError, match="warmup reference is invalid"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+def test_merge_rejects_warmup_history_that_completed_after_measurement(tmp_path):
+    payload = _execution_rank_payloads()[0]
+    payload["warmup_evidence"]["records"][0]["forward_index_end"] = 11
+    payload["warmup_evidence"]["records"][0]["observed_forward_count"] = 11
+    with pytest.raises(RuntimeError, match="warmup reference overlaps measurement"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+@pytest.mark.parametrize("count", [4, 99, -1, True, 5.0])
+def test_merge_rejects_contradictory_warmup_forward_count(tmp_path, count):
+    payload = _execution_rank_payloads()[0]
+    payload["warmup_evidence"]["records"][0]["observed_forward_count"] = count
+
+    with pytest.raises(RuntimeError, match="warmup forward count is invalid"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+@pytest.mark.parametrize("missing", ["forward_index_start", "observed_forward_count"])
+def test_merge_preserves_unknown_warmup_forward_count_or_start(tmp_path, missing):
+    payload = _execution_rank_payloads()[0]
+    record = payload["warmup_evidence"]["records"][0]
+    del record[missing]
+
+    merged = _merge_benchmark_rank_results(
+        [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+    )
+
+    assert merged["rank_warmup_evidence"]["0"]["records"] == [record]
+
+
+@pytest.mark.parametrize("ledger", [None, {"status": "unavailable", "records": [{}]}])
+def test_merge_rejects_missing_or_contradictory_declared_warmup_ledger(
+    tmp_path, ledger
+):
+    payload = _execution_rank_payloads()[0]
+    payload["warmup_evidence"] = ledger
+    with pytest.raises(RuntimeError, match="warmup evidence is invalid"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+def test_merge_rejects_execution_observations_without_declared_contract(tmp_path):
+    payload = _execution_rank_payloads()[0]
+    del payload["measurement_protocol"]["execution_evidence"]
+    del payload["warmup_evidence"]
+    with pytest.raises(
+        RuntimeError, match="execution evidence has no declared contract"
+    ):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+# --------------------------------------------------------------------------
+# Engine provenance worker probe (AIC-1950, Task 3)
+# --------------------------------------------------------------------------
+
+
+class _FakeAttentionBackend:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def get_name(self) -> str:
+        return self._name
+
+
+class _FakePrefillBackend:
+    """A stand-in prefill backend class. vLLM actually stores an *instance*
+    of it on MLAAttention.prefill_backend, but the probe tolerates a bare
+    class too -- see test_engine_probe_reads_backends_off_the_attention_layers."""
+
+
+class _FakeAttentionLayer:
+    def __init__(self, backend_name: str, prefill_backend=None) -> None:
+        self._backend = _FakeAttentionBackend(backend_name)
+        if prefill_backend is not None:
+            self.prefill_backend = prefill_backend
+
+    def get_attn_backend(self):
+        return self._backend
+
+
+def _fake_worker(
+    layers: dict,
+    capture_sizes=(1, 2, 8),
+    rank: int = 2,
+    data_parallel_rank=5,
+    data_parallel_index=None,
+    tensor_parallel_size=1,
+    pipeline_parallel_size=1,
+    prefill_context_parallel_size=1,
+):
+    """A stub worker. Like vLLM's ParallelConfig, its parallel config always has
+    every field, and data_parallel_index starts out equal to data_parallel_rank."""
+    if data_parallel_index is None:
+        data_parallel_index = data_parallel_rank
+    return SimpleNamespace(
+        rank=rank,
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                static_forward_context=layers,
+                cudagraph_mode=SimpleNamespace(name="FULL_DECODE_ONLY"),
+                cudagraph_capture_sizes=list(capture_sizes),
+            ),
+            parallel_config=SimpleNamespace(
+                data_parallel_rank=data_parallel_rank,
+                data_parallel_index=data_parallel_index,
+                tensor_parallel_size=tensor_parallel_size,
+                pipeline_parallel_size=pipeline_parallel_size,
+                prefill_context_parallel_size=prefill_context_parallel_size,
+            ),
+        ),
+    )
+
+
+def _engine_probe(worker) -> dict:
+    """Run the worker-side engine probe on a stub worker, as vLLM does once
+    it has mixed the extension class into the worker class."""
+    return FpmBenchmarkWorkerExtension.fpm_engine_probe(worker)
+
+
+def _merged_with_engine(
+    tmp_path,
+    rank_count: int = 1,
+    tensor_parallel_size: int = 1,
+    pipeline_parallel_size: int = 1,
+    prefill_context_parallel_size: int = 1,
+) -> dict:
+    """A merged document plus the rank files it points at, all on disk."""
+    rank_files = []
+    for dp_rank in range(rank_count):
+        path = tmp_path / f"rank{dp_rank}.json"
+        engine = _engine_block(dp_rank)
+        engine["parallel"].update(
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            prefill_context_parallel_size=prefill_context_parallel_size,
+        )
+        path.write_text(
+            json.dumps({"engine": engine, "dp": {"rank": dp_rank, "size": rank_count}})
+        )
+        rank_files.append(str(path))
+    merged_path = tmp_path / "merged.json"
+    merged = {
+        "run_id": "run-1",
+        "engine": _engine_block(0),
+        "rank_files": rank_files,
+        "merged_output_path": str(merged_path),
+        "dp": {
+            "ranks": list(range(rank_count)),
+            "source_ranks": list(range(rank_count)),
+            "global_size": rank_count,
+        },
+    }
+    merged["engine"]["parallel"]["data_parallel_rank"] = None
+    merged["engine"]["parallel"].update(
+        tensor_parallel_size=tensor_parallel_size,
+        pipeline_parallel_size=pipeline_parallel_size,
+        prefill_context_parallel_size=prefill_context_parallel_size,
+    )
+    merged["worker_probe_path"] = str(_benchmark_worker_probe_path(merged_path))
+    merged_path.write_text(json.dumps(merged))
+    return merged
+
+
+def _read_probe_sidecar(tmp_path) -> dict:
+    return json.loads((tmp_path / "merged_worker_probe.json").read_text())
+
+
+def _worker_factory_warnings(caplog) -> list[logging.LogRecord]:
+    """WARNING records of the launcher's own logger, oldest first."""
+    launcher = [r for r in caplog.records if r.name == "dynamo.vllm.worker_factory"]
+    return [r for r in launcher if r.levelno >= logging.WARNING]
+
+
+class _ExplodingAttentionLayer:
+    """A layer whose backend accessor raises, e.g. a half-initialised layer."""
+
+    prefill_backend = _FakePrefillBackend
+
+    def get_attn_backend(self):
+        raise RuntimeError("backend selector exploded")
+
+
+def test_engine_probe_reads_backends_off_the_attention_layers():
+    layers = {
+        # vLLM stores an *instance* on MLAAttention.prefill_backend (layer
+        # 1); the probe must also tolerate a bare class (layer 0).
+        "model.layers.0.self_attn.attn": _FakeAttentionLayer(
+            "FLASHINFER_MLA", _FakePrefillBackend
+        ),
+        "model.layers.1.self_attn.attn": _FakeAttentionLayer(
+            "FLASHINFER_MLA", _FakePrefillBackend()
+        ),
+        # A standard (non-MLA) attention layer: it has no prefill_backend
+        # attribute at all, the same as real vLLM's non-MLA Attention layers.
+        "model.layers.2.self_attn.attn": _FakeAttentionLayer("FLASH_ATTN"),
+        # A half-initialised layer whose backend accessor raises: it must be
+        # skipped entirely (no entry, no prefill contribution) and must not
+        # fail the probe for the healthy layers.
+        "model.layers.3.self_attn.attn": _ExplodingAttentionLayer(),
+        "model.layers.1.mlp": SimpleNamespace(),
+    }
+
+    result = _engine_probe(
+        _fake_worker(layers, rank=6, tensor_parallel_size=4, pipeline_parallel_size=2)
+    )
+
+    assert result["attention_backends"] == {
+        "model.layers.0.self_attn.attn": "FLASHINFER_MLA",
+        "model.layers.1.self_attn.attn": "FLASHINFER_MLA",
+        "model.layers.2.self_attn.attn": "FLASH_ATTN",
+    }
+    assert "model.layers.3.self_attn.attn" not in result["attention_backends"]
+    assert result["capture_errors"] == {
+        "model.layers.3.self_attn.attn": "RuntimeError: backend selector exploded"
+    }
+    # Only the MLA layers contribute a prefill backend; the standard layer
+    # does not dilute or clear it, and the exploding layer never reaches its
+    # own prefill_backend attribute. Both the class (layer 0) and the
+    # instance (layer 1) resolve to the same name.
+    assert result["mla_prefill_backend"] == "_FakePrefillBackend"
+    assert result["cudagraph_mode_resolved"] == "FULL_DECODE_ONLY"
+    assert result["cudagraph_capture_sizes_resolved"] == [1, 2, 8]
+    assert result["dp_rank"] == 5
+    assert result["worker_rank"] == 6
+    # tp_rank is derived from worker_rank % tensor_parallel_size, never from
+    # the raw global rank directly -- 6 % 4 == 2, distinct from both inputs,
+    # so this cannot pass by coincidentally echoing one of them.
+    assert result["tp_rank"] == 2
+    assert result["pp_rank"] == 1
+    assert result["pcp_rank"] == 0
+
+
+@pytest.mark.parametrize(
+    "tp_size, pp_size, worker_rank, tp_rank, pp_rank, pcp_rank",
+    [
+        (1, 1, 1, 0, 0, 1),
+        (1, 2, 1, 0, 0, 1),
+        (1, 2, 2, 0, 1, 0),
+        (2, 2, 7, 1, 1, 1),
+        (2, 2, 15, 1, 1, 1),
+    ],
+)
+def test_engine_probe_derives_ranks_with_prefill_context_parallelism(
+    tp_size, pp_size, worker_rank, tp_rank, pp_rank, pcp_rank
+):
+    worker = _fake_worker(
+        {},
+        rank=worker_rank,
+        data_parallel_rank=0,
+        data_parallel_index=3,
+        tensor_parallel_size=tp_size,
+        pipeline_parallel_size=pp_size,
+        prefill_context_parallel_size=2,
+    )
+
+    result = _engine_probe(worker)
+
+    assert result["tp_rank"] == tp_rank
+    assert result["pp_rank"] == pp_rank
+    assert result["pcp_rank"] == pcp_rank
+    assert result["dp_rank"] == 3
+
+
+def test_engine_probe_prefers_data_parallel_index_over_zeroed_rank():
+    """vLLM zeroes parallel_config.data_parallel_rank on every engine for a
+    dense (non-MoE) model under external DP, keeping the true rank only in
+    data_parallel_index -- the same trap instrumented_scheduler.py already
+    routes around. The probe must not silently report dp_rank=0 here."""
+    worker = _fake_worker(
+        {}, data_parallel_rank=0, data_parallel_index=3, tensor_parallel_size=4
+    )
+
+    result = _engine_probe(worker)
+
+    assert result["dp_rank"] == 3
+
+
+def test_engine_probe_reports_unresolved_graph_settings_as_none_and_empty():
+    """vLLM leaves cudagraph_mode and cudagraph_capture_sizes None until it has
+    resolved them; the probe reports that, not a made-up mode or size."""
+    worker = _fake_worker({})
+    compilation_config = worker.vllm_config.compilation_config
+    compilation_config.cudagraph_mode = None
+    compilation_config.cudagraph_capture_sizes = None
+
+    result = _engine_probe(worker)
+
+    assert result["cudagraph_mode_resolved"] is None
+    assert result["cudagraph_capture_sizes_resolved"] == []
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "data_parallel_index",
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "prefill_context_parallel_size",
+    ],
+)
+def test_engine_probe_fails_the_call_when_the_parallel_config_lacks_a_field(missing):
+    """No fallback reply: the call fails, which the launcher records as a
+    failed probe, instead of answering with a guessed rank or the raw global
+    rank in place of the TP-local one."""
+    worker = _fake_worker({}, rank=7, tensor_parallel_size=4)
+    delattr(worker.vllm_config.parallel_config, missing)
+
+    with pytest.raises(AttributeError, match=missing):
+        _engine_probe(worker)
+
+
+def _worker_probe_response(
+    dp_rank=0, worker_rank=0, tp_rank=0, pp_rank=0, pcp_rank=0, backend="FLASHINFER_MLA"
+):
+    return {
+        "dp_rank": dp_rank,
+        "worker_rank": worker_rank,
+        "tp_rank": tp_rank,
+        "pp_rank": pp_rank,
+        "pcp_rank": pcp_rank,
+        "attention_backends": {"model.layers.0.self_attn.attn": backend},
+        "mla_prefill_backend": "TrtllmRaggedMLAPrefill",
+        "cudagraph_mode_resolved": "FULL_AND_PIECEWISE",
+        "cudagraph_capture_sizes_resolved": [1, 2],
+        "capture_errors": {},
+    }
+
+
+def test_attach_engine_resolved_updates_merged_in_memory_and_probe_sidecar(tmp_path):
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    # Worker ranks are local to their DP engines, not globally unique.
+    replies = [_worker_probe_response(dp_rank=rank) for rank in (0, 1)]
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    # By name: vLLM's engine-core client refuses to carry a callable.
+    engine_client.collective_rpc.assert_awaited_once_with(
+        "fpm_engine_probe", timeout=ENGINE_PROBE_TIMEOUT_SECONDS
+    )
+    # The in-memory document is what get_perf_metrics serves.
+    assert merged["engine"]["resolved"] == replies[0]
+    assert merged["engine"]["resolved_scope"] == "representative_worker"
+    assert merged["engine"]["resolution"] == "worker_probe"
+    assert merged["engine"]["attention"]["backend_resolved"] == "FLASHINFER_MLA"
+    assert (
+        merged["engine"]["attention"]["mla_prefill_backend_resolved"]
+        == "TrtllmRaggedMLAPrefill"
+    )
+    assert merged["engine"]["attention"]["resolution"] == "worker_probe"
+    sidecar = _read_probe_sidecar(tmp_path)
+    assert sidecar["merged"]["resolved"] == replies[0]
+    assert sidecar["merged"]["resolved_scope"] == "representative_worker"
+    assert sidecar["merged"]["resolution"] == "worker_probe"
+    assert sidecar["merged"]["attention"] == {
+        "backend_resolved": "FLASHINFER_MLA",
+        "mla_prefill_backend_resolved": "TrtllmRaggedMLAPrefill",
+        "resolution": "worker_probe",
+    }
+    assert [
+        entry["response"] for entry in sidecar["merged"]["worker_probe"]["responses"]
+    ] == replies
+    assert sidecar["merged"]["worker_probe"]["coverage"]["complete"] is True
+    for dp_rank in (0, 1):
+        view = sidecar["ranks"][str(dp_rank)]
+        assert view["rank_file"] == str(tmp_path / f"rank{dp_rank}.json")
+        assert view["resolved"] == replies[dp_rank]
+        assert view["resolution"] == "worker_probe"
+        assert view["worker_probe"]["coverage"]["expected_dp_ranks"] == [dp_rank]
+        # The artifact itself keeps its startup placeholders.
+        rank_doc = json.loads((tmp_path / f"rank{dp_rank}.json").read_text())
+        assert rank_doc["engine"]["resolution"] == "pending_worker_probe"
+
+
+def test_attach_engine_resolved_marks_mixed_backends(tmp_path):
+    merged = _merged_with_engine(tmp_path)
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(
+            return_value=[
+                {
+                    **_worker_probe_response(),
+                    "attention_backends": {
+                        "layer.0": "FLASHINFER_MLA",
+                        "layer.1": "TRITON_ATTN",
+                    },
+                    "mla_prefill_backend": None,
+                }
+            ]
+        )
+    )
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["attention"]["backend_resolved"] is None
+    assert merged["engine"]["attention"]["resolution"] == "worker_probe_mixed"
+    assert merged["engine"]["resolved"]["attention_backends"]["layer.1"] == (
+        "TRITON_ATTN"
+    )
+
+
+def test_attach_engine_probe_does_not_copy_local_rpc_response_to_remote_rank(tmp_path):
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    reply = _worker_probe_response(dp_rank=1)
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=[reply]))
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["resolved"] == reply
+    assert merged["engine"]["resolution"] == "worker_probe_partial"
+    coverage = merged["engine"]["worker_probe"]["coverage"]
+    assert coverage["expected_dp_ranks"] == [0, 1]
+    assert coverage["missing_dp_ranks"] == [0]
+    assert coverage["complete"] is False
+    sidecar = _read_probe_sidecar(tmp_path)
+    assert sidecar["merged"]["resolution"] == "worker_probe_partial"
+    unobserved = sidecar["ranks"]["0"]
+    assert unobserved["resolved"] is None
+    assert unobserved["resolution"] == "worker_probe_unobserved"
+    assert unobserved["attention"]["backend_resolved"] is None
+    observed = sidecar["ranks"]["1"]
+    assert observed["resolved"] == reply
+    assert observed["resolution"] == "worker_probe"
+
+
+def test_attach_engine_probe_reports_disagreements_without_losing_replies(tmp_path):
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    replies = [
+        _worker_probe_response(dp_rank=0),
+        _worker_probe_response(dp_rank=1, backend="FLASH_ATTN"),
+    ]
+    replies[1]["cudagraph_mode_resolved"] = "NONE"
+    replies[1]["cudagraph_capture_sizes_resolved"] = []
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    engine = merged["engine"]
+    assert engine["resolution"] == "worker_probe_mixed"
+    assert engine["worker_probe"]["coverage"]["complete"] is True
+    assert engine["worker_probe"]["disagreements"] == [
+        "attention_backends",
+        "cudagraph_mode_resolved",
+        "cudagraph_capture_sizes_resolved",
+    ]
+    assert engine["attention"]["backend_resolved"] is None
+    sidecar = _read_probe_sidecar(tmp_path)
+    for rank, response in enumerate(replies):
+        local = sidecar["ranks"][str(rank)]
+        assert local["resolved"] == response
+        assert (
+            local["attention"]["backend_resolved"]
+            == response["attention_backends"]["model.layers.0.self_attn.attn"]
+        )
+
+
+def test_attach_engine_probe_keeps_different_pp_layer_sets(tmp_path):
+    merged = _merged_with_engine(tmp_path, pipeline_parallel_size=2)
+    replies = [
+        _worker_probe_response(),
+        _worker_probe_response(worker_rank=1, pp_rank=1),
+    ]
+    replies[1]["attention_backends"] = {
+        "model.layers.4.self_attn.attn": "FLASHINFER_MLA"
+    }
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    snapshot = merged["engine"]["worker_probe"]
+    assert snapshot["disagreements"] == []
+    assert snapshot["coverage"]["expected_workers_per_dp"] == 2
+    assert snapshot["coverage"]["complete"] is True
+    assert [entry["response"] for entry in snapshot["responses"]] == replies
+
+
+@pytest.mark.parametrize("pp_size, response_count", [(1, 1), (1, 2), (2, 3), (2, 4)])
+def test_attach_engine_probe_counts_pcp_workers_and_preserves_pp_layer_sets(
+    tmp_path, pp_size, response_count
+):
+    merged = _merged_with_engine(
+        tmp_path, pipeline_parallel_size=pp_size, prefill_context_parallel_size=2
+    )
+    replies = []
+    for worker_rank in range(response_count):
+        pp_rank, pcp_rank = divmod(worker_rank, 2)
+        response = _worker_probe_response(
+            worker_rank=worker_rank, pp_rank=pp_rank, pcp_rank=pcp_rank
+        )
+        # PP stages may legitimately choose different backends for disjoint layers.
+        response["attention_backends"] = {
+            f"model.layers.{pp_rank}.self_attn.attn": (
+                "FLASHINFER_MLA" if pp_rank == 0 else "FLASH_ATTN"
+            )
+        }
+        replies.append(response)
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    expected_workers = 2 * pp_size
+    complete = response_count == expected_workers
+    for engine in (merged["engine"], _read_probe_sidecar(tmp_path)["ranks"]["0"]):
+        snapshot = engine["worker_probe"]
+        assert snapshot["coverage"]["expected_workers_per_dp"] == expected_workers
+        assert snapshot["coverage"]["complete"] is complete
+        assert len(snapshot["coverage"]["observed_workers"]) == response_count
+        assert [
+            worker["pcp_rank"] for worker in snapshot["coverage"]["observed_workers"]
+        ] == [reply["pcp_rank"] for reply in replies]
+        assert [entry["response"] for entry in snapshot["responses"]] == replies
+        assert all(not entry["issues"] for entry in snapshot["responses"])
+        assert snapshot["disagreements"] == []
+        assert engine["resolution"] == (
+            "worker_probe" if complete else "worker_probe_partial"
+        )
+
+
+def test_attach_engine_probe_rejects_duplicate_pcp_slot(tmp_path):
+    merged = _merged_with_engine(tmp_path, prefill_context_parallel_size=2)
+    replies = [
+        _worker_probe_response(),
+        _worker_probe_response(worker_rank=2),
+    ]
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    snapshot = merged["engine"]["worker_probe"]
+    assert snapshot["coverage"]["complete"] is False
+    assert snapshot["coverage"]["observed_workers"] == []
+    assert all(
+        "duplicate (dp_rank, tp_rank, pcp_rank, pp_rank)" in entry["issues"]
+        for entry in snapshot["responses"]
+    )
+
+
+@pytest.mark.parametrize("invalid", [None, {}, {"attention_backends": []}, object()])
+def test_attach_engine_probe_keeps_good_reply_when_another_is_malformed(
+    tmp_path, invalid
+):
+    merged = _merged_with_engine(tmp_path)
+    good = _worker_probe_response()
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=[invalid, good]))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    engine = merged["engine"]
+    assert engine["resolved"] == good
+    assert engine["resolution"] == "worker_probe_partial"
+    snapshot = engine["worker_probe"]
+    assert len(snapshot["responses"]) == 2
+    assert snapshot["responses"][0]["issues"]
+    assert snapshot["responses"][1]["response"] == good
+    assert snapshot["coverage"]["complete"] is False
+    assert _read_probe_sidecar(tmp_path)["merged"]["worker_probe"] == snapshot
+
+
+def test_attach_engine_probe_marks_duplicate_identities_instead_of_counting_them(
+    tmp_path,
+):
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    replies = [
+        _worker_probe_response(),
+        _worker_probe_response(),
+        _worker_probe_response(dp_rank=1),
+    ]
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    engine = merged["engine"]
+    assert engine["resolved"] == replies[2]
+    snapshot = engine["worker_probe"]
+    assert snapshot["coverage"]["complete"] is False
+    assert snapshot["coverage"]["missing_dp_ranks"] == [0]
+    assert all(
+        "duplicate (dp_rank, worker_rank)" in entry["issues"]
+        for entry in snapshot["responses"][:2]
+    )
+    assert len(snapshot["responses"]) == 3
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"tp_rank": 1},
+        {"pp_rank": 1},
+        {"pcp_rank": 1},
+        {"pcp_rank": True},
+        {"pcp_rank": None},
+        {"dp_rank": True},
+    ],
+)
+def test_attach_engine_probe_rejects_inconsistent_worker_labels(tmp_path, identity):
+    merged = _merged_with_engine(tmp_path)
+    reply = {**_worker_probe_response(), **identity}
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=[reply]))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    engine = merged["engine"]
+    assert engine["resolved"] is None
+    assert engine["worker_probe"]["coverage"]["complete"] is False
+    assert engine["worker_probe"]["responses"][0]["issues"]
+
+
+@pytest.mark.parametrize(
+    "size", ["pipeline_parallel_size", "prefill_context_parallel_size"]
+)
+def test_attach_engine_probe_does_not_claim_complete_when_topology_is_unknown(
+    tmp_path, size
+):
+    merged = _merged_with_engine(tmp_path)
+    del merged["engine"]["parallel"][size]
+    client = SimpleNamespace(
+        collective_rpc=AsyncMock(return_value=[_worker_probe_response()])
+    )
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    assert merged["engine"]["resolution"] == "worker_probe_partial"
+    assert (
+        merged["engine"]["worker_probe"]["coverage"]["expected_workers_per_dp"] is None
+    )
+
+
+def test_attach_engine_resolved_records_probe_failure(tmp_path):
+    merged = _merged_with_engine(tmp_path)
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(side_effect=RuntimeError("worker died"))
+    )
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["resolved"] is None
+    assert merged["engine"]["resolution"] == "probe_failed: RuntimeError: worker died"
+    assert merged["engine"]["attention"]["backend_resolved"] is None
+    sidecar = _read_probe_sidecar(tmp_path)
+    for view in (sidecar["merged"], sidecar["ranks"]["0"]):
+        assert view["resolved"] is None
+        assert view["resolution"] == "probe_failed: RuntimeError: worker died"
+        assert view["worker_probe"]["responses"] == []
+        assert view["worker_probe"]["error"] == view["resolution"]
+
+
+def test_attach_engine_resolved_handles_an_empty_rpc_result(tmp_path):
+    """No worker answered at all (e.g. zero ranks in this DP group's RPC
+    fan-out); treated the same as a probe failure, not a crash."""
+    merged = _merged_with_engine(tmp_path)
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=[]))
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["resolved"] is None
+    assert merged["engine"]["resolution"].startswith("probe_failed:")
+    assert merged["engine"]["attention"]["backend_resolved"] is None
+
+
+def test_attach_engine_resolved_handles_a_non_dict_rpc_result(tmp_path):
+    """A worker answered with something that isn't the probe's dict shape
+    (e.g. it raised inside the RPC handler and vLLM surfaced ``None``);
+    treated the same as a probe failure, not a crash."""
+    merged = _merged_with_engine(tmp_path)
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=[None]))
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["resolved"] is None
+    assert merged["engine"]["resolution"].startswith("probe_failed:")
+    assert merged["engine"]["attention"]["backend_resolved"] is None
+
+
+def test_attach_engine_resolved_survives_a_malformed_dict_shaped_result(tmp_path):
+    """A dict-shaped RPC result whose ``attention_backends`` is not a
+    ``dict[str, str]`` (a malformed or future-incompatible probe payload)
+    used to raise ``AttributeError`` out of ``_apply_engine_resolved`` and
+    escape the launcher: applying the result and writing it out now run
+    inside the same fail-soft try as the RPC itself, so this is recorded as
+    a probe failure instead."""
+    merged = _merged_with_engine(tmp_path)
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(
+            return_value=[
+                {"attention_backends": ["FLASH_ATTN"], "mla_prefill_backend": None}
+            ]
+        )
+    )
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
+
+    assert merged["engine"]["resolved"] is None
+    assert merged["engine"]["resolution"].startswith("probe_failed:")
+    assert (
+        "invalid attention_backends"
+        in merged["engine"]["worker_probe"]["responses"][0]["issues"]
+    )
+    assert merged["engine"]["attention"]["backend_resolved"] is None
+    sidecar = _read_probe_sidecar(tmp_path)
+    assert sidecar["merged"]["resolution"] == merged["engine"]["resolution"]
+    assert sidecar["ranks"]["0"]["resolution"] == merged["engine"]["resolution"]
+
+
+@pytest.mark.timeout(5)
+def test_attach_engine_resolved_records_the_exception_type_on_a_timeout(
+    monkeypatch, tmp_path
+):
+    """``asyncio.wait_for`` raises a bare ``TimeoutError``, whose ``str()``
+    is empty; the recorded reason must still name the exception type so a
+    hung probe -- the single most likely production failure -- does not
+    degrade into a useless, reason-free ``"probe_failed: "``."""
+    monkeypatch.setattr("dynamo.vllm.worker_factory.ENGINE_PROBE_TIMEOUT_SECONDS", 0.05)
+    merged = _merged_with_engine(tmp_path)
+
+    async def hangs(*_args, **_kwargs):
+        await asyncio.sleep(2.0)
+        return [{}]
+
+    engine_client = SimpleNamespace(collective_rpc=hangs)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["resolved"] is None
+    assert merged["engine"]["resolution"] == "probe_failed: TimeoutError: "
+
+
+def test_engine_probe_sidecar_is_the_only_file_the_probe_writes(tmp_path):
+    """The probe must leave the measured artifacts alone: the rank and merged
+    files stay byte-identical, and the sidecar is the one new file."""
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    replies = [_worker_probe_response(dp_rank=rank) for rank in (0, 1)]
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    after = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    assert sorted(after) == sorted([*before, "merged_worker_probe.json"])
+    for name, content in before.items():
+        assert after[name] == content, name
+    sidecar = json.loads(after["merged_worker_probe.json"])
+    assert sidecar["schema"] == "dynamo.fpm.benchmark_worker_probe"
+    assert sidecar["schema_version"] == 1
+    assert sidecar["run_id"] == "run-1"
+    assert sidecar["merged_output_path"] == str(tmp_path / "merged.json")
+    assert sidecar["rank_files"] == [
+        str(tmp_path / "rank0.json"),
+        str(tmp_path / "rank1.json"),
+    ]
+    assert sorted(sidecar["ranks"]) == ["0", "1"]
+    assert merged["worker_probe_path"] == str(tmp_path / "merged_worker_probe.json")
+
+
+def test_attach_engine_resolved_is_a_noop_without_an_engine_block():
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock())
+
+    asyncio.run(_attach_engine_resolved({"status": "complete"}, engine_client))
+
+    engine_client.collective_rpc.assert_not_awaited()
+
+
+def test_benchmark_wait_probes_the_engine_before_restoring_workers(monkeypatch):
+    calls = []
+
+    async def fake_wait(_cfg, _vllm_config):
+        calls.append("wait")
+        return {"status": "complete"}
+
+    async def fake_attach(_merged, _client, **_kwargs):
+        calls.append("probe")
+
+    async def fake_stop(_client):
+        calls.append("stop")
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._attach_engine_resolved", fake_attach
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory._stop_worker_gc_policy", fake_stop)
+
+    results = asyncio.run(_await_benchmark_then_restore_workers({}, Mock(), Mock()))
+
+    assert results == {"status": "complete"}
+    assert calls == ["wait", "probe", "stop"]
+
+
+def test_engine_probe_sidecar_does_not_read_the_artifacts(tmp_path, caplog):
+    """Per-rank views come from the merged document in memory: the probe
+    works, and recreates nothing, even when every artifact is gone."""
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    for name in ("rank0.json", "rank1.json", "merged.json"):
+        (tmp_path / name).unlink()
+    replies = [_worker_probe_response(dp_rank=rank) for rank in (0, 1)]
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert [path.name for path in tmp_path.iterdir()] == ["merged_worker_probe.json"]
+    sidecar = _read_probe_sidecar(tmp_path)
+    assert sidecar["ranks"]["1"]["resolved"] == replies[1]
+    assert "Could not record engine provenance" not in caplog.text
+
+
+def test_engine_probe_sidecar_write_failure_is_logged_not_raised(
+    tmp_path, monkeypatch, caplog
+):
+    merged = _merged_with_engine(tmp_path)
+
+    def refuse(path, data):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr("dynamo.vllm.worker_factory._write_json_atomic", refuse)
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(return_value=[_worker_probe_response()])
+    )
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
+
+    # The served in-memory document still carries the probe result.
+    assert merged["engine"]["resolution"] == "worker_probe"
+    assert not (tmp_path / "merged_worker_probe.json").exists()
+    warning = next(
+        record
+        for record in caplog.records
+        if "Could not record engine provenance" in record.getMessage()
+    )
+    assert warning.levelno == logging.WARNING
+    assert warning.exc_info is not None
+    assert "merged_worker_probe.json" in warning.getMessage()
+
+
+def test_engine_probe_sidecar_path_failure_is_logged_not_raised(tmp_path, caplog):
+    """A ``merged_output_path`` that is not a path costs only the sidecar:
+    nothing escapes into the launcher, which still has to restore the
+    workers (``_await_benchmark_then_restore_workers``)."""
+    merged = _merged_with_engine(tmp_path)
+    merged["merged_output_path"] = 12345  # truthy, but not a path
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(return_value=[_worker_probe_response()])
+    )
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
+
+    assert merged["engine"]["resolution"] == "worker_probe"
+    (warning,) = _worker_factory_warnings(caplog)
+    assert warning.exc_info is not None
+    assert "Could not record engine provenance" in warning.getMessage()
+    assert "12345" in warning.getMessage()
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "merged.json",
+        "rank0.json",
+    ]
+
+
+def test_engine_probe_sidecar_path_failure_is_logged_not_raised_after_a_probe_failure(
+    tmp_path, caplog
+):
+    merged = _merged_with_engine(tmp_path)
+    merged["merged_output_path"] = 12345  # truthy, but not a path
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(side_effect=RuntimeError("worker died"))
+    )
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
+
+    assert merged["engine"]["resolution"] == "probe_failed: RuntimeError: worker died"
+    probe_failed, not_recorded = (
+        record.getMessage() for record in _worker_factory_warnings(caplog)
+    )
+    assert "Engine provenance probe failed" in probe_failed
+    assert "Could not record engine provenance" in not_recorded
+    assert "12345" in not_recorded
+
+
+def test_attach_engine_resolved_never_raises_when_recording_the_failure_fails(
+    tmp_path, caplog
+):
+    """Whatever breaks while the probe result is recorded, the failure is
+    logged and the launcher still gets to restore the workers."""
+    merged = _merged_with_engine(tmp_path)
+    merged["engine"]["parallel"] = "not-a-mapping"  # _apply_engine_resolved raises
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(return_value=[_worker_probe_response()])
+    )
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
+
+    probe_failed, not_recorded = _worker_factory_warnings(caplog)
+    assert "Engine provenance probe failed" in probe_failed.getMessage()
+    assert (
+        "Could not record the engine provenance probe failure"
+        in not_recorded.getMessage()
+    )
+    assert not_recorded.exc_info is not None
+    assert not (tmp_path / "merged_worker_probe.json").exists()
+
+
+def test_engine_probe_sidecar_view_never_claims_another_dp_ranks_replies(tmp_path):
+    """A rank view stays scoped to its own DP rank even for a rank label the
+    probe cannot compare: it observes nothing, instead of losing the filter
+    and adopting every DP rank's replies."""
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    merged["dp"]["source_ranks"] = [0, None]
+    replies = [_worker_probe_response(dp_rank=rank) for rank in (0, 1)]
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    sidecar = _read_probe_sidecar(tmp_path)
+    assert sidecar["ranks"]["0"]["resolved"] == replies[0]
+    unlabelled = sidecar["ranks"]["None"]
+    assert unlabelled["resolved"] is None
+    assert unlabelled["resolution"] == "worker_probe_unobserved"
+    assert unlabelled["worker_probe"]["coverage"]["observed_workers"] == []
+
+
+def test_engine_probe_sidecar_path_is_a_top_level_merged_field(tmp_path):
+    payloads = [_engine_rank_payload(rank, _engine_block(rank)) for rank in (0, 1)]
+    merged_path = tmp_path / "bench_merged.json"
+
+    merged = _merge_benchmark_rank_results(
+        [
+            (rank, tmp_path / f"rank{rank}.json", payload)
+            for rank, payload in enumerate(payloads)
+        ],
+        merged_path,
+    )
+
+    sidecar_path = tmp_path / "bench_merged_worker_probe.json"
+    assert _benchmark_worker_probe_path(merged_path) == sidecar_path
+    # Path bookkeeping sits next to merged_output_path, never in the engine block.
+    assert merged["merged_output_path"] == str(merged_path)
+    assert merged["worker_probe_path"] == str(sidecar_path)
+    expected_engine = copy.deepcopy(payloads[0]["engine"])
+    expected_engine["parallel"]["data_parallel_rank"] = None
+    assert merged["engine"] == expected_engine
+    # Rank documents never carry it either, so the cross-rank identity check
+    # (which just passed for these two ranks) cannot see it.
+    assert all("worker_probe_path" not in payload for payload in payloads)
+    assert all("worker_probe_path" not in payload["engine"] for payload in payloads)
+
+
+@pytest.mark.parametrize(
+    "rank_engines, pointer_expected",
+    [
+        pytest.param(
+            [{"capture_error": "boom"}, _engine_block(1)],
+            True,
+            id="reference_degraded_and_reseeded",
+        ),
+        pytest.param([{"capture_error": "boom"}, None], True, id="every_rank_degraded"),
+        pytest.param([None, None], False, id="no_engine_block"),
+    ],
+)
+def test_engine_probe_sidecar_path_follows_the_merged_engine_block(
+    tmp_path, rank_engines, pointer_expected
+):
+    """The pointer exists exactly when a probe sidecar can be written: the
+    merged document has an ``engine`` block, degraded or not."""
+    merged = _merge_benchmark_rank_results(
+        [
+            (rank, tmp_path / f"rank{rank}.json", _engine_rank_payload(rank, engine))
+            for rank, engine in enumerate(rank_engines)
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert isinstance(merged.get("engine"), dict) is pointer_expected
+    assert ("worker_probe_path" in merged) is pointer_expected
+    if pointer_expected:
+        assert merged["worker_probe_path"] == str(tmp_path / "merged_worker_probe.json")
+        assert "worker_probe_path" not in merged["engine"]
+
+
+def test_engine_probe_sidecar_pointer_is_written_and_a_stale_sidecar_removed(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv(ENV_FPM_BENCHMARK_OUTPUT_PATH, raising=False)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    output_path = tmp_path / "benchmark.json"
+    payload = _single_rank_benchmark_payload()
+    payload["engine"] = _engine_block(0)
+    output_path.write_text(json.dumps(payload))
+    sidecar_path = tmp_path / "benchmark_merged_worker_probe.json"
+    sidecar_path.write_text(json.dumps({"run_id": "an-earlier-run"}))
+
+    merged = asyncio.run(
+        _wait_and_load_benchmark(
+            {"output_path": str(output_path), "timeout": 1}, Mock()
+        )
+    )
+
+    on_disk = json.loads((tmp_path / "benchmark_merged.json").read_text())
+    assert on_disk["worker_probe_path"] == str(sidecar_path)
+    assert merged["worker_probe_path"] == str(sidecar_path)
+    assert "worker_probe_path" not in on_disk["engine"]
+    # This run's probe has not run yet; an earlier run's sidecar is gone.
+    assert not sidecar_path.exists()
+    assert on_disk["engine"]["resolution"] == "pending_worker_probe"
+
+
+# --------------------------------------------------------------------------
+# cudagraph_metrics restore before serving
+# --------------------------------------------------------------------------
+
+
+def _cudagraph_metrics_engine_client(collective_rpc):
+    """An engine client with both stat-logger shapes vLLM builds: an
+    aggregated logger, and a per-engine adapter with one logger per engine."""
+    return SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            observability_config=SimpleNamespace(cudagraph_metrics=True)
+        ),
+        logger_manager=SimpleNamespace(
+            stat_loggers=[
+                SimpleNamespace(cudagraph_logging=object()),
+                SimpleNamespace(
+                    per_engine_stat_loggers={
+                        0: SimpleNamespace(cudagraph_logging=object()),
+                        1: SimpleNamespace(cudagraph_logging=object()),
+                    }
+                ),
+                SimpleNamespace(),  # a logger without graph logging (Prometheus)
+            ]
+        ),
+        collective_rpc=collective_rpc,
+    )
+
+
+def _cudagraph_logging_states(engine_client) -> list:
+    aggregated, adapter, _ = engine_client.logger_manager.stat_loggers
+    return [
+        aggregated.cudagraph_logging,
+        *(
+            stat_logger.cudagraph_logging
+            for stat_logger in adapter.per_engine_stat_loggers.values()
+        ),
+    ]
+
+
+def _cudagraph_metrics_reset_done(engine_client) -> bool:
+    return (
+        engine_client.vllm_config.observability_config.cudagraph_metrics is False
+        and all(state is None for state in _cudagraph_logging_states(engine_client))
+    )
+
+
+def _cudagraph_metrics_warnings(caplog) -> list:
+    return [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and "cudagraph_metrics" in record.getMessage()
+    ]
+
+
+def test_restore_engine_cudagraph_metrics_turns_stat_loggers_off(monkeypatch):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    client = _cudagraph_metrics_engine_client(AsyncMock(return_value=[]))
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )
+
+    assert client.vllm_config.observability_config.cudagraph_metrics is False
+    assert _cudagraph_logging_states(client) == [None, None, None]
+    assert not hasattr(client.logger_manager.stat_loggers[2], "cudagraph_logging")
+
+
+def test_restore_engine_cudagraph_metrics_leaves_a_user_enabled_option_on(
+    monkeypatch,
+):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    rpc = AsyncMock()
+    client = _cudagraph_metrics_engine_client(rpc)
+
+    # args.py records nothing when the user enabled the option.
+    asyncio.run(_restore_benchmark_workers({}, client))
+
+    rpc.assert_not_awaited()
+    assert client.vllm_config.observability_config.cudagraph_metrics is True
+    assert all(state is not None for state in _cudagraph_logging_states(client))
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_error"),
+    [
+        pytest.param(None, None, id="no-failure"),
+        pytest.param("kda", RuntimeError, id="kda-restore-raises"),
+        pytest.param("gc", RuntimeError, id="gc-stop-raises"),
+        pytest.param("gc-hangs", asyncio.TimeoutError, id="gc-stop-cancelled"),
+    ],
+)
+def test_restore_engine_cudagraph_metrics_runs_last_after_a_failed_or_cancelled_step(
+    monkeypatch, failure, expected_error
+):
+    """The engine-client reset is the last restore step, and it still runs
+    when the KDA restore or the GC stop raises, or when the failure path's
+    time box cancels the GC stop."""
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    rpcs = []
+
+    async def collective_rpc(method, timeout=None):
+        # Note whether the reset had already run when this RPC went out.
+        rpcs.append((method, _cudagraph_metrics_reset_done(client)))
+        if failure == "kda" and method == "finish_benchmark_kda_state":
+            raise RuntimeError("kda restore failed")
+        if method == "fpm_gc_stop":
+            if failure == "gc":
+                raise RuntimeError("gc stop failed")
+            if failure == "gc-hangs":
+                await asyncio.sleep(3600)
+        return []
+
+    client = _cudagraph_metrics_engine_client(collective_rpc)
+    bench_cfg = {"cudagraph_metrics_auto_enabled": True, "randomize_kda_state": True}
+
+    async def restore():
+        await asyncio.wait_for(
+            _restore_benchmark_workers(bench_cfg, client),
+            timeout=0.05 if failure == "gc-hangs" else None,
+        )
+
+    if expected_error is None:
+        asyncio.run(restore())
+    else:
+        with pytest.raises(expected_error):
+            asyncio.run(restore())
+
+    # The KDA restore and the GC stop (which always runs) both go out before
+    # the reset ...
+    assert rpcs[:2] == [
+        ("finish_benchmark_kda_state", False),
+        ("fpm_gc_stop", False),
+    ]
+    # ... and the reset has run by the time the restore is over.
+    assert _cudagraph_metrics_reset_done(client)
+
+
+class _UnreadableConfig:
+    @property
+    def observability_config(self):
+        raise RuntimeError("config torn down")
+
+
+def test_restore_engine_cudagraph_metrics_client_failure_is_logged_after_kda_and_gc(
+    monkeypatch, caplog
+):
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    calls = []
+
+    def collective_rpc(method, timeout=None):
+        calls.append(method)
+        return []
+
+    client = _cudagraph_metrics_engine_client(AsyncMock(side_effect=collective_rpc))
+    client.vllm_config = _UnreadableConfig()
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _restore_benchmark_workers(
+            {"cudagraph_metrics_auto_enabled": True, "randomize_kda_state": True},
+            client,
+        )
+    )  # must not raise
+
+    # The KDA and GC restores run first and are unaffected.
+    assert calls[:2] == ["finish_benchmark_kda_state", "fpm_gc_stop"]
+    (warning,) = _cudagraph_metrics_warnings(caplog)
+    assert warning.exc_info is not None
+    assert "engine client" in warning.getMessage()
+    # The stat loggers, which stop the collection, do not depend on the config.
+    assert _cudagraph_logging_states(client) == [None, None, None]
+
+
+class _StubbornStatLogger:
+    """A stat logger whose graph logging cannot be dropped."""
+
+    @property
+    def cudagraph_logging(self):
+        return object()
+
+
+@pytest.mark.parametrize(
+    ("config_unreadable", "failed_steps"),
+    [
+        pytest.param(False, ["stat loggers of the engine client"], id="loggers"),
+        pytest.param(
+            True,
+            ["stat loggers of the engine client", "config of the engine client"],
+            id="loggers-and-config",
+        ),
+    ],
+)
+def test_restore_engine_cudagraph_metrics_each_client_step_logs_its_own_failure(
+    monkeypatch, caplog, config_unreadable, failed_steps
+):
+    """The stat loggers and then the config flag are reset independently: a
+    failure in one is logged on its own and never skips the other."""
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    client = _cudagraph_metrics_engine_client(AsyncMock(return_value=[]))
+    client.logger_manager = SimpleNamespace(stat_loggers=[_StubbornStatLogger()])
+    if config_unreadable:
+        client.vllm_config = _UnreadableConfig()
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )  # must not raise
+
+    # One WARNING with a traceback per failed step, naming it, in step order.
+    warnings = _cudagraph_metrics_warnings(caplog)
+    assert len(warnings) == len(failed_steps)
+    for step, warning in zip(failed_steps, warnings):
+        assert step in warning.getMessage()
+        assert warning.exc_info is not None
+    if not config_unreadable:
+        assert client.vllm_config.observability_config.cudagraph_metrics is False
+
+
+def test_restore_engine_cudagraph_metrics_tolerates_a_bare_engine_client(
+    monkeypatch, caplog
+):
+    """An engine client without vLLM's config or stat loggers is left as it
+    is, and nothing raises or warns."""
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _restore_benchmark_workers(
+            {"cudagraph_metrics_auto_enabled": True},
+            SimpleNamespace(collective_rpc=AsyncMock(return_value=[])),
+        )
+    )
+
+    assert _cudagraph_metrics_warnings(caplog) == []
+
+
+def test_restore_engine_cudagraph_metrics_calls_the_worker_method_once(monkeypatch):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    rpc = AsyncMock(return_value=[{"cudagraph_metrics": False}])
+    client = _cudagraph_metrics_engine_client(rpc)
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )
+
+    # By name: vLLM's engine-core client refuses to carry a callable.
+    rpc.assert_awaited_once_with(
+        "fpm_disable_cudagraph_metrics",
+        timeout=CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS,
+    )
+    assert _cudagraph_logging_states(client) == [None, None, None]
+
+
+def test_restore_engine_cudagraph_metrics_worker_failure_is_logged_after_kda_and_gc(
+    monkeypatch, caplog
+):
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    calls = []
+
+    def collective_rpc(method, timeout=None):
+        calls.append(method)
+        if method == "fpm_disable_cudagraph_metrics":
+            # What the engine client raises when a worker lacks the method,
+            # e.g. under a user's own --worker-extension-cls.
+            raise Exception(
+                "Call to collective_rpc method failed: Worker failed with error "
+                f"''Worker' object has no attribute '{method}''"
+            )
+        return []
+
+    client = _cudagraph_metrics_engine_client(AsyncMock(side_effect=collective_rpc))
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _restore_benchmark_workers(
+            {"cudagraph_metrics_auto_enabled": True, "randomize_kda_state": True},
+            client,
+        )
+    )  # must not raise
+
+    assert calls == [
+        "finish_benchmark_kda_state",
+        "fpm_gc_stop",
+        "fpm_disable_cudagraph_metrics",
+    ]
+    # The engine-client side does not depend on the workers.
+    assert _cudagraph_logging_states(client) == [None, None, None]
+    (warning,) = _cudagraph_metrics_warnings(caplog)
+    assert warning.exc_info is not None
+    assert "model workers" in warning.getMessage()
+
+
+@pytest.mark.timeout(5)
+def test_restore_engine_cudagraph_metrics_worker_rpc_is_time_boxed(monkeypatch, caplog):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS", 0.05
+    )
+
+    async def hangs(method, timeout=None):
+        await asyncio.sleep(2.0)
+        return []
+
+    client = _cudagraph_metrics_engine_client(hangs)
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )
+
+    (warning,) = _cudagraph_metrics_warnings(caplog)
+    assert issubclass(warning.exc_info[0], asyncio.TimeoutError)
+
+
+@pytest.mark.timeout(5)
+def test_restore_engine_cudagraph_metrics_worker_rpc_is_time_boxed_in_the_cleanup(
+    monkeypatch, caplog
+):
+    """The reset runs in the restore's ``finally`` chain. Once the restore's own
+    time box has fired it no longer bounds what runs there, so a worker call
+    that never answers must end at its own bound."""
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS", 0.05
+    )
+    rpcs = []
+
+    async def never_answers(method, timeout=None):
+        rpcs.append(method)
+        await asyncio.sleep(3600)
+
+    client = _cudagraph_metrics_engine_client(never_answers)
+    caplog.set_level(logging.WARNING)
+
+    async def restore():
+        await asyncio.wait_for(
+            _restore_benchmark_workers(
+                {"cudagraph_metrics_auto_enabled": True}, client
+            ),
+            timeout=0.05,
+        )
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(restore())
+
+    # The GC stop hung until the restore's time box fired; the worker call
+    # then ran in the cleanup and gave up at its own bound.
+    assert rpcs == ["fpm_gc_stop", "fpm_disable_cudagraph_metrics"]
+    (warning,) = _cudagraph_metrics_warnings(caplog)
+    assert issubclass(warning.exc_info[0], asyncio.TimeoutError)
+    assert _cudagraph_metrics_reset_done(client)
+
+
+def test_restore_engine_cudagraph_metrics_refusing_stat_logger_does_not_stop_the_rest(
+    monkeypatch, caplog
+):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    client = _cudagraph_metrics_engine_client(AsyncMock(return_value=[]))
+    # First in line, so the loop has loggers left to reach after the failure.
+    client.logger_manager.stat_loggers.insert(0, _StubbornStatLogger())
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )  # must not raise
+
+    # Every logger after the refusing one is cleared, aggregated or per-engine,
+    # and so is the config flag ...
+    _, aggregated, adapter, _ = client.logger_manager.stat_loggers
+    assert aggregated.cudagraph_logging is None
+    assert [
+        stat_logger.cudagraph_logging
+        for stat_logger in adapter.per_engine_stat_loggers.values()
+    ] == [None, None]
+    assert client.vllm_config.observability_config.cudagraph_metrics is False
+    # ... and the one that refused is named in its own WARNING.
+    (warning,) = _cudagraph_metrics_warnings(caplog)
+    assert warning.exc_info is not None
+    assert "_StubbornStatLogger" in warning.getMessage()
+
+
+class _UnreadableStatLoggers:
+    @property
+    def stat_loggers(self):
+        raise RuntimeError("stat loggers torn down")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(None, id="every-step-works"),
+        pytest.param("stat_logger", id="stat-logger-refuses"),
+        pytest.param("stat_loggers", id="stat-loggers-unreadable"),
+        pytest.param("config", id="config-unreadable"),
+        pytest.param("workers", id="worker-call-fails"),
+    ],
+)
+def test_restore_engine_cudagraph_metrics_success_is_logged_only_when_every_step_worked(
+    monkeypatch, caplog, failure
+):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    rpc = AsyncMock(return_value=[{"cudagraph_metrics": False}])
+    if failure == "workers":
+        rpc = AsyncMock(side_effect=Exception("worker call failed"))
+    client = _cudagraph_metrics_engine_client(rpc)
+    if failure == "stat_logger":
+        client.logger_manager.stat_loggers.append(_StubbornStatLogger())
+    if failure == "stat_loggers":
+        client.logger_manager = _UnreadableStatLoggers()
+    if failure == "config":
+        client.vllm_config = _UnreadableConfig()
+    caplog.set_level(logging.INFO, logger="dynamo.vllm.worker_factory")
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )  # must not raise
+
+    successes = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and "Turned vLLM cudagraph_metrics off" in record.getMessage()
+    ]
+    warnings = _cudagraph_metrics_warnings(caplog)
+    if failure is None:
+        (success,) = successes
+        assert "stat loggers cleared: 3" in success.getMessage()
+        assert warnings == []
+    else:
+        # The failed step has said so with its own WARNING; no success line.
+        assert successes == []
+        assert len(warnings) == 1
+    if failure != "config":
+        # A failed step never skips the config flag.
+        assert client.vllm_config.observability_config.cudagraph_metrics is False
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_restore_engine_cudagraph_metrics_calls_workers_only_with_dynamos_extension(
+    monkeypatch, caplog, installed
+):
+    """Under the user's own --worker-extension-cls the workers lack the method,
+    and calling it makes every worker and engine core log an ERROR. The restore
+    skips the call and says so once; everything else runs either way."""
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    calls = []
+
+    def collective_rpc(method, timeout=None):
+        calls.append(method)
+        if method == "fpm_disable_cudagraph_metrics":
+            return [{"cudagraph_metrics": False}]
+        return []
+
+    client = _cudagraph_metrics_engine_client(AsyncMock(side_effect=collective_rpc))
+    caplog.set_level(logging.WARNING)
+    bench_cfg = {
+        "cudagraph_metrics_auto_enabled": True,
+        "randomize_kda_state": True,
+        "worker_extension_installed": installed,
+        "user_worker_extension_cls": "user.Extension",
+    }
+
+    asyncio.run(_restore_benchmark_workers(bench_cfg, client))
+
+    expected = ["finish_benchmark_kda_state", "fpm_gc_stop"]
+    assert calls == expected + (["fpm_disable_cudagraph_metrics"] if installed else [])
+    # The engine-client reset does not depend on the extension.
+    assert _cudagraph_metrics_reset_done(client)
+    warnings = _cudagraph_metrics_warnings(caplog)
+    if installed:
+        assert warnings == []
+    else:
+        (warning,) = warnings
+        assert warning.exc_info is None
+        assert "user.Extension" in warning.getMessage()
+
+
+@pytest.mark.parametrize(
+    "replies",
+    [
+        pytest.param(
+            [{"cudagraph_metrics": False}, {"cudagraph_metrics": None}],
+            id="option-absent-in-one-worker",
+        ),
+        pytest.param([{"cudagraph_metrics": True}], id="option-still-on"),
+        pytest.param([None], id="reply-without-a-body"),
+        pytest.param(None, id="no-reply-list"),
+    ],
+)
+def test_restore_engine_cudagraph_metrics_unexpected_worker_reply_is_not_success(
+    monkeypatch, caplog, replies
+):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    client = _cudagraph_metrics_engine_client(AsyncMock(return_value=replies))
+    caplog.set_level(logging.INFO, logger="dynamo.vllm.worker_factory")
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )  # must not raise
+
+    # Anything but {"cudagraph_metrics": False} is not done: one WARNING (with a
+    # traceback only when the reply could not even be read), no success line.
+    (warning,) = _cudagraph_metrics_warnings(caplog)
+    assert "model workers" in warning.getMessage()
+    assert (warning.exc_info is not None) == (replies is None)
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and "Turned vLLM cudagraph_metrics off" in record.getMessage()
+    ]
+
+
+def test_engine_cudagraph_metrics_worker_extension_turns_the_option_off(monkeypatch):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    # Local, after the delenv: importing gc_policy starts the GC policy if it is set.
+    from dynamo.vllm.gc_policy import FpmGcWorkerExtension
+
+    # vLLM takes one extension class; the GC one replaces the benchmark one
+    # when DYN_FPM_GC_POLICY is set, so it must carry the method too.
+    assert issubclass(FpmGcWorkerExtension, FpmBenchmarkWorkerExtension)
+
+    class Worker(FpmBenchmarkWorkerExtension):
+        """vLLM appends the extension to the worker class's bases."""
+
+        def __init__(self, observability_config):
+            self.vllm_config = SimpleNamespace(
+                observability_config=observability_config
+            )
+
+    worker = Worker(SimpleNamespace(cudagraph_metrics=True))
+    assert worker.fpm_disable_cudagraph_metrics() == {"cudagraph_metrics": False}
+    assert worker.vllm_config.observability_config.cudagraph_metrics is False
+    # No fallback reply: a worker without the config fails the call, which the
+    # launcher reports, instead of answering as if the option had been turned off.
+    with pytest.raises(AttributeError):
+        Worker(None).fpm_disable_cudagraph_metrics()
+
+
+# --------------------------------------------------------------------------
+# Engine probe by method name, with and without Dynamo's worker extension
+# --------------------------------------------------------------------------
+
+
+def test_engine_probe_without_the_worker_extension_records_probe_failed(
+    tmp_path, caplog
+):
+    """The workers lack the probe method although the launcher expected it (vLLM
+    did not load the extension class): the RPC fails, and the failure is
+    recorded instead of raised."""
+    merged = _merged_with_engine(tmp_path)
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(
+            # What the engine client raises when a worker lacks the method.
+            side_effect=Exception(
+                "Call to collective_rpc method failed: Worker failed with error "
+                "''Worker' object has no attribute 'fpm_engine_probe''"
+            )
+        )
+    )
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
+
+    resolution = merged["engine"]["resolution"]
+    assert resolution.startswith("probe_failed: Exception: Call to collective_rpc")
+    assert "fpm_engine_probe" in resolution
+    assert _read_probe_sidecar(tmp_path)["merged"]["resolution"] == resolution
+    assert "Engine provenance probe failed" in caplog.text
+
+
+def test_attach_engine_resolved_skips_the_probe_under_a_users_worker_extension(
+    tmp_path, caplog
+):
+    """Under the user's own --worker-extension-cls the workers lack the probe
+    method, and calling it makes every worker and engine core log an ERROR. The
+    launcher skips the call, records why in the sidecar, and warns once."""
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock())
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _attach_engine_resolved(
+            merged,
+            engine_client,
+            worker_extension_installed=False,
+            user_worker_extension_cls="user.Extension",
+        )
+    )  # must not raise
+
+    engine_client.collective_rpc.assert_not_awaited()
+    resolution = "probe_skipped: worker extension not installed (user.Extension)"
+    assert merged["engine"]["resolved"] is None
+    assert merged["engine"]["resolution"] == resolution
+    assert merged["engine"]["attention"]["resolution"] == resolution
+    sidecar = _read_probe_sidecar(tmp_path)
+    for view in (sidecar["merged"], *sidecar["ranks"].values()):
+        assert view["resolved"] is None
+        assert view["resolution"] == resolution
+        assert view["worker_probe"]["responses"] == []
+        assert view["worker_probe"]["error"] == resolution
+    (warning,) = _worker_factory_warnings(caplog)
+    assert warning.exc_info is None
+    assert "user.Extension" in warning.getMessage()
+
+
+@pytest.mark.parametrize(
+    ("bench_cfg", "rpcs", "resolution"),
+    [
+        pytest.param(
+            {"worker_extension_installed": True},
+            ["fpm_engine_probe"],
+            "worker_probe",
+            id="installed",
+        ),
+        # A config without the key is treated as Dynamo's own extension.
+        pytest.param({}, ["fpm_engine_probe"], "worker_probe", id="key-absent"),
+        pytest.param(
+            {
+                "worker_extension_installed": False,
+                "user_worker_extension_cls": "user.Extension",
+            },
+            [],
+            "probe_skipped: worker extension not installed (user.Extension)",
+            id="users-own-class",
+        ),
+    ],
+)
+def test_engine_probe_follows_the_worker_extension_flag_through_the_benchmark_wait(
+    monkeypatch, tmp_path, bench_cfg, rpcs, resolution
+):
+    """The launcher hands the probe the flag that args.py recorded in the
+    benchmark config, so the probe call goes out only when the model workers
+    load one of Dynamo's extension classes."""
+    merged = _merged_with_engine(tmp_path)
+    sent = []
+
+    async def fake_wait(_cfg, _vllm_config):
+        return merged
+
+    async def collective_rpc(method, timeout=None):
+        sent.append(method)
+        return [_worker_probe_response()]
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._stop_worker_gc_policy", AsyncMock()
+    )
+
+    asyncio.run(
+        _await_benchmark_then_restore_workers(
+            bench_cfg, Mock(), SimpleNamespace(collective_rpc=collective_rpc)
+        )
+    )
+
+    assert sent == rpcs
+    assert merged["engine"]["resolution"] == resolution
