@@ -38,7 +38,7 @@ The [protocol module](../protocol.rs) exports:
 | `KvEventRelayClient` | Generated tonic client for Relay RPCs. |
 | `KvEventRelay`, `KvEventRelayServer` | Generated service trait and server wrapper. |
 | `ProducerKey::try_from(&identity)` | Validate and compare the explicit v1 wire producer key, excluding descriptor metadata. |
-| `validate_protocol_envelope`, `validate_*` | Validate envelopes, identities, descriptors, query semantics, and topology entries. |
+| `validate_protocol_envelope`, `validate_*` | Validate envelopes, identities, descriptors, query semantics, topology entries, and serving-load windows and entries. |
 | `WireIdentityError::is_unsupported()` | Distinguish unsupported semantics from malformed known data. |
 | `relay_error_reason(&status)` | Decode the machine-readable gRPC error trailer; return `None` when absent, unknown, or unspecified. |
 | `FILE_DESCRIPTOR_SET` | Compiled descriptors used by gRPC reflection. |

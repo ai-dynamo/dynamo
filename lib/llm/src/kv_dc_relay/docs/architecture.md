@@ -22,7 +22,8 @@ Wire semantics are specified in [the gRPC contract](grpc-contract.md) and
 | [`discovery.rs`](../discovery.rs), [`resolution.rs`](../resolution.rs) | Membership projection, conflicts, and canonical indexer-domain resolution. |
 | [`pool_registry.rs`](../pool_registry.rs) | Active pool generations and catalog withdrawal. |
 | [`actor.rs`](../actor.rs) | Exact rank ownership, refcounts, CKF mutation, and publication cuts. |
-| [`topology.rs`](../topology.rs), [`load.rs`](../load.rs) | Serving readiness and worker-authoritative load projections. |
+| [`topology.rs`](../topology.rs), [`load.rs`](../load.rs) | Serving readiness, worker-authoritative KV load, and per-pool router scheduler load. |
+| [`serving_load.rs`](../serving_load.rs) | Frontend-load aggregation and the serving-load snapshot behind `SubscribeServingLoad`. |
 | [`publication.rs`](../publication.rs) | Transport-neutral source, streams, frames, and error categories. |
 | [`publication/hub.rs`](../publication/hub.rs), [`publication/stream.rs`](../publication/stream.rs) | Lazy mirrors, bounded fanout, snapshot bootstrap, and stream continuity. |
 | [`wan/grpc.rs`](../wan/grpc.rs), [`wan/grpc/config.rs`](../wan/grpc/config.rs) | gRPC adapter facade and configuration. |
@@ -32,7 +33,8 @@ Wire semantics are specified in [the gRPC contract](grpc-contract.md) and
 ## Universal Publication Boundary
 
 The `wan::grpc` adapter consumes the existing `RelayPublicationSource`. The host configures
-publication resources and passes the source and lifecycle token to `GrpcTransport::start`.
+publication resources and passes the source, its serving-load snapshot watch, and lifecycle token
+to `GrpcTransport::start`.
 The adapter creates its private source wrapper; the host does not depend on gRPC handlers,
 Protobuf conversions, or that wrapper. The universal publisher
 owns lazy pool hubs, snapshot cuts, CBI1 encoding, bounded queues, generation fencing, and
@@ -78,9 +80,21 @@ The Relay consumes only DC-local, positively advertised facts:
 | Instance availability | per-endpoint instance watches | live worker sets; authoritative once the watch delivers its initial snapshot |
 | KV event source advertisements | typed `KvEventSource` discovery entries | pool materialization gate, per-`(worker_id, dp_rank)` ingest and recovery |
 | Worker KV-occupancy events | DC event plane (`kv_metrics` subject) | authoritative pool KV-load windows |
+| Router scheduler views | DC event plane (`scheduler_load` subject, per serving endpoint) | pool scheduler load in serving-load windows |
+| Frontend load frames | DC event plane (`frontend-load` topic, per namespace) | model request and token load in serving-load windows |
+| Event-channel registrations | discovery plane, listed once per second | expected routers and frontends for serving-load coverage |
 
 The Relay never probes workers, never synthesizes facts it cannot observe, and
 never assumes another component's internal state.
+
+Each pool's load collector subscribes to both worker subjects for its serving endpoint;
+scheduler views are kept per `(rank, router)` and are never mixed into KV usage. Routers tag
+each view with its scheduler group: views within a group overlap and take the per-rank maximum,
+while views from distinct groups are summed. With the WAN transport enabled, a serving-load
+aggregator subscribes to frontend load in every namespace that holds a catalog pool or a served
+model, plus the Relay's own namespace, reconciling those subscriptions as the catalog and
+namespace sources change. Once per second it lists the registered publishers and publishes one
+complete serving-load snapshot; its stopping fails the transport.
 
 ## The two projections
 
@@ -224,6 +238,4 @@ described above.
   Same-target repeats are allowed, but a consumer omits a lookup
   name that maps to more than one distinct `BindingIdentity`.
 - **Cross-endpoint KV merges.** One CKF never aggregates another endpoint's KV.
-- **Router scheduler load.** Scheduler events are replica-local and lack publisher identity, so
-  the Relay cannot aggregate them authoritatively across router replicas.
 - **KV-state endpoints and per-adapter load.**

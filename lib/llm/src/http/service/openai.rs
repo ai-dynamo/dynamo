@@ -1305,9 +1305,8 @@ async fn completions_single(
             err_response
         })?;
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight_guard.response_collector();
+    inflight_guard.tracked_request().attach_to(&mut request);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -1599,9 +1598,7 @@ async fn completions_batch(
             err_response
         })?;
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight_guard.response_collector();
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -1631,6 +1628,10 @@ async fn completions_batch(
             request.metadata().clone(),
         );
         copy_context_metadata(&request, &mut single_request_context);
+        // The preprocessor adds each prompt's tokens to the one tracked request.
+        inflight_guard
+            .tracked_request()
+            .attach_to(&mut single_request_context);
 
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
@@ -1871,9 +1872,7 @@ async fn embeddings(
         err_response
     })?;
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
 
     // issue the generate call on the engine
@@ -2015,9 +2014,7 @@ async fn classify(
         err_response
     })?;
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
 
     // issue the generate call on the engine
@@ -2105,9 +2102,7 @@ async fn rerank(
         inflight.mark_error(extract_error_type_from_response(&response));
         response
     })?;
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
     let stream = engine.generate(request).await.map_err(|error| {
         if super::metrics::request_was_rejected(error.as_ref()) {
@@ -2385,9 +2380,7 @@ async fn pooling(
         err_response
     })?;
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
 
     // issue the generate call on the engine
@@ -3587,9 +3580,8 @@ async fn chat_completions(
     let stream_can_defer_all_output =
         request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight_guard.response_collector();
+    inflight_guard.tracked_request().attach_to(&mut request);
 
     let annotations = request.annotations();
 
@@ -4310,9 +4302,8 @@ async fn responses(
     let stream_can_defer_all_output =
         request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight_guard.response_collector();
+    inflight_guard.tracked_request().attach_to(&mut request);
 
     tracing::trace!("Issuing generate call for responses");
 
@@ -5140,13 +5131,13 @@ async fn images_with_request(
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Images,
         streaming,
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = inflight.response_collector();
 
     // Issue the generate call on the engine
     // Note: This uses ServerStreamingEngine for internal routing/distribution,
@@ -5156,7 +5147,7 @@ async fn images_with_request(
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Images);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Images);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -5268,20 +5259,20 @@ async fn videos(
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Videos,
         streaming,
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = inflight.response_collector();
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -5394,18 +5385,20 @@ async fn video_stream(
         .get_videos_engine(&model)
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
-    let mut inflight =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Videos, true, request.id());
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Videos,
+        true,
+        request.id(),
+    );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = inflight.response_collector();
 
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -5692,9 +5685,7 @@ async fn audio_speech(
         &request_id,
     );
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight.response_collector();
 
     let ctx = request.context();
     inflight.mark_error(ErrorType::Cancelled);

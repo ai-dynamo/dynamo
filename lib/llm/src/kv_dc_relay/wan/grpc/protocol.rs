@@ -24,6 +24,11 @@ pub use v1::{
     SubscribeServingReadinessRequest, TopologyEntry, TopologyMember, WatchKvPoolCatalogRequest,
     WorkerRole, kv_event_relay_client::KvEventRelayClient,
 };
+pub use v1::{
+    DataStatus, LoadView, ModelDeploymentStatus, ModelServingLoad, PoolDeploymentStatus,
+    PoolServingLoad, RequestLifecycleStats, ServingLoadUpdate, SubscribeServingLoadRequest,
+    TokenLoadStats,
+};
 
 pub use v1::kv_event_relay_server::{KvEventRelay, KvEventRelayServer};
 pub use wire::{
@@ -31,6 +36,9 @@ pub use wire::{
     validate_endpoint_id, validate_model_registration, validate_pool_descriptor, validate_pool_id,
     validate_producer_identity, validate_protocol_envelope, validate_query_semantics,
     validate_topology_entry, validate_worker_roles,
+};
+pub use wire::{
+    validate_model_serving_load, validate_pool_serving_load, validate_serving_load_update,
 };
 
 /// Compatibility major; additive v1 changes do not increment this value.
@@ -380,5 +388,173 @@ mod tests {
         let decoded = KvPoolLoadUpdate::decode(heartbeat.encode_to_vec().as_slice())
             .expect("idle heartbeat must decode");
         assert!(decoded.pools.is_empty());
+    }
+
+    fn serving_load_update() -> ServingLoadUpdate {
+        let tokens = |prefill, decode| TokenLoadStats {
+            active_prefill_tokens: prefill,
+            active_decode_blocks: decode,
+            ..Default::default()
+        };
+        ServingLoadUpdate {
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            relay: Some(relay_identity()),
+            window_sequence: 1,
+            observed_ms: 1_000,
+            window_ms: 1_000,
+            pools: vec![PoolServingLoad {
+                producer: Some(producer()),
+                load: Some(LoadView {
+                    requests: None,
+                    tokens: Some(tokens(Some(3), Some(4))),
+                    status: DataStatus::Complete as i32,
+                    source_observed_ms: 900,
+                }),
+                deployment: Some(PoolDeploymentStatus::default()),
+            }],
+            models: vec![ModelServingLoad {
+                namespace: "ns".into(),
+                canonical_model_id: "llama".into(),
+                load: Some(LoadView {
+                    requests: Some(RequestLifecycleStats {
+                        requests_started_total: 5,
+                        ..Default::default()
+                    }),
+                    tokens: Some(TokenLoadStats {
+                        input_tokens_total: Some(10),
+                        output_tokens_total: Some(20),
+                        ..Default::default()
+                    }),
+                    status: DataStatus::Degraded as i32,
+                    source_observed_ms: 900,
+                }),
+                deployment: Some(ModelDeploymentStatus {
+                    serving_pools: vec![pool_id()],
+                    ..Default::default()
+                }),
+            }],
+            contract_marker: RELAY_CONTRACT_MARKER,
+        }
+    }
+
+    #[test]
+    fn serving_load_window_rejects_bad_envelopes_and_duplicate_keys() {
+        let update = serving_load_update();
+        let decoded = ServingLoadUpdate::decode(update.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded, update);
+        validate_serving_load_update(&update).unwrap();
+        validate_pool_serving_load(&update.pools[0]).unwrap();
+        validate_model_serving_load(&update.models[0]).unwrap();
+
+        let mut wrong_version = update.clone();
+        wrong_version.protocol_version += 1;
+        assert_eq!(
+            validate_serving_load_update(&wrong_version),
+            Err(WireIdentityError::ProtocolVersion(2))
+        );
+        let mut no_relay = update.clone();
+        no_relay.relay = None;
+        assert!(validate_serving_load_update(&no_relay).is_err());
+
+        let mut duplicate_pool = update.clone();
+        duplicate_pool.pools.push(update.pools[0].clone());
+        assert_eq!(
+            validate_serving_load_update(&duplicate_pool),
+            Err(WireIdentityError::DuplicateLoadPool)
+        );
+        let mut duplicate_model = update.clone();
+        duplicate_model.models.push(update.models[0].clone());
+        assert!(matches!(
+            validate_serving_load_update(&duplicate_model),
+            Err(WireIdentityError::DuplicateLoadModel { .. })
+        ));
+        let mut duplicate_link = update.models[0].clone();
+        duplicate_link
+            .deployment
+            .as_mut()
+            .unwrap()
+            .serving_pools
+            .push(pool_id());
+        assert_eq!(
+            validate_model_serving_load(&duplicate_link),
+            Err(WireIdentityError::DuplicateServingPool)
+        );
+
+        // A pool with an unsupported identity is quarantined, not fatal to the
+        // window; a pool that cannot be identified is.
+        let mut future_pool = update.clone();
+        future_pool.pools[0]
+            .producer
+            .as_mut()
+            .unwrap()
+            .pool_id
+            .as_mut()
+            .unwrap()
+            .identity_version += 1;
+        validate_serving_load_update(&future_pool).unwrap();
+        assert!(
+            validate_pool_serving_load(&future_pool.pools[0])
+                .unwrap_err()
+                .is_unsupported()
+        );
+        let mut anonymous = update.clone();
+        anonymous.pools[0].producer = None;
+        assert!(validate_serving_load_update(&anonymous).is_err());
+    }
+
+    #[test]
+    fn serving_load_entries_quarantine_unknown_status_and_enforce_presence_rules() {
+        let update = serving_load_update();
+        for status in [99, -1] {
+            let mut pool = update.pools[0].clone();
+            pool.load.as_mut().unwrap().status = status;
+            assert!(
+                validate_pool_serving_load(&pool)
+                    .unwrap_err()
+                    .is_unsupported()
+            );
+        }
+        let mut unspecified = update.models[0].clone();
+        unspecified.load.as_mut().unwrap().status = DataStatus::Unspecified as i32;
+        assert!(
+            !validate_model_serving_load(&unspecified)
+                .unwrap_err()
+                .is_unsupported()
+        );
+
+        let presence_violations: &[fn(&mut LoadView)] = &[
+            // DEGRADED gauges would read as a partial sum.
+            |view| view.requests.as_mut().unwrap().requests_generating = Some(1),
+            |view| view.tokens.as_mut().unwrap().inflight_input_tokens = Some(1),
+            // COMPLETE requires every gauge.
+            |view| view.status = DataStatus::Complete as i32,
+            // Totals are always set; pool fields never.
+            |view| view.tokens.as_mut().unwrap().output_tokens_total = None,
+            |view| view.tokens.as_mut().unwrap().active_decode_blocks = Some(1),
+        ];
+        for (index, violate) in presence_violations.iter().enumerate() {
+            let mut model = update.models[0].clone();
+            violate(model.load.as_mut().unwrap());
+            assert!(
+                matches!(
+                    validate_model_serving_load(&model),
+                    Err(WireIdentityError::LoadViewField(_))
+                ),
+                "model presence violation {index} was accepted"
+            );
+        }
+
+        let mut incomplete = update.pools[0].clone();
+        incomplete.load.as_mut().unwrap().status = DataStatus::Degraded as i32;
+        assert!(matches!(
+            validate_pool_serving_load(&incomplete),
+            Err(WireIdentityError::LoadViewField("active_prefill_tokens"))
+        ));
+        let mut with_requests = update.pools[0].clone();
+        with_requests.load.as_mut().unwrap().requests = Some(RequestLifecycleStats::default());
+        assert!(matches!(
+            validate_pool_serving_load(&with_requests),
+            Err(WireIdentityError::LoadViewField(_))
+        ));
     }
 }

@@ -222,8 +222,9 @@ async fn run_with_router_plugins(
     // with the instance_id as the router_id label.
     http_service_builder =
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
-    http_service_builder =
-        http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
+    http_service_builder = http_service_builder
+        .runtime(Some(Arc::new(distributed_runtime.clone())))
+        .namespace(local_model.namespace().map(str::to_owned));
     for extension in frontend_route_extensions {
         http_service_builder = http_service_builder.add_frontend_route_extension_arc(extension);
     }
