@@ -729,19 +729,21 @@ impl Slot for VllmConnectorSlot {
             let new_ids = &block_ids[overlap_len..];
 
             if !new_ids.is_empty() {
-                // Validate: no block in the non-overlapping portion should already exist.
-                let existing: HashSet<BlockId> = self.device_blocks.iter().copied().collect();
-                for id in new_ids {
-                    assert!(
-                        !existing.contains(id),
-                        "device_blocks contract violation: block {} already in device_blocks \
-                         but not part of suffix/prefix overlap (overlap_len={}, \
-                         device_blocks={:?}, block_ids={:?})",
-                        id,
-                        overlap_len,
-                        self.device_blocks,
-                        block_ids
-                    );
+                if block_ids.len() > 1 {
+                    // Validate: no block in the non-overlapping portion should already exist.
+                    let existing: HashSet<BlockId> = self.device_blocks.iter().copied().collect();
+                    for id in new_ids {
+                        assert!(
+                            !existing.contains(id),
+                            "device_blocks contract violation: block {} already in device_blocks \
+                             but not part of suffix/prefix overlap (overlap_len={}, \
+                             device_blocks={:?}, block_ids={:?})",
+                            id,
+                            overlap_len,
+                            self.device_blocks,
+                            block_ids
+                        );
+                    }
                 }
                 self.device_blocks.extend_from_slice(new_ids);
             }
@@ -2108,6 +2110,8 @@ mod connector_tests {
         slot.apply_scheduler_output(&decode_token, &decode_block, 95, 1, None, None)
             .unwrap();
         assert_eq!(slot.num_device_blocks_allocated(), 4);
+
+        assert_eq!(slot.device_blocks_snapshot(), &[100, 101, 102, 200]);
     }
 
     // ---------------------------------------------------------------
