@@ -2198,6 +2198,12 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
 		base.Env = MergeEnvs(baseEnv, user.Env)
+
+		// Replace the complete startup probe so handlers cannot merge with the default.
+		if user.StartupProbe != nil {
+			base.StartupProbe = user.StartupProbe.DeepCopy()
+		}
+
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
 		podSpec.Containers[i] = base
 		return nil

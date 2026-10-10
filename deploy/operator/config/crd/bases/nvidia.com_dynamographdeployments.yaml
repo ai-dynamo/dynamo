@@ -3845,6 +3845,10 @@ spec:
                               required:
                                 - name
                               type: object
+                              x-kubernetes-validations:
+                                - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                  message: startupProbe must define exactly one handler
+                                  fieldPath: .startupProbe
                             type: array
                             x-kubernetes-list-map-keys:
                               - name
@@ -5341,6 +5345,10 @@ spec:
                               required:
                                 - name
                               type: object
+                              x-kubernetes-validations:
+                                - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                  message: startupProbe must define exactly one handler
+                                  fieldPath: .startupProbe
                             type: array
                             x-kubernetes-list-map-keys:
                               - name
@@ -6917,6 +6925,10 @@ spec:
                               required:
                                 - name
                               type: object
+                              x-kubernetes-validations:
+                                - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                  message: startupProbe must define exactly one handler
+                                  fieldPath: .startupProbe
                             type: array
                             x-kubernetes-list-map-keys:
                               - name
@@ -8380,6 +8392,10 @@ spec:
                                 type: string
                             required: []
                             type: object
+                            x-kubernetes-validations:
+                              - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                message: startupProbe must define exactly one handler
+                                fieldPath: .startupProbe
                           nodeName:
                             description: |-
                               NodeName indicates in which node this pod is scheduled.
@@ -14306,6 +14322,10 @@ spec:
                                         required:
                                           - name
                                         type: object
+                                        x-kubernetes-validations:
+                                          - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                            message: startupProbe must define exactly one handler
+                                            fieldPath: .startupProbe
                                       type: array
                                       x-kubernetes-list-map-keys:
                                         - name
@@ -15802,6 +15822,10 @@ spec:
                                         required:
                                           - name
                                         type: object
+                                        x-kubernetes-validations:
+                                          - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                            message: startupProbe must define exactly one handler
+                                            fieldPath: .startupProbe
                                       type: array
                                       x-kubernetes-list-map-keys:
                                         - name
@@ -17378,6 +17402,10 @@ spec:
                                         required:
                                           - name
                                         type: object
+                                        x-kubernetes-validations:
+                                          - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                            message: startupProbe must define exactly one handler
+                                            fieldPath: .startupProbe
                                       type: array
                                       x-kubernetes-list-map-keys:
                                         - name
@@ -23639,6 +23667,9 @@ spec:
                                   x-kubernetes-validations:
                                     - rule: self.name == "main" || (has(self.image) && self.image != "")
                                       message: sidecar containers must specify a non-empty image
+                                    - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                      message: startupProbe must define exactly one handler
+                                      fieldPath: .startupProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -25135,6 +25166,10 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                      message: startupProbe must define exactly one handler
+                                      fieldPath: .startupProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -26714,6 +26749,9 @@ spec:
                                   x-kubernetes-validations:
                                     - rule: has(self.image) && self.image != ""
                                       message: init containers must specify a non-empty image
+                                    - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                      message: startupProbe must define exactly one handler
+                                      fieldPath: .startupProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -31835,6 +31873,9 @@ spec:
                                         x-kubernetes-validations:
                                           - rule: self.name == "main" || (has(self.image) && self.image != "")
                                             message: sidecar containers must specify a non-empty image
+                                          - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                            message: startupProbe must define exactly one handler
+                                            fieldPath: .startupProbe
                                       type: array
                                       x-kubernetes-list-map-keys:
                                         - name
@@ -33331,6 +33372,10 @@ spec:
                                         required:
                                           - name
                                         type: object
+                                        x-kubernetes-validations:
+                                          - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                            message: startupProbe must define exactly one handler
+                                            fieldPath: .startupProbe
                                       type: array
                                       x-kubernetes-list-map-keys:
                                         - name
@@ -34910,6 +34955,9 @@ spec:
                                         x-kubernetes-validations:
                                           - rule: has(self.image) && self.image != ""
                                             message: init containers must specify a non-empty image
+                                          - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                            message: startupProbe must define exactly one handler
+                                            fieldPath: .startupProbe
                                       type: array
                                       x-kubernetes-list-map-keys:
                                         - name
