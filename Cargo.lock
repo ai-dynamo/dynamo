@@ -2762,6 +2762,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "parking_lot",
+ "percent-encoding",
  "prometheus",
  "prost 0.13.5",
  "rand 0.9.4",
@@ -2876,9 +2877,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "10.0.0"
+version = "10.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2b2e1494536f4a2de5e87d5d429bc3f25287d3aef8e1754817f5039d71f1a4a"
+checksum = "1564d5bbb66372f478df3f9158df8071b45c523ca4e07b4f82a4ac257038c962"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2900,9 +2901,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.7.17"
+version = "0.7.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f80b88ab86928219f3444822dc33c1ca170d0cc67beeb40d18cf7d6f287bad5e"
+checksum = "f43e47b6a68353cc04d4dfe19c69414a5884c9963b72c68937d019998c5ef72e"
 dependencies = [
  "anyhow",
  "openai-harmony",
@@ -2929,15 +2930,14 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
- "utoipa",
  "uuid",
 ]
 
 [[package]]
 name = "dynamo-renderer"
-version = "8.0.0"
+version = "8.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aaa962e465f7b4299667eac03350640c49489cd5e5a475d2c0a065f0d8fbffb"
+checksum = "9dc3c1f04389ad78e3f9dad14360a191c27f3e3f574aba108b9986f5592cfea3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3145,6 +3145,7 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-sglang-mocker",
  "dynamo-sglang-sidecar",
+ "dynamo-sidecar-common",
  "dynamo-vllm-mocker",
  "dynamo-vllm-sidecar",
  "futures",
@@ -3266,10 +3267,12 @@ dependencies = [
  "dynamo-llm",
  "dynamo-mocker",
  "dynamo-runtime",
+ "dynamo-sidecar-common",
  "dynamo-vllm-sidecar",
  "futures",
  "prost-types 0.14.3",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic 0.14.6",
@@ -11072,8 +11075,6 @@ dependencies = [
  "quote",
  "regex",
  "syn 2.0.117",
- "url",
- "uuid",
 ]
 
 [[package]]

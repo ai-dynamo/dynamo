@@ -35,6 +35,7 @@ recipes:
 - gpt-oss-120b
 - k-exaone-2
 - ax-k2
+- minimax-m3
 deferred_recipes:
 - qwen3-6-35b
 - kimi-k2-5
