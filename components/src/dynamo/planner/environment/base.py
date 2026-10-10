@@ -17,8 +17,14 @@ from dynamo.planner.connectors.base import (
     is_startup_aware_connector,
 )
 from dynamo.planner.core.budget import minimum_power_footprint_fits
-from dynamo.planner.core.types import FpmObservations, TrafficObservation
+from dynamo.planner.core.types import (
+    BatchDrainLimitDecision,
+    BatchSchedulingObservation,
+    FpmObservations,
+    TrafficObservation,
+)
 from dynamo.planner.environment.interface import (
+    BatchSchedulingProvider,
     PlannerEnvironment,
     RuntimeNamespaceSource,
 )
@@ -75,6 +81,25 @@ class NoopFpmMetricsProvider:
         return None
 
 
+class NoopBatchSchedulingProvider:
+    """Disabled-state provider that rejects accidental batch actuation."""
+
+    async def initialize(self) -> None:
+        return None
+
+    async def collect(self) -> BatchSchedulingObservation:
+        raise RuntimeError("batch scheduling is not configured")
+
+    async def apply_drain_limits(
+        self, decisions: list[BatchDrainLimitDecision]
+    ) -> None:
+        del decisions
+        raise RuntimeError("batch drain actuation is not configured")
+
+    async def shutdown(self) -> None:
+        return None
+
+
 class PlannerEnvironmentImpl(PlannerEnvironment):
     """Default environment facade consumed by planner core."""
 
@@ -87,6 +112,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         require_decode: bool,
         traffic_provider: Optional[TrafficMetricsProvider] = None,
         fpm_provider: Optional[FpmMetricsProvider] = None,
+        batch_provider: Optional[BatchSchedulingProvider] = None,
         runtime_namespace_source: Optional[RuntimeNamespaceSource] = None,
     ) -> None:
         self.config = config
@@ -95,12 +121,18 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         self.controller = controller
         self.traffic_provider = traffic_provider or NoopTrafficMetricsProvider()
         self.fpm_provider = fpm_provider or NoopFpmMetricsProvider()
+        self.batch_provider = batch_provider or NoopBatchSchedulingProvider()
         self.runtime_namespace_source = runtime_namespace_source
         self._state = DeploymentState()
         self._metrics_state = Metrics()
 
     async def initialize(self) -> None:
         await self.controller.async_init()
+        # Native batch actuation first atomically replaces any surviving Redis
+        # lease with zero and fences the owned DGDSA. Keeping this before the
+        # potentially long deployment-settlement wait prevents stale admission
+        # from surviving a cold Planner restart.
+        await self.batch_provider.initialize()
         defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
         await self.controller.validate_deployment(
             prefill_component_name=(
@@ -173,13 +205,24 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     def collect_fpm(self) -> FpmObservations:
         return self.fpm_provider.collect_fpm()
 
+    async def collect_batch_scheduling(self) -> BatchSchedulingObservation:
+        return await self.batch_provider.collect()
+
     async def apply_scaling(
         self, targets: list[TargetReplica], blocking: bool = False
     ) -> None:
         await self.controller.set_component_replicas(targets, blocking=blocking)
 
+    async def apply_batch_drain_limits(
+        self, decisions: list[BatchDrainLimitDecision]
+    ) -> None:
+        await self.batch_provider.apply_drain_limits(decisions)
+
     async def shutdown(self) -> None:
-        await self.fpm_provider.shutdown()
+        try:
+            await self.batch_provider.shutdown()
+        finally:
+            await self.fpm_provider.shutdown()
 
     async def _refresh_deployment_state(
         self, deployment: Optional[dict] = None
