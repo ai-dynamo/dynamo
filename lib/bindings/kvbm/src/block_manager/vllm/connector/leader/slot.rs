@@ -169,6 +169,18 @@ pub trait ExternallyManagedDeviceSlot: Slot {
     ///
     /// The external device block manager has provided a set of mutable blocks to the slot.
     fn append_mutable_device_blocks(&mut self, block_ids: &[BlockId]) -> Result<(), SlotError>;
+
+    /// Trim device bookkeeping after speculative-decoding rewinds KV state.
+    ///
+    /// Called after the external block manager rewinds KV state for rejected
+    /// draft tokens.  The live block id list may be unchanged (when the rewind
+    /// stays within the last live block) or shorter (when whole blocks were
+    /// freed).  `current_position`, `evaluated_blocks`, `offload_terminated_at_block`,
+    /// and `stored_block_priorities` are clamped accordingly.
+    /// `num_tokens` is the exact post-rewind token count (may be less than
+    /// `live_block_ids.len() * block_size` when the rewind lands inside the
+    /// last live block).
+    fn rewind_device_blocks(&mut self, live_block_ids: &[BlockId], num_tokens: usize);
 }
 
 pub struct ConnectorSlotManager<R: RequestKey> {
@@ -1288,6 +1300,101 @@ impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
 
         Ok(())
     }
+
+    fn rewind_device_blocks(&mut self, live_block_ids: &[BlockId], num_tokens: usize) {
+        let old_len = self.device_blocks.len();
+        let new_len = live_block_ids.len();
+
+        if new_len > old_len {
+            tracing::debug!(
+                request_id = self.request_id,
+                old_len,
+                new_len,
+                "rewind_device_blocks: ignoring (live block count grew)"
+            );
+            return;
+        }
+
+        let freed = old_len - new_len;
+
+        if freed > 0 {
+            tracing::debug!(
+                request_id = self.request_id,
+                old_device_blocks = ?self.device_blocks,
+                live_block_ids = ?live_block_ids,
+                num_tokens,
+                "rewind_device_blocks: trimming {} freed blocks",
+                freed
+            );
+            self.device_blocks = live_block_ids.to_vec();
+        } else {
+            // Same block count: sync IDs in case the external manager
+            // reports a same-length replacement list.  In practice the IDs
+            // match (TRT-LLM same-block rewind), but syncing avoids staleness
+            // if they ever differ.
+            if self.device_blocks != live_block_ids {
+                tracing::warn!(
+                    request_id = self.request_id,
+                    old_device_blocks = ?self.device_blocks,
+                    live_block_ids = ?live_block_ids,
+                    "rewind_device_blocks: same block count but IDs differ; syncing"
+                );
+                self.device_blocks = live_block_ids.to_vec();
+            }
+            tracing::debug!(
+                request_id = self.request_id,
+                num_tokens,
+                "rewind_device_blocks: same block count, clamping position inside last block"
+            );
+        }
+
+        // Clamp current_position to the exact post-rewind token count.
+        // num_tokens may be less than new_len * block_size when the rewind
+        // lands inside the last live block.  This must run even when no
+        // blocks were freed (same block list, position moved backward).
+        let max_tokens = new_len * self.block_size;
+        let target_position = num_tokens.min(max_tokens);
+        if self.current_position > target_position {
+            self.current_position = target_position;
+        }
+
+        // Truncate the token sequence to match the post-rewind position.
+        // Without this, rejected draft tokens remain in the sequence and the
+        // next apply_scheduler_output appends new tokens after them, corrupting
+        // block hashes used for offload/save.
+        if let Err(e) = self.sequence.truncate(self.current_position) {
+            tracing::warn!(
+                request_id = self.request_id,
+                error = %e,
+                "rewind_device_blocks: failed to truncate sequence (may have multimodal runs)"
+            );
+        }
+
+        // Clamp block-level evaluation state based on the post-rewind token
+        // count.  Only blocks fully below target_position have unchanged
+        // content; the block at the boundary (if target_position is not
+        // block-aligned) has partially rejected tokens and must be
+        // re-evaluated.  This runs for both freed-block and same-block rewinds.
+        let valid_blocks = target_position / self.block_size;
+        if self.evaluated_blocks > valid_blocks {
+            self.evaluated_blocks = valid_blocks;
+        }
+
+        // Clear offload termination if it pointed at a block whose content is
+        // no longer final (at or past valid_blocks).  Since valid_blocks <=
+        // new_len always holds, this also covers freed blocks.
+        if let Some(terminated_at) = self.offload_terminated_at_block
+            && terminated_at >= valid_blocks
+        {
+            self.offload_terminated_at_block = None;
+        }
+
+        // Remove stored priorities for blocks no longer in the live set.
+        // This covers both freed-block rewinds and same-length ID replacements.
+        let live_set: HashSet<BlockId> = live_block_ids.iter().copied().collect();
+        self.stored_block_priorities
+            .retain(|id, _| live_set.contains(id));
+    }
 }
 
 impl VllmConnectorSlot {
@@ -2384,5 +2491,112 @@ mod connector_tests {
 
         assert_eq!(slot.num_device_blocks_allocated(), 7);
         assert_eq!(slot.device_blocks_snapshot(), &[10, 11, 12, 13, 14, 15, 16]);
+    }
+
+    // ---------------------------------------------------------------
+    // Test: rewind_device_blocks trims stale freed blocks
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_rewind_device_blocks_trims_freed_blocks() {
+        let num_tokens = 96; // 3 blocks of 32
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+
+        // Simulate 3 blocks allocated: [0, 1, 2]
+        slot.append_mutable_device_blocks(&[0, 1, 2]).unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 3);
+
+        // Advance position into the 3rd block.
+        slot.advance_computed_position(96).unwrap();
+
+        // Rewind frees block 2: live blocks are now [0, 1].
+        // Post-rewind token count is 64 (exactly 2 blocks).
+        slot.rewind_device_blocks(&[0, 1], 64);
+        assert_eq!(slot.num_device_blocks_allocated(), 2);
+        assert_eq!(slot.device_blocks_snapshot(), &[0, 1]);
+
+        // current_position must be clamped to 64.
+        assert_eq!(slot.current_position, 64);
+
+        // Append a new block 3 (re-alloc after rewind).
+        slot.append_mutable_device_blocks(&[3]).unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 3);
+        assert_eq!(slot.device_blocks_snapshot(), &[0, 1, 3]);
+    }
+
+    #[test]
+    fn test_rewind_device_blocks_trims_inside_last_block() {
+        let num_tokens = 96; // 3 blocks of 32
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+
+        slot.append_mutable_device_blocks(&[0, 1, 2]).unwrap();
+        slot.advance_computed_position(96).unwrap();
+
+        // Rewind frees block 2, but post-rewind token count is 60
+        // (lands inside block 1, which holds tokens 32-63).
+        slot.rewind_device_blocks(&[0, 1], 60);
+        assert_eq!(slot.num_device_blocks_allocated(), 2);
+
+        // current_position must be clamped to 60, not 64.
+        assert_eq!(slot.current_position, 60);
+    }
+
+    #[test]
+    fn test_rewind_device_blocks_noop_when_growing() {
+        let (mut slot, _rx) = create_test_slot(64, 0);
+        slot.append_mutable_device_blocks(&[0, 1]).unwrap();
+
+        // Rewind with more blocks than allocated should be a no-op.
+        slot.rewind_device_blocks(&[0, 1, 2], 64);
+        assert_eq!(slot.num_device_blocks_allocated(), 2);
+        assert_eq!(slot.device_blocks_snapshot(), &[0, 1]);
+    }
+
+    #[test]
+    fn test_rewind_device_blocks_same_blocks_position_moves_backward() {
+        let num_tokens = 64; // 2 blocks of 32
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+
+        slot.append_mutable_device_blocks(&[0, 1]).unwrap();
+        slot.advance_computed_position(64).unwrap();
+
+        // Simulate that both blocks were evaluated/offloaded.
+        slot.evaluated_blocks = 2;
+        slot.offload_terminated_at_block = Some(2);
+
+        // Same block list [0, 1] but position rewinds from 64 to 60.
+        // No blocks freed, but rejected tokens 60-63 must be truncated.
+        slot.rewind_device_blocks(&[0, 1], 60);
+        assert_eq!(slot.num_device_blocks_allocated(), 2);
+        assert_eq!(slot.device_blocks_snapshot(), &[0, 1]);
+        assert_eq!(slot.current_position, 60);
+
+        // Block 1 (tokens 32-63) is no longer fully valid: tokens 60-63 were
+        // rejected.  evaluated_blocks must be clamped to 60/32 = 1, and
+        // offload_terminated_at_block must be cleared (it pointed past valid).
+        assert_eq!(slot.evaluated_blocks, 1);
+        assert_eq!(slot.offload_terminated_at_block, None);
+    }
+
+    #[test]
+    fn test_rewind_device_blocks_same_blocks_refill_re_evaluates() {
+        let num_tokens = 64; // 2 blocks of 32
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+
+        slot.append_mutable_device_blocks(&[0, 1]).unwrap();
+        slot.advance_computed_position(64).unwrap();
+        slot.evaluated_blocks = 2;
+
+        // Rewind to 60 tokens, same blocks.
+        slot.rewind_device_blocks(&[0, 1], 60);
+        // Block 1 (tokens 32-63) is no longer fully valid: tokens 60-63 were
+        // rejected.  evaluated_blocks must be 1 so apply_scheduler_output
+        // re-evaluates block 1 instead of skipping it.
+        assert_eq!(slot.evaluated_blocks, 1);
+
+        // Refill 4 tokens to reach 64 again.
+        slot.apply_scheduler_output(&[10, 20, 30, 40], &[], 0, 4, None, None)
+            .unwrap();
+        // Block 1 was re-evaluated, so evaluated_blocks advances to 2.
+        assert_eq!(slot.evaluated_blocks, 2);
     }
 }
