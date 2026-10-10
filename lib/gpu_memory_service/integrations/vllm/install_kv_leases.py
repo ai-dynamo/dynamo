@@ -374,8 +374,8 @@ def _scheduler_init_with_gms_completion_fence(self, *args, **kwargs) -> None:
     _original_scheduler_init(self, *args, **kwargs)
     # vLLM already owns the correct scheduler/worker completion sequence for
     # overlapping batches. Bare GMS is not a KV consumer connector, so opt in
-    # explicitly: BlockPool.free_blocks (which seals/publishes READY) now runs
-    # only after update_from_output proves the last writer has completed.
+    # explicitly: completed full blocks are sealed after update_from_output,
+    # and BlockPool.free_blocks runs only after that same GPU completion fence.
     self.defer_block_free = True
     manager = getattr(self, "kv_cache_manager", None)
     if manager is not None:
@@ -385,12 +385,27 @@ def _scheduler_init_with_gms_completion_fence(self, *args, **kwargs) -> None:
         update = self.update_from_output
         pool = manager.block_pool
 
+        # Scan for newly completed in-flight blocks on the publication cadence
+        # rather than every step: most steps complete none, and blocks still
+        # unscanned when their request finishes are published by finalization.
+        inflight_scan = {"steps": 0}
+
         def update_with_completed_frees(*args, **kwargs):
             if getattr(pool, "_gms_completed_frees", None) is not None:
                 raise RuntimeError("nested GMS completion transaction")
             pool._gms_completed_frees = []
             try:
                 result = update(*args, **kwargs)
+                scheduler_output = args[0] if args else kwargs.get("scheduler_output")
+                inflight_scan["steps"] += 1
+                if (
+                    scheduler_output is not None
+                    and inflight_scan["steps"] >= _INFLIGHT_PUBLISH_STEPS
+                ):
+                    inflight_scan["steps"] = 0
+                    _publish_completed_inflight_blocks(
+                        self, scheduler_output, force=True
+                    )
                 _flush_completed_frees(pool)
                 _collect_async_capacity(pool)
                 return result
@@ -408,6 +423,9 @@ def _flush_completed_frees(pool) -> None:
     pool._gms_completed_frees = None
     if not groups:
         return
+    # Queued in-flight publications reach the directory before their blocks
+    # can be released or reused.
+    _flush_inflight_publications(pool)
     batch = []
     hashes = {}
     admission_blocks = 0
@@ -503,7 +521,9 @@ def _forget_directory_slot(self, content_hash: bytes, lease: KVLease | None) -> 
         slots_by_hash.pop(content_hash, None)
 
 
-def _publish_hbm_blocks(self, blocks, *, active: bool) -> bool:
+def _publish_hbm_blocks(
+    self, blocks, *, active: bool, release_duplicates: bool = True
+) -> bool:
     directory = getattr(self, "_gms_kv_directory", None)
     client = getattr(self, "_gms_kv_lease_client", None)
     if client is None:
@@ -536,7 +556,7 @@ def _publish_hbm_blocks(self, blocks, *, active: bool) -> bool:
         elif existing == lease:
             # A local cache hit reuses the already-published immutable slot.
             continue
-        else:
+        elif release_duplicates:
             duplicate_pairs.append((block, lease))
     duplicate_leases = []
     for block, lease in duplicate_pairs:
@@ -587,6 +607,140 @@ def _publish_hbm_blocks(self, blocks, *, active: bool) -> bool:
         return False
 
 
+def _publish_completed_inflight_blocks(
+    scheduler, scheduler_output, *, force: bool = False
+) -> int:
+    """Publish immutable full blocks after their GPU step has completed.
+
+    vLLM assigns hashes while scheduling, before the corresponding CUDA work
+    runs. ``update_from_output`` is the first scheduler boundary proving those
+    writes completed. Only block-aligned hashes at or below the committed token
+    frontier are therefore safe to seal. Later in-flight steps are subtracted
+    from vLLM's optimistic ``num_computed_tokens`` counter.
+
+    Per-request frontiers make the steady-state cost proportional to newly
+    completed blocks rather than total context length. A rollback (preemption
+    or speculative rejection) lowers the frontier and makes the range eligible
+    for inspection again.
+    """
+
+    manager = getattr(scheduler, "kv_cache_manager", None)
+    pool = getattr(manager, "block_pool", None)
+    directory = getattr(pool, "_gms_kv_directory", None)
+    coordinator = getattr(manager, "coordinator", None)
+    scheduled = getattr(scheduler_output, "num_scheduled_tokens", None)
+    if (
+        pool is None
+        or directory is None
+        or not directory.enabled
+        or not directory.authoritative
+        or coordinator is None
+        or not scheduled
+    ):
+        return 0
+
+    lease_map = getattr(pool, "_gms_kv_leases_by_block", {})
+    published_slots = getattr(pool, "_gms_kv_directory_slot_by_hash", {})
+    candidates = []
+    seen_slots = set()
+    seen_hashes = set()
+    frontier_updates = []
+    for request_id in scheduled:
+        request = scheduler.requests.get(request_id)
+        if request is None or request.is_finished():
+            continue
+        frontiers = getattr(request, "_gms_kv_publish_frontiers", None)
+        if frontiers is None:
+            frontiers = {}
+            request._gms_kv_publish_frontiers = frontiers
+        committed_tokens = max(
+            0,
+            int(request.num_computed_tokens)
+            - int(getattr(request, "num_in_flight_tokens", 0)),
+        )
+        for cache_manager in coordinator.single_type_managers:
+            key = id(cache_manager)
+            block_size = int(cache_manager.block_size)
+            blocks = cache_manager.req_to_blocks.get(request_id, ())
+            completed_blocks = min(len(blocks), committed_tokens // block_size)
+            start = min(int(frontiers.get(key, 0)), completed_blocks)
+            next_frontier = start
+            for block in blocks[start:completed_blocks]:
+                if block.is_null:
+                    next_frontier += 1
+                    continue
+                block_id = int(block.block_id)
+                native_hash = getattr(block, "block_hash", None)
+                hash_tokens = getattr(block, "block_hash_num_tokens", None)
+                # A non-null block without an aligned final hash can still be
+                # promoted by vLLM later. Stop here so the next completion
+                # revisits it instead of permanently skipping it.
+                if (
+                    native_hash is None
+                    or hash_tokens is None
+                    or int(hash_tokens) > committed_tokens
+                    or int(hash_tokens) % block_size != 0
+                    or block_id not in lease_map
+                ):
+                    break
+                content_hash = _directory_key(native_hash)
+                lease = lease_map[block_id]
+                if (
+                    block_id not in seen_slots
+                    and content_hash not in seen_hashes
+                    and published_slots.get(content_hash) != lease
+                ):
+                    seen_slots.add(block_id)
+                    seen_hashes.add(content_hash)
+                    candidates.append(block)
+                next_frontier += 1
+            frontier_updates.append((request, key, next_frontier))
+
+    # Queue instead of publishing every step: each publication is a daemon
+    # round trip whose send and acknowledgement compete with the scheduler
+    # for the GIL. The queue is flushed before any free (see
+    # _flush_inflight_publications), so a queued block cannot be reused.
+    pending = pool.__dict__.setdefault("_gms_inflight_pending", {})
+    for block in candidates:
+        pending.setdefault(int(block.block_id), block)
+    for request, key, next_frontier in frontier_updates:
+        request._gms_kv_publish_frontiers[key] = next_frontier
+    steps = int(getattr(pool, "_gms_inflight_steps", 0)) + 1
+    pool._gms_inflight_steps = steps
+    if pending and (
+        force
+        or steps >= _INFLIGHT_PUBLISH_STEPS
+        or len(pending) >= _INFLIGHT_PUBLISH_BLOCKS
+    ):
+        _flush_inflight_publications(pool)
+    return len(candidates)
+
+
+# Completed in-flight blocks are published every this many engine steps, and
+# always before any block is freed. The block cap only bounds memory: a
+# count-based flush would land in the update that releases a prefill's first
+# tokens, since every prompt block completes in that step.
+_INFLIGHT_PUBLISH_STEPS = 16
+_INFLIGHT_PUBLISH_BLOCKS = 1024
+
+
+def _flush_inflight_publications(pool) -> int:
+    """Publish queued completed blocks; must run before blocks are freed."""
+    pending = getattr(pool, "_gms_inflight_pending", None)
+    pool._gms_inflight_steps = 0
+    if not pending:
+        return 0
+    blocks = list(pending.values())
+    if not _publish_hbm_blocks(pool, blocks, active=False, release_duplicates=False):
+        # Keep them queued: the next flush retries, as the per-step path did.
+        logger.warning(
+            "[GMS-KVLease] deferred in-flight HBM publication was not accepted"
+        )
+        return 0
+    pending.clear()
+    return len(blocks)
+
+
 def _drop_directory_hashes(directory, entries) -> None:
     try:
         directory.publish(
@@ -610,6 +764,105 @@ def _drop_directory_hashes(directory, entries) -> None:
         )
         if directory.authoritative:
             raise
+
+
+def _demote_sealed_blocks_for_mutation(self, block_ids: set[int]) -> None:
+    """Make published immutable blocks writable before native invalidation.
+
+    A SEALED generation is a recovery promise: a successor may trust those
+    bytes after global takeover. vLLM connector invalidation can remove the
+    native hash from an active block, which makes that same physical block
+    writable again. Retire the exact directory records first, then atomically
+    adopt their lease generations back into the current writer's LEASED state.
+    A crash between those operations is a safe miss; the inverse ordering
+    would expose mutable bytes as recoverable.
+    """
+    # A background retirement must land before these records change again.
+    _collect_async_capacity(self, wait=True)
+    directory = getattr(self, "_gms_kv_directory", None)
+    client = getattr(self, "_gms_kv_lease_client", None)
+    lease_map = getattr(self, "_gms_kv_leases_by_block", {})
+    slots_by_hash = getattr(self, "_gms_kv_directory_slot_by_hash", {})
+    targets = []
+    for block_id in sorted(set(map(int, block_ids))):
+        if not 0 <= block_id < len(self.blocks):
+            continue
+        block = self.blocks[block_id]
+        native_hash = getattr(block, "block_hash", None)
+        lease = lease_map.get(block_id)
+        if native_hash is None or lease is None:
+            continue
+        content_hash = _directory_key(native_hash)
+        if slots_by_hash.get(content_hash) == lease:
+            targets.append((content_hash, block, lease))
+    if not targets:
+        return
+    if directory is None or not directory.authoritative or client is None:
+        raise RuntimeError("cannot mutate sealed vLLM blocks without writer authority")
+
+    # A previously deferred publication must reach the daemon before the
+    # synchronous retirement below, otherwise the two mutations could cross.
+    flush = getattr(directory, "flush_deferred", None)
+    if callable(flush) and not flush():
+        raise RuntimeError("timed out flushing sealed vLLM block publications")
+    victims = directory.ensure_hbm_capacity(
+        len(targets),
+        eligible_slot_ids=[int(block.block_id) for _, block, _ in targets],
+        engine_id=_directory_pool_id(),
+    )
+    expected = {
+        (content_hash, int(block.block_id), int(lease.generation))
+        for content_hash, block, lease in targets
+    }
+    observed = {
+        (bytes(victim["content_hash"]), int(block_id), int(generation))
+        for victim in victims
+        for block_id, generation in zip(
+            victim.get("slot_ids") or (), victim.get("generations") or ()
+        )
+    }
+    if observed != expected:
+        _restore_directory_hashes(
+            directory,
+            [(bytes(victim["content_hash"]), victim) for victim in victims],
+        )
+        raise RuntimeError("GMS could not retire every sealed vLLM block")
+
+    old_leases = [lease for _content_hash, _block, lease in targets]
+    successors = client.adopt(old_leases)
+    expected_successors = [
+        KVLease(lease.block_id, _successor_generation(lease.generation))
+        for lease in old_leases
+    ]
+    if successors != expected_successors:
+        # Directory records are already absent, so failing closed leaves no
+        # recoverable claim over bytes whose mutability is now ambiguous.
+        raise RuntimeError("GMS sealed vLLM block demotion failed")
+    for (content_hash, block, old), lease in zip(targets, successors):
+        lease_map[int(block.block_id)] = lease
+        _forget_directory_slot(self, content_hash, old)
+
+
+def _reset_prefix_cache(self, native_free_count: int, native_reset) -> bool:
+    """Retire recovery records before vLLM clears their native hashes."""
+    # A background retirement must land before these records change again.
+    _collect_async_capacity(self, wait=True)
+    if native_free_count != int(self.num_gpu_blocks) - 1:
+        return False
+    lease_map = getattr(self, "_gms_kv_leases_by_block", {})
+    published = {
+        int(lease.block_id)
+        for lease in getattr(self, "_gms_kv_directory_slot_by_hash", {}).values()
+        if lease_map.get(int(lease.block_id)) == lease
+    }
+    _demote_sealed_blocks_for_mutation(self, published)
+    leases = list(lease_map.values())
+    if leases:
+        self._gms_kv_lease_client.release(leases)
+        lease_map.clear()
+    if getattr(self, "_gms_kv_directory_slot_by_hash", None):
+        raise RuntimeError("vLLM prefix reset left recoverable directory entries")
+    return bool(native_reset())
 
 
 def _restore_directory_hashes(directory, entries) -> None:
@@ -1457,6 +1710,7 @@ def _free_blocks(self, ordered_blocks, *, admission_blocks=None):
     if pending is not None:
         pending.append(blocks_list)
         return
+    _flush_inflight_publications(self)
     free_blocks = []
     for block in blocks_list:
         block.ref_cnt -= 1
@@ -1545,12 +1799,10 @@ def _free_blocks(self, ordered_blocks, *, admission_blocks=None):
             active_leases=len(getattr(self, "_gms_kv_leases_by_block", {})),
         )
     if retained:
-        # Request finalization is the only HBM durability boundary. Seal
-        # every completed slot as one lease-ring operation, then publish
-        # one READY batch. A crash before publication leaves safely
-        # undiscoverable sealed slots; a crash after it leaves an
-        # adoptable directory generation. Publishing ACTIVE earlier adds
-        # scheduler work but cannot make an incomplete block recoverable.
+        # Incremental completion normally published every full immutable
+        # block already. Finalization closes any remaining eligible tail and
+        # publishes one READY batch. A crash before publication is a safe
+        # miss; a crash after it leaves an exact-generation recovery record.
         if _publish_hbm_blocks(self, retained, active=False):
             _reserve_dormant_headroom(
                 self,
@@ -1680,6 +1932,19 @@ def _build_gms_block_pool_class(block_pool_class):
 
         def free_blocks(self, ordered_blocks):
             return _free_blocks(self, ordered_blocks)
+
+        def evict_blocks(self, block_ids: set[int]) -> None:
+            _flush_inflight_publications(self)
+            _demote_sealed_blocks_for_mutation(self, block_ids)
+            return super().evict_blocks(block_ids)
+
+        def reset_prefix_cache(self) -> bool:
+            _flush_inflight_publications(self)
+            return _reset_prefix_cache(
+                self,
+                super().get_num_free_blocks(),
+                super().reset_prefix_cache,
+            )
 
         def take_events(self):
             _flush_completed_frees(self)

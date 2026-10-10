@@ -169,7 +169,10 @@ class GMSMemorySaverImpl:
                     0,
                     int(
                         os.environ.get(
-                            "RANK", os.environ.get("LOCAL_RANK", device_index)
+                            "GMS_SGLANG_NODE_RANK",
+                            os.environ.get(
+                                "RANK", os.environ.get("LOCAL_RANK", device_index)
+                            ),
                         )
                     ),
                 ),

@@ -277,6 +277,33 @@ def test_vllm_kv_disable_flag_uses_base_worker_paths(monkeypatch):
     assert not hasattr(instance, "_gms_kv_manager")
 
 
+def test_vllm_kv_context_passes_current_five_argument_contract(monkeypatch):
+    from gpu_memory_service.integrations.vllm import worker as worker_module
+
+    captured = []
+    sentinel = object()
+    manager = object()
+    kv_config = object()
+    model_config = object()
+    monkeypatch.setenv("GMS_VLLM_VMM_IPC_KV", "1")
+    monkeypatch.setattr(
+        worker_module,
+        "persistent_kv_allocation_context",
+        lambda *args: captured.append(args) or sentinel,
+    )
+    instance = object.__new__(worker_module.GMSWorker)
+    instance._gms_kv_manager = manager
+    instance._gms_kv_engine_id = "engine"
+    instance._gms_kv_cache_config = kv_config
+    instance._gms_device = 0
+    instance.vllm_config = SimpleNamespace(model_config=model_config)
+
+    assert instance._maybe_get_memory_pool_context("kv_cache") is sentinel
+    assert len(captured) == 1
+    assert len(captured[0]) == 5
+    assert captured[0][:4] == (manager, "engine", kv_config, model_config)
+
+
 def test_vllm_kv_disable_flag_skips_sleep_wake_kv_lifecycle(monkeypatch):
     from gpu_memory_service.integrations.vllm import worker as worker_module
 

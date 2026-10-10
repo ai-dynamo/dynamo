@@ -32,7 +32,9 @@ use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, PipelineOperator,
     ResponseStream, ServerStreamingEngine, SingleIn, async_trait, attach_first_response_guard,
-    network::egress::route_span::{RouteTraceContext, attach_route_trace_context, error_type_from_chain, error_type_name},
+    network::egress::route_span::{
+        RouteTraceContext, attach_route_trace_context, error_type_from_chain, error_type_name,
+    },
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -413,6 +415,7 @@ where
     session_affinity: Option<SessionAffinityId>,
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     next_stream: Option<ManyOut<Annotated<Resp>>>,
+    terminal_after_error: bool,
     retries_left: u64,
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
@@ -504,6 +507,7 @@ where
             session_affinity,
             next_generate: next,
             next_stream: None,
+            terminal_after_error: false,
             retries_left: u64::from(retries_left) + 1, // +1 to account for the initial attempt
             max_seq_len,
             model_name,
@@ -521,6 +525,9 @@ where
     }
 
     pub async fn next(&mut self) -> Option<Annotated<Resp>> {
+        if self.terminal_after_error {
+            return None;
+        }
         loop {
             let response_stream = match self.next_stream.as_mut() {
                 Some(stream) => stream,
@@ -562,10 +569,15 @@ where
                         self.metrics.inc_migration_ongoing_request(&self.model_name);
                         let migration_event =
                             MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
+                        // The failed stream can still hold a routing/affinity claim.
+                        // Release it before dispatching the replacement, or the retry
+                        // can wait indefinitely for its own predecessor.
+                        self.next_stream.take();
                         // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
                         // When no replacement is established, preserve the triggering stream error.
                         if let Err(err) = self.new_stream(Some(migration_event)).await {
                             tracing::warn!(error = ?err, "Cannot recreate stream");
+                            self.terminal_after_error = true;
                         } else {
                             continue;
                         }
@@ -1210,6 +1222,7 @@ mod tests {
             session_affinity: None,
             next_generate,
             next_stream: None,
+            terminal_after_error: false,
             // Initial dispatch plus one real retry. Unavailable discovery polls
             // must not consume this final attempt.
             retries_left: 2,
@@ -2080,6 +2093,76 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
+    #[tokio::test]
+    async fn retry_releases_failed_stream_before_dispatch() {
+        use std::sync::atomic::AtomicBool;
+
+        struct Claim(Arc<AtomicBool>);
+        impl Drop for Claim {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        struct ClaimEngine {
+            calls: AtomicU32,
+            released: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+            for ClaimEngine
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let responses: dynamo_runtime::engine::DataStream<Annotated<BackendOutput>> =
+                    if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        let released = self.released.clone();
+                        Box::pin(async_stream::stream! {
+                            let _claim = Claim(released);
+                            yield Annotated::from_err(migratable_error(ErrorType::Disconnected));
+                            std::future::pending::<()>().await;
+                        })
+                    } else {
+                        assert!(
+                            self.released.load(Ordering::SeqCst),
+                            "replacement dispatched while the failed stream still held its claim"
+                        );
+                        Box::pin(stream::once(async { create_mock_output(101) }))
+                    };
+                Ok(ResponseStream::new(responses, request.context()))
+            }
+        }
+
+        let released = Arc::new(AtomicBool::new(false));
+        let engine = Arc::new(ClaimEngine {
+            calls: AtomicU32::new(0),
+            released: released.clone(),
+        });
+        let mut manager = RetryManager::build(
+            Arc::new(Controller::new(uuid::Uuid::new_v4().to_string())),
+            BTreeMap::new(),
+            create_mock_request(2),
+            engine.clone(),
+            1,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(1), manager.next())
+            .await
+            .expect("retry blocked behind failed stream")
+            .expect("replacement response missing");
+        assert!(response.err().is_none());
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 2);
+        assert!(released.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

@@ -17,9 +17,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from gpu_memory_service.common.gpu_failure_marker import (
-    publish_gpu_failure_marker,
-)
+from gpu_memory_service.common.gpu_failure_marker import publish_gpu_failure_marker
 
 logger = logging.getLogger(__name__)
 
