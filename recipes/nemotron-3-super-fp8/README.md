@@ -7,16 +7,16 @@ SPDX-License-Identifier: Apache-2.0
 
 Functional deployments for **nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8** (~124B hybrid Mamba/Attention/MoE) across multiple backends.
 
-These recipes target **Dynamo 1.0**. See [Dynamo 0.9.1 Compatibility](#dynamo-091-compatibility) for notes on running with older containers.
+These recipes target **Dynamo 1.3.0** (image tags below). See [Dynamo 0.9.1 Compatibility](#dynamo-091-compatibility) for notes on running with older containers.
 
 ## Available Configurations
 
 | Configuration | GPUs | Backend | Mode | Description |
 |--------------|------|---------|------|-------------|
 | [**vllm/agg**](vllm/agg/) | 4x H100/H200 | vLLM | Aggregated | TP=4, KV-aware routing |
-| [**sglang/agg**](sglang/agg/) | 4x H100/H200 | SGLang | Aggregated | TP=4, KV-aware routing (not working on 0.9.1) |
+| [**sglang/agg**](sglang/agg/) | 4x H100/H200 | SGLang | Aggregated | TP=4, KV-aware routing |
 | [**trtllm/disagg**](trtllm/disagg/) | 4x H100/H200 | TensorRT-LLM | Disaggregated | TP=2 P/D split, UCX KV transfer |
-| [**sglang/disagg**](sglang/disagg/) | 4x H100/H200 | SGLang | Disaggregated | TP=2 P/D split, nixl KV transfer (not working on 0.9.1) |
+| [**sglang/disagg**](sglang/disagg/) | 4x H100/H200 | SGLang | Disaggregated | TP=2 P/D split, nixl KV transfer |
 
 ## Prerequisites
 
