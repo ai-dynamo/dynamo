@@ -88,57 +88,97 @@ func TestLPURuntimeBuildRef(t *testing.T) {
 	}
 }
 
-func TestResolvedPartitionDataOmitsXTModelColumnsBeforeMaterialization(t *testing.T) {
+func TestResolvedPartitionDataUsesModelCount(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Construct an XT Single projection with two physical runtime partitions")
-	projection := &ModelProjection{
-		model:    "default",
-		pipeline: PipelineSingle,
-		configuredBuild: Build{
-			Family: BuildFamilyXT,
-			Partitions: []BuildPartition{
-				{SourcePartitionID: 7, PartPath: "part-7", Topology: Topology{ChipCount: 16, Raw: "topology-7"}, DevicesPerNode: 8},
-				{SourcePartitionID: 9, PartPath: "part-9", Topology: Topology{ChipCount: 8, Raw: "topology-9"}, DevicesPerNode: 8},
+	t.Log("Cover one model, multiple models and an all-local model")
+	for _, test := range []struct {
+		name     string
+		models   []string
+		allLocal bool
+		want     map[string]string
+	}{
+		{
+			name: "single model", models: []string{"default"},
+			want: map[string]string{
+				"nodes_per_partition": "2\n1", "partition_ids": "7\n9",
+				"partition_node_offsets": "0\n2", "partition_paths": "part-7\npart-9", "topologies": "topology-7\ntopology-9",
 			},
 		},
-	}
-
-	t.Log("Project only the five columns consumed by the XT Single runtime")
-	data := resolvedPartitionData([]*ModelProjection{projection})
-
-	t.Log("Verify omitted model columns never enter the final map and retained bytes remain exact")
-	require.Equal(t, map[string]string{
-		"nodes_per_partition":    "2\n1",
-		"partition_ids":          "7\n9",
-		"partition_node_offsets": "0\n2",
-		"partition_paths":        "part-7\npart-9",
-		"topologies":             "topology-7\ntopology-9",
-	}, data)
-}
-
-func TestLPUConfigVolumeRejectsAuthoredSourceMismatch(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		source corev1.VolumeSource
-	}{
-		{name: "other ConfigMap", source: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: "other-config"},
-		}}},
-		{name: "other volume source", source: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{
+			name: "multiple models", models: []string{"draft0", "target"},
+			want: map[string]string{
+				"nodes_per_partition": "2\n1\n2\n1", "partition_ids": "7\n9\n7\n9",
+				"partition_indices": "0\n1\n0\n1", "partition_models": "draft0\ndraft0\ntarget\ntarget",
+				"partition_node_offsets": "0\n2\n0\n2", "partition_paths": "part-7\npart-9\npart-7\npart-9", "topologies": "topology-7\ntopology-9\ntopology-7\ntopology-9",
+			},
+		},
+		{
+			name: "single all-local model", models: []string{"default"}, allLocal: true,
+			want: map[string]string{
+				"nodes_per_partition": "", "partition_ids": "", "partition_node_offsets": "", "partition_paths": "", "topologies": "",
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Keep an authored runtime mount with a conflicting generated-volume source")
+			t.Parallel()
+
+			t.Log("Construct one projection per configured model")
+			projections := make([]*ModelProjection, len(test.models))
+			for index, model := range test.models {
+				projection := &ModelProjection{model: model}
+				if !test.allLocal {
+					projection.configuredBuild.Partitions = []BuildPartition{
+						{SourcePartitionID: 7, PartPath: "part-7", Topology: Topology{ChipCount: 16, Raw: "topology-7"}, DevicesPerNode: 8},
+						{SourcePartitionID: 9, PartPath: "part-9", Topology: Topology{ChipCount: 8, Raw: "topology-9"}, DevicesPerNode: 8},
+					}
+				}
+				projections[index] = projection
+			}
+
+			t.Log("Emit model columns only when needed, with indices and node offsets reset for each model")
+			require.Equal(t, test.want, resolvedPartitionData(projections))
+		})
+	}
+}
+
+func TestLPUConfigVolumePreservesAuthoredSource(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source *corev1.VolumeSource
+	}{
+		{name: "generated default"},
+		{name: "authored ConfigMap", source: &corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "other-config"},
+		}}},
+		{name: "other volume source", source: &corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Keep an authored runtime mount and unrelated storage")
 			spec := corev1.PodSpec{
 				Containers: []corev1.Container{{Name: "main", VolumeMounts: []corev1.VolumeMount{{Name: "config", MountPath: "/runtime/partitions", ReadOnly: true}}}},
-				Volumes:    []corev1.Volume{{Name: "config", VolumeSource: test.source}},
+				Volumes:    []corev1.Volume{{Name: "storage", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
 			}
-			before := spec.DeepCopy()
+			if test.source != nil {
+				spec.Volumes = append(spec.Volumes, corev1.Volume{Name: lpuConfigVolumeName, VolumeSource: *test.source})
+			}
+			want := spec.DeepCopy()
+			if test.source == nil {
+				want.Volumes = append(want.Volumes, corev1.Volume{
+					Name: lpuConfigVolumeName,
+					VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "generated-config"},
+					}},
+				})
+			}
 
-			t.Log("Reject the source mismatch before changing the HX template")
-			err := withLPUConfigVolume(&spec, "generated-config", false)
-			require.ErrorContains(t, err, `volume "config" is reserved for ConfigMap "generated-config"`)
-			require.Equal(t, *before, spec)
+			t.Log("Use the authored source or supply the generated default")
+			ensureLPUConfigVolume(&spec, "generated-config")
+			require.Equal(t, *want, spec)
+
+			t.Log("Repeated configuration leaves the selected volume and mounts intact")
+			ensureLPUConfigVolume(&spec, "generated-config")
+			require.Equal(t, *want, spec)
 		})
 	}
 }

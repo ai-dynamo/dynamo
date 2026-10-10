@@ -118,7 +118,7 @@ spec:
             - name: REDFISH_BMC_ENABLED
               value: "false"
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               failureThreshold: 3
               initialDelaySeconds: 10
@@ -129,6 +129,7 @@ spec:
               timeoutSeconds: 1
             resources:
               limits:
+                lpu.nvidia.com/devices: "1"
                 nvidia.com/lpu: "16"
               requests:
                 nvidia.com/lpu: "16"
@@ -269,7 +270,7 @@ spec:
             - name: REDFISH_BMC_ENABLED
               value: "false"
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               failureThreshold: 3
               initialDelaySeconds: 10
@@ -280,6 +281,7 @@ spec:
               timeoutSeconds: 1
             resources:
               limits:
+                lpu.nvidia.com/devices: "1"
                 nvidia.com/lpu: "16"
               requests:
                 nvidia.com/lpu: "16"
@@ -420,7 +422,7 @@ spec:
             - name: REDFISH_BMC_ENABLED
               value: "false"
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               failureThreshold: 3
               initialDelaySeconds: 10
@@ -431,6 +433,7 @@ spec:
               timeoutSeconds: 1
             resources:
               limits:
+                lpu.nvidia.com/devices: "1"
                 nvidia.com/lpu: "16"
               requests:
                 nvidia.com/lpu: "16"
@@ -638,7 +641,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-runtime:test
-            name: conductor
+            name: main
             readinessProbe:
               failureThreshold: 3
               httpGet:

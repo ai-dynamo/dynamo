@@ -57,36 +57,6 @@ data:
     12
     13
     14
-  partition_indices: |-
-    0
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
-    10
-    11
-    12
-    13
-  partition_models: |-
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
   partition_node_offsets: |-
     0
     1
@@ -138,7 +108,7 @@ metadata:
     lpx.nvidia.com/deployment-name: lpx-v2-local-partitions
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpx-v2-local-partitions-a708-lpu-2c2f74b5dc9e0648
+  name: lpx-v2-local-partitions-a708-lpu-cc12abb9e2bcee56
   namespace: inference-engine
 ---
 metadata:
@@ -156,7 +126,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v2-local-partitions
-        nvidia.com/extra-resources-hash: 2c2f74b5dc9e06482ae806feeca59ef92588bd41dfe19531e33da0f5c6d0e224
+        nvidia.com/extra-resources-hash: cc12abb9e2bcee5678c8c9ce1b7f66df5bb6820565e84d3087065bdc5b8e4365
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:ddd723d746da78065c032312c775dd3ad545eb3ddddaf6d3d81fb04bd4d849ba
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7df77aa0b1fe9e9a0fc937051e0f78cb5f86e80f95797db7fa21b4f2d24bafb8
         scheduling.lpu.nvidia.com/model: default
@@ -277,7 +247,7 @@ spec:
             - name: UCX_TLS
               value: tcp
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               failureThreshold: 6
               httpGet:
@@ -358,7 +328,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: lpx-v2-local-partitions-a708-lpu-2c2f74b5dc9e0648
+              name: lpx-v2-local-partitions-a708-lpu-cc12abb9e2bcee56
             name: config
         replicas: 14
         roleName: agt

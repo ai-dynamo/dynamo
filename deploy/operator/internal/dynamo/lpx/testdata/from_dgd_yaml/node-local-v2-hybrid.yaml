@@ -15,8 +15,6 @@ metadata:
 data:
   nodes_per_partition: "4"
   partition_ids: "0"
-  partition_indices: "0"
-  partition_models: default
   partition_node_offsets: "0"
   partition_paths: part-0
   topologies: test-topology
@@ -26,7 +24,7 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v2-hybrid
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-9d06-lpu-40c1426237894337
+  name: node-local-v2-hybrid-9d06-lpu-bc305acb57a75159
   namespace: test
 ---
 metadata:
@@ -44,7 +42,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
-        nvidia.com/extra-resources-hash: 40c1426237894337d864193c2ce98c857c622144d2c66ee912eefd3871f520f4
+        nvidia.com/extra-resources-hash: bc305acb57a7515995b642a9a57c53b844e3cde085399d45ca307105df359d23
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:5cad661716edebcf65e421a2ef66164e24970b24ff42d7c0c5aaca9b30744194
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:5d1acbf961a05af53edbbd71c05f2053eee85a5f05eac089ed6ee022db45d317
         scheduling.lpu.nvidia.com/model: default
@@ -116,7 +114,7 @@ spec:
             - name: UCX_TLS
               value: tcp
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               failureThreshold: 6
               httpGet:
@@ -129,6 +127,7 @@ spec:
             resources:
               limits:
                 hugepages-2Mi: 4Gi
+                lpu.nvidia.com/devices: "1"
                 lpu.nvidia.com/lpu: "8"
               requests:
                 cpu: "62"
@@ -197,7 +196,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-hybrid-9d06-lpu-40c1426237894337
+              name: node-local-v2-hybrid-9d06-lpu-bc305acb57a75159
             name: config
         replicas: 4
         roleName: agt

@@ -15,8 +15,6 @@ metadata:
 data:
   nodes_per_partition: "1"
   partition_ids: "1"
-  partition_indices: "0"
-  partition_models: default
   partition_node_offsets: "0"
   partition_paths: part-1
   topologies: opaque-v3-topology
@@ -26,7 +24,7 @@ metadata:
     lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpx-v3-hx-local-partitions-48b8-lpu-f8b027cf29abf6cd
+  name: lpx-v3-hx-local-partitions-48b8-lpu-33afae9730a491db
   namespace: test
 ---
 metadata:
@@ -44,7 +42,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
-        nvidia.com/extra-resources-hash: f8b027cf29abf6cdbab73060b6697b18f7107df8c993859d94073d6012107d12
+        nvidia.com/extra-resources-hash: 33afae9730a491db748f132a8f97c1747b8225428f8d2a189e7f7b94db86497f
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:5b7e0e1208d912bede5aad9900ee605eefba6133ff4ee69a3b3730e70c478c1d
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:1750efbc54e1345379cf7f298294ff47828ec6acb0057e92d7046bd2a0b0ff65
         scheduling.lpu.nvidia.com/model: default
@@ -116,7 +114,7 @@ spec:
             - name: UCX_TLS
               value: tcp
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               exec:
                 command:
@@ -197,7 +195,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: lpx-v3-hx-local-partitions-48b8-lpu-f8b027cf29abf6cd
+              name: lpx-v3-hx-local-partitions-48b8-lpu-33afae9730a491db
             name: config
         replicas: 1
         roleName: agt
