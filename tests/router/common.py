@@ -3399,6 +3399,140 @@ def _test_router_cache_salt_isolation(
     asyncio.run(test_sync())
 
 
+def _test_router_lora_isolation(
+    engine_workers,
+    endpoint,
+    model_name: str,
+    block_size: int,
+    lora_name: str,
+    lora_uri: str,
+):
+    """Verify LoRA adapter blocks are reused by adapter requests and stay
+    isolated from base-model blocks in the router index."""
+    from tests.serve.lora_utils import load_lora_adapter
+
+    async def test_sync():
+        expected_num_instances = engine_workers.num_workers
+        kv_router = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
+                endpoint=endpoint,
+                block_size=block_size,
+                kv_router_config=KvRouterConfig(
+                    use_kv_events=True,
+                    router_event_threads=4,
+                ),
+            ),
+            num_workers=expected_num_instances,
+            engine_workers=engine_workers,
+        )
+
+        worker_ids = await wait_for_workers_ready(
+            endpoint,
+            kv_router,
+            expected_num_workers=expected_num_instances,
+            model_name=model_name,
+        )
+        assert len(worker_ids) >= 2, "LoRA isolation requires two workers"
+
+        for system_port in engine_workers.system_ports:
+            await asyncio.to_thread(load_lora_adapter, system_port, lora_name, lora_uri)
+
+        worker_a = (worker_ids[0], 0)
+        worker_b = (worker_ids[1], 0)
+        token_ids = list(range(1_000, 1_000 + block_size * 2))
+        expected_blocks = len(token_ids) // block_size
+
+        async def generate(lora: Optional[str], worker_id: Optional[int] = None):
+            routing: dict[str, Any] = {}
+            if lora is not None:
+                routing["lora_name"] = lora
+            if worker_id is not None:
+                routing["backend_instance_id"] = worker_id
+            request = {
+                "model": lora or model_name,
+                "token_ids": token_ids,
+                "stop_conditions": {"ignore_eos": True, "max_tokens": 2},
+                "sampling_options": {},
+                "output_options": {},
+                "eos_token_ids": [],
+                "routing": routing,
+            }
+            stream = await kv_router.generate_from_request(request)
+            terminal = None
+            async for response in stream:
+                if (
+                    isinstance(response, dict)
+                    and response.get("finish_reason") is not None
+                ):
+                    terminal = response
+            assert terminal is not None, f"lora={lora!r} request did not finish"
+
+        async def device_blocks(lora: Optional[str]) -> dict[tuple[int, int], int]:
+            scores = await kv_router.get_overlap_scores(
+                token_ids,
+                include_shared=False,
+                lora_name=lora,
+            )
+            assert scores["block_size"] == block_size
+            assert scores["num_blocks"] == expected_blocks
+            return {
+                (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+                for row in scores["workers"]
+            }
+
+        async def wait_for_scores(
+            lora: Optional[str],
+            expected: dict[tuple[int, int], int],
+        ) -> None:
+            deadline = time.monotonic() + 10
+            last_scores: dict[tuple[int, int], int] = {}
+            while time.monotonic() < deadline:
+                last_scores = await device_blocks(lora)
+                if {k: v for k, v in last_scores.items() if v} == expected:
+                    return
+                await asyncio.sleep(0.25)
+            raise AssertionError(
+                f"lora={lora!r}: expected {expected}, got {last_scores}"
+            )
+
+        async def wait_for_worker(lora: Optional[str], expected: tuple[int, int]):
+            deadline = time.monotonic() + 10
+            last_selection: tuple[int, int, int] | None = None
+            while time.monotonic() < deadline:
+                last_selection = await kv_router.best_worker(token_ids, lora_name=lora)
+                if (
+                    last_selection[:2] == expected
+                    and last_selection[2] == expected_blocks
+                ):
+                    return
+                await asyncio.sleep(0.25)
+            raise AssertionError(
+                f"lora={lora!r}: expected worker {expected} with "
+                f"{expected_blocks} overlap blocks, got {last_selection}"
+            )
+
+        # Adapter blocks are indexed under the adapter, not the base model.
+        await generate(lora_name, worker_a[0])
+        await wait_for_scores(lora_name, {worker_a: expected_blocks})
+        await wait_for_scores(None, {})
+
+        # The same prompt on the base model is cached separately.
+        await generate(None, worker_b[0])
+        await wait_for_scores(None, {worker_b: expected_blocks})
+        await wait_for_scores(lora_name, {worker_a: expected_blocks})
+        await wait_for_worker(lora_name, worker_a)
+        await wait_for_worker(None, worker_b)
+
+        # Unpinned repeats must go back to the worker that holds their blocks;
+        # routing either to the other worker would publish a second score.
+        await generate(lora_name)
+        await generate(None)
+        await wait_for_scores(lora_name, {worker_a: expected_blocks})
+        await wait_for_scores(None, {worker_b: expected_blocks})
+
+    asyncio.run(test_sync())
+
+
 def _test_busy_threshold_endpoint(
     engine_workers,
     block_size: int,
