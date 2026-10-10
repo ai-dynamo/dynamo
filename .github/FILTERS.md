@@ -101,7 +101,7 @@ data retain the existing full selection. Set repository variable
 `FORCE_FULL_CI=true` to bypass admission. Main, postmerge and nightly are unchanged.
 
 The initial vLLM processor unit-test class retains vLLM CPU tests and mypy.
-The operator class covers SGLang and TRT-LLM and retains builds/compliance and every existing operator,
+The operator class covers SGLang, TRT-LLM and vLLM and retains builds/compliance and every existing operator,
 Helm, deployment, DGDR and Snapshot gate. Only each admitted backend's `*-test` and
 `*-multi-gpu-test` jobs are omitted: this includes standalone `gpu_0` tests on
 amd64/arm64 and `gpu_1`/`gpu_2` tests on amd64. Shared CPU selection is unchanged;

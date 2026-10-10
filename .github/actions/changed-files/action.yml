@@ -40,6 +40,9 @@ outputs:
   dgdr:
     description: 'Whether DGDR deploy-test files changed'
     value: ${{ steps.filter.outputs.dgdr_any_modified }}
+  vllm_runtime:
+    description: 'Whether standalone vLLM CPU/GPU tests are needed (fail full)'
+    value: ${{ steps.report.outputs.vllm_runtime }}
   vllm:
     description: 'Whether vllm files changed'
     value: ${{ steps.filter.outputs.vllm_any_modified }}

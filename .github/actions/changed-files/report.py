@@ -79,6 +79,7 @@ def runtime_test_outputs(output_dir: Path, all_files: set[str]) -> dict[str, boo
     operator = ordinary_files(output_dir, all_files, allow_added=True)
     return {
         "trtllm_runtime": not (operator and operator <= OPERATOR_ONLY_FILES),
+        "vllm_runtime": not (operator and operator <= OPERATOR_ONLY_FILES),
         "sglang_runtime": not (
             (operator and operator <= OPERATOR_ONLY_FILES)
             or (
