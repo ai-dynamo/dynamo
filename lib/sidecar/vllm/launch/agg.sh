@@ -7,14 +7,8 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-# Resolved relative to this script, not via $DYNAMO_HOME: some runtime images
-# (e.g. vllm_runtime.Dockerfile) bake DYNAMO_HOME to a minimal install path
-# with no examples/ directory, which would silently override this and break
-# sourcing. Matches examples/backends/vllm/launch/agg.sh's own approach.
-# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_vllm_gpu_mem_args
-# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -46,6 +40,7 @@ while [[ $# -gt 0 ]]; do
             echo "  MAX_MODEL_LEN           Maximum model length (default: 4096)"
             echo "  MAX_CONCURRENT_SEQS     Maximum concurrent sequences (default: 2)"
             echo "  DEFAULT_KV_CACHE_BYTES  KV cache cap when not profiling (default: 1119388000)"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             exit 0
             ;;
         *)
@@ -54,6 +49,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar vllm SIDECAR_CMD
 
 trap dynamo_exit_trap EXIT
 
@@ -96,7 +93,7 @@ vllm-rs serve "$MODEL" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_GRPC_PORT}" &
 
 wait_any_exit

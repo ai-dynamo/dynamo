@@ -761,7 +761,11 @@ def test_preset_shorthand_resolves_model_and_disagg_engines(tmp_path: Path):
     assert prefill.attention_dp_size == 1
     assert prefill.num_gpus == 1
     assert prefill.extra_args == {}
-    assert json.loads(SUBSTRATES["gpt_oss"].engine_args())["engine_type"] == "vllm"
+    assert prefill.runtime.cold_start_delay_s == 60.0
+    assert json.loads(SUBSTRATES["gpt_oss"].engine_args())["startup_time"] == 60.0
+    assert (
+        json.loads(SUBSTRATES["gpt_oss"].engine_args())["engine"]["backend"] == "vllm"
+    )
 
 
 def test_preset_legacy_replay_model_name_preserves_ais_model_path(tmp_path: Path):

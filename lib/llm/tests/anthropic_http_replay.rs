@@ -551,6 +551,99 @@ async fn tool_choice_controls_parallel_calls() {
 
 #[tokio::test]
 #[serial]
+async fn non_object_tool_inputs_are_suppressed_without_dropping_valid_siblings() {
+    temp_env::async_with_vars(ENV, async {
+        for stream in [false, true] {
+            for keep_valid_sibling in [false, true] {
+                let mut script = load_agent_fixture("parallel-tools.sse").await.unwrap();
+                for (index, arguments) in [(1, "[]"), (2, "null")] {
+                    if index == 2 && keep_valid_sibling {
+                        continue;
+                    }
+                    script[index].data.as_mut().unwrap().inner.choices[0]
+                        .delta
+                        .tool_calls
+                        .as_mut()
+                        .unwrap()[0]
+                        .function
+                        .as_mut()
+                        .unwrap()
+                        .arguments = Some(arguments.into());
+                }
+                let svc = HarnessService::start([script]).await;
+                let response = post_messages(
+                    &svc,
+                    &json!({
+                        "model": MODEL, "max_tokens": 128, "stream": stream,
+                        "tools": [tool("read_file")],
+                        "messages": [{"role": "user", "content": "Read /a and /b"}]
+                    }),
+                )
+                .await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let expected_reason = if keep_valid_sibling {
+                    "tool_use"
+                } else {
+                    "end_turn"
+                };
+                let inputs: Vec<Value> = if stream {
+                    let events = parse_json_sse(&response.text().await.unwrap())
+                        .await
+                        .unwrap();
+                    let mut arguments = BTreeMap::<u64, String>::new();
+                    for event in &events {
+                        if event.data["delta"]["type"] == "input_json_delta" {
+                            arguments
+                                .entry(event.data["index"].as_u64().unwrap())
+                                .or_default()
+                                .push_str(event.data["delta"]["partial_json"].as_str().unwrap());
+                        }
+                    }
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| event.data["content_block"]["type"] == "tool_use")
+                            .count(),
+                        usize::from(keep_valid_sibling)
+                    );
+                    assert_eq!(
+                        events
+                            .iter()
+                            .find(|event| event.event == "message_delta")
+                            .unwrap()
+                            .data["delta"]["stop_reason"],
+                        expected_reason
+                    );
+                    arguments
+                        .values()
+                        .map(|raw| serde_json::from_str(raw).unwrap())
+                        .collect()
+                } else {
+                    let body: Value = response.json().await.unwrap();
+                    assert_eq!(body["stop_reason"], expected_reason);
+                    body["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|block| block["type"] == "tool_use")
+                        .map(|block| block["input"].clone())
+                        .collect()
+                };
+                let expected = if keep_valid_sibling {
+                    vec![json!({"path": "/b"})]
+                } else {
+                    vec![]
+                };
+                assert_eq!(inputs, expected);
+                svc.shutdown().await;
+            }
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn parallel_tools_preserve_identity_and_arguments() {
     temp_env::async_with_vars(ENV, async {
         let svc =

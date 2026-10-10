@@ -1588,11 +1588,33 @@ class EngineFactory:
         else:
             reasoning_parser_class = None
         default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
+        runtime_config = mdc.runtime_config()
         (
             structural_tag_mode,
             structural_tag_scope,
             structural_tag_schema,
-        ) = runtime_structural_tag_options(mdc.runtime_config())
+        ) = runtime_structural_tag_options(runtime_config)
+        structural_tag = (
+            runtime_config.get("structural_tag")
+            if isinstance(runtime_config, dict)
+            else None
+        )
+        if isinstance(structural_tag, dict):
+            unsupported_options = [
+                name
+                for name, default in (
+                    ("allow_tool_calls_with_structured_output", False),
+                    ("exclude_special_tokens", None),
+                    ("reasoning_boundary", "auto"),
+                    ("tool_arguments_any_order", False),
+                )
+                if structural_tag.get(name, default) != default
+            ]
+            if unsupported_options:
+                logger.warning(
+                    "vLLM chat processor ignores unsupported structural-tag option(s): %s",
+                    ", ".join(unsupported_options),
+                )
 
         block_size = self.config.kv_cache_block_size or 16
 

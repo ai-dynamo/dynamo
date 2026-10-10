@@ -895,6 +895,7 @@ class ModelRuntimeConfig:
     tool_call_parser: str | None
     reasoning_parser: str | None
     tokenizer_backend: str | None
+    structural_tag: dict[str, Any] | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
@@ -923,16 +924,8 @@ class ModelRuntimeConfig:
         """Get an engine-specific runtime configuration value"""
         ...
 
-    def set_structural_tag_mode(self, mode: str) -> None:
-        """Set structural tag mode ("off" or "on")."""
-        ...
-
-    def set_structural_tag_scope(self, scope: str) -> None:
-        """Set structural tag scope ("auto" or "always")."""
-        ...
-
-    def set_structural_tag_schema(self, schema: str) -> None:
-        """Set structural tag schema mode ("auto" or "strict")."""
+    def set_structural_tag(self, structural_tag: dict[str, Any] | None) -> None:
+        """Set the structural-tag policy, or disable it with ``None``."""
         ...
 
     def set_disaggregated_endpoint(
@@ -2342,6 +2335,9 @@ def run_mocker_trace_replay(
     telemetry_callback: Optional[ReplayTelemetryCallback] = None,
     telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
     kv_event_lag_ms: Optional[float] = None,
+    agentic_snapshot: Optional[Dict[str, Any]] = None,
+    agentic_warmup: bool = False,
+    agentic_profile: Optional[Dict[str, Any]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -3339,9 +3335,7 @@ class backend:
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,
             health_check_payload: Optional[Dict[str, Any]] = None,
-            structural_tag_mode: str = ...,
-            structural_tag_scope: str = ...,
-            structural_tag_schema: str = ...,
+            structural_tag: Optional[Dict[str, Any]] = None,
             route_to_encoder: bool = ...,
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,
