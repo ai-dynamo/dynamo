@@ -63,6 +63,9 @@ export interface Release {
    *  composed from the release page's Highlights themes. */
   notesSummary?: string;
   partial?: boolean;
+  /** NGC publish date of the release's -enterprise artifacts. The newest
+   *  release carrying it is the enterprise-supported set. */
+  enterprise?: string;
 }
 
 export const CURRENT_VERSION = "v1.5.1";
@@ -88,6 +91,7 @@ export const RELEASES: Release[] = [
     date: "Oct 6, 2026",
     kind: "patch",
     github: `${GH}v1.5.1`,
+    enterprise: "Oct 6, 2026",
     docs: "https://docs.nvidia.com/dynamo",
     pins: { sglang: "0.5.18", trtllm: "1.3.0rc25", vllm: "0.28.0", nixlSglang: "1.4.0", nixlTrtllm: "1.3.1", nixlVllm: "1.3.2" },
     ucx: "1.21.x",
@@ -100,6 +104,7 @@ export const RELEASES: Release[] = [
     date: "Sep 18, 2026",
     kind: "stable",
     github: `${GH}v1.5.0`,
+    enterprise: "Sep 28, 2026",
     docs: "https://docs.nvidia.com/dynamo",
     pins: { sglang: "0.5.18", trtllm: "1.3.0rc25", vllm: "0.28.0", nixlSglang: "1.4.0", nixlTrtllm: "1.3.1", nixlVllm: "1.3.2" },
     ucx: "1.21.x",
@@ -114,6 +119,7 @@ export const RELEASES: Release[] = [
     date: "Aug 28, 2026",
     kind: "patch",
     github: `${GH}v1.4.2`,
+    enterprise: "Aug 28, 2026",
     docs: "https://docs.nvidia.com/dynamo",
     pins: { sglang: "0.5.16", trtllm: "1.3.0rc22", vllm: "0.26.0", nixlSglang: "1.3.0", nixlTrtllm: "1.3.1", nixlVllm: "1.3.2" },
     ucx: "1.21.x",
@@ -630,6 +636,22 @@ export const BACKEND_BLURBS = {
 };
 
 export type ArtifactCategory = "container" | "wheel" | "helm" | "crate";
+
+export interface EnterpriseArtifact {
+  component: string;
+  /** Pull reference or chart URL; `{tag}` takes the enterprise release tag. */
+  ref: string;
+}
+
+/** The curated -enterprise publication set on NGC. */
+export const ENTERPRISE_ARTIFACTS: EnterpriseArtifact[] = [
+  { component: "SGLang runtime", ref: "nvcr.io/nvidia/ai-dynamo/sglang-runtime-enterprise:{tag}" },
+  { component: "TensorRT-LLM runtime", ref: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-enterprise:{tag}" },
+  { component: "vLLM runtime", ref: "nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:{tag}" },
+  { component: "Dynamo Frontend", ref: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend-enterprise:{tag}" },
+  { component: "Dynamo Kubernetes Operator", ref: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator-enterprise:{tag}" },
+  { component: "Dynamo Platform Helm chart", ref: "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-enterprise-{tag}.tgz" },
+];
 
 export interface Artifact {
   category: ArtifactCategory;

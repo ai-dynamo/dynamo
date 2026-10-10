@@ -1295,7 +1295,7 @@ navigation:
             path: pages/enterprise/overview.mdx
             slug: overview
           - page: Supported Artifacts
-            path: pages/enterprise/supported-artifacts.mdx
+            path: pages/reference/general/enterprise-supported-artifacts.mdx
             slug: supported-artifacts
           - page: Install
             path: pages/enterprise/install.mdx
