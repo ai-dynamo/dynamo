@@ -40,7 +40,15 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Callable, Optional, Protocol, TypeVar, runtime_checkable
+from typing import (
+    Any,
+    Callable,
+    NamedTuple,
+    Optional,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
 logger = logging.getLogger("power_agent.actuator")
 
@@ -65,6 +73,28 @@ class _GpuIdentityMismatch(Exception):
     `apply_failures_total`, and lets the next reconcile cycle re-attribute
     and retry against the fresh enumeration.
     """
+
+
+class CapWriteResult(NamedTuple):
+    """Outcome of a single cap write.
+
+    ``effective_w`` keeps the pre-existing ``apply_cap`` contract exactly: the
+    post-clamp value the agent INTENDED to apply, ``max(min_w, min(watts,
+    max_w))``, returned whether or not the underlying NVML/DCGM write landed.
+
+    ``ok`` is the new information — ``False`` when the write raised, was skipped
+    on an identity mismatch, or was otherwise not applied. It exists so the
+    reconcile loop can learn the outcome of its own writes: a clean return from
+    ``apply_cap`` is NOT evidence that a cap is live, and the loop folds ``ok``
+    into the whole-cycle enforcement boolean that backs pod readiness.
+
+    A ``NamedTuple`` on purpose: every existing wattage consumer must be edited
+    to read ``.effective_w`` rather than silently keep working against a value
+    that now means something else.
+    """
+
+    effective_w: int
+    ok: bool
 
 
 @runtime_checkable
@@ -141,8 +171,8 @@ class Actuator(Protocol):
 
     def apply_cap(
         self, gpu_idx: int, watts: int, expected_uuid: Optional[str] = None
-    ) -> int:
-        """Write a per-GPU power cap. Returns the effective post-clamp value.
+    ) -> CapWriteResult:
+        """Write a per-GPU power cap. Returns the write outcome.
 
         `expected_uuid` is the GPU identity the caller anchored the policy
         decision to (the reconcile loop captures it BEFORE the PID snapshot
@@ -159,7 +189,7 @@ class Actuator(Protocol):
 
         Return-value contract:
 
-            The returned int is the **effective post-clamp value** —
+            `CapWriteResult.effective_w` is the **effective post-clamp value** —
             `max(min_w, min(watts, max_w))` against the SKU constraints —
             regardless of whether the underlying write to NVML / DCGM
             succeeded. This matches both implementations' actual behaviour
@@ -167,15 +197,17 @@ class Actuator(Protocol):
             returns effective_w even on DCGMError). The reason: callers
             (`PowerAgent._reconcile_gpu`, Prometheus exporters, log
             aggregators) need a non-Optional value to record what the agent
-            *intended* to apply; success/failure is reported separately via
-            `metrics.apply_failures_total`. Earlier doc wording said "actually
-            applied" which suggested a contract this method does not hold —
-            corrected here.
+            *intended* to apply.
+
+            `CapWriteResult.ok` reports whether the write actually landed:
+            `False` when it raised, was skipped on an identity mismatch, or was
+            otherwise not applied. Implementations MUST NOT report `ok=True` on
+            any path that did not issue the underlying Set.
 
         A failed write does NOT raise from `apply_cap` itself; the actuator
-        logs the failure and increments `apply_failures_total`. Callers that
-        need to detect failure should observe the metric, not the return
-        value.
+        logs the failure, increments `apply_failures_total`, and reports
+        `ok=False`. Callers that need to detect failure read `.ok` (the
+        metric remains for alerting).
         """
         ...
 
@@ -398,14 +430,14 @@ class NvmlActuator:
 
     def apply_cap(
         self, gpu_idx: int, watts: int, expected_uuid: Optional[str] = None
-    ) -> int:
-        """Apply a power cap to GPU `gpu_idx`, returning the effective watts.
+    ) -> CapWriteResult:
+        """Apply a power cap to GPU `gpu_idx`, returning the write outcome.
 
         Delegates to `power_agent._apply_cap`, which contains the
         clamping, managed-state tracking, metrics updates, and
-        NVMLError handling exercised by `test_apply_cap.py`.
-        `_apply_cap` returns `None` (predates the Protocol), so we
-        re-derive the post-clamp effective_w from constraints here
+        NVMLError handling exercised by `test_apply_cap.py`, and which
+        reports whether the Set landed. We re-derive the post-clamp
+        effective_w from constraints here
         WITHOUT calling `_clamp_to_constraints` again — a previous
         version did, which double-logged the clamp warning and
         double-incremented `cap_clamped_total` for any out-of-range
@@ -432,18 +464,21 @@ class NvmlActuator:
 
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
         # _apply_cap runs the SINGLE clamp (with its log + metric side-
-        # effects). We only need the post-clamp number to return.
-        power_agent._apply_cap(handle, gpu_idx, watts, self._metrics)
+        # effects) and reports whether the Set landed. We only need the
+        # post-clamp number to pair with it.
+        ok = power_agent._apply_cap(handle, gpu_idx, watts, self._metrics)
         try:
             min_mw, max_mw = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
             min_w, max_w = min_mw // 1000, max_mw // 1000
-            return max(min_w, min(watts, max_w))
+            return CapWriteResult(max(min_w, min(watts, max_w)), ok)
         except pynvml.NVMLError:
             # If constraints read fails, fall back to the requested
             # value — _apply_cap's own _clamp_to_constraints has the
             # same fallback (`return requested_w`), so the two paths
-            # remain consistent.
-            return watts
+            # remain consistent. This is a failure of the value
+            # RE-DERIVATION, not of the write: `ok` still reports what
+            # `_apply_cap` observed and must not be forced to False here.
+            return CapWriteResult(watts, ok)
 
     def restore_default(self, gpu_idx: int) -> Optional[bool]:
         """Restore the factory-default TGP via NVML.
@@ -1203,14 +1238,17 @@ class DcgmActuator:
 
     def apply_cap(
         self, gpu_idx: int, watts: int, expected_uuid: Optional[str] = None
-    ) -> int:
-        """Write a per-GPU cap via `dcgmConfigSet`; return the effective watts.
+    ) -> CapWriteResult:
+        """Write a per-GPU cap via `dcgmConfigSet`; return the write outcome.
 
         Mirrors `power_agent._apply_cap`'s clamp + metrics + state-track
         contract on the DCGM side. DCGMError other than
         CONNECTION_NOT_VALID is absorbed into `apply_failures_total`
         and the call returns the effective post-clamp watts regardless
-        (per the Actuator Protocol). SIGTERM / orphan-recovery callers want write
+        (per the Actuator Protocol), paired with `ok=False`. Every early
+        return below leaves the GPU unwritten, so every one reports
+        `ok=False`; only the `_apply_cap_inner` normal return issued a Set.
+        SIGTERM / orphan-recovery callers want write
         failures surfaced as exceptions instead — they call
         `restore_default`, which uses `_apply_cap_inner`.
 
@@ -1296,7 +1334,7 @@ class DcgmActuator:
                 e,
             )
             self._metrics.apply_failures_total.inc()
-            return watts
+            return CapWriteResult(watts, False)
         min_w = self._coerce_power_limit_watts(
             pl.minPowerLimit, "minPowerLimit", gpu_idx
         )
@@ -1308,8 +1346,8 @@ class DcgmActuator:
         if expected_uuid is None:
             # Entry identity was unreadable (logged + counted above). Return
             # the clamped effective watts per the Actuator Protocol; NO write
-            # happened.
-            return effective_w
+            # happened, hence ok=False.
+            return CapWriteResult(effective_w, False)
 
         if constraints_uuid != expected_uuid:
             # The SKU range we just clamped against came from a DIFFERENT
@@ -1328,7 +1366,7 @@ class DcgmActuator:
                 expected_uuid,
             )
             self._metrics.apply_failures_total.inc()
-            return effective_w
+            return CapWriteResult(effective_w, False)
 
         # Lazy import (deferred until we're actually about to call into
         # DCGM): keeps the actuator constructible and the "no metrics"
@@ -1340,8 +1378,11 @@ class DcgmActuator:
         import dcgm_structs
 
         try:
-            return self._apply_cap_inner(
-                gpu_idx, effective_w, expected_uuid=expected_uuid
+            return CapWriteResult(
+                self._apply_cap_inner(
+                    gpu_idx, effective_w, expected_uuid=expected_uuid
+                ),
+                True,
             )
         except _GpuIdentityMismatch as e:
             # The target index re-enumerated onto a different GPU during the
@@ -1356,7 +1397,7 @@ class DcgmActuator:
                 e,
             )
             self._metrics.apply_failures_total.inc()
-            return effective_w
+            return CapWriteResult(effective_w, False)
         except dcgm_structs.DCGMError as e:
             # Narrow on purpose: only DCGM write errors
             # are part of the "cap-write failed, log + bump metric +
@@ -1375,7 +1416,7 @@ class DcgmActuator:
                 e,
             )
             self._metrics.apply_failures_total.inc()
-            return effective_w
+            return CapWriteResult(effective_w, False)
 
     def _apply_cap_inner(
         self,
