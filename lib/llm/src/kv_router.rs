@@ -1753,6 +1753,15 @@ impl KvRouter {
         Ok(self.cache_hit_for_worker(&cache_hit_estimates, worker))
     }
 
+    /// Inspect this router's selection state without admission or a reservation.
+    pub async fn probe(
+        &self,
+        request: dynamo_kv_router::services::selection::SelectRequest,
+        policy_class: Option<String>,
+    ) -> Result<dynamo_kv_router::services::selection::SelectResponse> {
+        self.selection.probe(request, policy_class).await
+    }
+
     /// Get potential prefill and decode loads for all workers
     pub async fn get_potential_loads(
         &self,

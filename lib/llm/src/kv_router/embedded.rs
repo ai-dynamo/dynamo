@@ -388,6 +388,22 @@ impl EmbeddedSelection {
         self.partition.key()
     }
 
+    pub(crate) async fn probe(
+        &self,
+        mut request: dynamo_kv_router::services::selection::SelectRequest,
+        policy_class: Option<String>,
+    ) -> Result<dynamo_kv_router::services::selection::SelectResponse> {
+        request.model_name = self.partition.key().model_name.clone();
+        request.routing_group = self.partition.key().routing_group.clone();
+        request.advisory = true;
+        // A probe must not retain booking inputs for a later reservation.
+        request.selection_id = None;
+        Ok(self
+            .service
+            .select_with_policy_class(request, policy_class)
+            .await?)
+    }
+
     /// Run one selection through the shared core.
     pub(crate) async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
         // Keep the selection state out of the frontend's nested request future.

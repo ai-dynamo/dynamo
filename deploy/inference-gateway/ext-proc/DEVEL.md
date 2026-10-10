@@ -146,3 +146,8 @@ Clean the Rust package build artifacts:
 ```bash
 make clean
 ```
+
+## Request-specific routing signals
+
+The optional [routing probe API](routing-probe.md) exposes advisory cache and load
+estimates from the native EPP for model routers such as Switchyard.

@@ -20,6 +20,7 @@ pub mod metrics;
 pub mod peer_discovery;
 pub mod picker;
 pub mod pod_discovery;
+mod probe;
 pub mod proto;
 pub mod render_http;
 mod runner;
