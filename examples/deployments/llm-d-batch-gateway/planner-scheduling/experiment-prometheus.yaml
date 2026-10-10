@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A namespace-local Prometheus for the reproducible Planner/Batch Gateway
+# experiment. The shared cluster Prometheus is intentionally not a dependency:
+# some DGX Cloud node groups cannot route pod traffic to its monitoring node.
+# This instance scrapes only the experiment frontend and retains data briefly.
+# Render with envsubst '${NAMESPACE}' before applying.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: planner-impact-prometheus
+  namespace: ${NAMESPACE}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 1s
+      evaluation_interval: 1s
+    scrape_configs:
+      - job_name: dynamo-batch-frontend
+        metrics_path: /metrics
+        static_configs:
+          - labels:
+              # The frontend exports only its model label. Attach the target's
+              # Kubernetes namespace so the stock/native readiness queries are
+              # both isolated and non-empty.
+              namespace: ${NAMESPACE}
+            targets:
+              - qwen3-0-6b-batch-frontend:8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: planner-impact-prometheus
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: planner-impact-prometheus
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: planner-impact-prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: quay.io/prometheus/prometheus:v3.5.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=3h
+            - --storage.tsdb.retention.size=768MB
+            - --web.listen-address=0.0.0.0:9090
+          ports:
+            - name: http
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+              readOnly: true
+            - name: data
+              mountPath: /prometheus
+      securityContext:
+        fsGroup: 65534
+        runAsGroup: 65534
+        runAsUser: 65534
+      volumes:
+        - name: config
+          configMap:
+            name: planner-impact-prometheus
+        - name: data
+          emptyDir:
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: planner-impact-prometheus
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app.kubernetes.io/name: planner-impact-prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
