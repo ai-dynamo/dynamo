@@ -179,7 +179,7 @@ Each retained FPM's `benchmark_measurement` contains:
 |---|---|
 | `point_key`, `dp_rank` | Coordinate identity and the rank that produced this observation; the point key is independent of the grid digest and benchmark point id |
 | `prompts.status` | `"recorded"` when injected prompt ids were captured, otherwise `"unavailable"`; missing evidence is not a match |
-| `prompts.sha256`, `prompts.requests` | Combined prompt digest and the request slots, lengths, and individual prompt digests; on rows measured after a native exact-context stage, the hashed prompts are the stage's prefill prompts, `ctx - 1` tokens for a request with context length `ctx`, because the admission token is sampled |
+| `prompts.sha256`, `prompts.requests` | Combined prompt digest and the request slots, lengths, and individual prompt digests; on `real_kv` rows prepared by a native exact-context stage, the hashed prompts are the stage's prefill prompts, `ctx - 1` tokens for a request with context length `ctx`, because the admission token is sampled |
 | `preparation` | Actual grid digest, number of completed points before this point, KV-seeding regime, and `warmup_records_before`, the number of prior warmup records, including failed attempts |
 | `expected_internal_samples` | Number of scheduler steps expected for this point, including an admission step when the path uses one |
 | `raw_fpms` | Individual FPMs before reduction, in collection order, including discarded admission measurements and slow samples; each carries its own `benchmark_sample` execution evidence |
