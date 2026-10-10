@@ -127,6 +127,7 @@ dynamo = "dynamo.replay.simulation:DynamoReplayRunnerFactory"
 
 [project.entry-points."aisimulate.output_adapters"]
 dgd = "dynamo.aisimulate.output.dgd:create_adapter"
+dgdr_run = "dynamo.aisimulate.output.dgdr_run:create_adapter"
 
 [dependency-groups]
 docs = [
