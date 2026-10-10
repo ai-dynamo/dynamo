@@ -11,6 +11,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
+from decimal import Decimal
 from enum import Enum
 from typing import Any, cast
 
@@ -175,12 +176,14 @@ def _public_values(value: Any, defaults: list[Any]) -> list[Any]:
             or step <= 0
         ):
             raise ValueError("Planner independent numeric ranges require step")
-        values = []
-        current = minimum
-        while current <= maximum:
-            values.append(current)
-            current += step
-        return values
+        if all(isinstance(bound, int) for bound in (minimum, maximum, step)):
+            return list(range(minimum, maximum + 1, step))
+        # Decimal steps avoid the float drift that can drop ``max``.
+        start, stop, increment = (
+            Decimal(str(bound)) for bound in (minimum, maximum, step)
+        )
+        count = int((stop - start) // increment)
+        return [float(start + increment * index) for index in range(count + 1)]
     if isinstance(value, Mapping):
         raise ValueError("Planner domains must contain exactly choices or range")
     return [value]
