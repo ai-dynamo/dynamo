@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Render ../profile-external-storage.yaml with ../render_values.py.
+# These maps are the published dependencies' original configuration surfaces.
+targetDGD:
+  name: ""
+  namespace: ""
+model: ""
+batch-gateway:
+  global:
+    secretName: dynamo-batch-storage
+    maxInputFileSizeBytes: 209715200
+    podSecurityContext:
+      fsGroup: 65532
+    dbClient:
+      type: postgresql
+    fileClient:
+      type: s3
+      s3:
+        region: us-east-1
+        bucket: REPLACE_ME
+        endpoint: ""
+        accessKeyId: REPLACE_ME
+        prefix: dynamo-batch-example/qwen3-0-6b-batch
+        usePathStyle: false
+        autoCreateBucket: false
+  apiserver:
+    replicaCount: 1
+    # Multipart uploads above 32 MiB spill to disk; keep the root filesystem read-only.
+    volumes:
+      - name: upload-tmp
+        emptyDir:
+          sizeLimit: 1Gi
+    volumeMounts:
+      - name: upload-tmp
+        mountPath: /tmp
+    image:
+      repository: ghcr.io/llm-d/batch-gateway-apiserver
+      pullPolicy: IfNotPresent
+      tag: v0.6.0
+    httpRoute:
+      # Batch operations enter through the Dynamo frontend, not a public Batch API.
+      enabled: false
+    config:
+      inputHeaders:
+        tenant: X-MaaS-Username
+      batchAPI:
+        passThroughHeaders:
+          - Authorization
+  processor:
+    replicaCount: 1
+    workDirVolume:
+      sizeLimit: 10Gi
+    image:
+      repository: ghcr.io/llm-d/batch-gateway-processor
+      pullPolicy: IfNotPresent
+      tag: v0.6.0
+    config:
+      numWorkers: 5
+      inputFileDiskBudgetPercent: 10
+      dispatchMode: async
+      # Async owns dispatch concurrency; do not impose a lower Processor ceiling.
+      concurrency:
+        global: 256
+        perEndpoint: 256
+        recovery: 5
+        aimd:
+          enabled: false
+          min: 1
+          backoffFactor: 0.5
+          additiveIncrease: 1
+      asyncDispatch:
+        resultPollTimeout: 30s
+        # Filled by the renderer; Helm must not merge a sample model into a DGD.
+        models: {}
+      modelGateways: null
+  gc:
+    enabled: true
+    image:
+      repository: ghcr.io/llm-d/batch-gateway-gc
+      pullPolicy: IfNotPresent
+      tag: v0.6.0
+async:
+  ap:
+    image:
+      repository: ghcr.io/llm-d/llm-d-async
+      tag: v0.10.0
+    imagePullPolicy: IfNotPresent
+    # Starting concurrency; tune for the target model and worker topology.
+    concurrency: 64
+    drainTimeout: 2m
+    gateWaitTimeout: 5m
+    transport: redis-sortedset
+    transportConfig:
+      urlSecret:
+        name: dynamo-batch-storage
+        key: redis-url
+      # Fallback only: each request carries the Processor replica's result queue.
+      result_queue_name: "llm-d-async:results:dynamo-batch-example:qwen3-0-6b-batch"
+      poll_interval_ms: 100
+      batch_size: 64
+      queues:
+        - queue_name: "llm-d-async:requests:dynamo-batch-example:qwen3-0-6b-batch"
+          request_path_url: /v1/chat/completions
+          igw_base_url: "http://qwen3-0-6b-batch-frontend:8000"
+          gate_type: endpoint-scrape
+          gate_params:
+            url: "http://qwen3-0-6b-batch-frontend:8000/metrics"
+            metric: dynamo_frontend_model_ready
+            labels:
+              model: "Qwen/Qwen3-0.6B"
+            value_type: budget
+            fallback: "0"
+    metrics:
+      enabled: true
+      port: 9090
+      secure: false

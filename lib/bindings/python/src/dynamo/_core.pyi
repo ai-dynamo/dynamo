@@ -1473,13 +1473,18 @@ class HttpService:
     """
 
     def __init__(
-        self, port: Optional[int] = None, *, wait_for_first_item: bool = False
+        self,
+        port: Optional[int] = None,
+        *,
+        wait_for_first_item: bool = False,
+        batch_gateway_url: Optional[str] = None,
     ) -> None:
         """
         Create a new HTTP service.
 
         Args:
             port: Optional port number to bind the service to (default: 8080)
+            batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
             wait_for_first_item: When True, a streaming chat, completions,
                 responses, or Anthropic messages request waits for the engine's
                 first item before the HTTP status is committed, so an exception
@@ -3046,6 +3051,7 @@ class EntrypointArgs:
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
         tokenizer_backend: Optional[str] = None,
         tokenizer_fallback: Optional[bool] = None,
+        batch_gateway_url: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3083,6 +3089,7 @@ class EntrypointArgs:
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
             tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
             tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
+            batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
         """
         ...
 
@@ -3222,6 +3229,32 @@ class SelectionServiceError(DynamoException):
 # ---------------------------------------------------------------------------
 
 class backend:
+    class EngineMetrics:
+        """Metrics handle provided to an engine's registration hook."""
+
+        def register_prometheus_expfmt_callback(
+            self, callback: Callable[[], str]
+        ) -> None: ...
+
+        def register_prometheus_typed_callback(
+            self,
+            callback: Callable[
+                [],
+                list[
+                    tuple[
+                        str,
+                        str,
+                        str,
+                        str,
+                        list[tuple[str, list[tuple[str, str]], float, float | None]],
+                    ]
+                ],
+            ],
+        ) -> None: ...
+
+        @property
+        def auto_labels(self) -> Dict[str, str]: ...
+
     @staticmethod
     def _run_sglang_sidecar(argv: Optional[List[str]] = None) -> None:
         """Run the native SGLang sidecar with CLI-style arguments."""

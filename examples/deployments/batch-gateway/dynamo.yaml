@@ -26,7 +26,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
               command:
                 - python3
                 - -m
@@ -36,6 +36,12 @@ spec:
                 - round-robin
                 - --http-port
                 - "8000"
+                - --batch-gateway-url
+                - http://qwen3-0-6b-batch-batch-api:8000
+              env:
+                # Batch Gateway accepts a 200 MiB file; allow multipart framing.
+                - name: DYN_HTTP_BODY_LIMIT_MB
+                  value: "202"
               workingDir: /workspace
               resources:
                 requests:
@@ -49,7 +55,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
               command:
                 - python3
                 - -m
@@ -67,9 +73,6 @@ spec:
               env:
                 - name: HF_HOME
                   value: /opt/models
-              envFrom:
-                - secretRef:
-                    name: hf-token-secret
               volumeMounts:
                 - name: model-cache
                   mountPath: /opt/models
@@ -85,5 +88,4 @@ spec:
                   nvidia.com/gpu: "1"
           volumes:
             - name: model-cache
-              persistentVolumeClaim:
-                claimName: model-cache
+              emptyDir: {}

@@ -30,10 +30,17 @@ impl HttpService {
     ///   until the engine's first item, so an error raised by a Python
     ///   generator before its first `yield` maps to the same HTTP response as
     ///   it does for a non-streaming request
+    /// - `batch_gateway_url`: internal Batch Gateway URL for files and batch APIs
     #[new]
-    #[pyo3(signature = (port=None, *, wait_for_first_item=false))]
-    pub fn new(port: Option<u16>, wait_for_first_item: bool) -> PyResult<Self> {
-        let mut builder = service_v2::HttpService::builder().port(port.unwrap_or(8080));
+    #[pyo3(signature = (port=None, *, wait_for_first_item=false, batch_gateway_url=None))]
+    pub fn new(
+        port: Option<u16>,
+        wait_for_first_item: bool,
+        batch_gateway_url: Option<String>,
+    ) -> PyResult<Self> {
+        let mut builder = service_v2::HttpService::builder()
+            .port(port.unwrap_or(8080))
+            .batch_gateway_url(batch_gateway_url);
         if wait_for_first_item {
             builder = builder
                 .streaming_backend_error_check(service_v2::BackendErrorCheck::UntilFirstEvent);

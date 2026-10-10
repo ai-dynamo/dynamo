@@ -176,6 +176,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     kv_cache_block_size: Optional[int]
     http_host: str
     http_port: int
+    batch_gateway_url: Optional[str] = None
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
     tls_client_ca_cert_path: Optional[pathlib.Path]
@@ -253,6 +254,14 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             mode_flag = "--interactive" if self.interactive else "--kserve-grpc-server"
             raise ValueError(
                 "--frontend-route-extension is only supported by the HTTP frontend, "
+                f"so it cannot be combined with {mode_flag}"
+            )
+        if self.batch_gateway_url is not None and (
+            self.interactive or self.kserve_grpc_server
+        ):
+            mode_flag = "--interactive" if self.interactive else "--kserve-grpc-server"
+            raise ValueError(
+                "--batch-gateway-url is only supported by the HTTP frontend, "
                 f"so it cannot be combined with {mode_flag}"
             )
         if self.migration_limit < 0 or self.migration_limit > _U32_MAX:
@@ -403,6 +412,13 @@ class FrontendArgGroup(ArgGroup):
             default=8000,
             help="HTTP port for the engine (u16).",
             arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--batch-gateway-url",
+            env_var="DYN_BATCH_GATEWAY_URL",
+            default=None,
+            help="Internal Batch Gateway URL for proxying /v1/files and /v1/batches.",
         )
         add_negatable_bool_argument(
             g,
