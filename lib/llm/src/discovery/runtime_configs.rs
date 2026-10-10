@@ -28,11 +28,8 @@ pub type RuntimeConfigWatch = watch::Receiver<HashMap<WorkerId, ModelRuntimeConf
 // `stream.next()` forever, past every consumer's exit, past `lifecycle`
 // cancelling. See the "WorkerSet churn" test below.
 //
-// Nothing is published until the stream's first `Resync`. A watch replays existing
-// instances as one `Added` each before that `Resync`, so publishing per event would
-// briefly expose a subset of the workers, and a reader that requires exactly one
-// match (`Client.wait_for_instance_by_runtime_data`) could accept one of two
-// duplicates.
+// Publish nothing before the first `Resync`: the replayed `Added` events would expose
+// a partial worker set to exact-one-match readers (`wait_for_instance_by_runtime_data`).
 fn base_runtime_config_watch(
     mut stream: DiscoveryStream,
     lifecycle: CancellationToken,
@@ -332,9 +329,8 @@ mod tests {
         assert_eq!(configs.borrow().get(&9).unwrap().data_parallel_size, 1);
     }
 
-    /// A watch replays two existing workers as two `Added` events before its first
-    /// `Resync`. Readers must never see the one-worker state in between: the SGLang
-    /// rendezvous rejects duplicate leaders by requiring exactly one match.
+    /// Readers must never see the one-worker state between replayed `Added` events,
+    /// since the SGLang rendezvous rejects duplicate leaders by requiring one match.
     #[tokio::test]
     async fn initial_snapshot_is_published_only_after_first_resync() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
