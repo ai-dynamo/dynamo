@@ -52,8 +52,8 @@ DEFAULT_VLLM_KV_TRANSFER_CONFIG = {
 def _get_valued_arg(args: list[str], key: str) -> str | None:
     value = None
     for i, arg in enumerate(args):
-        if arg == key and i + 1 < len(args):
-            value = args[i + 1]
+        if arg == key:
+            value = args[i + 1] if i + 1 < len(args) else None
         if isinstance(arg, str) and arg.startswith(f"{key}="):
             value = arg.split("=", 1)[1]
     return value
@@ -643,9 +643,8 @@ class VllmV1ConfigModifier(BaseConfigModifier):
 
         args = break_arguments(args)
         try:
-            idx = args.index("--http-port")
-            return int(args[idx + 1])
-        except (ValueError, IndexError):
+            return int(_get_valued_arg(args, "--http-port") or "")
+        except ValueError:
             logger.warning(
                 "Port not found in configuration args, using default port: %s",
                 DYNAMO_RUN_DEFAULT_PORT,
