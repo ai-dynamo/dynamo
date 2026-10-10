@@ -1,8 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared cases exercise real Serde, separately from JSON Schema validation.
-//! Passing these cases is representative evidence, not behavioral conformance.
+//! Protect request deserialization acceptance and rejection against shared fixtures.
+//!
+//! `lib/llm/tests/fixtures/openapi/requests.json` supplies the expected Rust result
+//! (`valid`). This suite does not load or validate an OpenAPI document. Its companion,
+//! `scripts/protocol_compatibility/tests/composition/fidelity.py` (in the downstream
+//! tooling layer), checks the composed schema against `schema_valid`, defaulting to
+//! `valid`, with documented exceptions in `gap`.
+//! Both suites must pass against the same source revision to establish agreement for
+//! aligned examples. Passing known-gap cases reproduces documented disagreements;
+//! it is not conformance. Neither suite proves HTTP admission, backend support,
+//! inference, or Dynamo/framework parity.
+//!
+//! Run: `cargo test -p dynamo-llm --no-default-features --test protocols openapi_request_fidelity::`.
 
 use dynamo_llm::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
@@ -23,9 +34,9 @@ struct Cases {
 }
 
 #[test]
-fn composed_schema_cases_match_rust_deserialization() {
+fn request_fixtures_match_rust_deserialization() {
     let cases: Cases =
-        serde_json::from_str(include_str!("fixtures/openapi/requests.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/openapi/requests.json")).unwrap();
     let mut failures = Vec::new();
     for case in cases.cases {
         let result = match case.endpoint.as_str() {

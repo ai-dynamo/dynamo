@@ -40,6 +40,7 @@ from dynamo.sglang._compat import (
     sglang_uses_mla_backend,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
+from dynamo.sglang.capacity import sglang_dp_layout
 from dynamo.sglang.elastic_ep_preflight import check_elastic_ep_backend
 
 configure_dynamo_logging()
@@ -93,6 +94,24 @@ class Config:
         # SGLang chose the value or the user did.
         self.attention_backend_from_cli = attention_backend_from_cli
         self.serving_mode = self._set_serving_strategy()
+        if getattr(dynamo_args, "freeze_gc_after_init", False) and (
+            self.serving_mode == DisaggregationMode.PREFILL
+            or any(
+                getattr(dynamo_args, role, False)
+                for role in (
+                    "embedding_worker",
+                    "rerank_worker",
+                    "image_diffusion_worker",
+                    "video_generation_worker",
+                    "multimodal_encode_worker",
+                    "multimodal_worker",
+                    "diffusion_worker",
+                )
+            )
+        ):
+            raise ValueError(
+                "--freeze-gc-after-init is supported only for LLM decode or aggregated workers"
+            )
 
     def _set_serving_strategy(self):
         if self.server_args.disaggregation_mode == "null":
@@ -569,7 +588,7 @@ async def parse_args(args: list[str]) -> Config:
     # the supported SGLang releases.
     check_elastic_ep_backend(
         parsed_args.elastic_ep_backend,
-        parsed_args.enable_dp_attention,
+        sglang_dp_layout(parsed_args)[1],
     )
 
     # Dynamo argument processing

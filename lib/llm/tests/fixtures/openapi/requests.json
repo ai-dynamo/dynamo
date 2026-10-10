@@ -2,6 +2,14 @@
   "license": "SPDX-License-Identifier: Apache-2.0",
   "copyright": "SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
   "description": "Shared Rust deserialization and composed-schema cases. These test shape, not request validation, inference, or behavioral conformance.",
+  "field_descriptions": {
+    "name": "Diagnostic case identifier.",
+    "endpoint": "Rust request type selector: chat or completion.",
+    "body": "JSON passed to the selected Rust deserializer and, separately, the offline composed-schema validator.",
+    "valid": "Expected Rust deserialization success; not HTTP admission or backend support.",
+    "schema_valid": "Optional expected composed-schema validation result, defaulting to valid. Read by offline composition tests, not the Rust fixture test.",
+    "gap": "Reason schema_valid intentionally differs from valid. Records a known mismatch rather than claiming conformance."
+  },
   "cases": [
     {"name": "minimal-chat", "endpoint": "chat", "valid": true, "body": {"model": "test", "messages": [{"role": "user", "content": "hello"}]}},
     {"name": "missing-model", "endpoint": "chat", "valid": false, "body": {"messages": []}},

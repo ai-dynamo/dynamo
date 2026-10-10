@@ -852,6 +852,24 @@ pub mod response_plane {
     /// Response transport used by every runtime in this process: "tcp" or "quic".
     /// Defaults to "tcp".
     pub const DYN_RESPONSE_PLANE: &str = "DYN_RESPONSE_PLANE";
+
+    /// Seconds a frontend waits, after a worker ACKs a unary request, for that
+    /// worker to establish its response stream.
+    ///
+    /// The deadline starts at the request-plane ACK, so time spent waiting for
+    /// local admission, connecting, and sending does not count. It covers the
+    /// worker's queueing and setup before it sends the response prologue, and a
+    /// worker that accepts requests but cannot connect back. Set it above the
+    /// worst-case time a healthy worker takes to start a response.
+    ///
+    /// On expiry the request fails with a response timeout (or migrates when
+    /// migration is enabled) and the worker is inhibited for
+    /// `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Routers without fault detection
+    /// and bidirectional (streaming-input) requests do not apply this bound.
+    ///
+    /// Set to `0` or leave unset to disable the timeout (default: disabled).
+    pub const DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS: &str =
+        "DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS";
 }
 
 /// TCP request callback listener environment variables. Names are retained for compatibility.
@@ -1205,6 +1223,7 @@ mod tests {
             request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             response_plane::DYN_RESPONSE_PLANE,
+            response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS,
             request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
             request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
             request_plane::DYN_TCP_RPC_HOST,

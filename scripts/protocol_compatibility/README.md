@@ -126,7 +126,7 @@ a complete-coverage result until its known limitations are resolved.
 OASDIFF_BIN=/absolute/path/to/oasdiff \
   python -m unittest discover -s scripts/protocol_compatibility/tests -t . -v
 cargo test --locked -p dynamo-llm --no-default-features \
-  --test openapi_request_schema --test openapi_request_fidelity
+  --test protocols
 python -m scripts.protocol_compatibility.tests.composition.fidelity \
   --spec assessment/dynamo.composed.json
 ```

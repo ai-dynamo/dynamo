@@ -1,6 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Validate the composed request schemas against the same cases as Rust.
+"""Protect composed request-schema acceptance against shared Rust fixtures.
+
+The companion lib/llm/tests/protocols/openapi_request_fidelity.rs protects Rust
+deserialization acceptance/rejection according to `valid`. This suite checks the
+same lib/llm/tests/fixtures/openapi/requests.json cases against `schema_valid`,
+defaulting to `valid`, with documented exceptions in `gap`.
+Both suites must pass against the same source revision to establish agreement
+for aligned examples. Passing known-gap cases reproduces documented disagreements,
+not conformance. Neither suite proves HTTP admission, backend support, inference,
+or Dynamo/framework parity.
 
 Run with --spec pointing to a composed HTTP export. This is an explicit
 integration check, not a silently skipped unit test when an export is missing.

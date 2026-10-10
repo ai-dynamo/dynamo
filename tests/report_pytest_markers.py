@@ -241,6 +241,7 @@ STUB_MODULES = [
     "vllm.entrypoints.pooling",
     "vllm.entrypoints.pooling.embed",
     "vllm.entrypoints.pooling.embed.protocol",
+    "vllm.envs",
     "vllm.inputs",
     "vllm.logprobs",
     "vllm.lora",
