@@ -170,7 +170,7 @@ The shared protocol contains:
 | `timing_metric` | `"scheduler_wall_time"`; the existing scheduler timing boundary is unchanged, not replaced with CUDA-event timing |
 | `execution_evidence` | Versioned contract for per-sample observations and warmup records; identifies their field names, process-local clock and forward indices, graph-statistics source, and validation scope |
 | `input_evidence_scope` | `"injected_prompt_token_ids"`; hashes cover the prompt ids available at request injection |
-| `unobserved` | Lists inputs or context not established by this evidence: sampled continuation tokens, KV-cache tensors, recurrent-state tensors, decode real-KV chain warmup history, equivalent execution history, and equivalent graph, kernel, or cache warming |
+| `unobserved` | Lists inputs or context not established by this evidence: sampled continuation tokens, KV-cache tensors, recurrent-state tensors, decode real-KV warmup history (shared chains or native exact-context stages), equivalent execution history, and equivalent graph, kernel, or cache warming |
 | `preparation` | Warm-up iteration count, prefill real-seed and decode real-KV settings, and giant-KV threshold and repeat count |
 
 Each retained FPM's `benchmark_measurement` contains:
@@ -179,7 +179,7 @@ Each retained FPM's `benchmark_measurement` contains:
 |---|---|
 | `point_key`, `dp_rank` | Coordinate identity and the rank that produced this observation; the point key is independent of the grid digest and benchmark point id |
 | `prompts.status` | `"recorded"` when injected prompt ids were captured, otherwise `"unavailable"`; missing evidence is not a match |
-| `prompts.sha256`, `prompts.requests` | Combined prompt digest and the request slots, lengths, and individual prompt digests |
+| `prompts.sha256`, `prompts.requests` | Combined prompt digest and the request slots, lengths, and individual prompt digests; on rows measured after a native exact-context stage, the hashed prompts are the stage's prefill prompts, `ctx - 1` tokens for a request with context length `ctx`, because the admission token is sampled |
 | `preparation` | Actual grid digest, number of completed points before this point, KV-seeding regime, and `warmup_records_before`, the number of prior warmup records, including failed attempts |
 | `expected_internal_samples` | Number of scheduler steps expected for this point, including an admission step when the path uses one |
 | `raw_fpms` | Individual FPMs before reduction, in collection order, including discarded admission measurements and slow samples; each carries its own `benchmark_sample` execution evidence |
@@ -225,7 +225,7 @@ Observed dispatch is separate from the point's `expected_cudagraph_mode` and `ex
 
 ### Warmup Completion Evidence
 
-Each rank artifact's `warmup_evidence` contains `status` (`recorded` or `unavailable`) and an ordered `records` list. The list covers global warmup, discarded eager-shape replicas, real-prefix seeding, and real-prefix same-shape preparation. An empty recorded list means none of these attempts was recorded. Decode KV-chain preparation retains its existing `kvwarm` metadata; its individual warmup attempts are not recorded here.
+Each rank artifact's `warmup_evidence` contains `status` (`recorded` or `unavailable`) and an ordered `records` list. The list covers global warmup, discarded eager-shape replicas, real-prefix seeding, and real-prefix same-shape preparation. An empty recorded list means none of these attempts was recorded. Decode real-KV warmup, by shared prefill chains or native exact-context stages, is not in this list: each stage is recorded in `kvwarm.stages`, and `kvwarm.initialization_strategy` is `native_exact_context` when the native strategy is selected.
 
 | Record field | Meaning |
 |---|---|
