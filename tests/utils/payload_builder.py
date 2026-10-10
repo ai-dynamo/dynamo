@@ -5,9 +5,11 @@ from typing import Any, Dict, List, Optional, Union
 
 from tests.utils.client import send_request
 from tests.utils.constants import DefaultPort
+from tests.utils.engine_metrics import EngineMetrics
 from tests.utils.payloads import (
     AnthropicMessagesPayload,
     AnthropicMessagesStreamPayload,
+    BasePayload,
     CachedTokensChatPayload,
     ChatPayload,
     ChatPayloadWithLogprobs,
@@ -15,9 +17,11 @@ from tests.utils.payloads import (
     ClearKVBlocksPayload,
     CompletionPayload,
     CompletionPayloadWithLogprobs,
+    DisaggregatedChatPayload,
     ElasticEPScalePayload,
     EmbeddingPayload,
     GuidedDecodingChatPayload,
+    HttpCancellationPayload,
     ImagesPayload,
     ImageTokenMetricsPayload,
     KvEventMetricsPayload,
@@ -29,6 +33,7 @@ from tests.utils.payloads import (
     ResponsesStreamPayload,
     RouterNvextChatPayload,
     SGLangMetricsPayload,
+    StreamingChatPayload,
     TRTLLMMetricsPayload,
     VLLMMetricsPayload,
 )
@@ -743,6 +748,7 @@ def chat_payload_with_logprobs(
     max_tokens: int = 50,
     temperature: float = 0.0,
     top_logprobs: int = 3,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> ChatPayloadWithLogprobs:
     """
     Create a chat payload that requests and validates logprobs in the response.
@@ -754,6 +760,7 @@ def chat_payload_with_logprobs(
         max_tokens: Maximum tokens to generate
         temperature: Sampling temperature
         top_logprobs: Number of top logprobs to return per token
+        extra_body: Additional request fields, such as chat_template_kwargs
 
     Returns:
         ChatPayloadWithLogprobs that validates logprobs in response
@@ -771,12 +778,183 @@ def chat_payload_with_logprobs(
         "top_logprobs": top_logprobs,
     }
 
+    if extra_body:
+        body.update(extra_body)
     return ChatPayloadWithLogprobs(
         body=body,
         repeat_count=repeat_count,
         expected_log=[],
-        expected_response=expected_response or ["AI", "knock", "joke"],
+        expected_response=(
+            ["AI", "knock", "joke"] if expected_response is None else expected_response
+        ),
     )
+
+
+def streaming_chat_payload_with_logprobs(
+    content: Union[str, List[Dict[str, Any]]] = TEXT_PROMPT,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    max_tokens: int = 50,
+    temperature: float = 0.0,
+    top_logprobs: int = 3,
+    prompt_logprobs: Optional[int] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> StreamingChatPayload:
+    """Validate streamed logprobs, usage, and token associations."""
+    body: Dict[str, Any] = {
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "logprobs": True,
+        "top_logprobs": top_logprobs,
+    }
+    if extra_body:
+        body.update(extra_body)
+    body["stream"] = True
+    body["stream_options"] = {"include_usage": True}
+    body.setdefault("return_tokens_as_token_ids", True)
+    nvext = dict(body.get("nvext") or {})
+    fields = [*nvext.get("extra_fields", []), "completion_token_ids"]
+    nvext["extra_fields"] = fields
+    body["nvext"] = nvext
+    if prompt_logprobs is not None:
+        body["prompt_logprobs"] = prompt_logprobs
+        fields.extend(["prompt_token_ids", "prompt_logprobs"])
+    return StreamingChatPayload(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=[],
+        expected_response=(
+            ["AI", "knock", "joke"] if expected_response is None else expected_response
+        ),
+    )
+
+
+def disaggregated_chat_payload() -> DisaggregatedChatPayload:
+    return DisaggregatedChatPayload(
+        body={
+            "messages": [{"role": "user", "content": LONG_PROMPT_FOR_CACHING}],
+            "max_tokens": 64,
+            "n": 1,
+            "temperature": 0,
+            "stream": False,
+            "nvext": {"extra_fields": ["worker_id"]},
+        },
+        expected_response=[],
+        expected_log=[],
+        expected_num_choices=1,
+    )
+
+
+def disaggregated_token_count_payload() -> DisaggregatedChatPayload:
+    return DisaggregatedChatPayload(
+        body={
+            "messages": [{"role": "user", "content": LONG_PROMPT_FOR_CACHING}],
+            "max_tokens": 8,
+            "n": 1,
+            "temperature": 0,
+            "stream": False,
+            "ignore_eos": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "nvext": {
+                "extra_fields": [
+                    "worker_id",
+                    "completion_token_ids",
+                    "prompt_token_ids",
+                ]
+            },
+        },
+        expected_response=[],
+        expected_log=[],
+        expected_num_choices=1,
+        expected_finish_reason="length",
+        expected_completion_tokens=8,
+    )
+
+
+def sidecar_compatibility_payloads() -> list[BasePayload]:
+    logprobs = streaming_chat_payload_with_logprobs(
+        content="Count from one to ten.",
+        expected_response=[],
+        max_tokens=8,
+        top_logprobs=2,
+        prompt_logprobs=2,
+        extra_body={
+            "ignore_eos": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+    logprobs.expected_finish_reason = "length"
+    logprobs.expected_completion_tokens = 8
+    logprobs.min_token_chunks = 2
+    unicode_logprobs = streaming_chat_payload_with_logprobs(
+        content="Repeat these characters: café € 中文.",
+        expected_response=[],
+        max_tokens=8,
+        top_logprobs=2,
+        extra_body={
+            "return_tokens_as_token_ids": False,
+            "ignore_eos": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+    unicode_logprobs.expected_finish_reason = "length"
+    unicode_logprobs.expected_completion_tokens = 8
+    structured = GuidedDecodingChatPayload(
+        body={
+            "messages": [{"role": "user", "content": "Return a successful status."}],
+            "max_tokens": 64,
+            "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "status",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"ok": {"type": "boolean", "const": True}},
+                        "required": ["ok"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "nvext": {"extra_fields": ["completion_token_ids", "prompt_token_ids"]},
+        },
+        expected_response=[],
+        expected_log=[],
+        expected_json={"ok": True},
+        expected_finish_reason="stop",
+        needs_token_ids=True,
+    )
+    return [chat_payload_default(), logprobs, unicode_logprobs, structured]
+
+
+def http_cancellation_payloads(
+    metrics: EngineMetrics, *, max_tokens: int
+) -> list[BasePayload]:
+    body = {
+        "messages": [{"role": "user", "content": "Count from one to a thousand."}],
+        "max_tokens": max_tokens,
+        "ignore_eos": True,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "stream": True,
+    }
+    return [
+        HttpCancellationPayload(
+            body=body,
+            expected_response=[],
+            expected_log=[],
+            metrics=metrics,
+        ),
+        StreamingChatPayload(
+            body={**body, "max_tokens": 4, "stream_options": {"include_usage": True}},
+            expected_response=[],
+            expected_log=[],
+            expected_finish_reason="length",
+            expected_completion_tokens=4,
+        ),
+    ]
 
 
 def completion_payload_with_logprobs(

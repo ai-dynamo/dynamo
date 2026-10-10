@@ -428,6 +428,8 @@ def run_serve_deployment(
                 if hasattr(payload, "with_model"):
                     payload = payload.with_model(config.model)
 
+                payload.bind_environment(server_process.env)
+
                 # Default behavior: requests go to the frontend port. Metrics
                 # may target either the frontend or worker system ports; map
                 # each DefaultPort placeholder to its per-test allocation.
@@ -488,14 +490,15 @@ def run_serve_deployment(
                     try:
                         for attempt in range(payload.max_attempts):
                             try:
-                                response = send_request(
+                                payload.before_request()
+                                with send_request(
                                     url=payload.url(),
                                     payload=request_body,
                                     timeout=payload.timeout,
                                     method=payload.method,
                                     stream=payload.http_stream,
-                                )
-                                server_process.check_response(payload, response)
+                                ) as response:
+                                    server_process.check_response(payload, response)
                                 last_err = None
                                 break
                             except ResponseValidationError as e:

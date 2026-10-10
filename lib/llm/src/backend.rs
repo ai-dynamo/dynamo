@@ -100,6 +100,8 @@ fn fill_missing_top_logprob_text(
         for entry in position.iter_mut() {
             if entry.token.is_none()
                 && let Ok(decoded) = tokenizer.decode(&[entry.token_id], skip_special_tokens)
+                && decoded.is_complete()
+                && !decoded.as_str().contains('\u{fffd}')
             {
                 let token: String = decoded.into();
                 if entry.bytes.is_none() && !token.is_empty() {
@@ -346,11 +348,30 @@ impl
                     }
 
                     // if we have a data field without an event, then we might need to update the data
-                    if let Some(data) = &output.data
+                    if let Some(data) = &mut output.data
                         && data.text.is_some()
                         && !state.validate_engine_decode
                         && !state.no_stop_trim
                     {
+                        if data.log_probs.is_some() && data.tokens.is_none() {
+                            data.tokens = Some(
+                                data.token_ids
+                                    .iter()
+                                    .map(|token_id| {
+                                        state
+                                            .tokenizer
+                                            .decode(&[*token_id], state.skip_special_tokens)
+                                            .ok()
+                                            // Lossy text cannot recover the original token bytes.
+                                            .filter(|decoded| {
+                                                decoded.is_complete()
+                                                    && !decoded.as_str().contains('\u{fffd}')
+                                            })
+                                            .map(Into::into)
+                                    })
+                                    .collect(),
+                            );
+                        }
                         // Text already decoded; track finish for this choice
                         let choice_idx = data.index.unwrap_or(0);
                         let has_finish = data.finish_reason.is_some();
@@ -1299,10 +1320,9 @@ mod tests {
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
             let output = LLMEngineOutput {
                 token_ids: vec![101],
-                tokens: self
+                text: self
                     .engine_decodes_text
-                    .then(|| vec![Some("Okay".to_string())]),
-                text: self.engine_decodes_text.then(|| "Okay".to_string()),
+                    .then(|| "Engine-decoded text".to_string()),
                 log_probs: Some(vec![-0.125]),
                 top_logprobs: Some(vec![vec![
                     TopLogprob {
@@ -1393,6 +1413,15 @@ mod tests {
             .data
             .expect("response contains backend output");
 
+        assert_eq!(
+            output.text.as_deref(),
+            Some(if engine_decodes_text {
+                "Engine-decoded text"
+            } else {
+                "Okay"
+            })
+        );
+
         let options = DeltaGeneratorOptions::new(None, None, true, None);
         let mut generator = DeltaGenerator::new(
             "test-model".to_string(),
@@ -1409,6 +1438,11 @@ mod tests {
             .content
             .as_ref()
             .expect("client-visible logprob content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0].token_id, Some(101));
+        assert_eq!(content[0].token, "Okay");
+        assert_eq!(content[0].bytes, Some(b"Okay".to_vec()));
+        assert_eq!(content[0].logprob, -0.125);
         let candidates = &content[0].top_logprobs;
 
         assert_eq!(candidates[0].token, "Okay");
@@ -1427,6 +1461,103 @@ mod tests {
     #[tokio::test]
     async fn test_sglang_top_logprobs_are_decoded_before_engine_text_fast_path() {
         assert_sglang_top_logprobs_are_decoded_in_openai_response(true).await;
+    }
+
+    #[tokio::test]
+    async fn test_engine_text_logprobs_do_not_fabricate_lossy_token_bytes() {
+        let mut tokenizer = tokenizers::Tokenizer::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
+        ))
+        .unwrap();
+        tokenizer.add_tokens(&[tokenizers::AddedToken::from("\u{fffd}suffix", false)]);
+        let replacement_id = tokenizer.token_to_id("\u{fffd}suffix").unwrap();
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(
+            crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(tokenizer),
+        );
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        // TinyLlama's byte-fallback IDs for E2 82 AC encode the euro sign together.
+        let token_ids = vec![229, 133, 175, replacement_id];
+        let engine_text = "€\u{fffd}suffix";
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: Some(1),
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine {
+                outputs: Some(vec![LLMEngineOutput {
+                    token_ids: token_ids.clone(),
+                    text: Some(engine_text.to_string()),
+                    log_probs: Some(vec![-0.125; token_ids.len()]),
+                    top_logprobs: Some(
+                        token_ids
+                            .iter()
+                            .enumerate()
+                            .map(|(index, &token_id)| {
+                                vec![TopLogprob {
+                                    rank: 1,
+                                    token_id,
+                                    token: None,
+                                    logprob: -0.125,
+                                    bytes: (index == 0).then(|| vec![0xe2]),
+                                }]
+                            })
+                            .collect(),
+                    ),
+                    finish_reason: Some(FinishReason::Length),
+                    ..Default::default()
+                }]),
+            });
+        let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .unwrap();
+        let output = stream.next().await.unwrap().data.unwrap();
+        assert_eq!(output.text.as_deref(), Some(engine_text));
+        assert_eq!(output.tokens, vec![None; token_ids.len()]);
+
+        for is_token_id_mode in [false, true] {
+            let options = DeltaGeneratorOptions::new(None, Some(is_token_id_mode), true, None);
+            let mut generator =
+                DeltaGenerator::new("test-model".to_string(), options, "unicode".to_string());
+            let response = generator.choice_from_postprocessor(output.clone()).unwrap();
+            let choice = &response.inner.choices[0];
+            assert_eq!(
+                choice.delta.content,
+                Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                    engine_text.to_string()
+                ))
+            );
+            let content = choice.logprobs.as_ref().unwrap().content.as_ref().unwrap();
+            assert_eq!(content.len(), token_ids.len());
+            for (index, (entry, token_id)) in content.iter().zip(&token_ids).enumerate() {
+                let token = if is_token_id_mode {
+                    format!("token_id:{token_id}")
+                } else {
+                    String::new()
+                };
+                let bytes = is_token_id_mode.then(|| token.as_bytes().to_vec());
+                assert_eq!(entry.token_id, Some(*token_id));
+                assert_eq!(entry.token, token);
+                assert_eq!(entry.logprob, -0.125);
+                assert_eq!(entry.bytes, bytes);
+                assert_eq!(entry.top_logprobs[0].token, token);
+                assert_eq!(
+                    entry.top_logprobs[0].bytes,
+                    if is_token_id_mode {
+                        bytes
+                    } else {
+                        (index == 0).then(|| vec![0xe2])
+                    }
+                );
+            }
+        }
     }
 
     #[tokio::test]
