@@ -50,6 +50,14 @@ inputs:
     description: 'Docker Hub password for helm registry login'
     required: false
     default: ''
+  azure_acr_user:
+    description: 'Registry username. When set with azure_acr_password, the operator image is pulled with an image pull secret instead of node credentials. Needed on clusters whose nodes cannot pull from the registry.'
+    required: false
+    default: ''
+  azure_acr_password:
+    description: 'Registry password (used with azure_acr_user).'
+    required: false
+    default: ''
   vcluster_host_priority_class:
     description: 'Host PriorityClass to set on pods synced from the vCluster. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-02 or aws-gb300; use an empty value to disable.'
     required: false
@@ -405,6 +413,26 @@ runs:
               apply --server-side --force-conflicts --field-manager=ci-setup -f -
         echo "::endgroup::"
 
+    - name: Create operator image pull secret
+      if: inputs.registry != '' && inputs.azure_acr_user != '' && inputs.azure_acr_password != ''
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        ACR_USER: ${{ inputs.azure_acr_user }}
+        ACR_PASSWORD: ${{ inputs.azure_acr_password }}
+      run: |
+        echo "::group::Create operator image pull secret inside vCluster"
+        set -euo pipefail
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          create secret docker-registry operator-pull-secret \
+          --docker-server="${REGISTRY}" \
+          --docker-username="${ACR_USER}" \
+          --docker-password="${ACR_PASSWORD}" \
+          -n default --dry-run=client -o yaml \
+          | kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+              apply --server-side --force-conflicts --field-manager=ci-setup -f -
+        echo "::endgroup::"
+
     - name: Create shared model cache PV/PVC
       if: inputs.model_cache_server != '' && inputs.model_cache_path != ''
       shell: bash
@@ -489,6 +517,7 @@ runs:
         REGISTRY: ${{ inputs.registry }}
         REPOSITORY: ${{ inputs.repository }}
         OPERATOR_TAG: ${{ inputs.operator_tag }}
+        OPERATOR_PULL_SECRET: ${{ inputs.azure_acr_user != '' && inputs.azure_acr_password != '' }}
         CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
       run: |
         echo "::group::Install Dynamo platform via Helm (inside vCluster)"
@@ -515,6 +544,9 @@ runs:
             --set dynamo-operator.controllerManager.manager.image.tag="${OPERATOR_TAG}"
             --set dynamo-operator.controllerManager.manager.image.pullPolicy=Always
           )
+          if [ "${OPERATOR_PULL_SECRET}" = "true" ]; then
+            IMAGE_ARGS+=(--set 'dynamo-operator.imagePullSecrets[0].name=operator-pull-secret')
+          fi
         else
           echo "Using default operator image from Helm chart (nvcr.io/nvidia/ai-dynamo/kubernetes-operator)"
         fi
