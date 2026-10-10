@@ -1214,6 +1214,7 @@ impl KvEventPublisher {
         KvCacheEvent {
             event_id,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
                 start_position: None,
                 blocks: create_stored_blocks(

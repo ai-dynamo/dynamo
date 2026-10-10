@@ -877,6 +877,7 @@ policy_classes:
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: None,
                     start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
@@ -916,6 +917,7 @@ policy_classes:
                     data: KvCacheEventData::Stored(KvCacheStoreData {
                         parent_hash: first.checked_sub(1).map(block_hash),
                         start_position: None,
+                        shared_cache_eligible: false,
                         blocks: (first..if first == 0 { 1 } else { 4 })
                             .map(|index| KvCacheStoredBlockData {
                                 block_hash: block_hash(index),

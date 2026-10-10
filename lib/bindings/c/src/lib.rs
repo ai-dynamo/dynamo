@@ -281,6 +281,7 @@ fn kv_event_create_stored_from_parts(
 
     KvCacheEvent {
         data: KvCacheEventData::Stored(KvCacheStoreData {
+            shared_cache_eligible: false,
             blocks,
             parent_hash: kv_params.parent_hash.map(ExternalSequenceBlockHash),
             start_position: None,

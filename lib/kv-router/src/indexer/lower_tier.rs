@@ -777,6 +777,7 @@ impl LowerTierIndexer {
                     KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
+                            shared_cache_eligible: false,
                             parent_hash: key.parent_hash,
                             start_position: None,
                             blocks: vec![KvCacheStoredBlockData {
@@ -1432,6 +1433,7 @@ mod tests {
             event_id,
             dp_rank,
             KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: parent_hash.map(ExternalSequenceBlockHash),
                 start_position: None,
                 blocks: stored_blocks_with_sequence_hashes(
@@ -1454,6 +1456,7 @@ mod tests {
             event_id,
             dp_rank: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: parent_hash.map(ExternalSequenceBlockHash),
                 start_position: None,
                 blocks: stored_blocks_with_sequence_hashes(
