@@ -1023,18 +1023,134 @@ async def test_transfer_setup_failure_falls_back_to_raw_media(monkeypatch):
     processor = _processor()
     validate = MagicMock(side_effect=ValueError("invalid metadata"))
     monkeypatch.setattr(mod.MmKwargsShmTransferMetadata, "model_validate", validate)
+    image = Image.new("RGB", (1, 1))
+    processor.image_loader.load_image_batch.return_value = [image]
 
-    assert (
-        await processor.try_receive_mm_kwargs(
-            {"extra_args": {"mm_kwargs_shm": {"invalid": True}}}
-        )
-        is None
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {
+                "image_url": [{"Url": "https://example.com/image.png"}]
+            },
+            "extra_args": {"mm_kwargs_shm": {"invalid": True}},
+        },
+        "request-shm-fallback",
+        None,
+        DisaggregationMode.AGGREGATED,
     )
+
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
     validate.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_nixl_receiver_initialization_failure_falls_back(monkeypatch):
+async def test_shm_transfer_failure_without_raw_media_fails_closed(monkeypatch):
+    processor = _processor()
+    receiver = SimpleNamespace(
+        receive=AsyncMock(side_effect=FileNotFoundError("missing SHM segment"))
+    )
+    monkeypatch.setattr(
+        mod.MmKwargsShmTransferMetadata,
+        "model_validate",
+        MagicMock(
+            return_value=SimpleNamespace(
+                modality="image", mm_hashes=["0123456789abcdef"]
+            )
+        ),
+    )
+    monkeypatch.setattr(mod, "MmKwargsShmReceiver", MagicMock(return_value=receiver))
+
+    with pytest.raises(
+        mod.MultimodalTransferError,
+        match="use DYNAMO_MM_TRANSFER=nixl for separate pods or nodes",
+    ):
+        await _prepare_prompt(
+            processor,
+            {
+                "token_ids": [1, 2],
+                "extra_args": {
+                    "mm_kwargs_shm": {"segments": []},
+                    "mm_hashes": ["0123456789abcdef"],
+                    "mm_placeholders": [[0, 1]],
+                    "expanded_token_ids": [1, 2],
+                },
+            },
+            "request-shm-fail-closed",
+            None,
+            DisaggregationMode.AGGREGATED,
+        )
+
+    receiver.receive.assert_awaited_once()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_empty_transfer_metadata_fails_closed(monkeypatch):
+    processor = _processor()
+    validate = MagicMock(side_effect=ValueError("invalid metadata"))
+    monkeypatch.setattr(mod.MmKwargsShmTransferMetadata, "model_validate", validate)
+
+    with pytest.raises(mod.MultimodalTransferError, match="Multimodal SHM"):
+        await processor.try_receive_mm_kwargs({"extra_args": {"mm_kwargs_shm": {}}})
+
+    validate.assert_called_once_with({})
+
+
+@pytest.mark.asyncio
+async def test_null_transfer_metadata_is_absent():
+    processor = _processor()
+
+    result = await processor.try_receive_mm_kwargs(
+        {
+            "extra_args": {
+                "mm_kwargs_shm": None,
+                "mm_kwargs_nixl": None,
+            }
+        }
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_null_shm_metadata_does_not_shadow_nixl(monkeypatch):
+    processor = _processor()
+    receiver = SimpleNamespace()
+    metadata = SimpleNamespace(modality="image", mm_hashes=[])
+    transferred = {"type": "multimodal", "prompt_token_ids": [1, 2]}
+    receive = AsyncMock(return_value=transferred)
+    monkeypatch.setattr(
+        mod.MmKwargsTransferMetadata,
+        "model_validate",
+        MagicMock(return_value=metadata),
+    )
+    monkeypatch.setattr(mod, "MmKwargsNixlReceiver", MagicMock(return_value=receiver))
+    monkeypatch.setattr(processor, "_receive_mm_kwargs", receive)
+
+    result = await processor.try_receive_mm_kwargs(
+        {
+            "extra_args": {
+                "mm_kwargs_shm": None,
+                "mm_kwargs_nixl": {"modality": "image"},
+            }
+        }
+    )
+
+    assert result is transferred
+    receive.assert_awaited_once_with(
+        {
+            "mm_kwargs_shm": None,
+            "mm_kwargs_nixl": {"modality": "image"},
+        },
+        "nixl",
+        receiver,
+        metadata,
+    )
+
+
+@pytest.mark.asyncio
+async def test_nixl_receiver_initialization_failure_fails_closed(monkeypatch):
     processor = _processor()
     monkeypatch.setattr(
         mod.MmKwargsTransferMetadata,
@@ -1047,12 +1163,45 @@ async def test_nixl_receiver_initialization_failure_falls_back(monkeypatch):
         MagicMock(side_effect=RuntimeError("nixl unavailable")),
     )
 
-    assert (
-        await processor.try_receive_mm_kwargs(
-            {"extra_args": {"mm_kwargs_nixl": {"modality": "image"}}}
+    with pytest.raises(
+        mod.MultimodalTransferError,
+        match="Verify NIXL connectivity between the frontend and worker",
+    ):
+        await _prepare_prompt(
+            processor,
+            {
+                "token_ids": [1, 2],
+                "extra_args": {"mm_kwargs_nixl": {"modality": "image"}},
+            },
+            "request-nixl-fail-closed",
+            None,
+            DisaggregationMode.AGGREGATED,
         )
-        is None
+
+
+@pytest.mark.asyncio
+async def test_transfer_failure_with_unusable_raw_media_fails_closed(monkeypatch):
+    processor = _processor()
+    monkeypatch.setattr(
+        mod.MmKwargsShmTransferMetadata,
+        "model_validate",
+        MagicMock(side_effect=ValueError("invalid metadata")),
     )
+
+    with pytest.raises(mod.MultimodalTransferError, match="Multimodal SHM"):
+        await _prepare_prompt(
+            processor,
+            {
+                "token_ids": [1, 2],
+                "multi_modal_data": {
+                    "image_url": [{"Url": "https://example.com/image.png"}]
+                },
+                "extra_args": {"mm_kwargs_shm": {"invalid": True}},
+            },
+            "request-shm-empty-fallback",
+            None,
+            DisaggregationMode.AGGREGATED,
+        )
 
 
 @pytest.mark.asyncio
@@ -1581,18 +1730,21 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
 
-    result = await processor._receive_mm_kwargs(
-        {
-            "mm_hashes": ["cached_hash", "transferred_hash"],
-            "mm_placeholders": [(1, 2), (4, 2)],
-            "expanded_token_ids": [10, 11, 12, 13, 14, 15],
-        },
-        "shm",
-        receiver,
-        SimpleNamespace(modality="image", mm_hashes=[]),
-    )
+    with pytest.raises(
+        mod.MultimodalTransferError,
+        match="item, hash, and placeholder counts differ",
+    ):
+        await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["cached_hash", "transferred_hash"],
+                "mm_placeholders": [(1, 2), (4, 2)],
+                "expanded_token_ids": [10, 11, 12, 13, 14, 15],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
 
-    assert result is None
     input_processor.inject_into_mm_cache.assert_not_called()
 
 
@@ -1614,13 +1766,12 @@ def _real_kwargs_item(key: str = "pixel_values"):
 
 @pytest.mark.asyncio
 async def test_receive_transferred_kwargs_rejects_pickle_payload():
-    """A pickle-format payload must fall back, not deserialize.
+    """A pickle-format payload must fail closed, not deserialize.
 
     The transfer uses vLLM's typed msgpack decoder, so a payload in the old
-    pickle wire format (or any foreign bytes) fails the decode and the receive
-    path returns ``None``, which is its fallback. The pre-fix worker ran
-    pickle.loads on this payload and accepted the item, so this assertion fails
-    there.
+    pickle wire format (or any foreign bytes) fails the decode. The pre-fix
+    worker ran pickle.loads on this payload and accepted the item, so this
+    assertion fails there.
     """
     import pickle
 
@@ -1631,18 +1782,17 @@ async def test_receive_transferred_kwargs_rejects_pickle_payload():
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
     )
 
-    result = await processor._receive_mm_kwargs(
-        {
-            "mm_hashes": ["0123456789abcdef"],
-            "mm_placeholders": [[1, 2]],
-            "expanded_token_ids": [10, 11, 12],
-        },
-        "shm",
-        receiver,
-        SimpleNamespace(modality="image", mm_hashes=[]),
-    )
-
-    assert result is None
+    with pytest.raises(mod.MultimodalTransferError, match="Multimodal SHM"):
+        await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["0123456789abcdef"],
+                "mm_placeholders": [[1, 2]],
+                "expanded_token_ids": [10, 11, 12],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
 
 
 _LOG_SENTINEL = "zzsentinelzz"
@@ -1677,7 +1827,7 @@ def _undecodable_payload(case: str) -> bytes:
     "case", ["pickle_format", "short_frame", "wrong_structure", "pickle_ext_code"]
 )
 async def test_receive_transfer_failure_log_omits_payload_bytes(case, caplog):
-    """A payload that fails to decode falls back without logging its bytes."""
+    """A payload that fails to decode fails closed without logging its bytes."""
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=None)
     payload = _undecodable_payload(case)
@@ -1688,20 +1838,20 @@ async def test_receive_transfer_failure_log_omits_payload_bytes(case, caplog):
     )
 
     with caplog.at_level("DEBUG"):
-        result = await processor._receive_mm_kwargs(
-            {
-                "mm_hashes": ["0123456789abcdef"],
-                "mm_placeholders": [[1, 2]],
-                "expanded_token_ids": [10, 11, 12],
-            },
-            "shm",
-            receiver,
-            SimpleNamespace(modality="image", mm_hashes=[]),
-        )
+        with pytest.raises(mod.MultimodalTransferError):
+            await processor._receive_mm_kwargs(
+                {
+                    "mm_hashes": ["0123456789abcdef"],
+                    "mm_placeholders": [[1, 2]],
+                    "expanded_token_ids": [10, 11, 12],
+                },
+                "shm",
+                receiver,
+                SimpleNamespace(modality="image", mm_hashes=[]),
+            )
 
-    assert result is None
     # Positive control: the failure itself was logged and captured.
-    assert "falling back" in caplog.text
+    assert "multimodal transfer failed" in caplog.text
     assert _LOG_SENTINEL not in caplog.text
 
 
@@ -1713,7 +1863,7 @@ async def test_receive_refuses_pickle_extension_code_with_insecure_flag(
 
     The frame carries the pickle extension code with dummy bytes, not a pickle
     object. vLLM's own decoder would try to unpickle them when the variable is
-    set. The worker must refuse the code instead and take its fallback path.
+    set. The worker must refuse the code and fail closed instead.
     """
     import vllm.envs as envs
     from msgspec import msgpack
@@ -1737,19 +1887,19 @@ async def test_receive_refuses_pickle_extension_code_with_insecure_flag(
     )
 
     with caplog.at_level("DEBUG"):
-        result = await processor._receive_mm_kwargs(
-            {
-                "mm_hashes": ["0123456789abcdef"],
-                "mm_placeholders": [[1, 2]],
-                "expanded_token_ids": [10, 11, 12],
-            },
-            "shm",
-            receiver,
-            SimpleNamespace(modality="image", mm_hashes=[]),
-        )
+        with pytest.raises(mod.MultimodalTransferError):
+            await processor._receive_mm_kwargs(
+                {
+                    "mm_hashes": ["0123456789abcdef"],
+                    "mm_placeholders": [[1, 2]],
+                    "expanded_token_ids": [10, 11, 12],
+                },
+                "shm",
+                receiver,
+                SimpleNamespace(modality="image", mm_hashes=[]),
+            )
 
-    assert result is None
-    assert "falling back" in caplog.text
+    assert "multimodal transfer failed" in caplog.text
     # The logged cause is the refusal, not an attempt to unpickle the data.
     assert "Extension type code 1 is not supported" in caplog.text
 
