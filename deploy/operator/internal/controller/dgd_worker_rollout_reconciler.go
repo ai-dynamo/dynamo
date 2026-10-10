@@ -1046,13 +1046,19 @@ type oldWorkerReplicaPlan struct {
 	createdAt metav1.Time
 	spec      int32 // declared intent for this DCD
 	target    int32 // desired replica count for this DCD
+	served    int32 // available replicas that frontends serve
 }
 
+// allocateOldWorkerDCDReplicas splits oldTarget across old worker DCDs.
+// servedByDCD counts, by DCD name, the available replicas that frontends
+// serve; missing entries count as zero. Replicas no frontend serves are
+// retired first, so without serving information retirement is oldest first.
 func allocateOldWorkerDCDReplicas(
 	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 	oldTarget int32,
+	servedByDCD map[string]int32,
 ) map[string]int32 {
-	plans := buildOldWorkerReplicaPlans(dcds)
+	plans := buildOldWorkerReplicaPlans(dcds, servedByDCD)
 	var servingTarget int32
 	for i := range plans {
 		servingTarget += plans[i].target
@@ -1072,6 +1078,7 @@ func allocateOldWorkerDCDReplicas(
 // initializes DCD replicas to available replicas
 func buildOldWorkerReplicaPlans(
 	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
+	servedByDCD map[string]int32,
 ) []oldWorkerReplicaPlan {
 	plans := make([]oldWorkerReplicaPlan, 0, len(dcds))
 
@@ -1083,6 +1090,7 @@ func buildOldWorkerReplicaPlans(
 			createdAt: dcd.CreationTimestamp,
 			spec:      state.Spec,
 			target:    target,
+			served:    min(target, servedByDCD[dcd.Name]),
 		})
 	}
 
@@ -1096,6 +1104,14 @@ func removeAvailableReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasTo
 		}
 		return plans[i].createdAt.Time.Before(plans[j].createdAt.Time)
 	})
+
+	// Retire replicas that no frontend serves, such as the remaining roles of an
+	// incomplete generation, before replicas that still serve traffic.
+	for i := range plans {
+		removed := min(plans[i].target-plans[i].served, replicasToRemove)
+		plans[i].target -= removed
+		replicasToRemove -= removed
+	}
 
 	for i := range plans {
 		if replicasToRemove <= 0 {
@@ -1484,6 +1500,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		strategy := deploymentStrategyFromAnnotations(annotations)
 
 		var oldTarget, newTarget, maxSurge, maxUnavailable, minAvailable int32
+		var servedOld map[string]int32
 		switch strategy {
 		case common.DeploymentStrategyRecreate:
 			// Recreate deliberately permits the full component to be unavailable.
@@ -1502,12 +1519,29 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			maxSurge, maxUnavailable = resolveRollingUpdateParams(annotations, desired)
 			minAvailable = desired - maxUnavailable
 
-			newUnavailable := max(int32(0), newState.Spec-newState.Available)
+			// A replacement replica replaces old capacity only once every frontend serves it.
+			serving, gated, err := r.frontendServing(ctx, dgd, componentName)
+			if err != nil {
+				return dynamo.RollingUpdateContext{}, fmt.Errorf("check frontend serving for component %s: %w", componentName, err)
+			}
+			newAvailable := newState.Available
+			if gated {
+				servedOld = serving.byAnyFrontend
+				if served := serving.byEveryFrontend[newDCDName]; served < newAvailable {
+					logger.Info("Waiting for frontends to serve replacement workers before retiring old workers",
+						"component", componentName,
+						"availableReplacements", newAvailable,
+						"servedReplacements", served)
+					newAvailable = served
+				}
+			}
+
+			newUnavailable := max(int32(0), newState.Spec-newAvailable)
 			// maxScaledDown is the maximum number of old replicas that can be scaled down
 			maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
 			oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
 			// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
-			availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
+			availableSurplus := max(int32(0), (oldState.Available+newAvailable)-minAvailable)
 			oldTarget = max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
 
 			// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
@@ -1518,7 +1552,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		oldWorkerComponentReplicas[componentName] = oldTarget
 		newWorkerReplicas[componentName] = newTarget
 
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, oldTarget) {
+		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, oldTarget, servedOld) {
 			oldWorkerDCDReplicas[dcdName] = target
 		}
 
@@ -1541,7 +1575,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			continue
 		}
 		oldWorkerComponentReplicas[componentName] = 0
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, 0) {
+		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, 0, nil) {
 			oldWorkerDCDReplicas[dcdName] = target
 		}
 	}

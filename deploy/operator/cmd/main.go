@@ -75,6 +75,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/workermetadata"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
@@ -274,6 +275,7 @@ func main() {
 		setupLog.Error(err, "unable to configure Pod cache")
 		os.Exit(1)
 	}
+	workermetadata.Configure(&mgrOpts.Cache)
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

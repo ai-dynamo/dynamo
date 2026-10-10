@@ -76,3 +76,19 @@ Frontend readiness reflects its committed membership. The KV DC Relay evaluates
 discovery independently and can remain conservative while a frontend serves its
 incumbent. The shared readiness evaluator guarantees equal answers for equivalent
 input units, not for these different views of conflicting registrations.
+
+## Rollout Handoff
+
+After every controller step the frontend publishes its serving admissions: the
+committed members of each WorkerSet whose model and namespace form a complete
+serving topology under the shared readiness evaluator. `frontend_admission.rs`
+registers them as discovery event sources on the `frontend-model-admission`
+topic, one record per worker namespace plus a capability record. Under
+Kubernetes discovery they land in the frontend pod's DynamoWorkerMetadata, and
+the Dynamo operator retires a previous worker generation only after every ready
+frontend lists the replacement. A worker in an incomplete generation is never
+listed, so its Ready pods do not count as replacement capacity.
+
+The operator reads these records in `deploy/operator/internal/workermetadata`.
+Change the topic, record fields, or protocol version on both sides together,
+and keep records readable across the N-2 window.

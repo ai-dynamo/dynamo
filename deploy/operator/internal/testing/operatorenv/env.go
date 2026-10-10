@@ -21,6 +21,7 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/workermetadata"
 	snapshotcrds "github.com/ai-dynamo/snapshot/api/v1alpha1/crds"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -382,6 +383,7 @@ func (e *TestEnv) StartManager(setup func(ctrl.Manager) error) {
 	if err := podcache.Configure(&cacheOptions); err != nil {
 		e.tb.Fatalf("configure Pod cache: %v", err)
 	}
+	workermetadata.Configure(&cacheOptions)
 	mgr, err := ctrl.NewManager(e.rt.config, ctrl.Options{
 		Scheme:     e.rt.scheme,
 		Metrics:    metricsserver.Options{BindAddress: "0"},

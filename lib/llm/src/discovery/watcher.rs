@@ -63,9 +63,13 @@ use crate::{
 use super::readiness::normalize_legacy_prefill_topology;
 use super::{
     ModelManager,
-    controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
+    controller::{
+        ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController,
+        ServingAdmissions,
+    },
+    frontend_admission::run_admission_publisher,
 };
-use crate::namespace::{NamespaceFilter, NamespacePrefixMode};
+use crate::namespace::{GLOBAL_NAMESPACE, NamespaceFilter, NamespacePrefixMode};
 use tokio_util::sync::CancellationToken;
 
 /// Constructs a collision-free WorkerSet storage key from its exact endpoint,
@@ -192,6 +196,7 @@ pub struct ModelWatcher {
     model_update_tx: Option<Sender<ModelUpdate>>,
     model_update_dispatch:
         parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ModelUpdate>>>,
+    serving_admissions: tokio::sync::watch::Sender<ServingAdmissions>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     metrics: Arc<Metrics>,
@@ -310,6 +315,7 @@ impl ModelWatcher {
             notify_on_model: Notify::new(),
             model_update_tx: None,
             model_update_dispatch: parking_lot::Mutex::new(None),
+            serving_admissions: tokio::sync::watch::channel(ServingAdmissions::new()).0,
             chat_engine_factory,
             prefill_load_estimator,
             metrics,
@@ -390,10 +396,33 @@ impl ModelWatcher {
             })
         });
 
+        // Rollouts wait for every frontend to publish its admission of a replacement
+        // worker generation before retiring the previous one.
+        let frontend_namespace = match &namespace_filter {
+            NamespaceFilter::Exact(namespace) | NamespaceFilter::Prefix(namespace) => {
+                namespace.clone()
+            }
+            NamespaceFilter::Global => GLOBAL_NAMESPACE.to_string(),
+        };
+        let admission_cancellation = CancellationToken::new();
+        let mut admission_publisher = tokio::spawn(run_admission_publisher(
+            self.drt.discovery(),
+            frontend_namespace,
+            self.serving_admissions.subscribe(),
+            admission_cancellation.clone(),
+        ));
+
         ModelDiscoveryController::new(Arc::clone(&self))
             .run(discovery_stream, namespace_filter)
             .await;
 
+        admission_cancellation.cancel();
+        if tokio::time::timeout(Duration::from_secs(2), &mut admission_publisher)
+            .await
+            .is_err()
+        {
+            admission_publisher.abort();
+        }
         self.model_update_dispatch.lock().take();
         if let Some(mut dispatch_handle) = dispatch_handle
             && tokio::time::timeout(Duration::from_secs(1), &mut dispatch_handle)
@@ -1310,6 +1339,16 @@ impl ControllerHost for ModelWatcher {
 
     fn discard_prepared(&self, prepared: Self::Prepared) {
         drop(prepared);
+    }
+
+    fn publish_serving_admissions(&self, admissions: ServingAdmissions) {
+        self.serving_admissions.send_if_modified(|current| {
+            if *current == admissions {
+                return false;
+            }
+            *current = admissions;
+            true
+        });
     }
 
     async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {

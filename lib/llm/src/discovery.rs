@@ -24,6 +24,8 @@ pub use model_manager::{ModelManager, ModelManagerError, UNKNOWN_METRIC_MODEL};
 
 mod controller;
 
+mod frontend_admission;
+
 mod allocator;
 
 mod worker_set;

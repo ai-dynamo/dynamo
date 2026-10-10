@@ -3591,6 +3591,12 @@ mod tests {
     fn capture_events<T>(body: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
         use tracing_subscriber::layer::SubscriberExt;
 
+        // While one dispatcher is live, tracing-core caches a callsite's interest
+        // from whichever thread registers it first, so a parallel test that runs
+        // the same code without a subscriber can disable these callsites. A second
+        // live dispatcher makes registration consult every dispatcher.
+        let _registration_peer =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
         let out = tracing::subscriber::with_default(subscriber, body);
