@@ -261,8 +261,22 @@ manual `workflow_dispatch` with a tag specified.
    - Updates the "Latest" display-name to `"Latest (vX.Y.Z)"`
 9. Verifies the tagged file inventory, versioned navigation targets, and Fern
    configuration; missing shared Digest targets produce warnings
-10. Commits and pushes to `docs-website`
+10. Commits and pushes to `docs-website`, rebasing and retrying if a dev sync
+    pushed first
 11. Publishes to Fern via `fern generate --docs`
+
+If any step fails, the job opens a `Docs release snapshot failed for vX.Y.Z`
+issue, or comments on the open one, so a failed tag does not leave the site on
+the previous version unnoticed.
+
+**Pre-tag dry run:** The `Docs Release Dry Run` workflow runs daily. For every
+`release/X.Y.Z` branch with a commit in the last 30 days and no `vX.Y.Z` tag,
+it dispatches this job with `source_ref` set to the branch and `dry_run=true`.
+The job then builds and validates the snapshot against the live
+`docs-website` branch and stops before pushing. This catches breaks that come
+from `main` rather than the release branch, such as a shared Reference page
+moved after the branch was cut. A failure opens a
+`Docs release dry run failed for vX.Y.Z` issue.
 
 **Anti-recursion note:** Pushes made with `GITHUB_TOKEN` do not trigger other
 workflows (GitHub's built-in guard). This is why the publish step is inline in
@@ -577,6 +591,13 @@ config, and publishes.
 Go to **Actions → Fern Docs → Run workflow**:
 - Leave **tag** empty to trigger a dev sync.
 - Enter a tag (e.g., `v0.9.0`) to trigger a version release.
+- Enter a tag, set **source_ref** to its release branch, and check **dry_run**
+  to validate the snapshot before the tag exists:
+
+  ```bash
+  gh workflow run fern-docs.yml --ref main \
+    -f tag=v1.6.0 -f source_ref=release/1.6.0 -f dry_run=true
+  ```
 
 ### Debug a failed publish
 
@@ -587,3 +608,7 @@ Go to **Actions → Fern Docs → Run workflow**:
    - **Expired `FERN_TOKEN`:** Rotate the token in repo secrets.
    - **Duplicate version:** The tag was already released; check `docs-website`
      for existing `fern/pages-vX.Y.Z/` directory.
+   - **Missing shared page:** The tag's navigation points at a
+     `reference/general/` page that `main` has since moved or removed. Fix the
+     cause, then re-run the release with
+     `gh workflow run fern-docs.yml --ref main -f tag=vX.Y.Z`.
