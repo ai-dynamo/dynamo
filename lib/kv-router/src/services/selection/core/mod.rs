@@ -69,6 +69,7 @@ pub use operation::{
 
 use super::affinity::{
     AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
+    SessionAffinityMode,
 };
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
@@ -382,6 +383,19 @@ impl SelectionCore {
         if signal_indexer_ready {
             indexer_registry.signal_ready();
         }
+        // Hard affinity rejects a booking dispatched away from an eligible bound worker, so every
+        // policy, not only the default selector, must keep to that worker.
+        let worker_selection_policy_factory = match session_affinity {
+            Some(config) if config.mode == SessionAffinityMode::Hard => {
+                let policy = worker_selection_policy_factory;
+                let factory: WorkerSelectionPolicyFactory =
+                    Arc::new(move |config, worker_type, partition| {
+                        policy(config, worker_type, partition).with_exclusive_affinity(true)
+                    });
+                factory
+            }
+            _ => worker_selection_policy_factory,
+        };
         Self {
             catalog: WorkerCatalog::default(),
             catalog_updates: tokio::sync::Mutex::new(()),

@@ -403,7 +403,8 @@ pub struct ScheduleRequest {
     /// A session-affinity target resolved by the request host.
     ///
     /// The default selector treats an eligible target as exclusive. Custom policies receive the
-    /// target as advisory context and may select another eligible worker.
+    /// target as advisory context and may select another eligible worker, except under a selection
+    /// core with `Hard` session affinity, which makes every policy treat it as exclusive.
     pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,

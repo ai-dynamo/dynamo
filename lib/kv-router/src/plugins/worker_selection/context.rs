@@ -57,6 +57,8 @@ impl WorkerSelectionContext<'_> {
     ///
     /// The default selector treats an eligible target as exclusive. Custom policies receive it as
     /// advisory context; it may be absent from their candidate set when unavailable or filtered.
+    /// A selection core with `Hard` session affinity limits every policy's candidates to an
+    /// eligible target.
     pub fn affinity_target(&self) -> Option<WorkerAffinityTarget> {
         self.request.affinity_target
     }
