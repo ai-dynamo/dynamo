@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
+from _routed_engine_fakes import FakeRoutedItem
 from _thinking_parity import THINKING_PARITY_CASES
 from _tool_guidance_parity import (
     TOOL_GUIDANCE_PARITY_CASES,
@@ -1380,12 +1381,52 @@ async def test_generator_accepts_zero_top_logprobs(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_options,expected_logprobs,expected_prompt_logprobs",
+    [
+        ({}, None, None),
+        ({"logprobs": False, "top_logprobs": 0, "prompt_logprobs": None}, None, None),
+        ({"logprobs": True}, 0, None),
+        ({"logprobs": True, "top_logprobs": 1}, 1, None),
+        ({"logprobs": True, "top_logprobs": 0, "prompt_logprobs": 0}, 0, 0),
+        ({"logprobs": True, "top_logprobs": 1, "prompt_logprobs": 3}, 1, 3),
+        ({"prompt_logprobs": 0}, None, 0),
+        ({"stream": True}, None, None),
+        ({"stream": True, "prompt_logprobs": 0}, None, None),
+        ({"stream": True, "prompt_logprobs": 3}, None, None),
+        (
+            {
+                "stream": True,
+                "prompt_logprobs": 0,
+                "nvext": {"extra_fields": ["prompt_logprobs"]},
+            },
+            None,
+            0,
+        ),
+        (
+            {
+                "stream": True,
+                "prompt_logprobs": 3,
+                "nvext": {"extra_fields": ["prompt_logprobs"]},
+            },
+            None,
+            3,
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "generation_config", [{}, {"logprobs": 2, "prompt_logprobs": 2}]
+)
 async def test_generator_forwards_chat_logprobs_count(
     vllm_processor_module,
     monkeypatch,
+    request_options,
+    expected_logprobs,
+    expected_prompt_logprobs,
+    generation_config,
 ):
     class RequestForSampling(SimpleNamespace):
-        model_fields = frozenset()
+        model_fields = frozenset({"prompt_logprobs"})
 
     monkeypatch.setattr(
         vllm_processor_module,
@@ -1395,8 +1436,9 @@ async def test_generator_forwards_chat_logprobs_count(
                 request_for_sampling=RequestForSampling(
                     max_completion_tokens=None,
                     max_tokens=1,
-                    logprobs=True,
-                    top_logprobs=1,
+                    logprobs=request_options.get("logprobs"),
+                    top_logprobs=request_options.get("top_logprobs"),
+                    prompt_logprobs=request_options.get("prompt_logprobs"),
                     top_k=None,
                     min_p=None,
                     cache_salt=None,
@@ -1418,10 +1460,12 @@ async def test_generator_forwards_chat_logprobs_count(
     )
 
     def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        assert sampling_params.logprobs == expected_logprobs
+        assert sampling_params.prompt_logprobs == expected_prompt_logprobs
         return SimpleNamespace(sampling_params=sampling_params, mm_features=None)
 
     input_processor = SimpleNamespace(
-        generation_config_fields={},
+        generation_config_fields=generation_config,
         renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
         process_inputs=process_inputs,
         model_config=None,
@@ -1453,14 +1497,17 @@ async def test_generator_forwards_chat_logprobs_count(
             {
                 "model": "test",
                 "messages": [{"role": "user", "content": "Hello"}],
-                "logprobs": True,
-                "top_logprobs": 1,
+                **request_options,
             }
         )
     ]
 
     assert results == [{"captured": True}]
-    assert captured["dynamo_preproc"]["output_options"]["logprobs"] == 1
+    assert captured["dynamo_preproc"]["output_options"]["logprobs"] == expected_logprobs
+    assert (
+        captured["dynamo_preproc"]["output_options"]["prompt_logprobs"]
+        == expected_prompt_logprobs
+    )
 
 
 @pytest.mark.asyncio
@@ -1834,6 +1881,282 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 
 class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "request_options", [{}, {"logprobs": False, "top_logprobs": 0}]
+    )
+    async def test_unrequested_logprobs_skip_chunk_processing(
+        self, vllm_processor_module, monkeypatch, request_options
+    ):
+        def unexpected_logprob_work(*args, **kwargs):
+            raise AssertionError("unrequested logprobs must not be processed")
+
+        monkeypatch.setattr(
+            vllm_processor_module, "_append_worker_logprobs", unexpected_logprob_work
+        )
+        monkeypatch.setattr(
+            vllm_processor_module, "_apply_choice_logprobs", unexpected_logprob_work
+        )
+        processor = _make_processor(
+            vllm_processor_module,
+            _FakeRoutedEngine(
+                [
+                    {
+                        "token_ids": [101],
+                        "log_probs": [-0.25],
+                        "top_logprobs": [[{"token_id": 101, "logprob": -0.25}]],
+                        "engine_data": {"prompt_logprobs": "unrequested"},
+                    }
+                ]
+            ),
+        )
+        preproc = _base_preproc()
+        chunks = [
+            item["data"]
+            async for item in processor._generate_and_stream(
+                "request-id",
+                {"model": MODEL, **request_options},
+                preproc,
+                preproc["token_ids"],
+                SimpleNamespace(
+                    sampling_params=SimpleNamespace(n=1),
+                    request_id="vllm-request",
+                    external_req_id=None,
+                ),
+                {0: _FakePostProcessor()},
+            )
+            if "data" in item
+        ]
+
+        assert len(chunks) == 1
+        assert chunks[0]["choices"][0]["logprobs"] is None
+        assert "prompt_logprobs" not in chunks[0]
+        assert not processor.output_processor.request_states
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "texts,backend_end",
+        [
+            pytest.param(texts, backend_end, id=f"{case_name}-{backend_end}")
+            for case_name, texts in [
+                ("single", ("hello STOP",)),
+                ("one-stop", ("hello STOP", "world")),
+                ("both-stop", ("hello STOP", "world STOP")),
+            ]
+            for backend_end in [
+                "metadata",
+                "empty",
+                "eof",
+                "error",
+                "error-finish",
+                "abort",
+            ]
+        ]
+        + [
+            pytest.param(("hello STOP",), "close", id="single-close"),
+            pytest.param(("hello STOP", "world"), "close", id="one-stop-close"),
+        ],
+    )
+    async def test_local_stop_preserves_late_backend_outcome(
+        self, tokenizer, texts, backend_end
+    ):
+        import dynamo.frontend.vllm_processor as module
+
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+            "prompt_logprobs": 0,
+            "nvext": {"extra_fields": ["prompt_logprobs"]},
+        }
+        sampling_params = SamplingParams(
+            n=len(texts),
+            max_tokens=16,
+            stop=["STOP"],
+            output_kind=module.RequestOutputKind.DELTA,
+        )
+        tokens = tokenizer.encode("Hello", add_special_tokens=False)
+        vllm_preproc = module.EngineCoreRequest(
+            request_id="internal",
+            external_req_id="external",
+            prompt_token_ids=tokens,
+            mm_features=None,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            arrival_time=0.0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        )
+        posts = {
+            index: StreamingPostProcessor(
+                tokenizer=tokenizer,
+                request_for_sampling=prepost_module.ChatCompletionRequest.model_validate(
+                    request
+                ),
+                sampling_params=sampling_params,
+                prompt_token_ids=tokens,
+                tool_parser=None,
+                reasoning_parser_class=None,
+                chat_template_kwargs={},
+            )
+            for index in range(len(texts))
+        }
+        payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
+        frames = [
+            {
+                "index": index,
+                "token_ids": tokenizer.encode(text, add_special_tokens=False),
+            }
+            for index, text in enumerate(texts)
+        ]
+        output_tokens = sum(len(frame["token_ids"]) for frame in frames)
+        frames.append(
+            {"token_ids": tokenizer.encode(" hidden", add_special_tokens=False)}
+        )
+        if backend_end == "error":
+            frames.append(
+                FakeRoutedItem(None, is_error=True, comments=["backend disconnected"])
+            )
+        elif backend_end != "eof":
+            terminal = {"token_ids": [], "finish_reason": "length"}
+            if backend_end == "metadata":
+                terminal["engine_data"] = {"prompt_logprobs": payload}
+            elif backend_end == "error-finish":
+                terminal["finish_reason"] = "error: backend disconnected"
+            elif backend_end == "abort":
+                terminal["finish_reason"] = "cancelled"
+            frames.append(terminal)
+        if len(texts) == 2:
+            frames.append({"index": 1, "token_ids": [], "finish_reason": "length"})
+        engine = _FakeRoutedEngine(frames)
+        processor = _make_processor(module, engine)
+        processor.output_processor = module.OutputProcessor(tokenizer, log_stats=False)
+        response_stream = processor._generate_and_stream(
+            "external", request, _base_preproc(), tokens, vllm_preproc, posts
+        )
+
+        first = await anext(response_stream)
+        assert first["event"] == "llm_metrics"
+        assert json.loads(first["comment"][0])["output_tokens"] == len(
+            frames[0]["token_ids"]
+        )
+        assert engine.yielded == 1
+        assert len(processor.output_processor.request_states) == len(texts) - 1
+        if backend_end == "close":
+            await response_stream.aclose()
+            assert engine.yielded == 1
+            assert not processor.output_processor.request_states
+            return
+
+        envelopes = [first] + [item async for item in response_stream]
+        assert not processor.output_processor.request_states
+        chunks = [item["data"] for item in envelopes if "data" in item]
+        choices = [choice for chunk in chunks for choice in chunk["choices"]]
+        if backend_end in {"error", "error-finish", "abort"}:
+            assert envelopes[-1]["event"] == "error"
+            assert not any(c["finish_reason"] for c in choices)
+            return
+        assert engine.yielded == len(frames)
+        for index, text in enumerate(texts):
+            output = [choice for choice in choices if choice["index"] == index]
+            assert "".join(
+                c["delta"].get("content", "") for c in output
+            ) == text.replace("STOP", "")
+            assert [c["finish_reason"] for c in output if c["finish_reason"]] == [
+                "stop" if "STOP" in text else "length"
+            ]
+        assert all("prompt_logprobs" not in chunk for chunk in chunks)
+        metadata = [
+            chunk["nvext"]["prompt_logprobs"] for chunk in chunks if "nvext" in chunk
+        ]
+        assert metadata == ([payload] if backend_end == "metadata" else [])
+        metrics = [
+            item["data"]["llm_metrics"]
+            if "data" in item
+            else json.loads(item["comment"][0])
+            for item in envelopes
+            if "llm_metrics" in item.get("data", {})
+            or item.get("event") == "llm_metrics"
+        ]
+        assert sum(metric["chunk_tokens"] for metric in metrics) == output_tokens
+        assert [metric["output_tokens"] for metric in metrics] == sorted(
+            metric["output_tokens"] for metric in metrics
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("count", [None, 0])
+    @pytest.mark.parametrize("include_nvext", [False, True])
+    async def test_prompt_logprobs_survive_buffered_output(
+        self, vllm_processor_module, count, include_nvext
+    ):
+        payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
+        processor = _make_processor(
+            vllm_processor_module,
+            _FakeRoutedEngine(
+                [
+                    {
+                        "token_ids": [101],
+                        "engine_data": {"prompt_logprobs": payload},
+                    },
+                    {"token_ids": [], "finish_reason": "stop"},
+                ]
+            ),
+        )
+
+        class OutputProcessor(_FakeOutputProcessor):
+            def process_outputs(self, outputs):
+                choice = SimpleNamespace(
+                    index=0,
+                    finish_reason=(
+                        "stop" if outputs[0].finish_reason is not None else None
+                    ),
+                )
+                return SimpleNamespace(
+                    reqs_to_abort=[],
+                    request_outputs=[SimpleNamespace(outputs=[choice])],
+                )
+
+        class BufferedPostProcessor(_FakePostProcessor):
+            def process_output(self, output):
+                if output.finish_reason is None:
+                    return None
+                choice = super().process_output(output)
+                choice["finish_reason"] = output.finish_reason
+                return choice
+
+        processor.output_processor = OutputProcessor()
+        request = {"model": MODEL}
+        if count is not None:
+            request["prompt_logprobs"] = count
+        if include_nvext:
+            request["nvext"] = {"extra_fields": ["prompt_logprobs"]}
+        preproc = _base_preproc()
+        chunks = [
+            item["data"]
+            async for item in processor._generate_and_stream(
+                "prompt-logprobs",
+                request,
+                preproc,
+                preproc["token_ids"],
+                SimpleNamespace(
+                    sampling_params=SimpleNamespace(n=1),
+                    request_id="vllm-prompt-logprobs",
+                ),
+                {0: BufferedPostProcessor()},
+            )
+            if "data" in item
+        ]
+
+        assert len(chunks) == 1
+        assert chunks[0].get("prompt_logprobs") == (
+            payload if count is not None else None
+        )
+        assert chunks[0].get("nvext", {}).get("prompt_logprobs") == (
+            payload if include_nvext else None
+        )
+        assert "prompt_logprobs" not in chunks[0]["choices"][0]
+
     @pytest.mark.asyncio
     async def test_backend_rejection_keeps_the_backend_status(
         self, vllm_processor_module
