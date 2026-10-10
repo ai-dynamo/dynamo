@@ -425,8 +425,7 @@ impl WorkerSet {
                 .get(crate::preprocessor::DEFAULT_THINKING_MODE_RUNTIME_KEY)
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
-            structural_tag_mode: self.card.runtime_config.structural_tag_mode,
-            structural_tag_scope: self.card.runtime_config.structural_tag_scope,
+            structural_tag: self.card.runtime_config.structural_tag.clone(),
             exclude_tools_when_tool_choice_none: self
                 .card
                 .runtime_config

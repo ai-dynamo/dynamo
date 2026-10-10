@@ -246,7 +246,6 @@ func (p *groveProgram) Reconcile(
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
 	}
-
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil
 }

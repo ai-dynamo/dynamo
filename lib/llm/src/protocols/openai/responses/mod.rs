@@ -839,6 +839,10 @@ fn convert_tools_and_choice(
         .map(|tools| convert_tools(tools, names))
         .transpose()?
         .unwrap_or_default();
+    for tool in &converted_tools {
+        super::strict_schema::validate_strict_function(&tool.function)
+            .map_err(|error| ResponsesConversionError::InvalidArgument(error.to_string()))?;
+    }
 
     let converted_choice = match tool_choice {
         Some(ToolChoiceParam::AllowedTools(choice)) => {
@@ -2945,7 +2949,8 @@ mod tests {
                         "properties": {
                             "location": {"type": "string"}
                         },
-                        "required": ["location"]
+                        "required": ["location"],
+                        "additionalProperties": false
                     },
                     "strict": true
                 },
@@ -3006,6 +3011,62 @@ mod tests {
             names.decode(&tools[1].function.name),
             (Some("billing"), "lookup")
         );
+    }
+
+    #[test]
+    fn test_strict_schema_errors_are_invalid_arguments_before_filtering() {
+        let tools: Vec<Tool> = serde_json::from_value(serde_json::json!([
+            {"type": "function", "name": "retained"},
+            {"type": "function", "name": "excluded", "strict": true, "parameters": {"type": "object"}}
+        ])).unwrap();
+        let choice = serde_json::from_value(serde_json::json!({
+            "type": "allowed_tools", "mode": "auto",
+            "tools": [{"type": "function", "name": "retained"}]
+        }))
+        .unwrap();
+        let names = ToolNameMap::new(&tools, None);
+        let error = convert_tools_and_choice(Some(&tools), Some(&choice), &names).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ResponsesConversionError>(),
+            Some(ResponsesConversionError::InvalidArgument(_))
+        ));
+        assert_eq!(
+            error.to_string(),
+            "Invalid schema for function 'excluded': In context=#, object schemas require additionalProperties: false"
+        );
+    }
+
+    #[test]
+    fn test_excluded_non_strict_tools_keep_existing_validation_behavior() {
+        let choice = serde_json::from_value(serde_json::json!({
+            "type": "allowed_tools", "mode": "auto",
+            "tools": [{"type": "function", "name": "retained"}]
+        }))
+        .unwrap();
+        for strict in [None, Some(false)] {
+            let mut tools = vec![
+                serde_json::from_value::<Tool>(serde_json::json!({
+                    "type": "function", "name": "retained"
+                }))
+                .unwrap(),
+            ];
+            for i in 0..=super::super::validate::MAX_TOOLS {
+                tools.push(
+                    serde_json::from_value(serde_json::json!({
+                        "type": "function", "name": format!("invalid name {i} {}", "x".repeat(129)),
+                        "parameters": 42, "strict": strict
+                    }))
+                    .unwrap(),
+                );
+            }
+            let names = ToolNameMap::new(&tools, None);
+            let (converted, _) =
+                convert_tools_and_choice(Some(&tools), Some(&choice), &names).unwrap();
+            let converted = converted.unwrap();
+            assert_eq!(converted.len(), 1);
+            assert_eq!(converted[0].function.name, "retained");
+            super::super::validate::validate_tools(&Some(&converted)).unwrap();
+        }
     }
 
     /// A bare named choice selects the top-level tool despite a namespaced name collision.
