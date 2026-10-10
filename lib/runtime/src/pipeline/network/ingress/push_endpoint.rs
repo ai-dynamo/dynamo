@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
 use crate::SystemHealth;
-use crate::config::HealthStatus;
 use crate::logging::make_handle_payload_span;
 use crate::protocols::LeaseId;
 use anyhow::Result;
@@ -52,7 +51,7 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .set_endpoint_registered(endpoint_name_local.as_str());
+            .register_endpoint_transport(endpoint_name_local.as_str());
 
         loop {
             let req = tokio::select! {
@@ -148,7 +147,7 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::NotReady);
+            .unregister_endpoint_transport(endpoint_name_local.as_str());
 
         // await for all inflight requests to complete if graceful shutdown
         if self.graceful_shutdown {
