@@ -800,7 +800,12 @@ mod tests {
 
         assert_eq!(seq_manager.prefill.prefill_full_tokens_sum, 80);
         assert_eq!(
-            seq_manager.prefill.prefill_order,
+            seq_manager
+                .prefill
+                .prefill_order
+                .iter()
+                .cloned()
+                .collect::<VecDeque<_>>(),
             VecDeque::from(vec!["r1".to_string(), "r2".to_string()])
         );
 
@@ -808,7 +813,12 @@ mod tests {
         seq_manager.mark_prefill_completed(&"r1".to_string(), decay_now);
         assert_eq!(seq_manager.prefill.prefill_full_tokens_sum, 30);
         assert_eq!(
-            seq_manager.prefill.prefill_order,
+            seq_manager
+                .prefill
+                .prefill_order
+                .iter()
+                .cloned()
+                .collect::<VecDeque<_>>(),
             VecDeque::from(vec!["r2".to_string()])
         );
 
@@ -816,7 +826,12 @@ mod tests {
         seq_manager.free(&"r1".to_string(), decay_now);
         assert_eq!(seq_manager.prefill.prefill_full_tokens_sum, 30);
         assert_eq!(
-            seq_manager.prefill.prefill_order,
+            seq_manager
+                .prefill
+                .prefill_order
+                .iter()
+                .cloned()
+                .collect::<VecDeque<_>>(),
             VecDeque::from(vec!["r2".to_string()])
         );
 
