@@ -207,7 +207,7 @@ async def worker(argv: list[str] | None = None) -> None:
     if needs_local_model_path(config.model):
         config.engine_args.model = await fetch_model(config.model)
     elif not embedding_process_child and should_prefetch_model(config):
-        await fetch_model(config.model)
+        await fetch_model(config.model, revision=config.engine_args.revision)
 
     # Snapshot mode: load engine before runtime creation so there are no
     # runtime connections when CRIU captures GPU state.
@@ -964,6 +964,7 @@ async def register_vllm_model(
         # prefill and decode tiers differently.
         router_config=build_router_config(config.router_advertisement),
         ignore_weights=should_register_model_ignore_weights(config),
+        revision=vllm_config.model_config.revision,
         model_aliases=config.served_model_aliases or None,
         # Advertise LoRA capacity on the BASE card so the frontend can place the first
         # adapter onto an idle worker. Decode, aggregated, and prefill workers all serve

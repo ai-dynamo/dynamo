@@ -712,7 +712,9 @@ async def parse_args(args: list[str]) -> Config:
     # sglang cannot resolve `ngc://` names, so those use the local path instead;
     # every worker needs that path (ideally via a shared folder).
     if should_fetch_model(parsed_args, model_path):
-        local_path = await fetch_model(model_path)
+        local_path = await fetch_model(
+            model_path, revision=getattr(parsed_args, "revision", None)
+        )
         if needs_local_model_path(model_path):
             dynamo_config.model_source_uri = model_path
             parsed_args.model_path = model_path = local_path

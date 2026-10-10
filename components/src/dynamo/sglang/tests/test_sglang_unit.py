@@ -1707,7 +1707,7 @@ async def test_parse_args_resolves_ngc_before_server_args(
     config = await parse_args(argv)
 
     # A full download supplies the plugin's native fallback as well as config.
-    fetch.assert_awaited_once_with(model_uri)
+    fetch.assert_awaited_once_with(model_uri, revision=None)
     assert config.server_args.model_path == local_path
     assert config.dynamo_args.model_source_uri == model_uri
     assert config.server_args.served_model_name == "my-model"
