@@ -111,11 +111,12 @@ pub(super) struct FindStepInput<'a, S: HashSequence> {
     pub(super) kv_transfer_chain: Option<&'a mut Vec<ExternalSequenceBlockHash>>,
 }
 
-pub(super) struct FindStepOutcome {
+pub(super) struct FindStepOutcome<'g> {
     pub(super) edge_len: usize,
     pub(super) edge_match_len: usize,
     pub(super) active_count: usize,
-    pub(super) next_child: Option<SharedNode>,
+    /// Borrowed under the walk's epoch guard.
+    pub(super) next_child: Option<&'g Node>,
     pub(super) prev_edge_last_hash: Option<ExternalSequenceBlockHash>,
 }
 

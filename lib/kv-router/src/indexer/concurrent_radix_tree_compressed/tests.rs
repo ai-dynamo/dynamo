@@ -10,6 +10,7 @@ use crate::test_utils::{
 };
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::{Duration, Instant};
 
 type DirectLookup = FxHashMap<WorkerWithDpRank, WorkerLookup>;
 
@@ -1478,4 +1479,35 @@ fn successful_repair_does_not_restore_scrubbed_other_worker_entries() {
             "repair for another worker restored a scrubbed lookup entry"
         );
     }
+}
+
+#[test]
+fn drop_frees_the_tree_without_waiting_for_the_epoch() {
+    let index = ConcurrentRadixTreeCompressed::new();
+    let mut lookup = direct_lookup();
+    apply_direct(&index, &mut lookup, make_store_event(1, &[1, 2, 3]));
+    apply_direct(&index, &mut lookup, make_store_event(2, &[1, 2, 9]));
+    drop(lookup);
+
+    let leaf = index
+        .root
+        .child_snapshot(LocalBlockHash(1))
+        .and_then(|prefix| prefix.child_snapshot(LocalBlockHash(3)))
+        .expect("the split moves [3] under [1, 2]");
+    // Wait out snapshots retired while building, so only the parent map and `leaf` hold it.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Arc::strong_count(&leaf) != 2 {
+        assert!(Instant::now() < deadline, "retired snapshots never expired");
+        children::NodeChildren::flush_retired();
+        children::NodeChildren::drain_graveyard(usize::MAX);
+        thread::yield_now();
+    }
+    let weak = Arc::downgrade(&leaf);
+    drop(leaf);
+
+    drop(index);
+    assert!(
+        weak.upgrade().is_none(),
+        "the drop left a node to the epoch"
+    );
 }

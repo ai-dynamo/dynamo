@@ -3,6 +3,8 @@
 
 use super::*;
 
+use super::children::NodeChildren;
+
 impl ConcurrentRadixTreeCompressed {
     #[cfg(test)]
     pub(crate) fn run_cleanup_for_test(&self) {
@@ -10,9 +12,13 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     pub(super) fn sweep_stale_children(&self) {
+        // Free expired retired snapshots first so their child `Arc`s are gone.
+        NodeChildren::drain_graveyard(usize::MAX);
         let mut queue = VecDeque::from([self.root.clone()]);
         let mut edges = Vec::new();
 
+        let mut guard = crossbeam_epoch::pin();
+        let mut visited = 0usize;
         while let Some(parent) = queue.pop_front() {
             let children = parent.child_edges_snapshot();
             for (key, child) in children {
@@ -23,7 +29,13 @@ impl ConcurrentRadixTreeCompressed {
                     child: Arc::downgrade(&child),
                 });
             }
+            // Let the epoch advance during long walks; child loads above nest in `guard`.
+            visited += 1;
+            if visited.is_multiple_of(64) {
+                guard.repin();
+            }
         }
+        drop(guard);
 
         for edge in edges.into_iter().rev() {
             let Some(parent) = edge.parent.upgrade() else {

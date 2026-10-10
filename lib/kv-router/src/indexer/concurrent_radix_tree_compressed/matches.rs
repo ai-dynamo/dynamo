@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crossbeam_epoch::Guard;
+
+use super::children::LookupPin;
 use super::*;
 
 impl ConcurrentRadixTreeCompressed {
@@ -25,24 +28,27 @@ impl ConcurrentRadixTreeCompressed {
         early_exit: bool,
         retain_kv_transfer_chain: bool,
     ) -> MatchDetails {
+        let guard = LookupPin::new();
         let next_child = sequence
             .first()
-            .and_then(|&local_hash| self.root.child_snapshot(local_hash));
+            .and_then(|&local_hash| self.root.child_ref(local_hash, &guard));
         self.find_details_from_seq(
             next_child,
             SliceHashSequence(sequence),
             early_exit,
             retain_kv_transfer_chain,
+            &guard,
         )
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
-    pub(super) fn find_details_from_seq<S: HashSequence>(
+    pub(super) fn find_details_from_seq<'g, S: HashSequence>(
         &self,
-        next_child: Option<SharedNode>,
+        next_child: Option<&'g Node>,
         sequence: S,
         early_exit: bool,
         retain_kv_transfer_chain: bool,
+        guard: &'g Guard,
     ) -> MatchDetails {
         let mut details = MatchDetails::new();
         if sequence.len() == 0 {
@@ -64,6 +70,7 @@ impl ConcurrentRadixTreeCompressed {
                 scores,
                 Some(last_matched_hashes),
                 kv_transfer_chain.as_mut(),
+                guard,
             )
         };
 
@@ -74,9 +81,12 @@ impl ConcurrentRadixTreeCompressed {
         details
     }
 
+    /// Walks from `next_child` borrowing each node under `guard` rather than cloning its
+    /// `Arc`, so the walk touches no shared reference counts. The caller pins once for the
+    /// whole walk and keeps the first node alive for `'g`.
     #[cfg_attr(feature = "profile", inline(never))]
-    fn walk_match_path<S: HashSequence>(
-        mut next_child: Option<SharedNode>,
+    fn walk_match_path<'g, S: HashSequence>(
+        mut next_child: Option<&'g Node>,
         sequence: &S,
         early_exit: bool,
         scores: &mut OverlapScores,
@@ -84,6 +94,7 @@ impl ConcurrentRadixTreeCompressed {
             &mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
         >,
         mut kv_transfer_chain: Option<&mut Vec<ExternalSequenceBlockHash>>,
+        guard: &'g Guard,
     ) -> MatchWalkResult {
         let mut active: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
         let mut active_count: usize = 0;
@@ -104,18 +115,21 @@ impl ConcurrentRadixTreeCompressed {
                 None => break,
             };
 
-            let outcome = child.find_match_step(FindStepInput {
-                sequence,
-                seq_pos,
-                first_node,
-                prev_depth: matched_depth,
-                prev_edge_last_hash,
-                active: &mut active,
-                active_count,
-                scores,
-                last_matched_hashes: last_matched_hashes.as_deref_mut(),
-                kv_transfer_chain: kv_transfer_chain.as_deref_mut(),
-            });
+            let outcome = child.find_match_step(
+                FindStepInput {
+                    sequence,
+                    seq_pos,
+                    first_node,
+                    prev_depth: matched_depth,
+                    prev_edge_last_hash,
+                    active: &mut active,
+                    active_count,
+                    scores,
+                    last_matched_hashes: last_matched_hashes.as_deref_mut(),
+                    kv_transfer_chain: kv_transfer_chain.as_deref_mut(),
+                },
+                guard,
+            );
             let edge_len = outcome.edge_len;
             let edge_match_len = outcome.edge_match_len;
             active_count = outcome.active_count;
@@ -176,12 +190,20 @@ impl ConcurrentRadixTreeCompressed {
             return scores;
         }
 
+        let guard = LookupPin::new();
         let next_child = sequence
             .first()
-            .and_then(|&local_hash| self.root.child_snapshot(local_hash));
+            .and_then(|&local_hash| self.root.child_ref(local_hash, &guard));
         let sequence = SliceHashSequence(sequence);
-        let walk_result =
-            Self::walk_match_path(next_child, &sequence, early_exit, &mut scores, None, None);
+        let walk_result = Self::walk_match_path(
+            next_child,
+            &sequence,
+            early_exit,
+            &mut scores,
+            None,
+            None,
+            &guard,
+        );
         Self::record_surviving_scores(&mut scores, &walk_result);
         scores
     }
