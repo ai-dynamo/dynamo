@@ -29,6 +29,8 @@ A single frontend can discover worker generations from multiple supported releas
 
 This guarantee covers the frontend-to-worker discovery metadata and wire protocols owned by Dynamo. It does not establish a compatibility window for direct worker-to-worker protocols, such as prefill-to-decode communication.
 
+For Dynamo 1.5.0 SGLang embedding workers, the Operator supplies an embedding-shaped health-check payload when `--embedding-worker` or a literal `DYN_SGL_EMBEDDING_WORKER` value enables embedding mode. If embedding mode is set through Kubernetes `valueFrom` or `envFrom`, set `DYN_HEALTH_CHECK_PAYLOAD` explicitly before upgrading to an Operator that enables active health checks. Use a JSON payload with the worker's model name and a text input, for example `{"model":"your-model","input":"Test"}`. The Operator also leaves `envFrom` payload sources untouched; if an `envFrom` source might supply `DYN_HEALTH_CHECK_PAYLOAD`, it does not inject a default that could override that source.
+
 ### Rolling Update Behavior
 
 In Kubernetes deployments, worker spec changes during a rolling update create generation-specific Dynamo runtime namespaces (service-discovery scopes, not Kubernetes namespaces). The frontend watches the deployment's base runtime namespace prefix, so it can discover overlapping generations without allowing direct worker-to-worker communication across those generations. In a disaggregated deployment, prefill and decode workers in the same generation share one runtime namespace and remain isolated from other generations.
