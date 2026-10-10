@@ -350,6 +350,12 @@ impl DistributedRuntime {
                 distributed_runtime.get_metrics_registry(),
             );
         }
+        if response_plane == ResponsePlaneMode::Velo {
+            distributed_runtime.velo_response_service().await?;
+            crate::pipeline::network::velo_response::register_metrics(
+                distributed_runtime.get_metrics_registry(),
+            );
+        }
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -597,6 +603,12 @@ impl DistributedRuntime {
             })
             .await?
             .clone())
+    }
+
+    pub async fn velo_response_service(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::velo_response::VeloResponseService>> {
+        self.runtime.velo_response_service().service().await
     }
 
     pub async fn quic_response_server(
@@ -852,6 +864,52 @@ impl DistributedRuntime {
 #[cfg(test)]
 mod parser_env_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn distributed_runtime_validates_velo_at_startup() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::distributed_runtime_validates_velo_at_startup"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let mut cases = vec![
+            ("invalid", "127.0.0.1", None, "DYN_VELO_RESPONSE_TRANSPORT"),
+            (
+                "tcp",
+                "127.0.0.1",
+                Some("invalid"),
+                "DYN_VELO_RESPONSE_BATCH_MS",
+            ),
+            ("tcp", "invalid host", None, "invalid host"),
+            ("tcp", "192.0.2.1", None, "Failed to pre-bind TCP listener"), // Valid address, but not assigned to this host.
+        ];
+        if !cfg!(all(target_os = "linux", feature = "velo-ucx")) {
+            cases.push(("ucx", "127.0.0.1", None, "velo-ucx"));
+        }
+        for (transport, host, batch_ms, message) in cases {
+            temp_env::async_with_vars(
+                [
+                    ("DYN_VELO_RESPONSE_TRANSPORT", Some(transport)),
+                    ("DYN_VELO_RESPONSE_BATCH_MS", batch_ms),
+                    ("DYN_TCP_RESPONSE_STREAM_HOST", Some(host)),
+                ],
+                async {
+                    let runtime = Runtime::from_current().unwrap();
+                    let mut config = DistributedConfig::process_local();
+                    config.response_plane = Some(ResponsePlaneMode::Velo);
+                    let error = DistributedRuntime::new(runtime, config)
+                        .await
+                        .expect_err("Velo configuration must fail before serving endpoints");
+                    assert!(error.to_string().contains(message), "{error:#}");
+                },
+            )
+            .await;
+        }
+    }
 
     #[tokio::test]
     async fn distributed_runtime_rejects_invalid_parser_version() {
