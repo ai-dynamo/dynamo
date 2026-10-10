@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from contextlib import ExitStack
 
 import requests
+from gpu_memory_service.common.utils import is_truthy_env
 
 from tests.gpu_memory_service.common.gms import GMSServer
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DefaultPort
@@ -57,6 +58,19 @@ def _tp_visible_devices() -> str:
             )
         return ",".join(devices[:size])
     return ",".join(map(str, range(size)))
+
+
+def _sglang_cuda_graph_args() -> list[str]:
+    """Match production graph policy when the explicit GPU gate is enabled."""
+    args = ["--disable-piecewise-cuda-graph"]
+    if not is_truthy_env("GMS_TEST_ENABLE_CUDA_GRAPHS"):
+        args.append("--disable-cuda-graph")
+    return args
+
+
+def _vllm_cuda_graph_args() -> list[str]:
+    """Enable vLLM graphs only for the explicit production-mode GPU gate."""
+    return [] if is_truthy_env("GMS_TEST_ENABLE_CUDA_GRAPHS") else ["--enforce-eager"]
 
 
 class GMSProcessManager:
@@ -187,6 +201,7 @@ class GMSProcessManager:
         engine_id: str,
         *,
         read_only_weights: bool | None = None,
+        directory_standby: bool = False,
     ):
         if self._stack is None or self.frontend_port is None:
             raise RuntimeError(
@@ -207,6 +222,11 @@ class GMSProcessManager:
         assert engine.env is not None
         engine.env.update(self._directory_env)
         engine.env["ENGINE_ID"] = engine_id
+        if directory_standby:
+            engine.env["GMS_KV_DIRECTORY_STANDBY"] = "1"
+            engine.env["GMS_VLLM_HYDRATE_HBM"] = os.environ.get(
+                "GMS_VLLM_HYDRATE_HBM", "1"
+            )
         self._engine_ids.add(engine_id)
         return engine
 
@@ -216,12 +236,17 @@ class GMSProcessManager:
         *,
         read_only_weights: bool | None = None,
         wait_until_ready: bool = True,
+        directory_standby: bool = False,
     ):
         if self._stack is None:
             raise RuntimeError(
                 "GMSProcessManager must be entered before starting engines"
             )
-        engine = self.create_engine(engine_id, read_only_weights=read_only_weights)
+        engine = self.create_engine(
+            engine_id,
+            read_only_weights=read_only_weights,
+            directory_standby=directory_standby,
+        )
         health_checks = engine.health_check_urls
         if not wait_until_ready:
             engine.health_check_urls = []
@@ -409,7 +434,7 @@ class VLLMWithGMSProcess(GMSEngineProcess):
             FAULT_TOLERANCE_MODEL_NAME,
             "--load-format",
             "gms",
-            "--enforce-eager",
+            *_vllm_cuda_graph_args(),
             "--enable-sleep-mode",
             "--max-num-seqs",
             "1",
@@ -555,8 +580,7 @@ class SGLangWithGMSProcess(GMSEngineProcess):
             "--load-format",
             "gms",
             "--enable-memory-saver",
-            "--disable-cuda-graph",
-            "--disable-piecewise-cuda-graph",
+            *_sglang_cuda_graph_args(),
             "--mem-fraction-static",
             os.environ.get("SGLANG_GMS_MEM_FRACTION_STATIC", "0.8"),
             "--tp-size",

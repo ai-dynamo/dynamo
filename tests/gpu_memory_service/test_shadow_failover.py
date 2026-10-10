@@ -130,6 +130,7 @@ def _start_primary(
     kv_cache_gms,
     *,
     weights_hash: str,
+    cleared_layouts: int = 2,
 ):
     primary = manager.start_engine("primary", read_only_weights=True)
     assert_completion_ok(
@@ -147,7 +148,7 @@ def _start_primary(
     )
     assert_kv_history(
         kv_cache_gms.get_event_history().events,
-        cleared_layouts=2,
+        cleared_layouts=cleared_layouts,
         suffix=["rw_connected"],
     )
     return primary, weights_with_primary
@@ -185,39 +186,30 @@ def _resume_shadow_after_primary_failover(
     shadow: ManagedProcess,
     kv_cache_gms,
     primary: ManagedProcess,
+    after_primary_kill=None,
 ):
+    # Pre-activation failover model: the shadow begins taking over as soon as a
+    # crash is detected, and may go live BEFORE the primary fully dies. Primary
+    # and shadow coexist on the shared GMS-owned KV pool; per KV segment only one
+    # engine holds the RW lock, so the shadow writes the segments the primary has
+    # released and acquires the remainder once the primary is gone. The handoff
+    # therefore must NOT be required to block on a single whole-pool RW lock.
     resume_timeout_s = 300
-    expected_kv_kinds_while_blocked = [
-        "rw_connected",
-        "rw_aborted",
-        "allocations_cleared",
-    ] * 3 + ["rw_connected", "allocation_oom"]
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         resume_future = executor.submit(shadow.resume, resume_timeout_s)
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            if resume_future.done():
-                break
-            time.sleep(0.2)
-        assert not resume_future.done(), (
-            "Shadow resume completed before the primary died; "
-            "KV cache RW handoff did not block as expected"
-        )
 
+        # KV must remain RW-owned throughout the overlap window (never EMPTY):
+        # the persistent pool survives the crash and is continuously claimed.
         kv_with_primary = kv_cache_gms.get_runtime_state()
         assert kv_with_primary.state == ServerState.RW
         assert kv_with_primary.allocation_count > 0
 
         _kill_process_group(primary)
+        if after_primary_kill is not None:
+            after_primary_kill()
 
-        _wait_for_blocked_resume_layout(
-            kv_cache_gms,
-            resume_future,
-            kv_with_primary.allocation_count,
-            expected_kv_kinds_while_blocked,
-        )
-
+        # After the primary is gone the shadow must fully reacquire the KV pool.
         deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline:
             kv_after_primary_kill = kv_cache_gms.get_runtime_state()
@@ -230,7 +222,13 @@ def _resume_shadow_after_primary_failover(
         else:
             raise TimeoutError("shadow did not reacquire KV cache after failover")
 
-        return resume_future.result(timeout=resume_timeout_s)
+        result = resume_future.result(timeout=resume_timeout_s)
+        kv_with_shadow = kv_cache_gms.get_runtime_state()
+        assert kv_with_shadow.state == ServerState.RW
+        assert (
+            kv_with_shadow.allocation_count == kv_with_primary.allocation_count
+        ), "failover changed the committed shared KV allocation count"
+        return result
 
 
 def _run_shadow_failover_test(

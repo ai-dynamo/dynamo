@@ -19,12 +19,15 @@ orphaned local cohort when rank 0 dies. Both paths release pod-local ownership s
 complete warm-shadow TP cohort can take over without waiting for the NCCL timeout.
 
 Two properties make this better than both the NFS-flock idea and the NCCL timeout:
-  * The heartbeat runs on a CPU thread, so it keeps beating even while the GPU is busy
-    in a long legitimate collective (warmup, load spike) — it does NOT false-positive
-    the way an aggressive NCCL/engine watchdog does during init.
+  * The heartbeat does not wait for a CUDA collective. It still competes for
+    Python's GIL and CPU scheduling, so an aggressive deadline CAN false-positive
+    under legitimate load. Timeout logs include local observer delay to help
+    distinguish it from peer silence.
   * A peer process exit drops the heartbeat promptly, so a *crash* is detected in
-    ~one interval rather than ~one collective-timeout.
+    ~one heartbeat-timeout window rather than ~one collective-timeout.
 
+Missing heartbeats indicate suspicion, not proof of process death or CUDA drain.
+Callbacks must fence writers before handing off writable KV ownership.
 It does NOT replace the NCCL/engine watchdog: a rank that is hung-but-alive with its
 heartbeat thread still running is invisible here (only a timeout catches a true hang).
 This is the crash detector; the (dynamically-lowered) engine watchdog stays the hang
@@ -189,9 +192,15 @@ class RankLivenessClient:
         poller.register(sock, zmq.POLLIN)
         started = time.monotonic()
         last_ack: float | None = None
+        previous_cycle_started = started
         try:
             while not self._stop.is_set():
                 cycle_started = time.monotonic()
+                scheduling_gap_ms = (
+                    max(0.0, cycle_started - previous_cycle_started - self._interval)
+                    * 1000
+                )
+                previous_cycle_started = cycle_started
                 try:
                     sock.send(b"hb", flags=zmq.NOBLOCK)
                 except zmq.ZMQError:
@@ -203,7 +212,7 @@ class RankLivenessClient:
                 events = dict(poller.poll(max(1, int(self._interval * 1000))))
                 now = time.monotonic()
                 if sock in events:
-                    while True:
+                    for _ in range(_MAX_HEARTBEATS_PER_POLL):
                         try:
                             frame = sock.recv(flags=zmq.NOBLOCK)
                         except zmq.Again:
@@ -220,6 +229,15 @@ class RankLivenessClient:
                         self._fire(0, "startup-timeout")
                         return
                     if last_ack is not None and now - last_ack > self._timeout:
+                        logger.warning(
+                            "[GMS liveness] leader silent %.0fms (deadline %.0fms); "
+                            "local scheduling gap %.0fms, poll cycle %.0fms; "
+                            "suspected failure, writer fencing still required",
+                            (now - last_ack) * 1000,
+                            self._timeout * 1000,
+                            scheduling_gap_ms,
+                            (now - cycle_started) * 1000,
+                        )
                         self._fire(0, "liveness-timeout")
                         return
                 # An acknowledgement normally arrives immediately. Preserve the
@@ -320,6 +338,15 @@ class RankLivenessMonitor:
             self._thread.join(timeout=0.5)
             self._thread = None
 
+    def set_timeout_ms(self, value: int) -> None:
+        """Update the loss deadline without restarting the liveness socket.
+
+        Engine process creation can briefly starve Python heartbeat threads. The
+        leader can therefore start with a conservative deadline and tighten it
+        after the serving handler is attached.
+        """
+        self._timeout = max(1, int(value)) / 1000.0
+
     def wait_for_ranks(
         self, expected_ranks: Iterable[int], timeout: float | None = None
     ) -> bool:
@@ -365,6 +392,7 @@ class RankLivenessMonitor:
         poll_ms = max(10, int(self._timeout * 1000 / 5))
         try:
             while not self._stop.is_set():
+                cycle_started = time.monotonic()
                 events = dict(poller.poll(poll_ms))
                 now = time.monotonic()
                 if sock in events:
@@ -414,10 +442,13 @@ class RankLivenessMonitor:
                 for rank, seen in list(last_seen.items()):
                     if now - seen > self._timeout:
                         logger.warning(
-                            "[GMS liveness] rank %d silent for %.0fms (>%.0fms)",
+                            "[GMS liveness] rank %d silent for %.0fms (>%.0fms); "
+                            "local poll cycle %.0fms; suspected failure, "
+                            "writer fencing still required",
                             rank,
                             (now - seen) * 1000,
                             self._timeout * 1000,
+                            (now - cycle_started) * 1000,
                         )
                         self._fire(rank, "liveness-timeout")
                         return

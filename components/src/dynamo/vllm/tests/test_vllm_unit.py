@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 import dynamo.llm as dynamo_llm
-from dynamo.vllm import envs
+from dynamo.vllm import envs, headless
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
     _is_routable,
@@ -395,10 +395,11 @@ def test_headless_namespace_has_required_fields(mock_vllm_cli):
 
 
 @pytest.mark.parametrize(
-    "parallel_flag",
-    ("--tensor-parallel-size", "--pipeline-parallel-size", "--data-parallel-size"),
+    "parallel_flag", ("--pipeline-parallel-size", "--data-parallel-size")
 )
-def test_cli_shadow_mode_rejects_parallel_ranks(mock_vllm_cli, parallel_flag):
+def test_cli_shadow_mode_rejects_unsupported_parallel_ranks(
+    mock_vllm_cli, parallel_flag
+):
     mock_vllm_cli(
         "--model",
         "Qwen/Qwen3-0.6B",
@@ -409,8 +410,32 @@ def test_cli_shadow_mode_rejects_parallel_ranks(mock_vllm_cli, parallel_flag):
         "2",
     )
 
-    with pytest.raises(ValueError, match="exactly one local vLLM rank"):
+    with pytest.raises(ValueError, match="exactly one rank per node"):
         parse_args()
+
+
+@pytest.mark.parametrize("headless", (False, True))
+def test_cli_shadow_mode_accepts_one_tp_rank_per_node(mock_vllm_cli, headless):
+    args = [
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--load-format",
+        "gms",
+        "--gms-shadow-mode",
+        "--tensor-parallel-size",
+        "2",
+        "--distributed-executor-backend",
+        "mp",
+        "--nnodes",
+        "2",
+        "--node-rank",
+        "1" if headless else "0",
+    ]
+    if headless:
+        args.append("--headless")
+    mock_vllm_cli(*args)
+
+    assert parse_args().gms_shadow_mode is True
 
 
 def test_generic_shadow_alias_enables_vllm_mode(monkeypatch, mock_vllm_cli):
@@ -436,7 +461,7 @@ def test_generic_shadow_alias_uses_vllm_validation(monkeypatch, mock_vllm_cli):
         "2",
     )
 
-    with pytest.raises(ValueError, match="exactly one local vLLM rank"):
+    with pytest.raises(ValueError, match="exactly one rank per node"):
         parse_args()
 
 
@@ -467,6 +492,38 @@ def test_cli_shadow_mode_waits_for_primary_kv_geometry(monkeypatch):
     main._maybe_wait_for_gms_primary_kv_before_init(config)
 
     assert observed == [123]
+
+
+def test_headless_rank_fences_itself_when_leader_acknowledgements_stop(monkeypatch):
+    from dynamo.common import rank_liveness
+
+    captured = {}
+
+    class Client:
+        def __init__(self, leader_host, rank, **kwargs):
+            captured.update(leader_host=leader_host, rank=rank, **kwargs)
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setattr(rank_liveness, "liveness_enabled", lambda: True)
+    monkeypatch.setattr(rank_liveness, "RankLivenessClient", Client)
+    killed = []
+    monkeypatch.setattr(headless.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    config = SimpleNamespace(
+        gms_shadow_mode=True,
+        engine_args=SimpleNamespace(
+            node_rank=1, nnodes=2, master_addr="leader.example"
+        ),
+    )
+    headless._maybe_start_vllm_rank_liveness_client(config)
+
+    assert captured["started"] is True
+    captured["on_leader_lost"](0, "liveness-timeout")
+    import signal
+
+    assert killed == [(os.getpid(), signal.SIGTERM)]
 
 
 def test_rl_logprobs_force_converts_raw_mode():
@@ -2480,6 +2537,235 @@ async def test_gms_primary_acquires_active_lock_before_registration(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_gms_preinit_lock_starts_liveness_before_engine_setup(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+    events = []
+
+    class Lock:
+        async def release(self):
+            events.append("release")
+
+    lock = Lock()
+
+    async def acquire():
+        events.append("acquire")
+        return lock
+
+    async def fence(**kwargs):
+        events.append(("fence", kwargs["role"]))
+
+    def start_monitor(handler, config, *, failover_lock=None):
+        events.append(("monitor", handler, failover_lock))
+
+    runtime = SimpleNamespace(
+        set_health_status=lambda ready: events.append(("health", ready))
+    )
+    config = SimpleNamespace(gms_shadow_mode=True)
+    monkeypatch.setenv("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "1")
+    monkeypatch.setenv("ENGINE_ID", "0")
+    monkeypatch.setattr(factory, "_acquire_failover_lock", acquire)
+    monkeypatch.setattr(factory, "_maybe_start_rank_liveness_monitor", start_monitor)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence", fence
+    )
+
+    acquired, fenced = await factory._maybe_acquire_failover_lock_before_init(
+        runtime, config
+    )
+
+    assert acquired is lock
+    assert fenced is True
+    assert events == [
+        ("health", True),
+        "acquire",
+        ("fence", "engine-0-pre-init"),
+        ("monitor", None, lock),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gms_preinitialized_standby_starts_liveness_before_engine_setup(
+    monkeypatch,
+):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+    monitored = []
+    monkeypatch.setenv("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "0")
+    monkeypatch.setattr(
+        factory,
+        "_maybe_start_rank_liveness_monitor",
+        lambda handler, config: monitored.append((handler, config)),
+    )
+    config = SimpleNamespace(gms_shadow_mode=True)
+
+    acquired, fenced = await factory._maybe_acquire_failover_lock_before_init(
+        SimpleNamespace(), config
+    )
+
+    assert acquired is None
+    assert fenced is False
+    assert monitored == [(None, config)]
+
+
+@pytest.mark.asyncio
+async def test_gms_preinit_liveness_keeps_lock_until_exit_and_is_reused(monkeypatch):
+    import asyncio
+    import signal
+
+    from dynamo.common import rank_liveness
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    callbacks = []
+    timeout_updates = []
+
+    class Monitor:
+        def __init__(self, callback, expected_ranks, timeout_ms_override):
+            callbacks.append(callback)
+            assert list(expected_ranks) == [1]
+            assert timeout_ms_override == rank_liveness.DEFAULT_TIMEOUT_MS
+
+        def start(self):
+            pass
+
+        def set_timeout_ms(self, value):
+            timeout_updates.append(value)
+
+    released = asyncio.Event()
+
+    class Lock:
+        async def release(self):
+            released.set()
+
+    config = SimpleNamespace(
+        gms_shadow_mode=True, engine_args=SimpleNamespace(nnodes=2)
+    )
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+    killed = []
+    monkeypatch.setattr(rank_liveness, "liveness_enabled", lambda: True)
+    monkeypatch.setattr(rank_liveness, "RankLivenessMonitor", Monitor)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.os.kill",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    monitor = factory._maybe_start_rank_liveness_monitor(
+        None, config, failover_lock=Lock()
+    )
+    shutdown_event = asyncio.Event()
+    handler = SimpleNamespace(shutdown_event=shutdown_event)
+    assert factory._maybe_start_rank_liveness_monitor(handler, config) is monitor
+    assert handler._gms_rank_liveness_monitor is monitor
+    assert timeout_updates == [rank_liveness.timeout_ms()]
+
+    callbacks[0](1, "startup loss")
+    await asyncio.sleep(0)
+    assert not released.is_set()
+    assert shutdown_event.is_set()
+    assert killed == [(os.getpid(), signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
+async def test_gms_preinit_lock_owner_starts_rank_liveness_monitor(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+    handler = SimpleNamespace()
+    runtime = SimpleNamespace()
+    config = SimpleNamespace(gms_shadow_mode=True)
+    monitored = []
+    monkeypatch.setattr(
+        factory,
+        "_maybe_start_rank_liveness_monitor",
+        lambda candidate, candidate_config: monitored.append(
+            (candidate, candidate_config)
+        ),
+    )
+
+    await factory._maybe_wait_for_failover_lock(
+        handler,
+        runtime,
+        config,
+        lock_already_acquired=True,
+        post_lock_fence_already_run=True,
+    )
+
+    assert monitored == [(handler, config)]
+
+
+@pytest.mark.asyncio
+async def test_gms_rank_loss_aborts_active_stream_before_sigterm(monkeypatch):
+    import asyncio
+    import signal
+
+    from dynamo.common import rank_liveness
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    callbacks = []
+
+    class Monitor:
+        def __init__(self, callback, expected_ranks):
+            callbacks.append(callback)
+            assert list(expected_ranks) == [1]
+
+        def start(self):
+            pass
+
+    killed = []
+    shutdown_event = asyncio.Event()
+    handler = SimpleNamespace(shutdown_event=shutdown_event)
+    config = SimpleNamespace(
+        gms_shadow_mode=True, engine_args=SimpleNamespace(nnodes=2)
+    )
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(rank_liveness, "liveness_enabled", lambda: True)
+    monkeypatch.setattr(rank_liveness, "RankLivenessMonitor", Monitor)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.os.kill",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    factory._maybe_start_rank_liveness_monitor(handler, config)
+    callbacks[0](1, "heartbeat timeout")
+
+    await asyncio.sleep(0)
+    assert shutdown_event.is_set()
+    assert killed == [(os.getpid(), signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
 async def test_gms_shadow_sleeps_until_lock_then_wakes(monkeypatch):
     from dynamo.vllm.worker_factory import WorkerFactory
 
@@ -2500,12 +2786,16 @@ async def test_gms_shadow_sleeps_until_lock_then_wakes(monkeypatch):
     async def fake_post_lock_fence(*, backend_name, role):
         events.append(("fence", backend_name, role))
 
+    class EngineClient:
+        async def wake_up(self, tags):
+            events.append(("wake_up", tags))
+
     class PauseController:
         async def pause(self, *args, **kwargs):
             events.append(("pause", args, kwargs))
 
         async def resume(self, *args, **kwargs):
-            events.append("resume")
+            events.append(("resume", args, kwargs))
 
         def mark_resumed(self):
             events.append("mark_resumed")
@@ -2514,7 +2804,9 @@ async def test_gms_shadow_sleeps_until_lock_then_wakes(monkeypatch):
         def set_health_status(self, status):
             events.append(("health", status))
 
-    handler = SimpleNamespace(_pause_controller=PauseController())
+    handler = SimpleNamespace(
+        _pause_controller=PauseController(), engine_client=EngineClient()
+    )
     config = SimpleNamespace(gms_shadow_mode=True)
 
     monkeypatch.setenv("ENGINE_ID", "1")
@@ -2529,10 +2821,11 @@ async def test_gms_shadow_sleeps_until_lock_then_wakes(monkeypatch):
     assert getattr(handler, "_gms_failover_lock") is lock
     assert events == [
         ("pause", (1,), {"clear_cache": False}),
+        ("wake_up", ["weights"]),
         ("health", True),
         "lock",
         ("fence", "vllm", "shadow"),
-        "resume",
+        ("resume", (["kv_cache"],), {}),
         "mark_resumed",
     ]
 
@@ -2553,7 +2846,7 @@ async def test_gms_shadow_wake_timeout_requiesces_and_releases_lock(monkeypatch)
         async def pause(self, *args, **kwargs):
             events.append(("pause", args, kwargs))
 
-        async def resume(self):
+        async def resume(self, *args, **kwargs):
             events.append("resume")
             await asyncio.Event().wait()
 
@@ -2586,7 +2879,10 @@ async def test_gms_shadow_wake_timeout_requiesces_and_releases_lock(monkeypatch)
         "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence", pass_fence
     )
 
-    handler = SimpleNamespace(_pause_controller=PauseController())
+    handler = SimpleNamespace(
+        _pause_controller=PauseController(),
+        engine_client=SimpleNamespace(wake_up=AsyncMock()),
+    )
     with pytest.raises(asyncio.TimeoutError):
         await factory._maybe_wait_for_failover_lock(
             handler,
@@ -2626,7 +2922,7 @@ async def test_gms_shadow_wake_hard_timeout_retains_lock(monkeypatch):
         async def pause(self, *args, **kwargs):
             events.append(("pause", args, kwargs))
 
-        async def resume(self):
+        async def resume(self, *args, **kwargs):
             events.append("resume")
             try:
                 await asyncio.Event().wait()
@@ -2656,7 +2952,10 @@ async def test_gms_shadow_wake_hard_timeout_retains_lock(monkeypatch):
         lambda pid, sig: events.append(("kill", pid, sig)),
     )
 
-    handler = SimpleNamespace(_pause_controller=PauseController())
+    handler = SimpleNamespace(
+        _pause_controller=PauseController(),
+        engine_client=SimpleNamespace(wake_up=AsyncMock()),
+    )
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(
             factory._maybe_wait_for_failover_lock(
@@ -2705,7 +3004,7 @@ async def test_gms_shadow_retains_lock_if_activation_cannot_requiesce(monkeypatc
                     cancellation_seen.set()
                     await finish.wait()
 
-        async def resume(self):
+        async def resume(self, *args, **kwargs):
             events.append("resume")
             raise RuntimeError("resume failed")
 
@@ -2744,7 +3043,10 @@ async def test_gms_shadow_retains_lock_if_activation_cannot_requiesce(monkeypatc
         lambda pid, sig: events.append(("kill", pid, sig)),
     )
 
-    handler = SimpleNamespace(_pause_controller=PauseController())
+    handler = SimpleNamespace(
+        _pause_controller=PauseController(),
+        engine_client=SimpleNamespace(wake_up=AsyncMock()),
+    )
     with pytest.raises(RuntimeError, match="resume failed"):
         await factory._maybe_wait_for_failover_lock(
             handler,
@@ -2823,7 +3125,7 @@ async def test_gms_shadow_requiesces_and_releases_lock_when_warmup_fails(monkeyp
         async def pause(self, *args, **kwargs):
             events.append(("pause", args, kwargs))
 
-        async def resume(self):
+        async def resume(self, *args, **kwargs):
             events.append("resume")
 
         def mark_resumed(self):
@@ -2859,7 +3161,10 @@ async def test_gms_shadow_requiesces_and_releases_lock_when_warmup_fails(monkeyp
         "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence", pass_fence
     )
 
-    handler = SimpleNamespace(_pause_controller=PauseController())
+    handler = SimpleNamespace(
+        _pause_controller=PauseController(),
+        engine_client=SimpleNamespace(wake_up=AsyncMock()),
+    )
     with pytest.raises(RuntimeError, match="warmup failed"):
         await factory._maybe_wait_for_failover_lock(
             handler,

@@ -1361,15 +1361,17 @@ class WorkerFactory:
         lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
         engine_id = os.environ.get("ENGINE_ID", "0")
         lock = FlockFailoverLock(lock_path)
-        await lock.acquire(engine_id=f"engine-{engine_id}", timeout=timeout)
+        await lock.acquire(
+            engine_id=f"engine-{engine_id}", poll_interval=0.01, timeout=timeout
+        )
         return lock
 
-    async def _wake_up_kv_fenced(self, handler) -> None:
+    async def _wake_up_kv_fenced(self, handler, tags: list[str] | None = None) -> None:
         """Bound shadow wake so a wedged remap cannot retain ownership."""
         timeout = float(os.environ.get("DYN_GMS_FAILOVER_WAKEUP_TIMEOUT_SECS", "120"))
         try:
             await _run_gms_operation_with_hard_timeout(
-                handler._pause_controller.resume(),
+                handler._pause_controller.resume(tags),
                 timeout=timeout,
                 label="GMS wake/remap",
             )
@@ -1380,6 +1382,81 @@ class WorkerFactory:
                 timeout,
             )
             raise
+
+    def _maybe_start_rank_liveness_monitor(
+        self, handler, config: Config, *, failover_lock=None
+    ):
+        """Leader side of the cross-node ZMQ rank-liveness channel.
+
+        Only the rank-0 leader runs worker_factory (headless workers bypass it),
+        so reaching here means we are the active leader. When a worker node goes
+        silent, terminate the broken leader instead of waiting out the NCCL
+        collective timeout. Do not release the failover lock from this callback:
+        kernel release on leader exit is the proof that the predecessor can no
+        longer enqueue CUDA writes.
+        """
+        import signal
+
+        from dynamo.common import rank_liveness as rl
+
+        if not rl.liveness_enabled() or not getattr(config, "gms_shadow_mode", False):
+            return None
+        nnodes = int(getattr(config.engine_args, "nnodes", 1) or 1)
+        if nnodes <= 1:
+            return None
+
+        preinit_monitor = getattr(self, "_gms_preinit_rank_liveness_monitor", None)
+        if preinit_monitor is not None:
+            if handler is not None:
+                handler_ref = getattr(preinit_monitor, "_gms_handler_ref", None)
+                if handler_ref is not None:
+                    handler_ref[0] = handler
+                preinit_monitor.set_timeout_ms(rl.timeout_ms())
+                setattr(handler, "_gms_rank_liveness_monitor", preinit_monitor)
+            delattr(self, "_gms_preinit_rank_liveness_monitor")
+            return preinit_monitor
+
+        loop = asyncio.get_running_loop()
+        handler_ref = [handler]
+
+        def on_rank_lost(rank: int, reason: str) -> None:
+            active_handler = handler_ref[0]
+            logger.warning(
+                "[GMS liveness] vLLM worker rank %d lost (%s); terminating "
+                "broken leader so process death can release KV ownership",
+                rank,
+                reason,
+            )
+            # A broken TP cohort cannot make progress, so preserving its active
+            # streams for the normal graceful-shutdown grace period only delays
+            # frontend replay. Wake the handler's abort monitors immediately;
+            # discovery withdrawal and process exit still follow SIGTERM. The
+            # lock remains held until that process exit completes.
+            shutdown_event = getattr(active_handler, "shutdown_event", None)
+            if shutdown_event is not None:
+                loop.call_soon_threadsafe(shutdown_event.set)
+
+            # The cohort is broken (a TP rank is gone); bring the leader down so it
+            # stops holding the GPU/KV. Kernel lock release then admits the shadow.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        monitor_kwargs = {"expected_ranks": range(1, nnodes)}
+        if handler is None:
+            # Model/process startup can starve Python heartbeat threads for
+            # hundreds of milliseconds. Use the conservative default until the
+            # serving handler is attached, then adopt the configured deadline.
+            monitor_kwargs["timeout_ms_override"] = max(
+                rl.timeout_ms(), rl.DEFAULT_TIMEOUT_MS
+            )
+        monitor = rl.RankLivenessMonitor(on_rank_lost, **monitor_kwargs)
+        setattr(monitor, "_gms_handler_ref", handler_ref)
+        if handler is None:
+            setattr(self, "_gms_preinit_rank_liveness_monitor", monitor)
+        else:
+            setattr(handler, "_gms_rank_liveness_monitor", monitor)
+        monitor.start()
+        logger.info("[GMS liveness] started vLLM leader rank-liveness monitor")
+        return monitor
 
     async def _maybe_acquire_failover_lock_before_init(
         self,
@@ -1404,6 +1481,12 @@ class WorkerFactory:
                 "[Shadow] Preinitialized standby explicitly enabled; shared-KV "
                 "safety depends on the complete lease-aware vLLM integration"
             )
+            # Bind the cohort liveness endpoint before model loading. Large
+            # models can take longer than the startup grace, while non-leader
+            # ranks start heartbeating before their engine setup completes.
+            # This inactive cohort owns no shared-KV writer lock yet; after
+            # handler attachment the same monitor uses normal fenced release.
+            self._maybe_start_rank_liveness_monitor(None, config)
             return None, False
 
         logger.info(
@@ -1417,6 +1500,7 @@ class WorkerFactory:
                 backend_name="vllm",
                 role=f"engine-{os.environ.get('ENGINE_ID', '0')}-pre-init",
             )
+            self._maybe_start_rank_liveness_monitor(None, config, failover_lock=lock)
         except BaseException:
             await lock.release()
             raise
@@ -1444,6 +1528,7 @@ class WorkerFactory:
                 await run_gms_failover_post_lock_fence(
                     backend_name="vllm", role="pre-init"
                 )
+            self._maybe_start_rank_liveness_monitor(handler, config)
             logger.info(
                 "[Shadow] Failover lock already acquired before engine init; "
                 "registering with discovery"
@@ -1470,11 +1555,13 @@ class WorkerFactory:
                         "[Primary] Failed to release lock after fence error"
                     )
                 raise
+            self._maybe_start_rank_liveness_monitor(handler, config)
             return False
 
         # The pre-initialized standby relinquishes its writer role without clearing
         # prefix metadata, then waits while remaining healthy but undiscoverable.
         await handler._pause_controller.pause(1, clear_cache=False)
+        await handler.engine_client.wake_up(["weights"])
         if failover_metrics is not None:
             failover_metrics.set_state("standby")
         runtime.set_health_status(True)
@@ -1491,11 +1578,12 @@ class WorkerFactory:
         try:
             await run_gms_failover_post_lock_fence(backend_name="vllm", role="shadow")
             resume_attempted = True
-            await self._wake_up_kv_fenced(handler)
+            await self._wake_up_kv_fenced(handler, ["kv_cache"])
             resumed = True
             handler._pause_controller.mark_resumed()
             if promotion_warmup is not None:
                 await promotion_warmup()
+            self._maybe_start_rank_liveness_monitor(handler, config)
         except BaseException as activation_error:
             safe_to_release = not resume_attempted
             activation_may_still_run = isinstance(

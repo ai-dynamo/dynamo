@@ -22,9 +22,6 @@ pytestmark = [
 
 
 class _Client:
-    namespace = "test"
-    owner_id = "engine"
-
     def __init__(self, free=10):
         self.free = free
         self.released = []
@@ -61,7 +58,7 @@ def test_dormant_eviction_never_releases_a_block_in_use():
     published = []
     directory = SimpleNamespace(
         enabled=True,
-        ensure_hbm_capacity=lambda _n: [
+        ensure_hbm_capacity=lambda _n, eligible_slot_ids, engine_id=None, compact=False: [
             {"slot_ids": [1], "generations": [5]},
             {"slot_ids": [2], "generations": [7]},
         ],
@@ -73,30 +70,37 @@ def test_dormant_eviction_never_releases_a_block_in_use():
     pool = SimpleNamespace(
         _gms_kv_directory=directory,
         _gms_kv_lease_client=client,
+        num_gpu_blocks=4,
+        free_block_queue=SimpleNamespace(get_all_free_blocks=lambda: [idle]),
         blocks=[_block(0), busy, idle],
         _gms_kv_leases_by_block={1: busy_lease, 2: idle_lease},
+        _gms_kv_directory_slot_by_hash={},
+        enable_caching=True,
         _maybe_evict_cached_block=evicted.append,
     )
 
-    released = leases_mod._evict_dormant_directory_blocks(pool, 2)
+    released = leases_mod._evict_dormant_directory_blocks(pool, 2, [busy])
 
     assert released == 1
     assert client.released == [idle_lease]
     assert pool._gms_kv_leases_by_block == {1: busy_lease}
     assert evicted == [idle]
     # The in-use block is republished as ACTIVE, so no peer can adopt it.
-    assert [item["slot_id"] for item in published] == [1]
+    assert [item["slot_ids"][0] for item in published] == [1]
     assert published[0]["active"] is True
 
 
-def test_adoption_never_hands_out_a_locally_busy_slot():
+def test_adoption_never_hands_out_a_locally_busy_slot(monkeypatch):
     """A directory slot that is busy locally is not installed for a request."""
     busy = _block(3, ref_cnt=1)
     client = _Client()
-    client.adopt_result = [KVLease(3, leases_mod._successor_generation(4))]
+    client.adopt_result = [
+        KVLease(3, leases_mod._successor_generation(4)),
+    ]
+    dropped = []
     directory = SimpleNamespace(
         enabled=True,
-        mode="primary",
+        authoritative=True,
         read_view_is_current_writer=False,
         lookup_and_claim=lambda keys: (
             [{"tier": "hbm", "slot_ids": [3], "generations": [4]}],
@@ -104,8 +108,7 @@ def test_adoption_never_hands_out_a_locally_busy_slot():
         ),
         adopt_claim=lambda _token, items: len(items),
         release_claim=lambda _token: None,
-        publish=lambda items: len(items),
-        authoritative=False,
+        publish=lambda items: dropped.extend(items) or len(items),
     )
     inserted = []
     pool = SimpleNamespace(
@@ -115,9 +118,11 @@ def test_adoption_never_hands_out_a_locally_busy_slot():
         blocks=[_block(0), _block(1), _block(2), busy],
         hash_block_size=16,
         _gms_kv_leases_by_block={},
+        _gms_kv_directory_slot_by_hash={},
         _insert_block_hash=lambda *args: inserted.append(args),
         _maybe_evict_cached_block=lambda _block: None,
     )
+    monkeypatch.delenv("DYN_GMS_FAILOVER_FROZEN_PREDECESSOR", raising=False)
 
     result = leases_mod._get_cached_block(pool, lambda *_args: None, b"\x01" * 32, [0])
 
@@ -133,3 +138,34 @@ def test_free_block_count_is_bounded_by_the_lease_ring():
     assert leases_mod._get_num_free_blocks(pool, lambda: 10) == 3
     pool._gms_kv_lease_client.free = 50
     assert leases_mod._get_num_free_blocks(pool, lambda: 10) == 10
+
+
+def test_current_writer_freezes_its_directory_view_once():
+    """A hydrated writer stops replicating its own publications, then misses
+    stay native-only."""
+    frozen = []
+
+    class Directory:
+        enabled = True
+        read_view_is_current_writer = True
+
+        def freeze_current_writer_view(self):
+            frozen.append(True)
+            return True
+
+        def lookup_and_claim(self, _keys):
+            raise AssertionError("a current writer must not consult the directory")
+
+    pool = SimpleNamespace(
+        _gms_kv_directory=Directory(),
+        _gms_kv_lease_client=_Client(),
+        _gms_hydrate_hbm=False,
+    )
+
+    for _ in range(3):
+        assert (
+            leases_mod._get_cached_block(pool, lambda *_a: None, b"\x02" * 32, [0])
+            is None
+        )
+    assert frozen == [True]
+    assert pool._gms_writer_view_frozen is True

@@ -6,11 +6,16 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import logging
 import os
 from collections.abc import Callable
 
-from gms_kv_ring.common.content_directory import ContentDirectory
+from gms_kv_ring.common.content_directory import (
+    ContentDirectory,
+    async_directory_work_enabled,
+)
+from gms_kv_ring.daemon.client import PreparedDirectoryItem
 from gpu_memory_service.integrations.common.kv_lease_client import (
     GMSKVLeaseClient,
     KVLease,
@@ -111,36 +116,80 @@ def _failover_directory_standby() -> bool | None:
     )
 
 
-def _preferred_block_ids(free_block_queue, limit: int) -> list[int]:
-    """Return a bounded prefix of local free block IDs without walking
-    vLLM's entire free list. The real queue is a linked list; unit-test
-    fakes may only expose get_all_free_blocks().
+def _iter_preferred_block_ids(free_block_queue):
+    """Yield local free block IDs, oldest first, walking only as far as asked.
+
+    The real queue is a linked list; unit-test fakes may only expose
+    get_all_free_blocks().
     """
-    if limit <= 0:
-        return []
-    out: list[int] = []
     head = getattr(free_block_queue, "fake_free_list_head", None)
     block = getattr(head, "next_free_block", None) if head is not None else None
+    seen = set()
     while block is not None and getattr(block, "next_free_block", None) is not None:
         if not getattr(block, "is_null", False):
-            out.append(int(block.block_id))
-            if len(out) >= limit:
-                return out
+            block_id = int(block.block_id)
+            seen.add(block_id)
+            yield block_id
         block = getattr(block, "next_free_block", None)
+    if getattr(head, "next_free_block", None) is not None:
+        # The native linked queue was completely traversed. Falling through
+        # to get_all_free_blocks() walks it again, and list membership below
+        # makes a nearly-full shadow cache quadratic on every retirement.
+        return
 
     get_all = getattr(free_block_queue, "get_all_free_blocks", None)
     if get_all is None:
-        return out
+        return
     for block in get_all():
         if getattr(block, "is_null", False):
             continue
         block_id = int(block.block_id)
-        if block_id in out:
-            continue
-        out.append(block_id)
-        if len(out) >= limit:
+        if block_id not in seen:
+            seen.add(block_id)
+            yield block_id
+
+
+def _preferred_block_ids(free_block_queue, limit: int) -> list[int]:
+    """Return a bounded prefix of local free block IDs."""
+    if limit <= 0:
+        return []
+    return list(itertools.islice(_iter_preferred_block_ids(free_block_queue), limit))
+
+
+# Bound on free-queue nodes inspected to find unleased allocation candidates.
+_PREFERRED_UNLEASED_SCAN = 256
+
+
+def _preferred_unleased_block_ids(pool, limit: int) -> tuple[list[int], bool]:
+    """Prefer the oldest local free blocks that hold no lease.
+
+    The head of vLLM's free queue is usually a sealed cached block that keeps
+    its lease until directory retirement, so preferring it fails and the lease
+    ring falls back to a linear scan of every slot: about 220 us per
+    allocation on a 43k-block pool, against about 2 us for a free preferred
+    slot. Skip leased blocks within a small window; if none is found, keep the
+    plain head prefix and the ring's own fallback. The flag reports whether
+    the result is the queue's head prefix, which popleft_n may take as is.
+    """
+    if limit <= 0:
+        return [], True
+    leased = getattr(pool, "_gms_kv_leases_by_block", None) or {}
+    out: list[int] = []
+    skipped = False
+    for scanned, block_id in enumerate(
+        _iter_preferred_block_ids(pool.free_block_queue)
+    ):
+        if block_id in leased:
+            skipped = True
+        else:
+            out.append(block_id)
+            if len(out) >= limit:
+                return out, not skipped
+        if scanned + 1 >= _PREFERRED_UNLEASED_SCAN:
             break
-    return out
+    if out:
+        return out, not skipped
+    return _preferred_block_ids(pool.free_block_queue, limit), True
 
 
 def _preferred_candidate_limit(num_blocks: int) -> int:
@@ -323,6 +372,57 @@ def _scheduler_init_with_gms_completion_fence(self, *args, **kwargs) -> None:
     # explicitly: BlockPool.free_blocks (which seals/publishes READY) now runs
     # only after update_from_output proves the last writer has completed.
     self.defer_block_free = True
+    manager = getattr(self, "kv_cache_manager", None)
+    if manager is not None:
+        manager.block_pool._gms_admission_concurrency = max(
+            1, int(self.max_num_running_reqs)
+        )
+        update = self.update_from_output
+        pool = manager.block_pool
+
+        def update_with_completed_frees(*args, **kwargs):
+            if getattr(pool, "_gms_completed_frees", None) is not None:
+                raise RuntimeError("nested GMS completion transaction")
+            pool._gms_completed_frees = []
+            try:
+                result = update(*args, **kwargs)
+                _flush_completed_frees(pool)
+                _collect_async_capacity(pool)
+                return result
+            finally:
+                # On failure, do not publish unfinished work or return outputs.
+                # Unreleased leases remain fenced until cohort teardown.
+                pool._gms_completed_frees = None
+
+        self.update_from_output = update_with_completed_frees
+
+
+def _flush_completed_frees(pool) -> None:
+    """Commit completed requests together, before native events or outputs."""
+    groups = getattr(pool, "_gms_completed_frees", None)
+    pool._gms_completed_frees = None
+    if not groups:
+        return
+    batch = []
+    hashes = {}
+    admission_blocks = 0
+    for group in groups:
+        identities = {
+            block.block_hash: int(block.block_id)
+            for block in group
+            if block.block_hash is not None
+        }
+        # Different physical copies of the same prefix cannot share an atomic
+        # directory publication. Preserve the original request boundary there.
+        if any(
+            key in hashes and hashes[key] != slot for key, slot in identities.items()
+        ):
+            _free_blocks(pool, batch, admission_blocks=admission_blocks)
+            batch, hashes, admission_blocks = [], {}, 0
+        batch.extend(group)
+        hashes.update(identities)
+        admission_blocks = max(admission_blocks, len(identities))
+    _free_blocks(pool, batch, admission_blocks=admission_blocks)
 
 
 def _make_client(total_blocks: int) -> KVLeaseClient:
@@ -358,6 +458,8 @@ def _initialize_gms_block_pool(self) -> None:
     client = _make_client(int(self.num_gpu_blocks))
     self._gms_kv_lease_client = client
     self._gms_kv_leases_by_block: dict[int, KVLease] = {}
+    self._gms_kv_directory_slot_by_hash: dict[bytes, KVLease] = {}
+    self._gms_kv_read_pins_by_block: dict[int, tuple[KVLease, dict]] = {}
     self._gms_kv_directory = _make_directory(int(self.hash_block_size))
     start_directory_sync = getattr(self._gms_kv_directory, "start_async_read", None)
     if start_directory_sync is not None:
@@ -389,6 +491,13 @@ def _directory_pool_id() -> str:
     )
 
 
+def _forget_directory_slot(self, content_hash: bytes, lease: KVLease | None) -> None:
+    """Drop a local directory index entry only for its exact lease generation."""
+    slots_by_hash = getattr(self, "_gms_kv_directory_slot_by_hash", None)
+    if slots_by_hash is not None and slots_by_hash.get(content_hash) == lease:
+        slots_by_hash.pop(content_hash, None)
+
+
 def _publish_hbm_blocks(self, blocks, *, active: bool) -> bool:
     directory = getattr(self, "_gms_kv_directory", None)
     client = getattr(self, "_gms_kv_lease_client", None)
@@ -396,33 +505,75 @@ def _publish_hbm_blocks(self, blocks, *, active: bool) -> bool:
         return False
     lease_map = self._gms_kv_leases_by_block
     pairs = [
-        (block, lease_map.get(int(block.block_id)))
+        (block, lease_map.get(int(block.block_id)), _directory_key(block.block_hash))
         for block in blocks
         if getattr(block, "block_hash", None) is not None
     ]
-    pairs = [(block, lease) for block, lease in pairs if lease is not None]
+    pairs = [(block, lease, key) for block, lease, key in pairs if lease is not None]
     if not pairs:
         return True
-    leases = [lease for _block, lease in pairs]
+
+    # A content key names one immutable KV value, but concurrent/repeated
+    # requests can leave more than one physical vLLM block with that hash.
+    # Publishing the newer slot would replace the directory record and orphan
+    # the older SEALED lease. Keep the first durable copy and immediately make
+    # later duplicates ordinary reusable vLLM blocks instead.
+    slots_by_hash = getattr(self, "_gms_kv_directory_slot_by_hash", None)
+    if slots_by_hash is None:
+        slots_by_hash = {}
+        self._gms_kv_directory_slot_by_hash = slots_by_hash
+    publish_pairs = []
+    duplicate_pairs = []
+    for block, lease, key in pairs:
+        existing = slots_by_hash.get(key)
+        if existing is None:
+            publish_pairs.append((block, lease, key))
+        elif existing == lease:
+            # A local cache hit reuses the already-published immutable slot.
+            continue
+        else:
+            duplicate_pairs.append((block, lease))
+    duplicate_leases = []
+    for block, lease in duplicate_pairs:
+        if self.enable_caching and block.block_hash is not None:
+            self._maybe_evict_cached_block(block)
+        if lease_map.pop(int(block.block_id), None) == lease:
+            duplicate_leases.append(lease)
+    if duplicate_leases:
+        client.release(duplicate_leases)
+    if not publish_pairs:
+        return True
+
+    leases = [lease for _block, lease, _key in publish_pairs]
     _seal_or_fail_stop(client, leases)
     if directory is None or not directory.enabled:
         return True
     try:
-        published = directory.publish(
+        engine_id = _directory_pool_id()
+        publisher = getattr(directory, "publish_deferred", directory.publish)
+        # Built directly in wire form: the publication message then passes
+        # items through instead of normalizing a copy of each one.
+        published = publisher(
             [
-                {
-                    "content_hash": _directory_key(block.block_hash),
-                    "local_key": bytes(block.block_hash),
-                    "engine_id": _directory_pool_id(),
-                    "slot_id": int(block.block_id),
-                    "generation": int(lease.generation),
-                    "tier": "hbm",
-                    "active": active,
-                }
-                for block, lease in pairs
+                PreparedDirectoryItem(
+                    content_hash=key.hex(),
+                    local_key=bytes(block.block_hash).hex(),
+                    engine_id=engine_id,
+                    slot_ids=[int(block.block_id)],
+                    generations=[int(lease.generation)],
+                    ranges=[],
+                    tier="hbm",
+                    sealed=True,
+                    active=bool(active),
+                )
+                for block, lease, key in publish_pairs
             ]
         )
-        return published == len(pairs)
+        if published != len(publish_pairs):
+            return False
+        for _block, lease, key in publish_pairs:
+            slots_by_hash[key] = lease
+        return True
     except Exception:  # noqa: BLE001
         logger.warning(
             "[GMS-KVLease] vLLM HBM directory publication failed",
@@ -604,10 +755,11 @@ def _hydrate_hbm_directory(self, exclude: set[bytes]) -> int:
                 [(key, entry) for key, _native_key, entry, _old in stale],
             )
 
-        for (_key, native_key, _entry, _old), lease in adopted_pairs:
+        for (key, native_key, _entry, _old), lease in adopted_pairs:
             block = self.blocks[int(lease.block_id)]
             self._insert_block_hash(native_key, block, self.hash_block_size)
             self._gms_kv_leases_by_block[int(block.block_id)] = lease
+            self._gms_kv_directory_slot_by_hash[key] = lease
             installed.append(block)
 
         # The adopted blocks are sealed cache entries, not immediately
@@ -644,8 +796,10 @@ def _hydrate_hbm_directory(self, exclude: set[bytes]) -> int:
         return len(installed)
     except Exception:  # noqa: BLE001
         for block in installed:
+            key = _directory_key(block.block_hash)
+            lease = self._gms_kv_leases_by_block.pop(int(block.block_id), None)
             self._maybe_evict_cached_block(block)
-            self._gms_kv_leases_by_block.pop(int(block.block_id), None)
+            _forget_directory_slot(self, key, lease)
         if claimed_entries:
             _drop_directory_hashes(directory, claimed_entries)
         if acquired:
@@ -658,6 +812,72 @@ def _hydrate_hbm_directory(self, exclude: set[bytes]) -> int:
     finally:
         if token is not None:
             directory.release_claim(token)
+
+
+def _borrow_hbm_blocks(self, native_keys, entries, token):
+    """Install sealed foreign blocks under an exact-generation read pin."""
+    client = self._gms_kv_lease_client
+    leases = []
+    installed = []
+    pinned = False
+    try:
+        for entry in entries:
+            if entry is None or entry.get("tier") != "hbm":
+                return None
+            slots = entry.get("slot_ids") or []
+            generations = entry.get("generations") or []
+            if len(slots) != 1 or len(generations) != 1:
+                return None
+            leases.append(KVLease(int(slots[0]), int(generations[0])))
+        block_ids = [lease.block_id for lease in leases]
+        if len(set(block_ids)) != len(block_ids) or token is None:
+            return None
+        for lease in leases:
+            block = self.blocks[lease.block_id]
+            if block.ref_cnt != 0 or block.block_hash is not None:
+                return None
+        if not client.pin_read(leases):
+            return None
+        pinned = True
+        claim = {"token": token, "remaining": set(block_ids)}
+        out = []
+        for native_key, lease in zip(native_keys, leases):
+            block = self.blocks[lease.block_id]
+            self._insert_block_hash(native_key, block, self.hash_block_size)
+            self._gms_kv_read_pins_by_block[lease.block_id] = (lease, claim)
+            installed.append(block)
+            out.append(block)
+        logger.info("[GMS-KVDirectory] vLLM borrowed_hbm_blocks=%d", len(out))
+        return out
+    except Exception:  # noqa: BLE001
+        for block in installed:
+            self._maybe_evict_cached_block(block)
+            self._gms_kv_read_pins_by_block.pop(int(block.block_id), None)
+        if pinned:
+            try:
+                client.unpin_read(leases)
+            except Exception:  # noqa: BLE001
+                logger.exception("[GMS-KVLease] failed to roll back HBM read pins")
+        logger.warning("[GMS-KVLease] vLLM HBM read claim failed", exc_info=True)
+        return None
+
+
+def _freeze_writer_view_once(pool, directory) -> None:
+    """Stop replicating this writer's own publications into its process.
+
+    Once hydration is complete and this engine is the current writer, the
+    native block-hash map is authoritative and lookups never consult the
+    replicated view. Its background reader then only decodes this engine's own
+    publications, which contends with the scheduler for the GIL: after each
+    capacity retirement it applies thousands of changes. The frozen
+    current-writer bit stays valid for this writer epoch.
+    """
+    if getattr(pool, "_gms_writer_view_frozen", False):
+        return
+    freeze = getattr(directory, "freeze_current_writer_view", None)
+    if freeze is not None and freeze():
+        pool._gms_writer_view_frozen = True
+        logger.info("[GMS-KVDirectory] froze the vLLM writer's directory view")
 
 
 def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_ids):
@@ -676,6 +896,7 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
     if hydration_was_complete and getattr(
         directory, "read_view_is_current_writer", False
     ):
+        _freeze_writer_view_once(self, directory)
         return None
 
     from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
@@ -685,19 +906,27 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
         for group_id in kv_cache_group_ids
     ]
     keys = [_directory_key(key) for key in native_keys]
-    _hydrate_hbm_directory(self, set(native_keys))
+    if directory.authoritative:
+        _hydrate_hbm_directory(self, set(native_keys))
     token = None
     entries = []
     acquired = []
     installed = []
     try:
-        entries, token = directory.lookup_and_claim(keys)
+        shadow_read = not directory.authoritative
+        if shadow_read:
+            entries, token = directory.lookup_and_read_claim(keys)
+        else:
+            entries, token = directory.lookup_and_claim(keys)
         if len(entries) != len(keys) or any(
             entry is None or entry.get("tier") != "hbm" for entry in entries
         ):
             return None
-        if directory.mode == "shadow":
-            return None
+        if shadow_read:
+            borrowed = _borrow_hbm_blocks(self, native_keys, entries, token)
+            if borrowed is not None:
+                token = None
+            return borrowed
         slot_ids = []
         old_leases = []
         for entry in entries:
@@ -737,12 +966,13 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
             raise RuntimeError("GMS HBM adoption returned unexpected leases")
 
         out = []
-        for native_key, lease in zip(native_keys, acquired):
+        for key, native_key, lease in zip(keys, native_keys, acquired):
             block = self.blocks[int(lease.block_id)]
             if block.ref_cnt != 0 or block.block_hash is not None:
                 raise RuntimeError("adopted HBM slot is not locally free")
             self._insert_block_hash(native_key, block, self.hash_block_size)
             self._gms_kv_leases_by_block[int(block.block_id)] = lease
+            self._gms_kv_directory_slot_by_hash[key] = lease
             installed.append(block)
             out.append(block)
         log_adoption = (
@@ -754,8 +984,10 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
         return out
     except Exception:  # noqa: BLE001
         for block in installed:
+            key = _directory_key(block.block_hash)
+            lease = self._gms_kv_leases_by_block.pop(int(block.block_id), None)
             self._maybe_evict_cached_block(block)
-            self._gms_kv_leases_by_block.pop(int(block.block_id), None)
+            _forget_directory_slot(self, key, lease)
         if entries:
             _drop_directory_hashes(directory, list(zip(keys, entries)))
         if acquired:
@@ -770,34 +1002,175 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
             directory.release_claim(token)
 
 
-def _evict_dormant_directory_blocks(self, required_blocks: int) -> int:
-    directory = getattr(self, "_gms_kv_directory", None)
-    client = getattr(self, "_gms_kv_lease_client", None)
-    if directory is None or not directory.enabled or client is None:
-        return 0
-    victims = directory.ensure_hbm_capacity(required_blocks)
+def _select_capacity_candidates(self, required_blocks: int, additional_blocks=()):
+    """Return the oldest native-free cached slots that may be retired."""
+    # The directory's access order only records publication/remote claims. It
+    # cannot see native vLLM prefix hits, while BlockPool keeps exactly that
+    # information in its free queue. Constrain retirement to the oldest
+    # native-free cached slots so one-use output blocks are reclaimed before
+    # repeatedly-hit prompt prefixes. A small surplus tolerates entries that
+    # are temporarily claimed by readers without exposing the whole cache to
+    # the directory's less-informed LRU.
+    candidate_limit = min(
+        int(self.num_gpu_blocks),
+        int(required_blocks) + max(8, int(required_blocks) // 4),
+    )
+    eligible_slot_ids = []
+    leases_by_block = self._gms_kv_leases_by_block
+    # Walk the free queue lazily: it can hold the whole pool, and only the
+    # oldest candidate_limit eligible blocks are needed. A full Python walk
+    # per retirement stalled every running stream for tens of milliseconds.
+    seen = set()
+    for block_id in itertools.chain(
+        _iter_preferred_block_ids(self.free_block_queue),
+        (int(block.block_id) for block in additional_blocks),
+    ):
+        if block_id in seen:
+            continue
+        seen.add(block_id)
+        block = self.blocks[block_id]
+        if block.block_hash is None or block_id not in leases_by_block:
+            continue
+        eligible_slot_ids.append(block_id)
+        if len(eligible_slot_ids) >= candidate_limit:
+            break
+    return eligible_slot_ids
+
+
+def _apply_capacity_victims(self, victims, *, verify_generation: bool = False) -> int:
+    """Evict and release blocks whose directory records were just retired.
+
+    With ``verify_generation`` (asynchronous retirement), a victim is applied
+    only if this pool still holds the exact lease the daemon retired; a block
+    released or reused in the meantime is left alone.
+    """
+    client = self._gms_kv_lease_client
     leases = []
     restored = []
     for victim in victims:
         for block_id, generation in zip(victim["slot_ids"], victim["generations"]):
             block_id = int(block_id)
             block = self.blocks[block_id]
+            lease = self._gms_kv_leases_by_block.get(block_id)
+            if verify_generation and (
+                lease is None or int(lease.generation) != int(generation)
+            ):
+                continue
+            victim_lease = lease or KVLease(block_id, int(generation))
+            block_hash = getattr(block, "block_hash", None)
+            content_hash = (
+                _directory_key(block_hash) if block_hash is not None else None
+            )
+            if content_hash is not None:
+                # ensure_hbm_capacity already removed this exact directory
+                # record. Forget it before either releasing or republishing.
+                _forget_directory_slot(self, content_hash, victim_lease)
             if block.ref_cnt != 0:
-                lease = self._gms_kv_leases_by_block.get(block_id)
-                if lease is not None and block.block_hash is not None:
+                if lease is not None and block_hash is not None:
                     restored.append(block)
                 continue
-            if getattr(block, "block_hash", None) is not None:
+            if block_hash is not None:
                 self._maybe_evict_cached_block(block)
-            lease = self._gms_kv_leases_by_block.pop(block_id, None)
-            leases.append(lease or KVLease(block_id, int(generation)))
+            self._gms_kv_leases_by_block.pop(block_id, None)
+            leases.append(victim_lease)
     if restored:
         _publish_hbm_blocks(self, restored, active=True)
     client.release(leases)
     return len(leases)
 
 
-def _reserve_dormant_headroom(self, recent_blocks: int) -> int:
+def _evict_dormant_directory_blocks(
+    self, required_blocks: int, additional_blocks=()
+) -> int:
+    directory = getattr(self, "_gms_kv_directory", None)
+    client = getattr(self, "_gms_kv_lease_client", None)
+    if directory is None or not directory.enabled or client is None:
+        return 0
+    # Never select candidates alongside an in-flight asynchronous retirement.
+    _collect_async_capacity(self, wait=True)
+    eligible_slot_ids = _select_capacity_candidates(
+        self, required_blocks, additional_blocks
+    )
+    if not eligible_slot_ids:
+        return 0
+    victims = directory.ensure_hbm_capacity(
+        required_blocks,
+        eligible_slot_ids=eligible_slot_ids,
+        engine_id=_directory_pool_id(),
+        compact=True,
+    )
+    released = _apply_capacity_victims(self, victims)
+    if os.environ.get("GMS_KV_DIRECTORY_DIAGNOSTICS"):
+        logger.warning(
+            "[GMS-KVDirectory] vLLM capacity required=%d eligible=%d "
+            "victims=%d released=%d",
+            int(required_blocks),
+            len(eligible_slot_ids),
+            len(victims),
+            released,
+        )
+    return released
+
+
+def async_capacity_retirement_enabled() -> bool:
+    """Retire dormant HBM records off the scheduler thread (opt-in).
+
+    Enabled by DYN_GMS_ASYNC_DIRECTORY_WORK=1. The directory capacity call
+    runs on a background thread and its victims are applied on a later engine
+    step. Trade-off: freed headroom arrives a few steps later, so under a
+    sudden burst an allocation can still wait for the in-flight retirement;
+    retired records are briefly absent from the directory while their blocks
+    remain natively cached, and a native hit in that window republishes them
+    as active.
+    """
+    return async_directory_work_enabled()
+
+
+def _submit_async_capacity(self, required_blocks: int, additional_blocks=()) -> bool:
+    """Start one background capacity retirement; at most one is in flight."""
+    if getattr(self, "_gms_capacity_future", None) is not None:
+        return True
+    eligible_slot_ids = _select_capacity_candidates(
+        self, required_blocks, additional_blocks
+    )
+    if not eligible_slot_ids:
+        return False
+    executor = self.__dict__.get("_gms_capacity_executor")
+    if executor is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gms-capacity")
+        self._gms_capacity_executor = executor
+    self._gms_capacity_future = executor.submit(
+        self._gms_kv_directory.ensure_hbm_capacity,
+        int(required_blocks),
+        eligible_slot_ids=eligible_slot_ids,
+        engine_id=_directory_pool_id(),
+        compact=True,
+    )
+    return True
+
+
+def _collect_async_capacity(self, *, wait: bool = False) -> int:
+    """Apply a finished background retirement on the engine thread."""
+    future = getattr(self, "_gms_capacity_future", None)
+    if future is None or (not wait and not future.done()):
+        return 0
+    self._gms_capacity_future = None
+    try:
+        victims = future.result()
+    except Exception:  # noqa: BLE001
+        # Same outcome as a failed synchronous retirement: nothing is released
+        # here, and the next headroom check tries again.
+        logger.warning(
+            "[GMS-KVDirectory] background vLLM capacity retirement failed",
+            exc_info=True,
+        )
+        return 0
+    return _apply_capacity_victims(self, victims, verify_generation=True)
+
+
+def _reserve_dormant_headroom(self, recent_blocks: int, candidates=()) -> int:
     """Retire cold READY entries before the next allocation needs them.
 
     vLLM treats cached blocks in its free queue as immediately reusable.
@@ -815,9 +1188,50 @@ def _reserve_dormant_headroom(self, recent_blocks: int) -> int:
         or client is None
     ):
         return 0
-    shortage = int(recent_blocks) - int(client.free_count())
-    if shortage <= 0:
+    asynchronous = async_capacity_retirement_enabled()
+    if asynchronous:
+        _collect_async_capacity(self)
+    configured = os.environ.get("GMS_VLLM_DORMANT_HEADROOM_BLOCKS")
+    if configured is None:
+        # A percentage alone admits only one prompt on small pools. Size the
+        # low watermark for a concurrent wave of observed requests, bounded
+        # to an eighth of the pool to avoid erasing the retained prefix cache.
+        concurrency = int(getattr(self, "_gms_admission_concurrency", 1))
+        low = max(
+            1,
+            (int(self.num_gpu_blocks) + 99) // 100,
+            min(int(recent_blocks) * concurrency, int(self.num_gpu_blocks) // 8),
+        )
+        low = max(int(recent_blocks), low)
+        # Refill in batches: do not pay a directory RPC after every request.
+        high = min(
+            int(self.num_gpu_blocks) - 1,
+            max(low, min(2 * low, int(self.num_gpu_blocks) // 4)),
+        )
+    else:
+        low = max(int(recent_blocks), max(1, int(configured)))
+        high = min(int(self.num_gpu_blocks) - 1, low)
+    available = int(client.free_count())
+    if available >= low:
         return 0
+    shortage = max(0, high - available)
+    if os.environ.get("GMS_KV_DIRECTORY_DIAGNOSTICS"):
+        logger.warning(
+            "[GMS-KVDirectory] vLLM headroom recent=%d available=%d "
+            "low=%d high=%d shortage=%d candidates=%d authoritative=%s",
+            int(recent_blocks),
+            available,
+            low,
+            high,
+            shortage,
+            len(candidates),
+            directory.authoritative,
+        )
+    if asynchronous:
+        _submit_async_capacity(self, shortage, candidates)
+        return 0
+    if candidates:
+        return _evict_dormant_directory_blocks(self, shortage, candidates)
     return _evict_dormant_directory_blocks(self, shortage)
 
 
@@ -834,6 +1248,10 @@ def _get_num_free_blocks(self, native_get_num_free_blocks) -> int:
 
 
 def _get_new_blocks(self, native_get_num_free_blocks, num_blocks: int):
+    if num_blocks == 0:
+        # Most decode steps extend an already-owned block. No new pointer or
+        # ownership is exposed, so there is nothing to reserve or reclaim.
+        return []
     client = getattr(self, "_gms_kv_lease_client", None)
     assert client is not None
     local_free = native_get_num_free_blocks()
@@ -861,9 +1279,8 @@ def _get_new_blocks(self, native_get_num_free_blocks, num_blocks: int):
             "[GMS-KVLease] dormant HBM capacity reclaim failed",
             exc_info=True,
         )
-    preferred = _preferred_block_ids(
-        self.free_block_queue,
-        _preferred_candidate_limit(int(num_blocks)),
+    preferred, preferred_is_head = _preferred_unleased_block_ids(
+        self, _preferred_candidate_limit(int(num_blocks))
     )
 
     def acquire_with_preferred(
@@ -906,6 +1323,7 @@ def _get_new_blocks(self, native_get_num_free_blocks, num_blocks: int):
         try:
             leases = acquire_with_preferred(fallback_preferred, strict=False)
             preferred = fallback_preferred
+            preferred_is_head = True
         except Exception as fallback_exc:  # noqa: BLE001
             refresh = getattr(client, "refresh_free_count", None)
             if refresh is not None:
@@ -922,8 +1340,10 @@ def _get_new_blocks(self, native_get_num_free_blocks, num_blocks: int):
 
     lease_block_ids = [int(lease.block_id) for lease in leases]
     try:
-        if lease_block_ids == preferred[:num_blocks] and hasattr(
-            self.free_block_queue, "popleft_n"
+        if (
+            preferred_is_head
+            and lease_block_ids == preferred[:num_blocks]
+            and hasattr(self.free_block_queue, "popleft_n")
         ):
             ret = self.free_block_queue.popleft_n(num_blocks)
         else:
@@ -947,23 +1367,44 @@ def _get_new_blocks(self, native_get_num_free_blocks, num_blocks: int):
     return ret
 
 
-def _free_blocks(self, ordered_blocks):
+def _free_blocks(self, ordered_blocks, *, admission_blocks=None):
     client = getattr(self, "_gms_kv_lease_client", None)
     assert client is not None
 
     blocks_list = list(ordered_blocks)
-    # Classify inside the decrement loop, like native BlockPool.free_blocks:
-    # a block listed twice becomes free once, on the decrement that reaches 0.
+    pending = getattr(self, "_gms_completed_frees", None)
+    if pending is not None:
+        pending.append(blocks_list)
+        return
     free_blocks = []
     for block in blocks_list:
         block.ref_cnt -= 1
         if block.ref_cnt == 0 and not block.is_null:
             free_blocks.append(block)
+    borrowed_free = []
+    writer_free = []
+    read_pins = getattr(self, "_gms_kv_read_pins_by_block", {})
+    directory = getattr(self, "_gms_kv_directory", None)
+    for block in free_blocks:
+        read_pin = read_pins.pop(int(block.block_id), None)
+        if read_pin is None:
+            writer_free.append(block)
+            continue
+        lease, claim = read_pin
+        if self.enable_caching and block.block_hash is not None:
+            self._maybe_evict_cached_block(block)
+        client.unpin_read([lease])
+        claim["remaining"].discard(int(block.block_id))
+        if not claim["remaining"] and (
+            directory is None or not directory.release_claim(claim["token"])
+        ):
+            raise RuntimeError("failed to release vLLM HBM read claim")
+        borrowed_free.append(block)
+    free_blocks = writer_free
     leases = []
     missing_lease_blocks = []
     retained = []
     invalidated = []
-    directory = getattr(self, "_gms_kv_directory", None)
     # Retaining a freed block's prefix hash (sealing its lease instead of
     # releasing + evicting) preserves cross-request prefix caching, which the
     # release-on-every-free path otherwise silently disables under
@@ -995,6 +1436,8 @@ def _free_blocks(self, ordered_blocks):
         if self.enable_caching and block.block_hash is not None:
             self._maybe_evict_cached_block(block)
         lease = self._gms_kv_leases_by_block.pop(int(block.block_id), None)
+        if content_hash is not None:
+            _forget_directory_slot(self, content_hash, lease)
         if content_hash is not None and directory is not None and directory.enabled:
             invalidated.append(
                 (
@@ -1028,8 +1471,20 @@ def _free_blocks(self, ordered_blocks):
         # adoptable directory generation. Publishing ACTIVE earlier adds
         # scheduler work but cannot make an incomplete block recoverable.
         if _publish_hbm_blocks(self, retained, active=False):
-            _reserve_dormant_headroom(self, len(retained))
+            _reserve_dormant_headroom(
+                self,
+                len(retained) if admission_blocks is None else admission_blocks,
+                retained,
+            )
         else:
+            if directory is not None and directory.authoritative:
+                # The daemon may have committed before its reply was lost.
+                # Releasing here could race an adopter of that surviving
+                # record. Keep the sealed leases and stop this transaction;
+                # recovery must fence this cohort before reclaiming them.
+                raise RuntimeError(
+                    "ambiguous authoritative HBM publication; retaining sealed leases"
+                )
             # Publication is a recovery optimization, never a reason to kill
             # EngineCore (a lost lease is: see _seal_or_fail_stop). If the
             # authoritative directory cannot commit the sealed batch, make
@@ -1043,6 +1498,7 @@ def _free_blocks(self, ordered_blocks):
     if invalidated:
         _drop_directory_hashes(directory, invalidated)
     client.release(leases)
+    free_blocks.extend(borrowed_free)
     # Match current vLLM's reuse policy: unhashed blocks are hot reusable
     # capacity and go to the LIFO head, while retained prefix-cache entries go
     # to the FIFO/LRU tail.  Appending every block was inherited from the old
@@ -1062,9 +1518,17 @@ def _free_blocks(self, ordered_blocks):
 
 
 def _request_is_tracked(coordinator, request_id: str) -> bool:
+    managers = coordinator.single_type_managers
+    if len(managers) == 1:
+        # The common single KV-cache-group layout: two dict lookups.
+        manager = managers[0]
+        return (
+            request_id in manager.req_to_blocks
+            or request_id in manager.num_cached_block
+        )
     return any(
         request_id in manager.req_to_blocks or request_id in manager.num_cached_block
-        for manager in coordinator.single_type_managers
+        for manager in managers
     )
 
 
@@ -1123,6 +1587,10 @@ def _build_gms_block_pool_class(block_pool_class):
             return _get_num_free_blocks(self, super().get_num_free_blocks)
 
         def get_new_blocks(self, num_blocks: int):
+            if getattr(self, "_gms_completed_frees", None) is not None:
+                raise RuntimeError(
+                    "cannot allocate inside a GMS completion transaction"
+                )
             return _get_new_blocks(
                 self,
                 super().get_num_free_blocks,
@@ -1131,6 +1599,10 @@ def _build_gms_block_pool_class(block_pool_class):
 
         def free_blocks(self, ordered_blocks):
             return _free_blocks(self, ordered_blocks)
+
+        def take_events(self):
+            _flush_completed_frees(self)
+            return super().take_events()
 
     GMSBlockPool.__name__ = "GMSBlockPool"
     GMSBlockPool.__qualname__ = "GMSBlockPool"

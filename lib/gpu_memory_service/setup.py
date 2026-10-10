@@ -127,6 +127,7 @@ setup(
             "gms-storage-client=gpu_memory_service.cli.storage_runner:main",
         ],
         "sglang.srt.plugins": [
+            "gms-persistent-kv=gpu_memory_service.integrations.sglang.plugin:register_gms_plugin",
             "gms-v1=gpu_memory_service.v1.integrations.sglang.plugin:register_gms_v1_plugin",
         ],
     },
