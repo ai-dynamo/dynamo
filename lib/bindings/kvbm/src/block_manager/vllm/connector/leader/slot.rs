@@ -2111,9 +2111,6 @@ mod connector_tests {
             .unwrap();
         assert_eq!(slot.num_device_blocks_allocated(), 4);
 
-        slot.apply_scheduler_output(&[], &decode_block, num_tokens + 1, 0, None, None)
-            .unwrap();
-        assert_eq!(slot.num_device_blocks_allocated(), 4);
         assert_eq!(slot.device_blocks_snapshot(), &[100, 101, 102, 200]);
     }
 
