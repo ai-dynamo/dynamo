@@ -115,3 +115,7 @@
 # examples/gpu-sharing is added in the same PR as the GPU sharing docs
 # that link to it on main. Remove this rule once that PR merges.
 ^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/examples/gpu-sharing
+
+# The Qwen3-ASR DGD manifest is introduced by the same PR as its vLLM multimodal
+# guide link, so the blob/main URL returns 404 until merge. Remove this entry after merge.
+^https://github\.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_asr\.yaml$
