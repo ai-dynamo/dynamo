@@ -1163,7 +1163,11 @@ async fn handler_completions(
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
     let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
-    if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
+    // SDKs may send streaming options on unary requests. Ignore those hints
+    // before validation; the preprocessor enables unary usage independently.
+    if request.inner.stream != Some(true) {
+        request.inner.stream_options = None;
+    } else if *FORCE_INCLUDE_USAGE {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
 
@@ -2446,6 +2450,9 @@ async fn pooling(
     Ok(response)
 }
 
+/// Clear client streaming hints before validation so unary SDK requests remain valid.
+/// Unary token usage is enabled independently by the preprocessor; clearing these
+/// hints must not disable usage reporting.
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
@@ -2475,7 +2482,9 @@ async fn handler_chat_completions(
                 return Err(error);
             }
         };
-    if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
+    if request.inner.stream != Some(true) {
+        request.inner.stream_options = None;
+    } else if *FORCE_INCLUDE_USAGE {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
 
