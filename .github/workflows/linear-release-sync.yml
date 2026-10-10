@@ -31,17 +31,17 @@ on:
 env:
   # The release currently in development on main. Update at each cycle open,
   # when the prior release branch is cut and main rolls to the next line.
-  # The v prefix is part of the version: every Dynamo release in the Linear
-  # pipeline is v-prefixed, and the action matches an existing release by this
-  # exact string. A bare "1.6.0" creates a second, empty release next to the
-  # real one.
-  MAIN_RELEASE_VERSION: "v1.6.0"
+  # The version is bare (no v prefix), matching linear-release.yml, which syncs
+  # release/X.Y.Z pushes and completes vX.Y.Z tags with the bare X.Y.Z. The
+  # action matches an existing release by this exact string, so a v-prefixed
+  # value here creates a second release next to the real one.
+  MAIN_RELEASE_VERSION: "1.7.0"
 
   # First-run scan base. With no base the action scans from the pipeline's
   # latest release, which would sweep in every issue merged since August. This
-  # is the commit where the 1.5 branch was cut, so the first run sees exactly
+  # is the commit where the 1.6 branch was cut, so the first run sees exactly
   # the commits that belong to this cycle. Update it at each cycle open.
-  RELEASE_SCAN_BASE: "330ce842416d0065e33dbb67109585fbba6f4930"
+  RELEASE_SCAN_BASE: "16b2ae50032edbdde70a9e03a7e7056fac3b7c7d"
 
 concurrency:
   group: linear-release-sync-${{ github.ref }}
@@ -64,21 +64,11 @@ jobs:
           access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
           command: sync
           version: ${{ env.MAIN_RELEASE_VERSION }}
-          name: Dynamo ${{ env.MAIN_RELEASE_VERSION }}
+          name: Dynamo v${{ env.MAIN_RELEASE_VERSION }}
           base_ref: ${{ env.RELEASE_SCAN_BASE }}
-          # Deliberate rollout gate: the workflow does not sync until this is
-          # flipped. Dry run scans and logs what it would attach without
-          # creating or modifying anything in Linear. Flip to false in a
-          # follow-up PR once one observed run logs that it would update the
-          # existing "Dynamo v1.6.0" release rather than create one, and
-          # LINEAR_ACCESS_KEY is confirmed to be a pipeline access key.
-          #
-          # Flipping this also publishes the tracker release URL. The action
-          # runs the CLI with --json and echoes the result unconditionally
-          # (run.sh line 95 at the pinned SHA), and on the real path that
-          # result carries the release URL. Dry run returns null, so nothing
-          # is disclosed today. The log_level input does not suppress it,
-          # because that echo sits outside the CLI's own logging. This
-          # repository is public, so its job logs are public. The flip pull
-          # request has to accept that disclosure explicitly.
-          dry_run: true
+          # Live. The Linear "Dynamo v1.7.0" release carries version 1.7.0, so
+          # each run updates that release instead of creating one. The action
+          # echoes its JSON result, including the tracker release URL, into
+          # this public job log (run.sh line 95 at the pinned SHA); that
+          # disclosure was accepted when this was turned on.
+          dry_run: false
