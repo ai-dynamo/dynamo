@@ -49,7 +49,7 @@ from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uu
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
@@ -489,7 +489,7 @@ class HandlerBase(BaseGenerativeHandler):
         wrapper that defers abort() until the first token is received (KV
         transfer complete).
 
-        Raise EngineShutdown if shutdown event is triggered.
+        Raise WorkerShutdown if shutdown event is triggered.
         """
         cancellation_triggers: list[asyncio.Future[Any]] = []
         try:
@@ -519,9 +519,9 @@ class HandlerBase(BaseGenerativeHandler):
                 except asyncio.CancelledError:
                     pass
 
-            # Raise EngineShutdown if cancellation is due to shutdown event triggered
+            # Raise WorkerShutdown if cancellation is due to shutdown event triggered
             if shutdown_task in done:
-                raise EngineShutdown("Engine was shut down during generation.")
+                raise WorkerShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
@@ -548,7 +548,7 @@ class HandlerBase(BaseGenerativeHandler):
         In disaggregated decode mode, generation_result may be a _DeferredAbort
         wrapper that defers abort() until the first token.
 
-        Raise EngineShutdown if shutdown event is triggered.
+        Raise WorkerShutdown if shutdown event is triggered.
 
         Yields:
             asyncio.Task: The cancellation monitoring task

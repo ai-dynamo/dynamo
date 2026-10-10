@@ -16,6 +16,7 @@ from dynamo._core import RouterQueueLimitExceeded as RouterQueueLimitExceeded
 from dynamo._core import SelectionServiceError as SelectionServiceError
 from dynamo._core import StreamIncomplete as StreamIncomplete
 from dynamo._core import Unknown as Unknown
+from dynamo._core import WorkerShutdown as WorkerShutdown
 
 logger = logging.getLogger(__name__)
 

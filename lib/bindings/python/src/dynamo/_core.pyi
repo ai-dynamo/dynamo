@@ -3196,6 +3196,11 @@ class EngineShutdown(DynamoException):
 
     ...
 
+class WorkerShutdown(EngineShutdown):
+    """An explicit worker shutdown; in-flight requests may migrate."""
+
+    ...
+
 class StreamIncomplete(DynamoException):
     """The response stream was terminated before completion."""
 
