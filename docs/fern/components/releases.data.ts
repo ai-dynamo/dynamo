@@ -104,7 +104,7 @@ export const RELEASES: Release[] = [
     pins: { sglang: "0.5.18", trtllm: "1.3.0rc25", vllm: "0.28.0", nixlSglang: "1.4.0", nixlTrtllm: "1.3.1", nixlVllm: "1.3.2" },
     ucx: "1.21.x",
     delta:
-      "KVBM deprecated with removal targeted for v1.6.0; CRD storage version promoted to v1beta1 and the v1alpha1 admission webhook endpoints removed; Go EPP removed in favor of the Rust EPP shipped inside the Frontend image; Dynamo Snapshot moved to a standalone operator and chart, dropping the bundled snapshot chart, snapshot-agent image and DynamoCheckpoint CRD; AIConfigurator renamed to AISimulate; unified-backend entry point removed from the vLLM and SGLang workers; UCX 1.21.x.",
+      "KVBM deprecated with removal targeted for v1.7.0; CRD storage version promoted to v1beta1 and the v1alpha1 admission webhook endpoints removed; Go EPP removed in favor of the Rust EPP shipped inside the Frontend image; Dynamo Snapshot moved to a standalone operator and chart, dropping the bundled snapshot chart, snapshot-agent image and DynamoCheckpoint CRD; AIConfigurator renamed to AISimulate; unified-backend entry point removed from the vLLM and SGLang workers; UCX 1.21.x.",
     notesSummary:
       "Pluggable worker selection policies and tiered KV indexing in the Router, guided tool-call streaming and request validation in the Frontend, image decoding at the Frontend for encode-prefill-decode deployments, v1beta1 CRD storage with the Rust EPP as the default Endpoint Picker, GPU Memory Service V1, and a standalone Snapshot operator.",
   },
