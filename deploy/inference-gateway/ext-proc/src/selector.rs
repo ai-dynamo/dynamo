@@ -36,6 +36,7 @@ pub struct SelectRequest {
     pub allowed_worker_ids: Option<HashSet<u64>>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
+    pub do_not_queue: bool,
     pub expected_output_tokens: Option<u32>,
     pub policy_class: Option<String>,
     /// Session to pin (`x-dynamo-session-id`); the selector binds it to the
@@ -196,6 +197,7 @@ impl Selector {
             session_context: None,
             priority_jump: req.priority_jump,
             strict_priority: req.strict_priority,
+            do_not_queue: req.do_not_queue,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: req.allowed_worker_ids,
@@ -416,6 +418,7 @@ models:
             allowed_worker_ids: None,
             priority_jump: None,
             strict_priority: None,
+            do_not_queue: false,
             expected_output_tokens: None,
             policy_class: None,
             session_id: None,

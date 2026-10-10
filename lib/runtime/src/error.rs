@@ -432,7 +432,7 @@ impl ErrorReason {
             "request.conflict" => Some(ErrorClass::Conflict),
             "request.payload_too_large" => Some(ErrorClass::PayloadTooLarge),
             "request.unsupported_media" => Some(ErrorClass::UnsupportedMedia),
-            "request.rate_limited" => Some(ErrorClass::RateLimited),
+            "request.rate_limited" | "router.do_not_queue" => Some(ErrorClass::RateLimited),
             "runtime.not_implemented" => Some(ErrorClass::NotImplemented),
             _ => None,
         }
@@ -559,6 +559,13 @@ pub enum PublicDetails {
         limit: Option<u64>,
         remaining: Option<u64>,
     },
+    /// Router-owned queue snapshot captured after a request opts out of waiting.
+    RouterQueue {
+        policy_class: String,
+        pending_count: usize,
+        pending_isl_tokens: usize,
+        pending_cached_tokens: usize,
+    },
 }
 
 impl PublicDetails {
@@ -566,7 +573,10 @@ impl PublicDetails {
     pub fn message(&self) -> Option<&str> {
         match self {
             Self::Message { message } => Some(message),
-            Self::SizeLimit { .. } | Self::ContextLength { .. } | Self::RateLimit { .. } => None,
+            Self::SizeLimit { .. }
+            | Self::ContextLength { .. }
+            | Self::RateLimit { .. }
+            | Self::RouterQueue { .. } => None,
         }
     }
 }
@@ -1250,6 +1260,28 @@ mod tests {
                 remaining: Some(0),
             })
         );
+    }
+
+    #[test]
+    fn router_do_not_queue_has_rate_limited_reason_and_public_queue_snapshot() {
+        let error = DynamoError::builder()
+            .class(ErrorClass::RateLimited)
+            .reason(ErrorReason::new("router.do_not_queue").unwrap())
+            .public_details(PublicDetails::RouterQueue {
+                policy_class: "latency".to_string(),
+                pending_count: 2,
+                pending_isl_tokens: 128,
+                pending_cached_tokens: 64,
+            })
+            .build();
+
+        let encoded = serde_json::to_value(&error).unwrap();
+        assert_eq!(encoded["reason"], "router.do_not_queue");
+        assert_eq!(encoded["public"]["type"], "router_queue");
+        assert_eq!(encoded["public"]["policy_class"], "latency");
+        assert_eq!(encoded["public"]["pending_count"], 2);
+        assert_eq!(encoded["public"]["pending_isl_tokens"], 128);
+        assert_eq!(encoded["public"]["pending_cached_tokens"], 64);
     }
 
     #[test]

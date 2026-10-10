@@ -37,6 +37,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When present, the frontend skips tokenization. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
 | `cache_salt` | `string` | `None` | Router / supported backends | Namespaces Dynamo KV routing. Supported backends also isolate backend KV-cache reuse; see [Backend support](#backend-support). This is the recommended cache-isolation input. |
+| `do_not_queue` | `bool` | `false` | Router | Returns HTTP 429 if the request would remain in the router pending queue after the current scheduling pass. Requests admitted in that pass are unaffected. |
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"detailed_finish_reason"`, `"prompt_token_ids"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
 | `metadata_upload` | object | `None` | SGLang backend | Uploads final cumulative SGLang `meta_info` out of band. The object accepts one required `url` field. Requires an RL-enabled SGLang worker. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
@@ -55,6 +56,28 @@ Related root-level Dynamo output option:
 token IDs, pass integer IDs in the normal `stop` array, for example
 `"stop": [576]`. Strings such as `"token_id:576"` remain literal string stop
 sequences and are not parsed as token IDs.
+
+### Do Not Queue
+
+Set `nvext.do_not_queue` to `true` when the client must decide whether to retry
+or route elsewhere instead of waiting for worker capacity. The request still
+participates in normal policy-class scheduling, including priority and worker
+eligibility checks. Dynamo returns HTTP 429 only if the request remains in the
+router pending queue after the current scheduling pass. A request admitted in
+that pass proceeds normally. Omit the field or set it to `false` to preserve
+normal queueing behavior.
+
+Direct router clients set `do_not_queue` on `RouterRequest::New` instead:
+
+```json
+{"method": "new", "tokens": [101, 202, 303], "do_not_queue": true}
+```
+
+A rejected direct request returns `RouterResponse::DoNotQueue` with
+`method: "do_not_queue"`, the policy class, and its current `pending_count`,
+`pending_isl_tokens`, and `pending_cached_tokens`. These values describe the
+class's queued load after the rejected request has been removed; the rejected
+request is not included.
 
 ### Header Overrides
 

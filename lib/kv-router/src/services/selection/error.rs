@@ -66,6 +66,15 @@ impl SelectionError {
             Self::Indexer(_) => "internal",
         }
     }
+
+    /// Stable reason for a scheduler outcome that needs a distinct client
+    /// response, if one is defined.
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Scheduler(KvSchedulerError::DoNotQueue { .. }) => Some("router.do_not_queue"),
+            _ => None,
+        }
+    }
 }
 
 fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
@@ -81,6 +90,7 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         KvSchedulerError::AllEligibleWorkersOverloaded
         | KvSchedulerError::PinnedWorkerOverloaded { .. }
         | KvSchedulerError::QueueRejected(_)
+        | KvSchedulerError::DoNotQueue { .. }
         | KvSchedulerError::DeadlineExceeded => StatusCode::TOO_MANY_REQUESTS,
         KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
         // A duplicate live request id, or a lifecycle the caller ended (or
@@ -134,6 +144,28 @@ impl IntoResponse for SelectionError {
             )
                 .into_response();
         }
+        if let Self::Scheduler(KvSchedulerError::DoNotQueue {
+            policy_class,
+            pending_count,
+            pending_isl_tokens,
+            pending_cached_tokens,
+        }) = &self
+        {
+            return (
+                self.status(),
+                Json(serde_json::json!({
+                    "error": self.to_string(),
+                    "reason": self.reason(),
+                    "details": {
+                        "policy_class": policy_class,
+                        "pending_count": pending_count,
+                        "pending_isl_tokens": pending_isl_tokens,
+                        "pending_cached_tokens": pending_cached_tokens,
+                    },
+                })),
+            )
+                .into_response();
+        }
 
         (
             self.status(),
@@ -146,6 +178,7 @@ impl IntoResponse for SelectionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduling::{QueueLimitKind, QueueRejection};
 
     #[derive(Debug, thiserror::Error)]
     #[error("private plugin detail")]
@@ -165,6 +198,52 @@ mod tests {
             SelectionError::Scheduler(KvSchedulerError::DeadlineExceeded).status_code(),
             StatusCode::TOO_MANY_REQUESTS.as_u16()
         );
+    }
+
+    #[test]
+    fn preserves_other_scheduler_error_statuses_and_identifies_do_not_queue() {
+        let rejection = KvSchedulerError::QueueRejected(QueueRejection {
+            policy_class: "default".to_string(),
+            limit_kind: QueueLimitKind::Requests,
+            current: 1,
+            limit: 1,
+        });
+        assert_eq!(SelectionError::from(rejection).status_code(), 429);
+        assert_eq!(
+            SelectionError::Scheduler(KvSchedulerError::NoEndpoints).status_code(),
+            StatusCode::SERVICE_UNAVAILABLE.as_u16()
+        );
+        let error = SelectionError::Scheduler(KvSchedulerError::DoNotQueue {
+            policy_class: "latency-sensitive".to_string(),
+            pending_count: 2,
+            pending_isl_tokens: 128,
+            pending_cached_tokens: 64,
+        });
+        assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS.as_u16());
+        assert_eq!(error.kind(), "scheduler");
+        assert_eq!(error.reason(), Some("router.do_not_queue"));
+    }
+
+    #[tokio::test]
+    async fn do_not_queue_response_has_reason_and_safe_load_details() {
+        let response = SelectionError::Scheduler(KvSchedulerError::DoNotQueue {
+            policy_class: "latency-sensitive".to_string(),
+            pending_count: 2,
+            pending_isl_tokens: 128,
+            pending_cached_tokens: 64,
+        })
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["reason"], "router.do_not_queue");
+        assert_eq!(body["details"]["policy_class"], "latency-sensitive");
+        assert_eq!(body["details"]["pending_count"], 2);
+        assert_eq!(body["details"]["pending_isl_tokens"], 128);
+        assert_eq!(body["details"]["pending_cached_tokens"], 64);
     }
 
     #[tokio::test]
