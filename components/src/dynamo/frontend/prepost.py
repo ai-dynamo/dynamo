@@ -1427,13 +1427,11 @@ class StreamingPostProcessor:
         # ------------------------------------------------------------------
         if self._tool_text_buffer is not None:
             self._tool_text_buffer += delta_text
-            buffer_complete = (
-                any(
-                    marker in self._tool_text_buffer
-                    for marker in self._tool_end_markers()
-                )
-            ) or output.finish_reason
-            if buffer_complete:
+            # Parse once at the end: with multi-token steps (e.g. MTP) a chunk
+            # can close one call and open the next, and splitting the response
+            # between this parse and the streaming parser drops or re-indexes
+            # the later calls.
+            if output.finish_reason:
                 buffered_text = self._tool_text_buffer
                 self._tool_text_buffer = None
                 delta_message = self._extract_tool_calls_from_text(buffered_text)
