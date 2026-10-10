@@ -359,6 +359,7 @@ markers = [
     "core: marks tests that exercise core/runtime functionality",
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
+    "trtllm_disagg_router: existing TRT router-disaggregation launcher coverage",
     "sglang: marks tests as requiring sglang",
     "triton: marks tests as requiring triton",
     "triton_qa: marks the Triton QA test suite",
