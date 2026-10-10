@@ -107,11 +107,30 @@ echo "HTTP_PORT=${HTTP_PORT}, NAMESPACE=${NAMESPACE}"
 # itself) doesn't re-enter this trap and loop forever.
 trap 'trap - EXIT INT TERM; echo; kill 0' EXIT INT TERM
 
+# A worker that dies during startup never answers /health, so the readiness
+# loops check the recorded worker PIDs on every poll and fail fast instead of
+# polling a dead port until the deadline.
+WORKER_PIDS=()
+check_workers_alive() {
+    local i pid status
+    for i in "${!WORKER_PIDS[@]}"; do
+        pid="${WORKER_PIDS[$i]}"
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            status=0
+            wait "${pid}" || status=$?
+            echo "vLLM backend $((i + 1)) (pid ${pid}) exited with status ${status} before becoming ready" >&2
+            return 1
+        fi
+    done
+    return 0
+}
+
 wait_ready() {
     local url="$1" name="$2" timeout_s="${3:-900}"
     local deadline=$((SECONDS + timeout_s))
     echo "Waiting for ${name} ..."
     while (( SECONDS < deadline )); do
+        check_workers_alive || exit 1
         if curl -fsS "${url}" 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ready"'; then
             echo "${name} is ready"
             return 0
@@ -153,6 +172,8 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --max-model-len "${MAX_MODEL_LEN}" \
         --kv-events-config "${KV_EVENTS_CONFIG}" \
         ${GPU_MEM_ARGS} ${VLLM_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
+    # env execs python, so $! is the worker's own PID.
+    WORKER_PIDS+=("$!")
 done
 
 # Phase 2: wait for all workers to be ready.
@@ -173,6 +194,7 @@ python -m dynamo.frontend \
 echo "Waiting for frontend to accept requests ..."
 DEADLINE=$((SECONDS + 300))
 while (( SECONDS < DEADLINE )); do
+    check_workers_alive || exit 1
     HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
         -X POST "http://127.0.0.1:${HTTP_PORT}/v1/chat/completions" \
         -H "Content-Type: application/json" \
