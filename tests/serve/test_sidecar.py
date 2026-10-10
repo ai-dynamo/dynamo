@@ -19,7 +19,11 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.utils.constants import DynamoPortRange
-from tests.utils.engine_metrics import EngineMetrics, VllmMetricsChecker
+from tests.utils.engine_metrics import (
+    EngineMetrics,
+    SGLangMetricsChecker,
+    VllmMetricsChecker,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import (
@@ -88,6 +92,7 @@ TRTLLM_OPENENGINE_SKIP_REASON = (
 
 CANCELLATION_MAX_TOKENS = 2048
 CANCELLATION_CONTEXT_LEN = 4096
+SGLANG_CANCELLATION_KV_TOKENS = 8192
 
 
 def _aggregated_payloads(metrics: EngineMetrics):
@@ -149,17 +154,27 @@ sidecar_configs = {
         name="sglang_aggregated",
         directory=sglang_sidecar_dir,
         script_name="agg.sh",
+        script_args=["--enable-metrics", "--decode-log-interval", "1"],
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
             pytest.mark.timeout(780),
             pytest.mark.post_merge,
+            pytest.mark.requested_sglang_kv_tokens(SGLANG_CANCELLATION_KV_TOKENS),
         ],
         model="Qwen/Qwen3-0.6B",
-        env={"PYTHONUNBUFFERED": "1"},
-        request_payloads=[
-            chat_payload_default(),
-        ],
+        env={
+            "PYTHONUNBUFFERED": "1",
+            "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
+            "SGLANG_MAX_NEW_TOKENS_LIMIT": "0",
+        },
+        request_payloads=_aggregated_payloads(
+            SGLangMetricsChecker(
+                port_env="SGLANG_HTTP_PORT",
+                minimum_context_length=CANCELLATION_CONTEXT_LEN,
+                minimum_kv_capacity=SGLANG_CANCELLATION_KV_TOKENS,
+            ),
+        ),
     ),
     "trtllm_aggregated": EngineConfig(
         name="trtllm_aggregated",
@@ -256,7 +271,12 @@ sidecar_configs = {
         name="sglang_disaggregated",
         directory=sglang_sidecar_dir,
         script_name="disagg.sh",
-        script_args=["--disable-cuda-graph"],
+        script_args=[
+            "--disable-cuda-graph",
+            "--enable-metrics",
+            "--decode-log-interval",
+            "1",
+        ],
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
@@ -268,7 +288,11 @@ sidecar_configs = {
         health_check_workers=True,
         health_check_worker_count=2,
         env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
-        request_payloads=[disaggregated_chat_payload()],
+        request_payloads=_disaggregated_payloads(
+            prefill_metrics=SGLangMetricsChecker(port_env="SGLANG_PREFILL_HTTP_PORT"),
+            decode_metrics=SGLangMetricsChecker(port_env="SGLANG_DECODE_HTTP_PORT"),
+            transfer_metrics=SGLangMetricsChecker(port_env="SGLANG_PREFILL_HTTP_PORT"),
+        ),
     ),
 }
 
@@ -322,11 +346,13 @@ def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_ba
                     engine_ports[4]
                 )
 
-        elif backend == "vllm":
+        elif backend in ("vllm", "sglang"):
             namespace = f"sidecar-agg-{generate_random_suffix()}"
             monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
             monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
-            http_port_env = "VLLM_RS_HTTP_PORT"
+            http_port_env = (
+                "VLLM_RS_HTTP_PORT" if backend == "vllm" else "SGLANG_HTTP_PORT"
+            )
             engine_env = {
                 "DYN_NAMESPACE": namespace,
                 http_port_env: str(engine_ports[0]),
