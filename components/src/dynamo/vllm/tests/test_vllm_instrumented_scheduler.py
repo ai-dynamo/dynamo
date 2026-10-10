@@ -5944,7 +5944,11 @@ def test_kvwarm_native_capacity_counts_resident_blocks_not_evicted_placeholders(
 
 
 @pytest.mark.core
-def test_kvwarm_native_capacity_uses_sliding_window_admission_caps():
+@pytest.mark.parametrize(
+    "cap_attribute",
+    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
+)
+def test_kvwarm_native_capacity_uses_sliding_window_admission_caps(cap_attribute):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.max_model_len = 1024
     stub.num_lookahead_tokens = 0
@@ -5952,7 +5956,7 @@ def test_kvwarm_native_capacity_uses_sliding_window_admission_caps():
         coordinator=SimpleNamespace(
             single_type_managers=[
                 SimpleNamespace(block_size=16),
-                SimpleNamespace(block_size=4, _max_admission_blocks_per_request=4),
+                SimpleNamespace(block_size=4, **{cap_attribute: 4}),
             ]
         )
     )
