@@ -160,7 +160,7 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 </ParamField>
 
 <ParamField path="backendFramework" type="string">
-  GPU backend framework for worker components. When omitted, the operator infers the framework from each worker's command and arguments. When set, it must match the detected worker framework. LPX components omit this field. Backend-specific defaults apply to `spec.components[*].podTemplate.spec.containers[name=main]`.
+  GPU backend framework for worker components. When omitted, the operator infers the framework from each worker's Dynamo command and arguments, using `initContainers[name=runtime]` in sidecar mode and `containers[name=main]` otherwise. When set, it must match the detected worker framework. Set this field explicitly when the runtime launch is hidden in the image entrypoint or requires shell expansion. Changes in inferred sidecar backends can trigger a worker rollout on operator upgrade; see [Dynamo Sidecar Mode](dynamo-component-deployment.mdx#dynamo-sidecar-mode). LPX components omit this field. Backend-specific defaults apply to `spec.components[*].podTemplate.spec.containers[name=main]`.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
@@ -378,11 +378,11 @@ Replica information for a single component, keyed by component name in `status.c
 </ParamField>
 
 <ParamField path="servedModelName" type="string">
-  Effective primary model identity resolved from the fully rendered serving Pod. The operator checks `--served-model-name`, `--model-name`, `--model`, and `--model-path` in that order. Omitted when the rendered command declares none of those flags. During a rolling update, worker status retains the old active revision's value until cutover completes.
+  Effective primary model identity resolved from the fully rendered serving Pod. The operator checks `--served-model-name`, `--model-name`, `--model`, and `--model-path` in that order on the Dynamo runtime container. In sidecar mode, it falls back to the engine when the runtime has no model flag. Omitted when neither launch declares a model flag; positional models and registered model metadata are not projected. During a rolling update, worker status retains the old active revision's value until cutover completes.
 </ParamField>
 
 <ParamField path="runtimeComponentName" type="string">
-  Explicit Dynamo runtime component identity resolved from the serving Pod's `--endpoint` value. Omitted when the rendered command does not declare a component override. During a rolling update, worker status retains the old active revision's value until cutover completes.
+  Dynamo runtime component identity resolved from the runtime container's qualified `--endpoint` value. In sidecar mode, when no qualified endpoint supplies it, the operator checks `--component` and then a literal `DYN_COMPONENT` environment value. Environment references and `valueFrom` sources are not resolved. Omitted when no component identity can be derived. During a rolling update, worker status retains the old active revision's value until cutover completes.
 </ParamField>
 
 <ParamField path="gpuPowerLimitWatts" type="integer">

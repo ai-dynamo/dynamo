@@ -74,6 +74,85 @@ func TestResolveComponentRuntimeStatusUsesModelPathFallback(t *testing.T) {
 	}
 }
 
+// TestResolveComponentRuntimeStatusUsesNativeSidecar preserves engine model flags
+// while projecting the component from flags accepted by the native vLLM runtime.
+func TestResolveComponentRuntimeStatusUsesNativeSidecar(t *testing.T) {
+	cases := []struct {
+		name          string
+		engineArgs    []string
+		runtimeArgs   []string
+		runtimeEnv    []corev1.EnvVar
+		wantModel     string
+		wantComponent string
+	}{
+		{
+			name:        "component flag overrides environment with engine served model",
+			engineArgs:  []string{"serve", "model-source", "--served-model-name", "served-model"},
+			runtimeArgs: []string{"--grpc-endpoint", "127.0.0.1:50051", "--component", "custom-decode", "--endpoint", "generate"},
+			runtimeEnv:  []corev1.EnvVar{{Name: commonconsts.DynamoComponentEnvVar, Value: "decode"}},
+			wantModel:   "served-model", wantComponent: "custom-decode",
+		},
+		{
+			name:        "bare endpoint uses runtime environment and engine model flag",
+			engineArgs:  []string{"--model", "engine-model", "--endpoint", "dyn://prod.engine-component.generate"},
+			runtimeArgs: []string{"--grpc-endpoint", "127.0.0.1:50051", "--endpoint", "generate"},
+			runtimeEnv:  []corev1.EnvVar{{Name: commonconsts.DynamoComponentEnvVar, Value: "decode"}},
+			wantModel:   "engine-model", wantComponent: "decode",
+		},
+		{
+			name:          "positional engine model needs registered metadata",
+			engineArgs:    []string{"serve", "model-source"},
+			runtimeArgs:   []string{"--grpc-endpoint", "127.0.0.1:50051", "--component=custom-decode"},
+			wantComponent: "custom-decode",
+		},
+		{
+			name:        "engine endpoint does not supply runtime identity",
+			engineArgs:  []string{"--model", "engine-model", "--endpoint", "dyn://prod.engine-component.generate"},
+			runtimeArgs: []string{"--grpc-endpoint", "127.0.0.1:50051"},
+			wantModel:   "engine-model",
+		},
+		{
+			name:        "unresolved environment is not a component name",
+			runtimeArgs: []string{"--grpc-endpoint", "127.0.0.1:50051"},
+			runtimeEnv:  []corev1.EnvVar{{Name: commonconsts.DynamoComponentEnvVar, Value: "$(COMPONENT)"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Configure an independent engine and a native vLLM runtime using supported sidecar flags")
+			pod := &corev1.PodSpec{
+				Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Args: tc.engineArgs}},
+				InitContainers: []corev1.Container{
+					{Name: "setup", Args: []string{"--model", "setup-model"}},
+					{Name: "runtime", Command: []string{"dynamo-vllm-sidecar"}, RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Args: tc.runtimeArgs, Env: tc.runtimeEnv},
+				},
+			}
+			original := pod.DeepCopy()
+
+			t.Log("Resolve model fallback and runtime component identity without mutating the Pod")
+			status := ResolveComponentRuntimeStatus(pod, nil)
+			assert.Equal(t, tc.wantModel, status.ServedModelName)
+			assert.Equal(t, tc.wantComponent, status.RuntimeComponentName)
+			require.Equal(t, original, pod)
+		})
+	}
+}
+
+// TestResolveComponentRuntimeStatusPrefersRuntimeModel keeps explicit runtime
+// model identity ahead of the engine's model source for Python sidecar launches.
+func TestResolveComponentRuntimeStatusPrefersRuntimeModel(t *testing.T) {
+	t.Log("Configure different engine and runtime model names")
+	pod := &corev1.PodSpec{
+		Containers:     []corev1.Container{{Name: commonconsts.MainContainerName, Args: []string{"--model", "engine-model"}}},
+		InitContainers: []corev1.Container{{Name: "runtime", Command: []string{"python3", "-m", "dynamo.vllm"}, Args: []string{"--served-model-name", "served-model", "--endpoint", "dyn://prod.decode.generate"}}},
+	}
+
+	t.Log("Prefer the explicit runtime identity to the engine fallback")
+	status := ResolveComponentRuntimeStatus(pod, nil)
+	assert.Equal(t, "served-model", status.ServedModelName)
+	assert.Equal(t, "decode", status.RuntimeComponentName)
+}
+
 func TestResolveComponentRuntimeStatusFromRenderedTRTLLMLeader(t *testing.T) {
 	t.Log("Render a TRT-LLM leader and resolve identity through its nested bash launch wrapper")
 	container := &corev1.Container{
@@ -138,4 +217,18 @@ func runtimeStatusTestPodSpec(model string) corev1.PodSpec {
 		Name: commonconsts.MainContainerName,
 		Args: []string{"--model", model},
 	}}}
+}
+
+// TestDetectBackendFrameworkDoesNotMutateCommand protects callers that keep
+// additional command data in the same backing array.
+func TestDetectBackendFrameworkDoesNotMutateCommand(t *testing.T) {
+	t.Log("Keep a sentinel beyond the command slice's length")
+	backing := []string{"dynamo-vllm-sidecar", "unchanged"}
+	command := backing[:1]
+
+	t.Log("Detect the native launch without overwriting the caller's backing array")
+	backend, err := DetectBackendFrameworkFromArgs(command, []string{"--grpc-endpoint=127.0.0.1:50051"})
+	require.NoError(t, err)
+	assert.Equal(t, BackendFrameworkVLLM, backend)
+	assert.Equal(t, []string{"dynamo-vllm-sidecar", "unchanged"}, backing)
 }
