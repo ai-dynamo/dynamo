@@ -707,6 +707,54 @@ class MultimodalProcessorInstantiated(Exception):
     """Custom exception for testing MultimodalRequestProcessor."""
 
 
+@pytest.mark.core
+@pytest.mark.asyncio
+@pytest.mark.parametrize("served_name", [None, "public-model"])
+async def test_registration_uses_resolved_snapshot_and_preserves_name(
+    tmp_path, served_name
+):
+    config = parse_args(["--model", "org/model"])
+    config.served_model_name = served_name
+    config.frontend_decoding = False
+    runtime = mock.MagicMock()
+    runtime.snapshot_before_endpoint = None
+    runtime.endpoint.return_value.first_token_source = mock.AsyncMock()
+    runtime.endpoint.return_value.connection_id.return_value = 1
+    engine = mock.MagicMock()
+    engine.get_kv_cache_capacity.return_value = {}
+    engine.get_attention_dp_size.return_value = 1
+    engine_context = mock.MagicMock()
+    engine_context.__aenter__.return_value = engine
+
+    with (
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.resolve_model_path",
+            return_value=str(tmp_path),
+        ),
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.ModelRuntimeConfig"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.register_engine_metrics_callback"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            return_value=engine_context,
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.register_model",
+            new_callable=mock.AsyncMock,
+            side_effect=RuntimeError("registration reached"),
+        ) as registration,
+    ):
+        with pytest.raises(RuntimeError, match="registration reached"):
+            await init_llm_worker(runtime, config, asyncio.Event())
+
+    assert registration.await_args.args[3:5] == (
+        str(tmp_path),
+        served_name or "org/model",
+    )
+
+
 @pytest.mark.asyncio
 async def test_init_llm_worker_creates_multimodal_processor():
     config = parse_args(["--model", "fake-model", "--modality", "multimodal"])
