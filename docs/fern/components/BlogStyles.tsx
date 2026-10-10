@@ -76,6 +76,14 @@ article:has(.dynamo-blog-home) {
   padding: 0 clamp(0.25rem, 2vw, 1.5rem) 5rem;
 }
 
+/* Reserve the absent sticky TOC column at wide breakpoints to keep Blog
+   content aligned with TOC-bearing pages. */
+@media (min-width: 80rem) {
+  body:has(.dynamo-blog-home):not(:has(#fern-toc)) .fern-layout-content-wrapper {
+    margin-inline-end: var(--sticky-aside-width);
+  }
+}
+
 article:has(.dynamo-blog-home) > header {
   display: none;
 }
