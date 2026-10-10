@@ -332,7 +332,7 @@ impl ActiveSequences {
 
         if let Some(frac) = decay_fraction {
             self.blocks
-                .set_unique_suffix_fractional(&request_state.blocks, frac);
+                .set_unique_suffix_fractional(&mut request_state.blocks, frac);
         }
 
         self.validate_state();
