@@ -203,6 +203,23 @@ pub enum PickError {
     /// multiplexing means the connection cap does not bound concurrent requests.
     #[error("endpoint picker overloaded")]
     Overloaded,
+    /// The embedded router found every eligible worker overloaded → 429.
+    /// Distinct from the EPP's own [`Self::Overloaded`] cap.
+    #[error("all eligible workers are overloaded")]
+    RouterOverloaded,
+    /// A policy-class queue limit refused the request → 429. Workers may still
+    /// have capacity, so it stays distinct from [`Self::RouterOverloaded`].
+    #[error("router queue is full")]
+    RouterQueueRejected,
+    /// The request's deadline passed while it waited in the router's queue → 429.
+    #[error("request deadline exceeded")]
+    RouterDeadlineExceeded,
+    /// The request contradicts router state, e.g. a duplicate booking → 409.
+    #[error("conflicting router state for this request")]
+    RouterConflict,
+    /// A router invariant failed → 500.
+    #[error("internal routing error")]
+    RouterInternal,
 }
 
 #[cfg(test)]
