@@ -91,9 +91,11 @@ JSON-escaped names so they cannot introduce workflow commands into the log.
 ## Standalone runtime admission
 
 The PR workflow may omit standalone SGLang CPU/GPU jobs for a nonempty set of
-ordinary modifications contained entirely in one audited class in
-`actions/changed-files/report.py`. Classes cannot be mixed. All eight change
-statuses must be present and valid; additions, copies, deletions, renames,
+ordinary changes contained entirely in one audited class in
+`actions/changed-files/report.py`. The exact operator class allows additions and
+modifications; the vLLM unit-test class allows modifications only. Classes cannot
+be mixed. All eight change statuses must be present, valid and account for the
+complete changed-file set without overlapping additions/modifications. Copies, deletions, renames,
 type changes, unmerged/unknown files, unlisted siblings and malformed or missing
 data retain the existing full selection. Set repository variable
 `FORCE_FULL_CI=true` to bypass admission. Main, postmerge and nightly are unchanged.
@@ -137,13 +139,13 @@ Paths are relative to the repository root.
 | `recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json` | Recipe/schema generation validation and Kustomize consumers |
 | `recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json` | Recipe/schema generation validation and Kustomize consumers |
 
-Historical PRs #15930 and #13603 contain eight **added** paths in this list, so
-both actual diffs retain full execution. Their recorded runtime cost is not
-measured admission savings. Paths not yet present on the target branch cannot
-qualify until introduced and later modified; introduction itself stays full.
+Historical PRs #15930 and #13603 each contain 15 modified and eight added paths
+in this exact list. Both actual status-bearing diffs qualify for operator
+admission. Their recorded runtime cost is an opportunity estimate; selection
+replay alone does not demonstrate measured admission savings.
 
 Admission saves runtime work only when the original gates selected that work.
-For this operator list, only these four existing paths select standalone backend
+For this operator list, only these four paths select standalone backend
 runtime jobs through the `deploy` filter:
 
 - `deploy/helm/charts/platform/components/operator/templates/deployment.yaml`
@@ -153,4 +155,4 @@ runtime jobs through the `deploy` filter:
 
 README-, Go-, CRD-, documentation- and OpenAPI-only subsets already omit those
 runtime jobs and therefore save zero additional runtime work. A mixed set of
-allowed ordinary modifications can save work when it includes a listed Helm path.
+allowed additions/modifications can save work when it includes a listed Helm path.
