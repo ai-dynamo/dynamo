@@ -809,3 +809,57 @@ class TestEmbeddingWorkerProcesses:
         config.headless = True
         with pytest.raises(ValueError, match="--headless"):
             config._validate_embedding_worker_processes()
+
+
+class TestFreezeGcAfterInit:
+    """--freeze-gc-after-init is opt-in and rejected where it cannot run."""
+
+    def test_is_opt_in(self, monkeypatch):
+        monkeypatch.delenv("DYN_VLLM_FREEZE_GC_AFTER_INIT", raising=False)
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+
+        assert parser.parse_args([]).freeze_gc_after_init is False
+        assert parser.parse_args(["--freeze-gc-after-init"]).freeze_gc_after_init
+        assert DynamoVllmConfig.freeze_gc_after_init is False
+
+    def test_env_enables(self, monkeypatch):
+        monkeypatch.setenv("DYN_VLLM_FREEZE_GC_AFTER_INIT", "true")
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+
+        assert parser.parse_args([]).freeze_gc_after_init is True
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.AGGREGATED,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.PREFILL,
+        ],
+    )
+    def test_registering_roles_accepted(self, mode):
+        config = create_config()
+        config.freeze_gc_after_init = True
+        config.disaggregation_mode = mode
+        config._validate_freeze_gc_after_init()
+
+    def test_encode_rejected(self):
+        config = create_config()
+        config.freeze_gc_after_init = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+        with pytest.raises(ValueError, match="--freeze-gc-after-init"):
+            config._validate_freeze_gc_after_init()
+
+    def test_headless_rejected(self):
+        config = create_config()
+        config.freeze_gc_after_init = True
+        config.headless = True
+        with pytest.raises(ValueError, match="--headless"):
+            config._validate_freeze_gc_after_init()
+
+    def test_disabled_skips_checks(self):
+        config = create_config()
+        config.headless = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+        config._validate_freeze_gc_after_init()
