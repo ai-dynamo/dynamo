@@ -3,9 +3,10 @@
 
 //! Helper binary to generate the Dynamo HTTP frontend OpenAPI specification.
 //!
-//! This allows CI and documentation tooling to obtain the exact same
-//! OpenAPI document that is served at `/openapi.json` by the frontend
-//! without having to start the HTTP service and scrape the endpoint.
+//! This allows CI and documentation tooling to obtain the frontend API schemas
+//! without starting the HTTP service and scraping the endpoint. File mode also
+//! lists `/docs` and `/openapi.json`: those documentation routes are registered
+//! after the served document is generated, so the full documents differ there.
 //!
 //! Usage (from the repository root):
 //! ```bash
@@ -13,6 +14,10 @@
 //! ```
 //! The generated spec will be written to:
 //!   `docs/frontends/openapi.json`
+//!
+//! Alternatively, `--serve 0.0.0.0:8000` starts the actual HttpService router
+//! with in-memory discovery and no workers. Query `/openapi.json` over HTTP.
+//! This mode needs neither model weights nor a GPU and does not test inference.
 //!
 //! This is a native, partially resolved document: `x-dynamo-schema-import` marks
 //! dependency schema slots that require version-pinned offline composition. Those
@@ -24,6 +29,7 @@
 //! validate framing, event ordering, or termination.
 
 use std::fs;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::thread;
 
@@ -36,14 +42,21 @@ use dynamo_llm::http::service::{openapi_docs, service_v2::HttpService};
 /// additional stack space due to recursive type expansion.
 const GENERATOR_STACK_SIZE: usize = 8 * 1024 * 1024;
 
-/// Run [`generate_openapi`] on the larger-stack thread required for schema generation.
+/// Run [`generate_openapi`] in file mode or the CLI-selected `--serve IP:PORT` mode.
 ///
-/// Returns its result, or an error if thread creation fails or the thread panics.
+/// Returns the generator's result, or an error for invalid arguments, thread creation
+/// failure, or a generator-thread panic.
 fn main() -> anyhow::Result<()> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let listen = match args.as_slice() {
+        [] => None,
+        [flag, address] if flag == "--serve" => Some(address.parse::<SocketAddr>()?),
+        _ => anyhow::bail!("usage: generate-frontend-openapi [--serve IP:PORT]"),
+    };
     // Spawn a thread with a larger stack to handle deeply nested schema generation
     let handle = thread::Builder::new()
         .stack_size(GENERATOR_STACK_SIZE)
-        .spawn(generate_openapi)
+        .spawn(move || generate_openapi(listen))
         .context("failed to spawn generator thread")?;
 
     handle
@@ -51,36 +64,72 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("generator thread panicked: {:?}", e))?
 }
 
-/// Export the native document to disk without starting a listener or loading a model.
+/// Export a native schema artifact or expose it through the workerless frontend.
 ///
-/// Uses the current directory as the output root; run from the repository root to
-/// update its `docs/frontends/openapi.json`. Creates parent directories and overwrites
-/// that file non-atomically. Returns `Ok(())` after writing it and printing its path.
+/// # Arguments
+///
+/// * `listen` - `None` writes `docs/frontends/openapi.json` under the current directory;
+///   run from the repository root to update that checkout. `Some(address)` instead
+///   binds the frontend there and blocks until server termination. Ctrl-C requests
+///   shutdown; serving mode writes no schema file and has no inference workers.
+///
+/// # Returns
+///
+/// `Ok(())` after writing the file and printing its path, or after successful server
+/// termination. File mode creates parent directories and overwrites non-atomically.
 ///
 /// # Errors
 ///
-/// Propagates service-construction, serialization, and I/O errors. A failed write may
-/// leave a truncated file; created directories are not removed on failure.
+/// Propagates service-construction, serialization, I/O, runtime, signal, or server
+/// errors. A failed write may leave a truncated file; created directories are not
+/// removed on failure.
 ///
 /// # Panics
 ///
 /// Panics if compiled schema invariants are violated during document generation.
-fn generate_openapi() -> anyhow::Result<()> {
+fn generate_openapi(listen: Option<SocketAddr>) -> anyhow::Result<()> {
     // Build an HttpService instance with all standard OpenAI-compatible
     // frontend endpoints enabled so that the generated OpenAPI document
     // reflects the full surface area exposed to users.
     //
     // This does NOT start any network listeners; it only builds the router
     // graph and associated route documentation.
-    let http_service = HttpService::builder()
+    let builder = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .enable_embeddings_endpoints(true)
         .enable_responses_endpoints(true)
         .enable_anthropic_endpoints(true)
-        .enable_batch_endpoints(true)
+        .enable_batch_endpoints(true);
+    let builder = if let Some(address) = listen {
+        builder.host(address.ip().to_string()).port(address.port())
+    } else {
+        builder
+    };
+    let http_service = builder
         .build()
         .context("failed to build HttpService for OpenAPI generation")?;
+
+    if let Some(address) = listen {
+        println!("Serving frontend OpenAPI at http://{address}/openapi.json (no workers)");
+        return tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_stack_size(GENERATOR_STACK_SIZE)
+            .build()?
+            .block_on(async {
+                let cancellation = tokio_util::sync::CancellationToken::new();
+                let server = http_service.run(cancellation.clone());
+                tokio::pin!(server);
+                tokio::select! {
+                    result = &mut server => result,
+                    signal = tokio::signal::ctrl_c() => {
+                        signal?;
+                        cancellation.cancel();
+                        server.await
+                    }
+                }
+            });
+    }
 
     let route_docs = http_service.route_docs().to_vec();
     let openapi = openapi_docs::generate_openapi_spec(&route_docs);
