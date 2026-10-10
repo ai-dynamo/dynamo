@@ -19,8 +19,7 @@
 #
 #       Note: TensorRT-LLM uses build_trtllm_override_args_with_mem() instead (requires JSON merging)
 #
-#   inherited_gpu_id
-#       First entry of the inherited CUDA_VISIBLE_DEVICES, or 0 when unset.
+#   inherited_gpu_id  → first inherited CUDA_VISIBLE_DEVICES entry, or 0 when unset
 #
 # Usage:
 #   GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
@@ -53,17 +52,8 @@ build_vllm_gpu_mem_args() {
 }
 
 
-# ---------------------------------------------------------------------------
-# inherited_gpu_id
-#   Returns the GPU a single-GPU launch should use: the first entry of the
-#   inherited CUDA_VISIBLE_DEVICES, or 0 when it is unset (standalone use).
-#
-#   The GPU-parallel test runner pins each test to one physical card through
-#   CUDA_VISIBLE_DEVICES and books its VRAM against that card. A launcher that
-#   overwrites it with a literal 0 moves the test onto physical GPU 0, which
-#   overcommits that card while the booked one sits idle. Only the first entry
-#   is used so a single-GPU worker never sees more than one card.
-# ---------------------------------------------------------------------------
+# inherited_gpu_id: first inherited CUDA_VISIBLE_DEVICES entry, or 0 when unset.
+# The parallel test runner pins each test's card there; a literal 0 overcommits GPU 0.
 inherited_gpu_id() {
     local devices="${CUDA_VISIBLE_DEVICES:-0}"
     echo "${devices%%,*}"
