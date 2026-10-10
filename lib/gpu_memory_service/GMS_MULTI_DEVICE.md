@@ -19,10 +19,12 @@ This design introduces a **device-agnostic VMM abstraction layer** so that Intel
 | G5 | Add XPU torch mempool dispatch via `torch.xpu` APIs | ✅ Phase 2 |
 | G6 | Enable snapshot save/load for XPU (IPC path) | ✅ Phase 2 |
 | G7 | vLLM XPU integration (GMSWorker + XPUWorker) | ✅ Phase 2 |
-| G8 | SGLang XPU integration | ⬜ Phase 3 |
+| G8 | SGLang XPU integration | ✅ Phase 3 |
 | G9 | Disk snapshot save/load for XPU (pinned staging) | ⬜ Phase 3 |
 | G10 | NixL staging backend for XPU | ⬜ Phase 3 |
-| G11 | Multi-device XPU (TP > 1, oneCCL + multi-card IPC) | ⬜ Phase 3 |
+| G11 | Multi-device XPU — one GMS server per card, TP > 1 ranks | ✅ Phase 3 |
+
+Also need to ensure the dynamo XPU docker file updated for XPU GMS.
 
 ---
 

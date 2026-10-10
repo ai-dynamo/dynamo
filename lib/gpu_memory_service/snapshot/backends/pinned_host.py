@@ -41,6 +41,14 @@ def _free_aligned_buffer(view: memoryview, ptr: int) -> None:
     _LIBC.free(ctypes.c_void_p(ptr))
 
 
+def _is_unsupported_host_register_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "register_host_memory not available" in message
+        or "device does not support host memory registration" in message
+    )
+
+
 class PinnedCopySlot:
     """One reusable pinned host buffer and copy stream.
 
@@ -59,8 +67,18 @@ class PinnedCopySlot:
         self._closed = False
         try:
             self.stream = self._vmm.stream_create_nonblocking()
-            self._vmm.host_register(self.ptr, size)
-            self._registered = True
+            try:
+                self._vmm.host_register(self.ptr, size)
+            except Exception as exc:  # noqa: BLE001
+                if _is_unsupported_host_register_error(exc):
+                    _LOGGER.warning(
+                        "GPU backend does not support host memory registration; "
+                        "continuing with unregistered host staging buffer"
+                    )
+                else:
+                    raise
+            else:
+                self._registered = True
         except Exception:
             try:
                 if self.stream is not None:
