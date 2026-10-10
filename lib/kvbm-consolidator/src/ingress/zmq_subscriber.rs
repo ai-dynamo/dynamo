@@ -159,13 +159,12 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
                 return;
             }
 
-            let token_chunks: Vec<Vec<u32>> =
-                token_ids.chunks(block_size).map(|c| c.to_vec()).collect();
+            let token_chunk_count = token_ids.chunks(block_size).len();
 
-            if token_chunks.len() != block_hashes.len() {
+            if token_chunk_count != block_hashes.len() {
                 tracing::warn!(
                     "Token chunks ({}) don't match block hashes ({}), skipping event",
-                    token_chunks.len(),
+                    token_chunk_count,
                     block_hashes.len()
                 );
                 return;
@@ -176,13 +175,15 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
                 .filter(|namespace| !namespace.is_empty())
                 .map(Arc::<str>::from);
 
-            for (i, block_hash) in block_hashes.into_iter().enumerate() {
+            for (block_hash, block_tokens) in
+                block_hashes.into_iter().zip(token_ids.chunks(block_size))
+            {
                 let hash_str = block_hash.into_u64().to_string();
                 tracker.handle_store_input(StoreInput::new(
                     engine_source,
                     hash_str.clone(),
-                    current_parent.clone(),
-                    token_chunks[i].clone(),
+                    current_parent.take(),
+                    block_tokens.to_vec(),
                     block_size,
                     lora_name.clone(),
                     cache_namespace.clone(),
