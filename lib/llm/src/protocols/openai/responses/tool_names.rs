@@ -23,6 +23,9 @@ impl ToolNameMap {
     /// Build deterministic aliases from current tools and historical calls.
     /// Historical identities reserve names but are not available for tool selection.
     pub fn new(tools: &[Tool], input: Option<&InputParam>) -> Self {
+        if tools.is_empty() && matches!(input, Some(InputParam::Text(_))) {
+            return Self::default();
+        }
         let mut identities = BTreeSet::new();
         for tool in tools {
             match tool {
@@ -141,5 +144,29 @@ impl ToolNameMap {
             "Responses tool_choice references unknown function '{name}'"
         ))
         .into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_current_tools_preserves_colliding_historical_namespaces() {
+        let input: InputParam = serde_json::from_value(serde_json::json!([
+            {"type": "function_call", "call_id": "crm_call", "namespace": "crm",
+             "name": "lookup", "arguments": "{}"},
+            {"type": "function_call", "call_id": "billing_call", "namespace": "billing",
+             "name": "lookup", "arguments": "{}"}
+        ]))
+        .unwrap();
+        let names = ToolNameMap::new(&[], Some(&input));
+        let crm = names.encode(Some("crm"), "lookup");
+        let billing = names.encode(Some("billing"), "lookup");
+        assert_ne!(crm, billing);
+        assert_eq!(names.decode(&crm), (Some("crm"), "lookup"));
+        assert_eq!(names.decode(&billing), (Some("billing"), "lookup"));
+        assert!(names.resolve_choice(Some("crm"), "lookup").is_err());
+        assert!(names.resolve_choice(Some("billing"), "lookup").is_err());
     }
 }
