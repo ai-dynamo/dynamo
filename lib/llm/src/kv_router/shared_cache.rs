@@ -54,6 +54,10 @@ struct SglangHicacheMooncakeConfig {
     should_split_heads: bool,
     #[serde(default)]
     extra_backend_tag: Option<String>,
+    /// Full prefix SGLang's MooncakeStore prepends to stored keys (backend tag and model
+    /// name). Absent from workers that predate it.
+    #[serde(default)]
+    key_prefix: Option<String>,
     #[serde(default)]
     kv_events_endpoint: Option<String>,
 }
@@ -69,6 +73,17 @@ impl SglangHicacheMooncakeConfig {
             && self.tp_lcm_size == other.tp_lcm_size
             && self.should_split_heads == other.should_split_heads
             && self.extra_backend_tag == other.extra_backend_tag
+            && self.key_prefix == other.key_prefix
+    }
+
+    /// Prefix used for both physical keys and group IDs. Older workers publish only the
+    /// backend tag, so fall back to it when `key_prefix` is absent.
+    fn effective_key_prefix(&self) -> Option<&str> {
+        self.key_prefix.as_deref().or_else(|| {
+            self.extra_backend_tag
+                .as_deref()
+                .filter(|tag| !tag.is_empty())
+        })
     }
 }
 
@@ -551,21 +566,15 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn sglang_group_id(logical_page_hash: &str, config: &SglangHicacheMooncakeConfig) -> String {
-    match config
-        .extra_backend_tag
-        .as_deref()
-        .filter(|tag| !tag.is_empty())
-    {
-        Some(tag) => format!("sglang-hicache:{tag}_{logical_page_hash}"),
-        None => format!("sglang-hicache:{logical_page_hash}"),
-    }
+    let logical_key = maybe_prefix_key(logical_page_hash, config.effective_key_prefix());
+    format!("sglang-hicache:{logical_key}")
 }
 
 fn expand_actual_query_keys(
     logical_page_hash: &str,
     config: &SglangHicacheMooncakeConfig,
 ) -> Vec<String> {
-    let logical_key = maybe_prefix_key(logical_page_hash, config.extra_backend_tag.as_deref());
+    let logical_key = maybe_prefix_key(logical_page_hash, config.effective_key_prefix());
     let pp_size = config.pp_size.max(1);
 
     if config.is_mla_model {
@@ -605,8 +614,9 @@ fn expand_actual_query_keys(
     query_keys
 }
 
-fn maybe_prefix_key(logical_key: &str, extra_backend_tag: Option<&str>) -> String {
-    match extra_backend_tag.filter(|tag| !tag.is_empty()) {
+// SGLang prepends `{prefix}_` whenever the prefix is not None, even when it is empty.
+fn maybe_prefix_key(logical_key: &str, prefix: Option<&str>) -> String {
+    match prefix {
         Some(prefix) => format!("{prefix}_{logical_key}"),
         None => logical_key.to_string(),
     }
@@ -630,6 +640,7 @@ mod tests {
             tp_lcm_size: None,
             should_split_heads: false,
             extra_backend_tag: None,
+            key_prefix: None,
             kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
         }
     }
@@ -749,6 +760,27 @@ mod tests {
         };
 
         assert_eq!(sglang_group_id("hash", &config), "sglang-hicache:tag_hash");
+    }
+
+    #[test]
+    fn test_key_prefix_takes_precedence_over_extra_backend_tag() {
+        let config = SglangHicacheMooncakeConfig {
+            extra_backend_tag: Some("tag".to_string()),
+            key_prefix: Some("tag_Qwen-Qwen3-0.6B".to_string()),
+            ..mooncake_config()
+        };
+
+        assert_eq!(
+            sglang_group_id("hash", &config),
+            "sglang-hicache:tag_Qwen-Qwen3-0.6B_hash"
+        );
+        assert_eq!(
+            expand_actual_query_keys("hash", &config),
+            vec![
+                "tag_Qwen-Qwen3-0.6B_hash_0_k",
+                "tag_Qwen-Qwen3-0.6B_hash_0_v"
+            ]
+        );
     }
 
     #[test]
@@ -939,6 +971,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hits.total_hits, 0);
+    }
+
+    fn stored_events(object_keys: &[String], group_id: &str) -> Vec<MooncakeObjectEvent> {
+        object_keys
+            .iter()
+            .map(|object_key| MooncakeObjectEvent {
+                event_type: "stored".to_string(),
+                object_key: Some(object_key.clone()),
+                tenant_id: "default".to_string(),
+                group_id: Some(group_id.to_string()),
+            })
+            .collect()
+    }
+
+    // Key names as stored by an SGLang worker serving `Qwen/Qwen3-0.6B` with no
+    // `extra_backend_tag`.
+    #[tokio::test]
+    async fn test_check_blocks_matches_sglang_model_prefixed_keys() {
+        let hash = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72";
+        let config = SglangHicacheMooncakeConfig {
+            key_prefix: Some("Qwen-Qwen3-0.6B".to_string()),
+            ..mooncake_config()
+        };
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
+        cache.apply_batch(
+            1,
+            stored_events(
+                &[
+                    format!("Qwen-Qwen3-0.6B_{hash}_0_k"),
+                    format!("Qwen-Qwen3-0.6B_{hash}_0_v"),
+                ],
+                &format!("sglang-hicache:Qwen-Qwen3-0.6B_{hash}"),
+            ),
+        );
+
+        let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
+        assert_eq!(hits.total_hits, 1);
+        assert!(
+            cache
+                .group_states
+                .get(&format!("sglang-hicache:Qwen-Qwen3-0.6B_{hash}"))
+                .is_some_and(|v| v.1)
+        );
     }
 
     #[tokio::test]

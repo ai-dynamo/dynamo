@@ -410,3 +410,82 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     assert (
         "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text
     )
+
+
+# Expected values follow SGLang MooncakeStore's `config_prefix`: backend tag (when
+# not None) then served model name with "/" -> "-", joined with "_".
+@pytest.mark.parametrize(
+    "extra_config, served_model_name, expected",
+    [
+        ({}, "Qwen/Qwen3-0.6B", "Qwen-Qwen3-0.6B"),
+        ({"extra_backend_tag": "t"}, "Qwen/Qwen3-0.6B", "t_Qwen-Qwen3-0.6B"),
+        ({"extra_backend_tag": ""}, "Qwen/Qwen3-0.6B", "_Qwen-Qwen3-0.6B"),
+        ({"extra_backend_tag": 7}, "Qwen/Qwen3-0.6B", "7_Qwen-Qwen3-0.6B"),
+        ({}, "my-model", "my-model"),
+        ({"extra_backend_tag": "t"}, None, "t"),
+        ({}, None, None),
+    ],
+)
+def test_mooncake_runtime_data_publishes_sglang_key_prefix(
+    monkeypatch, extra_config, served_model_name, expected
+):
+    from dynamo.sglang import register
+
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    server_args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=json.dumps(extra_config),
+        served_model_name=served_model_name,
+        page_size=64,
+        tp_size=1,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+
+    runtime_data = register._get_mooncake_runtime_data(server_args)
+
+    assert runtime_data["key_prefix"] == expected
+
+
+@pytest.mark.parametrize(
+    "filename, content",
+    [
+        ("extra.json", '{"extra_backend_tag": "t"}'),
+        ("extra.toml", 'extra_backend_tag = "t"\n'),
+        ("extra.yaml", "extra_backend_tag: t\n"),
+        ("extra.yml", "extra_backend_tag: t\n"),
+    ],
+)
+def test_mooncake_key_prefix_reads_at_file_extra_config(
+    monkeypatch, tmp_path, filename, content
+):
+    from dynamo.sglang import register
+
+    config_path = tmp_path / filename
+    config_path.write_text(content)
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    server_args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=f"@{config_path}",
+        served_model_name="Qwen/Qwen3-0.6B",
+        page_size=64,
+        tp_size=1,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+
+    runtime_data = register._get_mooncake_runtime_data(server_args)
+
+    assert runtime_data["extra_backend_tag"] == "t"
+    assert runtime_data["key_prefix"] == "t_Qwen-Qwen3-0.6B"
+
+
+@pytest.mark.parametrize("filename", ["missing.json", "extra.ini"])
+def test_unreadable_at_file_extra_config_is_ignored(tmp_path, filename):
+    from dynamo.sglang import register
+
+    path = tmp_path / filename
+    if filename.endswith(".ini"):
+        path.write_text("extra_backend_tag = t\n")
+
+    assert register._parse_hicache_storage_extra_config(f"@{path}") == {}
