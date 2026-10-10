@@ -289,19 +289,19 @@ async def wait_for_frontend_ready(
                 f"expected={expected_num_workers}, configured={configured_workers}"
             )
 
-        runtime = get_runtime(
+        with managed_runtime(
             store_backend=store_backend,
             request_plane=request_plane,
-        )
-        for group in worker_groups:
-            endpoint = runtime.endpoint(
-                f"{group.namespace}.{group.component_name}.generate"
-            )
-            await poll_for_worker_instances(
-                endpoint,
-                group.num_workers,
-                max_wait_time=timeout,
-            )
+        ) as runtime:
+            for group in worker_groups:
+                endpoint = runtime.endpoint(
+                    f"{group.namespace}.{group.component_name}.generate"
+                )
+                await poll_for_worker_instances(
+                    endpoint,
+                    group.num_workers,
+                    max_wait_time=timeout,
+                )
 
     models_url = f"{frontend_url}/v1/models"
     chat_url = f"{frontend_url}/v1/chat/completions"
