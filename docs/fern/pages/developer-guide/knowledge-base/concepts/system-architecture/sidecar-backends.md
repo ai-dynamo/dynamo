@@ -11,9 +11,9 @@ subtitle: Run Dynamo beside a stock inference engine through its native gRPC API
 > backends.
 
 A Dynamo sidecar runs beside the inference engine process. It registers the
-engine with Dynamo discovery and forwards engine events into the Dynamo event
-plane. Today, requests also pass through the sidecar. The target design routes
-requests directly to the engine's native gRPC service.
+engine with Dynamo discovery, forwards engine events into the Dynamo event
+plane, and serves requests from the Dynamo frontend by calling the engine's
+native gRPC API.
 
 ## Design Goals
 
@@ -28,31 +28,18 @@ requests directly to the engine's native gRPC service.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  F[Dynamo Frontend]
-  subgraph W[Same host or Kubernetes pod]
-    direction TB
-    S[Dynamo Sidecar] <-->|Native gRPC| E[Inference Engine]
-  end
-  S -->|Discovery and Event planes| F
-  F -->|Request plane*<br/>Native gRPC| E
-```
+![Dynamo Sidecar architecture. A client sends OpenAI-compatible HTTP to the Dynamo Frontend, which tokenizes, routes, and sends token IDs over the request plane to the Dynamo Sidecar.](../../../../../assets/img/sidecar-architecture.svg)
 
-<sup>*</sup> The direct request path is the target design. Today, requests pass
-through the sidecar.
+The frontend and router discover sidecars and send requests to them over the
+Dynamo request plane. Each sidecar converts requests to the engine's native gRPC
+API and streams responses back.
 
-In the target design, the frontend and router resolve the engine endpoint
-through discovery, then send requests directly to the engine. The sidecar stays
-off the request path and uses the engine's native gRPC service for metadata and
-event integration with Dynamo's discovery and event planes.
-
-## Target Responsibilities
+## Responsibilities
 
 | Layer | Responsibility |
 |---|---|
-| Dynamo frontend and router | OpenAI-compatible API, preprocessing, routing, and direct native gRPC requests to the engine |
-| Dynamo sidecar | Engine registration and discovery, plus metadata and event forwarding |
+| Dynamo frontend and router | OpenAI-compatible API, preprocessing, and routing to sidecars |
+| Dynamo sidecar | Engine registration and discovery, request forwarding over native gRPC, and event forwarding |
 | Inference engine | Native gRPC request serving, scheduling, sampling, token generation, KV cache, and GPU execution |
 
 ## Container Packaging
@@ -72,23 +59,59 @@ The image's default entrypoint, `dynamo-sidecar`, maps the short names `vllm`,
 `docker run`; the deployment manifests override it with `command`. The inference
 engine remains in a separate GPU container, so the sidecar image does not
 include vLLM, SGLang, TensorRT-LLM, CUDA, or engine-specific Python
-dependencies.
+dependencies. The image runs as the non-root `dynamo` user with numeric user ID
+`1000` and declares port `9090` for Dynamo system endpoints, so Kubernetes can
+enforce `runAsNonRoot`.
 
-No published sidecar image is available yet. Build the sidecar image from the
-[sidecar Dockerfile](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/Dockerfile).
+The sidecar image is published to NGC for each release, starting with 1.6.0:
 
-## Current Readiness
+```bash
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>  # 1.6.0 or later
+```
 
-| Backend | Local launcher | Kubernetes example |
-|---|---|---|
-| [vLLM](../../modular-components/backends/vllm/sidecar.md) | Aggregated and disaggregated | Aggregated and disaggregated |
-| [SGLang](../../modular-components/backends/sglang/sidecar.md) | Aggregated and disaggregated | Aggregated and disaggregated |
-| [TensorRT-LLM](../../modular-components/backends/tensorrt-llm/sidecar.md) | Aggregated | Aggregated |
+To build it from source instead, run from the repository root with the
+[sidecar Dockerfile](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/Dockerfile):
 
-Disaggregated launch paths require multiple GPUs and use NIXL for KV transfer.
-This table describes validated launch topologies, not feature parity with the
-in-process backends.
+```bash
+docker build -f lib/sidecar/Dockerfile -t dynamo-sidecar:1.6.0-dev .
+```
 
-See the
-[sidecar Dockerfile, source, and engine-specific READMEs](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar)
-for implementation details.
+## Pod Layout
+
+> [!NOTE]
+> Kubernetes sidecar mode is a work in progress.
+
+The engine and sidecar share one worker pod. The engine is the `main`
+container; the sidecar is a
+[native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/):
+an init container named `runtime` with `restartPolicy: Always`, which requires
+Kubernetes 1.29 or later. The two connect over loopback.
+
+```yaml
+podTemplate:
+  spec:
+    initContainers:
+    - name: runtime
+      image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>
+      command: [dynamo-vllm-sidecar]
+      args: [--grpc-endpoint, 127.0.0.1:50051]
+      restartPolicy: Always
+    containers:
+    - name: main
+      image: vllm/vllm-openai:<version>
+```
+
+Kubernetes starts the sidecar before the engine and keeps it running for the
+life of the pod. Declaring the `runtime` init container enables sidecar mode in
+the Dynamo operator, which gives the sidecar `/live` and `/health` probes on
+port `9090`. These probes do not track engine loading, so keep the engine's own
+probes on `main`. Sidecar mode supports worker, prefill, and decode components;
+multinode deployments are not yet supported.
+
+## Topologies
+
+Each engine page shows its single-node TP, multi-node TP, and multi-node DP
+topologies:
+[vLLM](../../modular-components/backends/vllm/sidecar.md#topologies),
+[SGLang](../../modular-components/backends/sglang/sidecar.md#topologies),
+[TensorRT-LLM](../../modular-components/backends/tensorrt-llm/sidecar.md#topologies).

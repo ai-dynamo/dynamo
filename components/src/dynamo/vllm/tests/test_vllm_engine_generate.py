@@ -7,6 +7,7 @@ import importlib.util
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 pytestmark = [
     pytest.mark.unit,
@@ -94,7 +95,6 @@ def test_tito_adapter_preserves_kv_transfer_params_in_sampling_extra_args():
         sampling_params={"max_tokens": 5, "extra_args": {"existing": "value"}},
         kv_transfer_params={"connector_data": {"block_ids": [1, 2]}},
     )
-    request["kv_hint"] = {"source": "worker-a"}
     adapted = adapt_engine_generate_request(
         request,
         enable_multimodal=False,
@@ -108,7 +108,6 @@ def test_tito_adapter_preserves_kv_transfer_params_in_sampling_extra_args():
         "existing": "value",
         "kv_transfer_params": {
             "connector_data": {"block_ids": [1, 2]},
-            "kv_hint": {"source": "worker-a"},
         },
     }
 
@@ -316,7 +315,7 @@ def test_tito_adapter_rejects_unsupported_execution_paths(
 def test_tito_adapter_rejects_asymmetric_image_feature_objects(features):
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
-    with pytest.raises(TypeError, match="hashes and placeholders must be lists"):
+    with pytest.raises(ValidationError):
         adapt_engine_generate_request(
             _request(features=features, sampling_params={"max_tokens": 1}),
             enable_multimodal=True,

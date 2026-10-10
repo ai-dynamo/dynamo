@@ -58,7 +58,9 @@ func allEnabledGates() Gates {
 	return Gates{
 		Checkpoint:       true,
 		Grove:            true,
+		LPX:              true,
 		LWS:              true,
+		DisaggregatedSet: true,
 		KaiScheduler:     true,
 		VolcanoScheduler: true,
 		DRA:              true,

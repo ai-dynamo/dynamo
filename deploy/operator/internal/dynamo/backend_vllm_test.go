@@ -15,6 +15,67 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+func TestVLLMBackendRoleTemplateLaunchAddsOnlyMPMasterPort(t *testing.T) {
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+		Annotations: map[string]string{
+			commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+		},
+	})
+	for _, role := range []Role{RoleLeader, RoleWorker} {
+		t.Run(string(role), func(t *testing.T) {
+			container := &corev1.Container{
+				Command: []string{"vllm", "serve"},
+				Args:    []string{"test", "--distributed-executor-backend=mp"},
+			}
+			require.NoError(t, (&VLLMBackend{roleLaunchOwnership: roleLaunchOwnedByPodTemplate}).UpdateContainer(
+				container, 2, role, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0),
+			))
+
+			require.True(t, hasArg(getExpandedCommandLine(container), "--master-port", commonconsts.VLLMMpMasterPort))
+
+			// Complete role templates own backend selection. A conflicting
+			// annotation must not turn either authored command into a Ray launch.
+			commandLine := strings.Join(append(append([]string{}, container.Command...), container.Args...), " ")
+			for _, operatorGeneratedFlag := range []string{"--nnodes", "--node-rank", "--master-addr", "--headless"} {
+				require.NotContains(t, commandLine, operatorGeneratedFlag)
+			}
+		})
+	}
+}
+
+func TestVLLMBackendRoleTemplateLaunchAddsMPMasterPortToShellCommand(t *testing.T) {
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+	})
+	container := &corev1.Container{
+		Command: []string{"/usr/bin/bash", "-c"},
+		Args:    []string{"exec vllm serve test --distributed-executor-backend=mp"},
+	}
+
+	require.NoError(t, (&VLLMBackend{roleLaunchOwnership: roleLaunchOwnedByPodTemplate}).UpdateContainer(
+		container, 2, RoleWorker, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0),
+	))
+	require.Equal(t, []string{"/usr/bin/bash", "-c"}, container.Command)
+	require.Len(t, container.Args, 1)
+	require.Contains(t, container.Args[0], "--master-port "+commonconsts.VLLMMpMasterPort)
+}
+
+func TestVLLMBackendRoleTemplateLaunchAddsMPMasterPortToShellCommandOperand(t *testing.T) {
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+	})
+	container := &corev1.Container{
+		Command: []string{"/usr/bin/bash", "-c", "exec vllm serve test --distributed-executor-backend=mp"},
+	}
+
+	require.NoError(t, (&VLLMBackend{roleLaunchOwnership: roleLaunchOwnedByPodTemplate}).UpdateContainer(
+		container, 2, RoleWorker, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0),
+	))
+	require.Empty(t, container.Args)
+	require.Contains(t, container.Command[2], "--master-port "+commonconsts.VLLMMpMasterPort)
+}
+
 // TestShellQuotePOSIX_ArgvRoundTrip re-parses the quoted tokens through a real
 // /bin/sh and verifies every original argv element comes back byte-for-byte —
 // including embedded single quotes, whitespace, newlines, shell control
@@ -181,6 +242,51 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			expectedArgs: []string{fmt.Sprintf(
 				"exec python3 -m dynamo.vllm %s 16 --distributed-executor-backend mp --nnodes 2 --master-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --master-port %s --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --headless",
 				tensorParallelSizeFlag, commonconsts.VLLMMpMasterPort)},
+			expectProbesRemoved: true,
+		},
+		{
+			name:          "new multinode leader uses topology aliases",
+			numberOfNodes: 2,
+			role:          RoleLeader,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
+			containerGPUs:     8,
+			expectedArgs: []string{
+				"-m", "dynamo.vllm", tensorParallelSizeFlag, "16",
+				"--distributed-executor-backend", "mp",
+				"--nnodes", "2",
+				"--master-addr", commonconsts.DynamoLeaderAddressEnvVarReference,
+				"--master-port", commonconsts.VLLMMpMasterPort,
+				"--node-rank", commonconsts.DynamoRankEnvVarReference,
+			},
+			expectProbesRemoved: true,
+		},
+		{
+			name:          "new multinode worker uses topology aliases",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
+			containerGPUs:     8,
+			expectedArgs: []string{
+				"-m", "dynamo.vllm", tensorParallelSizeFlag, "16",
+				"--distributed-executor-backend", "mp",
+				"--nnodes", "2",
+				"--master-addr", commonconsts.DynamoLeaderAddressEnvVarReference,
+				"--master-port", commonconsts.VLLMMpMasterPort,
+				"--node-rank", commonconsts.DynamoRankEnvVarReference,
+				"--headless",
+			},
 			expectProbesRemoved: true,
 		},
 		{
@@ -415,6 +521,67 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			expectProbesRemoved: true,
 		},
 		{
+			// updateVLLMMultinodeArgs reads the container through getExpandedArgs, a
+			// separate entry point from the getExpandedCommandLine one the detection
+			// helpers use. These two rows are the only coverage that the sizing path
+			// normalizes at all: without them, deleting normalizeVLLMFlags from
+			// getExpandedArgs leaves the whole suite green.
+			name:          "multinode leader sizes from short -tp alias",
+			numberOfNodes: 2,
+			role:          RoleLeader,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+				},
+				Resources: &v1alpha1.Resources{
+					Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.vllm", "-tp", "2"},
+			},
+			containerGPUs: 1,
+			expectedArgs: []string{
+				"-m", "dynamo.vllm", "-tp", "2",
+				"--distributed-executor-backend", "mp",
+				"--nnodes", "2",
+				"--master-addr", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+				"--master-port", commonconsts.VLLMMpMasterPort,
+				"--node-rank", "0",
+			},
+			expectProbesRemoved: true,
+		},
+		{
+			name:          "multinode leader sizes from equals-form tensor-parallel-size",
+			numberOfNodes: 2,
+			role:          RoleLeader,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+				},
+				Resources: &v1alpha1.Resources{
+					Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.vllm", tensorParallelSizeFlag + "=2"},
+			},
+			containerGPUs: 1,
+			expectedArgs: []string{
+				"-m", "dynamo.vllm", tensorParallelSizeFlag + "=2",
+				"--distributed-executor-backend", "mp",
+				"--nnodes", "2",
+				"--master-addr", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+				"--master-port", commonconsts.VLLMMpMasterPort,
+				"--node-rank", "0",
+			},
+			expectProbesRemoved: true,
+		},
+		{
 			name:          "multinode worker computes data parallel ranks from DRA GPU count",
 			numberOfNodes: 2,
 			role:          RoleWorker,
@@ -577,110 +744,6 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 
 			if !reflect.DeepEqual(tt.initialContainer.Command, expectedCommand) {
 				t.Errorf("UpdateContainer() should preserve shell command, got: %v, want: %v", tt.initialContainer.Command, expectedCommand)
-			}
-		})
-	}
-}
-
-func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
-	backend := &VLLMBackend{}
-
-	tests := []struct {
-		name                  string
-		component             *v1alpha1.DynamoComponentDeploymentSharedSpec
-		volumeMounts          []corev1.VolumeMount
-		expectCacheEnvVar     bool
-		expectCacheEnvVarName string
-		expectCacheEnvVarVal  string
-	}{
-		{
-			name: "VLLM backend with useAsCompilationCache volume mount",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				VolumeMounts: []v1alpha1.VolumeMount{
-					{
-						Name:                  "vllm-cache",
-						MountPoint:            "/root/.cache/vllm",
-						UseAsCompilationCache: true,
-					},
-				},
-			},
-			volumeMounts:          []corev1.VolumeMount{},
-			expectCacheEnvVar:     true,
-			expectCacheEnvVarName: "VLLM_CACHE_ROOT",
-			expectCacheEnvVarVal:  "/root/.cache/vllm",
-		},
-		{
-			name: "VLLM backend with useAsCompilationCache at custom mount point",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				VolumeMounts: []v1alpha1.VolumeMount{
-					{
-						Name:                  "custom-cache",
-						MountPoint:            "/custom/cache/path",
-						UseAsCompilationCache: true,
-					},
-				},
-			},
-			volumeMounts:          []corev1.VolumeMount{},
-			expectCacheEnvVar:     true,
-			expectCacheEnvVarName: "VLLM_CACHE_ROOT",
-			expectCacheEnvVarVal:  "/custom/cache/path",
-		},
-		{
-			name: "VLLM backend without useAsCompilationCache",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				VolumeMounts: []v1alpha1.VolumeMount{
-					{
-						Name:       "regular-volume",
-						MountPoint: "/data",
-					},
-				},
-			},
-			volumeMounts:      []corev1.VolumeMount{},
-			expectCacheEnvVar: false,
-		},
-		{
-			name: "VLLM backend with no volume mounts",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				VolumeMounts: nil,
-			},
-			volumeMounts:      []corev1.VolumeMount{},
-			expectCacheEnvVar: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			g := gomega.NewGomegaWithT(t)
-
-			// Create a container with initial state including volume mounts
-			container := &corev1.Container{
-				Env:          []corev1.EnvVar{},
-				VolumeMounts: tt.volumeMounts,
-			}
-
-			// Call UpdateContainer
-			require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
-
-			if tt.expectCacheEnvVar {
-				// Check that the VLLM_CACHE_ROOT environment variable is set
-				found := false
-				for _, env := range container.Env {
-					if env.Name == tt.expectCacheEnvVarName {
-						found = true
-						g.Expect(env.Value).To(gomega.Equal(tt.expectCacheEnvVarVal))
-						break
-					}
-				}
-				if !found {
-					t.Errorf("Expected environment variable %s not found in container", tt.expectCacheEnvVarName)
-				}
-			} else {
-				// Check that no cache environment variable is set
-				for _, env := range container.Env {
-					if env.Name == "VLLM_CACHE_ROOT" {
-						t.Errorf("Unexpected environment variable VLLM_CACHE_ROOT found: %s", env.Value)
-					}
-				}
 			}
 		})
 	}
@@ -1032,6 +1095,46 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			},
 			expectInitContainer: true,
 			expectedInitImage:   "vllm:command",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+		},
+		{
+			name:              "mp worker with underscore-and-equals executor flag injects init container",
+			numberOfNodes:     2,
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "main",
+						Image:   "vllm:underscore",
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16", "--distributed_executor_backend=mp"},
+					},
+				},
+			},
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:underscore",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+		},
+		{
+			// The shell ends the word at ";", so vLLM runs with the mp backend and the
+			// worker needs the init container to wait for the leader's master port.
+			name:              "mp worker with shell-terminated executor flag injects init container",
+			numberOfNodes:     2,
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "main",
+						Image:   "vllm:terminated",
+						Command: []string{"/bin/sh", "-c"},
+						Args:    []string{"exec python3 -m dynamo.vllm " + tensorParallelSizeFlag + " 16 " + distributedExecutorFlag + " mp;"},
+					},
+				},
+			},
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:terminated",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
 		{

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import gc
 import logging
 import os
 import time
@@ -47,6 +48,13 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
 
 
+def _freeze_gc_after_init(enabled: bool) -> None:
+    if enabled:
+        collected = gc.collect()
+        gc.freeze()
+        logging.info("Froze SGLang worker GC objects after collecting %d", collected)
+
+
 @dataclass
 class _WorkerSetup:
     """Common state shared by decode/prefill worker init, built by
@@ -74,6 +82,7 @@ async def _init_worker_common(
     run_deferred_handlers: Callable[[], Awaitable[None]] | None,
     snapshot_engine: Optional[sgl.Engine],
     attached_engine: Optional[object],
+    freeze_gc: bool = False,
 ) -> Optional[_WorkerSetup]:
     """Setup shared by `init_decode` and `init_prefill`: endpoint creation,
     engine acquisition (fresh, snapshot or gateway-attached), gateway parent
@@ -121,6 +130,7 @@ async def _init_worker_common(
         # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
         # serve requests; gateway children do, this process keeps the engine alive.
         try:
+            _freeze_gc_after_init(freeze_gc and dynamo_args.freeze_gc_after_init)
             await serve_via_gateway_children(
                 engine, gateway_count, shutdown_event, load_time=load_time
             )
@@ -252,6 +262,7 @@ async def init_decode(
         run_deferred_handlers,
         snapshot_engine,
         attached_engine,
+        freeze_gc=True,
     )
     if setup is None:
         # Gateway parent or non-leader node: already handled by _init_worker_common.
@@ -299,6 +310,8 @@ async def init_decode(
         health_check_payload = SglangHealthCheckPayload(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
         ).to_dict()
+
+    _freeze_gc_after_init(dynamo_args.freeze_gc_after_init)
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:

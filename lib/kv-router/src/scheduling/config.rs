@@ -128,6 +128,13 @@ fn validate_min(field: &str, value: f64, min: f64) -> Result<(), String> {
     Err(format!("{field} must be greater than or equal to {min}"))
 }
 
+fn validate_finite_non_negative(field: &str, value: f64) -> Result<(), String> {
+    if value.is_finite() && value >= 0.0 {
+        return Ok(());
+    }
+    Err(format!("{field} must be finite and non-negative"))
+}
+
 fn validate_range(field: &str, value: f64, min: f64, max: f64) -> Result<(), String> {
     if value >= min && value <= max {
         return Ok(());
@@ -194,7 +201,7 @@ fn log_env_config(config: &KvRouterConfig) {
         router_event_threads = config.router_event_threads,
         router_queue_policy = %config.router_queue_policy,
         use_remote_indexer = config.use_remote_indexer,
-        shared_cache_multiplier = config.shared_cache_multiplier,
+        shared_cache_multiplier = ?config.shared_cache_multiplier,
         shared_cache_type = %config.shared_cache_type,
         host_cache_hit_weight = config.host_cache_hit_weight,
         disk_cache_hit_weight = config.disk_cache_hit_weight,
@@ -224,6 +231,41 @@ fn kv_router_config_from_lookup(
         get_env(key).and_then(|value| dynamo_truthy::parse_bool_opt(&value))
     }
 
+    // TODO(v1.7): Remove these env aliases after the v1.6 policy-YAML
+    // migration release; wire compatibility fields have a separate N-2 lifetime.
+    let get_env = |key: &str| {
+        let value = get_env(key)?;
+        let replacement = match key {
+            "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT" => {
+                Some("default policy parameters.overlap_score_credit")
+            }
+            "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY" => {
+                Some("default policy parameters.overlap_score_credit_decay")
+            }
+            "DYN_ROUTER_PREFILL_LOAD_SCALE"
+            | "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT"
+            | "DYN_OVERLAP_SCORE_WEIGHT" => Some("default policy parameters.prefill_load_scale"),
+            "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT" => {
+                Some("default policy parameters.decode_active_request_weight")
+            }
+            "DYN_ROUTER_TEMPERATURE" => Some("default policy parameters.router_temperature"),
+            "DYN_SHARED_CACHE_MULTIPLIER" => {
+                Some("default policy parameters.shared_cache_multiplier")
+            }
+            DYN_ROUTER_PREFILL_POLICY => Some("worker_selection.prefill"),
+            DYN_ROUTER_DECODE_POLICY => Some("worker_selection.decode"),
+            "DYN_ROUTER_QUEUE_THRESHOLD" => Some("policy_classes[].prefill_busy_threshold_frac"),
+            "DYN_ROUTER_QUEUE_POLICY" => Some("policy_classes[].queue_policy"),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            tracing::warn!(
+                "{key} is deprecated and will be removed in v1.7; use {replacement} in DYN_ROUTER_POLICY_CONFIG."
+            );
+        }
+        Some(value)
+    };
+
     let mut config = KvRouterConfig::default();
 
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {
@@ -243,7 +285,6 @@ fn kv_router_config_from_lookup(
         "DYN_OVERLAP_SCORE_WEIGHT",
     ] {
         if let Some(value) = parse_f64(&get_env, key) {
-            tracing::warn!("{key} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE");
             apply_deprecated_overlap_score_weight_override(
                 value,
                 &mut config.overlap_score_credit,
@@ -344,16 +385,9 @@ fn kv_router_config_from_lookup(
     if let Some(value) = parse_bool(&get_env, "DYN_USE_REMOTE_INDEXER") {
         config.use_remote_indexer = value;
     }
-    let mut shared_cache_multiplier_set = false;
-    if let Some(value) = parse_f64(&get_env, "DYN_SHARED_CACHE_MULTIPLIER") {
-        config.shared_cache_multiplier = value;
-        shared_cache_multiplier_set = true;
-    }
+    config.shared_cache_multiplier = parse_f64(&get_env, "DYN_SHARED_CACHE_MULTIPLIER");
     if let Some(value) = get_env("DYN_SHARED_CACHE_TYPE") {
         config.shared_cache_type = value.parse()?;
-    }
-    if config.shared_cache_type != SharedCacheType::None && !shared_cache_multiplier_set {
-        config.shared_cache_multiplier = 0.5;
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_HOST_CACHE_HIT_WEIGHT") {
         config.host_cache_hit_weight = value;
@@ -365,6 +399,7 @@ fn kv_router_config_from_lookup(
         config.router_prefill_load_model = value.parse()?;
     }
 
+    config.apply_policy_config()?;
     Ok(config)
 }
 
@@ -394,7 +429,8 @@ pub enum SharedCacheType {
 ///
 /// This selector is intentionally process-local. Workers do not advertise it in
 /// model cards because request lifetime and release ownership live in the router.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ApproximateCachePolicyKind {
     /// Expire predicted entries after `router_ttl_secs`.
     #[default]
@@ -473,14 +509,19 @@ impl fmt::Display for RouterQueuePolicy {
 pub enum RouterPrefillLoadModel {
     #[default]
     None,
-    Aic,
+    // v1.5 frontends only recognize "aic" in worker cards.
+    // TODO(v1.8): write "ais" with alias="aic" when v1.5 leaves N-2.
+    // TODO(v1.10): remove the wire "aic" alias when v1.7 writers leave N-2,
+    // provided v1.8 and later consistently emit "ais".
+    #[serde(rename = "aic", alias = "ais")]
+    Ais,
 }
 
 impl fmt::Display for RouterPrefillLoadModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => f.write_str("none"),
-            Self::Aic => f.write_str("aic"),
+            Self::Ais => f.write_str("ais"),
         }
     }
 }
@@ -491,9 +532,9 @@ impl FromStr for RouterPrefillLoadModel {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "none" => Ok(Self::None),
-            "aic" => Ok(Self::Aic),
+            "ais" | "aic" => Ok(Self::Ais),
             _ => Err(format!(
-                "unknown prefill load model: {s:?}, expected 'none' or 'aic'"
+                "unknown prefill load model: {s:?}, expected 'none' or 'ais'"
             )),
         }
     }
@@ -604,10 +645,10 @@ impl RouterConfigOverride {
             validate_overlap_score_credit(value)?;
         }
         if let Some(value) = self.prefill_load_scale {
-            validate_min("prefill_load_scale", value, 0.0)?;
+            validate_finite_non_negative("prefill_load_scale", value)?;
         }
         if let Some(value) = self.router_temperature {
-            validate_min("router_temperature", value, 0.0)?;
+            validate_finite_non_negative("router_temperature", value)?;
         }
         if let Some(value) = self.shared_cache_multiplier {
             validate_range("shared_cache_multiplier", value, 0.0, 1.0)?;
@@ -684,7 +725,7 @@ struct KvRouterConfigSerde {
     serve_indexer: bool,
     #[serde(default)]
     enable_session_prefix_index: bool,
-    shared_cache_multiplier: f64,
+    shared_cache_multiplier: Option<f64>,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
     conditional_disagg_enabled: bool,
@@ -881,12 +922,11 @@ pub struct KvRouterConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub enable_session_prefix_index: bool,
 
-    /// Multiplier for shared cache hits when scoring workers (0.0 to 1.0).
-    /// Blocks available in the shared cache are less valuable than device-local blocks
-    /// because they need to be fetched. A value of 0.5 means each shared cache hit
-    /// counts as half a device-local hit. Default: 0.0 (shared cache scoring disabled);
-    /// the CLI sets this to 0.5 when shared cache is enabled.
-    pub shared_cache_multiplier: f64,
+    /// Deprecated default-policy parameter. `None` lets the policy choose its default.
+    // TODO(v1.7): Remove with the deprecated flag after the v1.6 migration window.
+    // Omit absent values so older readers continue to receive numbers, never null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_cache_multiplier: Option<f64>,
 
     /// Type of external shared KV cache to query during routing.
     /// "none" (default): disabled. "hicache": query sglang workers for L3 cache state.
@@ -984,7 +1024,7 @@ impl Default for KvRouterConfig {
             use_remote_indexer: false,
             serve_indexer: false,
             enable_session_prefix_index: false,
-            shared_cache_multiplier: 0.0,
+            shared_cache_multiplier: None,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
             conditional_disagg_enabled: false,
@@ -1150,6 +1190,19 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
 }
 
 impl KvRouterConfig {
+    /// Apply explicit process-wide YAML settings over legacy flags/defaults at startup.
+    pub fn apply_policy_config(&mut self) -> Result<(), String> {
+        let settings = self
+            .loaded_policy_config()
+            .map_err(|error| error.to_string())?
+            .and_then(|config| config.router())
+            .cloned();
+        if let Some(settings) = settings {
+            settings.apply(self)?;
+        }
+        Ok(())
+    }
+
     fn loaded_policy_config(
         &self,
     ) -> Result<
@@ -1381,17 +1434,14 @@ impl KvRouterConfig {
 
     pub fn validate(&self) -> Result<(), String> {
         validate_overlap_score_credit(self.overlap_score_credit)?;
-        validate_min(
+        validate_finite_non_negative(
             "overlap_score_credit_decay",
             self.overlap_score_credit_decay,
-            0.0,
         )?;
-        validate_min("prefill_load_scale", self.prefill_load_scale, 0.0)?;
-        validate_range(
+        validate_finite_non_negative("prefill_load_scale", self.prefill_load_scale)?;
+        validate_finite_non_negative(
             "decode_active_request_weight",
             self.decode_active_request_weight,
-            0.0,
-            f64::MAX,
         )?;
         validate_range(
             "host_cache_hit_weight",
@@ -1405,7 +1455,7 @@ impl KvRouterConfig {
             0.0,
             1.0,
         )?;
-        validate_min("router_temperature", self.router_temperature, 0.0)?;
+        validate_finite_non_negative("router_temperature", self.router_temperature)?;
         validate_min("router_ttl_secs", self.router_ttl_secs, 0.0)?;
         if let Some(value) = self.router_queue_threshold {
             validate_min("router_queue_threshold", value, 0.0)?;
@@ -1413,12 +1463,9 @@ impl KvRouterConfig {
         if self.router_event_threads == 0 {
             return Err("router_event_threads must be at least 1".to_string());
         }
-        validate_range(
-            "shared_cache_multiplier",
-            self.shared_cache_multiplier,
-            0.0,
-            1.0,
-        )?;
+        if let Some(value) = self.shared_cache_multiplier {
+            validate_range("shared_cache_multiplier", value, 0.0, 1.0)?;
+        }
         if let Some(value) = self.router_predicted_ttl_secs {
             validate_min("router_predicted_ttl_secs", value, 0.0)?;
         }
@@ -1583,6 +1630,93 @@ fn random_sequence_hashes(num_blocks: usize) -> Vec<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn router_settings_override_legacy_values_once_and_preserve_process_fields() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        let yaml = include_str!("../../tests/data/router-settings.yaml");
+        std::fs::write(policy_file.path(), yaml).unwrap();
+        let mut config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            router_predicted_ttl_secs: Some(5.0),
+            router_prefill_policy: Some("default".into()),
+            policy_model_name: Some("model".into()),
+            ..Default::default()
+        };
+        config.apply_policy_config().unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.router_event_threads, 2);
+        assert_eq!(config.router_ttl_secs, 42.0);
+        assert_eq!(config.host_cache_hit_weight, 0.6);
+        assert_eq!(config.router_predicted_ttl_secs, None);
+        assert!(!config.router_assume_kv_reuse);
+        assert!(config.router_track_output_blocks);
+        assert_eq!(config.router_prefill_policy.as_deref(), Some("default"));
+        assert_eq!(config.policy_model_name.as_deref(), Some("model"));
+        assert!(
+            !config
+                .loaded_policy_config()
+                .unwrap()
+                .unwrap()
+                .has_routing_profiles()
+        );
+        std::fs::remove_file(policy_file.path()).unwrap();
+        config.apply_policy_config().unwrap();
+        assert_eq!(config.router_event_threads, 2);
+    }
+
+    #[test]
+    fn router_settings_apply_to_native_env_startup() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy_file.path(), "router:\n  use_kv_events: false\n  router_approximate_cache_policy: lru\n  router_event_threads: 2\n").unwrap();
+        let config = kv_router_config_from_lookup(|key| match key {
+            "DYN_ROUTER_POLICY_CONFIG" => Some(policy_file.path().display().to_string()),
+            "DYN_ROUTER_EVENT_THREADS" => Some("8".into()),
+            _ => None,
+        })
+        .unwrap();
+        config.validate().unwrap();
+        assert!(!config.use_kv_events);
+        assert_eq!(
+            config.router_approximate_cache_policy,
+            ApproximateCachePolicyKind::Lru
+        );
+        assert_eq!(config.router_event_threads, 2);
+    }
+
+    #[test]
+    fn router_settings_reject_policy_parameters_and_invalid_types() {
+        for setting in [
+            "overlap_score_credit: 1",
+            "router_policy_config: nested.yaml",
+            "use_kv_events: \"false\"",
+            "router_event_threads: false",
+            "router_event_threads: null",
+            "router_approximate_cache_policy: unknown",
+        ] {
+            let yaml = format!("router:\n  {setting}\n");
+            assert!(
+                super::super::policy_config::RouterPolicyConfig::from_yaml(&yaml).is_err(),
+                "{setting}"
+            );
+        }
+    }
+
+    #[test]
+    fn router_settings_still_validate_tracking_dependencies() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "router:\n  router_track_active_blocks: false\n  router_track_output_blocks: true\n",
+        )
+        .unwrap();
+        let mut config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        config.apply_policy_config().unwrap();
+        assert!(config.validate().is_err());
+    }
+
     use super::*;
     use crate::identity::RoutingPartitionRef;
     use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo, compute_seq_hash_for_block};
@@ -1602,6 +1736,48 @@ mod tests {
     fn try_config_from_values(values: &[(&str, &str)]) -> Result<KvRouterConfig, String> {
         let values: HashMap<&str, &str> = values.iter().copied().collect();
         kv_router_config_from_lookup(|key| values.get(key).map(|value| (*value).to_string()))
+    }
+
+    #[test]
+    fn prefill_load_model_preserves_legacy_wire_value_and_canonical_name() {
+        // The v1.5 reader recognizes only these two wire variants.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum LegacyPrefillLoadModel {
+            None,
+            Aic,
+        }
+
+        for spelling in ["aic", "ais"] {
+            let model: RouterPrefillLoadModel =
+                serde_json::from_value(serde_json::json!(spelling)).unwrap();
+            assert_eq!(model, RouterPrefillLoadModel::Ais);
+            assert_eq!(model.to_string(), "ais");
+            let wire = serde_json::to_string(&model).unwrap();
+            assert_eq!(wire, r#""aic""#);
+            assert_eq!(
+                serde_json::from_str::<LegacyPrefillLoadModel>(&wire).unwrap(),
+                LegacyPrefillLoadModel::Aic
+            );
+
+            let config = config_from_values(&[("DYN_ROUTER_PREFILL_LOAD_MODEL", spelling)]);
+            assert_eq!(
+                config.router_prefill_load_model,
+                RouterPrefillLoadModel::Ais
+            );
+        }
+        assert_eq!(
+            serde_json::from_str::<RouterPrefillLoadModel>(r#""none""#).unwrap(),
+            RouterPrefillLoadModel::None
+        );
+        assert_eq!(
+            serde_json::from_str::<LegacyPrefillLoadModel>(
+                &serde_json::to_string(&RouterPrefillLoadModel::None).unwrap()
+            )
+            .unwrap(),
+            LegacyPrefillLoadModel::None
+        );
+        assert!(serde_json::from_str::<RouterPrefillLoadModel>(r#""unknown""#).is_err());
     }
 
     #[test]
@@ -1633,7 +1809,7 @@ mod tests {
             ("DYN_SHARED_CACHE_TYPE", "hicache"),
             ("DYN_ROUTER_HOST_CACHE_HIT_WEIGHT", "0.6"),
             ("DYN_ROUTER_DISK_CACHE_HIT_WEIGHT", "0.3"),
-            ("DYN_ROUTER_PREFILL_LOAD_MODEL", "aic"),
+            ("DYN_ROUTER_PREFILL_LOAD_MODEL", "ais"),
             (DYN_ROUTER_PREFILL_POLICY, "prefill-cli"),
             (DYN_ROUTER_DECODE_POLICY, "decode-cli"),
             (DYN_ROUTER_APPROXIMATE_CACHE_POLICY, "lru"),
@@ -1666,13 +1842,13 @@ mod tests {
         assert_eq!(config.router_event_threads, 8);
         assert_eq!(config.router_queue_policy, RouterQueuePolicy::Wspt);
         assert!(config.use_remote_indexer);
-        assert_eq!(config.shared_cache_multiplier, 0.5);
+        assert_eq!(config.shared_cache_multiplier, Some(0.5));
         assert_eq!(config.shared_cache_type, SharedCacheType::Hicache);
         assert_eq!(config.host_cache_hit_weight, 0.6);
         assert_eq!(config.disk_cache_hit_weight, 0.3);
         assert_eq!(
             config.router_prefill_load_model,
-            RouterPrefillLoadModel::Aic
+            RouterPrefillLoadModel::Ais
         );
         assert_eq!(
             config.router_approximate_cache_policy,
@@ -1737,13 +1913,16 @@ mod tests {
         assert!(amplified.validate_config().is_ok());
 
         for value in ["-0.5", "NaN", "inf"] {
-            let invalid_credit =
-                config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", value)]);
-            assert!(invalid_credit.validate_config().is_err());
-
-            let invalid_active_request_weight =
-                config_from_values(&[("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", value)]);
-            assert!(invalid_active_request_weight.validate_config().is_err());
+            for key in [
+                "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
+                "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
+                "DYN_ROUTER_PREFILL_LOAD_SCALE",
+                "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
+                "DYN_ROUTER_TEMPERATURE",
+            ] {
+                let invalid = config_from_values(&[(key, value)]);
+                assert!(invalid.validate_config().is_err(), "{key}={value}");
+            }
         }
 
         let error = try_config_from_values(&[("DYN_ROUTER_TRACKING_HASH", "mystery")]).unwrap_err();
@@ -1761,7 +1940,7 @@ mod tests {
 
         let error =
             try_config_from_values(&[("DYN_ROUTER_PREFILL_LOAD_MODEL", "fast")]).unwrap_err();
-        assert!(error.contains("expected 'none' or 'aic'"));
+        assert!(error.contains("expected 'none' or 'ais'"));
 
         assert!(serde_json::to_string(&config_from_values(&[])).is_ok());
     }
@@ -1873,11 +2052,11 @@ mod tests {
     #[test]
     fn test_kv_router_config_rejects_out_of_range_shared_cache_multiplier() {
         let too_small = KvRouterConfig {
-            shared_cache_multiplier: -0.1,
+            shared_cache_multiplier: Some(-0.1),
             ..Default::default()
         };
         let too_large = KvRouterConfig {
-            shared_cache_multiplier: 1.1,
+            shared_cache_multiplier: Some(1.1),
             ..Default::default()
         };
 
@@ -1886,29 +2065,55 @@ mod tests {
     }
 
     #[test]
-    fn dynamo_env_config_applies_python_default_shared_cache_multiplier() {
-        let default = KvRouterConfig::default();
+    fn dynamo_env_config_preserves_only_explicit_shared_cache_multipliers() {
+        for cache_type in ["none", "hicache"] {
+            let config = config_from_values(&[("DYN_SHARED_CACHE_TYPE", cache_type)]);
+            assert_eq!(config.shared_cache_multiplier, None);
+            for (value, expected) in [("0", 0.0), ("0.3", 0.3)] {
+                let config = config_from_values(&[
+                    ("DYN_SHARED_CACHE_TYPE", cache_type),
+                    ("DYN_SHARED_CACHE_MULTIPLIER", value),
+                ]);
+                assert_eq!(config.shared_cache_multiplier, Some(expected));
+            }
+        }
+    }
 
-        // Without shared cache, the multiplier stays at its Rust default (0.0).
-        let none_type = config_from_values(&[("DYN_SHARED_CACHE_TYPE", "none")]);
-        assert_eq!(none_type.shared_cache_type, SharedCacheType::None);
-        assert_eq!(
-            none_type.shared_cache_multiplier,
-            default.shared_cache_multiplier
-        );
+    #[test]
+    fn yaml_shared_cache_keeps_the_default_in_the_policy() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "router:\n  shared_cache_type: hicache\n").unwrap();
+        let path = file.path().to_str().unwrap();
+        for (value, expected) in [
+            (None, None),
+            (Some("0"), Some(0.0)),
+            (Some("0.3"), Some(0.3)),
+        ] {
+            let mut values = vec![("DYN_ROUTER_POLICY_CONFIG", path)];
+            if let Some(value) = value {
+                values.push(("DYN_SHARED_CACHE_MULTIPLIER", value));
+            }
+            let config = config_from_values(&values);
+            assert_eq!(config.shared_cache_type, SharedCacheType::Hicache);
+            assert_eq!(config.shared_cache_multiplier, expected);
+        }
+    }
 
-        // Enabling shared cache without an explicit multiplier matches the
-        // Python CLI default of 0.5.
-        let hicache_only = config_from_values(&[("DYN_SHARED_CACHE_TYPE", "hicache")]);
-        assert_eq!(hicache_only.shared_cache_type, SharedCacheType::Hicache);
-        assert_eq!(hicache_only.shared_cache_multiplier, 0.5);
-
-        // An explicit multiplier still wins.
-        let explicit = config_from_values(&[
-            ("DYN_SHARED_CACHE_TYPE", "hicache"),
-            ("DYN_SHARED_CACHE_MULTIPLIER", "0.3"),
-        ]);
-        assert_eq!(explicit.shared_cache_multiplier, 0.3);
+    #[test]
+    fn shared_cache_multiplier_round_trips_absence_and_legacy_numbers() {
+        for multiplier in [None, Some(0.0), Some(0.3)] {
+            let config = KvRouterConfig {
+                shared_cache_multiplier: multiplier,
+                ..Default::default()
+            };
+            let json = serde_json::to_value(&config).unwrap();
+            assert_eq!(
+                json.get("shared_cache_multiplier"),
+                multiplier.map(serde_json::Value::from).as_ref()
+            );
+            let decoded: KvRouterConfig = serde_json::from_value(json).unwrap();
+            assert_eq!(decoded.shared_cache_multiplier, multiplier);
+        }
     }
 
     #[test]
@@ -2330,7 +2535,7 @@ worker_selection:
     #[test]
     fn policy_config_uses_fast_recheck_with_prefill_load_model() {
         let config = KvRouterConfig {
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             router_policy_config: Some("/tmp/policy.yaml".to_string()),
             router_queue_threshold: None,
             ..Default::default()
@@ -2358,7 +2563,7 @@ worker_selection:
         )
         .unwrap();
         let config = KvRouterConfig {
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             router_policy_config: Some(policy_file.path().display().to_string()),
             ..Default::default()
         };
@@ -2373,7 +2578,7 @@ worker_selection:
     #[test]
     fn prefill_load_model_allows_wspt_policy_classes() {
         let config = KvRouterConfig {
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             router_queue_policy: RouterQueuePolicy::Wspt,
             ..Default::default()
         };
@@ -2622,6 +2827,82 @@ models:
                 shared_cache_multiplier: None,
             };
             assert!(invalid.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn scoring_weights_must_be_finite_and_non_negative() {
+        let largest = KvRouterConfig {
+            overlap_score_credit_decay: f64::MAX,
+            prefill_load_scale: f64::MAX,
+            decode_active_request_weight: f64::MAX,
+            router_temperature: f64::MAX,
+            ..Default::default()
+        };
+        assert!(largest.validate().is_ok());
+
+        for value in [-0.1, f64::NAN, f64::INFINITY] {
+            let configs = [
+                (
+                    "overlap_score_credit_decay",
+                    KvRouterConfig {
+                        overlap_score_credit_decay: value,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "prefill_load_scale",
+                    KvRouterConfig {
+                        prefill_load_scale: value,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "decode_active_request_weight",
+                    KvRouterConfig {
+                        decode_active_request_weight: value,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "router_temperature",
+                    KvRouterConfig {
+                        router_temperature: value,
+                        ..Default::default()
+                    },
+                ),
+            ];
+            for (field, config) in configs {
+                assert_eq!(
+                    config.validate(),
+                    Err(format!("{field} must be finite and non-negative")),
+                    "{field}={value}"
+                );
+            }
+
+            let overrides = [
+                (
+                    "prefill_load_scale",
+                    RouterConfigOverride {
+                        prefill_load_scale: Some(value),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "router_temperature",
+                    RouterConfigOverride {
+                        router_temperature: Some(value),
+                        ..Default::default()
+                    },
+                ),
+            ];
+            for (field, config_override) in overrides {
+                assert_eq!(
+                    config_override.validate(),
+                    Err(format!("{field} must be finite and non-negative")),
+                    "{field}={value}"
+                );
+            }
         }
     }
 

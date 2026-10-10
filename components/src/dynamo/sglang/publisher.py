@@ -163,6 +163,21 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
     return NetworkAddress(ip_address, parsed.port).to_tcp()
 
 
+_WILDCARD_HOSTS = {"*", "0.0.0.0", "::"}
+
+
+def kv_event_connect_ip(endpoint: str) -> str:
+    """Return the address the local subscriber uses to reach SGLang's KV event publisher.
+
+    SGLang binds a wildcard endpoint without ZMQ_IPV6, so it listens on IPv4 only.
+    Loopback reaches that listener on every host, including IPv6-only hosts where the
+    host's own address is IPv6.
+    """
+    if urlparse(endpoint).hostname in _WILDCARD_HOSTS:
+        return "127.0.0.1"
+    return get_local_ip_auto()
+
+
 # Note: We use SGLang's ZmqEventPublisher.offset_endpoint_port() directly
 # to ensure perfect alignment between publisher (SGLang) and subscriber (dynamo).
 # This is the same pattern used by dynamo+vLLM.
@@ -384,7 +399,7 @@ class DynamoSglangPublisher:
                 raise ValueError(
                     "sglang kv_events_config is set but missing 'endpoint'"
                 )
-            local_ip = get_local_ip_auto()
+            connect_ip = kv_event_connect_ip(base_ep)
 
             # Determine DP attention configuration
             dp_ranks = get_local_dp_rank_range(self.server_args)
@@ -406,7 +421,7 @@ class DynamoSglangPublisher:
                     )
                     continue
 
-                zmq_ep = format_zmq_endpoint(zmq_ep, local_ip)
+                zmq_ep = format_zmq_endpoint(zmq_ep, connect_ip)
 
                 logging.info(
                     f"Setting up ZMQ kv event subscriber for dp_rank={dp_rank} "
@@ -455,17 +470,7 @@ class DynamoSglangPublisher:
         # FPM uses per-scheduler IPC endpoints suffixed by dp_rank.
         # Unlike KV events (per-request, routed), every scheduler emits FPM
         # independently — subscribe to all local DP ranks.
-        dp_size = getattr(self.server_args, "dp_size", 1) or 1
-        enable_dp_attention = getattr(self.server_args, "enable_dp_attention", False)
-        nnodes = getattr(self.server_args, "nnodes", 1) or 1
-        node_rank = getattr(self.server_args, "node_rank", 0) or 0
-
-        if enable_dp_attention and nnodes > 1:
-            local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
-            dp_start = node_rank * local_dp_size
-            dp_ranks = range(dp_start, dp_start + local_dp_size)
-        else:
-            dp_ranks = range(dp_size)
+        dp_ranks = range(*local_dp_rank_bounds(self.server_args))
 
         relays = []
         for dp_rank in dp_ranks:

@@ -6,9 +6,13 @@ use std::time::Duration;
 use parking_lot::Mutex as ParkingLotMutex;
 use std::sync::Mutex as StdMutex;
 
+use dynamo_kv_router::protocols::StorageTier;
+
 use crate::common::handoff::HandoffId;
-use crate::common::perf_model::{AicCallback, PerfModel};
-use crate::common::protocols::{FpmSink, KvCacheEventSink, WorkerType};
+use crate::common::perf_model::{AisCallback, PerfModel};
+use crate::common::protocols::{
+    FpmSink, KvCacheEventSink, NativeHostOffloadConfig, RawKvEvent, RawKvEventSink, WorkerType,
+};
 use crate::live::{LiveEngine, LiveEngineOptions};
 
 use super::*;
@@ -24,6 +28,7 @@ enum CapturedEffect {
 #[derive(Default)]
 struct CapturedEffects {
     kv: StdMutex<Vec<KvCacheEvent>>,
+    kv_tiers: StdMutex<Vec<StorageTier>>,
     fpm: StdMutex<Vec<ForwardPassSnapshot>>,
     publication_log: StdMutex<Vec<CapturedEffect>>,
 }
@@ -37,6 +42,11 @@ impl KvCacheEventSink for CapturedEffects {
         });
         self.kv.lock().unwrap().push(event);
         Ok(())
+    }
+
+    fn publish_with_storage_tier(&self, event: KvCacheEvent, tier: StorageTier) -> Result<()> {
+        self.kv_tiers.lock().unwrap().push(tier);
+        KvCacheEventSink::publish(self, event)
     }
 }
 
@@ -53,7 +63,7 @@ impl FpmSink for CapturedEffects {
 
 struct SlowDecode;
 
-impl AicCallback for SlowDecode {
+impl AisCallback for SlowDecode {
     fn predict_prefill(
         &self,
         _batch_size: usize,
@@ -68,8 +78,8 @@ impl AicCallback for SlowDecode {
     }
 }
 
-fn args(dp_size: u32) -> MockEngineArgs {
-    let mut args = MockEngineArgs::builder().build().unwrap();
+fn args(dp_size: u32) -> MockerConfig {
+    let mut args = MockerConfig::from_value(serde_json::json!({})).unwrap();
     args.dp_size = dp_size;
     args.block_size = 4;
     args.num_gpu_blocks = 128;
@@ -115,7 +125,7 @@ async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
         let mut engine_args = args(1);
         engine_args.worker_type = WorkerType::Prefill;
         engine_args.kv_transfer_bandwidth = Some(1.0);
-        engine_args.kv_bytes_per_token = Some(1_000_000);
+        engine_args.kv_transfer_bytes_per_token = Some(1_000_000);
         let compatibility = CompatibilityState::new(engine_args);
         let request_id = Uuid::from_u128(10 + u128::from(suppressed_pending_output));
         compatibility.native_request(request(request_id.as_u128(), 0));
@@ -228,6 +238,267 @@ async fn two_rank_handles_share_one_group_boundary_and_publish_rank_effects() {
     actor.await.unwrap().unwrap();
 }
 
+/// Encodes every raw batch with the vLLM ZMQ wire encoder, which requires each
+/// stored block's token IDs.
+#[derive(Default)]
+struct ZmqEncodingSink {
+    tiers: StdMutex<Vec<StorageTier>>,
+}
+
+impl RawKvEventSink for ZmqEncodingSink {
+    fn publish(&self, event: RawKvEvent) -> Result<()> {
+        self.publish_batch(vec![event])
+    }
+
+    fn publish_batch(&self, events: Vec<RawKvEvent>) -> Result<()> {
+        crate::services::zmq_events::encode_event_batch(&events, 4, 0)?;
+        let mut tiers = self.tiers.lock().unwrap();
+        tiers.extend(events.iter().map(|event| event.storage_tier));
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn native_host_offload_restore_wakes_idle_engine_and_publishes_g1_residency() {
+    let effects = Arc::new(CapturedEffects::default());
+    let zmq = Arc::new(ZmqEncodingSink::default());
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let engine_args = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "num_gpu_blocks": 1,
+            "block_size": 4,
+            "max_num_seqs": 1,
+            "max_num_batched_tokens": 4,
+            "kv_cache_bytes_per_token": 250_000,
+            "native_host_offload": NativeHostOffloadConfig::new(2).with_bandwidths(0.0, 0.01),
+            "timing_model": {
+                "type": "fixed",
+                "prefill_ms": 0.0,
+                "decode_ms": 0.0
+            }
+        }
+    }))
+    .unwrap();
+    let GroupedSchedulers {
+        schedulers, actor, ..
+    } = create_grouped_scheduler(
+        engine_args,
+        vec![GroupedSchedulerRankSinks {
+            output_tx: Some(output_tx),
+            kv_event_publishers: KvEventPublishers::new(
+                Some(Arc::clone(&effects) as Arc<dyn KvCacheEventSink>),
+                Some(Arc::clone(&zmq) as Arc<dyn RawKvEventSink>),
+            ),
+            ..GroupedSchedulerRankSinks::default()
+        }],
+        Some(cancel.clone()),
+    )
+    .unwrap();
+
+    for (id, tokens, cached_tokens) in [
+        (1, vec![1, 2, 3, 4], 0),
+        (2, vec![5, 6, 7, 8], 0),
+        (3, vec![1, 2, 3, 4], 4),
+    ] {
+        let submitted_at = tokio::time::Instant::now();
+        schedulers[0]
+            .request_sender()
+            .send(DirectRequest {
+                tokens,
+                max_output_tokens: 0,
+                uuid: Some(Uuid::from_u128(id)),
+                ..DirectRequest::default()
+            })
+            .unwrap();
+        let outputs = tokio::time::timeout(Duration::from_secs(1), output_rx.recv())
+            .await
+            .expect("host transfer must wake an otherwise idle engine")
+            .unwrap();
+        let output = outputs.last().unwrap();
+        assert_eq!(output.uuid, Uuid::from_u128(id));
+        assert!(output.completed);
+        assert!(!output.rejected);
+        assert_eq!(output.cached_tokens, Some(cached_tokens));
+        if id == 3 {
+            // One 1 MB block at 0.01 GB/s takes 100 ms to restore from G2.
+            assert!(submitted_at.elapsed() >= Duration::from_millis(100));
+        }
+    }
+
+    cancel.cancel();
+    actor.await.unwrap().unwrap();
+    let kv = effects.kv.lock().unwrap();
+    let tiers = effects.kv_tiers.lock().unwrap();
+    assert_eq!(
+        kv.len(),
+        tiers.len(),
+        "every grouped KV event carries its tier"
+    );
+    let KvCacheEventData::Stored(seed) = &kv[0].data else {
+        panic!("seed must publish its initial G1 residency");
+    };
+    let seed_hash = seed.blocks[0].block_hash;
+    let seed_residency = |tier: StorageTier| {
+        kv.iter()
+            .zip(tiers.iter())
+            .filter(|(_, event_tier)| **event_tier == tier)
+            .filter_map(|(event, _)| match &event.data {
+                KvCacheEventData::Stored(stored)
+                    if stored
+                        .blocks
+                        .iter()
+                        .any(|block| block.block_hash == seed_hash) =>
+                {
+                    Some("stored")
+                }
+                KvCacheEventData::Removed(removed) if removed.block_hashes.contains(&seed_hash) => {
+                    Some("removed")
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // The G2 restore re-publishes the seed as G1-resident, and its private G2
+    // copy is visible as HostPinned, so a KV router can credit it while the
+    // seed is host-only.
+    assert_eq!(
+        seed_residency(StorageTier::Device),
+        ["stored", "removed", "stored"]
+    );
+    assert_eq!(seed_residency(StorageTier::HostPinned), ["stored"]);
+    // G2 residency carries no token IDs, so only G1 events reach the vLLM wire.
+    let zmq_tiers = zmq.tiers.lock().unwrap();
+    assert!(!zmq_tiers.is_empty());
+    assert!(zmq_tiers.iter().all(|tier| *tier == StorageTier::Device));
+}
+
+#[tokio::test(start_paused = true)]
+async fn command_after_a_due_host_restore_drains_the_restore_first() {
+    let effects = Arc::new(CapturedEffects::default());
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let engine_args = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "num_gpu_blocks": 1,
+            "block_size": 4,
+            "max_num_seqs": 1,
+            "max_num_batched_tokens": 4,
+            "kv_cache_bytes_per_token": 250_000,
+            "native_host_offload": NativeHostOffloadConfig::new(2).with_bandwidths(0.0, 0.01),
+            "timing_model": {
+                "type": "fixed",
+                "prefill_ms": 0.0,
+                "decode_ms": 0.0
+            }
+        }
+    }))
+    .unwrap();
+    let GroupedSchedulers {
+        schedulers, actor, ..
+    } = create_grouped_scheduler(
+        engine_args,
+        vec![GroupedSchedulerRankSinks {
+            output_tx: Some(output_tx),
+            kv_event_publishers: KvEventPublishers::new(
+                Some(Arc::clone(&effects) as Arc<dyn KvCacheEventSink>),
+                None,
+            ),
+            ..GroupedSchedulerRankSinks::default()
+        }],
+        Some(cancel.clone()),
+    )
+    .unwrap();
+    let sender = schedulers[0].request_sender();
+    let send = |id: u128, tokens: Vec<u32>| {
+        sender
+            .send(DirectRequest {
+                tokens,
+                max_output_tokens: 0,
+                uuid: Some(Uuid::from_u128(id)),
+                ..DirectRequest::default()
+            })
+            .unwrap();
+    };
+
+    // Seed A, then evict it from the single G1 block into G2.
+    for (id, tokens) in [(1, vec![1, 2, 3, 4]), (2, vec![5, 6, 7, 8])] {
+        send(id, tokens);
+        let outputs = output_rx.recv().await.unwrap();
+        assert!(outputs.last().unwrap().completed);
+    }
+    // A's repeat starts a 100 ms G2 restore (1 MB at 0.01 GB/s).
+    send(3, vec![1, 2, 3, 4]);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    // Queue a submit, then move past the restore deadline. The actor's biased
+    // select sees the command before the timer, so the command arrives while
+    // the restore is already due.
+    send(4, vec![9, 10, 11, 12]);
+    tokio::time::advance(Duration::from_millis(200)).await;
+
+    let mut completed = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while completed.len() < 2 {
+            for output in output_rx.recv().await.unwrap() {
+                assert!(!output.rejected);
+                if output.completed {
+                    completed.push(output.uuid);
+                }
+            }
+        }
+    })
+    .await
+    .expect("a command arriving after the restore deadline must still be applied");
+    assert_eq!(completed, [Uuid::from_u128(3), Uuid::from_u128(4)]);
+
+    cancel.cancel();
+    actor.await.unwrap().unwrap();
+    let kv = effects.kv.lock().unwrap();
+    let tiers = effects.kv_tiers.lock().unwrap();
+    let KvCacheEventData::Stored(seed) = &kv[0].data else {
+        panic!("seed must publish its initial G1 residency");
+    };
+    let seed_hash = seed.blocks[0].block_hash;
+    let device_stores = kv
+        .iter()
+        .zip(tiers.iter())
+        .filter(|(_, tier)| **tier == StorageTier::Device)
+        .filter_map(|(event, _)| match &event.data {
+            KvCacheEventData::Stored(stored) => Some(stored.blocks[0].block_hash),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // Seed, B, the restored seed, then the new request.
+    assert_eq!(device_stores.len(), 4);
+    assert_eq!(device_stores[0], seed_hash);
+    assert_eq!(device_stores[2], seed_hash);
+    assert_ne!(device_stores[3], seed_hash);
+}
+
+#[tokio::test]
+async fn live_engine_rejects_cluster_shared_host_offload() {
+    let engine_args = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "kv_cache_bytes_per_token": 1024,
+            "native_host_offload": NativeHostOffloadConfig::new(2).cluster_shared("test-kv-layout")
+        }
+    }))
+    .unwrap();
+    let Err(error) = create_grouped_scheduler(
+        engine_args,
+        vec![GroupedSchedulerRankSinks::default()],
+        None,
+    ) else {
+        panic!("live engines must reject a cluster_shared G2 pool");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("supported only in offline replay"),
+        "{error:#}"
+    );
+}
+
 #[tokio::test]
 async fn same_rank_receive_burst_is_batched_into_one_native_pass() {
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
@@ -324,7 +595,7 @@ async fn command_ack_and_handoff_lifecycle_round_trip_dynamo_uuid() {
 async fn cancellation_lane_bypasses_an_ordinary_command_deferred_mid_pass() {
     let mut slow_args = args(1);
     slow_args.num_gpu_blocks = 2_048;
-    slow_args.max_num_batched_tokens = Some(2_048);
+    slow_args.max_num_batched_tokens = 2_048;
     slow_args.speedup_ratio = 0.001;
     let (admission_tx, mut admission_rx) = mpsc::unbounded_channel();
     let engine = LiveEngine::start_with_options(
@@ -366,7 +637,7 @@ async fn midpass_cancel_ack_precedes_completion_router_effects() {
     let effects = Arc::new(CapturedEffects::default());
     let mut slow_args = args(1);
     slow_args.speedup_ratio = 1.0;
-    slow_args.perf_model = Arc::new(PerfModel::from_aic_callback(Arc::new(SlowDecode)));
+    slow_args.perf_model = Arc::new(PerfModel::from_ais_callback(Arc::new(SlowDecode)));
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     let GroupedSchedulers {
@@ -587,6 +858,7 @@ async fn synthetic_midpass_kv_is_deferred_until_completion_before_fpm() {
                 result: CommandResult::Applied,
                 lifecycle_events: Vec::new(),
                 kv_events: vec![KvEvent {
+                    tier: aisimulate_core::engine::KvEventTier::Device,
                     event_id: 1,
                     dp_rank: 0,
                     data: KvEventData::Removed {
@@ -681,7 +953,7 @@ fn completion_metrics_override_the_midpass_command_snapshot() {
 async fn closed_output_receiver_cancels_request_and_releases_native_kv() {
     let mut slow_args = args(1);
     slow_args.speedup_ratio = 1.0;
-    slow_args.perf_model = Arc::new(PerfModel::from_aic_callback(Arc::new(SlowDecode)));
+    slow_args.perf_model = Arc::new(PerfModel::from_ais_callback(Arc::new(SlowDecode)));
     let effects = Arc::new(CapturedEffects::default());
     let (output_tx, output_rx) = mpsc::unbounded_channel();
     drop(output_rx);
