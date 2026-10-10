@@ -267,7 +267,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 ### Router request metrics
 
-`dynamo_component_router_*` histograms and counters for aggregate request-level statistics. On the frontend, exposed at `/metrics` on the HTTP port; on the standalone router, exposed on `DYN_SYSTEM_PORT`. Populated per-request when `--router-mode kv` is active; registered with zero values in non-KV modes.
+`dynamo_component_router_*` histograms and counters for aggregate request-level statistics. On the frontend, exposed at `/metrics` on the HTTP port; on the standalone router, exposed on `DYN_SYSTEM_PORT`. Request-level metrics (request counts, TTFT, ITL, ISL, and OSL) are populated per-request in every router mode. KV metrics (`kv_hit_rate`, `non_max_overlap_selections_total`, and `overlap_blocks_lost`) are populated only when `--router-mode kv` is active and stay at zero in non-KV modes.
 
 <ParamField path="dynamo_component_router_requests_started_total" type="counter">
   Requests admitted by the router scheduler.
@@ -298,7 +298,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
-  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
+  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Explicitly pinned requests and equal-overlap ties are excluded; session-affinity selections are compared against the best eligible worker. Labeled by `worker_type` (`prefill`).
 </ParamField>
 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
@@ -393,7 +393,7 @@ Not all router metrics appear in every deployment. This matrix shows which group
 
 | Metric group | Frontend + KV (agg) | Frontend + KV (disagg) | Frontend + non-KV | Standalone router |
 |---|---|---|---|---|
-| `dynamo_component_router_*` | Registered and populated | Registered and populated | Registered, **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
+| `dynamo_component_router_*` | Registered and populated | Registered and populated | Request-level metrics populated; KV metrics **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
 | `dynamo_router_overhead_*` | Registered and populated | Registered and populated | **Not registered** | **Not created** |
 | `dynamo_frontend_router_queue_*` | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
 | `dynamo_component_kv_cache_events_applied` | Populated when KV events received | Populated when KV events received | **Not registered** | Populated when KV events received |

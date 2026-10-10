@@ -247,6 +247,9 @@ impl RoutingHost {
                 .dp_rank
                 .map(|dp_rank| (target.worker_id, Some(dp_rank)))
         });
+        // A pin from the session binding alone is an affinity decision: forward it as the
+        // affinity target so the scheduler logs and measures it as one.
+        let pin_is_affinity_only = explicit_pin.is_none() && affinity_pin.is_some();
         let requested_pin = merge_affinity_pin(explicit_pin, affinity_pin);
         let pinned_worker = match planned_worker {
             Some(planned_worker) => {
@@ -357,7 +360,7 @@ impl RoutingHost {
             policy_class,
             session_context,
             expected_output_tokens,
-            affinity_target: None,
+            affinity_target: pin_is_affinity_only.then(|| pinned_worker.into()),
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
             routing_constraints,

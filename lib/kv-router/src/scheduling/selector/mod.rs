@@ -44,6 +44,14 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         false
     }
 
+    /// Whether the selector can reject workers that [`RoutingEligibility`] accepts.
+    ///
+    /// The host measures affinity selections against the best eligible worker only when
+    /// this is `false`, so cache metrics never count a worker the policy would reject.
+    fn applies_worker_filters(&self) -> bool {
+        true
+    }
+
     fn select_worker(
         &self,
         input: WorkerSelectionInput<'_, C>,
@@ -313,17 +321,19 @@ fn log_selection<C: WorkerConfigLike>(
         .copied()
         .unwrap_or(0);
 
-    if request.pinned_worker == Some(worker) {
-        tracing::info!(
-            request_id,
-            "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}",
-            worker_type,
-            worker.worker_id,
-            worker.dp_rank,
-            cost,
-            effective_overlap_blocks,
-        );
-    } else if worker_type == "decode" {
+    // Every routed request logs one "Selected worker" event.
+    let selection = if request
+        .affinity_target
+        .is_some_and(|target| target.matches(worker))
+    {
+        "session_affinity"
+    } else if request.pinned_worker == Some(worker) {
+        "pinned"
+    } else {
+        "kv"
+    };
+
+    if worker_type == "decode" {
         tracing::info!(
             router_mode = "kv",
             request_id,
@@ -333,6 +343,7 @@ fn log_selection<C: WorkerConfigLike>(
             logit = cost,
             host_pinned_blocks,
             disk_blocks,
+            selection,
             "Selected worker"
         );
     } else {
@@ -350,6 +361,7 @@ fn log_selection<C: WorkerConfigLike>(
             host_pinned_blocks,
             disk_blocks,
             total_kv_blocks = ?total_kv_blocks,
+            selection,
             "Selected worker"
         );
     }

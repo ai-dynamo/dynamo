@@ -584,6 +584,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         true
     }
 
+    fn applies_worker_filters(&self) -> bool {
+        false
+    }
+
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::CACHE | WorkerInputs::LOAD
     }

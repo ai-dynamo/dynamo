@@ -4513,3 +4513,198 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
 
     runtime.shutdown();
 }
+
+#[derive(Debug, Default, Clone)]
+struct CapturedEvent {
+    message: String,
+    fields: HashMap<String, String>,
+}
+
+impl tracing::field::Visit for CapturedEvent {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.message = value.to_string();
+        } else {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        } else {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct SelectedWorkerCapture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SelectedWorkerCapture {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut captured = CapturedEvent::default();
+        event.record(&mut captured);
+        if captured.message.starts_with("Selected") {
+            self.0.lock().unwrap().push(captured);
+        }
+    }
+}
+
+impl SelectedWorkerCapture {
+    /// Capture on the current thread. Tests run on a current-thread runtime, so the
+    /// scheduler actor's events land here too.
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        use tracing_subscriber::layer::SubscriberExt;
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(self.clone()))
+    }
+
+    fn events(&self) -> Vec<CapturedEvent> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_session_affinity_hit_logs_selected_worker() {
+    let (router, runtime) = router_with_workers(Some(Duration::from_secs(10)), &[7]).await;
+    let session_id = SessionAffinityId::new("kv-affinity-hit-observability");
+    bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(0))).await;
+
+    let tracker = Arc::new(RequestTracker::new());
+    let mut input = request();
+    input.tracker = Some(Arc::clone(&tracker));
+    let mut request = Context::new(input);
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+    let capture = SelectedWorkerCapture::default();
+    let (mut selection, guard) = {
+        let _capture = capture.install();
+        let (mut selection, _hold) = router
+            .select_with_affinity(
+                &request,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
+            )
+            .await
+            .unwrap();
+        let guard = router
+            .track_selection(
+                &request,
+                &mut selection,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
+            )
+            .await
+            .unwrap();
+        (selection, guard)
+    };
+    assert_eq!(selection.worker, WorkerWithDpRank::new(7, 0));
+
+    let events = capture.events();
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.message.starts_with("Selected pinned worker")),
+        "{events:?}"
+    );
+    let selected: Vec<_> = events
+        .iter()
+        .filter(|event| event.message == "Selected worker")
+        .collect();
+    assert_eq!(selected.len(), 1, "{events:?}");
+    let fields = &selected[0].fields;
+    assert_eq!(fields.get("router_mode").map(String::as_str), Some("kv"));
+    assert_eq!(fields.get("worker_id").map(String::as_str), Some("7"));
+    assert_eq!(fields.get("dp_rank").map(String::as_str), Some("0"));
+    assert_eq!(
+        fields.get("selection").map(String::as_str),
+        Some("session_affinity")
+    );
+
+    selection.booking.take();
+    drop(guard);
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_hard_affinity_hit_logs_selected_worker() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-affinity-hit-log".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("round-robin");
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let inner = PushRouter::from_client_with_dispatch(
+        client,
+        RouterMode::RoundRobin,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+    )
+    .await
+    .unwrap();
+    let (host, _affinity) = builtin_host_with_affinity(
+        inner,
+        load_context,
+        crate::session_affinity::SessionAffinityMode::Hard,
+    );
+
+    let session_id = "builtin-affinity-hit-log";
+    let mut first = host
+        .generate(affinity_request(session_id, None))
+        .await
+        .unwrap();
+    while first.next().await.is_some() {}
+
+    // The second request hits the binding and dispatches through `dispatch_exact`.
+    let capture = SelectedWorkerCapture::default();
+    {
+        let _capture = capture.install();
+        let mut second = host
+            .generate(affinity_request(session_id, None))
+            .await
+            .unwrap();
+        while second.next().await.is_some() {}
+    }
+    assert_eq!(
+        dispatch.worker_ids.lock().unwrap().as_slice(),
+        &[worker_id; 2]
+    );
+
+    let events = capture.events();
+    let selected: Vec<_> = events
+        .iter()
+        .filter(|event| event.message == "Selected worker")
+        .collect();
+    assert_eq!(selected.len(), 1, "{events:?}");
+    let fields = &selected[0].fields;
+    assert_eq!(
+        fields.get("router_mode").map(String::as_str),
+        Some("round-robin")
+    );
+    assert_eq!(
+        fields.get("worker_id").map(String::as_str),
+        Some(worker_id.to_string().as_str())
+    );
+
+    drop(host);
+    runtime.shutdown();
+}

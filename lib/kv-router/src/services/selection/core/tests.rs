@@ -685,6 +685,7 @@ struct CapturingPicker {
 #[derive(Debug, Clone)]
 struct SelectionObservation {
     session_context: Option<SessionContext>,
+    affinity_target: Option<WorkerAffinityTarget>,
     shared_beyond_device_blocks: Vec<u32>,
 }
 
@@ -700,6 +701,7 @@ impl crate::scheduling::selector::WorkerPicker for CapturingPicker {
     ) -> Result<usize, crate::scheduling::WorkerSelectionPolicyError> {
         self.observed.lock().push(SelectionObservation {
             session_context: context.session_context().cloned(),
+            affinity_target: context.affinity_target(),
             shared_beyond_device_blocks: input
                 .cache()
                 .expect("CACHE inputs requested")
@@ -732,6 +734,89 @@ fn capturing_policy_factory() -> (
         )
     });
     (factory, observed)
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn wire_explicit_pin_suppresses_affinity_context(#[case] reserve: bool) {
+    let (factory, observed) = capturing_policy_factory();
+    let core = core_with_host_and_policy(SelectionHost::default(), Some(factory));
+    core.upsert_worker(worker(1)).await.unwrap();
+    let target = WorkerWithDpRank::new(1, 0);
+
+    for pinned in [true, false] {
+        let response = if reserve {
+            let mut request = reserve_request(if pinned { "explicit" } else { "affinity" });
+            request.pinned_worker = pinned.then_some(target);
+            request.affinity_target = Some(target.into());
+            core.select_and_reserve(request).await.unwrap()
+        } else {
+            let mut request = select_request();
+            request.pinned_worker = pinned.then_some(target);
+            request.affinity_target = Some(target.into());
+            core.select(request).await.unwrap()
+        };
+        assert_eq!(response.worker_id, target.worker_id);
+        assert_eq!(response.dp_rank, target.dp_rank);
+    }
+
+    let observations = observed.lock();
+    assert_eq!(observations.len(), 2);
+    assert_eq!(observations[0].affinity_target, None);
+    assert_eq!(observations[1].affinity_target, Some(target.into()));
+}
+
+#[tokio::test]
+async fn wire_explicit_pin_does_not_report_affinity_overlap_loss() {
+    let (core, entry, tokens) = hint_fixture(|_| {}).await;
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+    assert!(
+        entry
+            .scheduler
+            .set_non_max_overlap_selection_observer(Arc::new(move |request_id, event| {
+                events_tx.send((request_id.to_owned(), event)).unwrap();
+            }))
+    );
+    let target = WorkerWithDpRank::new(2, 0);
+
+    let mut request = reserve_request("explicit");
+    request.prompt.token_ids = Some(tokens.clone());
+    request.pinned_worker = Some(target);
+    request.affinity_target = Some(target.into());
+    let response = core.select_and_reserve(request).await.unwrap();
+    assert_eq!(response.worker_id, target.worker_id);
+
+    // Embedded hosts still forward a session-derived pin with its affinity target.
+    let prompt = PromptRequest {
+        token_ids: Some(tokens),
+        ..PromptRequest::default()
+    };
+    let mut operation = lease_operation(prompt.view(), "affinity", true);
+    operation.pinned_worker = Some(target);
+    operation.affinity_target = Some(target.into());
+    let SelectionOutcome::Selected(selected) = core.run_selection(operation).await.result.unwrap()
+    else {
+        panic!("affinity selection was rejected");
+    };
+    assert_eq!(selected.response.best_worker, target);
+    assert_eq!(selected.response.selected_raw_cached_tokens, Some(0));
+    assert_eq!(selected.response.max_raw_cached_tokens, Some(8));
+
+    let (request_id, event) = tokio::time::timeout(Duration::from_secs(2), events_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request_id, "affinity");
+    assert_eq!(event.highest_overlap_worker, WorkerWithDpRank::new(1, 0));
+    assert_eq!(event.selected_worker, target);
+    assert!(event.overlap_blocks_lost() > 0.0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), events_rx.recv())
+            .await
+            .is_err()
+    );
 }
 
 type SharedCacheCalls = Arc<parking_lot::Mutex<Vec<(Vec<u32>, u32, Option<String>)>>>;
