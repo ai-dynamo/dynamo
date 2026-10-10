@@ -11,7 +11,7 @@ on:
       source:
         description: Frozen hook source to validate (one source per run)
         type: choice
-        options: [base, timings, file-chmod, pr340, metadata-stat, verification-control, metadata-corrected, verification-control-busybox, metadata-corrected-busybox, pinned-instrumentation, pinned-file-chmod]
+        options: [base, timings, file-chmod, pr340, metadata-stat, verification-control, metadata-corrected, verification-control-busybox, metadata-corrected-busybox, pinned-instrumentation, pinned-file-chmod, stat-before, modern-stat-exhaustion]
         default: base
         required: true
       expected_head:
@@ -37,11 +37,14 @@ env:
                       "9698a29869a257a892763098ca9476bbe492d2f5",
                       "c71f1b04748bde2d3da318abde88d248bb10aa49",
                       "e6d5d3f505e6c3db85ffd85d35607da08a5a7222",
-                      "3876a4e1bb84542782b5039ec11a3c5ab5f3d47e")
+                      "3876a4e1bb84542782b5039ec11a3c5ab5f3d47e",
+                      "6ecda1d8eaeac48a73958b3c6bf9532433512435",
+                      "40b463a129f3335e38a8ef6786f79b9b0f874dd9")
     def git(*args):
         return subprocess.check_output(["git", *args])
     assert git("rev-parse", "HEAD").decode().strip() == source
-    for tool, expected in (("node", "v24.13.0"), ("npm", "11.6.2")):
+    versions = ("v24.21.0", "11.19.0") if source == "40b463a129f3335e38a8ef6786f79b9b0f874dd9" else ("v24.13.0", "11.6.2")
+    for tool, expected in zip(("node", "npm"), versions):
         actual = subprocess.check_output([tool, "--version"]).decode().strip()
         print(json.dumps({"tool": tool, "expected": expected, "actual": actual}), flush=True)
         assert actual == expected
@@ -61,9 +64,9 @@ env:
         print(json.dumps({"path": path, "original_sha256": hashlib.sha256(original).hexdigest(),
                           "actual_sha256": hashlib.sha256(actual).hexdigest()}), flush=True)
         assert actual == original
-  HOOK_SOURCE_SHA: ${{ inputs.source == 'base' && 'd4731a43a2fe1a4d4f7ea24dc515a1a120a065c8' || inputs.source == 'timings' && '73d34cbebe8e647813e67f7fc768d2771b39aa06' || inputs.source == 'file-chmod' && '46faf02ef2fda46002c4ac3f8a51d3f2a1621a5c' || inputs.source == 'pr340' && '8e9457620f44e0cfc0aa4bb87fc7341f7758118f' || inputs.source == 'metadata-stat' && '15238c0d1d1dfa70811540518994bb435bc64787' || inputs.source == 'verification-control' && '507471d420e6e548f28c98d44a4e0096f9a13d98' || inputs.source == 'metadata-corrected' && '8559efb36c331e6c0ebe0b8d4cc2cb0ce559c396' || inputs.source == 'verification-control-busybox' && '9698a29869a257a892763098ca9476bbe492d2f5' || inputs.source == 'metadata-corrected-busybox' && 'c71f1b04748bde2d3da318abde88d248bb10aa49' || inputs.source == 'pinned-instrumentation' && 'e6d5d3f505e6c3db85ffd85d35607da08a5a7222' || inputs.source == 'pinned-file-chmod' && '3876a4e1bb84542782b5039ec11a3c5ab5f3d47e' || '' }}
-  HOOK_SOURCE_REPOSITORY: ${{ (inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod') && 'alec-flowers/runner-container-hooks' || 'actions/runner-container-hooks' }}
-  HOOK_WORKFLOW_SHA256: ${{ (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod') && '1f1ae324b183fed6fcd2486fb8bf33e483d51ab3c2322e9d8c9b2b9a83ffba35' || 'ac9df6264ddbc8b58faf58215ac2622cbe1999ab5cc6d3bd2d8a243b880af63a' }}
+  HOOK_SOURCE_SHA: ${{ inputs.source == 'base' && 'd4731a43a2fe1a4d4f7ea24dc515a1a120a065c8' || inputs.source == 'timings' && '73d34cbebe8e647813e67f7fc768d2771b39aa06' || inputs.source == 'file-chmod' && '46faf02ef2fda46002c4ac3f8a51d3f2a1621a5c' || inputs.source == 'pr340' && '8e9457620f44e0cfc0aa4bb87fc7341f7758118f' || inputs.source == 'metadata-stat' && '15238c0d1d1dfa70811540518994bb435bc64787' || inputs.source == 'verification-control' && '507471d420e6e548f28c98d44a4e0096f9a13d98' || inputs.source == 'metadata-corrected' && '8559efb36c331e6c0ebe0b8d4cc2cb0ce559c396' || inputs.source == 'verification-control-busybox' && '9698a29869a257a892763098ca9476bbe492d2f5' || inputs.source == 'metadata-corrected-busybox' && 'c71f1b04748bde2d3da318abde88d248bb10aa49' || inputs.source == 'pinned-instrumentation' && 'e6d5d3f505e6c3db85ffd85d35607da08a5a7222' || inputs.source == 'pinned-file-chmod' && '3876a4e1bb84542782b5039ec11a3c5ab5f3d47e' || inputs.source == 'stat-before' && '6ecda1d8eaeac48a73958b3c6bf9532433512435' || inputs.source == 'modern-stat-exhaustion' && '40b463a129f3335e38a8ef6786f79b9b0f874dd9' || '' }}
+  HOOK_SOURCE_REPOSITORY: ${{ (inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'modern-stat-exhaustion') && 'alec-flowers/runner-container-hooks' || 'actions/runner-container-hooks' }}
+  HOOK_WORKFLOW_SHA256: ${{ (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before') && '1f1ae324b183fed6fcd2486fb8bf33e483d51ab3c2322e9d8c9b2b9a83ffba35' || 'ac9df6264ddbc8b58faf58215ac2622cbe1999ab5cc6d3bd2d8a243b880af63a' }}
   EXPECTED_WRAPPER_HEAD: ${{ inputs.expected_head }}
   WRAPPER_WORKFLOW_SHA: ${{ github.workflow_sha }}
   WRAPPER_WORKFLOW_REF: ${{ github.workflow_ref }}
@@ -86,7 +89,7 @@ jobs:
           test "$WRAPPER_WORKFLOW_SHA" = "$EXPECTED_WRAPPER_HEAD"
           test "$WRAPPER_WORKFLOW_REF" = ai-dynamo/dynamo/.github/workflows/build-on-demand.yml@refs/heads/agent/ci-hook-source-hosted
           case "$HOOK_SOURCE_SHA" in
-            d4731a43a2fe1a4d4f7ea24dc515a1a120a065c8|73d34cbebe8e647813e67f7fc768d2771b39aa06|46faf02ef2fda46002c4ac3f8a51d3f2a1621a5c|8e9457620f44e0cfc0aa4bb87fc7341f7758118f|15238c0d1d1dfa70811540518994bb435bc64787|507471d420e6e548f28c98d44a4e0096f9a13d98|8559efb36c331e6c0ebe0b8d4cc2cb0ce559c396|9698a29869a257a892763098ca9476bbe492d2f5|c71f1b04748bde2d3da318abde88d248bb10aa49|e6d5d3f505e6c3db85ffd85d35607da08a5a7222|3876a4e1bb84542782b5039ec11a3c5ab5f3d47e) ;;
+            d4731a43a2fe1a4d4f7ea24dc515a1a120a065c8|73d34cbebe8e647813e67f7fc768d2771b39aa06|46faf02ef2fda46002c4ac3f8a51d3f2a1621a5c|8e9457620f44e0cfc0aa4bb87fc7341f7758118f|15238c0d1d1dfa70811540518994bb435bc64787|507471d420e6e548f28c98d44a4e0096f9a13d98|8559efb36c331e6c0ebe0b8d4cc2cb0ce559c396|9698a29869a257a892763098ca9476bbe492d2f5|c71f1b04748bde2d3da318abde88d248bb10aa49|e6d5d3f505e6c3db85ffd85d35607da08a5a7222|3876a4e1bb84542782b5039ec11a3c5ab5f3d47e|6ecda1d8eaeac48a73958b3c6bf9532433512435|40b463a129f3335e38a8ef6786f79b9b0f874dd9) ;;
             *) echo 'Source is outside the frozen allowlist' >&2; exit 1 ;;
           esac
       - id: source_checkout
@@ -109,25 +112,25 @@ jobs:
           sha256sum .github/workflows/build.yaml package*.json packages/*/package*.json
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
         with:
-          node-version: ${{ (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod') && '24.13.0' || '24' }}
+          node-version: ${{ inputs.source == 'modern-stat-exhaustion' && '24.21.0' || (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before') && '24.13.0' || '24' }}
           package-manager-cache: false  # No shared cache reads or writes.
       - name: Verify pinned-era source tools and pristine source
-        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod')
+        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before' || inputs.source == 'modern-stat-exhaustion')
         run: python3 -I -c "$PINNED_SOURCE_CHECK"
       - run: node --version && npm --version
         name: Log Node and npm versions
-        if: inputs.source != 'pr340' && inputs.source != 'verification-control' && inputs.source != 'metadata-corrected' && inputs.source != 'verification-control-busybox' && inputs.source != 'metadata-corrected-busybox' && inputs.source != 'pinned-instrumentation' && inputs.source != 'pinned-file-chmod'
+        if: inputs.source != 'pr340' && inputs.source != 'verification-control' && inputs.source != 'metadata-corrected' && inputs.source != 'verification-control-busybox' && inputs.source != 'metadata-corrected-busybox' && inputs.source != 'pinned-instrumentation' && inputs.source != 'pinned-file-chmod' && inputs.source != 'stat-before' && inputs.source != 'modern-stat-exhaustion'
       - run: npm ci
         name: Install dependencies
       - run: npm run bootstrap
         name: Bootstrap the packages
       - name: Verify pinned-era source after bootstrap
-        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod')
+        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before' || inputs.source == 'modern-stat-exhaustion')
         run: python3 -I -c "$PINNED_SOURCE_CHECK"
       - run: npm run build-all
         name: Build packages
       - name: Verify pinned-era source after build
-        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod')
+        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before' || inputs.source == 'modern-stat-exhaustion')
         run: python3 -I -c "$PINNED_SOURCE_CHECK"
       - run: npm run format-check
         name: Check formatting
@@ -136,7 +139,7 @@ jobs:
           npm run lint
           git diff --exit-code -- . ':!packages/k8s/tests/test-kind.yaml'
       - name: Verify pinned-era source after validation
-        if: always() && !cancelled() && (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod') && steps.source_checkout.outcome == 'success'
+        if: always() && !cancelled() && (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before' || inputs.source == 'modern-stat-exhaustion') && steps.source_checkout.outcome == 'success'
         run: python3 -I -c "$PINNED_SOURCE_CHECK"
 
   docker-tests:
@@ -165,30 +168,30 @@ jobs:
           sha256sum .github/workflows/build.yaml package*.json packages/*/package*.json
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
         with:
-          node-version: ${{ (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod') && '24.13.0' || '24' }}
+          node-version: ${{ inputs.source == 'modern-stat-exhaustion' && '24.21.0' || (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before') && '24.13.0' || '24' }}
           package-manager-cache: false  # No shared cache reads or writes.
       - name: Verify pinned-era source tools and pristine source
-        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod')
+        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before' || inputs.source == 'modern-stat-exhaustion')
         run: python3 -I -c "$PINNED_SOURCE_CHECK"
       - run: node --version && npm --version
         name: Log Node and npm versions
-        if: inputs.source != 'pr340' && inputs.source != 'verification-control' && inputs.source != 'metadata-corrected' && inputs.source != 'verification-control-busybox' && inputs.source != 'metadata-corrected-busybox' && inputs.source != 'pinned-instrumentation' && inputs.source != 'pinned-file-chmod'
+        if: inputs.source != 'pr340' && inputs.source != 'verification-control' && inputs.source != 'metadata-corrected' && inputs.source != 'verification-control-busybox' && inputs.source != 'metadata-corrected-busybox' && inputs.source != 'pinned-instrumentation' && inputs.source != 'pinned-file-chmod' && inputs.source != 'stat-before' && inputs.source != 'modern-stat-exhaustion'
       - run: npm ci
         name: Install dependencies
       - run: npm run bootstrap
         name: Bootstrap the packages
       - name: Verify pinned-era source after bootstrap
-        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod')
+        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before' || inputs.source == 'modern-stat-exhaustion')
         run: python3 -I -c "$PINNED_SOURCE_CHECK"
       - run: npm run build-all
         name: Build packages
       - name: Verify pinned-era source after build
-        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod')
+        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before' || inputs.source == 'modern-stat-exhaustion')
         run: python3 -I -c "$PINNED_SOURCE_CHECK"
       - name: Run Docker tests
         run: npm run test --prefix packages/docker
       - name: Verify pinned-era source after validation
-        if: always() && !cancelled() && (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod') && steps.source_checkout.outcome == 'success'
+        if: always() && !cancelled() && (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before' || inputs.source == 'modern-stat-exhaustion') && steps.source_checkout.outcome == 'success'
         run: python3 -I -c "$PINNED_SOURCE_CHECK"
 
   k8s-tests:
@@ -217,10 +220,10 @@ jobs:
           sha256sum .github/workflows/build.yaml package*.json packages/*/package*.json
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
         with:
-          node-version: ${{ (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod') && '24.13.0' || '24' }}
+          node-version: ${{ inputs.source == 'modern-stat-exhaustion' && '24.21.0' || (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before') && '24.13.0' || '24' }}
           package-manager-cache: false  # No shared cache reads or writes.
       - name: Verify pinned-era source tools and pristine source
-        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod')
+        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before' || inputs.source == 'modern-stat-exhaustion')
         run: python3 -I -c "$PINNED_SOURCE_CHECK"
       - run: sed -i "s|{{PATHTOREPO}}|$(pwd)|" packages/k8s/tests/test-kind.yaml
         name: Setup kind cluster yaml config
@@ -229,21 +232,21 @@ jobs:
           config: packages/k8s/tests/test-kind.yaml
       - run: node --version && npm --version
         name: Log Node and npm versions
-        if: inputs.source != 'pr340' && inputs.source != 'verification-control' && inputs.source != 'metadata-corrected' && inputs.source != 'verification-control-busybox' && inputs.source != 'metadata-corrected-busybox' && inputs.source != 'pinned-instrumentation' && inputs.source != 'pinned-file-chmod'
-      - run: ${{ (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod') && 'npm install' || 'npm ci' }}
+        if: inputs.source != 'pr340' && inputs.source != 'verification-control' && inputs.source != 'metadata-corrected' && inputs.source != 'verification-control-busybox' && inputs.source != 'metadata-corrected-busybox' && inputs.source != 'pinned-instrumentation' && inputs.source != 'pinned-file-chmod' && inputs.source != 'stat-before' && inputs.source != 'modern-stat-exhaustion'
+      - run: ${{ (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before') && 'npm install' || 'npm ci' }}
         name: Install dependencies
       - run: npm run bootstrap
         name: Bootstrap the packages
       - name: Verify pinned-era source after bootstrap
-        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod')
+        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before' || inputs.source == 'modern-stat-exhaustion')
         run: python3 -I -c "$PINNED_SOURCE_CHECK"
       - run: npm run build-all
         name: Build packages
       - name: Verify pinned-era source after build
-        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod')
+        if: (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before' || inputs.source == 'modern-stat-exhaustion')
         run: python3 -I -c "$PINNED_SOURCE_CHECK"
       - name: Run Kubernetes tests
         run: npm run test --prefix packages/k8s
       - name: Verify pinned-era source after validation
-        if: always() && !cancelled() && (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod') && steps.source_checkout.outcome == 'success'
+        if: always() && !cancelled() && (inputs.source == 'pr340' || inputs.source == 'verification-control' || inputs.source == 'metadata-corrected' || inputs.source == 'verification-control-busybox' || inputs.source == 'metadata-corrected-busybox' || inputs.source == 'pinned-instrumentation' || inputs.source == 'pinned-file-chmod' || inputs.source == 'stat-before' || inputs.source == 'modern-stat-exhaustion') && steps.source_checkout.outcome == 'success'
         run: python3 -I -c "$PINNED_SOURCE_CHECK"
