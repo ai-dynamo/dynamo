@@ -200,6 +200,12 @@ mod tests {
     }
 
     #[test]
+    fn image_request_rejects_jpg_output_format_alias() {
+        let json = r#"{"prompt":"a cat","output_format":"jpg"}"#;
+        assert!(serde_json::from_str::<NvCreateImageRequest>(json).is_err());
+    }
+
+    #[test]
     fn image_request_typed_fields_stay_out_of_passthrough() {
         let json = r#"{"prompt":"a cat","n":2,"input_reference":"ref.png","nvext":{"seed":7},"custom_knob":1}"#;
         let req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
