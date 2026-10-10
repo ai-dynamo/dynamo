@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Azure AKS InfiniBand fabric profile (UCX over IB).
+#
+# An agent materializes this onto a base DynamoGraphDeployment, resolving every
+# {{ ... }} @param. NOT a kustomize artifact — see ./README.md.
+provider: aks-ib
+fabric: ib
+
+target:
+  by: subComponentType
+  match: [prefill, decode]
+
+image:
+  rule: "{base_tag}"             # keep the base image — a standard runtime; UCX/IB is built in
+  note: no -efa variant needed
+
+device:
+  rdma/ib: "1"                   # device-plugin SLOT count (grants all HCAs); NOT GPU-derived — keep "1"
+
+securityContext:
+  privileged: true
+  capabilities: { add: [IPC_LOCK, SYS_PTRACE] }
+
+env:
+  # @param UCX_NET_DEVICES = this cluster's compute-fabric IB NICs (from `ibv_devinfo`).
+  #   Load-bearing: omitting it lets UCX bind a side NIC -> degraded BW + zeroed KV counter.
+  #   default below = Standard_ND96isr_H100_v5 (mlx5_0..3).
+  UCX_NET_DEVICES: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1"
+  NCCL_SOCKET_IFNAME: eth0
+
+kv_backend: UCX                  # default for both engines (vLLM default; TRT-LLM base already sets it)
+backend: {}                      # nothing to select
+
+place: prefill + decode must share ONE agentpool (per-agentpool IB pkeys) — pin via nodeSelector in the base DGD
+skip: [base_image_choice, storage_pvc, volume_mounts, agentpool_nodeSelector]

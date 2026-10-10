@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Nscale InfiniBand fabric profile (UCX over IB).
+#
+# An agent materializes this onto a base DynamoGraphDeployment, resolving every
+# {{ ... }} @param. NOT a kustomize artifact — see ./README.md.
+provider: nscale-ib
+fabric: ib
+
+target:
+  by: subComponentType
+  match: [prefill, decode]
+
+image:
+  rule: "{base_tag}"             # keep the base image — a standard runtime; UCX/IB is built in
+  note: no -efa variant needed
+
+device:
+  rdma/ib: "1"                   # device-plugin SLOT count (grants all HCAs); NOT GPU-derived — keep "1"
+
+securityContext:
+  privileged: true
+  capabilities: { add: [IPC_LOCK, SYS_PTRACE] }
+
+env:
+  # @param UCX_NET_DEVICES = this cluster's COMPUTE-fabric IB NICs only (from `ibv_devinfo`),
+  #   EXCLUDING the side fabric. Load-bearing on Nscale: mixing fabrics -> NIXL_ERR_REMOTE_DISCONNECT
+  #   at first transfer. default below = compute mlx5_0..5,10,11 (excludes side mlx5_6..9).
+  UCX_NET_DEVICES: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1"
+
+kv_backend: UCX                  # default for both engines
+backend: {}                      # nothing to select
+
+skip: [base_image_choice, storage_pvc, volume_mounts]
