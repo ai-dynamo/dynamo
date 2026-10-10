@@ -923,8 +923,11 @@ async fn test_http_service() {
             .is_some_and(|value| value.starts_with("application/json"))
     );
     let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(body["code"], StatusCode::BAD_REQUEST.as_u16());
-    assert_eq!(body["message"], "request exceeds strict token budget");
+    assert_eq!(body["error"]["code"], StatusCode::BAD_REQUEST.as_u16());
+    assert_eq!(
+        body["error"]["message"],
+        "request exceeds strict token budget"
+    );
     compare_counter(
         &metrics,
         "invalid-argument",

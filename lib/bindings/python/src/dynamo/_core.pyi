@@ -3167,7 +3167,12 @@ class Unknown(DynamoException):
     ...
 
 class InvalidArgument(DynamoException):
-    """Invalid input (e.g., prompt exceeds context length)."""
+    """Explicitly public invalid-input message.
+
+    Producers may set ``param`` to a reviewed top-level field name. The optional
+    attribute survives supported current Python/Rust validation-error boundaries;
+    never derive it from request values or private exception text.
+    """
 
     ...
 
