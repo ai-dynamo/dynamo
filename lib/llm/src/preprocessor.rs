@@ -2129,7 +2129,7 @@ impl OpenAIPreprocessor {
         Self::apply_default_thinking_mode_from_runtime_config(&self.runtime_config, request);
     }
 
-    fn guided_output_requires_reasoning<R: OAIChatLikeRequest>(
+    fn sglang_request_requires_reasoning<R: OAIChatLikeRequest>(
         request: &R,
         reasoning_parser: Option<&str>,
     ) -> bool {
@@ -2137,12 +2137,13 @@ impl OpenAIPreprocessor {
             return false;
         }
 
-        let is_guided_tool_choice = Self::has_guided_tool_choice(request);
-        let is_structured_response = Self::has_structured_response_format(request);
-        let structured_response_requires_reasoning = is_structured_response
-            && Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser);
+        // SGLang also needs this signal for plain thinking requests to count
+        // reasoning tokens and enforce strict-thinking budgets. GPT-OSS is the
+        // exception for structured output until its guided JSON path is fixed.
+        let unsupported_structured_response = Self::has_structured_response_format(request)
+            && !Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser);
 
-        (is_guided_tool_choice || structured_response_requires_reasoning)
+        (!unsupported_structured_response || Self::has_guided_tool_choice(request))
             && Self::sglang_effective_reasoning_enabled(
                 reasoning_parser,
                 request.chat_template_args(),
@@ -2154,7 +2155,7 @@ impl OpenAIPreprocessor {
         reasoning_parser: Option<&str>,
         has_thinking_budget: bool,
     ) -> bool {
-        Self::guided_output_requires_reasoning(request, reasoning_parser)
+        Self::sglang_request_requires_reasoning(request, reasoning_parser)
             || (has_thinking_budget
                 && Self::sglang_effective_reasoning_enabled(
                     reasoning_parser,
@@ -3269,7 +3270,7 @@ impl OpenAIPreprocessor {
             builder.extra_args(Some(extra_args));
         }
 
-        // SGLang needs this signal for guided output and per-request budgets.
+        // SGLang needs this signal for plain thinking, guided output, and budgets.
         builder.require_reasoning(Self::request_requires_reasoning(
             request,
             self.runtime_config.reasoning_parser.as_deref(),
@@ -13004,7 +13005,7 @@ mod tests {
                 Some("qwen3"),
                 true,
             ),
-            (serde_json::json!({}), Some("qwen3"), false),
+            (serde_json::json!({}), Some("qwen3"), true),
             (
                 serde_json::json!({"thinking_token_budget": 32}),
                 None,
@@ -13064,10 +13065,61 @@ mod tests {
         }
     }
 
-    /// Verifies the SGLang reasoning gate covers forced tool JSON and
-    /// structured assistant output while honoring per-request thinking controls.
     #[test]
-    fn test_guided_output_requires_reasoning() {
+    fn test_plain_chat_forwards_reasoning_signal_to_worker() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.reasoning_parser = Some("qwen3".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        for (thinking_enabled, expected) in [(None, true), (Some(true), true), (Some(false), false)]
+        {
+            let request = chat_request_with_args(thinking_enabled.map(|enabled| {
+                HashMap::from([("enable_thinking".to_string(), serde_json::json!(enabled))])
+            }));
+            let mut builder = preprocessor.builder(&request).unwrap();
+            builder.token_ids(vec![]);
+            let preprocessed = builder.build().unwrap();
+            assert_eq!(preprocessed.require_reasoning, expected);
+        }
+    }
+
+    /// Verifies the SGLang reasoning gate covers plain chat and guided output
+    /// while honoring per-request thinking controls and the GPT-OSS exception.
+    #[test]
+    fn test_sglang_request_requires_reasoning() {
+        let plain = chat_request_with_args(Some(HashMap::from([(
+            "reasoning_effort".to_string(),
+            serde_json::json!("medium"),
+        )])));
+        assert!(OpenAIPreprocessor::sglang_request_requires_reasoning(
+            &plain,
+            Some("qwen3")
+        ));
+        assert!(OpenAIPreprocessor::sglang_request_requires_reasoning(
+            &chat_request_with_args(None),
+            Some("qwen3")
+        ));
+        assert!(OpenAIPreprocessor::sglang_request_requires_reasoning(
+            &plain,
+            Some("gpt_oss")
+        ));
+        assert!(!OpenAIPreprocessor::sglang_request_requires_reasoning(
+            &plain, None
+        ));
+
+        let thinking_disabled = chat_request_with_args(Some(HashMap::from([(
+            "enable_thinking".to_string(),
+            serde_json::json!(false),
+        )])));
+        assert!(!OpenAIPreprocessor::sglang_request_requires_reasoning(
+            &thinking_disabled,
+            Some("qwen3")
+        ));
+
         let request = |tool_choice: serde_json::Value, enable_thinking: Option<bool>| {
             let mut value = serde_json::json!({
                 "model": "test-model",
@@ -13090,7 +13142,7 @@ mod tests {
         };
 
         let required = request(serde_json::json!("required"), Some(true));
-        assert!(OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(OpenAIPreprocessor::sglang_request_requires_reasoning(
             &required,
             Some("nemotron_v3")
         ));
@@ -13102,44 +13154,44 @@ mod tests {
             }),
             None,
         );
-        assert!(OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(OpenAIPreprocessor::sglang_request_requires_reasoning(
             &named,
             Some("nemotron_v3")
         ));
 
         let disabled = request(serde_json::json!("required"), Some(false));
-        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(!OpenAIPreprocessor::sglang_request_requires_reasoning(
             &disabled,
             Some("nemotron_v3")
         ));
-        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(!OpenAIPreprocessor::sglang_request_requires_reasoning(
             &required, None
         ));
 
         let automatic = request(serde_json::json!("auto"), Some(true));
-        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(OpenAIPreprocessor::sglang_request_requires_reasoning(
             &automatic,
             Some("nemotron_v3")
         ));
 
         let gemma_without_opt_in = request(serde_json::json!("required"), None);
-        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(!OpenAIPreprocessor::sglang_request_requires_reasoning(
             &gemma_without_opt_in,
             Some("gemma4")
         ));
         let gemma_with_opt_in = request(serde_json::json!("required"), Some(true));
-        assert!(OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(OpenAIPreprocessor::sglang_request_requires_reasoning(
             &gemma_with_opt_in,
             Some("gemma4")
         ));
 
         let deepseek_default = request(serde_json::json!("required"), None);
-        assert!(OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(OpenAIPreprocessor::sglang_request_requires_reasoning(
             &deepseek_default,
             Some("deepseek_v4")
         ));
         let deepseek_disabled = request(serde_json::json!("required"), Some(false));
-        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(!OpenAIPreprocessor::sglang_request_requires_reasoning(
             &deepseek_disabled,
             Some("deepseek_v4")
         ));
@@ -13168,31 +13220,31 @@ mod tests {
             }))
             .unwrap()
         };
-        assert!(OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(OpenAIPreprocessor::sglang_request_requires_reasoning(
             &structured_request(true),
             Some("qwen3")
         ));
-        assert!(OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(OpenAIPreprocessor::sglang_request_requires_reasoning(
             &json_object_request(true),
             Some("qwen3")
         ));
-        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(!OpenAIPreprocessor::sglang_request_requires_reasoning(
             &structured_request(false),
             Some("qwen3")
         ));
-        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(!OpenAIPreprocessor::sglang_request_requires_reasoning(
             &structured_request(true),
             Some("gpt_oss")
         ));
-        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(!OpenAIPreprocessor::sglang_request_requires_reasoning(
             &json_object_request(true),
             Some("gpt_oss")
         ));
-        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(!OpenAIPreprocessor::sglang_request_requires_reasoning(
             &structured_request(false),
             Some("gpt_oss")
         ));
-        assert!(OpenAIPreprocessor::guided_output_requires_reasoning(
+        assert!(OpenAIPreprocessor::sglang_request_requires_reasoning(
             &request(serde_json::json!("required"), None),
             Some("gpt_oss")
         ));
