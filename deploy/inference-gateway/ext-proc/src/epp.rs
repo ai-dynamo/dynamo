@@ -17,7 +17,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
-use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::discovery::{LoadThresholdConfig, ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
 use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -41,6 +41,10 @@ use crate::picker::{
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+// The Frontend reads the same variables for its `--active-*-threshold` flags.
+const DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: &str = "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD";
+const DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD: &str = "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD";
+const DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: &str = "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC";
 
 /// `tokens_safe_to_inject` is `false` when `token_ids` were computed from
 /// only one prompt of a multi-prompt text batch (routing-only, matching
@@ -80,6 +84,65 @@ fn validate_kube_discovery_mode_value(mode: Option<&str>) -> Result<bool> {
             "Invalid {DYN_KUBE_DISCOVERY_MODE} value {mode:?}; valid values are 'pod' and 'container'"
         ),
     }
+}
+
+/// The router's load thresholds from the environment. Each is opt-in; with none
+/// set, overload detection stays off. A set but invalid value fails startup
+/// rather than silently leaving shedding off.
+fn load_thresholds_from_env() -> Result<LoadThresholdConfig> {
+    fn parse<T: std::str::FromStr>(key: &str) -> Result<Option<T>> {
+        let Ok(raw) = std::env::var(key) else {
+            return Ok(None);
+        };
+        let raw = raw.trim();
+        // `None` disables a threshold, as in the Frontend's parser.
+        if raw.is_empty() || raw == "None" {
+            return Ok(None);
+        }
+        raw.parse()
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("invalid value for {key}: {raw:?}"))
+    }
+
+    let decode = parse(DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD)?;
+    let prefill = parse(DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD)?;
+    let prefill_frac = parse(DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC)?;
+
+    // `validate` names struct fields; check one variable at a time so the error
+    // names the one the operator set.
+    for (key, single) in [
+        (
+            DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD,
+            LoadThresholdConfig {
+                active_decode_blocks_threshold: decode,
+                ..Default::default()
+            },
+        ),
+        (
+            DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD,
+            LoadThresholdConfig {
+                active_prefill_tokens_threshold: prefill,
+                ..Default::default()
+            },
+        ),
+        (
+            DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC,
+            LoadThresholdConfig {
+                active_prefill_tokens_threshold_frac: prefill_frac,
+                ..Default::default()
+            },
+        ),
+    ] {
+        single
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid value for {key}: {error}"))?;
+    }
+
+    Ok(LoadThresholdConfig {
+        active_decode_blocks_threshold: decode,
+        active_prefill_tokens_threshold: prefill,
+        active_prefill_tokens_threshold_frac: prefill_frac,
+    })
 }
 
 fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigOverride> {
@@ -150,6 +213,7 @@ impl Router {
         component: &str,
     ) -> Result<Self> {
         let container_discovery = validate_kube_discovery_mode()?;
+        let load_thresholds = load_thresholds_from_env()?;
 
         let runtime = Runtime::from_settings()?;
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
@@ -188,6 +252,16 @@ impl Router {
                 enable_eagle,
             )
             .await?;
+        // The prefill router below shares this handle.
+        if load_thresholds.is_configured() {
+            decode_router
+                .load_context()
+                .load_thresholds()
+                .update(&load_thresholds);
+            tracing::info!(?load_thresholds, "Router load thresholds configured");
+        } else {
+            tracing::info!("Router load thresholds off; set DYN_ACTIVE_* to enable");
+        }
 
         // Wait for runtime config watch to populate
         {
