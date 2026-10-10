@@ -728,7 +728,7 @@ pub fn chat_completion_to_anthropic_response(
     model: &str,
     api_context: Option<&crate::protocols::unified::AnthropicContext>,
 ) -> AnthropicMessageResponse {
-    let _ = api_context; // Available for future enrichment (service_tier, etc.)
+    let single_tool = api_context.is_some_and(|ctx| ctx.disable_parallel_tool_use);
     let msg_id = format!("msg_{}", Uuid::new_v4().simple());
 
     let choice = chat_resp.inner.choices.into_iter().next();
@@ -775,6 +775,9 @@ pub fn chat_completion_to_anthropic_response(
                     name: tc.function.name,
                     input,
                 });
+                if single_tool {
+                    break;
+                }
             }
         }
 
