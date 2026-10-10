@@ -353,7 +353,11 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=19.0,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                # Both workers share one 22 GiB L4 and warm up together; a
+                # 1.6 GiB-per-worker KV budget left no headroom and one
+                # worker hit CUDA OOM in sampler warmup. 512 MiB (~14.5k
+                # tokens) still covers several 4096-token requests.
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
                 # Qwen2-VL / Qwen2.5-VL: chat template emits `<|image_pad|>`
                 # (151655) and vLLM's HF processor expands the same id N
