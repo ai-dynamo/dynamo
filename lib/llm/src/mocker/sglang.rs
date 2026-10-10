@@ -21,6 +21,7 @@ struct NativeControls {
     return_logprob: Option<bool>,
     top_logprobs_num: Option<i64>,
     logprob_start_len: Option<i64>,
+    token_ids_logprob: Option<Vec<u32>>,
 }
 
 /// Response metadata for a native SGLang request, or `None` for every other
@@ -48,11 +49,11 @@ pub(super) fn response_metadata(
     let request_id = controls
         .rid
         .unwrap_or_else(|| fallback_request_id.to_string());
-    Ok(Some(ResponseMetadata::new(
-        request_id,
-        &request.token_ids,
-        logprobs,
-    )))
+    let metadata = ResponseMetadata::new(request_id, &request.token_ids, logprobs);
+    Ok(Some(match controls.token_ids_logprob {
+        Some(token_ids) => metadata.with_candidate_token_ids(token_ids),
+        None => metadata,
+    }))
 }
 
 /// Wrap one canonical chunk in the native response the frontend unwraps.
@@ -61,11 +62,19 @@ pub(super) fn adapt(
     output: &mut LLMEngineOutput,
     completion_tokens: usize,
 ) {
-    let response = metadata.response(
+    let mut response = metadata.response(
         &output.token_ids,
         completion_tokens,
         output.finish_reason.as_ref().map(native_finish_reason),
     );
+    if let Some(cached_tokens) = output
+        .completion_usage
+        .as_ref()
+        .and_then(|usage| usage.prompt_tokens_details.as_ref())
+        .and_then(|details| details.cached_tokens)
+    {
+        response["meta_info"]["cached_tokens"] = json!(cached_tokens);
+    }
     output.engine_data = Some(json!({"sglang_response": response}));
 }
 
@@ -184,5 +193,34 @@ mod tests {
             assert_eq!(finish["type"], "abort");
             assert_eq!(finish["message"], expected_message);
         }
+    }
+
+    #[test]
+    fn forwards_measured_cache_usage_without_inventing_unknown_counts() {
+        let metadata = native_metadata(json!({}));
+        for count in [None, Some(0), Some(2)] {
+            let mut output = LLMEngineOutput::length();
+            output.completion_usage =
+                count.map(|cached| super::super::usage_with_cached_tokens(3, 0, cached));
+            adapt(&metadata, &mut output, 0);
+            let meta = &output.engine_data.as_ref().unwrap()["sglang_response"]["meta_info"];
+            match count {
+                Some(cached) => assert_eq!(meta["cached_tokens"], cached),
+                None => assert!(meta.get("cached_tokens").is_none()),
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_requested_candidate_ids() {
+        let metadata = native_metadata(json!({
+            "return_logprob": true,
+            "token_ids_logprob": [17, 4]
+        }));
+        let response = metadata.response(&[42], 1, Some(json!({"type": "length"})));
+        assert_eq!(
+            response["meta_info"]["output_token_ids_logprobs"],
+            json!([[[-10.8, 17, null], [-10.5, 4, null]]])
+        );
     }
 }
