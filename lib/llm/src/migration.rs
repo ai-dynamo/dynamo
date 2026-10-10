@@ -16,7 +16,7 @@ use crate::{
         TokenIdType,
         common::{
             extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
-            llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+            llm_backend::{BackendOutput, DecoderCheckpoint, LLMEngineOutput, PreprocessedRequest},
             preprocessor::MultimodalData,
             timing::RequestPhase,
         },
@@ -38,13 +38,12 @@ use dynamo_runtime::protocols::annotated::Annotated;
 /// Accessors the migration RetryManager needs from a response chunk.
 /// `token_ids` lets it replay already-delivered tokens; `worker_trace_link`
 /// lets it stamp the failed worker's span onto the next attempt's
-/// `migration_link`; `jailed_text` lets it carry forward whatever the Backend's
-/// decoder is still withholding as a possible hidden-stop-sequence prefix, so a
-/// retried attempt's fresh decoder can be reseeded instead of silently losing it.
+/// `migration_link`; `decoder_checkpoint` carries the Backend's in-process incremental
+/// decoder state so a retry can restore withheld text and buffered token IDs.
 pub(crate) trait HasTokenIds {
     fn token_ids(&self) -> &[TokenIdType];
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink>;
-    fn jailed_text(&self) -> Option<&str>;
+    fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint>;
 }
 
 impl HasTokenIds for BackendOutput {
@@ -54,8 +53,8 @@ impl HasTokenIds for BackendOutput {
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
         self.worker_trace_link.as_ref()
     }
-    fn jailed_text(&self) -> Option<&str> {
-        self.jailed_text.as_deref()
+    fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
+        self.jailed_text.as_ref()
     }
 }
 
@@ -66,8 +65,8 @@ impl HasTokenIds for LLMEngineOutput {
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
         self.worker_trace_link.as_ref()
     }
-    fn jailed_text(&self) -> Option<&str> {
-        self.jailed_text.as_deref()
+    fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
+        self.jailed_text.as_ref()
     }
 }
 
@@ -731,12 +730,10 @@ where
         if let Some(link) = llm_engine_output.worker_trace_link() {
             self.last_worker_link = Some(link.clone());
         }
-        // Snapshot whatever the Backend's decoder is currently withholding as a possible
-        // hidden-stop-sequence prefix, so a future retry's fresh decoder can be reseeded
-        // from it (`jail_seed`) instead of the withheld text simply vanishing. Overwritten
-        // on every chunk -- `None` once the decoder resolves it one way or the other -- so
-        // this always reflects the last known-good chunk's state, never a stale one.
-        self.request.jail_seed = llm_engine_output.jailed_text().map(str::to_string);
+        // Snapshot the Backend's complete in-process decoder checkpoint. Overwrite it on
+        // every chunk (`None` once fully resolved) so a future retry replays exactly the
+        // last known-good buffered IDs and stop-filter text, never stale state.
+        self.request.jail_seed = llm_engine_output.decoder_checkpoint().cloned();
         let output_len = u32::try_from(token_ids.len()).unwrap_or(u32::MAX);
         if self.exceed_max_seq_len(output_len) {
             return;
@@ -2629,7 +2626,7 @@ mod tests {
                     );
                     let responses = stream::iter(vec![
                         Annotated::from_data(BackendOutput {
-                            jailed_text: Some("STOP".to_string()),
+                            jailed_text: Some("STOP".to_string().into()),
                             ..create_mock_output(10).data.unwrap()
                         }),
                         Annotated::from_err(
@@ -3224,6 +3221,7 @@ mod tests {
                 .map(|&id| {
                     Annotated::from_data(LLMEngineOutput {
                         token_ids: vec![id],
+                        log_probs: Some(vec![f64::from(id)]),
                         index: Some(0),
                         ..Default::default()
                     })
@@ -3263,12 +3261,13 @@ mod tests {
     }
 
     /// Drives a `RetryManager` wrapping a real `Backend` over a scripted raw-token engine
-    /// and returns the concatenation of every response's visible text.
-    async fn run_raw_token_migration(
+    /// and returns every data-bearing response for content and accounting assertions.
+    async fn run_raw_token_migration_outputs(
+        backend: Arc<crate::backend::Backend>,
         stop: Option<Vec<String>>,
         first_attempt_tokens: Vec<u32>,
         retry_tokens: Vec<u32>,
-    ) -> String {
+    ) -> Vec<BackendOutput> {
         let context_id = uuid::Uuid::new_v4().to_string();
         let raw_engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             Arc::new(RawTokenMigrationEngine {
@@ -3279,7 +3278,7 @@ mod tests {
             });
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
             Arc::new(BackendWrappedEngine {
-                backend: letter_backend(),
+                backend,
                 raw_engine,
             });
 
@@ -3299,13 +3298,26 @@ mod tests {
         .await
         .expect("Failed to build RetryManager");
 
-        let mut text = String::new();
+        let mut outputs = Vec::new();
         while let Some(response) = retry_manager.next().await {
-            if let Some(t) = response.data.and_then(|data| data.text) {
-                text.push_str(&t);
+            if let Some(data) = response.data {
+                outputs.push(data);
             }
         }
-        text
+        outputs
+    }
+
+    /// Runs the letter-tokenizer fixture and concatenates its caller-visible text.
+    async fn run_raw_token_migration(
+        stop: Option<Vec<String>>,
+        first_attempt_tokens: Vec<u32>,
+        retry_tokens: Vec<u32>,
+    ) -> String {
+        run_raw_token_migration_outputs(letter_backend(), stop, first_attempt_tokens, retry_tokens)
+            .await
+            .into_iter()
+            .filter_map(|data| data.text)
+            .collect()
     }
 
     /// End-to-end regression for the migration-discards-withheld-text bug, through a real
@@ -3327,5 +3339,84 @@ mod tests {
     async fn migration_hides_stop_sequence_completed_across_real_backend_retry() {
         let text = run_raw_token_migration(Some(vec!["ozzy".to_string()]), vec![1], vec![3]).await;
         assert_eq!(text, "", "the completed hidden stop must not leak any text");
+    }
+
+    /// Real byte-fallback tokenizer used to prove migration replays incremental decoder
+    /// state rather than treating buffered generated IDs as already-consumed prompt.
+    fn byte_fallback_backend() -> Arc<crate::backend::Backend> {
+        let hf: tokenizers::Tokenizer = serde_json::from_value(serde_json::json!({
+            "version": "1.0", "truncation": null, "padding": null,
+            "added_tokens": [], "normalizer": null, "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": {"type": "Sequence", "decoders": [
+                {"type": "ByteFallback"}, {"type": "Fuse"}]},
+            "model": {"type": "BPE", "vocab": {
+                "<0x61>": 0, "<0xC3>": 1, "<0xA9>": 2, "!": 3
+            }, "merges": [], "byte_fallback": true}
+        }))
+        .unwrap();
+        let tokenizer: Arc<dyn crate::tokenizers::traits::Tokenizer> =
+            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf));
+        crate::backend::Backend::from_tokenizer(crate::tokenizers::Tokenizer::from(tokenizer))
+    }
+
+    /// A buffered ASCII byte from the failed attempt must be released with the retry's
+    /// boundary token, while token IDs, per-token strings, and logprobs remain aligned.
+    #[tokio::test]
+    async fn migration_replays_ascii_byte_fallback_decoder_state() {
+        let outputs =
+            run_raw_token_migration_outputs(byte_fallback_backend(), None, vec![0], vec![3]).await;
+        let text: String = outputs
+            .iter()
+            .filter_map(|data| data.text.as_deref())
+            .collect();
+        assert_eq!(text, "a!");
+
+        let accounting: Vec<_> = outputs
+            .iter()
+            .flat_map(|data| {
+                data.token_ids
+                    .iter()
+                    .copied()
+                    .zip(data.tokens.iter().map(|token| token.as_deref()))
+                    .zip(data.log_probs.iter().flatten().copied())
+                    .map(|((id, token), logprob)| (id, token, logprob))
+            })
+            .collect();
+        assert_eq!(accounting, vec![(0, Some("a"), 0.0), (3, Some("!"), 3.0)]);
+    }
+
+    /// Split UTF-8 bytes must combine across attempts; neither byte may be dropped or
+    /// double-counted when the retry reconstructs the incremental decoder.
+    #[tokio::test]
+    async fn migration_replays_multibyte_fallback_decoder_state() {
+        let outputs =
+            run_raw_token_migration_outputs(byte_fallback_backend(), None, vec![1], vec![2, 3])
+                .await;
+        let text: String = outputs
+            .iter()
+            .filter_map(|data| data.text.as_deref())
+            .collect();
+        assert_eq!(text, "é!");
+
+        let accounted: Vec<_> = outputs
+            .iter()
+            .flat_map(|data| {
+                data.token_ids
+                    .iter()
+                    .copied()
+                    .zip(data.tokens.iter().map(|token| token.as_deref()))
+                    .zip(data.log_probs.iter().flatten().copied())
+                    .map(|((id, token), logprob)| (id, token, logprob))
+            })
+            .collect();
+        assert_eq!(
+            accounted,
+            vec![
+                (1, Some("�"), 1.0),
+                (2, Some("�"), 2.0),
+                (3, Some("!"), 3.0)
+            ]
+        );
     }
 }
