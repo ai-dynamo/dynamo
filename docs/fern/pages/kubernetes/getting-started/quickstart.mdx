@@ -19,7 +19,8 @@ follow that tab throughout the guide. The Intel GPU path uses the XPU runtime an
         You need:
 
         - A Kubernetes v1.30 or later cluster with NVIDIA GPU nodes
-        - `kubectl` v1.30 or later configured for the cluster
+        - `kubectl` v1.30 or later, configured for the cluster and within one minor version of the
+          Kubernetes API server according to the [Kubernetes version skew policy](https://kubernetes.io/releases/version-skew-policy/#kubectl)
         - Helm v3 or later
       </Tab>
       <Tab title="Intel GPU">
@@ -32,6 +33,11 @@ follow that tab throughout the guide. The Intel GPU path uses the XPU runtime an
         - A local clone of the Dynamo repository
       </Tab>
     </Tabs>
+
+```bash
+kubectl version
+helm version
+```
   </Step>
 
   <Step title="Install accelerator support">
