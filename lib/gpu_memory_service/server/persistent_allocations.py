@@ -57,6 +57,10 @@ class PersistentClaimConflictError(Exception):
     tag) key while another claimant holds it."""
 
 
+class PersistentPoolIncompatibleError(PersistentClaimConflictError):
+    """Permanent geometry or same-session mode mismatch; retry cannot fix it."""
+
+
 class PersistentNotFoundError(Exception):
     """No persistent allocation exists for the requested
     (engine_id, tag) key."""
@@ -160,13 +164,13 @@ class PersistentAllocationManager:
         shared: bool,
     ) -> None:
         if not shared and aligned_size != existing.aligned_size:
-            raise PersistentClaimConflictError(
+            raise PersistentPoolIncompatibleError(
                 f"persistent allocation {key!r} exclusive reattach size "
                 f"mismatch: requested aligned {aligned_size} != existing "
                 f"{existing.aligned_size}"
             )
         if shared and aligned_size > existing.aligned_size:
-            raise PersistentClaimConflictError(
+            raise PersistentPoolIncompatibleError(
                 f"persistent allocation {key!r} shared reattach capacity "
                 f"mismatch: requested aligned {aligned_size} > existing "
                 f"{existing.aligned_size}"
