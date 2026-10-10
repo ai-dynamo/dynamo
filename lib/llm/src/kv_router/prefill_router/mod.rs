@@ -78,9 +78,10 @@ pub enum PrefillError {
     #[error("Prefill router not yet activated")]
     NotActivated,
 
-    // Callers must include the worker's error text in this message. The
-    // frontend receives this error through `to_pyerr`, which keeps only
-    // `Display` and drops the source chain, so a `#[source]` is never seen.
+    // Callers must include the worker's error text in this message.
+    // The frontend boundary walks the `#[source]` chain, so a classified
+    // InvalidRequest with a public message reaches the client with its own
+    // text.
     #[error("Prefill execution failed: {0}")]
     PrefillError(
         String,

@@ -161,6 +161,24 @@ fn public_invalid_request_message(error: &DynamoError) -> Option<&str> {
     }
 }
 
+fn public_invalid_argument_message(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(dynamo_err) = error.downcast_ref::<DynamoError>() {
+            return public_invalid_request_message(dynamo_err).map(str::to_owned);
+        }
+        current = error.source();
+    }
+    None
+}
+
+pub fn semantic_to_pyerr(err: &anyhow::Error) -> PyErr {
+    if let Some(message) = public_invalid_argument_message(err.as_ref()) {
+        return InvalidArgument::new_err(message);
+    }
+    pyo3::exceptions::PyException::new_err(format!("{err}"))
+}
+
 /// Read `(code, message)` off a Python exception carrying an HTTP-style
 /// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
 /// (matches `dynamo.common.http.HttpStatusError`) plus `.message`.
@@ -262,6 +280,35 @@ mod tests {
             .diagnostic("private validation detail")
             .build();
         assert_eq!(public_invalid_request_message(&error), None);
+    }
+
+    #[derive(Debug)]
+    struct RouterWrapped(DynamoError);
+
+    impl std::fmt::Display for RouterWrapped {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Prefill execution failed: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for RouterWrapped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn error_chain_yields_public_invalid_argument_message() {
+        let worker_error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic("private backend detail")
+            .public_message("use --enable-multimodal")
+            .build();
+        let wrapped = anyhow::Error::new(RouterWrapped(worker_error));
+        assert_eq!(
+            public_invalid_argument_message(wrapped.as_ref()),
+            Some("use --enable-multimodal".to_string())
+        );
     }
 
     #[test]

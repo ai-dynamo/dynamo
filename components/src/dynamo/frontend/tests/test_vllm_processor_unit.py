@@ -1860,6 +1860,17 @@ class TestRoutedEnginePath:
         assert "BackendInvalidArgument" not in excinfo.value.message
 
     @pytest.mark.asyncio
+    async def test_invalid_argument_rejection_propagates(self, vllm_processor_module):
+        class _RefusingEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                raise InvalidArgument("use --enable-multimodal")
+
+        processor = _make_processor(vllm_processor_module, _RefusingEngine())
+
+        with pytest.raises(InvalidArgument, match="--enable-multimodal"):
+            await _run_generate(processor, _base_preproc())
+
+    @pytest.mark.asyncio
     async def test_genuine_internal_failure_is_still_internal(
         self, vllm_processor_module
     ):
