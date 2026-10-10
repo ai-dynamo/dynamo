@@ -137,6 +137,8 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .map(dynamo_protocols::types::Stop::StringArray);
 
         Ok(NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
                 model: req.model,

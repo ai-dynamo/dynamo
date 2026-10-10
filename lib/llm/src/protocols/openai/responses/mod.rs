@@ -1026,6 +1026,8 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .transpose()?;
 
         Ok(NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: CreateChatCompletionRequest {
                 messages,
                 model: resp.inner.model.unwrap_or_default(),

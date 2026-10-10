@@ -88,6 +88,8 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
         .expect("Failed to build chat completion request");
 
     NvCreateChatCompletionRequest {
+        add_generation_prompt: None,
+        continue_final_message: None,
         inner,
         common: CommonExt::default(),
         nvext: None,

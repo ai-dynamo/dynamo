@@ -464,6 +464,7 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        validate::validate_chat_only_generation_flags(&self.unsupported_fields)?;
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_guided_decoding(self)?;
         validate::validate_model(&self.inner.model)?;
@@ -506,10 +507,6 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_total_choices(
             get_prompt_batch_size(&self.inner.prompt),
             self.inner.n.unwrap_or(1),
-        )?;
-        validate::validate_chat_only_generation_flags(
-            self.common.add_generation_prompt,
-            self.common.continue_final_message,
         )?;
         Ok(())
     }
@@ -640,7 +637,12 @@ mod tests {
     fn test_validate_rejects_chat_only_generation_flags() {
         for extra in [
             json!({"add_generation_prompt": false}),
+            json!({"add_generation_prompt": null}),
+            json!({"add_generation_prompt": true}),
             json!({"continue_final_message": true}),
+            json!({"continue_final_message": false}),
+            json!({"continue_final_message": null}),
+            json!({"continue_final_message": {"private": "do-not-echo"}}),
         ] {
             let mut body = json!({
                 "model": "test-model",
@@ -657,6 +659,7 @@ mod tests {
                 err.to_string().contains("/v1/chat/completions"),
                 "unexpected error: {err}"
             );
+            assert!(!err.to_string().contains("do-not-echo"));
         }
     }
 
