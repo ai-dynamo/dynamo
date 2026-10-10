@@ -4782,7 +4782,7 @@ func TestGenerateGrovePodCliqueSet_VLLMMultinodeDRA(t *testing.T) {
 	}
 }
 
-func TestGenerateGrovePodCliqueSet_UsesCompleteRolePodTemplates(t *testing.T) {
+func TestGenerateGrovePodCliqueSet_CompleteRolePodTemplates_15(t *testing.T) {
 	t.Log("Author distinct complete leader and worker templates with manual launch flags")
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -4884,6 +4884,122 @@ func TestGenerateGrovePodCliqueSet_UsesCompleteRolePodTemplates(t *testing.T) {
 			"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
 			"--user-owned-launch", expectation.launchRole,
 		}, main.Args)
+		assert.NotContains(t, strings.Join(main.Args, " "), "GROVE_")
+	}
+	assert.Nil(t, cliques["decode-wkr"].Spec.PodSpec.Containers[0].LivenessProbe)
+
+}
+
+func TestGenerateGrovePodCliqueSet_CompleteRolePodTemplates_16(t *testing.T) {
+	t.Log("Author distinct complete leader and worker templates with portable topology aliases")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "role-templates",
+			Namespace: "default",
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(BackendFrameworkSGLang),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				Roles: []v1beta1.ComponentRoleSpec{
+					{
+						Name: v1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"template-source": "leader"}},
+							Spec: corev1.PodSpec{
+								NodeSelector:   map[string]string{"node-role": "leader"},
+								ResourceClaims: []corev1.PodResourceClaim{{Name: "devices", ResourceClaimTemplateName: ptr.To("leader-devices")}},
+								Containers: []corev1.Container{{
+									Name:    commonconsts.MainContainerName,
+									Image:   "sglang-leader:1.5.0",
+									Command: []string{"python3"},
+									Args: []string{
+										"-m", "dynamo.sglang",
+										"--nnodes", "2",
+										"--node-rank", commonconsts.DynamoRankEnvVarReference,
+										"--dist-init-addr", commonconsts.DynamoLeaderAddressEnvVarReference + ":29500",
+										"--user-owned-launch", "leader",
+									},
+									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "devices"}}},
+								}},
+							},
+						},
+					},
+					{
+						Name: v1beta1.ComponentRoleWorker,
+						PodTemplate: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"template-source": "worker"}},
+							Spec: corev1.PodSpec{
+								NodeSelector:   map[string]string{"node-role": "worker"},
+								ResourceClaims: []corev1.PodResourceClaim{{Name: "devices", ResourceClaimTemplateName: ptr.To("worker-devices")}},
+								Containers: []corev1.Container{{
+									Name:    commonconsts.MainContainerName,
+									Image:   "sglang-worker:1.5.0",
+									Command: []string{"python3"},
+									Args: []string{
+										"-m", "dynamo.sglang",
+										"--nnodes", "2",
+										"--node-rank", commonconsts.DynamoRankEnvVarReference,
+										"--dist-init-addr", commonconsts.DynamoLeaderAddressEnvVarReference + ":29500",
+										"--user-owned-launch", "worker",
+									},
+									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "devices"}}},
+								}},
+							},
+						},
+					},
+				},
+			}},
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{},
+		nil, nil, nil, nil, false, nil,
+	)
+	require.NoError(t, err)
+
+	t.Log("Verify each Grove clique comes from its role template without automatic launch flags")
+	cliques := make(map[string]*grovev1alpha1.PodCliqueTemplateSpec, len(got.Spec.Template.Cliques))
+	for _, clique := range got.Spec.Template.Cliques {
+		cliques[clique.Name] = clique
+	}
+	for _, expectation := range []struct {
+		name       string
+		image      string
+		nodeRole   string
+		launchRole string
+	}{
+		{name: "decode-ldr", image: "sglang-leader:1.5.0", nodeRole: "leader", launchRole: "leader"},
+		{name: "decode-wkr", image: "sglang-worker:1.5.0", nodeRole: "worker", launchRole: "worker"},
+	} {
+		clique := cliques[expectation.name]
+		require.NotNil(t, clique)
+		assert.Equal(t, expectation.nodeRole, clique.Labels["template-source"])
+		assert.Equal(t, expectation.nodeRole, clique.Spec.PodSpec.NodeSelector["node-role"])
+		assert.Equal(t, expectation.nodeRole+"-devices", *clique.Spec.PodSpec.ResourceClaims[0].ResourceClaimTemplateName)
+		main := clique.Spec.PodSpec.Containers[0]
+		assert.Equal(t, expectation.image, main.Image)
+		assert.Equal(t, []string{
+			"-m", "dynamo.sglang",
+			"--nnodes", "2",
+			"--node-rank", commonconsts.DynamoRankEnvVarReference,
+			"--dist-init-addr", commonconsts.DynamoLeaderAddressEnvVarReference + ":29500",
+			"--user-owned-launch", expectation.launchRole,
+		}, main.Args)
+		assert.Contains(t, main.Env, corev1.EnvVar{
+			Name:  commonconsts.DynamoRankEnvVar,
+			Value: "$(GROVE_PCSG_POD_INDEX)",
+		})
+		assert.Contains(t, main.Env, corev1.EnvVar{
+			Name:  commonconsts.DynamoLeaderAddressEnvVar,
+			Value: "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-decode-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+		})
 		assert.NotContains(t, strings.Join(main.Args, " "), "GROVE_")
 	}
 	assert.Nil(t, cliques["decode-wkr"].Spec.PodSpec.Containers[0].LivenessProbe)
