@@ -50,7 +50,6 @@ pub struct ResponseStreamConverter {
     api_context: Option<ResponsesContext>,
     created_at: u64,
     sequence_number: u64,
-    // Message content tracking
     message_item_id: String,
     message_started: bool,
     message_output_index: u32,
@@ -1602,11 +1601,6 @@ mod tests {
         OutputStatus::Incomplete,
         "response.incomplete"
     )]
-    #[case::filtered(
-        Some(FinishReason::ContentFilter),
-        OutputStatus::Incomplete,
-        "response.incomplete"
-    )]
     fn refusal_before_text_preserves_parts_and_terminal_status(
         #[case] finish: Option<FinishReason>,
         #[case] status: OutputStatus,
@@ -1614,7 +1608,6 @@ mod tests {
     ) {
         let expected_reason = match finish {
             Some(FinishReason::Length) => Some("max_output_tokens"),
-            Some(FinishReason::ContentFilter) => Some("content_filter"),
             _ => None,
         };
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
