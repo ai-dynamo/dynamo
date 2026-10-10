@@ -653,7 +653,10 @@ class MultimodalRequestProcessor:
                             ) from exc
                 except UrlValidationError as e:
                     raise HttpStatusError(400, str(e), source) from e
-                except HttpStatusError:
+                except (HttpStatusError, HttpConfigurationError):
+                    # An untrusted egress proxy is deployment configuration,
+                    # not a bad request. It carries no status, so the generic
+                    # handler below would make it a 400.
                     raise
                 except MissingMediaDecoderError as e:
                     # A missing decoder is deployment configuration, not a bad
