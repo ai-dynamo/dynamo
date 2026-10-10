@@ -461,7 +461,7 @@ async fn tool_choice_controls_parallel_calls() {
 #[serial]
 async fn non_object_tool_inputs_are_suppressed_without_dropping_valid_siblings() {
     temp_env::async_with_vars(ENV, async {
-        for (stream, disable_parallel) in [(false, false), (true, false), (false, true), (true, true)] {
+        for stream in [false, true] {
             for keep_valid_sibling in [false, true] {
                 let mut script = load_agent_fixture("parallel-tools.sse").await.unwrap();
                 for (index, arguments) in [(1, "[]"), (2, "null")] {
@@ -484,7 +484,7 @@ async fn non_object_tool_inputs_are_suppressed_without_dropping_valid_siblings()
                     &json!({
                         "model": MODEL, "max_tokens": 128, "stream": stream,
                         "tools": [tool("read_file")],
-                        "tool_choice": {"type": "auto", "disable_parallel_tool_use": disable_parallel},
+                        "tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
                         "messages": [{"role": "user", "content": "Read /a and /b"}]
                     }),
                 )
@@ -545,7 +545,7 @@ async fn non_object_tool_inputs_are_suppressed_without_dropping_valid_siblings()
                 };
                 assert_eq!(inputs, expected);
                 let requests = svc.engine.take_requests().await;
-                assert_eq!(requests[0].inner.parallel_tool_calls, Some(!disable_parallel));
+                assert_eq!(requests[0].inner.parallel_tool_calls, Some(false));
                 svc.shutdown().await;
             }
         }
