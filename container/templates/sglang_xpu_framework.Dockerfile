@@ -34,17 +34,38 @@ RUN apt-get update && \
         libsqlite3-dev && \
     rm -rf /var/lib/apt/lists/*
 
+# Pin the Level-Zero UMD + IGC, matching upstream sgl-kernel-xpu's
+# Dockerfile.xpu_kernel for the v0.2.0 tag. These must stay in lockstep with
+# the host xe KMD: sgl-kernel-xpu#296 saw a mismatched UMD fault libze on
+# Battlemage. The compute-runtime release also carries libze-intel-gpu1's
+# matching intel-ocloc / intel-opencl-icd, so all three move together.
+#
+# Only the GPU driver (UMD) is pinned here. The Level Zero *loader* comes from
+# the base image, which ships libze1 + libze-dev 1.27.0 from Intel's
+# kobuk-team PPA. The 2025.3 base did not, which is why a standalone
+# level-zero deb used to be fetched; installing it now fails, because it
+# and libze1 both own /usr/lib/x86_64-linux-gnu/libze_loader.so.1. Upstream
+# v0.5.19 relies on the PPA loader for the same reason.
+ARG COMPUTE_RUNTIME_VERSION=26.18.38308.1
+ARG IGC_VERSION=2.34.4+21428
+ARG GMM_VERSION=22.10.0
+
 RUN mkdir -p /tmp/neo && cd /tmp/neo && \
     WGET="wget -q --tries=5 --waitretry=5 --retry-connrefused --retry-on-http-error=429,500,502,503,504" && \
-    $WGET https://github.com/intel/intel-graphics-compiler/releases/download/v2.24.8/intel-igc-core-2_2.24.8+20344_amd64.deb && \
-    $WGET https://github.com/intel/intel-graphics-compiler/releases/download/v2.24.8/intel-igc-opencl-2_2.24.8+20344_amd64.deb && \
-    $WGET https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/intel-ocloc_25.48.36300.8-0_amd64.deb && \
-    $WGET https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/intel-opencl-icd_25.48.36300.8-0_amd64.deb && \
-    $WGET https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/libigdgmm12_22.8.2_amd64.deb && \
-    $WGET https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/libze-intel-gpu1_25.48.36300.8-0_amd64.deb && \
-    $WGET https://github.com/oneapi-src/level-zero/releases/download/v1.26.0/level-zero_1.26.0+u24.04_amd64.deb && \
-    dpkg -i *.deb && \
-    cd / && rm -rf /tmp/neo
+    IGC_URL="https://github.com/intel/intel-graphics-compiler/releases/download/v${IGC_VERSION%%+*}" && \
+    CR_URL="https://github.com/intel/compute-runtime/releases/download/${COMPUTE_RUNTIME_VERSION}" && \
+    $WGET ${IGC_URL}/intel-igc-core-2_${IGC_VERSION}_amd64.deb && \
+    $WGET ${IGC_URL}/intel-igc-opencl-2_${IGC_VERSION}_amd64.deb && \
+    $WGET ${CR_URL}/intel-ocloc_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb && \
+    $WGET ${CR_URL}/intel-opencl-icd_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb && \
+    $WGET ${CR_URL}/libigdgmm12_${GMM_VERSION}_amd64.deb && \
+    $WGET ${CR_URL}/libze-intel-gpu1_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades ./*.deb && \
+    rm -rf /var/lib/apt/lists/* && \
+    cd / && rm -rf /tmp/neo && \
+    apt-mark hold libze-intel-gpu1 intel-opencl-icd intel-ocloc libigdgmm12 \
+        intel-igc-core-2 intel-igc-opencl-2
 
 # Install Miniforge (conda) — follows upstream sgl-project/sglang/docker/xpu.Dockerfile pattern.
 # Conda provides correct library linkage with the base image's oneAPI/Level Zero stack.
@@ -60,29 +81,58 @@ ENV VIRTUAL_ENV="${CONDA_DIR}/envs/sglang" \
     PATH="${CONDA_DIR}/envs/sglang/bin:${CONDA_DIR}/bin:${PATH}" \
     CONDA_DEFAULT_ENV=sglang
 
-# Install PyTorch XPU packages (matching upstream xpu.Dockerfile)
+# Install PyTorch XPU packages. Versions track sglang v0.5.19's
+# python/pyproject_xpu.toml exactly — pinning them here (rather than letting the
+# sglang install below resolve them) keeps the sgl-kernel-xpu build, which
+# compiles against this torch, on the same ABI. torch 2.13.0+xpu requires
+# triton-xpu 3.7.2, so it is no longer pinned separately below.
+# torchao is not a v0.5.19 XPU dependency (nothing under sglang/ imports it;
+# it appears only in check_env's optional report), so it is dropped rather than
+# resolved to a build that would pull a conflicting torch.
 WORKDIR /sgl-workspace
 RUN pip3 install \
-        torch==2.11.0+xpu \
-        torchao \
-        torchvision \
+        torch==2.13.0+xpu \
+        torchvision==0.28.0+xpu \
         torchaudio==2.11.0+xpu \
         --index-url https://download.pytorch.org/whl/xpu
 
-RUN pip3 install triton-xpu==3.7.0
-
 # Install sgl-kernel-xpu — needs icpx (DPCPP) for SYCL kernels.
 # Uses --no-build-isolation so build deps must be pre-installed.
+#
+# DPCPP_SYCL_TARGET is set explicitly: v0.2.0 auto-detects the AOT target by
+# running a Level Zero probe against a live GPU, which is not available inside
+# `docker build`. Without it the probe fails and CMake silently falls back to
+# `bmg`, so state the target rather than depend on that fallback. bmg = Xe2
+# (Arc A/B-series, Arc Pro B60); use cri for Xe3P.
+ARG DPCPP_SYCL_TARGET=bmg
 RUN source /opt/intel/oneapi/setvars.sh --force && \
     pip3 install scikit-build-core cmake ninja setuptools && \
-    pip3 install "sgl-kernel @ git+${SGLANG_KERNEL_GIT_URL}@${SGLANG_KERNEL_REF}" --no-build-isolation
+    pip3 install "sglang-kernel-xpu @ git+${SGLANG_KERNEL_GIT_URL}@${SGLANG_KERNEL_REF}" \
+        --no-build-isolation \
+        --config-settings=cmake.define.DPCPP_SYCL_TARGET=${DPCPP_SYCL_TARGET}
 
-# Clone SGLang and install for XPU (sgl-kernel is already satisfied from above)
+# Clone SGLang and install for XPU.
+#
+# The kernel requirement is dropped from pyproject.toml before installing.
+# pyproject_xpu.toml at v0.5.19 declares
+# `sgl-kernel @ git+https://github.com/sgl-project/sgl-kernel-xpu.git`, i.e. the
+# kernel repo's DEFAULT BRANCH under its OLD distribution name. That is stale two
+# ways: the repo renamed the distribution to `sglang-kernel-xpu` at v0.2.0, so pip
+# aborts on the name mismatch ("has inconsistent name"); and even resolved it
+# would re-clone main and recompile the SYCL kernels, discarding the pinned
+# ${SGLANG_KERNEL_REF} build above and adding a long build for an unpinned ref.
+# Upstream main has since repointed this at a released wheel. Removing the line
+# leaves the kernel install above as the single source of the pin.
+#
+# The grep guard makes the edit fail loudly rather than silently no-op if a
+# future ${SGLANG_REF} renames or drops the requirement.
 RUN git clone ${SGLANG_GIT_URL} sglang && \
     cd sglang && \
     git checkout ${SGLANG_REF} && \
     cd python && \
     cp pyproject_xpu.toml pyproject.toml && \
+    grep -q '^\s*"sgl-kernel @ git+' pyproject.toml && \
+    sed -i '/^\s*"sgl-kernel @ git+/d' pyproject.toml && \
     pip3 install --no-build-isolation --extra-index-url https://download.pytorch.org/whl/xpu ".[diffusion]" && \
     pip3 install "xgrammar==0.1.33" --no-deps && \
     pip3 install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate ftfy
