@@ -547,6 +547,35 @@ Standalone EPP supplies `WorkerType::Aggregated` because it selects from one ful
 </Tab>
 </Tabs>
 
+## Request Classifier Sequence Hashes
+
+`ClassifyRequest::sequence_hashes()` returns a read-only snapshot of the existing ordered active-tracking sequence hashes before admission. Each entry covers a complete tracking block; use the factory context's `block_size()` for token units. Partial trailing blocks are excluded. `None` means tracking data is absent; `Some(&[])` means the host supplied an empty sequence. The snapshot remains valid while the classification future is pending and does not grow with generated output.
+
+Sequence hashes retain the host's tracking configuration. When KV reuse is disabled, they are randomized identities rather than reusable content hashes. Public and keyed hashes must stay within their respective tracking domains and configurations; matching values do not establish physical KV residency or a safe shared-budget discount. This accessor adds no hashing or scheduling overrides.
+
+Preparing a classifier input copies the supplied sequence on each eligible scheduling attempt, including retries that subsequently reuse cached classification overrides. Each nonempty snapshot allocates and copies `8 * hashes.len()` bytes. Missing and empty sequences need no hash-buffer allocation. Requests without a classifier skip this snapshot construction.
+
+For `P` retained inputs containing `H` hashes each, the added hash payload is `8 * P * H` bytes, plus request layout and allocator overhead. For example, 1,024 inputs of 32,768 tokens with 64-token tracking blocks retain 4 MiB of additional hash payload. The original scheduling hashes remain live separately. Snapshots are created before waiting for the classifier lock and remain live while classification is pending. Worker queue limits apply after classification; they do not bound these copies. There is no classifier-local pending-count limit or universal prompt-length limit here, so deployments must enforce both limits before this projection to bound its aggregate memory use.
+
+For example, a classifier can inspect the sequence while retaining the request in its future:
+
+```rust
+use dynamo_kv_router::plugins::request_classifier::{
+    ClassifyFuture, ClassifyRequest, RequestClassifier,
+};
+
+struct InspectPrefixes;
+
+impl RequestClassifier for InspectPrefixes {
+    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+        Box::pin(async move {
+            let _tracked_blocks = request.sequence_hashes().map(|hashes| hashes.len());
+            Ok(request)
+        })
+    }
+}
+```
+
 ## Policy Contract
 
 - Return `true` from a filter to keep a worker and `false` to reject it.

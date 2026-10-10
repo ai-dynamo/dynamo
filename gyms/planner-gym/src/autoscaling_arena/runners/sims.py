@@ -19,6 +19,7 @@ sweep and scorecard live one layer up (Phases 3–4).
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -27,7 +28,7 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 from dynamo.planner.config.planner_config import PlannerConfig
@@ -40,9 +41,6 @@ from dynamo.replay.config import load_engine_args as _load_engine_args
 from dynamo.replay.report import PlannerReplayDetails, ReplayReport
 from dynamo.replay.reporting import write_report_json
 
-if TYPE_CHECKING:
-    from dynamo.mocker import MockEngineArgs
-
 EngineFactory = Callable[[PlannerConfig, WorkerCapabilities], EngineProtocol]
 
 TELEMETRY_CONTRACT = "dynamo.replay.telemetry.v1"
@@ -54,6 +52,7 @@ logger = logging.getLogger(__name__)
 # whole. Keep the substrate-sensitive derivations bound to Dynamo's current
 # Planner preparation implementation instead of copying them here.
 _engine_caps = _replay_planner._engine_caps
+_performance_config = _replay_planner.performance_config
 _generate_ais_decode_fpms = _replay_planner._generate_ais_decode_fpms
 _generate_ais_prefill_fpms = _replay_planner._generate_ais_prefill_fpms
 
@@ -1024,7 +1023,7 @@ def _validate_telemetry_destination(
 
 def _as_config(substrate_config: Union[PlannerConfig, str, dict]) -> PlannerConfig:
     if isinstance(substrate_config, PlannerConfig):
-        return substrate_config
+        return copy.deepcopy(substrate_config)
     if isinstance(substrate_config, dict):
         return PlannerConfig.from_config_arg(json.dumps(substrate_config))
     return PlannerConfig.from_config_arg(substrate_config)
@@ -1040,7 +1039,7 @@ def _normalize_engine_args_role(
 
     Arena callers commonly reuse one role-neutral substrate JSON object for
     both disaggregated pools. Dynamo's unified replay validates the role on
-    each ``MockEngineArgs``, so infer it from the slot unless the caller
+    each engine launch config, so infer it from the slot unless the caller
     already supplied ``worker_type`` or the legacy role flags.
     """
 
@@ -1049,6 +1048,31 @@ def _normalize_engine_args_role(
     values = json.loads(raw_args)
     if not isinstance(values, dict):
         raise ValueError(f"{argument_name} must contain a JSON object")
+
+    if "engine" in values:
+        engine = values["engine"]
+        if not isinstance(engine, dict):
+            raise ValueError(f"{argument_name}.engine must be a mapping")
+        declared = engine.get("worker_type")
+        if declared is not None and declared != expected:
+            raise ValueError(
+                f"{argument_name}.engine.worker_type must be {expected!r}, "
+                f"got {declared!r}"
+            )
+        engine["worker_type"] = expected
+        timing = engine.get("timing_model", {})
+        if isinstance(timing, dict) and timing.get("type") == "external":
+            perf_config = timing.get("config")
+            if isinstance(perf_config, dict):
+                declared = perf_config.get("worker_type")
+                if declared is not None and declared != expected:
+                    raise ValueError(
+                        f"{argument_name}.engine.timing_model.config.worker_type "
+                        f"must be {expected!r}, got {declared!r}"
+                    )
+                if timing.get("provider") in {"ais", "aic"}:
+                    perf_config["worker_type"] = expected
+        return json.dumps(values)
 
     declared = values.get("worker_type")
     if declared is not None and declared != expected:
@@ -1098,14 +1122,14 @@ def _resolved_performance_model_metadata(
     metadata: Optional[dict[str, Any]],
     *,
     mode: str,
-    extra_engine_args: Optional[MockEngineArgs],
-    prefill_engine_args: Optional[MockEngineArgs],
-    decode_engine_args: Optional[MockEngineArgs],
+    extra_engine_args: Optional[dict[str, Any]],
+    prefill_engine_args: Optional[dict[str, Any]],
+    decode_engine_args: Optional[dict[str, Any]],
 ) -> Optional[dict[str, Any]]:
     """Backfill each AIS role's version from its own lowered engine arguments.
 
     Match Config permits an omitted AIS backend version. Dynamo resolves that
-    version while lowering ``MockEngineArgs``; keeping the role-specific
+    version while lowering canonical engine arguments; keeping the role-specific
     metadata and filling it here avoids the canonical no-metadata fallback,
     which intentionally chooses one reference identity for both roles.
     Caller-owned metadata is never mutated and an explicit version wins.
@@ -1143,7 +1167,7 @@ def _resolved_performance_model_metadata(
         if not isinstance(raw_config, Mapping):
             continue
         config = dict(raw_config)
-        canonical = engine_args.ais_perf_config or {}
+        canonical = _performance_config(engine_args) or {}
         if (
             "backend_version" not in config
             and config.get("backend") == canonical.get("backend")
@@ -1159,9 +1183,9 @@ def _bootstrap_ais_regressions(
     engine: EngineProtocol,
     config: PlannerConfig,
     *,
-    extra_engine_args: Optional[MockEngineArgs],
-    prefill_engine_args: Optional[MockEngineArgs],
-    decode_engine_args: Optional[MockEngineArgs],
+    extra_engine_args: Optional[dict[str, Any]],
+    prefill_engine_args: Optional[dict[str, Any]],
+    decode_engine_args: Optional[dict[str, Any]],
     performance_model_metadata: Optional[dict[str, Any]],
     benchmark_granularity: int,
 ) -> None:
@@ -1190,7 +1214,7 @@ def _bootstrap_ais_regressions(
             or (
                 decode_engine_args
                 if decode_engine_args is not None
-                and decode_engine_args.ais_perf_config is not None
+                and _performance_config(decode_engine_args) is not None
                 else None
             )
             or prefill_engine_args
@@ -1327,6 +1351,7 @@ def run_arena_replay(
     performance_model_metadata: Optional[dict[str, Any]] = None,
     benchmark_granularity: int = 8,
     report_json: Optional[str] = None,
+    report_jsonl_path: Optional[str] = None,
 ) -> ArenaReplayResult:
     """Drive one autoscaler through one DynoSim match.
 
@@ -1356,8 +1381,8 @@ def run_arena_replay(
             timestamps).
         sla_ttft_ms / sla_itl_ms / sla_e2e_ms: **goodput** SLA passed to the
             collector so the trace_report carries ``goodput_*`` (SLA-gated
-            output tok/s) for ANY autoscaler. Independent of the planner's own
-            scaling SLA in ``substrate_config``.
+            output tok/s) for any autoscaler. Explicit TTFT and ITL bounds also
+            become the Planner's scaling targets for this run.
         capture_per_request: retain terminal request records in the canonical
             replay report so the scorecard can evaluate multiple SLO profiles.
         telemetry_sample_interval_s: simulated-time cadence for persisted
@@ -1401,6 +1426,21 @@ def run_arena_replay(
     )
     if not replay_trace_files:
         raise ValueError("trace_files must contain at least one trace file")
+    if report_jsonl_path is not None:
+        output = Path(report_jsonl_path).expanduser().resolve()
+        if any(
+            _paths_refer_to_same_file(output, Path(source))
+            for source in replay_trace_files
+        ):
+            raise ValueError("request JSONL output must not overwrite a trace input")
+        if report_json is not None and _paths_refer_to_same_file(
+            output, Path(report_json)
+        ):
+            raise ValueError("request JSONL and summary outputs must differ")
+        if telemetry_jsonl_path is not None and _paths_refer_to_same_file(
+            output, Path(telemetry_jsonl_path)
+        ):
+            raise ValueError("request JSONL and telemetry outputs must differ")
     if trace_format != "dynamo" and len(replay_trace_files) != 1:
         raise ValueError(
             f"trace_format={trace_format!r} requires exactly one trace file"
@@ -1410,6 +1450,10 @@ def run_arena_replay(
     # Rivals run in advisory mode like the planner replay (decisions are applied
     # by the harness, not by a live orchestrator).
     config.advisory = True
+    if sla_ttft_ms is not None:
+        config.ttft_ms = sla_ttft_ms
+    if sla_itl_ms is not None:
+        config.itl_ms = sla_itl_ms
 
     p_args = _load_engine_args(
         _normalize_engine_args_role(
@@ -1511,6 +1555,11 @@ def run_arena_replay(
 
             native = _run_mocker_trace_replay(
                 replay_trace_files,
+                **(
+                    {"report_jsonl_path": report_jsonl_path}
+                    if report_jsonl_path is not None
+                    else {}
+                ),
                 extra_engine_args=agg_args,
                 prefill_engine_args=p_args,
                 decode_engine_args=d_args,
@@ -1543,7 +1592,7 @@ def run_arena_replay(
             planner = adapter.finalize(native.lifecycle_operations)
             replay_report = ReplayReport(
                 summary=native.summary,
-                per_request=native.per_request,
+                per_request=native.per_request if capture_per_request else None,
                 coverage=native.coverage,
                 planner=planner,
             )

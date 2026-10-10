@@ -33,6 +33,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to both SGLang engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                         Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  SGLANG_PYTHON                 Python with SGLang installed (default: python3)"
             echo "  SGLANG_WORKER1_GPU            First GPU assignment (default: 0)"
@@ -58,6 +59,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar sglang SIDECAR_CMD
 
 trap dynamo_exit_trap EXIT
 
@@ -120,11 +123,11 @@ CUDA_VISIBLE_DEVICES="$SGLANG_WORKER2_GPU" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT1" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_WORKER1_GRPC_PORT}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT2" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_WORKER2_GRPC_PORT}" &
 
 wait_any_exit

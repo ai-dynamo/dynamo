@@ -25,6 +25,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional
 
+DEFAULT_COLD_START_DELAY_S = 60.0
+
 
 @dataclass(frozen=True)
 class Substrate:
@@ -58,14 +60,46 @@ class Substrate:
             "estimation_mode": "auto",
             "fallback_policy": "deny",
         }
+        rank = dict(self.extra_engine_args)
+        timing = rank.get("timing_model")
+        if timing is not None and (
+            not isinstance(timing, dict)
+            or timing.get("type") not in {"fixed", "polynomial"}
+        ):
+            raise ValueError(
+                "extra_engine_args.timing_model may override only fixed or polynomial timing; external model identity belongs in the substrate"
+            )
+        launch = {}
+        for key in (
+            "gpu_memory_utilization",
+            "mem_fraction_static",
+            "free_gpu_memory_fraction",
+            "cuda_graph_reserved_bytes",
+            "num_gpu_blocks_is_explicit",
+            "startup_time",
+            "dynamo",
+        ):
+            if key in rank:
+                launch[key] = rank.pop(key)
+        rank.update(backend=self.backend)
+        rank.setdefault(
+            "timing_model",
+            {
+                "type": "external",
+                "provider": "ais",
+                "config": {
+                    key: value
+                    for key, value in perf_config.items()
+                    if value is not None
+                },
+            },
+        )
         args = {
-            **self.extra_engine_args,
-            "engine_type": self.backend,
+            "startup_time": DEFAULT_COLD_START_DELAY_S,
+            **launch,
+            "engine": rank,
             "tensor_parallel_size": self.tp_size,
             "dp_size": self.attention_dp_size or 1,
-            "ais_perf_config": {
-                key: value for key, value in perf_config.items() if value is not None
-            },
         }
         return json.dumps(args)
 
