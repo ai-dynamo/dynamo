@@ -16,6 +16,8 @@ use axum::http::HeaderMap;
 use dynamo_runtime::pipeline::Context;
 use tonic::metadata::{KeyAndValueRef, MetadataMap};
 
+use crate::sensitive::is_sensitive_metadata;
+
 /// Default header prefix for context metadata injected from HTTP request headers.
 /// Overridable at startup via the [`DYNAMO_METADATA_HEADER_ENV`] environment variable.
 pub const DYNAMO_METADATA_HEADER_PREFIX_DEFAULT: &str = "x-dynamo-meta-";
@@ -46,14 +48,6 @@ pub(crate) fn metadata_header_prefix() -> &'static str {
     })
 }
 
-fn is_sensitive_metadata(raw_key: &str, raw_value: &str) -> bool {
-    let value: &str = raw_value.trim_start();
-    raw_key.eq_ignore_ascii_case("authorization")
-        || value
-            .get(.."bearer ".len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
-}
-
 fn insert_metadata_entry(
     out: &mut BTreeMap<String, String>,
     total_bytes: &mut usize,
@@ -68,7 +62,7 @@ fn insert_metadata_entry(
         return Ok(());
     }
 
-    if is_sensitive_metadata(raw_key, raw_value) {
+    if is_sensitive_metadata(raw_key, raw_value, &["authorization"]) {
         return Ok(());
     }
 
@@ -258,6 +252,30 @@ mod tests {
         assert!(!meta.contains_key("x-request-id"));
         assert!(!meta.contains_key("authorization"));
         assert!(!meta.contains_key("token"));
+    }
+
+    #[test]
+    fn test_extract_metadata_uses_shared_bearer_policy() {
+        let pairs = [
+            ("x-dynamo-meta-authorization", "Basic secret"),
+            ("x-dynamo-meta-token", "  bEaReR secret"),
+            ("x-dynamo-meta-custom", "Basic secret"),
+        ];
+        let headers: HeaderMap = pairs
+            .iter()
+            .map(|(name, value)| (name.parse::<HeaderName>().unwrap(), value.parse().unwrap()))
+            .collect();
+        let mut grpc = MetadataMap::new();
+        for (name, value) in pairs {
+            grpc.insert(
+                MetadataKey::from_bytes(name.as_bytes()).unwrap(),
+                MetadataValue::try_from(value).unwrap(),
+            );
+        }
+        let expected = BTreeMap::from([("custom".to_string(), "Basic secret".to_string())]);
+        assert_eq!(extract_metadata_from_http(&headers).unwrap(), expected);
+        assert_eq!(extract_metadata_from_header_pairs(pairs).unwrap(), expected);
+        assert_eq!(extract_metadata_from_grpc(&grpc).unwrap(), expected);
     }
 
     #[test]
