@@ -10,6 +10,7 @@ Validates:
   - tool_choice variants: auto / required / none / named function
   - Multi-turn conversations carrying tool results
   - Multi-tool parallel calls
+  - Tool calling on an EAGLE3 speculative decoding worker (nightly)
 
 """
 
@@ -26,12 +27,13 @@ from typing import Any, Generator
 
 import psutil
 import pytest
+import requests
 
 from tests.conftest import EtcdServer, NatsServer
 from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess, check_health_ready
-from tests.utils.payloads import check_models_api
+from tests.utils.payloads import SGLangSpecDecodeMetricsPayload, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_ports
 
 openai = pytest.importorskip("openai")
@@ -42,6 +44,9 @@ Draft7Validator = jsonschema.Draft7Validator
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
+# Same main/draft pair as examples/backends/sglang/launch/agg_spec_decoding.sh.
+SPEC_DECODING_MODEL = "Qwen/Qwen3-8B"
+SPEC_DECODING_DRAFT_MODEL = "Tengyunw/qwen3_8b_eagle3"
 
 pytestmark = [
     pytest.mark.sglang,
@@ -123,8 +128,9 @@ def _cleanup_sglang_stragglers(timeout: float = 10.0) -> None:
         )
 
 
-# Topology identifiers. Both drive the exact same test bodies; they differ in
-# where the SGLang chat processor / tool-call parser / reasoning parser live:
+# Topology identifiers. All drive the exact same test bodies; they differ in
+# where the SGLang chat processor / tool-call parser / reasoning parser live,
+# and in whether the worker runs speculative decoding:
 #
 #   * ``chat_processor_frontend`` — Python SGLang chat processor on the
 #     frontend (``--dyn-chat-processor sglang``) with parsers declared as
@@ -135,13 +141,48 @@ def _cleanup_sglang_stragglers(timeout: float = 10.0) -> None:
 #     (``--dyn-reasoning-parser`` / ``--dyn-tool-call-parser``) and
 #     propagated to the frontend via the model runtime config registered at
 #     discovery time.
-TOPOLOGIES = ("chat_processor_frontend", "rust_parsers")
+#
+#   * ``spec_decoding`` — the ``rust_parsers`` layout on a Qwen3-8B worker
+#     with an EAGLE3 draft model. It uses the 8B main/draft pair that the
+#     ``aggregated_spec_decoding`` serve test already validates, so it is
+#     nightly-only.
+TOPOLOGIES = (
+    "chat_processor_frontend",
+    "rust_parsers",
+    pytest.param(
+        "spec_decoding",
+        marks=[
+            pytest.mark.nightly,
+            pytest.mark.model(SPEC_DECODING_MODEL),
+            # CI workers run HF_HUB_OFFLINE=True, so the draft must be
+            # predownloaded too.
+            pytest.mark.model(SPEC_DECODING_DRAFT_MODEL),
+        ],
+    ),
+)
+_TOPOLOGY_MODELS = {"spec_decoding": SPEC_DECODING_MODEL}
+
+
+@dataclass(frozen=True)
+class ToolCallingStack:
+    topology: str
+    model: str
+    frontend_port: int
+    system_port: int
 
 
 class WorkerProcess(ManagedProcess):
     """backend worker for the tool-calling tests."""
 
-    def __init__(self, request, *, system_port: int, fpm_port: int, topology: str):
+    def __init__(
+        self,
+        request,
+        *,
+        system_port: int,
+        fpm_port: int,
+        topology: str,
+        model: str,
+    ):
         env = os.environ.copy()
         env["DYN_LOG"] = "info"
         env["DYN_SYSTEM_PORT"] = str(system_port)
@@ -155,17 +196,35 @@ class WorkerProcess(ManagedProcess):
             "-m",
             "dynamo.sglang",
             "--model-path",
-            MODEL_NAME,
+            model,
             "--served-model-name",
-            MODEL_NAME,
+            model,
             "--trust-remote-code",
         ]
-        if topology == "rust_parsers":
+        if topology in ("rust_parsers", "spec_decoding"):
             command += [
                 "--dyn-reasoning-parser",
                 "qwen3",
                 "--dyn-tool-call-parser",
                 "qwen25",
+            ]
+        if topology == "spec_decoding":
+            # Flags from agg_spec_decoding.sh; --enable-metrics exposes the
+            # sglang:spec_* counters on the worker system port.
+            command += [
+                "--page-size",
+                "16",
+                "--enable-metrics",
+                "--speculative-algorithm",
+                "EAGLE3",
+                "--speculative-draft-model-path",
+                SPEC_DECODING_DRAFT_MODEL,
+                "--speculative-num-steps",
+                "3",
+                "--speculative-eagle-topk",
+                "1",
+                "--speculative-num-draft-tokens",
+                "4",
             ]
         command.extend(build_gpu_mem_args("build_sglang_gpu_mem_args", env=env))
 
@@ -188,9 +247,8 @@ class ToolCallingFrontendProcess(ManagedProcess):
     """Frontend HTTP ingress.
 
     The chat processor + parser flags are attached only for the
-    ``chat_processor_frontend`` topology. The ``rust_parsers`` topology
-    uses a plain Rust frontend and relies on parsers declared on the worker
-    side.
+    ``chat_processor_frontend`` topology. The other topologies use a plain
+    Rust frontend and rely on parsers declared on the worker side.
     """
 
     def __init__(self, request, *, frontend_port: int, topology: str):
@@ -261,16 +319,16 @@ def runtime_services(request) -> Generator[None, None, None]:
 @pytest.fixture(scope="module", params=TOPOLOGIES)
 def tool_calling_services(
     request, runtime_services, predownload_models
-) -> Generator[int, None, None]:
+) -> Generator[ToolCallingStack, None, None]:
     """Start the SGLang worker + frontend for the selected topology.
 
     Parameterized so every test runs once per entry in :data:`TOPOLOGIES`,
-    giving side-by-side coverage of the Python chat-processor frontend and
-    the plain Rust frontend with worker-declared parsers.
-
-    Yields the frontend HTTP port.
+    giving side-by-side coverage of the Python chat-processor frontend, the
+    plain Rust frontend with worker-declared parsers, and the same Rust
+    frontend in front of a speculative decoding worker.
     """
     topology: str = request.param
+    model = _TOPOLOGY_MODELS.get(topology, MODEL_NAME)
     # Allocate from the disjoint bases in tests/utils/constants.py so this
     # module cannot land on the window another suite allocates from.
     allocated_ports: list[int] = []
@@ -284,7 +342,11 @@ def tool_calling_services(
         allocated_ports.append(fpm_port)
 
         with WorkerProcess(
-            request, system_port=system_port, fpm_port=fpm_port, topology=topology
+            request,
+            system_port=system_port,
+            fpm_port=fpm_port,
+            topology=topology,
+            model=model,
         ):
             # Allow worker to register with discovery.
             time.sleep(2)
@@ -301,7 +363,12 @@ def tool_calling_services(
                     frontend_port,
                     system_port,
                 )
-                yield frontend_port
+                yield ToolCallingStack(
+                    topology=topology,
+                    model=model,
+                    frontend_port=frontend_port,
+                    system_port=system_port,
+                )
     finally:
         # ManagedProcess.__exit__ has run for both context managers. Do a
         # narrowly-scoped straggler sweep so any surviving EngineCore / worker
@@ -320,15 +387,16 @@ def tool_calling_services(
 
 
 @pytest.fixture(scope="module")
-def client(tool_calling_services: int) -> OpenAI:
+def client(tool_calling_services: ToolCallingStack) -> OpenAI:
     return OpenAI(
-        api_key="EMPTY", base_url=f"http://localhost:{tool_calling_services}/v1"
+        api_key="EMPTY",
+        base_url=f"http://localhost:{tool_calling_services.frontend_port}/v1",
     )
 
 
 @pytest.fixture(scope="module")
-def model() -> str:
-    return MODEL_NAME
+def model(tool_calling_services: ToolCallingStack) -> str:
+    return tool_calling_services.model
 
 
 # ---------------------------------------------------------------------------
@@ -722,6 +790,30 @@ class TestToolCallingProtocol:
         assert isinstance(args["city"], str)
         assert args["city"]
 
+    def test_single_tool_call_non_streaming_schema_valid(
+        self, client: OpenAI, model: str
+    ):
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
+            tools=TOOLS_WEATHER,
+            max_tokens=4096,
+            temperature=0,
+            seed=0,
+        )
+        choice = response.choices[0]
+        assert choice.finish_reason == "tool_calls"
+        assert choice.message.tool_calls
+
+        schema = tool_schema_map(TOOLS_WEATHER)
+        args = parse_and_validate_tool_call(
+            choice.message.tool_calls[0].model_dump(),
+            schema,
+            expected_name="get_weather",
+        )
+        assert isinstance(args["city"], str)
+        assert args["city"]
+
     def test_tool_choice_required_forces_a_tool_call(self, client: OpenAI, model: str):
         result = stream_chat(
             client,
@@ -1052,3 +1144,60 @@ class TestToolCallingMultiTurn:
         assert result.content.strip()
         lower = result.content.lower()
         assert "tokyo" in lower or "paris" in lower
+
+
+# ---------------------------------------------------------------------------
+# Speculative decoding
+# ---------------------------------------------------------------------------
+
+
+class TestToolCallingSpecDecoding:
+    def test_speculation_active_during_tool_calls(
+        self, tool_calling_services: ToolCallingStack, client: OpenAI, model: str
+    ):
+        if tool_calling_services.topology != "spec_decoding":
+            pytest.skip("speculative decoding runs only in the spec_decoding topology")
+
+        # Drive a streaming and a non-streaming tool call here so the metric
+        # check does not depend on which other tests ran first.
+        schema = tool_schema_map(TOOLS_WEATHER)
+        streamed = stream_chat(
+            client,
+            model,
+            messages=[{"role": "user", "content": "What's the weather in Seoul?"}],
+            tools=TOOLS_WEATHER,
+            temperature=0,
+            seed=0,
+        )
+        assert_finish_reason(streamed, {"tool_calls"})
+        parse_and_validate_tool_call(
+            streamed.tool_calls[0], schema, expected_name="get_weather"
+        )
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "What's the weather in Madrid?"}],
+            tools=TOOLS_WEATHER,
+            max_tokens=4096,
+            temperature=0,
+            seed=0,
+        )
+        assert response.choices[0].finish_reason == "tool_calls"
+        parse_and_validate_tool_call(
+            response.choices[0].message.tool_calls[0].model_dump(),
+            schema,
+            expected_name="get_weather",
+        )
+
+        metrics = requests.get(
+            f"http://localhost:{tool_calling_services.system_port}/metrics",
+            timeout=10,
+        )
+        metrics.raise_for_status()
+        SGLangSpecDecodeMetricsPayload(
+            body={},
+            expected_response=[],
+            expected_log=[],
+            port=tool_calling_services.system_port,
+            min_num_requests=2,
+        ).validate(metrics, metrics.text)
