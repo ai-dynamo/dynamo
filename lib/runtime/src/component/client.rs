@@ -999,6 +999,9 @@ impl Client {
         secondary.spawn(async move {
             tracing::trace!("endpoint_watcher: Starting for discovery query: {:?}", discovery_query);
             let mut map: HashMap<u64, Instance> = HashMap::new();
+            // Publish nothing before the first `Resync`: the replayed `Added` events would expose
+            // a partial instance set to readers that join it with other discovery state.
+            let mut established = false;
 
             loop {
                 let discovery_event = tokio::select! {
@@ -1032,6 +1035,7 @@ impl Client {
                     DiscoveryEvent::Added(_) => {}
                     DiscoveryEvent::ModelTaintsUpdated(_) => {}
                     DiscoveryEvent::Resync(instances) => {
+                        established = true;
                         map = instances
                             .into_iter()
                             .filter_map(|instance| {
@@ -1049,6 +1053,9 @@ impl Client {
                     }
                 }
 
+                if !established {
+                    continue;
+                }
                 let instances: Vec<Instance> = map.values().cloned().collect();
                 if watch_tx.send(instances).is_err() {
                     break;
@@ -1395,8 +1402,46 @@ mod tests {
         let mut instances = source.instance_receiver();
 
         let first = endpoint_instance(&endpoint, 1);
+        let replayed = endpoint_instance(&endpoint, 3);
         feed.send(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(
             first.clone(),
+        ))))
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), instances.changed())
+                .await
+                .is_err(),
+            "a replayed Added was published before the initial Resync"
+        );
+        feed.send(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(
+            replayed.clone(),
+        ))))
+        .unwrap();
+        feed.send(Ok(DiscoveryEvent::Resync(vec![
+            DiscoveryInstance::Endpoint(first.clone()),
+            DiscoveryInstance::Endpoint(replayed.clone()),
+        ])))
+        .unwrap();
+        instances.changed().await.unwrap();
+        let mut published: Vec<u64> = instances
+            .borrow_and_update()
+            .iter()
+            .map(Instance::id)
+            .collect();
+        published.sort_unstable();
+        assert_eq!(
+            published,
+            vec![1, 3],
+            "the first published set must be the whole initial snapshot"
+        );
+
+        feed.send(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(
+            crate::discovery::EndpointInstanceId {
+                namespace: first.namespace.clone(),
+                component: first.component.clone(),
+                endpoint: first.endpoint.clone(),
+                instance_id: replayed.instance_id,
+            },
         ))))
         .unwrap();
         wait_for_watch_state(&mut instances, |instances| {
