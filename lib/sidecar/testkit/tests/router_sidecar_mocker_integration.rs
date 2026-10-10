@@ -26,6 +26,8 @@ use serde_json::{Value, json};
 mod process;
 #[allow(dead_code)]
 mod support;
+#[path = "router_sidecar_mocker_integration/tool_calling.rs"]
+mod tool_calling;
 
 use process::{Environment, Gate, outputs};
 use support::{FixtureConfig, HandoffFixture, ProcessFixture, SidecarFixture, sglang, vllm};

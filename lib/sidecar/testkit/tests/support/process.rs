@@ -151,7 +151,19 @@ impl Environment {
         mode: DisaggregationMode,
         deadline: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, deadline, false, 0)
+        Process::spawn::<F>(self, endpoint, mode, deadline, false, 0, &[])
+    }
+
+    pub fn spawn_with_args<F: ProcessFixture>(&self, endpoint: &str, args: &[&str]) -> Process {
+        Process::spawn::<F>(
+            self,
+            endpoint,
+            DisaggregationMode::Aggregated,
+            5,
+            false,
+            0,
+            args,
+        )
     }
 
     pub fn spawn_with_grace<F: ProcessFixture>(
@@ -159,7 +171,7 @@ impl Environment {
         endpoint: &str,
         mode: DisaggregationMode,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, 5, false, 1)
+        Process::spawn::<F>(self, endpoint, mode, 5, false, 1, &[])
     }
 
     pub fn spawn_env<F: ProcessFixture>(
@@ -168,7 +180,7 @@ impl Environment {
         mode: DisaggregationMode,
         deadline: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, deadline, true, 0)
+        Process::spawn::<F>(self, endpoint, mode, deadline, true, 0, &[])
     }
 }
 
@@ -192,6 +204,7 @@ impl Process {
         deadline: u64,
         from_env: bool,
         grace_secs: u64,
+        args: &[&str],
     ) -> Self {
         use std::os::unix::process::CommandExt;
         let role = match mode {
@@ -234,6 +247,7 @@ impl Process {
             }
         }
         let child = command
+            .args(args)
             .args([
                 "--grpc-connections",
                 "1",
