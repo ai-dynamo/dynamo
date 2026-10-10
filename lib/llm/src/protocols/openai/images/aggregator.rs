@@ -15,7 +15,7 @@ impl StreamAggregable for NvImagesResponse {
     }
 
     fn merge(&mut self, next: Self) {
-        self.inner.data.extend(next.inner.data);
+        self.data.extend(next.data);
     }
 }
 

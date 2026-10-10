@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from PIL import Image
+from pydantic import ValidationError
 
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler import (
@@ -180,6 +181,19 @@ class TestImageDiffusionWorkerHandler:
         assert len(response["data"]) == 1
         assert "url" in response["data"][0]
         assert response["data"][0]["url"].startswith("file:///tmp/images/users/")
+
+    @pytest.mark.asyncio
+    async def test_generate_defaults_to_url_format(self, handler, mock_context):
+        """A request without response_format gets a URL."""
+        test_image = Image.new("RGB", (256, 256), color="green")
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image.convert("RGB")])
+        )
+
+        request = {"prompt": "A green square", "model": "test-model"}
+        results = [result async for result in handler.generate(request, mock_context)]
+
+        assert results[0]["data"][0]["url"].startswith("file:///tmp/images/users/")
 
     @pytest.mark.asyncio
     async def test_generate_success_b64_format(self, handler, mock_context):
@@ -666,11 +680,12 @@ class TestNParameter:
 
     @pytest.mark.asyncio
     async def test_n_above_max_is_rejected(self, handler, mock_context):
-        """n above MAX_IMAGES_PER_REQUEST is rejected, matching the TRT-LLM
-        image handler's [1, 10] validation (no silent clamping)."""
+        """n above 10 is rejected by the shared request model, as the frontend
+        rejects it (no silent clamping). A ValueError from the handler reaches
+        the client as a 400."""
         self._mock_one_image(handler)
 
-        with pytest.raises(InvalidArgument, match=r"n must be in \[1, 10\]"):
+        with pytest.raises(ValidationError, match="less than or equal to 10"):
             async for _ in handler.generate(self._request(n=99), mock_context):
                 pass
         assert handler.generator.generate.call_count == 0
@@ -680,7 +695,7 @@ class TestNParameter:
         """n=0 must not silently produce one image."""
         self._mock_one_image(handler)
 
-        with pytest.raises(InvalidArgument, match=r"n must be in \[1, 10\]"):
+        with pytest.raises(ValidationError, match="greater than or equal to 1"):
             async for _ in handler.generate(self._request(n=0), mock_context):
                 pass
         assert handler.generator.generate.call_count == 0

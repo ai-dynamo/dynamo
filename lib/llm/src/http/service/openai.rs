@@ -70,8 +70,8 @@ use crate::protocols::common::input_trigger::{
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
-    ParsingOptions,
-    audios::{AudioDataSource, NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
+    MediaDelivery, ParsingOptions,
+    audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
@@ -5102,9 +5102,9 @@ async fn images_with_request(
     mut request: NvCreateImageRequest,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
-    // (per-model readiness check is deferred until after we resolve the
-    // ImageModel enum into a string; see below)
     check_ready(&state)?;
+
+    validate_request_fields_generic(&request, "images")?;
 
     request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
@@ -5115,23 +5115,8 @@ async fn images_with_request(
     let streaming = false;
 
     // Get the model name from the request (diffusion model)
-    let model = request
-        .inner
-        .model
-        .as_ref()
-        .map(|m| match m {
-            dynamo_protocols::types::ImageModel::DallE2 => "dall-e-2".to_string(),
-            dynamo_protocols::types::ImageModel::DallE3 => "dall-e-3".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage1 => "gpt-image-1".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage1dot5 => "gpt-image-1.5".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage1Mini => "gpt-image-1-mini".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage2 => "gpt-image-2".to_string(),
-            dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
-        })
-        .unwrap_or_else(|| "diffusion".to_string());
+    let model = request.model.as_deref().unwrap_or("diffusion").to_string();
 
-    // Per-model serving readiness gate (now that we have a resolved model
-    // name string).
     check_model_serving_ready(&state, &model)?;
 
     let metric_model = state.manager().metric_model_for(&model).to_string();
@@ -5252,6 +5237,8 @@ async fn videos(
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
+
+    validate_request_fields_generic(&request, "videos")?;
 
     request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
@@ -5387,6 +5374,8 @@ async fn video_stream(
     let mut request: NvCreateVideoRequest = parse_json_request("video stream", &body)?;
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
+
+    validate_request_fields_generic(&request, "videos")?;
 
     request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
@@ -5590,13 +5579,13 @@ async fn handler_audio_speech(
 
     validate_request_fields_generic(&request, "audio speech")?;
 
-    let returns_audio_bytes = request.data_source != Some(AudioDataSource::Url);
+    let returns_audio_bytes = request.data_source != Some(MediaDelivery::Url);
     let streams_audio_chunks = returns_audio_bytes
         && matches!(
             request.response_format.as_deref().unwrap_or("wav"),
             "pcm" | "wav"
         )
-        && request.speed.is_none_or(|speed| speed == 1.0);
+        && request.speed == 1.0;
     let request_id = get_or_create_request_id(&headers);
     if streams_audio_chunks {
         // Advertise that this frontend can concatenate incremental worker

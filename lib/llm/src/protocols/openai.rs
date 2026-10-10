@@ -24,6 +24,10 @@ pub(crate) mod delta_common;
 pub mod embeddings;
 pub mod generate;
 pub mod images;
+#[cfg(test)]
+mod media_fixtures;
+#[cfg(test)]
+mod media_schemas;
 pub mod models;
 pub mod pooling;
 pub mod rerank;
@@ -59,6 +63,19 @@ pub(crate) fn nest_media_passthrough(
         MEDIA_PASSTHROUGH_KEY.to_string(),
         serde_json::Value::Object(nested),
     );
+}
+
+/// Delivery mode of generated media: a URL to the file, or the bytes as
+/// base64 text.
+///
+/// The set has two values. A request with an unknown value fails to parse.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaDelivery {
+    /// The response carries a URL to the media file.
+    Url,
+    /// The response carries the media bytes as base64 text.
+    B64Json,
 }
 
 /// Side from which prompt tokens are truncated.

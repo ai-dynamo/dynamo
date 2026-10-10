@@ -286,7 +286,7 @@ class AudioGenerationHandler:
             request_type=RequestType.AUDIO_GENERATION,
             response_format=req.data_source,
             output_format=req.response_format,
-            speed=req.speed or 1.0,
+            speed=req.speed,
             stream_audio=stream_audio,
         )
 
@@ -308,7 +308,7 @@ class AudioGenerationHandler:
             "pcm",
             "wav",
         }
-        uses_default_speed = req.speed is None or req.speed == 1.0
+        uses_default_speed = req.speed == 1.0
         return (
             frontend_accepts_audio_chunks
             and returns_audio_bytes

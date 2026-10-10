@@ -14,7 +14,7 @@
 # limitations under the License.
 
 default_install_hook_types: [pre-commit, commit-msg]
-exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$|lib/sidecar/trtllm/proto/openengine/v1/.*\.proto$)
+exclude: ^(src/grpc_generated|components/src/dynamo/common/protocols/(audio|image|video)_protocol\.py$|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$|lib/sidecar/trtllm/proto/openengine/v1/.*\.proto$)
 repos:
 - repo: https://github.com/timothycrosley/isort
   rev: 5.12.0
@@ -242,6 +242,17 @@ repos:
       language: python
       pass_filenames: false
       always_run: true
+    - id: generate-media-protocols
+      name: Generate the Python media protocol models from the Rust schemas
+      entry: python scripts/generate_media_protocols.py
+      language: python
+      # The generated models are excluded at the top of this file, so a hand
+      # edit of one alone does not trigger this hook. CI runs every hook on
+      # every file, which regenerates the models and fails on the diff.
+      files: ^(lib/llm/src/protocols/openai/media_schemas/.*\.json|scripts/generate_media_protocols\.py)$
+      pass_filenames: false
+      additional_dependencies:
+        - datamodel-code-generator==0.83.0
     - id: DCO check
       name: Checks the commit message for a developer certificate of origin signature
       entry: python3 scripts/dco_check.py
