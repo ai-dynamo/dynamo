@@ -54,6 +54,25 @@ from gpu_memory_service.server.fsm import ServerState
 from gpu_memory_service.server.gpu_quiescence import process_start_time
 from gpu_memory_service.server.rpc import GMSRPCServer
 
+
+def test_rpc_timeout_closes_stalled_transport():
+    client, stalled_server = socket.socketpair()
+    transport = _GMSRPCTransport("unused")
+    transport._socket = client
+    try:
+        started = time.monotonic()
+        with pytest.raises(ConnectionError, match="GetRuntimeStateRequest failed"):
+            transport.request(
+                GetRuntimeStateRequest(),
+                GetRuntimeStateResponse,
+                response_timeout_ms=20,
+            )
+        assert time.monotonic() - started < 1.0
+        assert not transport.is_connected
+    finally:
+        stalled_server.close()
+
+
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.integration,

@@ -110,15 +110,17 @@ def _int_env_value(name: str, value: str | None, default: int) -> int:
 def _install_kv_leases() -> bool:
     try:
         from gpu_memory_service.integrations.vllm.install_kv_leases import (
-            install as install_kv_leases,
+            install as install_selected_hooks,
         )
     except Exception:  # noqa: BLE001
-        logger.debug("[GMS-VMM-IPC] vLLM KV lease installer unavailable", exc_info=True)
+        logger.debug(
+            "[GMS-VMM-IPC] vLLM KV recovery installer unavailable", exc_info=True
+        )
         return False
     try:
-        return bool(install_kv_leases())
+        return bool(install_selected_hooks())
     except Exception:  # noqa: BLE001
-        logger.exception("[GMS-VMM-IPC] vLLM KV lease install failed")
+        logger.exception("[GMS-VMM-IPC] vLLM KV recovery install failed")
         raise
 
 
@@ -455,65 +457,195 @@ def persistent_kv_allocation_context(
             clear_persistent_allocator_tag_plan("kv_pool")
 
 
-def _geometry_device() -> int:
-    for name in ("GMS_VLLM_KV_LEASE_DEVICE", "LOCAL_RANK"):
-        value = os.environ.get(name)
-        if value is None:
-            continue
-        try:
-            return int(value)
-        except ValueError:
-            logger.warning("Ignoring invalid %s=%r for GMS KV geometry", name, value)
-    return 0
+def _directory_geometry_inputs() -> tuple[str, str, str] | None:
+    if not use_existing_shared_geometry():
+        return None
+    manifest_id = os.environ.get("GMS_KV_DIRECTORY_MANIFEST", "").strip()
+    socket_path = (
+        os.environ.get("GMS_KV_DIRECTORY_SOCKET")
+        or os.environ.get("GMS_VLLM_DAEMON_SOCKET")
+        or ""
+    ).strip()
+    if not manifest_id or not socket_path:
+        return None
+    engine_id = str(
+        os.environ.get("GMS_VLLM_ENGINE_ID")
+        or os.environ.get("GMS_KVR_ENGINE_ID")
+        or "0"
+    )
+    return socket_path, manifest_id, engine_id
 
 
 def _existing_shared_kv_blocks(*, wait_ms: int = 0) -> int | None:
-    if not use_existing_shared_geometry():
+    inputs = _directory_geometry_inputs()
+    if inputs is None:
         return None
-    if env_enabled_by_default("GMS_KV_LEASE_SHM_RESET", default=False):
-        return None
+    from gms_kv_ring.daemon.client import DaemonClient
 
-    from gpu_memory_service.integrations.common.kv_lease_client import (
-        kv_leases_enabled,
-        read_any_kv_lease_namespace_total_blocks,
-        read_kv_lease_namespace_total_blocks,
-    )
-
-    if not kv_leases_enabled("vllm"):
-        return None
-
-    device = _geometry_device()
+    socket_path, manifest_id, engine_id = inputs
     deadline = time.monotonic() + max(0, wait_ms) / 1000.0
     logged_wait = False
     while True:
-        namespace, total_blocks = read_kv_lease_namespace_total_blocks(
-            "vllm",
-            device,
-            namespace_suffix="block-pool",
-        )
-        if total_blocks is None:
-            namespace, total_blocks = read_any_kv_lease_namespace_total_blocks("vllm")
-        if total_blocks is not None:
-            break
+        client = None
+        try:
+            client = DaemonClient(
+                socket_path,
+                connect_timeout=0.5,
+                op_timeout=2.0,
+            )
+            geometry, _epoch, _writer = client.directory_pool_geometry(
+                manifest_id, engine_id
+            )
+        except Exception:  # noqa: BLE001
+            geometry = None
+        finally:
+            if client is not None:
+                client.close()
+        if geometry is not None:
+            total_blocks = int(geometry["total_blocks"])
+            logger.info(
+                "[GMS-VMM-IPC] reusing directory pool geometry: blocks=%d",
+                total_blocks,
+            )
+            return total_blocks
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
         if not logged_wait:
             logger.info(
-                "[GMS-VMM-IPC] Waiting up to %d ms for existing KV lease "
-                "namespace geometry",
+                "[GMS-VMM-IPC] waiting up to %dms for persistent pool geometry",
                 wait_ms,
             )
             logged_wait = True
         time.sleep(min(0.05, remaining))
 
-    logger.info(
-        "[GMS-VMM-IPC] Reusing existing KV lease namespace geometry: "
-        "namespace=%s blocks=%d",
-        namespace,
-        total_blocks,
+
+def _register_shared_kv_blocks(total_blocks: int) -> None:
+    inputs = _directory_geometry_inputs()
+    if inputs is None:
+        return
+    from gms_kv_ring.common.content_directory import resolve_writer_id
+    from gms_kv_ring.daemon.client import DaemonClient
+
+    socket_path, manifest_id, engine_id = inputs
+    writer_id = resolve_writer_id()
+    client = DaemonClient(socket_path, connect_timeout=0.5, op_timeout=2.0)
+    try:
+        geometry, epoch, active = client.directory_pool_geometry(manifest_id, engine_id)
+        if active is None and os.environ.get(
+            "GMS_KV_DIRECTORY_STANDBY", "0"
+        ).lower() in (
+            "",
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            # Cold boot has no predecessor to fence. Claim the empty directory
+            # with the same epoch CAS used by normal first publication before
+            # registering pool geometry. A standby must never claim it here.
+            promoted, epoch, active = client.directory_promote(epoch, writer_id)
+            if not promoted or active != writer_id:
+                raise RuntimeError("persistent KV directory cold-start promotion lost")
+        if active != writer_id:
+            # A lease-backed standby is allowed to map the existing pool
+            # read-only before it owns the failover lock. It must consume the
+            # writer's exact geometry, never republish it under its own ID.
+            if geometry is not None and int(geometry["total_blocks"]) == int(
+                total_blocks
+            ):
+                return
+            raise RuntimeError(
+                "cannot register persistent KV geometry without directory ownership: "
+                f"expected={writer_id!r} observed={active!r}"
+            )
+        registered, rejected, _observed_epoch = client.directory_register_pool(
+            manifest_id,
+            writer_id,
+            engine_id,
+            int(total_blocks),
+            expected_epoch=epoch,
+        )
+        if rejected or not registered:
+            raise RuntimeError("persistent KV geometry registration was fenced")
+    finally:
+        client.close()
+
+
+def register_persistent_kv_rank_binding(
+    manager,
+    persistent_engine_id: str,
+    *,
+    rank: int,
+    tensor_parallel_size: int,
+    kv_cache_config,
+    model_config,
+) -> None:
+    """Publish concrete per-rank allocations before recovery can activate."""
+    inputs = _directory_geometry_inputs()
+    if inputs is None:
+        if use_existing_shared_geometry():
+            raise RuntimeError(
+                "shared persistent KV requires directory manifest and socket"
+            )
+        return
+    from gms_kv_ring.common.content_directory import resolve_writer_id
+    from gms_kv_ring.daemon.client import DaemonClient
+
+    socket_path, manifest_id, pool_id = inputs
+    model_identity = _model_identity(model_config)
+    layout_fingerprint = _kv_layout_fingerprint(kv_cache_config, model_identity)
+    planned_tags = set(_semantic_kv_tensor_tag_plan(kv_cache_config, model_identity))
+    layout_digest = hashlib.sha256(
+        "\0".join((layout_fingerprint, *sorted(planned_tags))).encode("utf-8")
+    ).hexdigest()
+    inventory = manager.list_persistent(engine_id=persistent_engine_id)
+    allocations = [
+        {
+            "engine_id": persistent_engine_id,
+            "tag": str(item.tag),
+            "allocation_id": str(item.allocation_id),
+            "aligned_size": int(item.aligned_size),
+        }
+        for item in inventory
+        if str(item.tag) in planned_tags and bool(item.claimed)
+    ]
+    observed_tags = {item["tag"] for item in allocations}
+    if observed_tags != planned_tags:
+        raise RuntimeError(
+            "persistent KV allocation binding is incomplete: "
+            f"expected={sorted(planned_tags)} observed={sorted(observed_tags)}"
+        )
+
+    writer_id = resolve_writer_id()
+    coordinator_socket = os.environ.get(
+        "GMS_VLLM_TP_COORDINATOR_DIRECTORY_SOCKET", socket_path
     )
-    return int(total_blocks)
+    for target_socket in dict.fromkeys((socket_path, coordinator_socket)):
+        client = DaemonClient(target_socket, connect_timeout=0.5, op_timeout=2.0)
+        try:
+            _binding, epoch, active = client.directory_pool_binding(
+                manifest_id, pool_id
+            )
+            if active != writer_id:
+                raise RuntimeError(
+                    "cannot bind persistent KV allocations without directory ownership: "
+                    f"expected={writer_id!r} observed={active!r}"
+                )
+            registered, rejected, _observed_epoch = client.directory_register_pool_rank(
+                manifest_id,
+                writer_id,
+                pool_id,
+                int(rank),
+                int(tensor_parallel_size),
+                layout_digest,
+                allocations,
+                expected_epoch=epoch,
+            )
+            if rejected or not registered:
+                raise RuntimeError("persistent KV allocation binding was fenced")
+        finally:
+            client.close()
 
 
 def _available_memory_exhausted(available_memory) -> bool:
@@ -540,9 +672,6 @@ def _geometry_wait_ms(available_memory) -> int:
     if value is not None:
         return max(0, _int_env_value(name, value, 300_000))
 
-    if value is None:
-        name = "GMS_KV_LEASE_GEOMETRY_WAIT_MS"
-        value = os.environ.get(name)
     return max(0, _int_env_value(name, value, 300_000))
 
 
@@ -567,8 +696,15 @@ def _wrap_get_kv_cache_configs(original):
                 else _geometry_wait_ms(available_memory)
             )
         )
-        if existing_blocks is None or cache_config is None:
+        if cache_config is None:
             return original(vllm_config, kv_cache_specs, available_memory)
+        if existing_blocks is None:
+            configs = original(vllm_config, kv_cache_specs, available_memory)
+            if configs:
+                _register_shared_kv_blocks(
+                    min(int(config.num_blocks) for config in configs)
+                )
+            return configs
 
         previous_override = getattr(cache_config, "num_gpu_blocks_override", None)
         if previous_override is not None and int(previous_override) != existing_blocks:
@@ -581,7 +717,9 @@ def _wrap_get_kv_cache_configs(original):
 
         cache_config.num_gpu_blocks_override = existing_blocks
         try:
-            return original(vllm_config, kv_cache_specs, available_memory)
+            configs = original(vllm_config, kv_cache_specs, available_memory)
+            _register_shared_kv_blocks(existing_blocks)
+            return configs
         finally:
             cache_config.num_gpu_blocks_override = previous_override
 
@@ -597,7 +735,7 @@ def install_geometry_patch() -> bool:
     missing piece is earlier: vLLM profiles currently free HBM before it builds
     KVCacheConfig. A shadow/restarted engine can therefore fail or shrink its KV
     block count before it reaches the GMS persistent allocation path. When the
-    primary has already initialized the shared lease namespace, its header is
+    primary has already initialized the persistent pool directory, its manifest is
     the authoritative logical block count for subsequent attachers.
 
     vLLM imports ``get_kv_cache_configs`` into ``vllm.v1.engine.core`` by value,
@@ -705,8 +843,8 @@ def install() -> bool:
         )
         return False
     geometry_changed = install_geometry_patch()
-    leases_changed = _install_kv_leases()
-    return geometry_changed or leases_changed
+    recovery_changed = _install_kv_leases()
+    return geometry_changed or recovery_changed
 
 
 def persistent_kv_hooks_installed() -> bool:
@@ -724,7 +862,7 @@ def install_lazy() -> None:
         return
 
     targets = {
-        "vllm.v1.core.block_pool",  # Scheduler-side KV lease publication
+        "vllm.v1.core.block_pool",  # Scheduler-side sealed KV publication
         "vllm.v1.engine.core",  # KV sizing call-site imports get_kv_cache_configs by value
     }
 

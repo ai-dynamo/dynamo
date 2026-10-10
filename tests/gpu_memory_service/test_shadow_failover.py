@@ -238,12 +238,10 @@ def _resume_shadow_after_primary_failover(
     primary: ManagedProcess,
     after_primary_kill=None,
 ):
-    # Pre-activation failover model: the shadow begins taking over as soon as a
-    # crash is detected, and may go live BEFORE the primary fully dies. Primary
-    # and shadow coexist on the shared GMS-owned KV pool; per KV segment only one
-    # engine holds the RW lock, so the shadow writes the segments the primary has
-    # released and acquires the remainder once the primary is gone. The handoff
-    # therefore must NOT be required to block on a single whole-pool RW lock.
+    # Start shadow recovery concurrently with primary teardown. The shadow may
+    # prepare while the primary exits, but cannot serve or write shared KV until
+    # it holds the global writer lock and predecessor GPU work is fenced. The
+    # per-block lease states distinguish sealed reusable KV from incomplete KV.
     resume_timeout_s = 300
 
     with ThreadPoolExecutor(max_workers=1) as executor:

@@ -73,6 +73,29 @@ def test_sglang_node_rank_is_exported_for_gms_children(monkeypatch):
     assert os.environ["GMS_SGLANG_NODE_RANK"] == "15"
 
 
+@pytest.mark.asyncio
+async def test_failed_tp_cohort_fences_late_sglang_output_until_shutdown():
+    from dynamo.llm.exceptions import EngineShutdown
+    from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+
+    shutdown = asyncio.Event()
+    handler = SimpleNamespace(
+        _gms_failover_child_watchdog=SimpleNamespace(failure_started=True),
+        shutdown_event=shutdown,
+    )
+    fence = asyncio.create_task(
+        DecodeWorkerHandler._fence_output_after_gms_failure(handler)
+    )
+    await asyncio.sleep(0)
+    assert not fence.done(), "late output must wait for the fenced handoff"
+    shutdown.set()
+    with pytest.raises(EngineShutdown, match="TP cohort failed"):
+        await fence
+
+    handler._gms_failover_child_watchdog.failure_started = False
+    await DecodeWorkerHandler._fence_output_after_gms_failure(handler)
+
+
 @pytest.mark.parametrize(("tp_size", "nnodes"), [(2, 1), (4, 2)])
 def test_authoritative_tp_requires_rank_local_directory_topology(
     monkeypatch, tp_size, nnodes
@@ -241,7 +264,6 @@ async def test_prepare_non_leader_failover_attaches_lock_owner(monkeypatch):
         "backend_name": "sglang",
         "tags": ["kv_cache"],
         "promotion_warmup": None,
-        "lease_transition_serving": False,
     }
 
 
@@ -516,7 +538,9 @@ def test_sglang_failover_watchdog_shutdown_when_loop_is_closed(monkeypatch):
         target, SimpleNamespace(), object()
     )
 
+    assert not watchdog.failure_started
     watchdog._trigger_failure("test")
+    assert watchdog.failure_started
     assert watchdog._fence_thread is not None
     watchdog._fence_thread.join(timeout=1.0)
     assert not watchdog._fence_thread.is_alive()
@@ -630,13 +654,28 @@ def test_sglang_failover_watchdog_routes_sigquit_to_controlled_handoff(monkeypat
     assert restored == manager.running_phase_sigquit_handler
 
 
-def test_gms_multinode_shadow_enables_nccl_prewarm(monkeypatch):
+def test_gms_multinode_shadow_nccl_prewarm_is_opt_in(monkeypatch):
     monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", " true ")
     server_args = SimpleNamespace(nnodes=2, pre_warm_nccl=False)
 
     init_llm._enable_gms_nccl_prewarm(server_args)
 
+    assert server_args.pre_warm_nccl is False
+
+    monkeypatch.setenv("DYN_SGLANG_GMS_NCCL_PREWARM", "1")
+    init_llm._enable_gms_nccl_prewarm(server_args)
+
     assert server_args.pre_warm_nccl is True
+
+
+def test_gms_multinode_nccl_prewarm_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setenv("DYN_SGLANG_GMS_NCCL_PREWARM", "0")
+    server_args = SimpleNamespace(nnodes=2, pre_warm_nccl=False)
+
+    init_llm._enable_gms_nccl_prewarm(server_args)
+
+    assert server_args.pre_warm_nccl is False
 
 
 def test_nccl_prewarm_is_scoped_to_multinode_shadow(monkeypatch):
@@ -723,9 +762,9 @@ def test_lock_before_init_keeps_release_and_remap_path(monkeypatch):
     assert init_llm._can_prewarm_mapped_standby() is True
 
 
-@pytest.mark.parametrize(("lock_before_init", "expected"), [("0", True), ("1", False)])
-def test_sglang_leader_broadcasts_fast_fence_for_mapped_standby(
-    monkeypatch, lock_before_init, expected
+@pytest.mark.parametrize("lock_before_init", ["0", "1"])
+def test_sglang_leader_broadcasts_fast_fence_for_any_active_role(
+    monkeypatch, lock_before_init
 ):
     from dynamo.common import rank_liveness
 
@@ -741,6 +780,7 @@ def test_sglang_leader_broadcasts_fast_fence_for_mapped_standby(
     monkeypatch.setenv("DYN_GMS_RANK_LIVENESS", "1")
     monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
     monkeypatch.setenv("DYN_SGLANG_GMS_LOCK_BEFORE_INIT", lock_before_init)
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS_ISOLATED", "0")
     monkeypatch.setattr(rank_liveness, "RankLivenessMonitor", Monitor)
     target = SimpleNamespace()
 
@@ -757,7 +797,7 @@ def test_sglang_leader_broadcasts_fast_fence_for_mapped_standby(
 
     assert monitor is not None
     assert captured["started"] is True
-    assert captured["broadcast_fence"] is expected
+    assert captured["broadcast_fence"] is True
     assert captured["runtime_armed"] is False
     assert captured["expected_ranks"] == range(1, 4)
 
@@ -777,6 +817,7 @@ async def test_sglang_worker_fences_when_leader_acknowledgements_stop(monkeypatc
 
     monkeypatch.setenv("DYN_GMS_RANK_LIVENESS", "1")
     monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS_ISOLATED", "0")
     monkeypatch.setattr(rank_liveness, "RankLivenessClient", Client)
     reasons = []
     target = SimpleNamespace(
@@ -817,6 +858,7 @@ async def test_rank_liveness_without_polling_watchdog_uses_controlled_handoff(
 
     monkeypatch.setenv("DYN_GMS_RANK_LIVENESS", "1")
     monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS_ISOLATED", "0")
     monkeypatch.setattr(rank_liveness, "RankLivenessClient", Client)
     monkeypatch.setattr(failover_watchdog, "SGLangGmsFailoverChildWatchdog", Handoff)
     target = SimpleNamespace()
@@ -861,6 +903,136 @@ def test_sglang_failover_watchdog_retains_lock_while_child_alive(monkeypatch):
 
     assert shutdowns == []
     assert target._gms_failover_lock is not None
+
+
+def test_sglang_child_fence_quiesces_registered_cuda_cohort_first(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        failover_watchdog,
+        "quiesce_local_gpu_cohort_after_rank_loss",
+        lambda backend, **_kwargs: events.append(("quiesce", backend)) or True,
+    )
+    monkeypatch.setattr(failover_watchdog, "_child_pids", lambda _engine: [])
+    monkeypatch.setattr(
+        failover_watchdog, "_watchdog_processes", lambda _engine: ([], [])
+    )
+
+    assert failover_watchdog._fence_children(object())
+    assert events == [("quiesce", "sglang")]
+
+
+def test_sglang_child_fence_retains_live_client_after_uncertified_mps(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setattr(
+        failover_watchdog,
+        "quiesce_local_gpu_cohort_after_rank_loss",
+        lambda _backend, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        failover_watchdog,
+        "_child_pids",
+        lambda _engine: pytest.fail("uncertified client must not be killed"),
+    )
+    assert not failover_watchdog._fence_children(object())
+
+
+def test_sglang_frozen_child_fence_attempts_live_mps_but_proceeds_on_failure(
+    monkeypatch,
+):
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    calls = []
+    alive = {12345}
+    monkeypatch.setattr(
+        failover_watchdog, "frozen_predecessor_enabled", lambda _backend: True
+    )
+    monkeypatch.setattr(
+        failover_watchdog,
+        "quiesce_local_gpu_cohort_after_rank_loss",
+        lambda backend, **_kwargs: calls.append(backend) or False,
+    )
+    monkeypatch.setattr(failover_watchdog, "_child_pids", lambda _engine: [12345])
+    monkeypatch.setattr(
+        failover_watchdog, "_watchdog_processes", lambda _engine: ([], [])
+    )
+    monkeypatch.setattr(failover_watchdog, "_pid_running", lambda pid: pid in alive)
+
+    def terminate(pid):
+        calls.append(f"kill:{pid}")
+        alive.discard(pid)
+
+    monkeypatch.setattr(
+        failover_watchdog,
+        "_terminate_pid",
+        terminate,
+    )
+    assert failover_watchdog._fence_children(object())
+    assert calls == ["sglang", "kill:12345"]
+
+
+def test_sglang_frozen_child_fence_uses_certified_mps_before_host_exit(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setattr(
+        failover_watchdog, "frozen_predecessor_enabled", lambda _backend: True
+    )
+    monkeypatch.setattr(
+        failover_watchdog,
+        "quiesce_local_gpu_cohort_after_rank_loss",
+        lambda _backend, **_kwargs: True,
+    )
+    monkeypatch.setattr(failover_watchdog, "_child_pids", lambda _engine: [12345])
+    monkeypatch.setattr(
+        failover_watchdog, "_watchdog_processes", lambda _engine: ([], [])
+    )
+    monkeypatch.setattr(failover_watchdog, "_pid_running", lambda _pid: True)
+    killed = []
+    monkeypatch.setattr(
+        failover_watchdog,
+        "_terminate_pid",
+        lambda pid: killed.append(pid) or True,
+    )
+
+    assert failover_watchdog._fence_children(object(), wait_s=0.0)
+    assert killed == [12345]
+
+
+def test_sglang_frozen_child_fence_requires_kill_signal_for_fast_handoff(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setattr(
+        failover_watchdog, "frozen_predecessor_enabled", lambda _backend: True
+    )
+    monkeypatch.setattr(
+        failover_watchdog,
+        "quiesce_local_gpu_cohort_after_rank_loss",
+        lambda _backend, **_kwargs: True,
+    )
+    monkeypatch.setattr(failover_watchdog, "_child_pids", lambda _engine: [12345])
+    monkeypatch.setattr(
+        failover_watchdog, "_watchdog_processes", lambda _engine: ([], [])
+    )
+    monkeypatch.setattr(failover_watchdog, "_pid_running", lambda _pid: True)
+    monkeypatch.setattr(failover_watchdog, "_terminate_pid", lambda _pid: False)
+
+    assert not failover_watchdog._fence_children(object(), wait_s=0.0)
+
+
+def test_sglang_frozen_child_fence_waits_for_exit_without_mps_proof(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setattr(
+        failover_watchdog, "frozen_predecessor_enabled", lambda _backend: True
+    )
+    monkeypatch.setattr(
+        failover_watchdog,
+        "quiesce_local_gpu_cohort_after_rank_loss",
+        lambda _backend, **_kwargs: False,
+    )
+    monkeypatch.setattr(failover_watchdog, "_child_pids", lambda _engine: [12345])
+    monkeypatch.setattr(
+        failover_watchdog, "_watchdog_processes", lambda _engine: ([], [])
+    )
+    monkeypatch.setattr(failover_watchdog, "_pid_running", lambda _pid: True)
+    monkeypatch.setattr(failover_watchdog, "_terminate_pid", lambda _pid: True)
+
+    assert not failover_watchdog._fence_children(object(), wait_s=0.0)
 
 
 def test_sglang_failover_watchdog_retains_lock_when_fence_raises(monkeypatch):

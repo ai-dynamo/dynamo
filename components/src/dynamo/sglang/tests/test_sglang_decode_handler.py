@@ -2365,10 +2365,11 @@ async def test_disagg_parallel_sampling_rejected_before_handoff(handler_type, pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("salt", [None, "reference-isolation"])
 @pytest.mark.parametrize(
     "mode,n", [(DisaggregationMode.AGGREGATED, 2), (DisaggregationMode.DECODE, 1)]
 )
-async def test_supported_sampling_reaches_engine(mode, n):
+async def test_supported_sampling_reaches_engine(mode, n, salt):
     """Allow aggregated parallel sampling and disaggregated single sampling."""
     handler = _new_decode_handler()
     handler.serving_mode = mode
@@ -2398,6 +2399,7 @@ async def test_supported_sampling_reaches_engine(mode, n):
     )
     request = {
         "sampling_options": {"n": n},
+        "extra_args": {"nvext": {"cache_salt": salt}},
         "stop_conditions": {"max_tokens": 1},
         "bootstrap_info": {
             "bootstrap_host": "prefill.invalid",
@@ -2410,6 +2412,7 @@ async def test_supported_sampling_reaches_engine(mode, n):
 
     assert [output["index"] for output in outputs] == list(range(n))
     assert handler.engine.async_generate.await_args.kwargs["sampling_params"]["n"] == n
+    assert handler.engine.async_generate.await_args.kwargs.get("cache_salt") == salt
     assert all(output["finish_reason"] for output in outputs)
 
 
@@ -2529,3 +2532,28 @@ def test_build_native_generate_request_forwards_prefill_dp_rank():
         prefill_dp_rank=3,
     )
     assert native.disagg_prefill_dp_rank == 3
+
+
+@pytest.mark.parametrize(
+    ("enabled", "routing", "expected"),
+    [
+        (False, {"priority_jump": 2.0}, None),
+        (True, {"priority_jump": 2.0}, 1),
+        (True, {"priority": 3, "priority_jump": 2.0}, 4),
+        (True, {"priority": 3}, 3),
+        (True, {"priority_jump": 0.0}, None),
+    ],
+)
+def test_routing_priority_puts_replays_ahead_only_with_priority_scheduling(
+    enabled, routing, expected
+):
+    from types import SimpleNamespace
+
+    from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+
+    handler = SimpleNamespace(
+        config=SimpleNamespace(
+            server_args=SimpleNamespace(enable_priority_scheduling=enabled)
+        )
+    )
+    assert BaseWorkerHandler._routing_priority(handler, routing) == expected

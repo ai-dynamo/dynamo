@@ -1192,6 +1192,24 @@ def _as_exact_int(value: object) -> Optional[int]:
             return None
     return None
 
+def engine_priority(engine_client, routing: dict) -> int:
+    """vLLM priority for a request (lower is scheduled first).
+
+    A migration replay of a stream that already delivered tokens carries
+    routing.priority_jump. With priority scheduling it goes ahead of requests
+    of the same priority, so after a takeover the streams that were generating
+    get the free slots before requests that had not started. Under FCFS vLLM
+    rejects a nonzero priority, so the priority is unchanged.
+    """
+    priority = -int(routing.get("priority", 0))
+    if (routing.get("priority_jump") or 0) > 0:
+        scheduler_config = getattr(
+            getattr(engine_client, "vllm_config", None), "scheduler_config", None
+        )
+        if str(getattr(scheduler_config, "policy", "fcfs")) == "priority":
+            priority -= 1
+    return priority
+
 
 class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
@@ -1395,6 +1413,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
         logger.error(f"vLLM EngineDeadError: {e}")
+        self._shutdown_worker()
+
+    async def _fence_output_after_gms_rank_loss(self) -> None:
+        """Never forward a TP cohort's late output after a peer has failed.
+
+        The surviving vLLM worker can flush a stale delta while its EngineCore
+        is being torn down. Wait for the local quiescence path to signal
+        shutdown, then exit so the frontend replays only the last valid chunk.
+        """
+        rank_loss = getattr(self, "_gms_rank_loss_started", None)
+        if rank_loss is None or not rank_loss.is_set():
+            return
+        logger.warning("[GMS liveness] discarding late vLLM output after TP rank loss")
+        if self.shutdown_event is not None:
+            try:
+                await asyncio.wait_for(self.shutdown_event.wait(), timeout=5.0)
+            except TimeoutError:
+                logger.error("[GMS liveness] rank-loss shutdown signal timed out")
         self._shutdown_worker()
 
     def init_embedding_loader(
@@ -4035,7 +4071,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = (
             engine_generate_input.priority
             if engine_generate_input is not None
-            else -int(routing.get("priority", 0))
+            else engine_priority(getattr(self, "engine_client", None), routing)
         )
 
         trace_headers = context.trace_headers()
@@ -4092,6 +4128,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         report_kv_cache_hit=kv_params is None,
                         want_engine_data=want_engine_data,
                     ):
+                        await self._fence_output_after_gms_rank_loss()
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
                         if prefill_result is not None and "completion_usage" in tok:
@@ -4135,7 +4172,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = -int(routing.get("priority", 0))
+        priority = engine_priority(getattr(self, "engine_client", None), routing)
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text_per_choice: dict[int, str] = {}
         first_token_output_seen = False
@@ -4179,6 +4216,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
 
                 async for res in gen:
+                    await self._fence_output_after_gms_rank_loss()
                     if not res.outputs:
                         yield {
                             "id": openai_request_id,
@@ -4357,7 +4395,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = -int(routing.get("priority", 0))
+        priority = engine_priority(getattr(self, "engine_client", None), routing)
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)

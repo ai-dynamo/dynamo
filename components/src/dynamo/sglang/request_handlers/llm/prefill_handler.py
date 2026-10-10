@@ -166,7 +166,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         mm_kwargs = build_disagg_mm_kwargs(inner_request)
 
         routing = inner_request.get("routing") or {}
-        priority = routing.get("priority")
+        priority = self._routing_priority(routing)
         dp_rank = routing.get("dp_rank")
 
         if dp_rank is not None and dp_rank == _DP_RANK_UNSET:

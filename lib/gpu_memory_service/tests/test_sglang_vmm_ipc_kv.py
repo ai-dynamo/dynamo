@@ -53,7 +53,9 @@ def test_post_capture_pool_is_rejected_before_allocator_or_native_init(
 def test_install_rebinds_unsupported_pool_constructors(monkeypatch, name):
     from sglang.srt.mem_cache import kv_cache_configurator
 
-    original = getattr(kv_cache_configurator, name)
+    original = getattr(kv_cache_configurator, name, None)
+    if original is None:
+        pytest.skip(f"{name} is not selected by this SGLang version")
     monkeypatch.setattr(kv_cache_configurator, name, original)
     monkeypatch.setattr(installer, "_INSTALLED", False)
 

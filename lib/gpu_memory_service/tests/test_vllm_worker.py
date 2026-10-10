@@ -29,6 +29,9 @@ pytestmark = [
 
 def test_init_device_forwards_ro_connect_timeout(monkeypatch, tmp_path):
     manager_factory = Mock()
+    monkeypatch.delenv("GMS_VLLM_WRITER_COHORT_PATH", raising=False)
+    monkeypatch.setenv("GMS_VLLM_VMM_IPC_KV", "0")
+    monkeypatch.setattr(gms_worker, "shared_kv_enabled", lambda: False)
     monkeypatch.setattr(
         gms_worker, "get_or_create_gms_client_memory_manager", manager_factory
     )
@@ -41,7 +44,10 @@ def test_init_device_forwards_ro_connect_timeout(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         "vllm.platforms.current_platform",
-        SimpleNamespace(set_device=lambda _: None),
+        SimpleNamespace(
+            set_device=lambda _: None,
+            logical_device_id_to_visible_device_id=lambda device: device,
+        ),
     )
     monkeypatch.setattr(gms_worker._BaseWorker, "init_device", lambda _: None)
 
@@ -86,3 +92,47 @@ def test_v1_worker_uses_upstream_sleep_backend_accessor(monkeypatch):
         worker._maybe_get_memory_pool_context("kv_cache")
         is backend.capture_kv_cache.return_value
     )
+
+
+def test_mapped_shadow_worker_rejects_uncertified_predecessor(monkeypatch):
+    from gpu_memory_service.integrations.common import gpu_quiescence
+
+    worker = gms_worker.GMSWorker.__new__(gms_worker.GMSWorker)
+    worker._gms_device = 0
+    monkeypatch.setattr(gms_worker, "shared_kv_enabled", lambda: True)
+    monkeypatch.setattr(
+        gpu_quiescence, "gpu_quiescence_provider_configured", lambda _: True
+    )
+    monkeypatch.setattr(
+        gpu_quiescence,
+        "prove_predecessor_gpu_quiescence_sync",
+        lambda **_: SimpleNamespace(
+            quiesced=False, detail="MPS result 201", provider="gms-mps"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="MPS result 201"):
+        worker.gms_prove_predecessor_gpu_quiescence()
+
+
+def test_mapped_shadow_worker_accepts_certified_predecessor(monkeypatch):
+    from gpu_memory_service.integrations.common import gpu_quiescence
+
+    worker = gms_worker.GMSWorker.__new__(gms_worker.GMSWorker)
+    worker._gms_device = 0
+    monkeypatch.setattr(gms_worker, "shared_kv_enabled", lambda: True)
+    monkeypatch.setattr(
+        gpu_quiescence, "gpu_quiescence_provider_configured", lambda _: True
+    )
+    monkeypatch.setattr(
+        gpu_quiescence,
+        "prove_predecessor_gpu_quiescence_sync",
+        lambda **_: SimpleNamespace(
+            quiesced=True,
+            detail="cuda_result=0",
+            provider="gms-mps",
+            elapsed_ms=1.0,
+        ),
+    )
+
+    assert worker.gms_prove_predecessor_gpu_quiescence() is True

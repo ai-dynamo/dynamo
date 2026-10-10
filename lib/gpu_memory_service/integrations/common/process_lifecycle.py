@@ -11,6 +11,7 @@ import fcntl
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 _PR_SET_PDEATHSIG = 1
@@ -38,19 +39,229 @@ def acquire_writer_guard(path: Path) -> int:
         raise
 
 
+def retired_writer_cohort_has_no_processes(path: Path) -> bool:
+    """Check the immutable tombstone while excluding all cohort guard holders.
+
+    This proves that the registered CPU/CUDA worker processes have released
+    their lifetime guards. It is deliberately not a substitute for MPS client
+    termination: an MPS server can retain outstanding GPU work after a client
+    process exits.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return os.pread(fd, 1, 0) == b"R"
+    finally:
+        os.close(fd)
+
+
+_PF_EXITING = 0x00000004
+_SIGKILL_BIT = 1 << (signal.SIGKILL - 1)
+_NETWORK_FILESYSTEMS = ("nfs", "nfs4", "cifs", "smb3", "fuse", "ceph", "9p", "lustre")
+
+
+def _pod_scoped_fence() -> bool:
+    return os.environ.get("DYN_GMS_WRITER_COHORT_SCOPE", "").strip().lower() == "pod"
+
+
+def _on_local_filesystem(path: Path) -> bool:
+    """Whether every guard holder must run in this kernel (not a network FS)."""
+    target = os.path.realpath(path)
+    best, fstype = "", None
+    try:
+        with open("/proc/self/mountinfo") as mounts:
+            for line in mounts:
+                left, _, right = line.partition(" - ")
+                mount_point = left.split()[4]
+                inside = target == mount_point or target.startswith(
+                    mount_point.rstrip("/") + "/"
+                )
+                if inside and len(mount_point) >= len(best):
+                    best, fstype = mount_point, right.split()[0]
+    except OSError:
+        return False
+    return fstype is not None and not fstype.startswith(_NETWORK_FILESYSTEMS)
+
+
+def _guard_lock_holders(path: Path) -> set[int]:
+    """PIDs with a descriptor that holds a lock on ``path``'s inode.
+
+    ``fdinfo`` lists the locks of each open file description, so a child that
+    inherited a locked descriptor across fork is reported too. Descriptors
+    without a lock (for example this fence's own) are not holders.
+    """
+    target = os.stat(path)
+    holders = set()
+    for entry in os.listdir("/proc"):
+        if entry.isdigit() and _holds_lock_on(f"/proc/{entry}", target):
+            holders.add(int(entry))
+    return holders
+
+
+def _holds_lock_on(proc: str, target: os.stat_result) -> bool:
+    for base in _descriptor_tables(proc):
+        try:
+            fds = os.listdir(f"{base}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                st = os.stat(f"{base}/fd/{fd}")
+                if (st.st_dev, st.st_ino) != (target.st_dev, target.st_ino):
+                    continue
+                with open(f"{base}/fdinfo/{fd}") as info:
+                    if any(line.startswith("lock:") for line in info):
+                        return True
+            except OSError:
+                continue
+    return False
+
+
+def _descriptor_tables(proc: str):
+    """Yield ``proc``, then its threads if its main thread has no fd table.
+
+    ``/proc/<pid>/fd`` shows the main thread's table. A main thread that
+    exited first (a zombie leader) shows none, while threads still blocked
+    in driver teardown keep the shared table, and its flocks, alive.
+    """
+    yield proc
+    try:
+        if os.listdir(f"{proc}/fd"):
+            return
+        tasks = os.listdir(f"{proc}/task")
+    except OSError:
+        return
+    pid = proc.rsplit("/", 1)[1]
+    for tid in tasks:
+        task = f"{proc}/task/{tid}"
+        try:
+            if tid != pid and os.listdir(f"{task}/fd"):
+                # Threads share one table; the first live one shows it.
+                yield task
+                return
+        except OSError:
+            continue
+
+
+def _sigkill_pending(task: str) -> bool:
+    try:
+        with open(f"{task}/status") as status:
+            for line in status:
+                if line.startswith(("SigPnd:", "ShdPnd:")):
+                    if int(line.split()[1], 16) & _SIGKILL_BIT:
+                        return True
+    except OSError:
+        return True
+    return False
+
+
+def _user_space_dead(pid: int) -> bool:
+    """True once no thread of ``pid`` can return to user space.
+
+    The kernel sets PF_EXITING on a thread as it enters do_exit; it never runs
+    user code again. A killed thread still blocked in a driver call enters
+    do_exit only when that call returns, but its pending SIGKILL is taken
+    before any return to user space and cannot be blocked or handled. Driver
+    teardown of GPU mappings can take seconds, and the process's descriptors
+    (and flocks) are only closed at the very end.
+    """
+    try:
+        tasks = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return True
+    for tid in tasks:
+        task = f"/proc/{pid}/task/{tid}"
+        try:
+            with open(f"{task}/stat") as stat:
+                fields = stat.read().rsplit(")", 1)[1].split()
+        except OSError:
+            continue
+        if not int(fields[6]) & _PF_EXITING and not _sigkill_pending(task):
+            return False
+    return True
+
+
+def cannot_run_user_code(pid: int) -> bool:
+    """Whether ``pid`` is gone or none of its threads can run user code again.
+
+    A killed process can spend seconds in NVIDIA driver teardown before it
+    exits, but once every thread is exiting or has SIGKILL pending it can
+    never submit more CPU work.
+    """
+    return _user_space_dead(pid)
+
+
+def _lock_owner_pids(target: os.stat_result) -> list[int]:
+    """Owners of granted locks on ``target`` listed in /proc/locks.
+
+    An exiting process closes its descriptors before the final close of each
+    file, which runs with the (slow) GPU device release at the end of exit.
+    In between, the lock is held but in no descriptor table; its owner still
+    appears here. Locks of processes outside this PID namespace are hidden.
+    """
+    owners = []
+    try:
+        with open("/proc/locks") as locks:
+            for line in locks:
+                fields = line.split()
+                if len(fields) < 6 or fields[1] == "->":
+                    continue  # a blocked waiter holds nothing
+                major, minor, ino = fields[5].split(":")
+                device = (int(major, 16), int(minor, 16))
+                if int(ino) == target.st_ino and device == (
+                    os.major(target.st_dev),
+                    os.minor(target.st_dev),
+                ):
+                    owners.append(int(fields[4]))
+    except (OSError, ValueError):
+        return []
+    return owners
+
+
+def _holders_all_exiting(path: Path) -> bool:
+    owners = _lock_owner_pids(os.stat(path))
+    if not owners or any(pid <= 0 for pid in owners):
+        # A busy lock with no visible owner is held outside this namespace.
+        return False
+    holders = _guard_lock_holders(path) | set(owners)
+    holders.discard(os.getpid())
+    return bool(holders) and all(_user_space_dead(pid) for pid in holders)
+
+
 async def retire_writer_cohort(path: Path) -> None:
     """Exclude current and future CPU submitters; NOT a CUDA completion fence.
 
     Never unlink/recreate the inode: a delayed opener must see its tombstone.
     Cancellation while waiting leaves admission and ownership unchanged.
+
+    With a pod-scoped cohort on a local filesystem every guard holder runs in
+    this pod, whose containers must share one PID namespace
+    (``shareProcessNamespace``). The fence can then also complete once every
+    holder has stopped running user code, instead of waiting seconds for
+    driver teardown to close its descriptors. The tombstone is written first
+    and the holders re-checked, so a member that joined in between keeps the
+    fence waiting.
     """
     fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
+        fast = _pod_scoped_fence() and _on_local_filesystem(path)
+        next_scan = 0.0
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
+                now = time.monotonic()
+                if fast and now >= next_scan:
+                    next_scan = now + 0.02
+                    if _holders_all_exiting(path):
+                        if os.pwrite(fd, b"R", 0) != 1:
+                            raise OSError("could not retire GMS writer cohort")
+                        if _holders_all_exiting(path):
+                            return
                 await asyncio.sleep(0.01)
         if os.pwrite(fd, b"R", 0) != 1:
             raise OSError("could not retire GMS writer cohort")

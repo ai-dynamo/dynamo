@@ -6,6 +6,7 @@
 import asyncio
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
@@ -180,6 +181,7 @@ async def elect_and_wake(
     *,
     lock_path: str | None = None,
     failover_metrics: Any = None,
+    post_lock_pre_wake: Callable[[], Awaitable[None]] | None = None,
 ) -> Any | None:
     """Elect a single engine via flock, then wake it.
 
@@ -187,6 +189,11 @@ async def elect_and_wake(
     snapshot-restored engine arrives that way, and a cold-start shadow sleeps
     itself before calling. With no ``lock_path`` there is no election and the
     engine simply resumes.
+
+    ``post_lock_pre_wake`` lets backends establish any data-plane fencing that
+    must hold before a restored CUDA engine can resume. It runs only after a
+    configured election lock has been acquired and propagates failure without
+    waking the engine.
 
     Returns the acquired lock, or None when no election ran. The flock lives on
     the lock's open fd, so callers need not retain it: the kernel releases it
@@ -219,6 +226,9 @@ async def elect_and_wake(
             if lock.was_contended:
                 # Only a contended acquire is a failover; a bootup is not a switch.
                 failover_metrics.record_switch_attempt()
+
+        if post_lock_pre_wake is not None:
+            await post_lock_pre_wake()
 
     await pause_controller.resume()
     pause_controller.mark_resumed()

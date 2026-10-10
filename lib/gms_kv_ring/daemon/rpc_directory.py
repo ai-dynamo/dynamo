@@ -1026,8 +1026,192 @@ def handle_directory_publish_batch(
     }
 
 
+def handle_directory_pool_geometry(
+    daemon: "GmsKvCacheManager", msg: Message
+) -> Response:
+    """Read immutable logical pool geometry for one compatibility manifest."""
+    manifest_id = str(msg.get("manifest_id", "")).strip()
+    engine_id = str(msg.get("engine_id", "")).strip()
+    if not manifest_id or not engine_id:
+        return {"ok": False, "error": "manifest_id and engine_id are required"}
+    with daemon._content_hash_lock:
+        geometry = daemon._content_directory_pools.get((manifest_id, engine_id))
+        return {
+            "ok": True,
+            "geometry": None if geometry is None else dict(geometry),
+            "directory_epoch": int(daemon._content_directory_epoch),
+            "writer_id": daemon._content_directory_writer_id,
+        }
+
+
+def handle_directory_register_pool(
+    daemon: "GmsKvCacheManager", msg: Message
+) -> Response:
+    """Register immutable pool capacity under the active global writer."""
+    writer_id = str(msg.get("writer_id", "")).strip()
+    manifest_id = str(msg.get("manifest_id", "")).strip()
+    engine_id = str(msg.get("engine_id", "")).strip()
+    layout_digest = str(msg.get("layout_digest", "")).strip()
+    try:
+        expected_epoch = int(msg["expected_epoch"])
+        total_blocks = int(msg["total_blocks"])
+    except (KeyError, TypeError, ValueError):
+        return {
+            "ok": False,
+            "error": "expected_epoch and total_blocks are required",
+        }
+    if not writer_id or not manifest_id or not engine_id:
+        return {
+            "ok": False,
+            "error": "writer_id, manifest_id and engine_id are required",
+        }
+    if total_blocks <= 0:
+        return {"ok": False, "error": "total_blocks must be positive"}
+
+    with daemon._content_hash_lock:
+        if not _directory_writer_matches(daemon, writer_id, expected_epoch):
+            return {
+                "ok": True,
+                "registered": False,
+                "rejected_stale_writer": True,
+                "directory_epoch": int(daemon._content_directory_epoch),
+                "writer_id": daemon._content_directory_writer_id,
+            }
+        key = (manifest_id, engine_id)
+        geometry = {
+            "total_blocks": total_blocks,
+            "layout_digest": layout_digest,
+        }
+        existing = daemon._content_directory_pools.get(key)
+        if existing is not None and existing != geometry:
+            return {
+                "ok": False,
+                "error": "persistent KV pool geometry changed for this manifest",
+            }
+        daemon._content_directory_pools[key] = geometry
+        return {
+            "ok": True,
+            "registered": True,
+            "rejected_stale_writer": False,
+            "directory_epoch": int(daemon._content_directory_epoch),
+            "writer_id": writer_id,
+        }
+
+
+def handle_directory_pool_binding(
+    daemon: "GmsKvCacheManager", msg: Message
+) -> Response:
+    """Read the immutable physical allocation binding for one KV pool."""
+    manifest_id = str(msg.get("manifest_id", "")).strip()
+    engine_id = str(msg.get("engine_id", "")).strip()
+    if not manifest_id or not engine_id:
+        return {"ok": False, "error": "manifest_id and engine_id are required"}
+    with daemon._content_hash_lock:
+        binding = daemon._content_directory_pool_bindings.get((manifest_id, engine_id))
+        return {
+            "ok": True,
+            "binding": None if binding is None else dict(binding),
+            "directory_epoch": int(daemon._content_directory_epoch),
+            "writer_id": daemon._content_directory_writer_id,
+        }
+
+
+def handle_directory_register_pool_rank(
+    daemon: "GmsKvCacheManager", msg: Message
+) -> Response:
+    """Idempotently bind one TP rank to concrete persistent allocations."""
+    writer_id = str(msg.get("writer_id", "")).strip()
+    manifest_id = str(msg.get("manifest_id", "")).strip()
+    engine_id = str(msg.get("engine_id", "")).strip()
+    layout_digest = str(msg.get("layout_digest", "")).strip()
+    try:
+        expected_epoch = int(msg["expected_epoch"])
+        rank = int(msg["rank"])
+        expected_tp_size = int(msg["expected_tp_size"])
+        raw_allocations = list(msg["allocations"])
+    except (KeyError, TypeError, ValueError):
+        return {"ok": False, "error": "invalid pool rank binding"}
+    if not writer_id or not manifest_id or not engine_id or not layout_digest:
+        return {
+            "ok": False,
+            "error": "writer, manifest, engine and layout identities are required",
+        }
+    if expected_tp_size <= 0 or rank < 0 or rank >= expected_tp_size:
+        return {"ok": False, "error": "rank is outside the expected TP cohort"}
+    allocations = []
+    for raw in raw_allocations:
+        if not isinstance(raw, dict):
+            return {"ok": False, "error": "allocation identity must be an object"}
+        try:
+            allocation = {
+                "engine_id": str(raw["engine_id"]).strip(),
+                "tag": str(raw["tag"]).strip(),
+                "allocation_id": str(raw["allocation_id"]).strip(),
+                "aligned_size": int(raw["aligned_size"]),
+            }
+        except (KeyError, TypeError, ValueError):
+            return {"ok": False, "error": "invalid allocation identity"}
+        if (
+            not allocation["engine_id"]
+            or not allocation["tag"]
+            or not allocation["allocation_id"]
+            or allocation["aligned_size"] <= 0
+        ):
+            return {"ok": False, "error": "incomplete allocation identity"}
+        allocations.append(allocation)
+    if not allocations:
+        return {"ok": False, "error": "rank binding has no allocations"}
+    allocations.sort(key=lambda item: (item["tag"], item["allocation_id"]))
+
+    with daemon._content_hash_lock:
+        if not _directory_writer_matches(daemon, writer_id, expected_epoch):
+            return {
+                "ok": True,
+                "registered": False,
+                "rejected_stale_writer": True,
+                "directory_epoch": int(daemon._content_directory_epoch),
+                "writer_id": daemon._content_directory_writer_id,
+            }
+        key = (manifest_id, engine_id)
+        binding = daemon._content_directory_pool_bindings.get(key)
+        if binding is None:
+            binding = {
+                "expected_tp_size": expected_tp_size,
+                "layout_digest": layout_digest,
+                "ranks": {},
+            }
+            daemon._content_directory_pool_bindings[key] = binding
+        if (
+            int(binding["expected_tp_size"]) != expected_tp_size
+            or str(binding["layout_digest"]) != layout_digest
+        ):
+            return {"ok": False, "error": "persistent KV pool binding changed"}
+        rank_key = str(rank)
+        existing = binding["ranks"].get(rank_key)
+        if existing is not None and existing["allocations"] != allocations:
+            return {
+                "ok": False,
+                "error": "persistent KV rank allocation binding changed",
+            }
+        binding["ranks"][rank_key] = {
+            "attached_epoch": expected_epoch,
+            "allocations": allocations,
+        }
+        return {
+            "ok": True,
+            "registered": True,
+            "rejected_stale_writer": False,
+            "directory_epoch": int(daemon._content_directory_epoch),
+            "writer_id": writer_id,
+        }
+
+
 DIRECTORY_HANDLERS: dict[str, Handler] = {
     "directory_snapshot": handle_directory_snapshot,
+    "directory_pool_geometry": handle_directory_pool_geometry,
+    "directory_register_pool": handle_directory_register_pool,
+    "directory_pool_binding": handle_directory_pool_binding,
+    "directory_register_pool_rank": handle_directory_register_pool_rank,
     "directory_changes": handle_directory_changes,
     "directory_lookup": handle_directory_lookup,
     "directory_lookup_claim": handle_directory_lookup_claim,

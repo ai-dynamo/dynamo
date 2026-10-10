@@ -223,6 +223,44 @@ This ensures the "new writer gets fresh allocations" workflow can wait for memor
 - Runtime-state `allocation_count` and `allocations_cleared` report server-owned allocation handles only. Imported handles in other processes can still keep VRAM alive after the server clears its own layout state.
 - GMS by itself does not prove that a disconnected writer has no in-flight GPU work. The engine writer-cohort guard excludes CPU submitters: each participating process holds a shared kernel lock, and a successor acquires it exclusively and permanently retires that cohort before promotion. Delayed children cannot reopen a retired cohort. This lock does **not** establish completion of queued GPU work; CUDA driver cleanup can outlive file-lock release. Abrupt-crash reuse of predecessor-writable pages still needs a validated GPU-quiescence contract. Without one, deployments requiring this guarantee must use fresh allocations or quarantine those pages. A fixed delay, heartbeat loss, or absence of traffic is not a completion fence.
 
+### Frozen Predecessor Recovery and MPS Failure
+
+With `DYN_GMS_FAILOVER_FROZEN_PREDECESSOR=1`, takeover separates serving from
+reclamation. After CPU writer fencing and directory validation, the successor can
+use published sealed KV and safe free capacity. Pages with uncertain GPU writes
+remain quarantined while GMS requests a GPU-quiescence proof in the background.
+Only a successful termination proof permits those pages to return to the free
+pool. MPS timeouts, CUDA errors, missing client records, and host process exit
+leave the quarantine in place.
+
+Primary and shadow cohorts must use separate MPS pipe directories. Frozen-mode
+registration rejects an omitted directory or a directory already registered to
+another cohort without a successful termination proof. A replacement cohort may
+reuse a directory after GMS has certified the preceding cohort's GPU retirement;
+CPU retirement alone does not allow this. This keeps a failed predecessor MPS
+server from also serving the successor. According to the [NVIDIA MPS termination guidance](https://docs.nvidia.com/deploy/mps/when-to-use-mps.html),
+terminating an active client without synchronizing its GPU work can leave its MPS
+server in an undefined state. A successful `terminate_client` response establishes
+termination of the target contexts; a timeout does not establish that result.
+
+For recovery orchestration, set `DYN_GMS_FAILOVER_RECLAIM_STATUS_DIR` to a private
+directory. Each participating process atomically writes
+`<backend>-<role>-<pid>.json`, containing `status` (`pending`, `quarantined`, or
+`reclaimed`), `detail`, `pid`, `updated_at_unix_ms`, and, when available,
+`quarantined_blocks`. The block count is the rank-local classification snapshot,
+not deployment-wide free capacity or a continuously refreshed metric. A
+`reclaimed` result reports zero remaining blocks for that recovery operation.
+Status output is optional and does not itself control admission or readiness.
+
+If reclamation fails, the shadow may continue serving within its safe capacity.
+Operators must monitor actual allocator headroom and arrange replacement or drain
+before quarantine exhausts that capacity. Resetting the affected GPU after
+draining its consumers is a last resort and discards its cache. An automatic
+capacity-based replacement controller is not provided by this recovery path.
+Changing the final host kill to SIGTERM alone cannot establish GPU completion;
+cooperative shutdown also needs to stop submissions and acknowledge successful
+stream synchronization on every rank.
+
 ---
 
 ### Server Trust Boundary

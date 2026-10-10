@@ -1166,7 +1166,7 @@ async fn handler_completions(
 
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.inner.model)?;
+    check_model_serving_ready(&state, &request.inner.model).await?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -1797,7 +1797,7 @@ async fn embeddings(
     let mut request: NvCreateEmbeddingRequest = parse_json_request("embeddings", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.inner.model)?;
+    check_model_serving_ready(&state, &request.inner.model).await?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -1951,7 +1951,7 @@ async fn classify(
     let mut request: NvCreateClassifyRequest = parse_json_request("classify", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.model)?;
+    check_model_serving_ready(&state, &request.model).await?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -2062,7 +2062,7 @@ async fn rerank(
     Json(mut request): Json<NvCreateRerankRequest>,
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.model)?;
+    check_model_serving_ready(&state, &request.model).await?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -2311,7 +2311,7 @@ async fn pooling(
     let mut request: NvCreatePoolingRequest = parse_json_request("pooling", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.model)?;
+    check_model_serving_ready(&state, &request.model).await?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -2487,7 +2487,7 @@ async fn handler_chat_completions(
     }
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     if !resolved_model.is_empty()
-        && let Err(error) = check_model_serving_ready(&state, resolved_model)
+        && let Err(error) = check_model_serving_ready(&state, resolved_model).await
     {
         lifecycle_request.record_session(&request_id, None);
         terminal.finish(terminal_outcome_for_error_response(&error));
@@ -4045,7 +4045,7 @@ async fn handler_responses(
         template.as_ref(),
     );
     if !resolved_model.is_empty() {
-        check_model_serving_ready(&state, resolved_model)?;
+        check_model_serving_ready(&state, resolved_model).await?;
     }
 
     if !state.nvext_enabled() {
@@ -4662,7 +4662,16 @@ pub(crate) fn model_not_ready_message(model_name: &str) -> String {
 /// isn't ready to serve. Models absent from the committed catalog, including
 /// discovered models still being built, fall through here; the per-handler
 /// engine lookup later in the request path returns a 404 instead.
-pub(crate) fn check_model_serving_ready(
+///
+/// A model failing over is not reported as not ready right away: either its
+/// last serving instance just disappeared (a discovery hold, see
+/// `DYN_HTTP_MODEL_FAILOVER_WAIT_MS`), or a committed worker set has no
+/// routable instance left (reported down or withdrawn). The request waits for a warm replacement,
+/// polling every `DYN_MIGRATION_FAILOVER_POLL_MS`, for at most
+/// `DYN_HTTP_NEW_REQUEST_FAILOVER_WAIT_MS` (default: the hold, or the
+/// discovery grace; `0` rejects at once). Cold start and missing worker roles
+/// never wait.
+pub(crate) async fn check_model_serving_ready(
     state: &Arc<service_v2::State>,
     model_name: &str,
 ) -> Result<(), ErrorResponse> {
@@ -4674,9 +4683,77 @@ pub(crate) fn check_model_serving_ready(
     if model.has_ready_workers() {
         return Ok(());
     }
+    let started = tokio::time::Instant::now();
+    let new_request_wait = new_request_failover_wait();
+    loop {
+        let deadline = match state.manager().failover_hold_deadline(model_name) {
+            Some(hold) => Some(new_request_wait.map_or(hold, |wait| hold.min(started + wait))),
+            // A committed worker set lost every routable instance (the failed
+            // primary was reported down or withdrew before its successor
+            // registered): wait like a hold, from now.
+            None if state
+                .manager()
+                .get_committed_model(model_name)
+                .is_some_and(|model| model.has_failing_over_workers()) =>
+            {
+                new_request_wait
+                    .or_else(model_failover_wait)
+                    .map(|wait| started + wait)
+            }
+            None => None,
+        };
+        let now = tokio::time::Instant::now();
+        let Some(deadline) = deadline.filter(|deadline| now < *deadline) else {
+            break;
+        };
+        tokio::time::sleep(failover_poll().min(deadline - now)).await;
+        if state
+            .manager()
+            .get_committed_model(model_name)
+            .is_none_or(|model| model.has_ready_workers())
+        {
+            return Ok(());
+        }
+    }
     Err(ErrorMessage::service_unavailable_with_body(
         model_not_ready_message(model_name),
     ))
+}
+
+/// `DYN_HTTP_MODEL_FAILOVER_WAIT_MS`, the discovery failover grace.
+fn model_failover_wait() -> Option<std::time::Duration> {
+    static WAIT: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *WAIT.get_or_init(|| {
+        std::env::var("DYN_HTTP_MODEL_FAILOVER_WAIT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|millis| *millis > 0)
+            .map(std::time::Duration::from_millis)
+    })
+}
+
+/// `DYN_HTTP_NEW_REQUEST_FAILOVER_WAIT_MS`: cap on how long a new request
+/// waits during a failover hold. Unset means the whole hold.
+fn new_request_failover_wait() -> Option<std::time::Duration> {
+    static WAIT: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *WAIT.get_or_init(|| {
+        std::env::var("DYN_HTTP_NEW_REQUEST_FAILOVER_WAIT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+    })
+}
+
+fn failover_poll() -> std::time::Duration {
+    static POLL: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *POLL.get_or_init(|| {
+        std::env::var("DYN_MIGRATION_FAILOVER_POLL_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|millis| *millis > 0)
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(std::time::Duration::from_millis(50))
+    })
 }
 
 /// openai compatible format
@@ -4986,7 +5063,7 @@ async fn get_model_openai(
     // wins over the readiness sub-resource of a sibling `foo`.
     // `get_model_retrieve` applies the readiness gate itself (503 if not ready).
     if state.manager().get_committed_model(model_id).is_some() {
-        return get_model_retrieve(&state, model_id);
+        return get_model_retrieve(&state, model_id).await;
     }
 
     // Readiness sub-resource. Resolves against all committed models (above
@@ -5004,11 +5081,11 @@ async fn get_model_openai(
 
 /// `GET /v1/models/{model}` — the OpenAI retrieve-model object. Reports the
 /// model only if it is ready to serve (mirrors the `list_models_openai` filter).
-fn get_model_retrieve(
+async fn get_model_retrieve(
     state: &Arc<service_v2::State>,
     model_id: &str,
 ) -> Result<Response, ErrorResponse> {
-    check_model_serving_ready(state, model_id)?;
+    check_model_serving_ready(state, model_id).await?;
 
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5132,7 +5209,7 @@ async fn images_with_request(
 
     // Per-model serving readiness gate (now that we have a resolved model
     // name string).
-    check_model_serving_ready(&state, &model)?;
+    check_model_serving_ready(&state, &model).await?;
 
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -5251,7 +5328,7 @@ async fn videos(
     let mut request: NvCreateVideoRequest = parse_json_request("videos", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.model)?;
+    check_model_serving_ready(&state, &request.model).await?;
 
     request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
@@ -5386,7 +5463,7 @@ async fn video_stream(
     let body = read_json_request_body(&headers, body).await?;
     let mut request: NvCreateVideoRequest = parse_json_request("video stream", &body)?;
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.model)?;
+    check_model_serving_ready(&state, &request.model).await?;
 
     request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
@@ -5623,7 +5700,7 @@ async fn handler_audio_speech(
     // Per-model serving readiness gate (now that we have a resolved model
     // name string). Runs on the requested name so a 503 quotes back what the
     // caller asked for.
-    check_model_serving_ready(&state, &model)?;
+    check_model_serving_ready(&state, &model).await?;
 
     // Audio registrations honor --served-model-name aliases, so resolve one to
     // its primary before it reaches routing, metrics, or the engine request.

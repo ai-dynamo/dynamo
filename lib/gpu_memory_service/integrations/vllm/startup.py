@@ -32,19 +32,20 @@ def _try_install(name: str, installer: Callable[[], object], *, required: bool) 
 def verify_kv_failover_hooks() -> None:
     if not failover_hooks_required():
         return
-    from gpu_memory_service.integrations.vllm import (
-        install_kv_leases,
-        install_vmm_ipc_kv,
-    )
+    from gpu_memory_service.integrations.vllm import install_kv_leases as hooks
+    from gpu_memory_service.integrations.vllm import install_vmm_ipc_kv
+
+    hook_name = "BlockPool/KVCacheManager lease hooks"
+    hook_check = hooks.lease_hooks_installed
 
     missing = [
         name
         for name, installed in (
             (
-                "BlockPool/KVCacheManager lease hooks",
-                install_kv_leases.lease_hooks_installed(),
+                hook_name,
+                hook_check(),
             ),
-            ("EngineCore process hook", install_kv_leases.engine_core_hook_installed()),
+            ("EngineCore process hook", hooks.engine_core_hook_installed()),
             (
                 "persistent VMM allocation and geometry hooks",
                 install_vmm_ipc_kv.persistent_kv_hooks_installed(),
@@ -63,16 +64,16 @@ def verify_kv_failover_hooks() -> None:
 
 
 def install_and_verify_kv_failover_hooks() -> None:
-    from gpu_memory_service.integrations.vllm import (
-        install_kv_leases,
-        install_vmm_ipc_kv,
-    )
+    from gpu_memory_service.integrations.vllm import install_kv_leases as hooks
+    from gpu_memory_service.integrations.vllm import install_vmm_ipc_kv
+
+    hook_name = "lease hooks"
 
     required = failover_hooks_required()
-    _try_install("lease hooks", install_kv_leases.install, required=required)
+    _try_install(hook_name, hooks.install, required=required)
     _try_install(
         "EngineCore process hook",
-        install_kv_leases.install_engine_core_hook,
+        hooks.install_engine_core_hook,
         required=required,
     )
     _try_install("persistent VMM hooks", install_vmm_ipc_kv.install, required=required)

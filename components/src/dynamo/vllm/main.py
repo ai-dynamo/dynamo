@@ -25,6 +25,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.gms_failover import run_gms_failover_post_lock_fence
 from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
@@ -167,6 +168,14 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     return config.model
 
 
+def _export_gms_shadow_mode(configured: bool) -> None:
+    # --gms-shadow-mode lives in the parsed config, while EngineCore and its
+    # CUDA workers consult the environment before they receive that config.
+    # Canonicalize the CLI spelling before spawning either process.
+    if configured:
+        os.environ["DYN_VLLM_GMS_SHADOW_MODE"] = "1"
+
+
 def _gms_failover_shadow_member(*, configured: bool = False) -> bool:
     if not (
         configured
@@ -270,6 +279,7 @@ async def worker(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
     config = parse_args(argv)
+    _export_gms_shadow_mode(config.gms_shadow_mode)
 
     embedding_process_child = is_embedding_process_child()
     if config.embedding_worker_processes > 1 and os.environ.get(
@@ -322,11 +332,12 @@ async def worker(argv: list[str] | None = None) -> None:
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
         config.gms_shadow_mode = gms_shadow_mode_enabled()
+        _export_gms_shadow_mode(config.gms_shadow_mode)
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
     if config.headless:
-        run_dynamo_headless(config)
+        await run_dynamo_headless(config)
         return
 
     shutdown_event = asyncio.Event()
@@ -341,7 +352,33 @@ async def worker(argv: list[str] | None = None) -> None:
     if snapshot_controller is not None:
         # The flock lives on the open fd, not on any Python reference; the
         # kernel releases it when the process exits.
-        await elect_and_wake(snapshot_controller.pause_controller, runtime)
+        post_lock_pre_wake = None
+        if config.gms_shadow_mode:
+            if not os.environ.get("FAILOVER_LOCK_PATH"):
+                raise RuntimeError(
+                    "snapshot GMS restore requires FAILOVER_LOCK_PATH before "
+                    "the restored CUDA engine can resume"
+                )
+            from gpu_memory_service.integrations.vllm.writer_lifecycle import (
+                prepare_writer_cohort,
+            )
+
+            os.environ.pop("DYN_VLLM_GMS_ACTIVE_LOCK_HELD", None)
+            prepare_writer_cohort()
+
+            async def fence_gms_pool_before_wake() -> None:
+                await run_gms_failover_post_lock_fence(
+                    backend_name="vllm", role="snapshot-restore"
+                )
+                os.environ["DYN_VLLM_GMS_ACTIVE_LOCK_HELD"] = "1"
+
+            post_lock_pre_wake = fence_gms_pool_before_wake
+
+        await elect_and_wake(
+            snapshot_controller.pause_controller,
+            runtime,
+            post_lock_pre_wake=post_lock_pre_wake,
+        )
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there

@@ -469,6 +469,7 @@ impl ModelWatcher {
             admitted_ids,
         });
         worker_set.set_instance_watcher(instance_watcher);
+        worker_set.set_routing_client(client.clone());
 
         // A surface-less Encode worker is reached only through EncoderRouter.
         // Register it for serving readiness, publish its endpoint to any
@@ -1269,6 +1270,11 @@ impl ControllerHost for ModelWatcher {
             self.notify_on_model.notify_waiters();
         }
         Ok(())
+    }
+
+    fn set_failover_hold(&self, key: &GroupKey, until: Option<tokio::time::Instant>) {
+        self.manager
+            .set_failover_hold(&key.id(), &key.model_name, until);
     }
 
     fn remove_group(&self, key: &GroupKey) {

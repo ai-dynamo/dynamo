@@ -40,12 +40,13 @@ def verify_kv_failover_hooks() -> None:
         install_vmm_ipc_kv,
     )
 
+    allocator_hooks = install_kv_leases.lease_hooks_installed()
     missing = [
         name
         for name, installed in (
             (
-                "token/page allocator lease hooks",
-                install_kv_leases.lease_hooks_installed(),
+                "token/page allocator recovery hooks",
+                allocator_hooks,
             ),
             (
                 "persistent VMM allocation hooks",
@@ -72,7 +73,6 @@ def install_and_verify_kv_failover_hooks() -> None:
     """Install all SGLang KV hooks and verify the live or armed methods."""
     from gpu_memory_service.integrations.sglang import (
         install_gms_unified_cache,
-        install_kv_leases,
         install_vmm_ipc_kv,
     )
 
@@ -80,6 +80,8 @@ def install_and_verify_kv_failover_hooks() -> None:
     _try_install(
         "persistent VMM hook", install_vmm_ipc_kv.install_lazy, required=required
     )
+    from gpu_memory_service.integrations.sglang import install_kv_leases
+
     _try_install("lease hooks", install_kv_leases.install, required=required)
     _try_install(
         "UnifiedRadixCache backend",

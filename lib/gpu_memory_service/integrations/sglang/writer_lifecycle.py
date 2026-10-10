@@ -56,6 +56,32 @@ def mark_gms_recovery_ready() -> None:
     _mark_boot_marker(".gms-recovery-ready")
 
 
+def gms_reclaim_ready() -> bool:
+    """Return whether phase two completed, independently of its policy."""
+    marker = _boot_marker(".gms-reclaimed")
+    return marker is not None and marker.is_file()
+
+
+def mark_gms_reclaim_ready() -> None:
+    """Notify the allocator that released FREE pages can be reserved again.
+
+    This is not a GPU-quiescence certificate: timed best-effort reclamation
+    publishes this marker too. Every allocation still needs a lease CAS.
+    """
+    _mark_boot_marker(".gms-reclaimed")
+
+
+def gms_reclaim_refused() -> bool:
+    """Return whether phase two terminally kept predecessor pages quarantined."""
+    marker = _boot_marker(".gms-reclaim-refused")
+    return marker is not None and marker.is_file()
+
+
+def mark_gms_reclaim_refused() -> None:
+    """Let the allocator stop waiting for capacity that will never be freed."""
+    _mark_boot_marker(".gms-reclaim-refused")
+
+
 def gpu_quiescence_ready() -> bool:
     """Return whether this boot finished local predecessor GPU recovery."""
     marker = _boot_marker(".gpu-quiesced")
@@ -64,6 +90,7 @@ def gpu_quiescence_ready() -> bool:
 
 def mark_gpu_quiescence_ready() -> None:
     """Publish local phase-two completion for diagnostics and reclamation."""
+    mark_gms_reclaim_ready()
     _mark_boot_marker(".gpu-quiesced")
 
 

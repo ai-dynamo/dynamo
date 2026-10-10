@@ -27,6 +27,20 @@ def failover_hooks_required() -> bool:
     as a shared pool: either mode must never silently start with only some of
     the native SGLang hooks installed.
     """
+    mode = (
+        os.environ.get(
+            "GMS_SGLANG_KV_RECOVERY_MODE",
+            os.environ.get("GMS_KV_RECOVERY_MODE", "granular"),
+        )
+        .strip()
+        .lower()
+    )
+    if mode != "granular":
+        raise ValueError(
+            f"unsupported SGLang KV recovery mode {mode!r}; "
+            "only the lease-backed global-writer path remains "
+            "(legacy mode value 'granular')"
+        )
     return shared_kv_enabled() or (
         os.environ.get("GMS_KV_DIRECTORY_MODE", "off").strip().lower()
         == "authoritative"

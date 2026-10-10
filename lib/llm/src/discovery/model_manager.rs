@@ -205,6 +205,10 @@ pub struct ModelManager {
     /// in steady state; held only across in-memory map reads/writes, never across
     /// an `.await`.
     reservation_lock: parking_lot::Mutex<()>,
+
+    /// Discovery groups that lost their last instance while serving and are
+    /// held for a warm replacement: group id → (model name, hold deadline).
+    failover_holds: DashMap<String, (String, tokio::time::Instant)>,
 }
 
 impl Default for ModelManager {
@@ -230,7 +234,40 @@ impl ModelManager {
             lora_controller_cancel: parking_lot::Mutex::new(None),
             alias_to_primary: DashMap::new(),
             reservation_lock: parking_lot::Mutex::new(()),
+            failover_holds: DashMap::new(),
         }
+    }
+
+    /// Start (`Some`) or end (`None`) a discovery group's failover hold.
+    pub fn set_failover_hold(
+        &self,
+        group_id: &str,
+        model_name: &str,
+        until: Option<tokio::time::Instant>,
+    ) {
+        match until {
+            Some(deadline) => {
+                self.failover_holds
+                    .insert(group_id.to_string(), (model_name.to_string(), deadline));
+            }
+            None => {
+                self.failover_holds.remove(group_id);
+            }
+        }
+    }
+
+    /// Latest live failover-hold deadline for `model_name`, if any.
+    ///
+    /// While held, the model's last serving instance has disappeared and the
+    /// committed pipeline is retained for a warm replacement, so new requests
+    /// may wait for it instead of failing as "not ready".
+    pub fn failover_hold_deadline(&self, model_name: &str) -> Option<tokio::time::Instant> {
+        let now = tokio::time::Instant::now();
+        self.failover_holds
+            .iter()
+            .filter(|entry| entry.value().0 == model_name && entry.value().1 > now)
+            .map(|entry| entry.value().1)
+            .max()
     }
 
     fn publish_catalog_locked(&self) {

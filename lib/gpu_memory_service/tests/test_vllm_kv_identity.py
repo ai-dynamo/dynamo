@@ -407,6 +407,116 @@ def test_generic_failover_shadow_mode_enables_shared_geometry(monkeypatch):
     assert kv_identity.use_existing_shared_geometry()
 
 
+@pytest.mark.parametrize(
+    ("mode", "blocks", "allowed"),
+    [("granular", 16, True), ("granular", 15, False)],
+)
+def test_standby_uses_existing_geometry_without_directory_ownership(
+    monkeypatch, mode, blocks, allowed
+):
+    from gms_kv_ring.daemon import client as client_module
+
+    monkeypatch.setenv("GMS_VLLM_KV_RECOVERY_MODE", mode)
+    monkeypatch.setenv("GMS_VLLM_SHARED_KV", "1")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MANIFEST", "manifest")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_SOCKET", "/tmp/directory.sock")
+    monkeypatch.setenv("GMS_VLLM_ENGINE_ID", "pool-0")
+    monkeypatch.setenv("ENGINE_ID", "1")
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def directory_pool_geometry(self, manifest_id, pool_id):
+            assert (manifest_id, pool_id) == ("manifest", "pool-0")
+            return {"total_blocks": 16}, 7, "engine-0"
+
+        def directory_register_pool(self, *_args, **_kwargs):
+            raise AssertionError("standby must not publish pool geometry")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(client_module, "DaemonClient", Client)
+    if allowed:
+        install_vmm_ipc_kv._register_shared_kv_blocks(blocks)
+    else:
+        with pytest.raises(RuntimeError, match="without directory ownership"):
+            install_vmm_ipc_kv._register_shared_kv_blocks(blocks)
+
+
+def test_cold_start_claims_empty_directory_before_registering_geometry(monkeypatch):
+    from gms_kv_ring.daemon import client as client_module
+
+    monkeypatch.setenv("GMS_VLLM_SHARED_KV", "1")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MANIFEST", "manifest")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_SOCKET", "/tmp/directory.sock")
+    monkeypatch.setenv("GMS_VLLM_ENGINE_ID", "pool-0")
+    monkeypatch.setenv("ENGINE_ID", "primary")
+    monkeypatch.delenv("GMS_KV_DIRECTORY_STANDBY", raising=False)
+    calls = []
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def directory_pool_geometry(self, manifest_id, pool_id):
+            assert (manifest_id, pool_id) == ("manifest", "pool-0")
+            return None, 7, None
+
+        def directory_promote(self, epoch, writer_id):
+            calls.append(("promote", epoch, writer_id))
+            return True, 8, writer_id
+
+        def directory_register_pool(
+            self, manifest_id, writer_id, pool_id, total_blocks, *, expected_epoch
+        ):
+            calls.append(("register", expected_epoch, writer_id))
+            assert (manifest_id, pool_id, total_blocks) == ("manifest", "pool-0", 16)
+            return True, False, expected_epoch
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(client_module, "DaemonClient", Client)
+    install_vmm_ipc_kv._register_shared_kv_blocks(16)
+    assert calls == [
+        ("promote", 7, "engine-primary"),
+        ("register", 8, "engine-primary"),
+    ]
+
+
+def test_standby_cannot_claim_empty_directory_geometry(monkeypatch):
+    from gms_kv_ring.daemon import client as client_module
+
+    monkeypatch.setenv("GMS_VLLM_SHARED_KV", "1")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MANIFEST", "manifest")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_SOCKET", "/tmp/directory.sock")
+    monkeypatch.setenv("GMS_VLLM_ENGINE_ID", "pool-0")
+    monkeypatch.setenv("ENGINE_ID", "shadow")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_STANDBY", "1")
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def directory_pool_geometry(self, *_args):
+            return None, 7, None
+
+        def directory_promote(self, *_args):
+            raise AssertionError("standby must not promote")
+
+        def directory_register_pool(self, *_args, **_kwargs):
+            raise AssertionError("standby must not publish pool geometry")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(client_module, "DaemonClient", Client)
+    with pytest.raises(RuntimeError, match="without directory ownership"):
+        install_vmm_ipc_kv._register_shared_kv_blocks(16)
+
+
 def test_native_kv_allocation_context_check_detects_worker_drift(monkeypatch):
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -424,6 +534,91 @@ def test_geometry_wait_honors_vllm_specific_timeout(monkeypatch):
     assert install_vmm_ipc_kv._geometry_wait_ms(-1) == 42
 
 
+def test_register_rank_binding_publishes_actual_allocations(monkeypatch):
+    from gms_kv_ring.daemon import client as client_module
+
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MANIFEST", "manifest")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_SOCKET", "/tmp/directory.sock")
+    monkeypatch.setenv(
+        "GMS_VLLM_TP_COORDINATOR_DIRECTORY_SOCKET", "/tmp/coordinator.sock"
+    )
+    monkeypatch.setenv("GMS_VLLM_ENGINE_ID", "pool-0")
+    monkeypatch.setenv("ENGINE_ID", "0")
+    monkeypatch.setenv("GMS_VLLM_MODEL_ARTIFACT_DIGEST", "artifact")
+    tensor = SimpleNamespace(
+        size=4096,
+        offset=0,
+        block_stride=0,
+        shared_by=("layer.0",),
+    )
+    config = SimpleNamespace(kv_cache_tensors=[tensor], kv_cache_groups=[])
+    model = SimpleNamespace(
+        model="model",
+        model_weights=None,
+        hf_config_path=None,
+        revision=None,
+        hf_config=None,
+        code_revision=None,
+        quantization=None,
+    )
+    tag = install_vmm_ipc_kv._semantic_kv_tensor_tag_plan(
+        config, install_vmm_ipc_kv._model_identity(model)
+    )[0]
+    manager = SimpleNamespace(
+        list_persistent=lambda **_kwargs: [
+            SimpleNamespace(
+                tag=tag,
+                allocation_id="allocation-1",
+                aligned_size=8192,
+                claimed=True,
+            )
+        ]
+    )
+    calls = []
+    sockets = []
+
+    class Client:
+        def __init__(self, socket, **_kwargs):
+            sockets.append(socket)
+
+        def directory_pool_binding(self, manifest_id, pool_id):
+            assert (manifest_id, pool_id) == ("manifest", "pool-0")
+            return None, 7, "engine-0"
+
+        def directory_register_pool_rank(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return True, False, 7
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(client_module, "DaemonClient", Client)
+
+    install_vmm_ipc_kv.register_persistent_kv_rank_binding(
+        manager,
+        "device-1",
+        rank=1,
+        tensor_parallel_size=2,
+        kv_cache_config=config,
+        model_config=model,
+    )
+
+    args, kwargs = calls[0]
+    assert args[:5] == ("manifest", "engine-0", "pool-0", 1, 2)
+    assert args[6] == [
+        {
+            "engine_id": "device-1",
+            "tag": tag,
+            "allocation_id": "allocation-1",
+            "aligned_size": 8192,
+        }
+    ]
+    assert kwargs == {"expected_epoch": 7}
+    assert sockets == ["/tmp/directory.sock", "/tmp/coordinator.sock"]
+    assert len(calls) == 2
+
+
 def test_geometry_patch_does_not_wait_with_explicit_block_override(monkeypatch):
     from gpu_memory_service.integrations.vllm import install_vmm_ipc_kv
 
@@ -435,12 +630,12 @@ def test_geometry_patch_does_not_wait_with_explicit_block_override(monkeypatch):
     )
 
     def original(_vllm_config, _kv_cache_specs, available_memory):
-        return available_memory
+        return [SimpleNamespace(num_blocks=available_memory)]
 
     patched = install_vmm_ipc_kv._wrap_get_kv_cache_configs(original)
     config = SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=4096))
 
-    assert patched(config, object(), -1) == -1
+    assert patched(config, object(), -1)[0].num_blocks == -1
     assert waits == [0]
 
 

@@ -26,7 +26,6 @@ from gpu_memory_service.integrations.common.utils import (
 )
 from gpu_memory_service.integrations.sglang import (
     install_gms_unified_cache,
-    install_kv_leases,
     install_vmm_ipc_kv,
 )
 from gpu_memory_service.integrations.sglang.memory_saver import (
@@ -43,6 +42,14 @@ from gpu_memory_service.integrations.sglang.patches import (
 
 logger = logging.getLogger(__name__)
 
+
+def _install_kv_allocator_hooks() -> None:
+    """Install the lease-backed allocator inside each spawned scheduler."""
+    from gpu_memory_service.integrations.sglang import install_kv_leases
+
+    install_kv_leases.install()
+
+
 # Apply patches at module import time.
 # This module is only imported when load_format="gms" is used.
 # Because SGLang scheduler processes use multiprocessing spawn, these patches
@@ -56,7 +63,7 @@ patch_failover_extend_warmup_for_gms()
 patch_static_state_for_gms()
 patch_serving_collective_timeout_for_gms()
 install_vmm_ipc_kv.install()
-install_kv_leases.install()
+_install_kv_allocator_hooks()
 install_gms_unified_cache.install()
 logger.info("[GMS] Applied patches")
 

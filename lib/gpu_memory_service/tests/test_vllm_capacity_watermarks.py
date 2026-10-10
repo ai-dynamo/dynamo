@@ -29,11 +29,11 @@ def test_small_pool_keeps_concurrent_headroom_with_hysteresis(monkeypatch):
     monkeypatch.setattr(
         hooks, "_evict_dormant_directory_blocks", lambda _, n: evicted.append(n) or n
     )
-    assert hooks._reserve_dormant_headroom(pool, 28) == 248
-    assert evicted == [248]
+    assert hooks._reserve_dormant_headroom(pool, 28) == 696
+    assert evicted == [696]
     free[0] = 300  # below high watermark, but no synchronous refill needed
     assert hooks._reserve_dormant_headroom(pool, 28) == 0
-    assert evicted == [248]
+    assert evicted == [696]
 
 
 def test_concurrency_reserve_does_not_erase_entire_prefix_cache(monkeypatch):
@@ -46,6 +46,21 @@ def test_concurrency_reserve_does_not_erase_entire_prefix_cache(monkeypatch):
     )
     monkeypatch.setattr(hooks, "_evict_dormant_directory_blocks", lambda _, n: n)
     assert hooks._reserve_dormant_headroom(pool, 28) == 1024
+
+
+def test_native_free_queue_is_not_walked_twice():
+    tail = SimpleNamespace(next_free_block=None)
+    second = SimpleNamespace(block_id=2, is_null=False, next_free_block=tail)
+    first = SimpleNamespace(block_id=1, is_null=False, next_free_block=second)
+
+    def unexpected_fallback():
+        raise AssertionError("native linked queue was traversed twice")
+
+    queue = SimpleNamespace(
+        fake_free_list_head=SimpleNamespace(next_free_block=first),
+        get_all_free_blocks=unexpected_fallback,
+    )
+    assert hooks._preferred_block_ids(queue, 10) == [1, 2]
 
 
 def _linked_queue(block_ids):

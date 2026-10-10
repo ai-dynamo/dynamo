@@ -62,6 +62,7 @@ class _Directory:
         self.released = []
         self.read_view_is_current_writer = False
         self.read_view = []
+        self.snapshot = None
 
     def start_async_read(self):
         return True
@@ -77,6 +78,10 @@ class _Directory:
             and (not state or entry.get("state") == state)
         ]
         return items if limit is None else items[:limit]
+
+    def snapshot_authoritative(self):
+        entries = self.read_view if self.snapshot is None else self.snapshot
+        return dict(entries)
 
     def publish_deferred(self, items):
         # The fake commits immediately so enqueue failures and compensation
@@ -232,6 +237,27 @@ def test_directory_hashes_support_legacy_key_without_cache_salt():
     ]
 
 
+@pytest.mark.parametrize("is_bigram", [False, True])
+@pytest.mark.parametrize("scope", [None, "tenant-a"])
+def test_native_directory_hashes_are_stable_for_page_aligned_prefixes(is_bigram, scope):
+    from sglang.srt.mem_cache.utils import get_hash_str
+
+    tokens = array("q", range(1, 10 if is_bigram else 9))
+    key = RadixKey(
+        tokens,
+        scope,
+        is_bigram=is_bigram,
+        cache_salt="salt-a",
+    )
+    full = adapter._directory_hashes(key, 2, get_hash_str)
+
+    for prefix_len in (2, 4, 6, 8):
+        assert (
+            adapter._directory_hashes(key[:prefix_len], 2, get_hash_str)
+            == full[: prefix_len // 2]
+        )
+
+
 def test_reset_invalidates_directory_before_discarding_derived_state(monkeypatch):
     cache, allocator = _cache(monkeypatch)
     content_hash = b"r" * 32
@@ -276,6 +302,220 @@ def test_uses_native_unified_tree_without_enabling_storage_hashing(monkeypatch):
     assert type(cache).__mro__[1].__name__ == "UnifiedRadixCache"
     assert _matched_indices(cache, result) == [6, 7, 2, 3]
     assert cache.tree_core.get_hash_values(inserted.last_device_node) == []
+
+
+def test_native_hit_seeds_request_pages_when_directory_map_is_incomplete(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    cache._gms_directory = _Directory()
+    cache._gms_steady_state = True
+    allocator._gms_kv_leases_by_page = {
+        3: KVLease(3, 13),
+        1: KVLease(1, 11),
+    }
+    key = _key(1, 2, 3, 4)
+    cache.insert(InsertParams(key=key, value=torch.tensor([6, 7, 2, 3])))
+    req = SimpleNamespace(session=None)
+
+    cache.match_prefix(MatchPrefixParams(key=key, req=req))
+
+    assert req._gms_kv_page_ids == [3, 1]
+
+
+def test_fresh_unfinished_insert_uses_request_cpu_pages_without_gpu_sync(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    cache._gms_directory = _Directory()
+    cache._gms_steady_state = True
+    allocator._gms_kv_leases_by_page = {
+        3: KVLease(3, 13),
+        1: KVLease(1, 11),
+    }
+    key = _key(1, 2, 3, 4)
+    req = SimpleNamespace(session=None, _gms_kv_page_ids=[3, 1], finished=lambda: False)
+
+    def native_checkpoint(target, native_req, **_kwargs):
+        # SGLang inserts, then re-matches through its own tree walk to repoint
+        # the request's row onto the tree's pages.
+        target.insert(InsertParams(key=key, value=torch.tensor([6, 7, 2, 3])))
+        target._match_tree(MatchPrefixParams(key=key, req=native_req))
+
+    monkeypatch.setattr(
+        type(cache).__mro__[1], "checkpoint_into_tree", native_checkpoint
+    )
+    monkeypatch.setattr(
+        torch.Tensor,
+        "cpu",
+        lambda *_args, **_kwargs: pytest.fail(
+            "fresh native insertion must not synchronize the GPU index tensor"
+        ),
+    )
+
+    cache.checkpoint_into_tree(req, up_to=4)
+
+    assert req._gms_kv_page_ids == [3, 1]
+    assert cache._gms_fresh_insert is None
+
+
+def test_duplicate_unfinished_insert_uses_native_pages_not_request_pages(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    cache._gms_directory = _Directory()
+    cache._gms_steady_state = True
+    allocator._gms_kv_leases_by_page = {
+        page: KVLease(page, 10 + page) for page in (1, 3, 4, 5)
+    }
+    key = _key(1, 2, 3, 4)
+    cache.insert(InsertParams(key=key, value=torch.tensor([6, 7, 2, 3])))
+    req = SimpleNamespace(session=None, _gms_kv_page_ids=[4, 5], finished=lambda: False)
+
+    def native_checkpoint(target, native_req, **_kwargs):
+        target.insert(InsertParams(key=key, value=torch.tensor([8, 9, 10, 11])))
+        target._match_tree(MatchPrefixParams(key=key, req=native_req))
+
+    monkeypatch.setattr(
+        type(cache).__mro__[1], "checkpoint_into_tree", native_checkpoint
+    )
+
+    cache.checkpoint_into_tree(req, up_to=4)
+
+    assert req._gms_kv_page_ids == [3, 1]
+    assert cache._gms_fresh_insert is None
+
+
+class _ReqToTokenPool:
+    def __init__(self, row):
+        self.req_to_token = torch.tensor([row], dtype=torch.int64)
+
+    def write(self, index, values):
+        self.req_to_token[index] = values
+
+
+def _checkpoint_req(tokens, pages, *, finished):
+    return SimpleNamespace(
+        rid="r",
+        session=None,
+        finished=lambda: finished,
+        finished_reason=None,
+        full_untruncated_fill_ids=array("q", tokens),
+        origin_input_ids=array("q", tokens),
+        extra_key=None,
+        cache_salt=None,
+        priority=0,
+        session_id=None,
+        kv_rotation_base=None,
+        lock=None,
+        last_node=None,
+        is_retracted=False,
+        kv=SimpleNamespace(
+            req_pool_idx=0,
+            cache_protected_len=0,
+            cache_inserted_len=0,
+            kv_allocated_len=len(tokens),
+        ),
+        _gms_kv_page_ids=list(pages),
+    )
+
+
+def test_native_running_checkpoint_attaches_request_pages(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    cache._gms_directory = _Directory()
+    cache._gms_steady_state = True
+    allocator._gms_kv_leases_by_page = {3: KVLease(3, 13), 1: KVLease(1, 11)}
+    cache.req_to_token_pool = _ReqToTokenPool([6, 7, 2, 3])
+    req = _checkpoint_req([1, 2, 3, 4], [3, 1], finished=False)
+    attached = []
+    original_attach = cache._attach_request_pages
+    monkeypatch.setattr(
+        cache,
+        "_attach_request_pages",
+        lambda params, result: attached.append(params.req)
+        or original_attach(params, result),
+    )
+
+    # SGLang's own checkpoint inserts and re-matches through its tree walk.
+    cache.checkpoint(req, up_to=4)
+
+    assert attached == [req]
+    assert req._gms_kv_page_ids == [3, 1]
+    assert req.kv.cache_protected_len == 4
+    assert cache._gms_unfinished_req is None
+    assert cache._gms_fresh_insert is None
+    assert cache._gms_directory.published == []
+
+
+def test_native_final_checkpoint_publishes_page_aligned_prefix(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    cache._gms_directory = _Directory()
+    cache._gms_steady_state = True
+    leases = {3: KVLease(3, 13), 1: KVLease(1, 11), 4: KVLease(4, 14)}
+    allocator._gms_kv_leases_by_page = leases
+    monkeypatch.setattr(
+        adapter,
+        "retain_hbm_pages",
+        lambda _allocator, pages: [leases[page] for page in pages],
+    )
+    cache.req_to_token_pool = _ReqToTokenPool([6, 7, 2, 3, 8])
+    req = _checkpoint_req([1, 2, 3, 4, 5], [3, 1, 4], finished=True)
+    attached = []
+    monkeypatch.setattr(
+        cache, "_attach_request_pages", lambda params, _result: attached.append(1)
+    )
+
+    cache.checkpoint(req, up_to=5)
+
+    # Only the sealed, page-aligned prefix is published; the partial tail
+    # page stays request-owned for release_kv_cache to free.
+    assert [item["slot_ids"] for item in cache._gms_directory.published] == [
+        [3],
+        [1],
+    ]
+    assert attached == []
+    assert req.kv.cache_protected_len == 4
+
+
+def test_native_hit_never_records_unleased_page(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    cache._gms_directory = _Directory()
+    cache._gms_steady_state = True
+    allocator._gms_kv_leases_by_page = {3: KVLease(3, 13)}
+    key = _key(1, 2, 3, 4)
+    cache.insert(InsertParams(key=key, value=torch.tensor([6, 7, 2, 3])))
+    req = SimpleNamespace(session=None)
+
+    cache.match_prefix(MatchPrefixParams(key=key, req=req))
+
+    assert req._gms_kv_page_ids is None
+
+
+def test_second_native_match_preserves_still_allocated_request_suffix(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    cache._gms_directory = _Directory()
+    cache._gms_steady_state = True
+    allocator._gms_kv_leases_by_page = {
+        page: KVLease(page, 10 + page) for page in (1, 3, 4)
+    }
+    key = _key(1, 2, 3, 4)
+    cache.insert(InsertParams(key=key, value=torch.tensor([6, 7, 2, 3])))
+    req = SimpleNamespace(
+        session=None,
+        # The seventh native page may be only partly filled when the second
+        # lookup runs; it still belongs to this request.
+        kv=SimpleNamespace(kv_allocated_len=5),
+        _gms_kv_page_ids=[3, 1, 4],
+        is_retracted=False,
+    )
+
+    cache.match_prefix(MatchPrefixParams(key=key, req=req))
+
+    assert req._gms_kv_page_ids == [3, 1, 4]
+
+    req.kv.kv_allocated_len = 4
+    cache.match_prefix(MatchPrefixParams(key=key, req=req))
+    assert req._gms_kv_page_ids == [3, 1]
+
+    req.kv.kv_allocated_len = 5
+    req._gms_kv_page_ids = [3, 1, 4]
+    allocator._gms_kv_leases_by_page.pop(4)
+    cache.match_prefix(MatchPrefixParams(key=key, req=req))
+    assert req._gms_kv_page_ids == [3, 1]
 
 
 def test_finished_publication_reuses_insert_result_without_second_match(monkeypatch):
@@ -335,11 +575,26 @@ def test_finished_publication_uses_cpu_pages_without_device_collection(monkeypat
 
 
 def test_live_prefix_publication_seals_only_newly_committed_full_pages(monkeypatch):
+    monkeypatch.setattr(adapter, "_LIVE_CONFIRM_CALLS", 1)
+    monkeypatch.setattr(adapter, "_LIVE_PUBLISH_DELAY_CALLS", 0)
     cache, allocator = _cache(monkeypatch)
     leases = {page: KVLease(page, 10 + page) for page in (3, 4, 5)}
     allocator._gms_kv_leases_by_page = leases
     cache._gms_steady_state = True
     cache._gms_directory = _Directory()
+    acknowledgements = []
+    votes = []
+
+    def vote(stage, digest, operation):
+        votes.append((stage, digest))
+        return operation()
+
+    cache._gms_tp = SimpleNamespace(transact_digest=vote)
+    monkeypatch.setattr(
+        cache._gms_directory,
+        "flush_deferred",
+        lambda timeout: acknowledgements.append(timeout) or True,
+    )
     monkeypatch.setattr(
         cache,
         "_hashes_for_key",
@@ -369,12 +624,215 @@ def test_live_prefix_publication_seals_only_newly_committed_full_pages(monkeypat
 
     assert len(cache._gms_directory.published) == 2
     assert req._gms_published_kv_len == 4
+    assert acknowledgements == [2.0]
+    assert len(votes) == 1 and votes[0][0] == "live:ack"
 
     req.kv.kv_committed_len = 6
     cache._gms_publish_live_prefixes([req])
 
+    # Published now, confirmed by the next output: no daemon wait or TP
+    # barrier on the output path that publishes.
     assert len(cache._gms_directory.published) == 3
     assert cache._gms_directory.published[-1]["slot_ids"] == [5]
+    assert acknowledgements == [2.0]
+    assert req._gms_published_kv_len == 4
+
+    cache._gms_publish_live_prefixes([req])
+    assert acknowledgements == [2.0, 2.0]
+    assert len(votes) == 2
+    assert req._gms_published_kv_len == 6
+
+
+def test_live_prefix_is_not_marked_published_without_daemon_ack(monkeypatch):
+    monkeypatch.setattr(adapter, "_LIVE_CONFIRM_CALLS", 1)
+    monkeypatch.setattr(adapter, "_LIVE_PUBLISH_DELAY_CALLS", 0)
+    cache, _allocator = _cache(monkeypatch)
+    cache._gms_steady_state = True
+    cache._gms_directory = _Directory()
+    monkeypatch.setattr(cache, "_publish_finished_prefix", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cache._gms_directory, "flush_deferred", lambda timeout: False)
+    req = SimpleNamespace(
+        kv=SimpleNamespace(kv_committed_len=2),
+        origin_input_ids=[1, 2],
+        output_ids=[],
+        extra_key=None,
+        cache_salt=None,
+        _gms_kv_page_ids=[3],
+        finished=lambda: False,
+    )
+
+    cache._gms_tp = SimpleNamespace(
+        transact_digest=lambda _stage, _digest, operation: operation()
+    )
+    cache._gms_publish_live_prefixes([req])
+    with pytest.raises(RuntimeError, match="acknowledging live SGLang"):
+        cache._gms_publish_live_prefixes([req])
+
+    assert not hasattr(req, "_gms_published_kv_len")
+
+
+def test_live_prefix_is_not_marked_published_without_tp_vote(monkeypatch):
+    monkeypatch.setattr(adapter, "_LIVE_CONFIRM_CALLS", 1)
+    monkeypatch.setattr(adapter, "_LIVE_PUBLISH_DELAY_CALLS", 0)
+    cache, _allocator = _cache(monkeypatch)
+    cache._gms_steady_state = True
+    cache._gms_directory = _Directory()
+    monkeypatch.setattr(cache, "_publish_finished_prefix", lambda *_a, **_kw: None)
+
+    def fail_peer_vote(_stage, _digest, operation):
+        operation()
+        raise RuntimeError("peer rank did not commit")
+
+    cache._gms_tp = SimpleNamespace(transact_digest=fail_peer_vote)
+    req = SimpleNamespace(
+        kv=SimpleNamespace(kv_committed_len=2),
+        origin_input_ids=[1, 2],
+        output_ids=[],
+        extra_key=None,
+        cache_salt=None,
+        _gms_kv_page_ids=[3],
+        finished=lambda: False,
+    )
+
+    cache._gms_publish_live_prefixes([req])
+    with pytest.raises(RuntimeError, match="peer rank"):
+        cache._gms_publish_live_prefixes([req])
+
+    assert not hasattr(req, "_gms_published_kv_len")
+
+
+def test_live_publish_failure_is_reported_through_the_vote(monkeypatch):
+    monkeypatch.setattr(adapter, "_LIVE_CONFIRM_CALLS", 1)
+    monkeypatch.setattr(adapter, "_LIVE_PUBLISH_DELAY_CALLS", 0)
+    """A rank that fails to publish fails the next vote, so peers stop too."""
+    cache, _allocator = _cache(monkeypatch)
+    cache._gms_steady_state = True
+    cache._gms_directory = _Directory()
+
+    def broken_publish(*_args, **_kwargs):
+        raise RuntimeError("local publish failed")
+
+    monkeypatch.setattr(cache, "_publish_finished_prefix", broken_publish)
+    votes = []
+
+    def vote(stage, _digest, operation):
+        try:
+            operation()
+        except Exception:
+            votes.append((stage, False))
+            raise RuntimeError("SGLang GMS TP transaction failed") from None
+        votes.append((stage, True))
+
+    cache._gms_tp = SimpleNamespace(transact_digest=vote)
+    req = SimpleNamespace(
+        kv=SimpleNamespace(kv_committed_len=2),
+        origin_input_ids=[1, 2],
+        output_ids=[],
+        extra_key=None,
+        cache_salt=None,
+        _gms_kv_page_ids=[3],
+        finished=lambda: False,
+    )
+
+    cache._gms_publish_live_prefixes([req])
+    with pytest.raises(RuntimeError, match="TP transaction failed"):
+        cache._gms_publish_live_prefixes([req])
+
+    assert votes == [("live:ack", False)]
+    assert not hasattr(req, "_gms_published_kv_len")
+
+
+def test_live_publications_are_confirmed_together(monkeypatch):
+    """Several publications share one daemon wait and one TP vote."""
+    monkeypatch.setattr(adapter, "_LIVE_CONFIRM_CALLS", 3)
+    monkeypatch.setattr(adapter, "_LIVE_PUBLISH_DELAY_CALLS", 0)
+    cache, _allocator = _cache(monkeypatch)
+    cache._gms_steady_state = True
+    cache._gms_directory = _Directory()
+    published = []
+    monkeypatch.setattr(
+        cache,
+        "_publish_finished_prefix",
+        lambda key, **_kw: published.append(len(key)),
+    )
+    acknowledgements = []
+    monkeypatch.setattr(
+        cache._gms_directory,
+        "flush_deferred",
+        lambda timeout: acknowledgements.append(timeout) or True,
+    )
+    votes = []
+
+    def vote(stage, digest, operation):
+        votes.append(stage)
+        return operation()
+
+    cache._gms_tp = SimpleNamespace(transact_digest=vote)
+
+    def request(rid):
+        return SimpleNamespace(
+            rid=rid,
+            kv=SimpleNamespace(kv_committed_len=2),
+            origin_input_ids=[1, 2],
+            output_ids=[],
+            extra_key=None,
+            cache_salt=None,
+            _gms_kv_page_ids=[3],
+            finished=lambda: False,
+        )
+
+    first, second = request("a"), request("b")
+    cache._gms_publish_live_prefixes([first])
+    cache._gms_publish_live_prefixes([first, second])
+    # Pending publications are not republished while awaiting confirmation.
+    assert len(published) == 2
+    assert votes == [] and acknowledgements == []
+    assert not hasattr(first, "_gms_published_kv_len")
+
+    cache._gms_publish_live_prefixes([first, second])
+    cache._gms_publish_live_prefixes([first, second])
+    assert votes == ["live:ack"] and acknowledgements == [2.0]
+    assert first._gms_published_kv_len == second._gms_published_kv_len == 2
+    assert len(published) == 2
+
+
+def test_live_prefix_waits_and_finished_requests_skip_it(monkeypatch):
+    """New pages publish after a delay; a request that finishes first never does."""
+    monkeypatch.setattr(adapter, "_LIVE_PUBLISH_DELAY_CALLS", 2)
+    cache, _allocator = _cache(monkeypatch)
+    cache._gms_steady_state = True
+    cache._gms_directory = _Directory()
+    published = []
+    monkeypatch.setattr(
+        cache, "_publish_finished_prefix", lambda key, **_kw: published.append(key)
+    )
+    cache._gms_tp = SimpleNamespace(
+        transact_digest=lambda _stage, _digest, operation: operation()
+    )
+
+    def request(rid):
+        done = {"value": False}
+        return done, SimpleNamespace(
+            rid=rid,
+            kv=SimpleNamespace(kv_committed_len=2),
+            origin_input_ids=[1, 2],
+            output_ids=[],
+            extra_key=None,
+            cache_salt=None,
+            _gms_kv_page_ids=[3],
+            finished=lambda: done["value"],
+        )
+
+    _live_done, live = request("live")
+    short_done, short = request("short")
+    cache._gms_publish_live_prefixes([live, short])
+    cache._gms_publish_live_prefixes([live, short])
+    assert published == []
+    short_done["value"] = True
+    cache._gms_publish_live_prefixes([live, short])
+    assert len(published) == 1
+    assert live._gms_live_pending_len == 2
+    assert not hasattr(short, "_gms_live_pending_len")
 
 
 def test_finished_publication_falls_back_when_captured_node_has_no_indices(
@@ -633,6 +1091,62 @@ def test_steady_state_requires_common_current_writer_inventory(monkeypatch):
         assert state["steady_state"] is True
 
 
+def test_steady_state_uses_committed_snapshot_when_async_view_is_stale(monkeypatch):
+    cache, _allocator = _cache(monkeypatch)
+    content_hash = b"s" * 32
+    directory = _Directory()
+    directory.read_view_is_current_writer = True
+    directory.read_view = []
+    directory.snapshot = [(content_hash, {"tier": "hbm", "state": "ready"})]
+    cache._gms_directory = directory
+    cache._gms_tp = SimpleNamespace(
+        all_true=lambda _stage, value: bool(value),
+        run_intersection=lambda _stage, operation: (operation(), [content_hash]),
+    )
+
+    assert cache._maybe_enter_steady_state() is True
+    assert cache._gms_recovery_candidates == {content_hash}
+
+
+@pytest.mark.parametrize("activated_tokens", [0, 8])
+def test_steady_state_bootstraps_zero_writable_pages(monkeypatch, activated_tokens):
+    cache, allocator = _cache(monkeypatch)
+    directory = _Directory()
+    directory.read_view_is_current_writer = True
+    cache._gms_directory = directory
+    cache._gms_tp = SimpleNamespace(
+        all_true=lambda _stage, value: bool(value),
+        run_intersection=lambda _stage, operation: (operation(), []),
+    )
+    state = {"exclusive_hidden_pages": {1, 2}, "steady_state": False}
+    monkeypatch.setitem(install_kv_leases._STATE, id(allocator), state)
+    monkeypatch.setattr(
+        install_kv_leases,
+        "enter_exclusive_steady_state",
+        lambda _allocator: 0,
+    )
+    calls = []
+
+    def activate(target, required_tokens, *, max_batch_pages):
+        calls.append((target, required_tokens, max_batch_pages))
+        return activated_tokens
+
+    monkeypatch.setattr(
+        install_kv_leases, "activate_hidden_recovery_capacity", activate
+    )
+    from gpu_memory_service.integrations.sglang import writer_lifecycle
+
+    # A settled (here: refused) phase two ends the wait after one retry.
+    monkeypatch.setattr(writer_lifecycle, "gms_reclaim_refused", lambda: True)
+    if activated_tokens:
+        assert cache._maybe_enter_steady_state() is True
+    else:
+        with pytest.raises(RuntimeError, match="no writable KV pages"):
+            cache._maybe_enter_steady_state()
+    expected = (allocator, allocator.page_size, 256)
+    assert calls == [expected] * (1 if activated_tokens else 2)
+
+
 def test_steady_state_definite_miss_avoids_directory_and_tp_vote(monkeypatch):
     cache, _allocator = _cache(monkeypatch)
     cache._gms_steady_state = True
@@ -649,10 +1163,38 @@ def test_steady_state_definite_miss_avoids_directory_and_tp_vote(monkeypatch):
     cache._gms_directory.lookup_and_claim = lambda *_args: pytest.fail(
         "a definite steady-state miss must not call the directory"
     )
+    cache._adopt_directory_suffix = lambda *_args: pytest.fail(
+        "steady state without recovery candidates must skip adoption checks"
+    )
 
     result = cache.match_prefix(MatchPrefixParams(key=key))
 
     assert result.device_prefix_len == 0
+
+
+def test_steady_state_candidate_miss_hashes_only_first_missing_page(monkeypatch):
+    cache, _allocator = _cache(monkeypatch)
+    cache._gms_steady_state = True
+    cache._gms_directory = _Directory()
+    key = _key(1, 2, 3, 4, 5, 6)
+    hashes = cache._hashes_for_key(key, cache.page_size)
+    # A later candidate cannot be adopted without the first missing page.
+    cache._gms_recovery_candidates = {hashes[-1]}
+    cache._gms_directory.lookup_and_claim = lambda *_args: pytest.fail(
+        "a noncontiguous candidate must not reach the directory"
+    )
+    original_hashes = cache._hashes_for_key
+    hashed_lengths = []
+
+    def record_hashes(prefix, page_size):
+        hashed_lengths.append(len(prefix))
+        return original_hashes(prefix, page_size)
+
+    cache._hashes_for_key = record_hashes
+    result = cache.match_prefix(MatchPrefixParams(key=key))
+
+    assert result.device_prefix_len == 0
+    assert hashed_lengths == [cache.page_size]
 
 
 def test_steady_state_publication_skips_digest_vote(monkeypatch):
@@ -685,8 +1227,7 @@ def test_steady_state_publication_skips_digest_vote(monkeypatch):
     assert content_hash not in cache._gms_recovery_candidates
 
 
-@pytest.mark.parametrize("transition_mode", [None, "0", "1"])
-def test_publication_stays_native_until_writer_visible(monkeypatch, transition_mode):
+def test_publication_stays_native_until_writer_visible(monkeypatch):
     cache, allocator = _cache(monkeypatch)
     key = _key(1, 2)
     cache.insert(InsertParams(key=key, value=torch.tensor([6, 7])))
@@ -701,10 +1242,6 @@ def test_publication_stays_native_until_writer_visible(monkeypatch, transition_m
         retained.extend(int(page) for page in pages)
         return [lease]
 
-    if transition_mode is None:
-        monkeypatch.delenv("DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING", raising=False)
-    else:
-        monkeypatch.setenv("DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING", transition_mode)
     monkeypatch.setattr(adapter, "retain_hbm_pages", retain)
 
     cache._publish_finished_prefix(key)
@@ -889,6 +1426,40 @@ def test_publication_retires_oldest_page_with_batched_generation_tombstone(monke
     assert cache._gms_local_pages_by_hash[old_hashes[0]] == 1
     assert cache._gms_local_hashes_by_page[1] == {old_hashes[0]}
     assert old_hashes[0] not in cache._gms_recovery_candidates
+
+
+def test_publication_does_not_scan_retained_order_below_cap(monkeypatch):
+    class NoScanOrder(dict):
+        def __iter__(self):
+            raise AssertionError("retained order scanned without eviction pressure")
+
+    cache, allocator = _cache(monkeypatch)
+    allocator.size = 8
+    cache._gms_steady_state = True
+    cache._gms_directory = _Directory()
+    cache._gms_retained_order = NoScanOrder({1: None})
+    allocator._gms_retained_pages.add(1)
+    allocator._gms_kv_leases_by_page = {2: KVLease(2, 12)}
+
+    def retain(_allocator, pages):
+        allocator._gms_retained_pages.update(pages)
+        return [allocator._gms_kv_leases_by_page[page] for page in pages]
+
+    monkeypatch.setattr(adapter, "retain_hbm_pages", retain)
+    item = {
+        "content_hash": b"n" * 32,
+        "engine_id": "0",
+        "slot_ids": [2],
+        "generations": [12],
+        "tier": "hbm",
+        "active": False,
+    }
+
+    cache._commit_finished_prefixes([([item["content_hash"]], [2], [item])])
+
+    assert cache._gms_directory.published == [item]
+    assert allocator._gms_retained_pages == {1, 2}
+    assert dict(cache._gms_retained_order) == {1: None, 2: None}
 
 
 def test_concurrent_identical_prefixes_publish_one_canonical_page(monkeypatch):
@@ -1320,6 +1891,51 @@ def test_persistent_plan_rejects_partial_reattach():
         )
 
 
+def _standby_env(monkeypatch, wait_secs="5"):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setenv("GMS_SGLANG_SHADOW_KV_PLAN_WAIT_SECS", wait_secs)
+
+
+def test_standby_waits_for_primary_plan_to_complete(monkeypatch):
+    _standby_env(monkeypatch)
+    calls = []
+
+    def listed(**_kwargs):
+        calls.append(1)
+        # The primary is still allocating: none, then partial, then complete.
+        tags = [[], ["kv:new:a"], ["kv:new:a", "kv:new:b"]][min(len(calls) - 1, 2)]
+        return [SimpleNamespace(tag=tag) for tag in tags]
+
+    manager = SimpleNamespace(list_persistent=listed)
+    assert install_vmm_ipc_kv._prepare_standby_tag_plan(
+        manager, "engine", "kv_pool", ["kv:new:a", "kv:new:b"]
+    )
+    assert len(calls) == 3
+
+
+def test_standby_never_allocates_a_missing_plan(monkeypatch):
+    _standby_env(monkeypatch, wait_secs="0.6")
+    manager = SimpleNamespace(list_persistent=lambda **_kwargs: [])
+    with pytest.raises(RuntimeError, match="Timed out waiting for the primary"):
+        install_vmm_ipc_kv._prepare_standby_tag_plan(
+            manager, "engine", "kv_pool", ["kv:new:a"]
+        )
+
+
+def test_primary_plan_preparation_does_not_wait(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setenv("ENGINE_ID", "0")
+    manager = SimpleNamespace(list_persistent=lambda **_kwargs: [])
+    assert (
+        install_vmm_ipc_kv._prepare_standby_tag_plan(
+            manager, "engine", "kv_pool", ["kv:new:a"]
+        )
+        is False
+    )
+
+
 def test_persistent_plan_rejects_same_manifest_with_different_layout(monkeypatch):
     monkeypatch.setenv("GMS_KV_DIRECTORY_MANIFEST", "model@immutable-revision")
     old_plan = install_vmm_ipc_kv._semantic_tag_plan(
@@ -1350,6 +1966,7 @@ def test_persistent_init_marks_pool_only_after_complete_plan(monkeypatch):
     from gpu_memory_service.client.torch import allocator as torch_allocator
 
     events = []
+    monkeypatch.setenv("GMS_SGLANG_KV_RECOVERY_MODE", "granular")
     instance = SimpleNamespace()
     manager = object()
 
@@ -1632,7 +2249,31 @@ def test_steady_state_eviction_uses_activated_recovery_capacity(monkeypatch):
 
     result = cache.evict_for_alloc(EvictParams(num_tokens=64))
 
-    assert observed[0].num_tokens == 0
+    assert observed[0].num_tokens == 64
+    assert result.num_tokens_evicted == 64
+
+
+def test_steady_state_eviction_does_not_probe_hidden_pages_when_native_suffices(
+    monkeypatch,
+):
+    from sglang.srt.mem_cache.base_prefix_cache import EvictParams, EvictResult
+    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
+
+    cache, _allocator = _cache(monkeypatch)
+    cache._gms_steady_state = True
+    monkeypatch.setattr(
+        install_kv_leases,
+        "activate_hidden_recovery_capacity",
+        lambda *_args: pytest.fail("native eviction met the full shortfall"),
+    )
+    monkeypatch.setattr(
+        UnifiedRadixCache,
+        "evict_for_alloc",
+        lambda self, params: EvictResult(num_tokens_evicted=params.num_tokens),
+    )
+
+    result = cache.evict_for_alloc(EvictParams(num_tokens=64))
+
     assert result.num_tokens_evicted == 64
 
 
@@ -1649,3 +2290,60 @@ def test_non_authoritative_eviction_keeps_native_quota(monkeypatch):
     )
     params = EvictParams(num_tokens=2)
     assert cache.evict_for_alloc(params) is params
+
+
+@pytest.mark.parametrize(("settle_after", "expected"), [(3, 4), (None, 0)])
+def test_handoff_waits_for_async_reclaim_before_failing(
+    monkeypatch, settle_after, expected
+):
+    from gpu_memory_service.integrations.sglang import writer_lifecycle
+
+    cache, _allocator = _cache(monkeypatch)
+    attempts = []
+
+    def activate(_allocator, _page_size, *, max_batch_pages):
+        attempts.append(max_batch_pages)
+        return 4 if settle_after is not None and len(attempts) > settle_after else 0
+
+    monkeypatch.setattr(
+        writer_lifecycle,
+        "gms_reclaim_ready",
+        lambda: settle_after is not None and len(attempts) >= settle_after,
+    )
+    monkeypatch.setattr(writer_lifecycle, "gms_reclaim_refused", lambda: False)
+    monkeypatch.setenv("GMS_SGLANG_HANDOFF_CAPACITY_WAIT_SECS", "0.3")
+
+    assert cache._activate_handoff_capacity(activate) == expected
+    assert len(attempts) >= 2
+    assert set(attempts) == {256}
+
+
+def test_handoff_stops_waiting_after_terminal_refusal(monkeypatch):
+    from gpu_memory_service.integrations.sglang import writer_lifecycle
+
+    cache, _allocator = _cache(monkeypatch)
+    attempts = []
+    monkeypatch.setattr(writer_lifecycle, "gms_reclaim_ready", lambda: False)
+    monkeypatch.setattr(writer_lifecycle, "gms_reclaim_refused", lambda: True)
+    monkeypatch.setenv("GMS_SGLANG_HANDOFF_CAPACITY_WAIT_SECS", "3600")
+
+    def activate(*_args, **_kwargs):
+        attempts.append(1)
+        return 0
+
+    assert cache._activate_handoff_capacity(activate) == 0
+    assert len(attempts) == 2
+
+
+@pytest.mark.parametrize(
+    ("shadow", "engine_id", "standby"),
+    [("1", "1", True), ("1", "0", False), ("0", "1", False), ("1", "2", True)],
+)
+def test_sglang_failover_standby_detection(monkeypatch, shadow, engine_id, standby):
+    import gpu_memory_service.integrations.sglang as gms_sglang
+
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", shadow)
+    monkeypatch.setenv("ENGINE_ID", engine_id)
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    assert gms_sglang._is_failover_standby() is standby
+    assert install_vmm_ipc_kv._is_failover_standby() is standby

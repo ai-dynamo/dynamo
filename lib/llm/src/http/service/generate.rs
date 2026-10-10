@@ -939,7 +939,7 @@ async fn handler_generate(
         request.model = Some(model.clone());
     }
 
-    if let Err(response) = check_model_serving_ready(&state, &model) {
+    if let Err(response) = check_model_serving_ready(&state, &model).await {
         metric_lifecycle.mark_error(generate_metric_error_type(response.0));
         return response.into_response();
     }

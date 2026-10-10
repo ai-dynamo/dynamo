@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import fcntl
 import multiprocessing
 import os
 import select
 import signal
 import sys
+import threading
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -68,6 +71,43 @@ def test_headless_rank_joins_leader_boot_identity():
     joined = lifecycle.join_prepared_writer_cohort(timeout=0.1)
     assert joined == leader
     assert os.environ["GMS_VLLM_WRITER_COHORT_PATH"] == str(leader)
+
+
+def test_concurrent_cohort_publication_uses_distinct_pending_files(monkeypatch):
+    current = lifecycle.prepare_writer_cohort()
+    barrier = threading.Barrier(2)
+    replaced = []
+    real_replace = os.replace
+
+    def replace(source, destination):
+        if Path(destination).name == "active":
+            replaced.append(Path(source))
+            barrier.wait(timeout=3)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(lifecycle.os, "replace", replace)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        calls = [
+            pool.submit(
+                lambda: asyncio.run(lifecycle._fence_predecessor_writers_for(current))
+            )
+            for _ in range(2)
+        ]
+        assert [call.result(timeout=5) for call in calls] == [None, None]
+    assert len(set(replaced)) == 2
+
+
+def test_late_tp_rank_retains_predecessor_identity():
+    current = lifecycle.prepare_writer_cohort()
+    predecessor = current.parent / uuid.uuid4().hex
+    predecessor.touch()
+    (current.parent / "active").write_text(predecessor.name)
+
+    first = asyncio.run(lifecycle._fence_predecessor_writers_for(current))
+    late_rank = asyncio.run(lifecycle._fence_predecessor_writers_for(current))
+
+    assert first == predecessor
+    assert late_rank == predecessor
 
 
 def test_process_join_rechecks_same_parent_after_guard(monkeypatch):
@@ -307,3 +347,90 @@ def test_takeover_waits_for_orphaned_engine_core_writer():
         if supervisor:
             os.kill(supervisor, signal.SIGKILL)
             os.waitpid(supervisor, 0)
+
+
+def test_joined_worker_fences_without_creating_a_second_cohort(monkeypatch):
+    current = lifecycle.prepare_writer_cohort()
+    marker = current.parent / "active"
+    marker.write_text(current.name)
+    monkeypatch.setattr(
+        lifecycle,
+        "prepare_writer_cohort",
+        lambda: pytest.fail("worker must not create a new writer cohort"),
+    )
+    assert asyncio.run(lifecycle.fence_joined_writer_cohort()) is None
+    assert marker.read_text() == current.name
+
+
+def _start_pod_predecessor(lock_path: Path):
+    """Fork a predecessor that owns a writer cohort on one pod's lock dir."""
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        os.environ["FAILOVER_LOCK_PATH"] = str(lock_path)
+        lifecycle._boot = None
+        lifecycle._held_in_pid = None
+        lifecycle._leader_fd = None
+        lifecycle.prepare_writer_cohort()
+        asyncio.run(lifecycle.fence_predecessor_writers())
+        os.write(write_fd, b"R")
+        signal.pause()
+        os._exit(0)
+    os.close(write_fd)
+    assert _read(read_fd) == b"R"
+    os.close(read_fd)
+    return pid
+
+
+def test_pod_scoped_cohorts_fence_only_their_own_pod(tmp_path, monkeypatch):
+    """A live writer on another pod neither blocks nor escapes the fence."""
+    monkeypatch.setenv("DYN_GMS_WRITER_COHORT_SCOPE", "pod")
+    assert lifecycle.pod_scoped_writer_cohort()
+    pod_a = tmp_path / "pod-a" / "failover.lock"
+    pod_b = tmp_path / "pod-b" / "failover.lock"
+    pod_a.parent.mkdir()
+    pod_b.parent.mkdir()
+    old_a = _start_pod_predecessor(pod_a)
+    old_b = _start_pod_predecessor(pod_b)
+    try:
+        os.kill(old_a, signal.SIGKILL)
+        os.waitpid(old_a, 0)
+        old_a = 0
+
+        # Pod A's successor only depends on pod A's (exited) predecessor.
+        monkeypatch.setenv("FAILOVER_LOCK_PATH", str(pod_a))
+        predecessor = asyncio.run(
+            asyncio.wait_for(lifecycle.fence_predecessor_writers(), 2.0)
+        )
+        assert predecessor is not None and predecessor.parent.parent == pod_a.parent
+
+        # Pod B's successor must still wait for pod B's live predecessor.
+        lifecycle._boot = None
+        lifecycle._held_in_pid = None
+        lifecycle._close_leader_guard()
+        monkeypatch.setenv("FAILOVER_LOCK_PATH", str(pod_b))
+
+        async def fence_b():
+            fence = asyncio.create_task(lifecycle.fence_predecessor_writers())
+            await asyncio.sleep(0.3)
+            assert not fence.done(), "pod B's live predecessor escaped its fence"
+            os.kill(old_b, signal.SIGKILL)
+            os.waitpid(old_b, 0)
+            return await asyncio.wait_for(fence, 2.0)
+
+        predecessor = asyncio.run(fence_b())
+        old_b = 0
+        assert predecessor is not None and predecessor.parent.parent == pod_b.parent
+    finally:
+        for pid in (old_a, old_b):
+            if pid:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+
+
+def test_pod_scope_is_opt_in(monkeypatch):
+    monkeypatch.delenv("DYN_GMS_WRITER_COHORT_SCOPE", raising=False)
+    assert not lifecycle.pod_scoped_writer_cohort()
+    monkeypatch.setenv("DYN_GMS_WRITER_COHORT_SCOPE", "shared")
+    assert not lifecycle.pod_scoped_writer_cohort()

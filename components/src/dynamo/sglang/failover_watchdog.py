@@ -16,7 +16,12 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
-from dynamo.common.gms_failover import release_attached_gms_failover_lock
+from dynamo.common.gms_failover import (
+    frozen_kill_before_gpu_proof,
+    frozen_predecessor_enabled,
+    quiesce_local_gpu_cohort_after_rank_loss,
+    release_attached_gms_failover_lock,
+)
 from dynamo.common.utils.env import env_bool as _truthy_env
 
 logger = logging.getLogger(__name__)
@@ -24,11 +29,6 @@ logger = logging.getLogger(__name__)
 
 def _watchdog_enabled() -> bool:
     return _truthy_env("DYN_SGLANG_GMS_FAILOVER_CHILD_WATCHDOG", default=True)
-
-
-def _mapped_sleeping_standby() -> bool:
-    value = os.environ.get("DYN_SGLANG_GMS_LOCK_BEFORE_INIT", "1")
-    return value.strip().lower() in {"0", "false", "no", "off"}
 
 
 def _poll_interval_s() -> float:
@@ -85,13 +85,15 @@ def _pid_running(pid: int) -> bool:
         return True
 
 
-def _terminate_pid(pid: int) -> None:
+def _terminate_pid(pid: int) -> bool:
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
-        return
+        return True
     except PermissionError:
         logger.warning("[GMS failover] cannot SIGKILL SGLang child pid=%s", pid)
+        return False
+    return True
 
 
 def _request_owner_shutdown() -> None:
@@ -163,20 +165,63 @@ def _scheduler_dead(engine: Any) -> bool:
 
 
 def _fence_children(engine: Any, *, wait_s: float = 0.25) -> bool:
+    # MPS can certify a survivor only while its CUDA client is still alive.
+    # Attempt that proof before killing the CPU submitters in either mode.
+    # Frozen takeover may proceed if it fails, but the successor then keeps
+    # the affected GPU-touched pages quarantined.
+    from gpu_memory_service.integrations.common.gpu_quiescence import (
+        gms_mps_provider_enabled,
+    )
+    from gpu_memory_service.integrations.common.process_lifecycle import (
+        cannot_run_user_code,
+    )
+
+    frozen = frozen_predecessor_enabled("sglang")
+    mps_enabled = gms_mps_provider_enabled("sglang")
+    quiesced = not frozen_kill_before_gpu_proof(
+        "sglang"
+    ) and quiesce_local_gpu_cohort_after_rank_loss(
+        "sglang", require_cuda_success=frozen
+    )
+    if mps_enabled and not quiesced and not frozen:
+        # Do not destroy the registered CUDA client or relinquish the lock
+        # after an uncertified MPS result. A retry may still obtain proof.
+        return False
     pids = set(_child_pids(engine))
     processes, _names = _watchdog_processes(engine)
     pids.update(int(proc.pid) for proc in processes if getattr(proc, "pid", None))
+    kill_issued = True
     for pid in pids:
         if _pid_running(pid):
-            _terminate_pid(pid)
+            kill_issued = _terminate_pid(pid) and kill_issued
+
+    if frozen and mps_enabled and quiesced and kill_issued:
+        # GMS's positive result means MPS returned CUDA_SUCCESS for the
+        # birth-checked client, removed it from MPS inventory, and sent it
+        # SIGKILL. It can no longer submit GPU work, even if Linux spends
+        # seconds tearing down its host process. The successor still freezes
+        # predecessor pages and reclaims them only after its own proof.
+        logger.info(
+            "[GMS failover] SGLang CUDA cohort certified retired; "
+            "handoff need not wait for host child exit"
+        )
+        return True
+
+    def fenced(pid: int) -> bool:
+        if not _pid_running(pid):
+            return True
+        # In frozen mode the successor serves only sealed and free KV, so a
+        # killed child that can no longer run user code is fenced even while
+        # its driver teardown keeps the process alive for seconds.
+        return frozen and kill_issued and cannot_run_user_code(pid)
 
     deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
-        if all(not _pid_running(pid) for pid in pids):
+        if all(fenced(pid) for pid in pids):
             return True
         time.sleep(0.01)
 
-    alive = [pid for pid in pids if _pid_running(pid)]
+    alive = [pid for pid in pids if not fenced(pid)]
     if alive:
         logger.warning(
             "[GMS failover] SGLang child fence timed out; still-running pids=%s",
@@ -205,6 +250,11 @@ class SGLangGmsFailoverChildWatchdog:
         self._previous_sigquit_callback: tuple[Any, tuple[Any, ...]] | None = None
         self._sigquit_uses_asyncio = False
         self._sigquit_handler: Any = None
+
+    @property
+    def failure_started(self) -> bool:
+        """Set before child fencing, so request output can stop immediately."""
+        return self._released.is_set()
 
     def start(self) -> None:
         if self._thread is not None:
@@ -581,7 +631,7 @@ def maybe_start_rank_liveness(
         def on_leader_lost(rank: int, reason: str) -> None:
             trigger_handoff(f"cross-node leader rank {rank} liveness lost ({reason})")
 
-        client = rl.RankLivenessClient(
+        client = rl.new_client(
             leader_host,
             node_rank,
             connect_addr=rl.leader_connect_addr(leader_host, cohort_identity),
@@ -595,16 +645,17 @@ def maybe_start_rank_liveness(
     def on_rank_lost(rank: int, reason: str) -> None:
         trigger_handoff(f"cross-node rank {rank} liveness lost ({reason})")
 
-    monitor = rl.RankLivenessMonitor(
+    monitor = rl.new_monitor(
         on_rank_lost,
         bind_addr=rl.leader_bind_addr(cohort_identity),
         expected_ranks=expected_ranks,
         runtime_armed=runtime_armed,
-        # A mapped standby can take over immediately after every pod-local
-        # writer lock is released. Tell surviving primary ranks to fail-stop
-        # as soon as the leader observes any cohort failure; the per-rank lock
-        # barrier remains the authoritative proof that fencing completed.
-        broadcast_fence=_mapped_sleeping_standby(),
+        # The *active primary* must broadcast the loss. Its lock-before-init
+        # setting is independent of the shadow's mapped-standby setting, so
+        # gating this on the local standby role silently left surviving
+        # ranks waiting for their heartbeat timeout. Writer locks and GMS GPU
+        # proof remain authoritative; this broadcast is only a fast trigger.
+        broadcast_fence=True,
     )
     target._gms_rank_liveness_monitor = monitor
     monitor.start()

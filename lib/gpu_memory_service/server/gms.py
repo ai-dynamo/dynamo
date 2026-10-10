@@ -564,6 +564,7 @@ class GMS:
                 process_start_time_value=msg.process_start_time,
                 rank=msg.rank,
                 failure_notify_addr=msg.failure_notify_addr,
+                mps_pipe_directory=msg.mps_pipe_directory,
                 crash_interlock=msg.crash_interlock,
             )
             logger.info(

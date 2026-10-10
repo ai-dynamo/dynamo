@@ -1108,7 +1108,7 @@ async fn get_model(
 
     // Registered but incomplete worker set → 503, mirroring the OpenAI retrieve
     // path so an incomplete deployment isn't reported as retrievable.
-    super::openai::check_model_serving_ready(&state, model_id)?;
+    super::openai::check_model_serving_ready(&state, model_id).await?;
 
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)

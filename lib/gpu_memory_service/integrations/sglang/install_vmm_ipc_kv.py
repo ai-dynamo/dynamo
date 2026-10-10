@@ -179,11 +179,58 @@ def _prepare_tag_plan(manager, engine_id: str, base_tag: str, plan: list[str]) -
     return True
 
 
+def _is_failover_standby() -> bool:
+    shadow = os.environ.get("DYN_GMS_FAILOVER_SHADOW_MODE", "").strip().lower()
+    return shadow in {"1", "true", "yes", "on"} and os.environ.get(
+        "ENGINE_ID", "0"
+    ) != os.environ.get("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+
+
+def _prepare_standby_tag_plan(manager, engine_id: str, base_tag: str, plan) -> bool:
+    """Reattach a standby only to the primary's complete KV allocation plan.
+
+    A standby that starts alongside its primary can observe the plan while
+    the primary is still allocating it. Wait, bounded by
+    GMS_SGLANG_SHADOW_KV_PLAN_WAIT_SECS (default 1800), instead of failing on a
+    partial plan or allocating the plan itself. The primary path is unchanged.
+    """
+    if not _is_failover_standby():
+        return _prepare_tag_plan(manager, engine_id, base_tag, plan)
+    import time
+
+    timeout = float(os.environ.get("GMS_SGLANG_SHADOW_KV_PLAN_WAIT_SECS", "1800"))
+    deadline = time.monotonic() + max(0.0, timeout)
+    logged = False
+    while True:
+        try:
+            if _prepare_tag_plan(manager, engine_id, base_tag, plan):
+                return True
+            state = "absent"
+        except RuntimeError as exc:
+            if "only partially present" not in str(exc):
+                raise
+            state = str(exc)
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "Timed out waiting for the primary's persistent SGLang KV "
+                f"allocation plan before standby initialization ({state})"
+            )
+        if not logged:
+            logger.info(
+                "[GMS-VMM-IPC] standby waiting up to %.0fs for the primary's "
+                "KV allocation plan (%s)",
+                timeout,
+                state,
+            )
+            logged = True
+        time.sleep(0.5)
+
+
 def _release_new_plan(manager, engine_id: str, plan: list[str]) -> None:
     for tag in plan:
         try:
             manager.release_persistent(engine_id, tag)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "[GMS-VMM-IPC] failed to roll back SGLang KV allocation "
                 "engine_id=%s tag=%s",
@@ -229,7 +276,7 @@ def _persistent_init(original_init, name: str, instance, args, kwargs):
         ) from exc
     base_tag = allocator_tag(device)
     plan = _semantic_tag_plan(name, values)
-    reattaching = _prepare_tag_plan(manager, engine_id, base_tag, plan)
+    reattaching = _prepare_standby_tag_plan(manager, engine_id, base_tag, plan)
     logger.info(
         "[GMS-VMM-IPC] %s persistent KV allocation engine_id=%s device=%d "
         "reattaching=%s semantic_tags=%d",

@@ -8,15 +8,54 @@ from types import SimpleNamespace
 
 import pytest
 from gms_kv_ring.common.content_directory import ContentDirectory
+from gms_kv_ring.daemon.directory_server import DirectoryState
 from gms_kv_ring.daemon.rpc_directory import (
     SERVER_CONNECTION_ID,
     handle_directory_ensure_hbm_capacity,
     handle_directory_lookup_claim,
     handle_directory_promote,
+    handle_directory_publish_batch,
     release_directory_connection_claims,
 )
 
 pytestmark = pytest.mark.pre_merge
+
+
+def test_delayed_old_generation_tombstone_preserves_new_publication():
+    daemon = DirectoryState()
+    daemon._content_directory_writer_id = "writer"
+    epoch = daemon._content_directory_epoch
+    base = {
+        "manifest_id": "manifest",
+        "writer_id": "writer",
+        "expected_epoch": epoch,
+    }
+
+    def publish(generation: int, *, sealed: bool):
+        return handle_directory_publish_batch(
+            daemon,
+            {
+                **base,
+                "items": [
+                    {
+                        "content_hash": (b"a" * 32).hex(),
+                        "engine_id": "engine",
+                        "slot_ids": [7],
+                        "generations": [generation],
+                        "tier": "hbm",
+                        "sealed": sealed,
+                    }
+                ],
+            },
+        )
+
+    assert publish(3, sealed=True)["ok"]
+    assert publish(4, sealed=True)["ok"]
+    assert publish(3, sealed=False)["ok"]
+    key = ("manifest", b"a" * 32)
+    assert daemon._content_directory[key]["generations"] == [4]
+    assert publish(4, sealed=False)["ok"]
+    assert key not in daemon._content_directory
 
 
 def test_authoritative_mode_standby_is_read_only_until_writer_handoff():
@@ -63,6 +102,55 @@ def test_freeze_current_writer_view_preserves_epoch_and_publication_pipeline():
     assert directory.read_view_is_current_writer is True
     assert directory.read_view_cursor == (7, 11)
     assert directory._pipeline_stop is False
+
+
+def test_freeze_current_writer_view_does_not_wait_for_late_reader_reply():
+    import threading
+    import time
+
+    directory = ContentDirectory(
+        "/tmp/gms-directory-freeze-late-reader.sock",
+        engine="test",
+        block_size=16,
+        mode="shadow",
+    )
+    directory._view = {b"old": {"state": "ready", "tier": "hbm"}}
+    directory._view_epoch = 7
+    directory._view_revision = 11
+    directory._view_writer = directory.writer_id
+    directory._view_current_writer = True
+    directory._view_ready.set()
+    release_reply = threading.Event()
+
+    def late_reader():
+        assert release_reply.wait(timeout=2)
+        directory._apply_changes(
+            {
+                "reset_required": False,
+                "changes": [{"content_hash": b"old", "entry": None}],
+                "next_revision": 12,
+                "directory_epoch": 8,
+                "writer_id": "another-writer",
+                "has_more": False,
+            }
+        )
+        directory._install_snapshot({}, 13, 9, "another-writer")
+        directory._invalidate_read_view()
+
+    reader = threading.Thread(target=late_reader, daemon=True)
+    directory._view_thread = reader
+    reader.start()
+    started = time.monotonic()
+    assert directory.freeze_current_writer_view() is True
+    assert time.monotonic() - started < 0.1
+    release_reply.set()
+    reader.join(timeout=2)
+    assert not reader.is_alive()
+    assert directory.read_view_is_current_writer is True
+    assert directory.read_view_cursor == (7, 11)
+    assert directory.read_view_items(tier="hbm") == [
+        (b"old", {"state": "ready", "tier": "hbm"})
+    ]
 
 
 def test_publish_worker_survives_a_failing_mutation():

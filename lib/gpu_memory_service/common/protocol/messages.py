@@ -257,6 +257,9 @@ class RegisterGPUClientRequest(msgspec.Struct, tag="register_gpu_client_request"
     # The message is a latency hint only; writer fencing remains authoritative.
     # Empty preserves the shared-file-marker fallback.
     failure_notify_addr: str = ""
+    # The CUDA client's MPS server, not the GMS daemon's own CUDA context.
+    # Primary and shadow can use separate servers on the same GPU.
+    mps_pipe_directory: str = ""
     # Ask the daemon for a one-shot pipe whose write end is installed in a
     # native fatal-signal handler. Disabled by default: deployments must opt in
     # to both the GMS MPS provider and the crash-interlock contract.

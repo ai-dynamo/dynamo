@@ -34,6 +34,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Live prefixes are confirmed (daemon ack plus TP vote) in batches: after this
+# many output calls since the oldest unconfirmed publication, or once this many
+# publications are pending. Both count lockstep output calls, so every rank
+# votes at the same point.
+_LIVE_CONFIRM_CALLS = 64
+_LIVE_CONFIRM_BATCH = 32
+# A newly sealed live prefix is published after this many output calls, so
+# requests that finish sooner are published only by their finalization.
+_LIVE_PUBLISH_DELAY_CALLS = 16
+
 _publication_gate_installed = False
 _original_process_batch_result = None
 _original_stream_output = None
@@ -215,6 +225,7 @@ def make_gms_unified_cache_class():
             _install_publication_gate()
             self._gms_directory = _make_directory(self.page_size)
             self._gms_engine_id = _engine_id()
+            self.token_to_kv_pool_allocator._gms_engine_id = self._gms_engine_id
             self.token_to_kv_pool_allocator._gms_kv_directory = self._gms_directory
             # An active writer otherwise leases every native-free page when it
             # enters the lock-free steady state. In failover mode, keep exactly
@@ -237,8 +248,14 @@ def make_gms_unified_cache_class():
             # (kv record, CPU page IDs) armed by claim_kv_row for the one
             # release free of a request's own pages.
             self._gms_release_hint = None
+            self._gms_unfinished_req = None
+            self._gms_fresh_insert = None
             self._gms_publication_batch_depth = 0
             self._gms_pending_publications = []
+            # Live publications awaiting TP confirmation, and the output-call
+            # counter that schedules it identically on every rank.
+            self._gms_live_unconfirmed = []
+            self._gms_live_calls = 0
             self._gms_local_pages_by_hash: dict[bytes, int] = {}
             self._gms_local_hashes_by_page: dict[int, set[bytes]] = {}
             self._gms_retained_order: dict[int, None] = {}
@@ -289,13 +306,17 @@ def make_gms_unified_cache_class():
             )
             if not ready:
                 return False
-            _local, common = self._gms_tp.run_intersection(
+            # The async read view is a fast readiness hint, but it may still
+            # be missing predecessor deltas when writer identity changes.
+            # Seed the recovery set from one daemon-committed snapshot per
+            # rank. This runs once per takeover, never on the steady-state
+            # match_prefix hot path.
+            local, common = self._gms_tp.run_intersection(
                 "steady:inventory",
                 lambda: [
                     content_hash
-                    for content_hash, _entry in self._gms_directory.read_view_items(
-                        tier="hbm", state=""
-                    )
+                    for content_hash, entry in self._gms_directory.snapshot_authoritative().items()
+                    if entry.get("tier") == "hbm"
                 ],
             )
             if not self._gms_tp.all_true(
@@ -307,6 +328,7 @@ def make_gms_unified_cache_class():
                 return False
             from gpu_memory_service.integrations.sglang.install_kv_leases import (
                 _STATE,
+                activate_hidden_recovery_capacity,
                 enter_exclusive_steady_state,
             )
 
@@ -322,37 +344,81 @@ def make_gms_unified_cache_class():
             state = _STATE.get(id(self.token_to_kv_pool_allocator))
             if state is not None:
                 state["steady_state"] = True
+                # SGLang may decline to schedule any allocation when native
+                # free_pages starts empty, so evict_for_alloc never gets a
+                # chance to activate the predecessor's hidden pages. Retire
+                # only a small bootstrap batch here; later native pressure
+                # can reclaim more while most SEALED KV stays recoverable.
+                if writable_pages == 0 and state.get("exclusive_hidden_pages"):
+                    activated_tokens = self._activate_handoff_capacity(
+                        activate_hidden_recovery_capacity
+                    )
+                    if activated_tokens <= 0:
+                        raise RuntimeError(
+                            "SGLang recovery has no writable KV pages after handoff"
+                        )
+                    writable_pages = activated_tokens // self.page_size
             logger.info(
                 "[GMS-KVLease] SGLang entered exclusive steady state "
-                "candidates=%d writable_pages=%d",
+                "local_candidates=%d candidates=%d writable_pages=%d",
+                len(local),
                 len(self._gms_recovery_candidates),
                 writable_pages,
             )
             return True
 
+        def _activate_handoff_capacity(self, activate) -> int:
+            """Wait for asynchronous phase two when handoff has no capacity.
+
+            Near-full HBM can leave no FREE page and no retirable SEALED page
+            until predecessor quarantine is reclaimed a few seconds later.
+            """
+            import time
+
+            from gpu_memory_service.integrations.sglang import writer_lifecycle
+
+            deadline = time.monotonic() + float(
+                os.environ.get("GMS_SGLANG_HANDOFF_CAPACITY_WAIT_SECS", "30")
+            )
+            while True:
+                activated = activate(
+                    self.token_to_kv_pool_allocator,
+                    self.page_size,
+                    max_batch_pages=256,
+                )
+                if activated > 0:
+                    return activated
+                settled = self._gms_tp.all_true(
+                    "handoff:reclaim-settled",
+                    writer_lifecycle.gms_reclaim_ready()
+                    or writer_lifecycle.gms_reclaim_refused(),
+                )
+                in_time = self._gms_tp.all_true(
+                    "handoff:reclaim-wait", time.monotonic() < deadline
+                )
+                if settled or not in_time:
+                    return activate(
+                        self.token_to_kv_pool_allocator,
+                        self.page_size,
+                        max_batch_pages=256,
+                    )
+                time.sleep(0.1)
+
         def evict_for_alloc(self, params):
-            # Native pressure eviction otherwise frees just one request's
-            # shortfall. That leaves no eligible pages over which the GMS
-            # reservation protocol can amortize its TP transaction. Ask the
-            # native policy for bounded headroom; it still chooses the LRU
-            # victims and protects every locked/in-flight prefix.
+            # Prefer native eviction of this writer's own cache entries. Only
+            # retire predecessor SEALED pages when native eviction cannot meet
+            # the requested shortfall; probing the hidden pool on every
+            # successful native eviction adds a synchronous directory round
+            # trip to prefill and needlessly reduces recoverable KV.
             from dataclasses import replace
 
             from gpu_memory_service.integrations.sglang.install_kv_leases import (
                 activate_hidden_recovery_capacity,
+                begin_batched_sealed_eviction,
+                finish_batched_sealed_eviction,
             )
 
-            activated = 0
-            if self._gms_steady_state and params.num_tokens > 0:
-                activated = activate_hidden_recovery_capacity(
-                    self.token_to_kv_pool_allocator, params.num_tokens
-                )
-                if activated:
-                    params = replace(
-                        params,
-                        num_tokens=max(0, params.num_tokens - activated),
-                    )
-
+            requested_tokens = params.num_tokens
             if (
                 params.num_tokens > 0
                 and self._gms_directory.authoritative
@@ -362,9 +428,21 @@ def make_gms_unified_cache_class():
                 page_size = int(self.page_size)
                 headroom = (size // 16 // page_size) * page_size
                 params = replace(params, num_tokens=max(params.num_tokens, headroom))
-            result = super().evict_for_alloc(params)
-            if activated:
-                result.num_tokens_evicted += activated
+            batched = begin_batched_sealed_eviction(self.token_to_kv_pool_allocator)
+            try:
+                result = super().evict_for_alloc(params)
+            finally:
+                if batched:
+                    finish_batched_sealed_eviction(self.token_to_kv_pool_allocator)
+            remaining = max(
+                0, requested_tokens - int(getattr(result, "num_tokens_evicted", 0))
+            )
+            if self._gms_steady_state and remaining:
+                activated = activate_hidden_recovery_capacity(
+                    self.token_to_kv_pool_allocator, remaining
+                )
+                if activated:
+                    result.num_tokens_evicted += activated
             return result
 
         @staticmethod
@@ -429,9 +507,79 @@ def make_gms_unified_cache_class():
             key = params.key.page_aligned(self.page_size)
             hashes = self._hashes_for_key(key, self.page_size)[:matched_pages]
             pages = [self._gms_local_pages_by_hash.get(value) for value in hashes]
+
+            def attach(pages: list[int]) -> None:
+                known = getattr(req, "_gms_kv_page_ids", None)
+                allocated_len = int(
+                    getattr(getattr(req, "kv", None), "kv_allocated_len", 0)
+                )
+                if (
+                    isinstance(known, list)
+                    and len(known) > len(pages)
+                    and known[: len(pages)] == pages
+                    and not getattr(req, "is_retracted", False)
+                    and allocated_len > (len(known) - 1) * int(self.page_size)
+                    and all(
+                        page in self.token_to_kv_pool_allocator._gms_kv_leases_by_page
+                        for page in known[len(pages) :]
+                    )
+                ):
+                    # A second nonempty match can run after extend allocated
+                    # the next page. Preserve the still-owned suffix instead
+                    # of truncating the request's CPU page record to the
+                    # original radix hit and poisoning all later decode steps.
+                    return
+                req._gms_kv_page_ids = pages
+
             if len(pages) == matched_pages and all(page is not None for page in pages):
-                req._gms_kv_page_ids = [int(page) for page in pages]
+                attach([int(page) for page in pages])
                 return
+            fresh = self._gms_fresh_insert
+            if (
+                fresh is not None
+                and fresh[0] is req
+                and fresh[1] is params.key
+                and getattr(self, "linker", None) is None
+                and fresh[3] == result.last_device_node
+                and len(fresh[2]) == matched_pages
+                and int(result.device_prefix_len) == len(params.key)
+                and all(
+                    page in self.token_to_kv_pool_allocator._gms_kv_leases_by_page
+                    for page in fresh[2]
+                )
+            ):
+                # SGLang calls match_prefix immediately after an insert that
+                # created an entirely new native path. No other tree operation
+                # can interleave on this scheduler thread, so the request's
+                # allocator-recorded CPU pages are exactly the matched pages.
+                # Avoid synchronizing a GPU index tensor back to the CPU.
+                attach(list(fresh[2]))
+                return
+            if self._gms_steady_state and self._gms_directory.authoritative:
+                # A native hit may precede GMS publication, so the local
+                # hash map is not a complete index of SGLang-owned pages.
+                # Snapshot one token index per page at admission, not on each
+                # decode step. The paged allocator makes each physical page a
+                # contiguous page_size run; only leased pages can be sealed.
+                page_size = int(self.page_size)
+                indices = self._match_device_indices(params, result)
+                slots = (
+                    []
+                    if indices is None
+                    else indices[: matched_pages * page_size : page_size]
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+                native_pages = [int(slot) // page_size for slot in slots]
+                lease_map = self.token_to_kv_pool_allocator._gms_kv_leases_by_page
+                if (
+                    len(native_pages) == matched_pages
+                    and len(set(native_pages)) == matched_pages
+                    and all(page > 0 and page in lease_map for page in native_pages)
+                ):
+                    attach(native_pages)
+                    return
             known = getattr(req, "_gms_kv_page_ids", None)
             if known is None or len(known) < matched_pages:
                 req._gms_kv_page_ids = None
@@ -690,12 +838,14 @@ def make_gms_unified_cache_class():
                 )
                 cap = max(1, total_pages * 3 // 4) if total_pages > 2 else 0
                 excess = max(0, len(retained) - cap) if cap else 0
-                current_pages = set(unique_pages)
-                retire_pages = [
-                    page
-                    for page in self._gms_retained_order
-                    if page in retained and page not in current_pages
-                ][:excess]
+                retire_pages = []
+                if excess:
+                    current_pages = set(unique_pages)
+                    for page in self._gms_retained_order:
+                        if page in retained and page not in current_pages:
+                            retire_pages.append(page)
+                            if len(retire_pages) == excess:
+                                break
                 if retire_pages:
                     retired_leases = demote_hbm_pages_local(allocator, retire_pages)
                     if len(retired_leases) != len(retire_pages):
@@ -847,16 +997,64 @@ def make_gms_unified_cache_class():
             self._gms_recovery_candidates.clear()
             self._gms_pending_publications.clear()
             self._gms_publication_batch_depth = 0
+            self._gms_live_unconfirmed = []
+            self._gms_live_calls = 0
             self._gms_local_pages_by_hash.clear()
             self._gms_local_hashes_by_page.clear()
             self._gms_retained_order.clear()
             self._gms_finished_insert = None
             self._gms_release_hint = None
+            self._gms_unfinished_req = None
+            self._gms_fresh_insert = None
+
+        def checkpoint_into_tree(self, req, *, up_to: int, **kwargs) -> None:
+            # Every tree insert of a request, from both checkpoint_kv_cache and
+            # a checkpointing release_kv_cache (including a streaming session's
+            # first prompt), lands here. SGLang itself tells the final insert
+            # from a running checkpoint by req.finished().
+            if req.finished():
+                return self._gms_checkpoint_finished(req, up_to=up_to, **kwargs)
+            previous_req = self._gms_unfinished_req
+            previous_insert = self._gms_fresh_insert
+            self._gms_unfinished_req = req
+            self._gms_fresh_insert = None
+            try:
+                return super().checkpoint_into_tree(req, up_to=up_to, **kwargs)
+            finally:
+                self._gms_unfinished_req = previous_req
+                self._gms_fresh_insert = previous_insert
+
+        def _match_tree(self, params):
+            # A running checkpoint re-matches its just-inserted key to repoint
+            # the request's row onto the tree's pages. Treat that match like
+            # an ordinary lookup so the request's CPU page record follows the
+            # row; other tree walks stay native.
+            req = self._gms_unfinished_req
+            if req is None or getattr(params, "req", None) is not req:
+                return super()._match_tree(params)
+            return self._gms_match(params, super()._match_tree)
 
         def insert(self, params):
             result = super().insert(params)
             if self._gms_capture_finished_insert:
                 self._gms_finished_insert = (params, result)
+            req = self._gms_unfinished_req
+            if (
+                req is not None
+                and params.key is not None
+                and result.prefix_len == 0
+                and result.last_device_node is not None
+                and not result.rotation_tail_declined
+            ):
+                count = len(params.key) // int(self.page_size)
+                known = getattr(req, "_gms_kv_page_ids", None)
+                if isinstance(known, list) and len(known) >= count:
+                    self._gms_fresh_insert = (
+                        req,
+                        params.key,
+                        tuple(known[:count]),
+                        result.last_device_node,
+                    )
             return result
 
         def _node_directory_hashes(self, node) -> list[bytes]:
@@ -925,58 +1123,129 @@ def make_gms_unified_cache_class():
             return super()._evict_device_leaf(node_id, tracker)
 
         def _gms_publish_live_prefixes(self, reqs) -> None:
-            """Seal newly committed full pages before their tokens reach clients."""
+            """Publish full-page live prefixes and confirm them one output later.
+
+            Every TP rank calls this from the output streamer with the same
+            requests. A prefix counts as published only after the daemon has
+            acknowledged it and every rank has voted on the same identity.
+            Waiting for both before releasing tokens put a daemon round trip
+            and a cross-rank barrier (1.5-2 ms) on the output path whenever a
+            request crossed a page. Confirming pending publications together a
+            few output calls later keeps the rule, overlaps the acknowledgement
+            with decode steps, and pays one barrier per batch. A new page is
+            also published only after it has been live for a few outputs; a
+            request that finishes first is published by its finalization. A
+            crash before confirmation only means the replay recomputes those
+            pages.
+            """
             if not self._gms_steady_state or not self._gms_directory.authoritative:
                 return
+            self._gms_live_calls += 1
+            unconfirmed = self._gms_live_unconfirmed
+            if unconfirmed and (
+                self._gms_live_calls - unconfirmed[0][3] >= _LIVE_CONFIRM_CALLS
+                or len(unconfirmed) >= _LIVE_CONFIRM_BATCH
+            ):
+                self._gms_confirm_live_prefixes()
             page_size = int(self.page_size)
+            pending_ack = []
             for req in reqs:
                 finished = getattr(req, "finished", None)
                 if callable(finished) and finished():
                     continue
                 committed = int(getattr(req.kv, "kv_committed_len", 0))
                 sealed_len = committed // page_size * page_size
-                if sealed_len <= int(getattr(req, "_gms_published_kv_len", 0)):
+                if sealed_len <= max(
+                    int(getattr(req, "_gms_published_kv_len", 0)),
+                    int(getattr(req, "_gms_live_pending_len", 0)),
+                ):
                     continue
-                pages = getattr(req, "_gms_kv_page_ids", None)
-                expected_pages = sealed_len // page_size
-                if pages is None or len(pages) < expected_pages:
-                    if (
-                        getattr(req, "_gms_live_publish_deferred_len", None)
-                        != sealed_len
-                    ):
-                        logger.warning(
-                            "[GMS-KVDirectory] deferring live SGLang prefix; "
-                            "CPU page metadata is incomplete (%s/%s)",
-                            0 if pages is None else len(pages),
-                            expected_pages,
-                        )
-                        req._gms_live_publish_deferred_len = sealed_len
+                # Publish a newly sealed prefix only once it has been live for
+                # a few outputs: a request that finishes first is published by
+                # its finalization instead, so short requests skip this work.
+                due = getattr(req, "_gms_live_due_call", None)
+                if due is None:
+                    req._gms_live_due_call = self._gms_live_calls
+                    if _LIVE_PUBLISH_DELAY_CALLS > 0:
+                        continue
+                elif self._gms_live_calls - due < _LIVE_PUBLISH_DELAY_CALLS:
                     continue
-                token_ids = (req.origin_input_ids + req.output_ids)[:sealed_len]
-                if len(token_ids) != sealed_len:
-                    logger.warning(
-                        "[GMS-KVDirectory] deferring live SGLang prefix; "
-                        "committed token metadata is incomplete (%s/%s)",
-                        len(token_ids),
-                        sealed_len,
-                    )
-                    continue
-                key = RadixKey(
-                    token_ids,
-                    req.extra_key,
-                    is_bigram=self.tree_core.is_eagle,
-                    cache_salt=req.cache_salt,
-                ).page_aligned(page_size)
-                self._publish_finished_prefix(key, request_pages=pages)
-                req._gms_published_kv_len = sealed_len
+                req._gms_live_due_call = None
+                pending_ack.append((req, sealed_len))
+            if not pending_ack:
+                return
 
-        def checkpoint_into_tree(self, req, *, up_to: int, **kwargs) -> None:
-            # Every tree insert of a request, from both checkpoint_kv_cache and
-            # a checkpointing release_kv_cache, lands here. SGLang itself tells
-            # the final insert from a running checkpoint by req.finished().
-            if req.finished():
-                return self._gms_checkpoint_finished(req, up_to=up_to, **kwargs)
-            return super().checkpoint_into_tree(req, up_to=up_to, **kwargs)
+            identity = sha256()
+            for req, sealed_len in pending_ack:
+                identity.update(str(getattr(req, "rid", "")).encode())
+                identity.update(b"\0")
+                identity.update(sealed_len.to_bytes(8, "little"))
+
+            error = None
+            try:
+                for req, sealed_len in pending_ack:
+                    pages = getattr(req, "_gms_kv_page_ids", None)
+                    expected_pages = sealed_len // page_size
+                    if pages is None or len(pages) < expected_pages:
+                        raise RuntimeError(
+                            "live SGLang KV page metadata is incomplete "
+                            f"({0 if pages is None else len(pages)}/{expected_pages})"
+                        )
+                    token_ids = (req.origin_input_ids + req.output_ids)[:sealed_len]
+                    if len(token_ids) != sealed_len:
+                        raise RuntimeError(
+                            "live SGLang committed token metadata is incomplete "
+                            f"({len(token_ids)}/{sealed_len})"
+                        )
+                    key = RadixKey(
+                        token_ids,
+                        req.extra_key,
+                        is_bigram=self.tree_core.is_eagle,
+                        cache_salt=req.cache_salt,
+                    ).page_aligned(page_size)
+                    self._publish_finished_prefix(key, request_pages=pages)
+                self._gms_flush_publications()
+            except Exception as exc:  # noqa: BLE001
+                # Report through the confirmation vote so every rank stops
+                # together instead of one rank leaving its peers in a vote.
+                error = exc
+            for req, sealed_len in pending_ack:
+                req._gms_live_pending_len = sealed_len
+            self._gms_live_unconfirmed.append(
+                (identity.digest(), pending_ack, error, self._gms_live_calls)
+            )
+
+        def _gms_confirm_live_prefixes(self) -> None:
+            """Agree all pending live publications after their daemon acks."""
+            unconfirmed = self._gms_live_unconfirmed
+            if not unconfirmed:
+                return
+            self._gms_live_unconfirmed = []
+            combined = sha256()
+            pending_ack = []
+            error = None
+            for digest, publication, publication_error, _call in unconfirmed:
+                combined.update(digest)
+                pending_ack.extend(publication)
+                error = error or publication_error
+            digest = combined.digest()
+
+            def acknowledge() -> None:
+                if error is not None:
+                    raise error
+                # The stream hook runs on every TP rank, but rank 0 may reach
+                # client output before a peer reaches this point. Only a
+                # daemon ACK *and* the following TP vote make the prefix
+                # common; neither a userspace enqueue nor a local ACK does.
+                if not self._gms_directory.flush_deferred(timeout=2.0):
+                    raise RuntimeError(
+                        "timed out acknowledging live SGLang HBM publication"
+                    )
+
+            self._gms_tp.transact_digest("live:ack", digest, acknowledge)
+            for req, sealed_len in pending_ack:
+                if sealed_len > int(getattr(req, "_gms_published_kv_len", 0)):
+                    req._gms_published_kv_len = sealed_len
 
         def _gms_checkpoint_finished(self, req, *, up_to: int, **kwargs) -> None:
             self._gms_finished_insert = None
@@ -1011,15 +1280,18 @@ def make_gms_unified_cache_class():
 
             if self._gms_steady_state and not self._gms_recovery_candidates:
                 return False
+            if self._gms_steady_state:
+                # Adoption requires a contiguous suffix. A missing first page
+                # cannot be rescued by any later candidate, so avoid hashing
+                # the rest of an unrelated prompt on every native cache miss.
+                first_missing_page = matched_len // self.page_size
+                first_key = key[: (first_missing_page + 1) * self.page_size]
+                first_hash = self._hashes_for_key(first_key, self.page_size)[-1]
+                if first_hash not in self._gms_recovery_candidates:
+                    return False
             hashes = self._hashes_for_key(key, self.page_size)
             suffix_hashes = hashes[matched_len // self.page_size :]
-            if self._gms_steady_state:
-                if not any(
-                    content_hash in self._gms_recovery_candidates
-                    for content_hash in suffix_hashes
-                ):
-                    return False
-            elif not self._gms_tp.leader_true(
+            if not self._gms_steady_state and not self._gms_tp.leader_true(
                 "adopt:candidate",
                 self._gms_directory.may_have_hbm_candidate(suffix_hashes),
             ):
@@ -1274,14 +1546,16 @@ def make_gms_unified_cache_class():
 
         def _gms_match(self, params, native_match):
             self._maybe_enter_steady_state()
-            result = super().match_prefix(params)
+            result = native_match(params)
             # Native SGLang cache state is replicated by the scheduler, while
             # GMS page allocation is already agreed by the TP allocator. A
             # collective here would serialize every lookup, including native
             # hits. Directory adoption performs its own fail-closed agreement
             # before any native state is mutated.
-            if self._gms_directory.authoritative and self._adopt_directory_suffix(
-                params, result
+            if (
+                self._gms_directory.authoritative
+                and (not self._gms_steady_state or self._gms_recovery_candidates)
+                and self._adopt_directory_suffix(params, result)
             ):
                 result = native_match(params)
             self._attach_request_pages(params, result)

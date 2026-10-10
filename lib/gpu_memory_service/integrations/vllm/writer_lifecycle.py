@@ -71,6 +71,20 @@ def writer_cohort_required() -> bool:
     )
 
 
+def pod_scoped_writer_cohort() -> bool:
+    """Return whether each pod keeps its own writer cohort (no shared lock dir).
+
+    With ``DYN_GMS_WRITER_COHORT_SCOPE=pod`` every pod (one TP rank's primary
+    and standby containers) creates its own cohort under a pod-local
+    ``FAILOVER_LOCK_PATH``. Each successor rank fences only its own pod's
+    predecessor, and the all-rank ``gms_fence_predecessor_cpu_writers``
+    collective is the cross-node barrier before any rank resumes. Nothing
+    needs a shared filesystem, and every flock is released by the local
+    kernel the moment a writer exits.
+    """
+    return os.environ.get("DYN_GMS_WRITER_COHORT_SCOPE", "").strip().lower() == "pod"
+
+
 def _directory() -> Path:
     lock = Path(os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock"))
     return lock.with_name(lock.name + ".vllm-writers")
@@ -197,10 +211,9 @@ def join_writer_cohort_process() -> None:
     arm_parent_death_signal(expected_parent_pid=expected_parent)
 
 
-async def fence_predecessor_writers() -> Path | None:
-    """Retire predecessor CPU submitters; GPU completion is a separate contract."""
-    current = prepare_writer_cohort()
+async def _fence_predecessor_writers_for(current: Path) -> Path | None:
     marker = current.parent / "active"
+    predecessor_marker = current.with_suffix(".predecessor")
     try:
         previous = marker.read_text().strip()
     except FileNotFoundError:
@@ -211,7 +224,46 @@ async def fence_predecessor_writers() -> Path | None:
             raise RuntimeError("invalid vLLM predecessor writer-cohort identity")
         predecessor = current.parent / previous
         await retire_writer_cohort(predecessor)
-    pending = current.parent / (current.name + ".active")
+        # Every TP rank must retain the same predecessor identity, including
+        # ranks that arrive after another worker updates the active marker.
+        pending_predecessor = predecessor_marker.with_name(
+            predecessor_marker.name + f".{uuid.uuid4().hex}.pending"
+        )
+        pending_predecessor.write_text(previous)
+        os.replace(pending_predecessor, predecessor_marker)
+    elif predecessor_marker.exists():
+        previous = predecessor_marker.read_text().strip()
+        if uuid.UUID(hex=previous).hex != previous:
+            raise RuntimeError("invalid vLLM predecessor writer-cohort identity")
+        predecessor = current.parent / previous
+    # Every TP worker may enter this fence through the same collective RPC.
+    # They share a cohort identity, but must not race to rename one pending
+    # file out from under one another.
+    pending = current.parent / (current.name + f".{uuid.uuid4().hex}.active")
     pending.write_text(current.name)
     os.replace(pending, marker)
     return predecessor
+
+
+async def fence_predecessor_writers() -> Path | None:
+    """Retire predecessor CPU submitters; GPU completion is a separate contract."""
+    return await _fence_predecessor_writers_for(prepare_writer_cohort())
+
+
+async def fence_joined_writer_cohort() -> Path | None:
+    """Fence the rank-local predecessor from an already-joined CUDA worker.
+
+    A worker must use the cohort created by its launcher. Calling
+    ``prepare_writer_cohort`` here would incorrectly create a second identity
+    and could skip the predecessor that still has GPU submitters on this rank.
+    """
+    raw = os.environ.get(_COHORT_ENV)
+    if not raw:
+        raise RuntimeError("vLLM CUDA worker has no joined writer-cohort identity")
+    current = Path(raw)
+    if (
+        current.parent != _directory()
+        or uuid.UUID(hex=current.name).hex != current.name
+    ):
+        raise RuntimeError("invalid vLLM joined writer-cohort identity")
+    return await _fence_predecessor_writers_for(current)
