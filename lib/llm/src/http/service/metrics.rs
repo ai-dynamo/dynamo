@@ -22,7 +22,7 @@ use prometheus::{
 use serde::Serialize;
 use std::{
     sync::{Arc, LazyLock, OnceLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::discovery::ModelManager;
@@ -152,6 +152,26 @@ const UNSET_DP_RANK_LABEL: &str = "none";
 const ITL_LOCAL_FLUSH_TOKENS: u64 = 64;
 
 const MODEL_READY_HELP: &str = "Whether the frontend can route at least one inference request for the model (1 = ready, 0 = not ready)";
+const PROCESS_START_TIME_HELP: &str =
+    "Start time of the frontend process since the Unix epoch in seconds";
+
+static PROCESS_START_TIME_SECONDS: LazyLock<f64> = LazyLock::new(|| {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("frontend process start time predates the Unix epoch")
+        .as_secs_f64()
+});
+
+/// Register a stable process identity in one frontend-local metrics registry.
+///
+/// The frontend creates a custom registry per service instance, so each
+/// registry receives its own collector while all collectors expose the same
+/// process-global start value.
+pub fn register_process_start_time_metric(registry: &Registry) -> Result<(), prometheus::Error> {
+    let gauge = prometheus::Gauge::new("process_start_time_seconds", PROCESS_START_TIME_HELP)?;
+    gauge.set(*PROCESS_START_TIME_SECONDS);
+    registry.register(Box::new(gauge))
+}
 
 fn model_ready_metric_name(metrics_prefix: Option<&str>) -> String {
     let prefix =
@@ -2603,6 +2623,30 @@ mod tests {
 
     fn model_ready_value(registry: &Registry, model: &str) -> Option<f64> {
         model_ready_value_with_name(registry, &model_ready_metric_name(None), model)
+    }
+
+    #[test]
+    fn process_start_time_metric_is_stable_across_registries() {
+        let registries = [Registry::new(), Registry::new()];
+        let mut values = Vec::new();
+
+        for registry in &registries {
+            register_process_start_time_metric(registry).unwrap();
+            let families: Vec<_> = registry
+                .gather()
+                .into_iter()
+                .filter(|family| family.name() == "process_start_time_seconds")
+                .collect();
+            assert_eq!(families.len(), 1);
+            assert_eq!(families[0].get_metric().len(), 1);
+            let metric = &families[0].get_metric()[0];
+            assert!(metric.get_label().is_empty());
+            let value = metric.get_gauge().value();
+            assert!(value.is_finite() && value > 0.0);
+            values.push(value);
+        }
+
+        assert_eq!(values[0], values[1]);
     }
 
     #[test]
