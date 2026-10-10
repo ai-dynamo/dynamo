@@ -27,6 +27,12 @@ pub type RuntimeConfigWatch = watch::Receiver<HashMap<WorkerId, ModelRuntimeConf
 // events, the case a retired WorkerSet is usually in) this task can sit in
 // `stream.next()` forever, past every consumer's exit, past `lifecycle`
 // cancelling. See the "WorkerSet churn" test below.
+//
+// Nothing is published until the stream's first `Resync`. A watch replays existing
+// instances as one `Added` each before that `Resync`, so publishing per event would
+// briefly expose a subset of the workers, and a reader that requires exactly one
+// match (`Client.wait_for_instance_by_runtime_data`) could accept one of two
+// duplicates.
 fn base_runtime_config_watch(
     mut stream: DiscoveryStream,
     lifecycle: CancellationToken,
@@ -35,6 +41,7 @@ fn base_runtime_config_watch(
 
     tokio::spawn(async move {
         let mut configs = HashMap::new();
+        let mut established = false;
         loop {
             let result = tokio::select! {
                 _ = lifecycle.cancelled() => break,
@@ -96,13 +103,21 @@ fn base_runtime_config_watch(
                     }
                 }
                 Ok(DiscoveryEvent::Removed(_)) => continue,
-                Ok(DiscoveryEvent::Resync(_)) => continue,
+                Ok(DiscoveryEvent::Resync(_)) => {
+                    if established {
+                        continue;
+                    }
+                    established = true;
+                }
                 Err(error) => {
                     tracing::error!(%error, "Base model runtime-config discovery stream failed");
                     continue;
                 }
             }
 
+            if !established {
+                continue;
+            }
             if *tx.borrow() != configs && tx.send(configs.clone()).is_err() {
                 break;
             }
@@ -266,6 +281,11 @@ mod tests {
             .unwrap();
         tx.send(Ok(DiscoveryEvent::Added(base_instance.clone())))
             .unwrap();
+        tx.send(Ok(DiscoveryEvent::Resync(vec![
+            lora_instance.clone(),
+            base_instance.clone(),
+        ])))
+        .unwrap();
         configs.changed().await.unwrap();
         let config = configs.borrow().get(&7).cloned().unwrap();
         assert_eq!(config.data_parallel_start_rank, 3);
@@ -303,12 +323,48 @@ mod tests {
         }
         tx.send(Ok(DiscoveryEvent::Added(model_instance(9, None, &valid))))
             .unwrap();
+        tx.send(Ok(DiscoveryEvent::Resync(vec![]))).unwrap();
 
         configs.changed().await.unwrap();
         assert!(!configs.borrow().contains_key(&6));
         assert!(!configs.borrow().contains_key(&7));
         assert!(!configs.borrow().contains_key(&8));
         assert_eq!(configs.borrow().get(&9).unwrap().data_parallel_size, 1);
+    }
+
+    /// A watch replays two existing workers as two `Added` events before its first
+    /// `Resync`. Readers must never see the one-worker state in between: the SGLang
+    /// rendezvous rejects duplicate leaders by requiring exactly one match.
+    #[tokio::test]
+    async fn initial_snapshot_is_published_only_after_first_resync() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let stream: DiscoveryStream =
+            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx));
+        let mut configs = base_runtime_config_watch(stream, CancellationToken::new());
+        let card = ModelDeploymentCard::default();
+        let leader_a = model_instance(7, None, &card);
+        let leader_b = model_instance(8, None, &card);
+
+        tx.send(Ok(DiscoveryEvent::Added(leader_a.clone())))
+            .unwrap();
+        // Give the task time to process `Added(A)` alone, so a per-event publish
+        // would be observed here.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), configs.changed())
+                .await
+                .is_err(),
+            "a partial initial snapshot with {} worker(s) was published",
+            configs.borrow().len()
+        );
+
+        tx.send(Ok(DiscoveryEvent::Added(leader_b.clone())))
+            .unwrap();
+        tx.send(Ok(DiscoveryEvent::Resync(vec![leader_a, leader_b])))
+            .unwrap();
+        configs.changed().await.unwrap();
+        let published = configs.borrow_and_update();
+        assert_eq!(published.len(), 2);
+        assert!(published.contains_key(&7) && published.contains_key(&8));
     }
 
     #[tokio::test]
@@ -325,6 +381,8 @@ mod tests {
         };
 
         tx.send(Ok(DiscoveryEvent::Added(base_instance.clone())))
+            .unwrap();
+        tx.send(Ok(DiscoveryEvent::Resync(vec![base_instance.clone()])))
             .unwrap();
         configs.changed().await.unwrap();
         configs.borrow_and_update();
