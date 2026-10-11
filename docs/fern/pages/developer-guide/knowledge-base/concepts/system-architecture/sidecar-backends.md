@@ -44,11 +44,13 @@ engine's native gRPC API and streams responses back.
 > stream to the caller. The sidecar enables this path only when SGLang's
 > `GetServerInfo` reports an HTTP port with `incremental_streaming_output`
 > enabled and the HTTP `/health` check passes at startup; only then does the
-> worker advertise the `sglang_generate` capability. If either condition is not met at startup, the sidecar still
-> serves ordinary gRPC traffic but does not advertise native generate. A native
-> generate request that reaches a sidecar without a ready HTTP endpoint fails,
-> and an HTTP request failure is returned to the caller. Neither case falls
-> back to gRPC. See the
+> worker advertise the `sglang_generate` capability. If `GetServerInfo` reports
+> no HTTP port, `incremental_streaming_output` is not enabled, or the `/health`
+> check fails at startup, the sidecar still serves ordinary gRPC traffic but
+> does not advertise native generate. A malformed `port` value stops startup
+> instead. A native generate request that reaches a sidecar without a ready
+> HTTP endpoint fails, and an HTTP request failure is returned to the caller.
+> Neither case falls back to gRPC. See the
 > [reinforcement learning implementation guide](../../../../use-cases/reinforcement-learning/implementation-guide.md)
 > to enable the route.
 
