@@ -65,7 +65,7 @@ use super::{
     ModelManager,
     controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
 };
-use crate::namespace::NamespaceFilter;
+use crate::namespace::{NamespaceFilter, NamespacePrefixMode};
 use tokio_util::sync::CancellationToken;
 
 /// Constructs a collision-free WorkerSet storage key from its exact endpoint,
@@ -182,6 +182,7 @@ pub enum ModelUpdate {
 }
 
 pub struct ModelWatcher {
+    namespace_prefix_mode: NamespacePrefixMode,
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
     router_config: RouterConfig,
@@ -301,6 +302,7 @@ impl ModelWatcher {
     ) -> Self {
         Self {
             manager: model_manager,
+            namespace_prefix_mode: NamespacePrefixMode::from_env(),
             drt: runtime,
             router_config,
             migration_limit,
@@ -325,6 +327,10 @@ impl ModelWatcher {
 
     pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
         self.local_model_path = path;
+    }
+
+    pub fn set_namespace_prefix_mode(&mut self, mode: NamespacePrefixMode) {
+        self.namespace_prefix_mode = mode;
     }
 
     pub fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) {
@@ -1031,12 +1037,13 @@ impl ControllerHost for ModelWatcher {
         namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Option<DesiredInstance>> {
         let mcid = model_card_instance_id(&instance)?;
-        if !namespace_filter.matches(&mcid.namespace) {
+        if !namespace_filter.matches_with_prefix_mode(&mcid.namespace, self.namespace_prefix_mode) {
             return Ok(None);
         }
 
         let mut card = instance.deserialize_model::<ModelDeploymentCard>()?;
         normalize_legacy_prefill_topology(&mut card);
+        card.runtime_config.normalize_structural_tag_compatibility();
         self.apply_tokenizer_overrides(&mut card);
         validate_card_shape(&card)?;
         anyhow::ensure!(
@@ -1665,6 +1672,68 @@ mod tests {
             card_json: serde_json::to_value(card).unwrap(),
             model_suffix: None,
         })
+    }
+
+    #[tokio::test]
+    async fn operator_namespace_scope_filters_model_discovery() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let make_watcher = || {
+            ModelWatcher::new(
+                drt.clone(),
+                Arc::new(ModelManager::new()),
+                RouterConfig::default(),
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+            )
+        };
+        temp_env::with_var("DYN_NAMESPACE_PREFIX_STRICT", None::<&str>, || {
+            assert_eq!(
+                make_watcher().namespace_prefix_mode,
+                NamespacePrefixMode::Literal
+            );
+        });
+        let mut watcher = temp_env::with_var("DYN_NAMESPACE_PREFIX_STRICT", Some("true"), || {
+            let watcher = make_watcher();
+            assert_eq!(
+                watcher.namespace_prefix_mode,
+                NamespacePrefixMode::WorkerGeneration
+            );
+            watcher
+        });
+        let card = ModelDeploymentCard::with_name_only("isolated-model");
+        let literal = NamespaceFilter::from_namespace_and_prefix(None, Some("default-foo"));
+        for (namespace, admitted) in [
+            ("default-foo", true),
+            ("default-foo-1a2b3c4d", true),
+            ("default-foo-legacy", true),
+            ("default-foo-bar", false),
+            ("default-foo-bar-1a2b3c4d", false),
+        ] {
+            let DiscoveryEvent::Added(instance) = discovered_card(namespace, 1, &card) else {
+                unreachable!();
+            };
+            watcher.set_namespace_prefix_mode(NamespacePrefixMode::WorkerGeneration);
+            assert_eq!(
+                watcher
+                    .normalize(instance.clone(), &literal)
+                    .unwrap()
+                    .is_some(),
+                admitted,
+                "{namespace}"
+            );
+            watcher.set_namespace_prefix_mode(NamespacePrefixMode::Literal);
+            assert!(
+                watcher.normalize(instance, &literal).unwrap().is_some(),
+                "manual scope: {namespace}"
+            );
+        }
+        runtime.shutdown();
     }
 
     type TestDiscoverySender =
@@ -3156,6 +3225,64 @@ request_classifier:
         assert_eq!(legacy.card.needs, vec![vec![WorkerType::Decode]]);
         assert_eq!(legacy.group_key, current.group_key);
         assert_eq!(legacy.mdc_checksum, current.mdc_checksum);
+    }
+
+    #[tokio::test]
+    async fn discovery_normalizes_legacy_and_future_structural_tag_fields() {
+        use crate::local_model::runtime_config::{StructuralTagConfig, StructuralTagScope};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        );
+
+        let card = serde_json::to_value(ModelDeploymentCard::with_name_only("model")).unwrap();
+        let mut legacy_card = card.clone();
+        let legacy_runtime = legacy_card["runtime_config"].as_object_mut().unwrap();
+        legacy_runtime.insert("structural_tag_mode".into(), serde_json::json!("on"));
+        legacy_runtime.insert("structural_tag_scope".into(), serde_json::json!("always"));
+
+        let mut future_card = card;
+        future_card["runtime_config"]["structural_tag"] = serde_json::json!({
+            "scope": "always",
+            "future_option": true
+        });
+
+        let normalize = |instance_id, card_json| {
+            watcher
+                .normalize(
+                    DiscoveryInstance::Model {
+                        namespace: "ns1".to_string(),
+                        component: "workers".to_string(),
+                        endpoint: "generate".to_string(),
+                        instance_id,
+                        card_json,
+                        model_suffix: None,
+                    },
+                    &NamespaceFilter::Global,
+                )
+                .unwrap()
+                .unwrap()
+        };
+        let legacy = normalize(1, legacy_card);
+        let future = normalize(2, future_card);
+        let expected = Some(StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            ..Default::default()
+        });
+
+        assert_eq!(legacy.card.runtime_config.structural_tag, expected);
+        assert_eq!(future.card.runtime_config.structural_tag, expected);
     }
 
     #[test]

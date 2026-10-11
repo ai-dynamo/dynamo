@@ -602,7 +602,7 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # No `import PyNvVideoCodec` smoke test here, deliberately. Unlike nvidia.dali it
 # dlopens libnvcuvid and needs NVIDIA_DRIVER_CAPABILITIES to include "video",
 # which the builder does not have, so an import check would fail every build.
-RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
+RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
     set -eu; \
     before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))' 2>/dev/null || echo none); \
     echo "PyNvVideoCodec in base image: $before"; \
@@ -632,32 +632,14 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     fi; \
     /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
         'PyNvVideoCodec==2.2.3'; \
+    PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.3; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))'); \
     echo "PyNvVideoCodec version: $v"; \
-    [ "$v" = "2.2.3" ] \
-        || { echo "ERROR: wanted PyNvVideoCodec 2.2.3, got $v -- this stage and" >&2; \
-             echo "       requirements.trtllm.txt must pin the same version." >&2; exit 1; }; \
-    dists=$(find /usr/local/lib/python3.12/dist-packages -maxdepth 1 \
-        -name 'pynvvideocodec-*.dist-info' | wc -l); \
-    [ "$dists" -eq 1 ] \
-        || { echo "ERROR: expected exactly one PyNvVideoCodec in system site, found $dists:" >&2; \
-             find /usr/local/lib/python3.12/dist-packages -maxdepth 1 \
-                 -name 'pynvvideocodec-*.dist-info' >&2; exit 1; }; \
-    tarballs=$(find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' 2>/dev/null | wc -l); \
-    [ "$tarballs" -eq 1 ] \
-        || { echo "ERROR: expected exactly one bundled FFmpeg source tarball after the" >&2; \
-             echo "       removal and reinstall, found $tarballs:" >&2; \
-             find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' >&2; exit 1; }; \
-    if find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' | grep -q .; then \
-        echo "ERROR: PyNvVideoCodec $v still bundles a libavcodec:" >&2; \
-        find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' >&2; \
-        exit 1; \
-    fi; \
     examined=0; \
     for lib in $(find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
             -name 'libavcodec*.so*' -o -name 'libavformat*.so*'); do \
         examined=$((examined + 1)); \
-        /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
+        /usr/bin/python3 /tmp/compliance/compliance/enumerate_bundled_decoders.py "$lib"; \
     done; \
     [ "$examined" -gt 0 ] \
         || { echo "ERROR: found no FFmpeg libraries under PyNvVideoCodec to examine;" >&2; \

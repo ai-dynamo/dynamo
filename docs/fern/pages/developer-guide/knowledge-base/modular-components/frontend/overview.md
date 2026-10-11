@@ -95,6 +95,7 @@ See the [KServe gRPC Frontend](frontend-guide.md) page for KServe configuration 
 | Document | Description |
 |----------|-------------|
 | [Configuration Reference](../../../../reference/components/frontend-configuration.mdx) | All CLI arguments, env vars, and HTTP endpoints |
+| [Protocol Field Handling](protocol-field-handling.md) | Ownership, transport, and end-to-end review contract for request and response fields |
 | [KServe gRPC Frontend](frontend-guide.md) | KServe endpoints, backend registration, and flow-control tuning |
 | [Python Route Extensions](python-route-extensions.md) | Add trusted HTTP routes from a Python package or importable module |
 | [NVIDIA Request Extensions (nvext)](../../../additional-resources/nvidia-request-extensions-nvext.md) | Custom request fields for routing hints and cache control |

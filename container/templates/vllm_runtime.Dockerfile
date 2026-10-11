@@ -453,95 +453,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
         --no-deps --requirement /tmp/requirements.vllm.txt && \
     rm -rf /opt/uv/cache
 
-# Assert what the removal and install left. A requirements specifier constrains
-# what pip installs; it cannot say "exactly one copy on disk" or "no libavcodec",
-# and those are the properties the codec gate depends on. Checked beside the
-# install so a regression names its cause instead of surfacing as a scan
-# violation later.
-# PINNED is duplicated from the requirements file deliberately -- this stage
-# must not parse the file it is checking; a test asserts the two agree.
-RUN python3 - <<'PYEOF'
-import csv
-import glob
-import os
-import re
-import sys
-from importlib.metadata import distributions
-
-PINNED = "2.2.3"
-NAME = "pynvvideocodec"
-# Mirrors the deny globs in container/compliance/policy/codec_policy.yaml. Kept as
-# families rather than the four this package happens to have shed, so a future
-# release vendoring libpostproc or libx264 is caught here -- beside the install
-# that introduced it -- instead of as an unattributed scan violation later.
-DENIED = (
-    "libavcodec",
-    "libavdevice",
-    "libavfilter",
-    "libswscale",
-    "libswresample",
-    "libpostproc",
-    "libx264",
-    "libx265",
-    "libfdk-aac",
-)
-
-
-def canonical(name):
-    return re.sub(r"[-_.]+", "-", name or "").lower()
-
-
-# Enumerated over sys.path rather than one scheme directory: these images carry
-# both /usr/local/lib/python3.12/dist-packages and /usr/lib/python3/dist-packages,
-# and the wheel declares Root-Is-Purelib: false, so neither purelib nor platlib
-# alone is guaranteed to be the install target or the only place a copy can hide.
-# A surviving base copy beside the new one is the failure being looked for, which
-# is also why this counts distributions instead of asking for one version.
-installed = [d for d in distributions() if canonical(d.metadata["Name"]) == NAME]
-versions = sorted(d.version for d in installed)
-print("PyNvVideoCodec distributions on sys.path:", versions)
-if len(installed) != 1:
-    sys.exit(f"ERROR: expected exactly one PyNvVideoCodec, found {versions}")
-if versions[0] != PINNED:
-    sys.exit(f"ERROR: PyNvVideoCodec is {versions[0]}, but the requirements file "
-             f"pins {PINNED}")
-
-site = os.path.normpath(str(installed[0].locate_file("")))
-pkg = os.path.join(site, "PyNvVideoCodec")
-bundled = sorted(
-    os.path.relpath(p, pkg)
-    for p in glob.glob(os.path.join(pkg, "**", "lib*.so*"), recursive=True)
-)
-print("PyNvVideoCodec bundles:", bundled)
-# Positive first, and on both libraries: an empty package directory satisfies
-# every negative check below while shipping no demuxer at all.
-for required in ("libavformat", "libavutil"):
-    if not any(os.path.basename(n).startswith(required) for n in bundled):
-        sys.exit(
-            f"ERROR: PyNvVideoCodec bundles no {required}, so the checks below "
-            f"would pass vacuously; found {bundled}"
-        )
-denied = [n for n in bundled if os.path.basename(n).startswith(DENIED)]
-if denied:
-    sys.exit(f"ERROR: PyNvVideoCodec bundles libraries the codec gate denies: {denied}")
-
-# The FFmpeg source tarball lands outside site-packages, so its directory is read
-# from the wheel's own RECORD rather than guessed from a sysconfig path -- the
-# RECORD is what the installer actually wrote, and it moves if the layout does.
-record = installed[0].read_text("RECORD") or ""
-declared = [
-    row[0]
-    for row in csv.reader(record.splitlines())
-    if row and row[0].endswith((".tar.xz", ".tar.gz", ".tar.bz2"))
-]
-if len(declared) != 1:
-    sys.exit(f"ERROR: expected one source tarball in the RECORD, found {declared}")
-external = os.path.dirname(os.path.normpath(os.path.join(site, declared[0])))
-tarballs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(external, "ffmpeg-*.tar.*")))
-print("bundled FFmpeg source tarballs in", external, "->", tarballs)
-if len(tarballs) != 1:
-    sys.exit(f"ERROR: expected exactly one bundled FFmpeg source tarball, found {tarballs}")
-PYEOF
+# Assert what the removal and install left. The pin is repeated from the
+# requirements file on purpose; a test asserts the two agree.
+RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
+    PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.3
 {% else %}
 # PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
 # non-NVIDIA device. Drop it from the shared requirements rather than ship an

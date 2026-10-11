@@ -24,6 +24,7 @@ from dynamo.common.snapshot.lifecycle import (
     configure_snapshot_capture_env,
 )
 from dynamo.sglang._compat import override_server_args, resolved_server_args
+from dynamo.sglang.capacity import sglang_dp_layout
 
 if TYPE_CHECKING:
     from dynamo.sglang.args import Config
@@ -78,6 +79,7 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
 
     from sglang.srt.environ import envs
 
+    num_dp_ranks, _ = sglang_dp_layout(server_args)
     warmup_args: dict[str, Any] = {
         "sampling_params": {
             "temperature": DUMMY_WARMUP_TEMPERATURE,
@@ -85,14 +87,12 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
         }
     }
     if server_args.skip_tokenizer_init:
-        warmup_args["input_ids"] = [
-            DUMMY_WARMUP_INPUT_IDS for _ in range(server_args.dp_size)
-        ]
-        if server_args.dp_size == 1:
+        warmup_args["input_ids"] = [DUMMY_WARMUP_INPUT_IDS for _ in range(num_dp_ranks)]
+        if num_dp_ranks == 1:
             warmup_args["input_ids"] = warmup_args["input_ids"][0]
     else:
-        warmup_args["prompt"] = [DUMMY_WARMUP_PROMPT] * server_args.dp_size
-        if server_args.dp_size == 1:
+        warmup_args["prompt"] = [DUMMY_WARMUP_PROMPT] * num_dp_ranks
+        if num_dp_ranks == 1:
             warmup_args["prompt"] = warmup_args["prompt"][0]
 
     if server_args.debug_tensor_dump_input_file:
@@ -117,15 +117,15 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
                 "max_new_tokens": DUMMY_WARMUP_MAX_NEW_TOKENS,
                 "ignore_eos": True,
             },
-            "bootstrap_host": [FAKE_BOOTSTRAP_HOST] * server_args.dp_size,
+            "bootstrap_host": [FAKE_BOOTSTRAP_HOST] * num_dp_ranks,
             # This is a hack to ensure fake transfer is enabled during
             # prefill warmup and each DP rank has a unique room.
             "bootstrap_room": [
-                i * (DUMMY_BOOTSTRAP_ROOM_RANGE // server_args.dp_size)
+                i * (DUMMY_BOOTSTRAP_ROOM_RANGE // num_dp_ranks)
                 + (i % server_args.tp_size)
-                for i in range(server_args.dp_size)
+                for i in range(num_dp_ranks)
             ],
-            "input_ids": [DUMMY_DISAGG_WARMUP_INPUT_IDS] * server_args.dp_size,
+            "input_ids": [DUMMY_DISAGG_WARMUP_INPUT_IDS] * num_dp_ranks,
         }
 
     warmup_timeout = envs.SGLANG_WARMUP_TIMEOUT.get()

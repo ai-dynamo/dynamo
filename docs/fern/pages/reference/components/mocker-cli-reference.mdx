@@ -47,7 +47,9 @@ mode.
 </ParamField>
 
 <ParamField path="--extra-engine-args" type="path" default="null">
-  Path to a JSON file with mocker configuration. Overrides individual CLI arguments.
+  Path to a JSON file with canonical AISimulate launch configuration and optional `dynamo` runtime options.
+  Engine fields belong under `engine`. This file overrides individual CLI arguments; see
+  [Canonical Python Engine Configuration](dynosim-replay-cli-reference.mdx#canonical-python-engine-configuration).
 </ParamField>
 
 ## KV cache
@@ -106,18 +108,19 @@ Offline replay can also simulate one G2 pool shared by every worker of the simul
 Live mocker workers reject this scope, so pass it through the offline replay Python API:
 
 ```python
-from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_trace_replay
 
-engine_args = MockEngineArgs(
-    engine_type="vllm",
-    kv_bytes_per_token=131072,
-    native_host_offload={
-        "scope": "cluster_shared",
-        "num_host_blocks": 65536,
-        "kv_layout_id": "llama-3-8b-tp1",
+engine_args = {
+    "engine": {
+        "backend": "vllm",
+        "kv_cache_bytes_per_token": 131072,
+        "native_host_offload": {
+            "scope": "cluster_shared",
+            "num_host_blocks": 65536,
+            "kv_layout_id": "llama-3-8b-tp1",
+        },
     },
-)
+}
 report = run_trace_replay(
     "trace.jsonl",
     extra_engine_args=engine_args,
@@ -127,8 +130,8 @@ report = run_trace_replay(
 )
 ```
 
-Offline replay does not compute bytes per token from a model, so set `kv_bytes_per_token` (or
-`kv_cache_bytes_per_token`) explicitly. `native_host_offload` also accepts
+Offline replay does not compute bytes per token from a model, so set `engine.kv_cache_bytes_per_token`
+explicitly. `engine.native_host_offload` also accepts
 `latency_to_first_byte_ms` and the shared-pool bandwidth caps. G2 host offload does not support
 MTP (`--ais-nextn`).
 
@@ -300,7 +303,7 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
   Comma-separated rendezvous base ports, one per worker in disaggregated mode.
 </ParamField>
 
-<ParamField path="--kv-transfer-bandwidth" type="float" default="64.0">
+<ParamField path="--kv-transfer-bandwidth" type="float" default="null">
   KV cache transfer bandwidth in GB/s. Set to `0` to disable.
 </ParamField>
 
@@ -341,18 +344,24 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
 
 ## SGLang-specific
 
-Apply only when `--engine-type sglang`.
+Apply only when `--engine-type sglang`. Set the radix-cache page size with `--block-size`.
 
-<ParamField path="--sglang-schedule-policy" type="string" default="fifo / fcfs">
-  SGLang scheduling policy. `fifo`/`fcfs` is the default; `lpm` is longest prefix match.
+<ParamField path="--sglang-schedule-policy" type="string" default="fifo">
+  SGLang scheduling policy. `fifo` is the default; `lpm` is longest prefix match.
+  The deprecated `fcfs` alias maps to `fifo` and prints a warning when used.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>fifo</Badge> <Badge intent="note" minimal>fcfs</Badge> <Badge intent="note" minimal>lpm</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>fifo</Badge> <Badge intent="note" minimal>lpm</Badge></span>
 </ParamField>
 
-<ParamField path="--sglang-page-size" type="integer" default="1">
-  SGLang radix-cache page size in tokens. Also becomes the effective block size when
-  `--engine-type sglang` and `--block-size` is omitted.
+<ParamField path="--sglang-page-size" type="integer" default="null">
+  Deprecated alias for `--block-size` when `--engine-type sglang`. Prints a warning when used;
+  other backends ignore it. If both flags are supplied for SGLang, their values must match.
 </ParamField>
+
+<Warning>
+  Both aliases are deprecated in Dynamo 1.6.0 and will be removed in Dynamo 1.8.0, after two
+  releases. Use `--sglang-schedule-policy fifo` and `--block-size` instead.
+</Warning>
 
 <ParamField path="--sglang-max-prefill-tokens" type="integer" default="16384">
   SGLang max prefill-token budget per batch.
