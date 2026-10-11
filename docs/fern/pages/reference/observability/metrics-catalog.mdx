@@ -159,6 +159,10 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
   Active prefill tokens queued per worker.
 </ParamField>
 
+<ParamField path="dynamo_frontend_worker_active_requests" type="gauge">
+  Active requests booked per worker, split by an additional [`request_phase`](metric-labels.mdx#metric-specific-labels) label. A request counts as `prefill` from booking until its worker returns the first output token, then as `decode` until it completes. Sum both phases for the worker's total concurrency. The count is the router's view, including requests booked by peer routers when router replica sync is enabled.
+</ParamField>
+
 <ParamField path="dynamo_frontend_worker_last_time_to_first_token_seconds" type="gauge">
   Last observed time to first token per worker, in seconds.
 </ParamField>
