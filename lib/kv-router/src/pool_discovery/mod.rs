@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pluggable pool discovery for the Global Router (DEP-1276).
+//! Pluggable pool discovery for the Global Router. Design:
+//! <https://github.com/ai-dynamo/enhancements/pull/103>.
 //!
 //! Pools dial into the hub. Discovery answers three questions: which pools
 //! exist, who may speak for each pool, and which router replicas a pool must

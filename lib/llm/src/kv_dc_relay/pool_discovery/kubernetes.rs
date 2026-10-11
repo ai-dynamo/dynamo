@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Kubernetes mode, using SIG Multicluster (DEP-1277). Sketch only:
+//! Kubernetes mode, using SIG Multicluster. Sketch only:
 //! signatures, no bodies.
 //!
 //! V1 assumes a trusted network where pod addresses are reachable between
