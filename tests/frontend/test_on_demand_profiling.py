@@ -143,7 +143,7 @@ async def test_uncertain_start_is_bounded_and_cleaned_up(
 
 
 @pytest.mark.asyncio
-async def test_worker_only_plan_still_profiles_frontend_and_stop_is_concurrent(
+async def test_worker_only_plan_still_profiles_frontend_and_targets_run_concurrently(
     controller, collector, monkeypatch
 ):
     controller.workers["worker"] = Worker(
@@ -151,19 +151,26 @@ async def test_worker_only_plan_still_profiles_frontend_and_stop_is_concurrent(
     )
     stop_entered = asyncio.Event()
     finish_export = asyncio.Event()
+    entered = []
+
+    async def start():
+        # Sequential startup would never let the second worker enter.
+        entered.append(None)
+        while len(entered) < 2:
+            await asyncio.sleep(0)
 
     async def stop():
         stop_entered.set()
         await finish_export.wait()
 
     worker_collector = SimpleNamespace(
-        evidence={"collector": "torch_profiler"}, start=AsyncMock(), stop=stop
+        evidence={"collector": "torch_profiler"}, start=start, stop=stop
     )
     controller.workers["second"] = Worker(
         "second", "epoch", "vllm", "http://configured"
     )
     fast_worker = SimpleNamespace(
-        evidence={"collector": "torch_profiler"}, start=AsyncMock(), stop=AsyncMock()
+        evidence={"collector": "torch_profiler"}, start=start, stop=AsyncMock()
     )
     monkeypatch.setattr(
         adapters,
@@ -184,6 +191,35 @@ async def test_worker_only_plan_still_profiles_frontend_and_stop_is_concurrent(
     finally:
         finish_export.set()
         await session.task
+
+
+@pytest.mark.asyncio
+async def test_stop_before_recording_reports_missing_coverage(tmp_path, collector):
+    probing = asyncio.Event()
+    release = asyncio.Event()
+
+    async def measure(worker, config):
+        probing.set()
+        await release.wait()
+        return {"alignment": "unknown"}
+
+    controller = Coordinator(
+        Config("unused", str(tmp_path), frontend_perf_enabled=False),
+        RuntimeSnapshot(
+            123, "epoch", "host", [Worker("decode", "epoch", "vllm", "http://w")]
+        ),
+        registry=CollectorRegistry(),
+        clock_sampler=SimpleNamespace(measure=measure),
+    )
+    controller.registry.register("torch_profile", lambda *args: [collector])
+    session = controller.submit(Plan("early", [Target("decode", "epoch")], 5000))
+    await asyncio.wait_for(probing.wait(), 1)
+    controller.stop(session.session_id)
+    release.set()
+    await asyncio.wait_for(session.task, 1)
+    assert session.state == "failed"
+    assert session.errors == ["Capture stopped before recording started"]
+    collector.start.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,18 @@ except ImportError:
 from .collectors import CollectionError, TorchCollector, process_epoch
 from .models import Config, Plan, RuntimeSnapshot
 
+CPU_TABLES = ("COMPOSITE_EVENTS", "SCHED_EVENTS", "OSRT_API", "NVTX_EVENTS")
+CUDA_TABLES = (
+    "CUPTI_ACTIVITY_KIND_KERNEL",
+    "CUPTI_ACTIVITY_KIND_MEMCPY",
+    "CUPTI_ACTIVITY_KIND_MEMSET",
+)
+
+
+def file_state(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns
+
 
 def report_paths(prefix: Path) -> list[Path]:
     pattern = re.compile(rf"{re.escape(prefix.name)}(?:\.\d+)?\.nsys-rep")
@@ -122,14 +134,12 @@ def inspect_report(
     report: Path, evidence: dict, config: Config, deadline: float
 ) -> dict:
     """Validate the automatic export and hash its associated native report."""
-    database = report.with_suffix(".sqlite")
-    before = [
-        (path.stat().st_size, path.stat().st_mtime_ns) for path in (report, database)
-    ]
+    paths = (report, report.with_suffix(".sqlite"))
+    before = [file_state(path) for path in paths]
     if any(size <= 0 or size > config.max_trace_bytes for size, _ in before):
         raise ValueError("Nsight artifact is empty or exceeds the byte limit")
     with closing(
-        sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=0.1)
+        sqlite3.connect(paths[1].as_uri() + "?mode=ro", uri=True, timeout=0.1)
     ) as conn:
         conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 10000)
         if conn.execute("PRAGMA quick_check").fetchone() != ("ok",):
@@ -148,37 +158,17 @@ def inspect_report(
             raise ValueError(
                 "Nsight SQLite export is incomplete or belongs to another report"
             )
-        cuda_tables = (
-            "CUPTI_ACTIVITY_KIND_KERNEL",
-            "CUPTI_ACTIVITY_KIND_MEMCPY",
-            "CUPTI_ACTIVITY_KIND_MEMSET",
-        )
         counts = {}
-        for table in (
-            "COMPOSITE_EVENTS",
-            "SCHED_EVENTS",
-            "OSRT_API",
-            "NVTX_EVENTS",
-            *cuda_tables,
-        ):
-            clause = " WHERE cpuCycles = 1" if table == "COMPOSITE_EVENTS" else ""
-            parameters = ()
-            if evidence.get("pid") and table in (
-                "COMPOSITE_EVENTS",
-                "SCHED_EVENTS",
-                "OSRT_API",
-                "NVTX_EVENTS",
-            ):
-                clause += (
-                    " AND " if clause else " WHERE "
-                ) + "((globalTid >> 24) & 16777215) = ?"
-                parameters = (evidence["pid"],)
+        for table in (*CPU_TABLES, *CUDA_TABLES):
+            conditions = ["cpuCycles = 1"] if table == "COMPOSITE_EVENTS" else []
+            parameters = []
+            if evidence.get("pid") and table in CPU_TABLES:
+                conditions.append("((globalTid >> 24) & 16777215) = ?")
+                parameters.append(evidence["pid"])
+            where = " WHERE " + " AND ".join(conditions) if conditions else ""
+            query = f'SELECT COUNT(*) FROM "{table}"{where}'
             counts[table] = (
-                conn.execute(
-                    f'SELECT COUNT(*) FROM "{table}"' + clause, parameters
-                ).fetchone()[0]
-                if table in tables
-                else 0
+                conn.execute(query, parameters).fetchone()[0] if table in tables else 0
             )
         if evidence["required_activity"] == "cpu_events" and not (
             counts["COMPOSITE_EVENTS"] or counts["SCHED_EVENTS"] or counts["OSRT_API"]
@@ -187,7 +177,7 @@ def inspect_report(
         gpu_processes = sorted(
             {
                 row[0]
-                for table in cuda_tables
+                for table in CUDA_TABLES
                 if counts[table]
                 for row in conn.execute(f'SELECT DISTINCT globalPid FROM "{table}"')
                 if row[0] is not None
@@ -236,7 +226,7 @@ def inspect_report(
             else []
         )
     artifacts = []
-    for path in (report, database):
+    for path in paths:
         digest = hashlib.sha256()
         with path.open("rb") as stream:
             for chunk in iter(lambda: stream.read(65536), b""):
@@ -250,10 +240,7 @@ def inspect_report(
                 "sha256": digest.hexdigest(),
             }
         )
-    after = [
-        (path.stat().st_size, path.stat().st_mtime_ns) for path in (report, database)
-    ]
-    if before != after:
+    if before != [file_state(path) for path in paths]:
         raise ValueError("Nsight export is still changing")
     return {
         "status": "verified",

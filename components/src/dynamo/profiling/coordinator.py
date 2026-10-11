@@ -33,6 +33,11 @@ COLLECTION_ERRORS = (
 )
 
 
+async def errors_of(operations) -> list[str]:
+    """Run operations concurrently and keep only the errors they report."""
+    return [error for error in await asyncio.gather(*operations) if error]
+
+
 @dataclass
 class Session:
     session_id: str
@@ -136,6 +141,11 @@ class Coordinator:
             ],
         ]
 
+    def nsys_prefix(self, target_id: str) -> str | None:
+        if target_id == "frontend":
+            return self.config.nsys_frontend_output_prefix
+        return self.workers[target_id].nsys_output_prefix
+
     def validate(self, plan: Plan) -> None:
         if not plan.client_request_id or len(plan.client_request_id) > 128:
             raise BadRequest("client_request_id must contain 1..128 characters")
@@ -147,46 +157,36 @@ class Coordinator:
         if not target_ids or len(target_ids) != len(set(target_ids)):
             raise BadRequest("targets must be nonempty and unique")
         epochs = {item["target_id"]: item["process_epoch"] for item in self.targets()}
+        prefixes = []
         for target in plan.targets:
             if target.target_id not in epochs:
                 raise BadRequest("Unknown target; use GET targets")
             if epochs[target.target_id] != target.process_epoch:
                 raise Conflict("Target process epoch does not match inventory")
-            if (
-                self.builtin_collectors
-                and plan.mode == "torch_profile"
-                and target.target_id != "frontend"
-            ):
-                worker = self.workers[target.target_id]
-                if worker.backend == "vllm" and worker.nsys_output_prefix:
+            if not self.builtin_collectors:
+                continue
+            prefix = self.nsys_prefix(target.target_id)
+            if plan.mode == "torch_profile":
+                if (
+                    target.target_id != "frontend"
+                    and prefix
+                    and self.workers[target.target_id].backend == "vllm"
+                ):
                     raise Unsupported(
                         "This vLLM launch uses its CUDA profiler; Torch profiling requires a separate launch"
                     )
-            if plan.mode == "nsys" and self.builtin_collectors:
-                prefix = (
-                    self.config.nsys_frontend_output_prefix
-                    if target.target_id == "frontend"
-                    else self.workers[target.target_id].nsys_output_prefix
-                )
-                if not prefix:
-                    raise Unsupported("Nsight requires a prepared launch/output prefix")
-                if not Path(prefix).is_absolute():
-                    raise Unsupported("Nsight output prefixes must be absolute")
-                if target.target_id == "frontend" and self.frontend_pid != os.getpid():
-                    raise Unsupported("NVTX frontend capture requires an embedded host")
-        if plan.mode == "nsys" and self.builtin_collectors:
-            prefixes = [
-                (
-                    self.config.nsys_frontend_output_prefix
-                    if target.target_id == "frontend"
-                    else self.workers[target.target_id].nsys_output_prefix
-                )
-                for target in plan.targets
-            ]
-            if len(set(prefixes)) != len(prefixes):
-                raise BadRequest(
-                    "Selected Nsight launches must have distinct output prefixes"
-                )
+                continue
+            if not prefix:
+                raise Unsupported("Nsight requires a prepared launch/output prefix")
+            if not Path(prefix).is_absolute():
+                raise Unsupported("Nsight output prefixes must be absolute")
+            if target.target_id == "frontend" and self.frontend_pid != os.getpid():
+                raise Unsupported("NVTX frontend capture requires an embedded host")
+            prefixes.append(prefix)
+        if len(set(prefixes)) != len(prefixes):
+            raise BadRequest(
+                "Selected Nsight launches must have distinct output prefixes"
+            )
         if (
             plan.mode == "torch_profile"
             and not self.config.frontend_perf_enabled
@@ -237,6 +237,7 @@ class Coordinator:
         return session
 
     def manifest(self, session: Session) -> dict:
+        statuses = {item["status"] for item in session.artifact_validation}
         stop_due = session.accepted_at_ns + session.plan.duration_ms * 1000000
         manifest = {
             "schema_version": 1,
@@ -295,15 +296,9 @@ class Coordinator:
             },
             "artifact_validation": session.artifact_validation,
             "artifact_status": "verified"
-            if session.artifact_validation
-            and all(
-                item["status"] == "verified" for item in session.artifact_validation
-            )
+            if statuses == {"verified"}
             else "partial"
-            if any(
-                item["status"] in ("partial", "invalid")
-                for item in session.artifact_validation
-            )
+            if statuses & {"partial", "invalid"}
             else "unverified",
             "errors": session.errors,
         }
@@ -335,67 +330,70 @@ class Coordinator:
                 session.state = "failed"
             logger.warning("%s: %s", session.session_id, error)
 
+    def start_budget(self, session: Session, phase: str) -> float:
+        remaining = session.deadline_monotonic - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise CollectionError(f"Capture deadline expired during {phase}")
+        return min(remaining, self.config.start_timeout_s)
+
     async def capture(self, session: Session) -> None:
-        deadline = session.deadline_monotonic
         session.state = "starting"
         self.persist_progress(session)
+        assert session.runtime is not None
+        workers = {worker.target_id: worker for worker in session.runtime.workers}
+        selected = [
+            workers[target.target_id]
+            for target in session.plan.targets
+            if target.target_id != "frontend"
+        ]
         capture_ok = False
         try:
             if session.errors:
                 raise CollectionError("Manifest write failed before collector startup")
-            assert session.runtime is not None
-            workers = {worker.target_id: worker for worker in session.runtime.workers}
-            for target in session.plan.targets:
-                if target.target_id == "frontend":
-                    continue
-                remaining = deadline - asyncio.get_running_loop().time()
-                if session.stop_requested.is_set():
-                    break
-                if remaining <= 0:
-                    raise CollectionError(
-                        "Capture deadline expired during runtime validation"
-                    )
-                worker = workers[target.target_id]
-                measurement = await asyncio.wait_for(
-                    self.clock_sampler.measure(worker, self.config),
-                    min(remaining, self.config.start_timeout_s),
-                )
-                session.clocks[target.target_id] = {
+            # Probe and start targets concurrently: startup skew is bounded by
+            # the slowest target rather than accumulating across targets.
+            budget = self.start_budget(session, "runtime validation")
+            measurements = await asyncio.wait_for(
+                asyncio.gather(
+                    *(self.clock_sampler.measure(w, self.config) for w in selected)
+                ),
+                budget,
+            )
+            for worker, measurement in zip(selected, measurements):
+                session.clocks[worker.target_id] = {
                     "start": measurement,
                     "end": {"alignment": "unknown"},
                 }
-            candidates = self.registry.create(
+            if session.stop_requested.is_set():
+                raise CollectionError("Capture stopped before recording started")
+            # Register before starting: a timeout may have taken effect
+            # remotely, so cleanup must also attempt stop on uncertain starts.
+            session.collectors = self.registry.create(
                 self.config, session.runtime, session.plan, session.directory
             )
-            for collector in candidates:
-                if session.stop_requested.is_set():
-                    break
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise CollectionError("Capture deadline expired during startup")
-                # Register before starting: a timeout may have taken effect
-                # remotely, so cleanup must also attempt stop on uncertain starts.
-                session.collectors.append(collector)
-                clock = session.clocks.get(collector.evidence.get("target_id"), {}).get(
-                    "start", {}
-                )
-                if clock.get("identity_verification") == "control_process_epoch":
+            for collector in session.collectors:
+                clock = session.clocks.get(collector.evidence.get("target_id"), {})
+                if (
+                    clock.get("start", {}).get("identity_verification")
+                    == "control_process_epoch"
+                ):
                     collector.evidence[
                         "identity_verification"
                     ] = "control_process_epoch"
-                await asyncio.wait_for(
-                    collector.start(), min(remaining, self.config.start_timeout_s)
-                )
-                self.persist_progress(session)
-                if session.errors:
-                    raise CollectionError(
-                        "Manifest write failed after collector startup"
-                    )
+            budget = self.start_budget(session, "startup")
+            failures = await asyncio.wait_for(
+                errors_of(self.start_collector(c) for c in session.collectors), budget
+            )
+            if failures:
+                raise CollectionError("; ".join(failures))
+            self.persist_progress(session)
+            if session.errors:
+                raise CollectionError("Manifest write failed after collector startup")
             session.state = "recording"
             self.persist_progress(session)
-            remaining = max(0, deadline - asyncio.get_running_loop().time())
+            remaining = session.deadline_monotonic - asyncio.get_running_loop().time()
             try:
-                await asyncio.wait_for(session.stop_requested.wait(), remaining)
+                await asyncio.wait_for(session.stop_requested.wait(), max(0, remaining))
             except asyncio.TimeoutError:
                 pass  # The lease deadline is a normal stop trigger.
             capture_ok = True
@@ -410,61 +408,69 @@ class Coordinator:
             session.state = "finalizing"
             self.persist_progress(session)
             # Stop all collectors concurrently: slow worker trace serialization
-            # must not keep frontend perf recording beyond its lease.
-            results = await asyncio.gather(
-                *(self.stop_collector(collector) for collector in session.collectors)
+            # must not keep other targets recording beyond their lease.
+            stop_errors = await errors_of(
+                self.stop_collector(c) for c in session.collectors
             )
-            session.errors.extend(error for error in results if error is not None)
-            if any(error is not None for error in results):
-                self.cleanup_uncertain = True
-            for target_id, measurements in session.clocks.items():
-                worker = workers[target_id]
-                if not worker.verify_runtime:
-                    continue
-                try:
-                    measurements["end"] = await asyncio.wait_for(
-                        self.clock_sampler.measure(worker, self.config),
-                        self.config.start_timeout_s,
-                    )
-                    if (
-                        measurements["start"].get("alignment")
-                        == measurements["end"].get("alignment")
-                        == "estimated"
-                    ):
-                        measurements["offset_delta_ns"] = (
-                            measurements["end"]["offset_ns"]
-                            - measurements["start"]["offset_ns"]
-                        )
-                except COLLECTION_ERRORS as exc:
-                    measurements["end"] = {"alignment": "unknown", "error": str(exc)}
-                    session.errors.append(
-                        f"{target_id}: final runtime verification failed: {exc}"
-                    )
-            for collector in session.collectors:
-                try:
-                    validation = await self.artifact_validator.validate(
-                        collector.evidence, self.config
-                    )
-                except COLLECTION_ERRORS as exc:
-                    validation = {
-                        "status": "invalid",
-                        "coverage": "partial",
-                        "error": str(exc),
-                    }
-                session.artifact_validation.append(
-                    {"target_id": collector.evidence.get("target_id"), **validation}
+            session.errors.extend(stop_errors)
+            self.cleanup_uncertain |= bool(stop_errors)
+            session.errors.extend(
+                await errors_of(
+                    self.measure_end(session, workers[target_id])
+                    for target_id in session.clocks
+                    if workers[target_id].verify_runtime
                 )
+            )
+            validations = await asyncio.gather(
+                *(
+                    self.validate_artifacts(collector)
+                    for collector in session.collectors
+                )
+            )
+            for collector, validation in zip(session.collectors, validations):
+                session.artifact_validation.append(validation)
                 if validation["status"] in ("partial", "invalid"):
                     if collector.evidence.get("collector") == "nsys":
                         # An unfinished export could be misassociated with the
                         # next window; require reconciliation before admitting it.
                         self.cleanup_uncertain = True
                     session.errors.append(
-                        f"{collector.evidence.get('target_id')}: artifacts {validation['status']}"
+                        f"{validation['target_id']}: artifacts {validation['status']}"
                     )
             session.state = "failed" if session.errors else "completed"
             self.persist_progress(session)
             self.active = None
+
+    async def measure_end(self, session: Session, worker) -> str | None:
+        measurements = session.clocks[worker.target_id]
+        try:
+            measurements["end"] = await asyncio.wait_for(
+                self.clock_sampler.measure(worker, self.config),
+                self.config.start_timeout_s,
+            )
+        except COLLECTION_ERRORS as exc:
+            measurements["end"] = {"alignment": "unknown", "error": str(exc)}
+            return f"{worker.target_id}: final runtime verification failed: {exc}"
+        start, end = measurements["start"], measurements["end"]
+        if start.get("alignment") == end.get("alignment") == "estimated":
+            measurements["offset_delta_ns"] = end["offset_ns"] - start["offset_ns"]
+        return None
+
+    async def validate_artifacts(self, collector: Collector) -> dict:
+        try:
+            validation = await self.artifact_validator.validate(
+                collector.evidence, self.config
+            )
+        except COLLECTION_ERRORS as exc:
+            validation = {"status": "invalid", "coverage": "partial", "error": str(exc)}
+        return {"target_id": collector.evidence.get("target_id"), **validation}
+
+    async def start_collector(self, collector: Collector) -> str | None:
+        try:
+            await collector.start()
+        except COLLECTION_ERRORS as exc:
+            return str(exc) or type(exc).__name__
+        return None
 
     async def stop_collector(self, collector: Collector) -> str | None:
         try:
