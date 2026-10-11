@@ -52,8 +52,7 @@ build_vllm_gpu_mem_args() {
 }
 
 
-# inherited_gpu_id: first inherited CUDA_VISIBLE_DEVICES entry, or 0 when unset.
-# The parallel test runner pins each test's card there; a literal 0 overcommits GPU 0.
+# The parallel test runner pins each test's card in CUDA_VISIBLE_DEVICES; a literal 0 overcommits GPU 0.
 inherited_gpu_id() {
     local devices="${CUDA_VISIBLE_DEVICES:-0}"
     echo "${devices%%,*}"
