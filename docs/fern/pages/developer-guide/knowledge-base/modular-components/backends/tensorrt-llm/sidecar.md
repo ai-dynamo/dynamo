@@ -87,4 +87,4 @@ node holds the remaining TP ranks.
 Not supported yet. The TensorRT-LLM sidecar does not target DP ranks or
 publish KV events.
 
-![TensorRT-LLM data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local TensorRT-LLM over native gRPC.](../../../../../../assets/img/sidecar-trtllm-multinode-dp.svg)
+![Planned TensorRT-LLM data parallelism across two nodes, not supported yet. Today the TensorRT-LLM sidecar registers one logical worker, rank 0, and rejects requests that target a nonzero DP rank. TensorRT-LLM places requests across its own attention-DP ranks inside the engine; Dynamo does not route to those ranks.](../../../../../../assets/img/sidecar-trtllm-multinode-dp.svg)
