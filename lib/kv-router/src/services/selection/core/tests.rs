@@ -819,6 +819,18 @@ async fn declaring_policy_reads_polled_resident_blocks() {
 }
 
 #[tokio::test]
+async fn only_a_declaring_policy_polls_resident_blocks() {
+    use crate::scheduling::selector::WorkerInputs;
+    let indexer = crate::services::indexer::backend::create_indexer(16, 1);
+    let key = default_key();
+    let poll = |inputs| {
+        super::workers::poll_resident_block_counts(&key, inputs, &indexer, CancellationToken::new())
+    };
+    assert!(poll(WorkerInputs::CACHE | WorkerInputs::LOAD).is_none());
+    assert!(poll(WorkerInputs::CACHE | WorkerInputs::RESIDENT_BLOCKS).is_some());
+}
+
+#[tokio::test]
 async fn partition_rejects_resident_blocks_without_cache() {
     let (core, _) =
         resident_blocks_core(crate::scheduling::selector::WorkerInputs::RESIDENT_BLOCKS);

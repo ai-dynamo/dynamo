@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
-use crate::indexer::RESIDENT_BLOCK_COUNTS_POLL_INTERVAL;
+use crate::indexer::{RESIDENT_BLOCK_COUNTS_POLL_INTERVAL, ResidentBlockCountsHandle};
 use crate::plugins::worker_selection::WorkerInputs;
 use crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
@@ -344,13 +344,12 @@ impl SelectionCore {
                     .kv_router_config
                     .policy_profile(Some(&key.model_name))
                     .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
-                // Poll this partition's indexer only for a policy that reads the counts.
-                if inputs.contains(WorkerInputs::RESIDENT_BLOCKS)
-                    && let Some(counts) = indexer.spawn_resident_block_counts_poller(
-                        RESIDENT_BLOCK_COUNTS_POLL_INTERVAL,
-                        self.cancel_token.child_token(),
-                    )
-                {
+                if let Some(counts) = poll_resident_block_counts(
+                    &key,
+                    inputs,
+                    &indexer,
+                    self.cancel_token.child_token(),
+                ) {
                     selector = selector.with_resident_block_counts(counts);
                 }
                 let scheduler = LocalScheduler::new(
@@ -435,4 +434,26 @@ impl SelectionCore {
         #[cfg(not(test))]
         let _ = modified;
     }
+}
+
+/// Polls `indexer` for a policy that reads resident block counts. Warns when the partition has
+/// no local indexer, since those components can only ever read `None`.
+pub(super) fn poll_resident_block_counts(
+    key: &RoutingPartitionId,
+    inputs: WorkerInputs,
+    indexer: &Indexer,
+    cancel: CancellationToken,
+) -> Option<ResidentBlockCountsHandle> {
+    if !inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
+        return None;
+    }
+    let counts =
+        indexer.spawn_resident_block_counts_poller(RESIDENT_BLOCK_COUNTS_POLL_INTERVAL, cancel);
+    if counts.is_none() {
+        tracing::warn!(
+            partition = %key,
+            "Worker-selection policy reads resident block counts, but the partition has no local indexer; components will read None"
+        );
+    }
+    counts
 }

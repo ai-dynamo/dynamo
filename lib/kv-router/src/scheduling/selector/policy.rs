@@ -747,11 +747,12 @@ mod tests {
             }
         }
 
-        struct FewestResidentPicker;
+        /// Picks the fewest resident blocks; an undeclared picker reads None and takes row 0.
+        struct ResidencyPicker(WorkerInputs);
 
-        impl WorkerPicker for FewestResidentPicker {
+        impl WorkerPicker for ResidencyPicker {
             fn required_worker_inputs(&self) -> WorkerInputs {
-                WorkerInputs::RESIDENT_BLOCKS
+                self.0
             }
 
             fn pick(
@@ -761,11 +762,13 @@ mod tests {
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 let rows = input.candidates().len();
                 assert_eq!(input.resident_blocks(rows), None);
+                let declared = self.0.contains(WorkerInputs::RESIDENT_BLOCKS);
                 for (row, candidate) in input.candidates().iter().enumerate() {
-                    assert_eq!(input.resident_blocks(row), Some(held(candidate.worker())));
+                    let expected = declared.then_some(held(candidate.worker()));
+                    assert_eq!(input.resident_blocks(row), expected);
                 }
                 Ok((0..rows)
-                    .min_by_key(|&row| input.resident_blocks(row).unwrap())
+                    .min_by_key(|&row| input.resident_blocks(row).unwrap_or(0))
                     .unwrap())
             }
         }
@@ -783,30 +786,34 @@ mod tests {
                 Box::new(ResidencyProbe(WorkerInputs::NONE)),
             ]
         };
-        let policy = WorkerSelectionPolicy::new_with_filters(
-            KvRouterConfig::default(),
-            "test",
-            probes()
-                .into_iter()
-                .map(|probe| probe as Box<dyn WorkerFilter>)
-                .collect(),
-            probes()
-                .into_iter()
-                .map(|probe| probe as Box<dyn WorkerScorer>)
-                .collect(),
-            Box::new(FewestResidentPicker),
-        )
-        .with_resident_block_counts(counts);
+        for picker_inputs in [WorkerInputs::RESIDENT_BLOCKS, WorkerInputs::NONE] {
+            let policy = WorkerSelectionPolicy::new_with_filters(
+                KvRouterConfig::default(),
+                "test",
+                probes()
+                    .into_iter()
+                    .map(|probe| probe as Box<dyn WorkerFilter>)
+                    .collect(),
+                probes()
+                    .into_iter()
+                    .map(|probe| probe as Box<dyn WorkerScorer>)
+                    .collect(),
+                Box::new(ResidencyPicker(picker_inputs)),
+            )
+            .with_resident_block_counts(counts.clone());
 
-        let selected = policy
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                &request,
-                request.eligibility(),
-                16,
-            ))
-            .unwrap();
-        assert_eq!(selected.worker, WorkerWithDpRank::new(8, 0));
+            let selected = policy
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    16,
+                ))
+                .unwrap();
+            if picker_inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
+                assert_eq!(selected.worker, WorkerWithDpRank::new(8, 0));
+            }
+        }
     }
 
     #[test]
