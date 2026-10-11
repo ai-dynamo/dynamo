@@ -32,9 +32,7 @@ pub use admission::admit;
 pub use identity::{
     PeerCredentials, RelayAuthenticator, RelayIdentity, VerifiedRelayIdentity, verify,
 };
-pub use mode::{
-    BuildPoolDiscovery, McsImplementation, PoolDiscovery, PoolDiscoveryMode, SettlePolicy,
-};
+pub use mode::{BuildPoolDiscovery, McsImplementation, PoolDiscovery, PoolDiscoveryMode};
 pub use record::{PoolDirectory, PoolEvent, PoolRecord, PoolRecordBuilder, Revision};
 pub use registrar::{LeasePolicy, PoolRegistrar, Registration};
 pub use replicas::{ReplicaDirectory, ReplicaEndpoint, ReplicaEvent, ReplicaId};

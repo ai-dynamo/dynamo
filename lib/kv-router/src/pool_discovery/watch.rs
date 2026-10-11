@@ -34,7 +34,7 @@ pub struct Snapshot<T> {
 pub enum Completeness {
     /// Read from a shared store: every existing item is listed.
     Exact,
-    /// Built from what this replica has heard so far, settled by a `SettlePolicy`.
+    /// Built from what this replica has heard so far (gRPC mode).
     Estimated,
 }
 

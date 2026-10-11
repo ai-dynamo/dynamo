@@ -3,7 +3,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -14,16 +13,18 @@ use super::registrar::{LeasePolicy, PoolRegistrar};
 use super::replicas::ReplicaDirectory;
 
 /// Chosen once at startup, like `dynamo_runtime::distributed::DiscoveryBackend`.
+/// Each mode's own settings are added with its implementation.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum PoolDiscoveryMode {
+    /// Pools call `RegisterPool`. Records live in router memory.
     Grpc {
         lease: LeasePolicy,
-        settle: SettlePolicy,
     },
+    /// Pools call `RegisterPool`. The router writes records to the hub's
+    /// Kubernetes API.
     Hybrid {
         lease: LeasePolicy,
-        hub_namespace: String,
     },
     /// SIG Multicluster: pools are MCS `ServiceExport`s. Liveness is endpoint
     /// readiness, so there is no lease. Assumes a trusted network with pod
@@ -51,18 +52,6 @@ pub enum McsImplementation {
     /// Karmada's own names: a `derived-<service>` Service, and the source
     /// cluster in the `work.karmada.io/namespace` annotation.
     Karmada,
-}
-
-/// When a gRPC-mode replica treats its pool list as settled (soft readiness).
-#[derive(Clone, Copy, Debug)]
-pub enum SettlePolicy {
-    FixedDelay(Duration),
-    /// No new pool for this long.
-    QuietPeriod(Duration),
-    /// Copy a peer replica's list; fall back to a delay if none answers.
-    PeerSnapshot {
-        fallback: Duration,
-    },
 }
 
 /// Everything the router needs from the selected mode. The router code is
