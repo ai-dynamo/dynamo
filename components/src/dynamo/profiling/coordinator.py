@@ -237,9 +237,18 @@ class Coordinator:
         return session
 
     def manifest(self, session: Session) -> dict:
+        # Callers receive a detached copy; persistence serializes in place.
+        return deepcopy(self.build_manifest(session))
+
+    def build_manifest(self, session: Session) -> dict:
         statuses = {item["status"] for item in session.artifact_validation}
+        frontend_enabled = (
+            any(target.target_id == "frontend" for target in session.plan.targets)
+            if session.plan.mode == "nsys"
+            else self.config.frontend_perf_enabled
+        )
         stop_due = session.accepted_at_ns + session.plan.duration_ms * 1000000
-        manifest = {
+        return {
             "schema_version": 1,
             "session_id": session.session_id,
             "state": session.state,
@@ -262,16 +271,12 @@ class Coordinator:
             "frontend": {
                 "pid": self.frontend_pid,
                 "process_epoch": self.frontend_epoch,
-                "profiling_enabled": self.frontend_enabled(session),
-                "omission_reason": (
-                    None
-                    if self.frontend_enabled(session)
-                    else (
-                        "not_selected"
-                        if session.plan.mode == "nsys"
-                        else "disabled_by_operator_config"
-                    )
-                ),
+                "profiling_enabled": frontend_enabled,
+                "omission_reason": None
+                if frontend_enabled
+                else "not_selected"
+                if session.plan.mode == "nsys"
+                else "disabled_by_operator_config",
             },
             "profiles": [collector.evidence for collector in session.collectors],
             "lifecycle_otel": {
@@ -302,18 +307,10 @@ class Coordinator:
             else "unverified",
             "errors": session.errors,
         }
-        return deepcopy(manifest)
-
-    def frontend_enabled(self, session: Session) -> bool:
-        return (
-            any(target.target_id == "frontend" for target in session.plan.targets)
-            if session.plan.mode == "nsys"
-            else self.config.frontend_perf_enabled
-        )
 
     def persist(self, session: Session) -> None:
         pending = session.directory / "manifest.json.tmp"
-        pending.write_text(json.dumps(self.manifest(session), indent=2) + "\n")
+        pending.write_text(json.dumps(self.build_manifest(session), indent=2) + "\n")
         pending.replace(session.directory / "manifest.json")
 
     def persist_progress(self, session: Session) -> None:
