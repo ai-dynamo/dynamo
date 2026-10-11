@@ -26,6 +26,9 @@ use crate::{get_current_cancel_token, get_current_tokio_handle};
 
 use super::*;
 
+#[cfg(test)]
+type ApcTestPool<S> = Arc<dyn BlockPool<S, VllmLocality, BasicMetadata>>;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SlotError {
     #[error("slot not found")]
@@ -376,6 +379,10 @@ pub struct VllmConnectorSlot {
     /// Block manager for device pool operations (cache lookup, onboarding).
     /// `None` only in unit tests where these operations are not exercised.
     block_manager: Option<VllmBlockManager>,
+    #[cfg(test)]
+    apc_test_host: Option<ApcTestPool<PinnedStorage>>,
+    #[cfg(test)]
+    apc_test_disk: Option<ApcTestPool<DiskStorage>>,
 
     block_size: usize,
 
@@ -418,6 +425,16 @@ pub struct VllmConnectorSlot {
 }
 
 impl VllmConnectorSlot {
+    fn clear_staged_matches(&mut self) {
+        self.staging_from_host = None;
+        self.staging_from_disk = None;
+        self.tokens_cached_from_host = 0;
+        self.tokens_cached_from_disk = 0;
+        if matches!(self.state, SlotState::OnboardStaged(_)) {
+            self.state = SlotState::Initialized;
+        }
+    }
+
     fn new(
         request_id: String,
         tokens: Tokens,
@@ -436,6 +453,10 @@ impl VllmConnectorSlot {
             request_id,
             sequence,
             block_manager: Some(block_manager),
+            #[cfg(test)]
+            apc_test_host: None,
+            #[cfg(test)]
+            apc_test_disk: None,
             block_size,
             xfer_tx,
             // default values
@@ -475,6 +496,8 @@ impl VllmConnectorSlot {
             request_id,
             sequence,
             block_manager: None,
+            apc_test_host: None,
+            apc_test_disk: None,
             block_size,
             xfer_tx,
             state: SlotState::Initialized,
@@ -1030,12 +1053,10 @@ impl Slot for VllmConnectorSlot {
 
     #[tracing::instrument(level = "debug", skip_all)]
     fn acquire_local_matches(&mut self, num_computed_tokens: usize) -> Result<(), SlotError> {
-        if matches!(self.state(), SlotState::OnboardStaged(_)) {
-            tracing::debug!("slot is already in the OnboardStaged state; skipping lookup");
-            return Ok(());
-        }
-
-        if !matches!(self.state(), SlotState::Initialized | SlotState::Preempted) {
+        if !matches!(
+            self.state(),
+            SlotState::Initialized | SlotState::Preempted | SlotState::OnboardStaged(_)
+        ) {
             return Err(SlotError::InvalidOperation(format!(
                 "slot must be in the NotScheduled or Preempted state to acquire local matches; got {:?}",
                 self.state()
@@ -1072,6 +1093,7 @@ impl Slot for VllmConnectorSlot {
                 "no blocks to lookup from host/disk; GPU has all blocks"
             );
             // Still mark that we performed a lookup (even though we didn't need to query)
+            self.clear_staged_matches();
             self.performed_cache_lookup = true;
             self.total_blocks_queried = 0;
             return Ok(());
@@ -1099,30 +1121,34 @@ impl Slot for VllmConnectorSlot {
         //     disk.touch_blocks_blocking(&sequence_hashes)?;
         // }
 
-        let mut host_blocks = self
-            .block_manager
-            .as_ref()
-            .and_then(|bm| bm.host())
+        let host_pool = self.block_manager.as_ref().and_then(|bm| bm.host());
+        #[cfg(test)]
+        let host_pool = host_pool.or(self.apc_test_host.as_deref());
+        let mut host_blocks = host_pool
             .map(|host| host.match_sequence_hashes_blocking(blocks_to_lookup))
             .transpose()?
             .unwrap_or_default();
 
         let num_matched_host_blocks = host_blocks.len();
-        self.record_cached_host_tokens(num_matched_host_blocks * block_size);
 
         // advance the search offset by the number of matched host blocks
         let search_offset = search_offset + num_matched_host_blocks;
 
         // start at host offset
-        let mut disk_blocks = self
-            .block_manager
-            .as_ref()
-            .and_then(|bm| bm.disk())
+        let disk_pool = self.block_manager.as_ref().and_then(|bm| bm.disk());
+        #[cfg(test)]
+        let disk_pool = disk_pool.or(self.apc_test_disk.as_deref());
+        let mut disk_blocks = disk_pool
             .map(|disk| disk.match_sequence_hashes_blocking(&sequence_hashes[search_offset..]))
             .transpose()?
             .unwrap_or_default();
 
         let num_matched_disk_blocks = disk_blocks.len();
+
+        // Keep the previous source references alive until both fresh lookups succeed.
+        // The scheduler may change its local prefix between allocation attempts.
+        self.clear_staged_matches();
+        self.record_cached_host_tokens(num_matched_host_blocks * block_size);
         self.record_cached_disk_tokens(num_matched_disk_blocks * block_size);
 
         let num_matched_blocks = num_matched_host_blocks + num_matched_disk_blocks;
@@ -2386,3 +2412,7 @@ mod connector_tests {
         assert_eq!(slot.device_blocks_snapshot(), &[10, 11, 12, 13, 14, 15, 16]);
     }
 }
+
+#[cfg(test)]
+#[path = "apc_repoll_tests.rs"]
+mod apc_repoll_tests;

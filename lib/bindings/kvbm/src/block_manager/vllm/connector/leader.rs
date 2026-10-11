@@ -277,11 +277,6 @@ impl Leader for KvConnectorLeader {
             }
         }
 
-        // early exit if we cannot match full block
-        if (slot.sequence().total_tokens() - num_computed_tokens) < self.block_size {
-            return Ok((0, false));
-        }
-
         // find matches for any remaining tokens
         // this will advance the computed position and hold any newly matched blocks in the slot
         slot.acquire_local_matches(num_computed_tokens)?;
