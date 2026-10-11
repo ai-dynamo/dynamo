@@ -35,7 +35,7 @@ Breaking changes and deprecations for this release are tracked on the [Deprecati
 
 Pull, deploy, and install with every artifact pinned to the v1.3.0 release set.
 
-<PinnedEnvironment />
+<PinnedEnvironment version="v1.3.0" />
 
 ## Highlights
 

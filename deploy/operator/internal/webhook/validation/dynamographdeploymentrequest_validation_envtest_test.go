@@ -73,7 +73,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				request.Spec.RuntimeVersionOverride = ""
 			}),
 			gpuDiscovery: true,
-			wantImage:    "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0",
+			wantImage:    "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.6.0",
 		},
 		{
 			name: "custom image requires runtime version override",
