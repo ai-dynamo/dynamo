@@ -13,6 +13,7 @@ generated tests as real subprocesses.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -23,7 +24,6 @@ import pytest
 from tests.utils import pytest_parallel_gpu, vram_utils
 from tests.utils.pytest_parallel_gpu import (
     _GpuState,
-    _kill_process_trees,
     _priority_key,
     _select_launches,
     _TestEntry,
@@ -555,37 +555,60 @@ def test_stage_deadline_kills_running_tree_and_skips_queued(tmp_path, monkeypatc
 
 
 _IGNORE_SIGTERM = (
-    "import signal, subprocess, sys, time\n"
+    "import os, signal, subprocess, sys, time\n"
     "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-    "if sys.argv[1:] == ['parent']:\n"
-    "    subprocess.Popen([sys.executable, __file__], start_new_session=True)\n"
+    "open(os.path.join(sys.argv[1], str(os.getpid())), 'w').close()\n"
+    "if sys.argv[2:] == ['parent']:\n"
+    "    subprocess.Popen([sys.executable, __file__, sys.argv[1]],"
+    " start_new_session=True)\n"
     "time.sleep(600)\n"
 )
+
+# The middle process exits at once, so the sleeper is orphaned before the
+# kill starts and is no longer in the root's tree.
+_ORPHAN_TREE = (
+    "import subprocess, sys, time\n"
+    "if sys.argv[1] == 'root':\n"
+    "    subprocess.Popen([sys.executable, __file__, 'middle', sys.argv[2]])\n"
+    "    time.sleep(600)\n"
+    "elif sys.argv[1] == 'middle':\n"
+    "    p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'],"
+    " start_new_session=True)\n"
+    "    open(sys.argv[2], 'w').write(str(p.pid))\n"
+)
+
+
+def _wait_for(cond, timeout_s: float = 15) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not cond():
+        assert time.monotonic() < deadline, "timed out waiting for test processes"
+        time.sleep(0.05)
 
 
 @pytest.mark.timeout(60)
 def test_kill_process_trees_shares_one_wait(tmp_path):
-    # Each tree ignores SIGTERM, so each needs the full grace period. Killing
-    # them one at a time would take at least four grace periods.
+    # Each process ignores SIGTERM, so each tree needs the full grace period.
+    # Killing them one at a time would take at least four grace periods.
     script = tmp_path / "ignore_term.py"
     script.write_text(_IGNORE_SIGTERM)
+    ready = tmp_path / "ready"
+    ready.mkdir()
+    keep = frozenset(c.pid for c in psutil.Process().children())
     parents = [
-        subprocess.Popen([sys.executable, str(script), "parent"]) for _ in range(4)
+        subprocess.Popen([sys.executable, str(script), str(ready), "parent"])
+        for _ in range(4)
     ]
     procs: list[psutil.Process] = []
     try:
-        deadline = time.monotonic() + 10
-        for parent in parents:
-            p = psutil.Process(parent.pid)
-            while not p.children() and time.monotonic() < deadline:
-                time.sleep(0.05)
-            procs.append(p)
-            procs.extend(p.children(recursive=True))
-        assert len(procs) == 8, "not every tree started its grandchild"
+        # Each process writes its ready file after it starts ignoring SIGTERM.
+        _wait_for(lambda: len(list(ready.iterdir())) == 8)
+        procs = [psutil.Process(int(f.name)) for f in ready.iterdir()]
 
         grace_s = 2.0
         start = time.monotonic()
-        _kill_process_trees([p.pid for p in parents], grace_s=grace_s)
+        pytest_parallel_gpu._kill_process_trees(
+            [p.pid for p in parents], grace_s=grace_s, keep=keep
+        )
         elapsed = time.monotonic() - start
 
         for parent in parents:
@@ -593,8 +616,41 @@ def test_kill_process_trees_shares_one_wait(tmp_path):
         assert not any(_pid_alive(p.pid) for p in procs)
         assert grace_s <= elapsed < 2 * grace_s + 1
     finally:
-        for p in procs:
-            _kill_if_alive(p.pid)
+        for f in ready.iterdir():
+            _kill_if_alive(int(f.name))
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="child subreaper is Linux only"
+)
+@pytest.mark.timeout(60)
+def test_kill_process_trees_kills_adopted_orphan(tmp_path):
+    script = tmp_path / "orphan_tree.py"
+    script.write_text(_ORPHAN_TREE)
+    pid_file = tmp_path / "orphan.pid"
+    keep = frozenset(c.pid for c in psutil.Process().children())
+    assert pytest_parallel_gpu._set_child_subreaper(True)
+    root = None
+    try:
+        root = subprocess.Popen([sys.executable, str(script), "root", str(pid_file)])
+        _wait_for(lambda: pid_file.exists() and pid_file.read_text())
+        orphan = psutil.Process(int(pid_file.read_text()))
+        # The orphan reparents to this test process once the middle exits.
+        _wait_for(lambda: orphan.ppid() == os.getpid())
+        assert orphan.pid not in {
+            c.pid for c in psutil.Process(root.pid).children(recursive=True)
+        }
+
+        pytest_parallel_gpu._kill_process_trees([root.pid], grace_s=2.0, keep=keep)
+
+        root.wait(timeout=5)
+        assert not _pid_alive(orphan.pid)
+    finally:
+        pytest_parallel_gpu._set_child_subreaper(False)
+        if root is not None and root.poll() is None:
+            root.kill()
+        if pid_file.exists() and pid_file.read_text():
+            _kill_if_alive(int(pid_file.read_text()))
 
 
 def _kill_if_alive(pid: int) -> None:

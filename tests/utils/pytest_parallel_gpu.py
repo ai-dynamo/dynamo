@@ -30,6 +30,7 @@ killed, and the run fails.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import math
 import os
 import subprocess
@@ -297,37 +298,63 @@ def _stage_deadline() -> float | None:
 # One shared wait for all trees, so the kill time stays bounded however many
 # tests were running when the deadline passed.
 _STAGE_KILL_GRACE_S = 15.0
+_PR_SET_CHILD_SUBREAPER = 36
 
 
-def _kill_process_trees(pids: list[int], grace_s: float = _STAGE_KILL_GRACE_S) -> None:
-    """SIGTERM every process in all the given trees, then SIGKILL survivors.
+def _set_child_subreaper(enabled: bool) -> bool:
+    """Make orphaned descendants reparent to this process instead of init.
 
-    Takes at most about twice ``grace_s`` in total, unlike calling
-    terminating one tree at a time, where the waits add up.
+    Linux only. Returns False when the call is unavailable or fails.
     """
-    procs: list[psutil.Process] = []
-    for pid in pids:
-        try:
-            parent = psutil.Process(pid)
-        except psutil.NoSuchProcess:
-            continue
-        procs.append(parent)
-        try:
-            procs.extend(parent.children(recursive=True))
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(_PR_SET_CHILD_SUBREAPER, int(enabled), 0, 0, 0) == 0
+    except (OSError, AttributeError):
+        return False
+
+
+def _signal_all(procs, kill: bool) -> None:
     for proc in procs:
         try:
-            proc.terminate()
+            proc.kill() if kill else proc.terminate()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
+
+
+def _tree(pid: int) -> list[psutil.Process]:
+    try:
+        root = psutil.Process(pid)
+        return [root, *root.children(recursive=True)]
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return []
+
+
+def _kill_process_trees(
+    pids: list[int],
+    grace_s: float = _STAGE_KILL_GRACE_S,
+    keep: frozenset[int] = frozenset(),
+) -> None:
+    """SIGTERM every process in all the given trees, then SIGKILL survivors.
+
+    Takes about three times ``grace_s`` at most, where terminating one tree
+    at a time adds up the waits. Descendants orphaned earlier are not in any
+    tree; with _set_child_subreaper on they are children of this process, so
+    every child not in ``keep`` is killed afterwards.
+    """
+    me = psutil.Process()
+    procs = [p for pid in pids for p in _tree(pid)]
+    _signal_all(procs, kill=False)
     _, alive = psutil.wait_procs(procs, timeout=grace_s)
-    for proc in alive:
-        try:
-            proc.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+    _signal_all(alive, kill=True)
     psutil.wait_procs(alive, timeout=grace_s)
+    for _ in range(3):
+        adopted = [p for c in me.children() if c.pid not in keep for p in _tree(c.pid)]
+        if not adopted:
+            break
+        _signal_all(adopted, kill=True)
+        psutil.wait_procs(adopted, timeout=grace_s / 3)
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -712,6 +739,9 @@ def run_parallel(
     # --- Scheduling state ---
     t0 = time.monotonic()
     stage_deadline = _stage_deadline()
+    # Keeps orphaned test processes findable so the deadline can kill them.
+    subreaper = stage_deadline is not None and _set_child_subreaper(True)
+    own_children = frozenset(c.pid for c in psutil.Process().children())
     if stage_deadline is not None:
         _print(
             f"Stage deadline in {stage_deadline - time.time():.0f}s "
@@ -946,9 +976,11 @@ def run_parallel(
             pending = []
             for test in not_run:
                 _print(f"[w{test.w_id}] {test.name} NOT RUN - stage budget exhausted")
-            # Kills each child pytest and every descendant, including
-            # engine processes that moved to their own session.
-            _kill_process_trees([r.proc.pid for r in running.values()])
+            # Kills each child pytest and every descendant, including engine
+            # processes in their own session and orphans adopted as subreaper.
+            _kill_process_trees(
+                [r.proc.pid for r in running.values()], keep=own_children
+            )
             for w_id, run_info in list(running.items()):
                 run_info.proc.wait()
                 if run_info.reader_thread is not None:
@@ -1071,6 +1103,8 @@ def run_parallel(
             time.sleep(1.0)
 
     # Summary
+    if subreaper:
+        _set_child_subreaper(False)
     wall_time = time.monotonic() - t0
     sequential_time = sum(c.duration for c in completed if not c.skipped)
     n_passed = sum(1 for c in completed if c.passed)
