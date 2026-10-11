@@ -84,7 +84,10 @@ def sglang_generate_mocker(
             yield frontend_port
 
 
-@pytest.mark.timeout(120)
+# func_only: setup can be the worker's first `predownload_tokenizers` call, a
+# Hugging Face Hub download whose latency CI cannot bound when no model cache is
+# mounted. Each startup wait in the fixture has its own limit.
+@pytest.mark.timeout(120, func_only=True)
 def test_native_generate_replays_incremental_ids_and_keeps_openai_canonical(
     sglang_generate_mocker: int,
 ) -> None:
