@@ -212,7 +212,7 @@ Existing reports cannot satisfy another window. `verified` establishes the
 reported validation scope; it does not prove every configured event was collected.
 Frontend evidence requires CPU activity beyond NVTX and records missing samples,
 context switches, and Nsight diagnostics. Host policy may permit OS runtime
-tracing while denying CPU sampling. Worker evidence requires CUDA kernels and,
+tracing while denying CPU sampling. Worker evidence requires CUDA kernel or memory activity and,
 when rank membership is configured, the matching GPU process count. Rank identities
 remain unattested; Nsight may combine a replica's ranks into one report.
 Native report bounds and host clock estimates are recorded separately.

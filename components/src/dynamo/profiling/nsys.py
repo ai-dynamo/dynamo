@@ -85,7 +85,7 @@ class NsysWorkerCollector(TorchCollector):
             collector="nsys",
             output_prefix=worker.nsys_output_prefix,
             trigger="cudaProfilerApi",
-            required_activity="cuda_kernels",
+            required_activity="cuda_events",
             expected_gpu_processes=len(worker.expected_rank_ids),
         )
 
@@ -148,13 +148,18 @@ def inspect_report(
             raise ValueError(
                 "Nsight SQLite export is incomplete or belongs to another report"
             )
+        cuda_tables = (
+            "CUPTI_ACTIVITY_KIND_KERNEL",
+            "CUPTI_ACTIVITY_KIND_MEMCPY",
+            "CUPTI_ACTIVITY_KIND_MEMSET",
+        )
         counts = {}
         for table in (
             "COMPOSITE_EVENTS",
             "SCHED_EVENTS",
             "OSRT_API",
             "NVTX_EVENTS",
-            "CUPTI_ACTIVITY_KIND_KERNEL",
+            *cuda_tables,
         ):
             clause = " WHERE cpuCycles = 1" if table == "COMPOSITE_EVENTS" else ""
             parameters = ()
@@ -179,17 +184,20 @@ def inspect_report(
             counts["COMPOSITE_EVENTS"] or counts["SCHED_EVENTS"] or counts["OSRT_API"]
         ):
             raise ValueError("Frontend report contains no CPU activity beyond NVTX")
-        gpu_processes = []
-        if counts["CUPTI_ACTIVITY_KIND_KERNEL"]:
-            gpu_processes = [
+        gpu_processes = sorted(
+            {
                 row[0]
-                for row in conn.execute(
-                    "SELECT DISTINCT globalPid FROM CUPTI_ACTIVITY_KIND_KERNEL"
-                )
-            ]
-        if evidence["required_activity"] == "cuda_kernels":
+                for table in cuda_tables
+                if counts[table]
+                for row in conn.execute(f'SELECT DISTINCT globalPid FROM "{table}"')
+                if row[0] is not None
+            }
+        )
+        if evidence["required_activity"] == "cuda_events":
             if not gpu_processes:
-                raise ValueError("Worker report contains no CUDA kernels")
+                raise ValueError(
+                    "Worker report contains no CUDA kernel or memory activity"
+                )
             expected = evidence.get("expected_gpu_processes", 0)
             if expected and len(gpu_processes) != expected:
                 raise ValueError(

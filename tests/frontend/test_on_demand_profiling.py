@@ -968,7 +968,7 @@ async def test_nsys_rejects_incomplete_or_ambiguous_exports(tmp_path, defect):
             "collector": "nsys",
             "output_prefix": str(tmp_path / "worker"),
             "required_activity": (
-                "cpu_events" if defect == "missing_cpu" else "cuda_kernels"
+                "cpu_events" if defect == "missing_cpu" else "cuda_events"
             ),
             "expected_gpu_processes": 2 if defect == "missing_rank" else 1,
             "previous_reports": [],
@@ -995,3 +995,28 @@ def test_vllm_nsight_launch_rejects_torch_plan(tmp_path):
     with pytest.raises(errors.Unsupported, match="separate launch"):
         coordinator.submit(Plan("id", [Target("decode", "epoch")], 50))
     assert not coordinator.sessions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_kernels", [False, True])
+async def test_nsys_accepts_cuda_memory_activity(tmp_path, with_kernels):
+    # A decoder waiting for KV transfer can perform copies without launching
+    # kernels. A process appearing in both tables must still count as one rank.
+    path = tmp_path / "worker.1.nsys-rep"
+    nsys_report(path, "gpu" if with_kernels else "cpu")
+    with sqlite3.connect(path.with_suffix(".sqlite")) as conn:
+        conn.execute("CREATE TABLE CUPTI_ACTIVITY_KIND_MEMCPY(globalPid INTEGER)")
+        conn.execute("INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY VALUES (0)")
+    result = await SharedFilesystemValidator().validate(
+        {
+            "collector": "nsys",
+            "output_prefix": str(tmp_path / "worker"),
+            "previous_reports": [],
+            "required_activity": "cuda_events",
+            "expected_gpu_processes": 1,
+        },
+        Config("unused", str(tmp_path), artifact_validation_timeout_s=0.05),
+    )
+    assert result["status"] == "verified"
+    assert result["events"]["CUPTI_ACTIVITY_KIND_MEMCPY"] == 1
+    assert result["gpu_processes"] == [0]
