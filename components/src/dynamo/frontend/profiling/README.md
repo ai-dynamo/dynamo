@@ -98,8 +98,10 @@ records the omission and explicit frontend targets are then rejected.
 toward it. There is no exact-duration or synchronized-start guarantee, and an
 embedded event-loop stall can delay stop. Early stop shortens the lease. Startup,
 export/stop, and validation use `start_timeout_s`, `finalize_timeout_s`, and
-`artifact_validation_timeout_s`, respectively. Stops run concurrently so slow
-worker export does not extend frontend perf. Uncertain starts still receive
+`artifact_validation_timeout_s`, respectively. Selected targets are probed,
+started, stopped and validated concurrently, so slow worker export does not
+extend frontend perf. A stop before recording begins fails the session with
+explicit missing coverage. Uncertain starts still receive
 cleanup; failed/timed-out cleanup blocks new captures. Reconcile worker state
 before restarting the coordinator.
 
