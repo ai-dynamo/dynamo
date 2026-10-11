@@ -123,8 +123,9 @@ runs:
         VERIFY_GPU: ${{ inputs.verify_gpu }}
       run: |
         # Taken first so the GPU-parallel stage deadline counts setup time
-        # against the step timeout.
-        STEP_START_EPOCH=$(date +%s)
+        # against the step timeout. Uses the bash clock builtin because the
+        # distroless planner test image ships no date.
+        printf -v STEP_START_EPOCH '%(%s)T' -1
 
         # Sanitize test_type for the JUnit and coverage filenames this step
         # writes: remove commas and spaces.
@@ -278,7 +279,8 @@ runs:
               STAGE_MARGIN_MINUTES=10
               if (( GPU_PARALLEL_STAGE_TIMEOUT_MINUTES > STAGE_MARGIN_MINUTES )); then
                 export DYN_GPU_PARALLEL_STAGE_DEADLINE=$(( STEP_START_EPOCH + (GPU_PARALLEL_STAGE_TIMEOUT_MINUTES - STAGE_MARGIN_MINUTES) * 60 ))
-                echo "⏱️ GPU-parallel stage deadline: $(( (DYN_GPU_PARALLEL_STAGE_DEADLINE - $(date +%s)) / 60 )) minutes from now"
+                printf -v NOW_EPOCH '%(%s)T' -1
+                echo "⏱️ GPU-parallel stage deadline: $(( (DYN_GPU_PARALLEL_STAGE_DEADLINE - NOW_EPOCH) / 60 )) minutes from now"
               fi
             fi
           else
