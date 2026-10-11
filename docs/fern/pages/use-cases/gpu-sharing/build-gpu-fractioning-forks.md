@@ -1,10 +1,16 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Build the KAI-Scheduler and GPU Fractioning Forks
-sidebar-title: Build the GPU Fractioning Forks
+title: Build the KAI + GPU Fractions Stack
+sidebar-title: Build the KAI + GPU Fractions Stack
 subtitle: Build, push, and install the two forks that give each model a hard compute and memory share of a GPU
 ---
+
+> [!NOTE]
+> This is part 1 of the KAI + GPU Fractions experiment. It builds KAI-Scheduler
+> and gpu-fractioning from open upstream pull requests and installs them. When the
+> smoke test in Step 5 passes, continue to
+> [Deploy the KAI + GPU Fractions Experiment](deploy-kai-gpu-fractions.md).
 
 This guide builds two forks from source, pushes the images to a registry you control, and installs them on a Kubernetes cluster. Together they give each pod a hard share of a GPU's streaming multiprocessors (SMs) and memory, enforced by CUDA Multi-Process Service (MPS) v3 namespaces. You need them for the "KAI + GPU fractions" experiment in [Interpreting GPU Sharing Results](gpu-sharing-results.mdx): 16 Qwen3-4B models on 8 A100 GPUs, each model capped at 50% of the SMs and 50% of the memory of one GPU.
 

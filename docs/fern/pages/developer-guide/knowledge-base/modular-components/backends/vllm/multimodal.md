@@ -28,7 +28,7 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 > video decoder, so these codecs are decoded on the GPU by NVDEC and no other codec
 > (VP8, VP9, AV1) has a decoder available. NVDEC decode requires a GPU with a video
 > decode engine and a container granted the `video` driver capability — see
-> [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
+> [Video Decode GPU Requirements](../../../../../use-cases/video/video-decoding.md).
 > `http`, `https`, `file://` and `data:` sources are all hardware-decoded; `file://`
 > additionally requires `DYN_MM_LOCAL_PATH` to permit local reads.
 
@@ -66,7 +66,7 @@ The main multimodal vLLM launchers in this repo are:
 
 ### Custom Vision Encoders
 
-The aggregated vLLM worker can load an author-provided vision tower in process, batch images across concurrent requests, and adapt the ordered results into decoder-compatible prompt input. See [Custom Vision Encoders](../../../../../use-cases/multimodal-serving/custom-vision-encoders.md) for the backend contract, launch instructions, batch sizing guidance, and current limitations.
+The aggregated vLLM worker can load an author-provided vision tower in process, batch images across concurrent requests, and adapt the ordered results into decoder-compatible prompt input. See [Custom Vision Encoders](../../../../../use-cases/image/custom-vision-encoders.md) for the backend contract, launch instructions, batch sizing guidance, and current limitations.
 
 ## Multimodal KV Routing
 
@@ -98,7 +98,7 @@ The default path keeps multimodal processing on the worker:
 
 By default, the frontend hashes the exact full URI: the complete `data:` URI string or the HTTP URL including its query string. Set `--frontend-decoding` on the worker to register frontend media decoding and use decoded image content as the hash input. Content-addressed hashing lets different URLs for identical image bytes share a routing key.
 
-Exact video routing on this path requires `--frontend-decoding`. The frontend hashes sampled RGB frames and their model-visible metadata, then uses a model adapter to reproduce the worker's prompt expansion. Supported adapters cover Qwen3-VL, Qwen3.5, and Nemotron 3 Nano Omni. See [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md#video-identity-and-token-layout) for setup, verification, and fallback behavior.
+Exact video routing on this path requires `--frontend-decoding`. The frontend hashes sampled RGB frames and their model-visible metadata, then uses a model adapter to reproduce the worker's prompt expansion. Supported adapters cover Qwen3-VL, Qwen3.5, and Nemotron 3 Nano Omni. See [Multimodal KV Routing](../../../../../use-cases/video/exact-video-kv-routing.md#video-identity-and-token-layout) for setup, verification, and fallback behavior.
 
 Launch the default path:
 
@@ -136,7 +136,7 @@ This launcher sets `--dyn-chat-processor vllm`. The frontend runs vLLM's Hugging
 
 If a client supplies opaque multimodal UUIDs, Dynamo cannot derive a matching content hash. Those requests use text-prefix routing.
 
-For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md).
+For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/multimodal-performance/multimodal-kv-routing.md).
 
 ## Image/Video Serving
 

@@ -24,7 +24,7 @@ All commands run from `examples/gpu-sharing` in a checkout of the [Dynamo reposi
 
 ## Requirements
 
-You must build and install the two forks before you deploy any models. That procedure, including the full node requirements, is in [Build the KAI-Scheduler and GPU Fractioning Forks](build-gpu-fractioning-forks.md) and is not repeated here.
+This is part 2 of the KAI + GPU Fractions experiment. Part 1, [Build the KAI + GPU Fractions Stack](build-gpu-fractioning-forks.md), builds and installs KAI-Scheduler and gpu-fractioning and lists the full node requirements, including driver r615 and GPU Operator v26.7.1 or later.
 
 This guide assumes a multi-node Kubernetes cluster that you administer from a workstation with `kubectl` and `helm`. All 16 models run on one node with eight A100 40GB GPUs. The model cache is a `hostPath` directory on that node, so every frontend and worker is pinned to it. The load generator runs in its own pod on a different node and reaches each frontend through its Service DNS name.
 
@@ -50,26 +50,19 @@ export GPU_NODE=<node-name>
 kubectl get node "$GPU_NODE" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 8
 ```
 
-## Step 1: Install the Dynamo Platform
+## Step 1: Complete the Common Setup
 
-```bash
-cd examples/gpu-sharing
-common/install-dynamo-platform.sh
-```
+Install the Dynamo platform and download the model as described in
+[Common Setup](common-setup.md). Skip this step if you already did it for
+another experiment on this cluster.
 
-The script installs the `dynamo-platform` Helm chart, version 1.4.2, into the `dynamo-system` namespace and waits for its pods to be Ready. It sets `global.etcd.install=true` and `global.nats.install=true`, which is deliberate. Platform 1.4.x installs without etcd and NATS by default and configures Kubernetes-based discovery, and with that default the `vllm-runtime:1.3.0` frontend never lists the model: `/v1/models` is empty and chat requests return 404. The generated DGDs set `DYN_DISCOVERY_BACKEND=etcd`, which needs the etcd and NATS the script installs.
+## Step 2: Confirm the GPU Fractions Stack
 
-## Step 2: Download the Model to the GPU Node
-
-```bash
-NODE_NAME="$GPU_NODE" common/download-model.sh
-```
-
-The script runs a Kubernetes Job on `$GPU_NODE` that downloads `Qwen/Qwen3-4B` at revision `1cfa9a7208912126459214e8b04321603b3df60c` into the `hostPath` cache `HF_CACHE_DIR` (default `/opt/hf-cache`) on that node, and prints the snapshot path. An init container running as root creates the directory and opens its permissions, because the download container, like the workers, runs as a non-root user. The script also reads `NAMESPACE` (default `default`), `HF_TOKEN`, and `RUNTIME_IMAGE`.
-
-## Step 3: Install the Forks
-
-Follow [Build the KAI-Scheduler and GPU Fractioning Forks](build-gpu-fractioning-forks.md) through Step 4. Do not install the upstream KAI-Scheduler or the HAMi isolator on the same cluster: the forks are a matched pair, and the KAI + HAMi stack uses the same `kai-scheduler` release and namespace. If you ran the [KAI + HAMi experiment](deploy-kai-hami.md) on this cluster, uninstall it first.
+Complete [Build the KAI + GPU Fractions Stack](build-gpu-fractioning-forks.md),
+including its two-pod smoke test, before you continue. Do not install the
+upstream KAI-Scheduler or the HAMi isolator on the same cluster: the KAI +
+HAMi stack uses the same `kai-scheduler` release and namespace. If you ran the
+[KAI + HAMi experiment](deploy-kai-hami.md) on this cluster, uninstall it first.
 
 ### Queues
 
@@ -84,9 +77,9 @@ for q in default-parent-queue default-queue; do
 done
 ```
 
-### Verify the Caps With the Smoke Test
+### Optional: Re-check the Caps
 
-[`smoke-test-half-gpu.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/smoke-test-half-gpu.yaml) starts two idle pods, `fraction-smoke-a` and `fraction-smoke-b`, each requesting `gpu-fraction: "0.5"`, the same pods as the [build guide smoke test](build-gpu-fractioning-forks.md#step-5-verify-with-a-two-pod-smoke-test). Run it before you commit eight GPUs to the full experiment:
+[`smoke-test-half-gpu.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/smoke-test-half-gpu.yaml) starts two idle pods, `fraction-smoke-a` and `fraction-smoke-b`, each requesting `gpu-fraction: "0.5"`, the same pods as the [build guide smoke test](build-gpu-fractioning-forks.md#step-5-verify-with-a-two-pod-smoke-test). If time has passed since you built the stack, or you changed the node, re-run it before you commit eight GPUs to the full experiment:
 
 ```bash
 kubectl apply -f kai-gpu-fractions/smoke-test-half-gpu.yaml
@@ -102,7 +95,7 @@ Both pods must report the same `NVIDIA_VISIBLE_DEVICES` GPU UUID, `CUDA_MPS_ACTI
 kubectl delete -f kai-gpu-fractions/smoke-test-half-gpu.yaml
 ```
 
-## Step 4: Deploy the 16 DGDs
+## Step 3: Deploy the 16 DGDs
 
 [`kai-gpu-fractions/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/gen-dgds.sh) renders the 16 DGDs. With `NODE_NAME` set, it pins every frontend and worker to that node, where the model cache is. Render and apply in one step:
 
@@ -111,7 +104,7 @@ NODE_NAME="$GPU_NODE" kai-gpu-fractions/gen-dgds.sh | kubectl apply -f -
 kubectl get dgd -n default      # wait until all 16 DGDs are Ready
 ```
 
-The generator also reads `NAMESPACE` (default `default`) and `HF_CACHE_DIR` (default `/opt/hf-cache`); set them to the values you used in Step 2. It takes an optional model snapshot path as its first argument. The checked-in [`kai-gpu-fractions/dgds-16x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/dgds-16x.yaml) is the same output without a node pin, for reference.
+The generator also reads `NAMESPACE` (default `default`) and `HF_CACHE_DIR` (default `/opt/hf-cache`); set them to the values you used in [Common Setup](common-setup.md#download-the-model-to-the-gpu-node). It takes an optional model snapshot path as its first argument. The checked-in [`kai-gpu-fractions/dgds-16x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/dgds-16x.yaml) is the same output without a node pin, for reference.
 
 `NUM_MODELS` (default `16`) sets the number of DGDs. Each worker carries the label `kai.scheduler/queue: default-queue`, the annotations `gpu-fraction: "0.5"` and `nvidia.com/container.main.gpu-compute.mode: sm-sharing`, `schedulerName: kai-scheduler`, `runtimeClassName: nvidia`, and a non-root security context. It has no `nvidia.com/gpu` resource.
 
@@ -145,7 +138,7 @@ kubectl -n gpu-fractioning exec ds/gpu-fractioning-mpsd -- \
 
 The worker reports `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=50` and `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=0=19968M`. The namespace list shows 16 `kai_*` namespaces at `50.00` active thread percentage, plus the `default` namespace at `10.00`.
 
-## Step 5: Run the Concurrency Sweep
+## Step 4: Run the Concurrency Sweep
 
 The frontends' ClusterIPs are reachable only from inside the cluster, so the sweep runs in a load-generator pod, [`common/aiperf-client-pod.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/common/aiperf-client-pod.yaml). The pod requests 16 CPUs, one per concurrent AIPerf process, and its node affinity keeps it off `$GPU_NODE`, so load generation does not compete with the workers for host CPU.
 
@@ -221,7 +214,7 @@ Throughput grows about 7.8x from `c=1` to `c=32`, with only a 13% gain from `c=1
 | `--gpu-memory-utilization` | `0.40` | MPS does not virtualize the memory total the way HAMi does, so vLLM sizes against the physical 39.5 GiB card. 0.40 is about 15.8 GiB, comparable to the HAMi experiment's 0.85 of about 20 GB. Recompute it for other GPUs |
 | `runtimeClassName` and non-root security context | `nvidia`, `runAsNonRoot` | A root container is equivalent to the MPS owner and could raise its own cap. Keep the non-root context |
 | `--max-model-len` / `--max-num-seqs` | `4096` / `32` | A cap of 32 sequences keeps the high-concurrency points measuring GPU contention rather than vLLM queueing |
-| `DYN_DISCOVERY_BACKEND` | `etcd` on both components | Required with operator 1.4.2 and `vllm-runtime:1.3.0` (see Step 1) |
+| `DYN_DISCOVERY_BACKEND` | `etcd` on both components | Required with operator 1.4.2 and `vllm-runtime:1.3.0` (see [Common Setup](common-setup.md#install-the-dynamo-platform)) |
 | `DYN_NAMESPACE_WORKER_SUFFIX` | empty, on the worker | The operator otherwise appends a random suffix to the worker namespace. Pinning it empty makes the worker and frontend namespaces match exactly |
 
 ## Clean Up

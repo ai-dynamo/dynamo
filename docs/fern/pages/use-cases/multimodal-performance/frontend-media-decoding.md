@@ -1,11 +1,11 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Parallel Media Decoding
-subtitle: Decode media inputs concurrently in the Rust frontend and transfer pixels to inference backends
+title: Frontend Media Decoding
+subtitle: Decode images and video in parallel in the Rust frontend with --frontend-decoding
 ---
 
-Parallel media decoding moves media fetching and decoding from the inference
+Frontend media decoding moves media fetching and decoding from the inference
 backend to the NVIDIA Dynamo Rust frontend. The frontend decodes supported
 images and videos on a CPU worker pool and transfers the decoded pixel buffers
 to the backend through NIXL.
@@ -29,13 +29,13 @@ SGLang frontend video decoding is available only on CUDA. SGLang XPU images do
 not include the in-tree FFmpeg decoder. Image frontend decoding is not subject
 to that codec restriction.
 
-This matrix describes parallel media decoding, not the overall multimodal
+This matrix describes frontend media decoding, not the overall multimodal
 support of each backend. A backend can support video or audio by decoding it on
 the worker even when the frontend decoding path does not support that modality.
 
 ## When to Use
 
-Use parallel media decoding when media preprocessing consumes a significant
+Use frontend media decoding when media preprocessing consumes a significant
 part of request latency or backend CPU time. It is most useful for workloads
 with:
 
@@ -44,7 +44,7 @@ with:
 - Backend workers whose request path is constrained by media fetching or
   decompression
 
-Parallel media decoding can also be combined with the [embedding
+Frontend media decoding can also be combined with the [embedding
 cache](embedding-cache.md). Frontend decoding reduces media input processing
 work, while the embedding cache can skip vision encoding for repeated images.
 
@@ -60,7 +60,7 @@ For each request, the frontend:
 The backend reads the decoded pixels through NIXL, then continues with its
 normal multimodal processor and vision encoder.
 
-## Enable Parallel Media Decoding
+## Enable Frontend Media Decoding
 
 Add `--frontend-decoding` to the backend worker command. Do not add the flag to
 `dynamo.frontend`; the backend advertises the decoder configuration when it
@@ -100,6 +100,6 @@ frontend process to trade one CPU core for each NIXL agent for that latency.
 
 - The published `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.0` image installs
   NIXL wheels but does not expose the native NIXL and UCX libraries and plugins
-  required by the Rust frontend. It cannot run parallel media decoding as
+  required by the Rust frontend. It cannot run frontend media decoding as
   shipped. Run the frontend in a backend runtime image or environment where
   NIXL and UCX are configured and available.

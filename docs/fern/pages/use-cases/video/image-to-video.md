@@ -5,7 +5,16 @@ title: Image-to-Video
 subtitle: Animate source images with vLLM-Omni or SGLang
 ---
 
-Choose a backend for image-to-video generation. See the [Diffusion Overview](../overview.md) for installation and shared configuration.
+Image-to-video (I2V) animates a source image from a text prompt through the
+same `/v1/videos` endpoint as [Text-to-Video](text-to-video.md), with an extra
+`input_reference` field that points at the source image.
+
+> [!NOTE]
+> Before you begin, set up vLLM-Omni or SGLang as described in
+> [Text-to-Video › Set up the backend](text-to-video.md#set-up-the-backend).
+> TensorRT-LLM does not support image-to-video.
+
+## Generate Videos from Images
 
 <Tabs>
 <Tab title="vLLM-Omni">
@@ -14,7 +23,7 @@ Choose a backend for image-to-video generation. See the [Diffusion Overview](../
 
 Image-to-video (I2V) uses the same `/v1/videos` endpoint as [text-to-video](text-to-video.md#vllm-omni), with an additional `input_reference` field that provides the source image. Run a vLLM-Omni worker with `--output-modalities video`.
 
-## Tested Models
+### Tested Models
 
 | Model | Notes |
 |---|---|
@@ -27,7 +36,7 @@ To run a non-default model, pass `--model` to the launch script:
 bash examples/backends/vllm/launch/agg_omni_i2v.sh --model Wan-AI/Wan2.2-I2V-A14B-Diffusers
 ```
 
-## Launch
+### Launch
 
 Launch with the provided script using `Wan-AI/Wan2.2-TI2V-5B-Diffusers`:
 
@@ -35,7 +44,7 @@ Launch with the provided script using `Wan-AI/Wan2.2-TI2V-5B-Diffusers`:
 bash examples/backends/vllm/launch/agg_omni_i2v.sh
 ```
 
-## Generate a Video from an Image
+### Generate a Video from an Image
 
 ```bash
 curl -s http://localhost:8000/v1/videos \
@@ -62,7 +71,7 @@ The `input_reference` field accepts:
 - **Base64 data URI**: `"data:image/png;base64,iVBORw0KGgo..."`
 - **Local file path**: `"/path/to/image.png"` or `"file:///path/to/image.png"`
 
-## Request Parameters (`nvext`)
+### Request Parameters (`nvext`)
 
 I2V accepts all [text-to-video `nvext` fields](text-to-video.md#request-parameters-nvext), plus two fields that control the dual-expert MoE denoising schedule in Wan2.x models:
 
@@ -73,11 +82,11 @@ I2V accepts all [text-to-video `nvext` fields](text-to-video.md#request-paramete
   CFG scale for the low-noise expert (I2V).
 </ParamField>
 
-## See Also
+### See Also
 
 - [Text-to-Video with vLLM-Omni](text-to-video.md#vllm-omni)
 - [Image-to-Video with SGLang](image-to-video.md#sglang)
-- [vLLM-Omni Configuration reference](../../../reference/backends/vllm-omni-configuration.mdx)
+- [vLLM-Omni Configuration reference](../../reference/backends/vllm-omni-configuration.mdx)
 
 </Tab>
 <Tab title="SGLang">
@@ -86,24 +95,51 @@ I2V accepts all [text-to-video `nvext` fields](text-to-video.md#request-paramete
 
 SGLang's video generation worker (`--video-generation-worker`) supports image-to-video (I2V) in addition to [text-to-video](text-to-video.md#sglang), using SGLang's `DiffGenerator` with frame-to-video encoding.
 
-## Launch
+### Launch
+
+The `text-to-video-diffusion.sh` launcher loads text-to-video checkpoints only
+(`Wan-AI/Wan2.1-T2V-*`), which cannot take a source image. For image-to-video,
+start the worker directly with an image-to-video checkpoint:
 
 ```bash
-cd $DYNAMO_HOME/examples/backends/sglang
-./launch/text-to-video-diffusion.sh
+python3 -m dynamo.frontend --http-port 8000 &
+python3 -m dynamo.sglang \
+  --model-path <image-to-video-model> \
+  --served-model-name <image-to-video-model> \
+  --video-generation-worker \
+  --media-output-fs-url file:///tmp/dynamo_media \
+  --trust-remote-code \
+  --skip-tokenizer-init
 ```
 
-Use `--wan-size 1b` (default, 1 GPU) or `--wan-size 14b` (2 GPUs). See the launch script for all configuration options.
+Replace `<image-to-video-model>` with an image-to-video Diffusers checkpoint
+that SGLang's `DiffGenerator` supports. Check SGLang's diffusion model list for
+your installed version.
 
-## Generate a Video from an Image
+### Generate a Video from an Image
 
-Provide the source image alongside the prompt in the `/v1/videos` request. See the [launch script](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch/text-to-video-diffusion.sh) and [SGLang Examples](../../../recipes/cli-templates/sglang.mdx) for the full I2V request format and supported models.
+Pass the source image URL in `input_reference`. The worker fetches it under
+the same [media URL policy](../image/image-understanding.md#media-url-policy) as
+image inputs.
 
-## See Also
+```bash
+curl http://localhost:8000/v1/videos \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<image-to-video-model>",
+    "prompt": "The cat slowly turns its head and blinks",
+    "input_reference": "https://example.com/cat.png",
+    "seconds": 2,
+    "size": "832x480",
+    "response_format": "url"
+  }'
+```
+
+### See Also
 
 - [Text-to-Video with SGLang](text-to-video.md#sglang)
 - [Image-to-Video with vLLM-Omni](image-to-video.md#vllm-omni)
-- [SGLang Examples](../../../recipes/cli-templates/sglang.mdx)
+- [SGLang Examples](../../recipes/cli-templates/sglang.mdx)
 
 </Tab>
 </Tabs>

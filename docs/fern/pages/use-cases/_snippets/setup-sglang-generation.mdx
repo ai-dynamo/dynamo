@@ -1,0 +1,18 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+subtitle: Reusable setup steps for SGLang image and video generation workers
+---
+
+SGLang generates images and video through its standard Dynamo backend. No separate installation is needed beyond a working SGLang backend setup. Select the worker mode with a flag:
+
+| Workload | Worker flag | Endpoint |
+|----------|-------------|----------|
+| Text-to-image | `--image-diffusion-worker` | `/v1/images/generations` |
+| Text-to-video or image-to-video | `--video-generation-worker` | `/v1/videos` |
+
+If startup reports `cuDNN frontend 1.8.1 requires cuDNN lib >= 9.5.0`, PyTorch ships an older cuDNN than SGLang needs for Conv3d. Set:
+
+```bash
+export SGLANG_DISABLE_CUDNN_CHECK=1
+```

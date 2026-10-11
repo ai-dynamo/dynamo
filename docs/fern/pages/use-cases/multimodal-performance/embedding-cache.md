@@ -61,7 +61,7 @@ Set `--multimodal-embedding-cache-capacity-gb` based on your expected working se
 
 > [!NOTE]
 > If one image URL can return different content for different sessions, enable
-> session-scoped caching as described in [Multimodal Model Serving](overview.md#session-scoping).
+> session-scoped caching as described in [Multimodal Model Serving](../image/shared-image-download-cache.md#session-scoping).
 > Dynamo then partitions its image embedding caches by affinity scope and
 > bypasses them when a request has no valid scope.
 
