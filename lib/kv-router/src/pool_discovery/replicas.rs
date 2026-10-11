@@ -7,6 +7,11 @@
 //! Replicas register themselves, so a `ReplicaDirectory` can be backed by
 //! `dynamo_runtime::discovery::Discovery`. A replica must be listed before it
 //! is ready, or pools can never reach it.
+//!
+//! The Relay reads a `ReplicaDirectory` in every mode. In gRPC and Hybrid
+//! modes it is filled from the `RegisterPool` and `Heartbeat` replies
+//! ([`super::Registration::replicas`]). In Kubernetes mode it reads the
+//! router's EndpointSlices that MCS imports into the Relay's cluster.
 
 use url::Url;
 

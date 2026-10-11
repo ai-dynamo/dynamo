@@ -8,7 +8,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::PoolDiscoveryError;
-use super::admission::PoolAdmission;
 use super::identity::RelayAuthenticator;
 use super::record::PoolDirectory;
 use super::registrar::{LeasePolicy, PoolRegistrar};
@@ -73,7 +72,8 @@ pub struct PoolDiscovery {
     pub replicas: Arc<ReplicaDirectory>,
     /// `None` in Kubernetes and File modes.
     pub registrar: Option<Arc<dyn PoolRegistrar>>,
-    pub admission: Arc<dyn PoolAdmission>,
+    /// Incoming Relays go through `verify` with this, then
+    /// [`super::admit`] with `pools`.
     pub authenticator: Arc<dyn RelayAuthenticator>,
 }
 

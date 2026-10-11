@@ -4,4 +4,3 @@
 //! WAN adapters over the transport-neutral Relay publication source.
 
 pub mod grpc;
-pub mod outbound;

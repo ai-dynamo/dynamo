@@ -5,7 +5,6 @@
 //! Catalog, CKF, stats, and reconnect lifecycle are owned by this module.
 
 mod coordinator;
-pub mod inbound;
 mod runtime;
 mod scorer;
 pub mod stats;

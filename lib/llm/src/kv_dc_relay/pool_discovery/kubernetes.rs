@@ -25,7 +25,8 @@
 //! .await?;
 //! let mut pools = discovery.pools.list_and_watch(Some(cancel.clone())).await?;
 //! // WatchEvent::{Added, Removed, Resync} update the GlobalViewRuntime's pool set.
-//! // RelayListener::accept uses discovery.authenticator and discovery.admission.
+//! // Each incoming Relay: pool_discovery::verify(&*discovery.authenticator, ..),
+//! // then pool_discovery::admit(&*discovery.pools, ..).
 //! ```
 //!
 //! Relay in a workload cluster:
@@ -33,7 +34,7 @@
 //! ```ignore
 //! let replicas = EndpointSliceReplicaDirectory::imported(local, &router, mcs);
 //! let mut events = replicas.list_and_watch(Some(cancel.clone())).await?;
-//! // Added(replica): dialer.dial(&replica, &pool_key, publication.clone(), cancel.clone())
+//! // Added(replica): open a state connection to it
 //! // Removed(id): close that connection
 //! ```
 
@@ -46,6 +47,6 @@ pub mod mcs;
 
 pub use endpoints::{EndpointSliceReplicaDirectory, RouterService};
 pub use hub::{
-    DirectoryAdmission, McsPoolDirectory, McsPoolDiscovery, MeshAuthenticator, RelayAuth,
-    TrustedNetworkAuthenticator, address_identity,
+    McsPoolDirectory, McsPoolDiscovery, MeshAuthenticator, RelayAuth, TrustedNetworkAuthenticator,
+    address_identity,
 };

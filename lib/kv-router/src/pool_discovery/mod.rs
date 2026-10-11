@@ -8,6 +8,11 @@
 //! connect to. Pool state still arrives on the Relay's own connections and is
 //! assembled by [`crate::global_view::source::PoolObservationAssembler`].
 //!
+//! Only the parts that differ between modes are traits: [`PoolDirectory`],
+//! [`PoolRegistrar`], [`ReplicaDirectory`] and [`RelayAuthenticator`].
+//! Admission, the Relay's `RegisterPool` client, and the connections that
+//! carry pool state work the same in every mode, so they are concrete code.
+//!
 //! | Mode | Pool list stored in | Pools call |
 //! |---|---|---|
 //! | gRPC | Router memory | `RegisterPool` on the router |
@@ -16,7 +21,6 @@
 //! | File | Static file (tests, first deployments) | Nothing |
 
 pub mod admission;
-pub mod announce;
 pub mod identity;
 pub mod mode;
 pub mod record;
@@ -24,8 +28,7 @@ pub mod registrar;
 pub mod replicas;
 pub mod watch;
 
-pub use admission::PoolAdmission;
-pub use announce::{Announcement, PoolAnnouncer};
+pub use admission::admit;
 pub use identity::{
     PeerCredentials, RelayAuthenticator, RelayIdentity, VerifiedRelayIdentity, verify,
 };

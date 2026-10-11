@@ -5,16 +5,14 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use dynamo_kv_router::global_view::PoolKey;
 use dynamo_kv_router::global_view::state::PoolLocation;
 use dynamo_kv_router::pool_discovery::watch::{Directory, Snapshot, WatchStream};
 use dynamo_kv_router::pool_discovery::{
-    BuildPoolDiscovery, McsImplementation, PeerCredentials, PoolAdmission, PoolDirectory,
-    PoolDiscovery, PoolDiscoveryError, PoolRecord, RelayAuthenticator, RelayIdentity,
-    VerifiedRelayIdentity,
+    BuildPoolDiscovery, McsImplementation, PeerCredentials, PoolDiscovery, PoolDiscoveryError,
+    PoolRecord, RelayAuthenticator, RelayIdentity,
 };
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client};
@@ -127,7 +125,7 @@ pub fn address_identity(address: IpAddr) -> RelayIdentity {
 
 /// For a trusted network with no mesh. Accepts only
 /// `PeerCredentials::PeerAddress` and names the caller with
-/// [`address_identity`], which [`DirectoryAdmission`] matches against the
+/// [`address_identity`], which `pool_discovery::admit` matches against the
 /// pool's Ready PoolRelay endpoint. Traffic between clusters must not be
 /// source-NATed: exclude the peer ranges in the AKS ip-masq-agent or the AWS
 /// VPC CNI, for example.
@@ -153,23 +151,6 @@ impl RelayAuthenticator for MeshAuthenticator {
         &self,
         credentials: &PeerCredentials,
     ) -> Result<RelayIdentity, PoolDiscoveryError> {
-        todo!()
-    }
-}
-
-/// `PoolDirectory::get`. If the record has a `relay_identity`, the caller
-/// must match it. Not Kubernetes-specific.
-pub struct DirectoryAdmission {
-    pools: Arc<PoolDirectory>,
-}
-
-#[async_trait]
-impl PoolAdmission for DirectoryAdmission {
-    async fn admit(
-        &self,
-        key: &PoolKey,
-        caller: &VerifiedRelayIdentity,
-    ) -> Result<PoolRecord, PoolDiscoveryError> {
         todo!()
     }
 }
