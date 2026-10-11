@@ -410,7 +410,6 @@ impl ResponseStreamConverter {
             self.usage = Some(ResponseUsage {
                 input_tokens: u.prompt_tokens,
                 input_tokens_details: InputTokenDetails {
-                    cache_write_tokens: None,
                     cached_tokens: u
                         .prompt_tokens_details
                         .as_ref()
