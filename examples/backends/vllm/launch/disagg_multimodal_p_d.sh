@@ -71,17 +71,21 @@ PD_EXTRA_ARGS=""
 PREFILL_GPU_MEM_ARGS=""
 DECODE_GPU_MEM_ARGS=""
 
-# GPU assignments
-DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
-DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-1}
+# GPU assignments (override via environment variables)
+# In single-GPU mode both workers share the inherited GPU (see inherited_gpu_id).
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-$(inherited_gpu_id)}
+    DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-$(inherited_gpu_id)}
+else
+    DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
+    DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-1}
+fi
 
 # GPU memory utilization
 DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
 DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    DYN_PREFILL_WORKER_GPU=$(inherited_gpu_id)
-    DYN_DECODE_WORKER_GPU=$(inherited_gpu_id)
     DYN_PREFILL_GPU_MEM=0.45
     DYN_DECODE_GPU_MEM=0.45
     EXTRA_ARGS="--enforce-eager"
