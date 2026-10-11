@@ -90,6 +90,14 @@ pub(super) struct UncoveredParent {
     pub(super) cutoff: usize,
 }
 
+/// The store worker's coverage of a parent hash, read under the node lock.
+pub(super) enum ParentCoverage {
+    Covered,
+    Uncovered(UncoveredParent),
+    /// The hash is not in this edge: the lookup entry is stale after a split.
+    Missing,
+}
+
 pub(super) struct FindStepInput<'a, S: HashSequence> {
     pub(super) sequence: &'a S,
     pub(super) seq_pos: usize,

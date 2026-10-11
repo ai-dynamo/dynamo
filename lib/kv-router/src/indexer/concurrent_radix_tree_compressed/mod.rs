@@ -11,7 +11,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
-#[cfg(feature = "bench")]
+#[cfg(any(test, feature = "bench"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
@@ -50,18 +50,18 @@ pub struct ConcurrentRadixTreeCompressed {
     anchor_nodes: DashMap<ExternalSequenceBlockHash, SharedNode, FxBuildHasher>,
     cleanup: CleanupState,
     lifecycle: super::HashLifecycle,
-    #[cfg(feature = "bench")]
+    #[cfg(any(test, feature = "bench"))]
     bench_metrics: CrtcBenchMetrics,
 }
 
-#[cfg(feature = "bench")]
+#[cfg(any(test, feature = "bench"))]
 struct CrtcBenchMetrics {
     node_splits: AtomicU64,
     lookup_repair_scans: AtomicU64,
     lookup_repair_entries: AtomicU64,
 }
 
-#[cfg(feature = "bench")]
+#[cfg(any(test, feature = "bench"))]
 impl CrtcBenchMetrics {
     fn new() -> Self {
         Self {
@@ -121,7 +121,7 @@ impl ConcurrentRadixTreeCompressed {
             anchor_nodes: DashMap::with_hasher(FxBuildHasher),
             cleanup: CleanupState::new(),
             lifecycle: super::HashLifecycle::default(),
-            #[cfg(feature = "bench")]
+            #[cfg(any(test, feature = "bench"))]
             bench_metrics: CrtcBenchMetrics::new(),
         }
     }
@@ -196,10 +196,19 @@ impl ConcurrentRadixTreeCompressed {
         Some(node)
     }
 
+    /// Whether `node`, whose edge contains `hash`, is the branch anchor for `hash`.
+    ///
+    /// The node flag is exact: anchors are created only by `apply_anchor`, stay in
+    /// `anchor_nodes` until the tree is dropped, and keep their one-block edge, so an
+    /// anchor containing `hash` is the map entry for `hash`.
     fn is_anchor_node(&self, hash: ExternalSequenceBlockHash, node: &SharedNode) -> bool {
-        self.anchor_nodes
-            .get(&hash)
-            .is_some_and(|anchor| Arc::ptr_eq(anchor.value(), node))
+        debug_assert_eq!(
+            node.is_anchor(),
+            self.anchor_nodes
+                .get(&hash)
+                .is_some_and(|anchor| Arc::ptr_eq(anchor.value(), node)),
+        );
+        node.is_anchor()
     }
 
     // ------------------------------------------------------------------
@@ -219,7 +228,7 @@ impl ConcurrentRadixTreeCompressed {
         prefix: &SharedNode,
         split: SplitLookupData,
     ) {
-        #[cfg(feature = "bench")]
+        #[cfg(any(test, feature = "bench"))]
         self.bench_metrics
             .node_splits
             .fetch_add(1, Ordering::Relaxed);

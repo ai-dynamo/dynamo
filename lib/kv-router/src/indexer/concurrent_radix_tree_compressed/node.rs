@@ -40,6 +40,9 @@ pub(super) struct Node {
     /// Sticky logical-internal marker. Once true, this node is treated as
     /// internal even if cleanup removes all physical children later.
     internal: AtomicBool,
+    /// Set only for synthetic branch anchors, which live in `anchor_nodes` for the
+    /// tree's lifetime and never change their single-block edge.
+    anchor: bool,
     state: RwLock<CrtcNodeState>,
     children: NodeChildren,
 }
@@ -64,10 +67,12 @@ impl Node {
         anchor_local_hash: LocalBlockHash,
         anchor_id: ExternalSequenceBlockHash,
     ) -> Self {
-        Self::from_state_and_children(
+        let mut node = Self::from_state_and_children(
             CrtcNodeState::new(vec![(anchor_local_hash, anchor_id)]),
             FxHashMap::default(),
-        )
+        );
+        node.anchor = true;
+        node
     }
 
     fn from_state_and_children(
@@ -83,6 +88,7 @@ impl Node {
             shape_gate: RwLock::new(()),
             shape_version: AtomicU64::new(0),
             internal: AtomicBool::new(internal),
+            anchor: false,
             state: RwLock::new(state),
             children,
         }
@@ -161,6 +167,10 @@ impl Node {
 
     pub(super) fn child_snapshot(&self, local_hash: LocalBlockHash) -> Option<SharedNode> {
         self.children.get(&local_hash)
+    }
+
+    pub(super) fn is_anchor(&self) -> bool {
+        self.anchor
     }
 
     /// Number of leading `hashes` present in this node's edge, read under one lock.
@@ -311,18 +321,20 @@ impl Node {
         state.edge[range].iter().map(|&(_, hash)| hash).collect()
     }
 
-    pub(super) fn reject_uncovered_parent(
+    pub(super) fn parent_coverage(
         &self,
         worker: WorkerWithDpRank,
         parent_hash: ExternalSequenceBlockHash,
-    ) -> Option<UncoveredParent> {
+    ) -> ParentCoverage {
         let _gate = self.shape_gate.read();
         let state = self.state.read();
-        let pos = state.position(parent_hash)?;
+        let Some(pos) = state.position(parent_hash) else {
+            return ParentCoverage::Missing;
+        };
         if state.covers_pos(worker, pos) {
-            return None;
+            return ParentCoverage::Covered;
         }
-        Some(UncoveredParent {
+        ParentCoverage::Uncovered(UncoveredParent {
             pos,
             cutoff: state.current_cutoff(worker),
         })

@@ -1722,3 +1722,187 @@ mod lookup_redirect_tests {
         }
     }
 }
+
+mod fused_lookup_validation_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn repair_scans(index: &ConcurrentRadixTreeCompressed) -> u64 {
+        index
+            .bench_metrics
+            .lookup_repair_scans
+            .load(Ordering::Relaxed)
+    }
+
+    fn split_six_block_chain_at_three() -> (ConcurrentRadixTreeCompressed, DirectLookup) {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event(0, &[1, 2, 3, 4, 5, 6]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event(1, &[1, 2, 3, 4, 5, 6]),
+        );
+        // A store on another event thread splits the edge; lookup0 still names the
+        // prefix node for the moved suffix.
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event_with_parent(1, &[1, 2, 3], &[7]),
+        );
+        (index, lookup0)
+    }
+
+    #[test]
+    fn store_with_stale_parent_reports_missing_and_repairs_once() {
+        let (index, mut lookup0) = split_six_block_chain_at_three();
+        let worker0 = worker(0);
+        let prefix = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        let continuation = stored_data(make_store_event_with_parent(0, &[1, 2, 3, 4, 5, 6], &[8]));
+        let parent_hash = continuation.parent_hash.unwrap();
+        assert!(Arc::ptr_eq(
+            &lookup0.node(worker0, parent_hash).unwrap(),
+            &prefix
+        ));
+        assert!(matches!(
+            prefix.parent_coverage(worker0, parent_hash),
+            ParentCoverage::Missing
+        ));
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event_with_parent(0, &[1, 2, 3, 4, 5, 6], &[8]),
+        );
+
+        assert_eq!(repair_scans(&index), 1);
+        assert_eq!(
+            index.edge_topology_for_test(),
+            vec![edge_topology(
+                &[1, 2, 3],
+                vec![
+                    edge_topology(&[4, 5, 6, 8], vec![]),
+                    edge_topology(&[7], vec![])
+                ],
+            )],
+        );
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6, 8], worker0, 7);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker(1), 6);
+    }
+
+    #[test]
+    fn store_with_resolved_but_uncovered_stale_parent_fails_without_spinning() {
+        let (index, mut lookup0) = split_six_block_chain_at_three();
+        let worker0 = worker(0);
+        let prefix = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        // A worker-removal sweep on another lane drops worker 0 from the tree while
+        // lookup0, which that sweep did not see, keeps the stale entry.
+        index.erase_worker_coverage(
+            &mut direct_lookup(),
+            WorkerRemovalTarget::WorkerId(worker0.worker_id),
+            true,
+        );
+        let continuation = make_store_event_with_parent(0, &[1, 2, 3, 4, 5, 6], &[8]);
+        let parent_hash = stored_data(continuation.clone()).parent_hash.unwrap();
+        assert!(Arc::ptr_eq(
+            &lookup0.node(worker0, parent_hash).unwrap(),
+            &prefix
+        ));
+
+        // Repair resolves the suffix but cannot rewrite the entry, because worker 0
+        // no longer covers the parent there. Re-reading the entry would spin.
+        let result = index.apply_event(&mut lookup0, continuation, None);
+
+        assert!(matches!(
+            result,
+            Err(KvCacheEventError::ParentBlockNotFound)
+        ));
+        assert_eq!(repair_scans(&index), 1);
+        assert!(lookup0.contains_worker(worker0));
+        assert!(lookup0.node(worker0, parent_hash).is_none());
+        lookup0.assert_invariants();
+    }
+
+    #[test]
+    fn store_with_detached_stale_parent_fails_without_spinning() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup1 = direct_lookup();
+        let mut lookup2 = direct_lookup();
+        apply_direct(&index, &mut lookup1, make_store_event(1, &[1, 2, 3, 4]));
+        apply_direct(&index, &mut lookup2, make_store_event(2, &[1, 2, 9]));
+        // Evicting the shared head for both workers detaches the split suffix, so
+        // lookup1's entries for [3, 4] name a node whose subtree no longer has them.
+        let head = remove_hashes_with_parent(&[], &[1, 2]);
+        apply_direct(&index, &mut lookup1, remove_event(1, 0, 0, head.clone()));
+        apply_direct(&index, &mut lookup2, remove_event(2, 1, 0, head));
+        assert_eq!(worker_lookup_len(&lookup1, worker(1)), Some(2));
+
+        let result = index.apply_event(
+            &mut lookup1,
+            make_store_event_with_parent(1, &[1, 2, 3, 4], &[5]),
+            None,
+        );
+
+        assert!(matches!(
+            result,
+            Err(KvCacheEventError::ParentBlockNotFound)
+        ));
+        assert_eq!(repair_scans(&index), 0);
+    }
+
+    #[test]
+    fn anchor_flag_agrees_with_anchor_map() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup = direct_lookup();
+        apply_direct(&index, &mut lookup, make_store_event(0, &[1, 2]));
+        let regular = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        let regular_hashes = remove_hashes_with_parent(&[], &[1, 2]);
+
+        // Anchor ids borrow router-owned prefix hashes, so one can equal a block
+        // hash that a regular node also holds.
+        let shared_id = regular_hashes[1];
+        let private_id = ExternalSequenceBlockHash(0xA11C_0000);
+        for anchor_id in [shared_id, private_id] {
+            index
+                .apply_anchor(
+                    worker(1),
+                    AnchorTask {
+                        anchor_id,
+                        anchor_local_hash: LocalBlockHash(2),
+                        anchor_depth: 2,
+                    },
+                )
+                .unwrap();
+        }
+
+        let map_says = |hash: ExternalSequenceBlockHash, node: &SharedNode| {
+            index
+                .anchor_nodes
+                .get(&hash)
+                .is_some_and(|anchor| Arc::ptr_eq(anchor.value(), node))
+        };
+        let shared_anchor = index.anchor_nodes.get(&shared_id).unwrap().clone();
+        let private_anchor = index.anchor_nodes.get(&private_id).unwrap().clone();
+        let cases = [
+            (shared_id, &shared_anchor, true),
+            (private_id, &private_anchor, true),
+            (shared_id, &regular, false),
+            (regular_hashes[0], &regular, false),
+        ];
+        for (hash, node, expected) in cases {
+            assert_eq!(map_says(hash, node), expected);
+            assert_eq!(index.is_anchor_node(hash, node), expected);
+        }
+
+        // A store under the anchor takes the anchor path and never extends its edge.
+        let continuation = make_store_event_with_parent(3, &[1, 2], &[5]);
+        apply_direct(&index, &mut lookup, continuation);
+        assert_eq!(shared_anchor.edge_len_for_test(), 1);
+        assert_eq!(shared_anchor.children_snapshot().len(), 1);
+    }
+}

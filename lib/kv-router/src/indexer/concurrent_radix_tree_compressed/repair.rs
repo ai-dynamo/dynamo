@@ -24,6 +24,25 @@ impl ConcurrentRadixTreeCompressed {
         None
     }
 
+    /// Resolve `hash`, which a locked operation found missing from `stale`, to the
+    /// descendant a cross-thread split moved it to, and repair the lookup range
+    /// that `direction` will use.
+    pub(super) fn repair_stale(
+        &self,
+        lookup: &mut LaneLookup,
+        stale: &SharedNode,
+        hash: ExternalSequenceBlockHash,
+        direction: LookupRepairDirection,
+    ) -> Option<SharedNode> {
+        let resolved = Self::find_in_subtree(stale, hash)?;
+        #[cfg(any(test, feature = "bench"))]
+        self.bench_metrics
+            .lookup_repair_scans
+            .fetch_add(1, Ordering::Relaxed);
+        self.repair_lookup_for_resolved_node(lookup, hash, stale, &resolved, direction);
+        Some(resolved)
+    }
+
     /// Look up `hash` in a worker's lookup, resolving stale entries caused by
     /// cross-thread splits. Returns the `SharedNode` whose edge contains `hash`.
     pub(super) fn resolve_lookup(
@@ -34,20 +53,10 @@ impl ConcurrentRadixTreeCompressed {
         direction: LookupRepairDirection,
     ) -> Option<SharedNode> {
         let node = lookup.node(worker, hash)?;
-
-        // Fast path: hash is still in this node's edge_index.
         if node.contains_edge_hash(hash) {
             return Some(node);
         }
-
-        // Slow path: hash was moved to a descendant by a cross-thread split.
-        let resolved = Self::find_in_subtree(&node, hash)?;
-        #[cfg(feature = "bench")]
-        self.bench_metrics
-            .lookup_repair_scans
-            .fetch_add(1, Ordering::Relaxed);
-        self.repair_lookup_for_resolved_node(lookup, hash, &node, &resolved, direction);
-        Some(resolved)
+        self.repair_stale(lookup, &node, hash, direction)
     }
 
     /// Repoints this lane's entries that still name `stale` at `resolved`, over the range
@@ -64,7 +73,7 @@ impl ConcurrentRadixTreeCompressed {
             resolved.lookup_hashes_for_worker_repair(worker, hash, direction)
         });
 
-        #[cfg(feature = "bench")]
+        #[cfg(any(test, feature = "bench"))]
         self.bench_metrics
             .lookup_repair_entries
             .fetch_add(_changed_entries as u64, Ordering::Relaxed);

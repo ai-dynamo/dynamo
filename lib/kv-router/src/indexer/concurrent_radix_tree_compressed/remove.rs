@@ -180,7 +180,7 @@ impl ConcurrentRadixTreeCompressed {
                                 &resolved,
                                 LookupRepairDirection::TowardHead,
                             );
-                            #[cfg(feature = "bench")]
+                            #[cfg(any(test, feature = "bench"))]
                             self.bench_metrics
                                 .lookup_repair_scans
                                 .fetch_add(1, Ordering::Relaxed);

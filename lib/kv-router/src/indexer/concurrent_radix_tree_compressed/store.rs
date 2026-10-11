@@ -65,12 +65,38 @@ impl ConcurrentRadixTreeCompressed {
         op: &KvCacheStoreData,
         id: u64,
     ) -> Result<StoreParentResolution, KvCacheEventError> {
+        let mut node = self.lookup_store_parent_node(lookup, worker, parent_hash, None, op, id)?;
         loop {
-            let node = self.lookup_store_parent_node(lookup, worker, parent_hash, op, id)?;
             // NOTE(perf): Combining coverage rejection and edge planning into
             // one state snapshot regressed throughput. Keep these phases separate.
-            self.reject_uncovered_store_parent(lookup, worker, &node, parent_hash, id)?;
+            match node.parent_coverage(worker, parent_hash) {
+                ParentCoverage::Covered => {}
+                ParentCoverage::Uncovered(uncovered) => {
+                    return Err(self.reject_uncovered_store_parent(
+                        lookup,
+                        worker,
+                        parent_hash,
+                        uncovered,
+                        id,
+                    ));
+                }
+                // The lookup entry is stale; continue from the node the hash moved to,
+                // not from the entry, which repair leaves alone if the worker no longer
+                // covers the parent there.
+                ParentCoverage::Missing => {
+                    node = self.lookup_store_parent_node(
+                        lookup,
+                        worker,
+                        parent_hash,
+                        Some(&node),
+                        op,
+                        id,
+                    )?;
+                    continue;
+                }
+            }
 
+            // A split after the coverage check surfaces as `Missing` on the next pass.
             let Some(plan) = node.plan_store_parent_edge(parent_hash, &op.blocks) else {
                 continue;
             };
@@ -97,20 +123,28 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
+    /// Find the store parent through the worker's lookup, or, when `stale` is the
+    /// node a locked check found missing `parent_hash`, through lookup repair.
+    /// Falls back to branch anchors.
     fn lookup_store_parent_node(
         &self,
         lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         parent_hash: ExternalSequenceBlockHash,
+        stale: Option<&SharedNode>,
         op: &KvCacheStoreData,
         id: u64,
     ) -> Result<SharedNode, KvCacheEventError> {
-        if let Some(node) = self.resolve_lookup(
-            lookup,
-            worker,
-            parent_hash,
-            LookupRepairDirection::TowardTail,
-        ) {
+        let node = match stale {
+            None => lookup.node(worker, parent_hash),
+            Some(stale) => self.repair_stale(
+                lookup,
+                stale,
+                parent_hash,
+                LookupRepairDirection::TowardTail,
+            ),
+        };
+        if let Some(node) = node {
             return Ok(node);
         }
 
@@ -133,13 +167,10 @@ impl ConcurrentRadixTreeCompressed {
         &self,
         lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
-        node: &SharedNode,
         parent_hash: ExternalSequenceBlockHash,
+        uncovered: UncoveredParent,
         id: u64,
-    ) -> Result<(), KvCacheEventError> {
-        let Some(uncovered) = node.reject_uncovered_parent(worker, parent_hash) else {
-            return Ok(());
-        };
+    ) -> KvCacheEventError {
         tracing::warn!(
             worker_id = worker.worker_id.to_string(),
             dp_rank = worker.dp_rank,
@@ -152,7 +183,7 @@ impl ConcurrentRadixTreeCompressed {
 
         lookup.remove(worker, parent_hash);
         self.release_hash(worker, parent_hash);
-        Err(KvCacheEventError::ParentBlockNotFound)
+        KvCacheEventError::ParentBlockNotFound
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
