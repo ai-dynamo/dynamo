@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Sidecar Backends
-subtitle: Run Dynamo beside a stock inference engine through its native gRPC API.
+subtitle: Run Dynamo beside a stock inference engine through its native APIs.
 ---
 
 > [!WARNING]
@@ -12,8 +12,9 @@ subtitle: Run Dynamo beside a stock inference engine through its native gRPC API
 
 A Dynamo sidecar runs beside the inference engine process. It registers the
 engine with Dynamo discovery, forwards engine events into the Dynamo event
-plane, and serves requests from the Dynamo frontend by calling the engine's
-native gRPC API.
+plane, and serves ordinary inference requests from the Dynamo frontend by
+calling the engine's native gRPC API. Native SGLang `/generate` requests use
+the engine's HTTP API instead, as described below.
 
 ## Design Goals
 
