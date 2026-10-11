@@ -177,7 +177,6 @@ spec:
               --disaggregation-mode pd \
               --enable-mm-embeds \
               --route-to-encoder \
-              --mm-prompt-template "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n" \
               --dtype bfloat16 \
               --max-num-seqs 40 \
               --kv-cache-dtype fp8 \
