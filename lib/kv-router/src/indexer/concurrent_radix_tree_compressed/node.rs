@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::children::{ChildInsertResult, NodeChildren};
@@ -171,15 +171,6 @@ impl Node {
 
     pub(super) fn is_anchor(&self) -> bool {
         self.anchor
-    }
-
-    /// Number of leading `hashes` present in this node's edge, read under one lock.
-    pub(super) fn leading_edge_hash_count(&self, hashes: &[ExternalSequenceBlockHash]) -> usize {
-        let state = self.state.read();
-        hashes
-            .iter()
-            .take_while(|&&hash| state.contains_hash(hash))
-            .count()
     }
 
     pub(super) fn contains_edge_hash(&self, hash: ExternalSequenceBlockHash) -> bool {
@@ -579,36 +570,45 @@ impl Node {
         SplitLookupData { suffix }
     }
 
-    pub(super) fn remove_worker_for_hashes(
+    /// Removes `worker` from the leading run of `hashes` found in this edge, under one
+    /// exclusive shape gate. Returns how many hashes the run consumed and the newly
+    /// uncovered hashes, or `None` if the first hash is no longer in this edge.
+    pub(super) fn remove_worker_for_leading_hashes(
         &self,
         worker: WorkerWithDpRank,
-        block_hashes: &[ExternalSequenceBlockHash],
-    ) -> Option<RemoveBatchOutcome> {
+        hashes: &[ExternalSequenceBlockHash],
+    ) -> Option<(usize, Vec<ExternalSequenceBlockHash>)> {
+        // The exclusive gate keeps every other writer off this node, so the run is read
+        // alongside readers, and only a coverage change upgrades to the write lock.
         let _gate = self.shape_gate.write();
-        let mut state = self.state.write();
-        let mut min_match = None;
-        let mut unmatched_hashes = Vec::new();
+        let state = self.state.upgradable_read();
+        let mut min_match: Option<(usize, ExternalSequenceBlockHash)> = None;
+        let mut consumed = 0;
+        let mut last_pos = None;
 
-        for &hash in block_hashes {
-            match state.position(hash) {
-                Some(pos) => {
-                    if min_match.is_none_or(|(min_pos, _)| pos < min_pos) {
-                        min_match = Some((pos, hash));
-                    }
-                }
-                None => unmatched_hashes.push(hash),
+        for &hash in hashes {
+            let Some(pos) = state.position_near(hash, last_pos) else {
+                break;
+            };
+            last_pos = Some(pos);
+            if min_match.is_none_or(|(min_pos, _)| pos < min_pos) {
+                min_match = Some((pos, hash));
             }
+            consumed += 1;
         }
 
         let (pos, block_hash) = min_match?;
-        let outcome = state.remove_worker_at_pos(worker, pos, block_hash);
-        let should_clear_children = state.full_edge_workers.is_empty();
-        drop(state);
+        let (stale_hashes, should_clear_children) = if pos >= state.current_cutoff(worker) {
+            let should_clear_children = state.full_edge_workers.is_empty();
+            drop(state);
+            (vec![block_hash], should_clear_children)
+        } else {
+            let mut state = RwLockUpgradableReadGuard::upgrade(state);
+            let outcome = state.remove_worker_at_pos(worker, pos, block_hash);
+            (outcome.stale_hashes, state.full_edge_workers.is_empty())
+        };
         self.clear_children_if_unreachable(should_clear_children);
-        Some(RemoveBatchOutcome {
-            stale_hashes: outcome.stale_hashes,
-            unmatched_hashes,
-        })
+        Some((consumed, stale_hashes))
     }
 
     #[cfg_attr(feature = "profile", inline(never))]

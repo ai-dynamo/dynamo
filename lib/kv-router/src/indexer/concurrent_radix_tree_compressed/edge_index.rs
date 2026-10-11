@@ -33,6 +33,9 @@ pub(super) struct EdgeIndex {
     /// lies along its probe run in descending position order. A split may leave positions
     /// past the edge's end behind as tombstones, which lookups skip.
     slots: Box<[u32]>,
+    /// Whether the table indexes some hash at two positions; a table insert notices it for
+    /// free. A split that does not rebuild may leave it set after dropping the repeat.
+    repeats: bool,
 }
 
 impl EdgeIndex {
@@ -56,8 +59,10 @@ impl EdgeIndex {
         let capacity = Self::capacity_for(edge.len());
         if capacity == 0 {
             self.slots = Box::default();
+            self.repeats = false;
             return;
         }
+        self.repeats = false;
         if self.slots.len() == capacity {
             self.slots.fill(EMPTY);
         } else {
@@ -92,11 +97,19 @@ impl EdgeIndex {
                 return;
             }
             if edge[slot as usize].1 == hash {
+                self.repeats = true;
                 self.slots[i] = carried;
                 carried = slot;
             }
             i = (i + 1) & mask;
         }
+    }
+
+    /// Whether a neighbor match is known to be a hash's only position: the edge keeps a
+    /// table that saw no repeated hash. A scanning edge's own lookup is already short.
+    #[inline]
+    pub(super) fn neighbors_are_unique(&self) -> bool {
+        !self.slots.is_empty() && !self.repeats
     }
 
     /// The last position of `hash` in `edge`.

@@ -912,7 +912,15 @@ mod remove_tests {
             )],
         );
 
-        index.apply_removed_group(&mut lookup0, worker0, &group_node, &remove_hashes, 42);
+        // Only the head of the run is still on the pre-split node; the rest resolve
+        // through lookup repair onto the suffix.
+        assert!(group_node.contains_edge_hash(remove_hashes[0]));
+        assert!(!group_node.contains_edge_hash(remove_hashes[1]));
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_remove_event_with_parent(0, &[1, 2], &[3, 4, 5]),
+        );
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 2);
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
 
@@ -966,7 +974,18 @@ mod remove_tests {
             )],
         );
 
-        index.apply_removed_group(&mut lookup0, worker0, &group_node, &remove_hashes, 42);
+        // The whole run moved off the node the lookup still names, so the grouped
+        // removal declines without touching it and the remove path repairs instead.
+        assert!(
+            group_node
+                .remove_worker_for_leading_hashes(worker0, &remove_hashes)
+                .is_none()
+        );
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_remove_event_with_parent(0, &[1, 2, 3], &[4, 5]),
+        );
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 3);
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
         assert_eq!(worker_lookup_len(&lookup0, worker0), Some(3));
@@ -1118,7 +1137,9 @@ mod remove_tests {
                     }
                     _ => continue,
                 };
-                let _ = index.apply_event(&mut lanes[(w % 2) as usize], event, None);
+                let lane = &mut lanes[(w % 2) as usize];
+                let _ = index.apply_event(lane, event, None);
+                lane.assert_invariants();
 
                 // A lookup entry for a block the worker no longer holds is a leak.
                 for (lw, held_lw) in held.iter().enumerate() {
@@ -1756,6 +1777,44 @@ mod fused_lookup_validation_tests {
             make_store_event_with_parent(1, &[1, 2, 3], &[7]),
         );
         (index, lookup0)
+    }
+
+    #[test]
+    fn remove_with_stale_head_repairs_once_and_consumes_run_on_suffix() {
+        let (index, mut lookup0) = split_six_block_chain_at_three();
+        let worker0 = worker(0);
+        let worker1 = worker(1);
+        let prefix = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        let suffix = prefix.child_snapshot(LocalBlockHash(4)).unwrap();
+        let moved = remove_hashes_with_parent(&[1, 2, 3], &[4, 5, 6]);
+        assert!(Arc::ptr_eq(
+            &lookup0.node(worker0, moved[1]).unwrap(),
+            &prefix
+        ));
+        assert_eq!(repair_scans(&index), 0);
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            remove_event(0, 0, 0, moved[1..].to_vec()),
+        );
+
+        // One scan resolves the run head; the rest of the run is consumed on the
+        // suffix under the same lock instead of being resolved hash by hash.
+        assert_eq!(repair_scans(&index), 1);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 4);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+        assert_eq!(worker_lookup_len(&lookup0, worker0), Some(4));
+        // Head-ward repair pointed the surviving suffix entry at the suffix, so a
+        // later remove of it needs no second scan.
+        assert!(Arc::ptr_eq(
+            &lookup0.node(worker0, moved[0]).unwrap(),
+            &suffix
+        ));
+        apply_direct(&index, &mut lookup0, remove_event(0, 1, 0, vec![moved[0]]));
+        assert_eq!(repair_scans(&index), 1);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 3);
+        assert_eq!(worker_lookup_len(&lookup0, worker0), Some(3));
     }
 
     #[test]
