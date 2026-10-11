@@ -349,6 +349,58 @@ const PUBLICATIONS_CSS = `
   margin-top: 1.5rem;
 }
 
+.dynamo-pubs-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 2rem;
+}
+
+.dynamo-pubs-totals button {
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--dynamo-blog-rule);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--dynamo-blog-muted);
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.dynamo-pubs-totals button:hover {
+  border-color: var(--dynamo-blog-green);
+}
+
+.dynamo-pubs-totals button[aria-pressed="true"] {
+  border-color: var(--dynamo-blog-green);
+  background: rgba(118, 185, 0, 0.14);
+}
+
+.dynamo-pubs-totals strong {
+  margin-right: 0.25rem;
+  color: var(--dynamo-blog-ink);
+  font-size: 1rem;
+}
+
+.dynamo-pubs__group-label--spaced {
+  margin-top: 3.5rem !important;
+}
+
+.dynamo-pubs__group-note {
+  margin: -0.4rem 0 0.8rem !important;
+  color: var(--dynamo-blog-muted);
+  font-size: 0.86rem;
+}
+
+.dynamo-pubs-toolbar__meta--solo {
+  margin-bottom: 1.1rem;
+}
+
+.dynamo-pubs-more {
+  gap: 0.6rem;
+}
+
 @media (max-width: 1024px) {
   .dynamo-pubs-featured { grid-template-columns: minmax(0, 1fr); }
 }
