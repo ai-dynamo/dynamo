@@ -486,10 +486,8 @@ trtllm_configs = {
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
         delayed_start=120,
-        # Serve the image from the local image_server fixture: a pre-merge test
-        # must not depend on an external download, and the encode worker's
-        # 30 s image fetch timeout matched the extra deployment lifetime of
-        # the flaky CI attempts (DYN-4539).
+        # Serve the image from the local image_server fixture so this pre-merge
+        # test does not depend on an external download.
         request_payloads=[make_image_payload(["green"])],
         env={
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
