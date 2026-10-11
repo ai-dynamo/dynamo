@@ -13,6 +13,8 @@ generated tests as real subprocesses.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import time
 
 import psutil
@@ -21,6 +23,7 @@ import pytest
 from tests.utils import pytest_parallel_gpu, vram_utils
 from tests.utils.pytest_parallel_gpu import (
     _GpuState,
+    _kill_process_trees,
     _priority_key,
     _select_launches,
     _TestEntry,
@@ -549,6 +552,49 @@ def test_stage_deadline_kills_running_tree_and_skips_queued(tmp_path, monkeypatc
     assert not marker.exists(), "queued test started after the deadline"
     assert rc != 0
     assert elapsed < deadline_s + 45
+
+
+_IGNORE_SIGTERM = (
+    "import signal, subprocess, sys, time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "if sys.argv[1:] == ['parent']:\n"
+    "    subprocess.Popen([sys.executable, __file__], start_new_session=True)\n"
+    "time.sleep(600)\n"
+)
+
+
+@pytest.mark.timeout(60)
+def test_kill_process_trees_shares_one_wait(tmp_path):
+    # Each tree ignores SIGTERM, so each needs the full grace period. Killing
+    # them one at a time would take at least four grace periods.
+    script = tmp_path / "ignore_term.py"
+    script.write_text(_IGNORE_SIGTERM)
+    parents = [
+        subprocess.Popen([sys.executable, str(script), "parent"]) for _ in range(4)
+    ]
+    procs: list[psutil.Process] = []
+    try:
+        deadline = time.monotonic() + 10
+        for parent in parents:
+            p = psutil.Process(parent.pid)
+            while not p.children() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            procs.append(p)
+            procs.extend(p.children(recursive=True))
+        assert len(procs) == 8, "not every tree started its grandchild"
+
+        grace_s = 2.0
+        start = time.monotonic()
+        _kill_process_trees([p.pid for p in parents], grace_s=grace_s)
+        elapsed = time.monotonic() - start
+
+        for parent in parents:
+            parent.wait(timeout=5)
+        assert not any(_pid_alive(p.pid) for p in procs)
+        assert grace_s <= elapsed < 2 * grace_s + 1
+    finally:
+        for p in procs:
+            _kill_if_alive(p.pid)
 
 
 def _kill_if_alive(pid: int) -> None:

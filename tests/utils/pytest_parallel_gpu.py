@@ -46,7 +46,6 @@ _repo_root = str(Path(__file__).resolve().parents[2])
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-from tests.utils.managed_process import terminate_process_tree  # noqa: E402
 from tests.utils.vram_utils import (  # noqa: E402
     VRAM_MULTI_PROC_MARGIN,
     auto_worker_count,
@@ -293,6 +292,42 @@ def _stage_deadline() -> float | None:
     if not math.isfinite(deadline):
         raise ValueError(f"{_STAGE_DEADLINE_ENV} must be finite, got {raw!r}")
     return deadline
+
+
+# One shared wait for all trees, so the kill time stays bounded however many
+# tests were running when the deadline passed.
+_STAGE_KILL_GRACE_S = 15.0
+
+
+def _kill_process_trees(pids: list[int], grace_s: float = _STAGE_KILL_GRACE_S) -> None:
+    """SIGTERM every process in all the given trees, then SIGKILL survivors.
+
+    Takes at most about twice ``grace_s`` in total, unlike calling
+    terminating one tree at a time, where the waits add up.
+    """
+    procs: list[psutil.Process] = []
+    for pid in pids:
+        try:
+            parent = psutil.Process(pid)
+        except psutil.NoSuchProcess:
+            continue
+        procs.append(parent)
+        try:
+            procs.extend(parent.children(recursive=True))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    for proc in procs:
+        try:
+            proc.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    _, alive = psutil.wait_procs(procs, timeout=grace_s)
+    for proc in alive:
+        try:
+            proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    psutil.wait_procs(alive, timeout=grace_s)
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -911,14 +946,10 @@ def run_parallel(
             pending = []
             for test in not_run:
                 _print(f"[w{test.w_id}] {test.name} NOT RUN - stage budget exhausted")
+            # Kills each child pytest and every descendant, including
+            # engine processes that moved to their own session.
+            _kill_process_trees([r.proc.pid for r in running.values()])
             for w_id, run_info in list(running.items()):
-                # Kills the child pytest and every descendant, including
-                # engine processes that moved to their own session.
-                try:
-                    terminate_process_tree(run_info.proc.pid)
-                except psutil.NoSuchProcess:
-                    # The test exited while its tree was being listed.
-                    pass
                 run_info.proc.wait()
                 if run_info.reader_thread is not None:
                     run_info.reader_thread.join(timeout=5)
