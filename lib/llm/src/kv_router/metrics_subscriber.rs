@@ -121,6 +121,10 @@ impl PendingActiveLoads {
         PushOutcome::Accepted { should_wake }
     }
 
+    fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
     fn clear(&mut self) {
         self.order.clear();
         self.values.clear();
@@ -213,7 +217,8 @@ impl ActiveLoadSender {
             anyhow::bail!("direct-ZMQ KV metrics consumer closed");
         }
         {
-            // Hold every shard so no load lands between clearing and recording the fault.
+            // Hold every shard until the fault is recorded, so no load lands between clearing
+            // and recording, and `try_pop` sees the fault before any later load.
             let mut shards: Vec<_> = self
                 .mailbox
                 .shards
@@ -253,18 +258,26 @@ impl ActiveLoadReceiver {
 
     /// Return a pending fault first, then one load, visiting shards round-robin.
     fn try_pop(&mut self) -> Option<Result<ActiveLoad>> {
-        if let Some(fault) = self.mailbox.fault.lock().take() {
-            return Some(Err(fault.into()));
-        }
         let shards = self.mailbox.shards.len();
         for offset in 0..shards {
             let index = (self.next_shard + offset) % shards;
-            if let Some(load) = self.mailbox.shards[index].0.lock().pop() {
-                self.next_shard = (index + 1) % shards;
-                return Some(Ok(load));
+            let mut pending = self.mailbox.shards[index].0.lock();
+            if pending.is_empty() {
+                continue;
             }
+            // `send_fault` records its fault while holding every shard, so a load found
+            // here while a fault is pending was sent after that fault.
+            if let Some(fault) = self.mailbox.fault.lock().take() {
+                return Some(Err(fault.into()));
+            }
+            self.next_shard = (index + 1) % shards;
+            return pending.pop().map(Ok);
         }
-        None
+        self.mailbox
+            .fault
+            .lock()
+            .take()
+            .map(|fault| Err(fault.into()))
     }
 }
 
@@ -565,6 +578,39 @@ mod tests {
             load(7, 1, None, None, Some(2))
         );
         assert!(receiver.try_pop().is_none());
+    }
+
+    #[test]
+    fn direct_metrics_fault_precedes_later_loads_under_concurrency() {
+        const UPDATES: u64 = 100_000;
+
+        let (sender, mut receiver) = active_load_mailbox();
+        let producer = std::thread::spawn(move || {
+            for value in 1..=UPDATES {
+                sender
+                    .send_fault(DirectKvMetricsFault::Disconnected)
+                    .unwrap();
+                sender.send(load(1, 0, None, None, Some(value))).unwrap();
+            }
+        });
+
+        // Every load is sent after a fault, so a fault must arrive before each load.
+        let mut fault_seen = false;
+        let mut last_value = 0;
+        while last_value < UPDATES {
+            match receiver.try_pop() {
+                Some(Err(_)) => fault_seen = true,
+                Some(Ok(update)) => {
+                    let value = update.kv_used_blocks.unwrap();
+                    assert!(fault_seen, "load {value} arrived before its fault");
+                    assert!(value > last_value);
+                    fault_seen = false;
+                    last_value = value;
+                }
+                None => std::hint::spin_loop(),
+            }
+        }
+        producer.join().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
