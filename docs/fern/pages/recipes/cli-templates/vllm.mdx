@@ -975,7 +975,7 @@ emits speech codec tokens, and stage 1 decodes those tokens to a 16 kHz mono wav
 Audex serves a single built-in voice, so the request contract differs from Qwen3-TTS: the handler
 accepts `voice` only when it is omitted or set to `default`, rejects `ref_audio` and `ref_text`,
 and accepts an optional `nvext.cfg_scale` for classifier-free guidance. The printed curl example adapts to the selected model. See
-[Text-to-Audio](../../use-cases/diffusion/workflows/text-to-audio.md) for the request format.
+[Text-to-Audio](../../use-cases/speech/text-to-speech.md) for the request format.
 
 <Note>
 Both Audex checkpoints report the same model type, so the 30B-A3B needs an explicit stage

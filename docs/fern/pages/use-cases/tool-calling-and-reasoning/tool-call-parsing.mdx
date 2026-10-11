@@ -134,7 +134,7 @@ Tool calling lets Dynamo connect models to external tools and services by return
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.
 
-The **Upstream name** column shows where the vLLM or SGLang parser name differs from Dynamo’s — relevant when using `--dyn-chat-processor vllm` or `sglang` (see [Parser Engine Fallback](chat-processors.mdx)). A blank upstream column means the same name works everywhere. `Dynamo-only` means no upstream parser exists for this format.
+The **Upstream name** field shows where the vLLM or SGLang parser name differs from Dynamo’s — relevant when using `--dyn-chat-processor vllm` or `sglang` (see [Parser Engine Fallback](chat-processors.mdx)). A missing upstream name means the same name works everywhere. `Dynamo-only` means no upstream parser exists for this format.
 
 <AccordionGroup>
   <Accordion title="Kimi">
@@ -145,6 +145,14 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
         **Upstream name:** Same name across Dynamo, vLLM, and SGLang
 
         **Notes:** Pair with `--dyn-reasoning-parser kimi` or `kimi_k25`. For Kimi K2.5 thinking models, use `kimi_k25` so `<think>` blocks and tool calls are parsed from the same response. See [Reasoning Parsing (Dynamo)](reasoning-parsing.md).
+      </Accordion>
+
+      <Accordion title="Kimi K3">
+        **Parser:** `kimi_k3`
+
+        **Upstream name:** Check your engine version's `--help`
+
+        **Notes:** Pair with `--dyn-reasoning-parser kimi_k3`, as the [Kimi K3 recipe](../../recipes/model-recipes/kimi-k3.mdx) does.
       </Accordion>
     </AccordionGroup>
   </Accordion>
@@ -177,6 +185,14 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
         **Upstream name:** vLLM: `deepseek_v4`; SGLang: `deepseekv4`
 
         **Notes:** DSML tags (`<｜DSML｜tool_calls>...`). Aliases: `deepseek-v4`, `deepseekv4`
+      </Accordion>
+
+      <Accordion title="DeepSeek V4.1 Flash">
+        **Parser:** `deepseek_v41`
+
+        **Upstream name:** Check your engine version's `--help`
+
+        **Notes:** Pair with `--dyn-reasoning-parser deepseek_v41`. See the [DeepSeek V4.1 Flash recipe](../../recipes/model-recipes/deepseek-v4-1-flash.mdx).
       </Accordion>
 
       <Accordion title="DeepSeek V3 and DeepSeek R1-0528+">
@@ -333,6 +349,18 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
         **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
 
         **Notes:** `<tool_calls>` JSON
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Muse">
+    <AccordionGroup>
+      <Accordion title="Muse-Glimmer-30B">
+        **Parser:** `muse_glimmer`
+
+        **Upstream name:** Check your engine version's `--help`
+
+        **Notes:** Served through the v2 unified parser. Alias: `muse`
       </Accordion>
     </AccordionGroup>
   </Accordion>

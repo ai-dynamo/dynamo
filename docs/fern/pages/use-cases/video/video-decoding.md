@@ -1,7 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Video Decode GPU Requirements
+title: Video Decoding and GPU Requirements
+subtitle: Decode video input with NVDEC or the frontend decoder, and add software decoders when needed
 ---
 
 Dynamo provides two video-input decode paths. CUDA runtime images can use both;
@@ -41,17 +42,15 @@ A common misconception is that datacenter GPUs have no video engines. That appli
 | RTX 6000 Ada | Ada Lovelace | 3 engines | 3 | Yes (8/10-bit) | Yes (8/10/12-bit, up to 4:4:4) |
 
 Every GPU above decodes both codecs Dynamo routes to hardware, so H.264 and H.265 video
-input works across the datacenter lineup. Hopper's NVDEC matches Turing's feature set and
+input works across the lineup. Hopper's NVDEC matches Turing's feature set and
 does **not** decode AV1; Blackwell adds AV1 decode. The Ada parts (L4, L40S, RTX 6000 Ada)
-decode AV1 as well, and unlike the datacenter accelerators they also carry NVENC.
-
-Because no datacenter GPU ships NVENC, Dynamo's video *generation* path encodes with a
-CPU VP9 encoder rather than a hardware H.264 encoder.
+decode AV1 as well, and unlike A100, H100, H200, B200, and GB200 they also carry NVENC.
 
 > [!NOTE]
 > Under Multi-Instance GPU (MIG), NVDEC engines are divided across instances. A given MIG
 > profile may expose fewer decoders than the full GPU, and some profiles expose none.
 > Verify decode works in the exact profile you deploy.
+
 
 ## Container requirements
 
@@ -129,6 +128,7 @@ Expect `libnvcuvid.so.1`. Nothing means the `video` capability did not reach thi
 container. If it is present on the node but not inside, the capability is being dropped
 between the two.
 
+
 ## Behavior when NVDEC is unavailable
 
 Hardware decode is additive and never blocks a request on its own: routing falls through
@@ -144,13 +144,47 @@ SGLang on CUDA, does not depend on NVDEC.
 >
 > Grant the container the `video` driver capability so NVDEC can serve H.264 and H.265.
 > For VP8 and VP9, use frontend decoding on vLLM, or SGLang on CUDA. For
-> other software-decoded cases, install a decode carrier alongside or transcode
-> the input before sending it.
+> other software-decoded cases, [install an additional decoder](#install-additional-decoders)
+> or transcode the input before sending it.
 
-### Installing a software decoder
 
-To decode a format NVDEC does not cover — or H.264/H.265 on a host with no NVDEC —
-explicitly install the backend's decode package at the validated version bounds:
+## Install Additional Decoders
+
+Dynamo's runtime images ship a deliberately small media stack. The in-tree FFmpeg is built for VP8/VP9 video, and the wider backend decode packages are not pre-installed, which keeps the distributed images small and their input-format surface narrow by default.
+
+Two input classes are already covered without installing anything:
+
+- **VP8 and VP9 video** decode through the in-tree FFmpeg when frontend
+  decoding is enabled on vLLM, or SGLang on CUDA.
+- **H.264 and H.265 video** decode on the GPU through NVDEC on supported backend paths. NVDEC needs a GPU with a video decode engine and a container granted the `video` driver capability. See [GPU Support](#gpu-support) for the hardware and capability matrix.
+
+Without frontend decoding, the backend worker owns VP8/VP9 decoding. Follow the
+[same-version replacement procedure](#notes-and-limits) for vLLM video; other
+backends need the corresponding package from the table below. Installing an
+additional decoder package also covers:
+
+- **AAC and other compressed audio**, which NVDEC does not decode at all.
+- **H.264 and H.265 on hosts where NVDEC is unavailable** — no video decode engine on the GPU, or a container without the `video` capability.
+
+Each backend decodes such input through a specific Python package whose wheel bundles its own FFmpeg, so the support is added with a plain `pip install` — no image rebuild. **Nothing installs automatically.** There is no environment switch and no startup hook: an operator runs the install as a deliberate, visible step, so a deployment that broadens the image's codec surface says so in its Dockerfile, pod spec, or runbook.
+
+> [!NOTE]
+> This affects **input decoding** only. Generated video **output** is unaffected and always uses VP9.
+
+### What Each Backend Needs
+
+| Backend | Input | Package (validated version bounds) | Import |
+|---------|-------|------------------------------------|--------|
+| vLLM | video | `opencv-python-headless`, matching the installed version | `cv2` |
+| vLLM | audio | `av>=18.0.0,<19` | `av` |
+| SGLang | video | `decord2>=3.4.0,<4` | `decord` |
+| TensorRT-LLM | video | `opencv-python-headless>=4.13.0.92,<5` | `cv2` |
+
+For vLLM video, the installer replaces codec-free OpenCV with a binary wheel of the installed version. If OpenCV is absent, it uses `opencv-python-headless>=4.13.0.92,<5`. For the bounded specs, the lower bound is the version validated against Dynamo's multimodal test suite; the upper bound excludes the next major release so an install cannot silently pick up an unvalidated version. PyNvVideoCodec is not in this list because every CUDA runtime image already ships it — it is the NVDEC path, not a fallback, so there is nothing to install. torchcodec is left out because no Dynamo decode path imports it.
+
+### Install with pip
+
+The table above is the contract; these commands are its direct translation, and work with the installer of your choice (`pip`, `uv pip`, ...):
 
 ```bash
 # vLLM: audio input
@@ -163,9 +197,58 @@ pip install --no-deps 'decord2>=3.4.0,<4'
 pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5'
 ```
 
-vLLM **video** input is the exception, because those images already ship OpenCV built
-without a video backend. Adding video decode there means replacing that build with the
-binary wheel of the same version, not installing a range:
+`--no-deps` keeps the install from changing the image's pinned dependency stack (for example numpy under PyTorch/vLLM); the carriers only need numpy, which the backend already provides. To pin different versions or install a custom subset, adjust these commands directly — that is the intended customization path.
+
+### Install with the bundled installer
+
+Every runtime image ships an installer for the packages above as part of the `ai-dynamo` package. Run it in the worker container (not the frontend) for the backend you deploy:
+
+```bash
+python -m dynamo.common.utils.install_media_decoders vllm
+```
+
+It skips usable decoders, serializes concurrent installs, and verifies imports in a fresh interpreter. For OpenCV, it also checks for a video backend. On vLLM, it replaces codec-free OpenCV with a same-version binary wheel using `--force-reinstall --only-binary` and installs missing PyAV. Other packages use the validated bounds. It exits non-zero if verification fails. To see what it would do first:
+
+```bash
+python -m dynamo.common.utils.install_media_decoders vllm --dry-run
+```
+
+### Kubernetes
+
+Prefer baking the install into an image layer, so the deployment manifest deploys exactly what was reviewed and scanned:
+
+```dockerfile
+FROM nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
+RUN python -m dynamo.common.utils.install_media_decoders vllm
+```
+
+For a quick evaluation without an image build, run the installer ahead of the worker in the pod command, where it is visible in the manifest:
+
+```yaml
+command: ["sh", "-c"]
+args:
+  - python -m dynamo.common.utils.install_media_decoders vllm &&
+    exec python -m dynamo.vllm --model $MODEL
+```
+
+### Air-gapped and allowlisted networks
+
+The install needs a package index or a local wheelhouse. Point pip at one with `--pip-args` (use the `=` form, so a value starting with a dash is not mistaken for an option):
+
+```bash
+python -m dynamo.common.utils.install_media_decoders vllm \
+  --pip-args="--no-index --find-links /opt/wheels"
+```
+
+The default pip timeout is 600 seconds (`--timeout-s` overrides it; `0` disables it), so a stalled index fails the run rather than hanging it.
+
+
+### Notes and Limits
+
+- For H.264 and H.265, prefer NVDEC. Granting the container the `video` driver capability decodes those formats on the GPU with no extra package. Install a software decoder when that is not an option, or when the input is audio.
+- Installing a decoder package brings in that wheel's bundled media libraries. The runtime images are scanned for media components at build time; a package installed afterwards is not covered by that scan. Review what your deployment ships — a baked image layer keeps the change visible and reviewable.
+- On TensorRT-LLM, the install puts back `opencv-python-headless`, which those images deliberately do not ship. H.264 and H.265 already decode there through NVDEC, so install it only for a host where NVDEC is unavailable.
+- The vLLM images ship OpenCV already, rebuilt from source with every video backend disabled. It covers still images — which multimodal Mistral models need, because `mistral_common` resizes every image through `cv2` — and decodes no video at all. Backend video input on vLLM goes through NVDEC. To decode video in software instead, swap that build for the PyPI wheel of the same version:
 
 ```bash
 VERSION=$(pip show opencv-python-headless | awk '/^Version:/{print $2}')
@@ -180,27 +263,22 @@ fi
 pip install --no-deps --force-reinstall --only-binary opencv-python-headless "$SPEC"
 ```
 
-With neither pip metadata nor an importable `cv2`, this falls back to the bounded range instead of
-an unresolvable `==.*` pin.
+`--force-reinstall --only-binary` replaces the source build even when its version already satisfies pip. Pinning preserves the image's OpenCV version; with neither metadata nor an importable `cv2`, the command falls back to the bounded range, which is what the bundled installer does too. The wheel restores bundled FFmpeg and codecs, so review it against your distribution policy. The bundled vLLM installer performs this replacement and installs missing PyAV.
 
-Nothing installs automatically — this is a deliberate operator step. The images also ship
-an installer with the same bounds plus idempotency and air-gap support
-(`python -m dynamo.common.utils.install_media_decoders <backend>`). For vLLM, it replaces
-codec-free OpenCV with a same-version binary wheel and installs missing PyAV. See
-[Additional Media Decoders](additional-media-decoders.md) for the full workflow,
-including baking the install into an image layer for Kubernetes.
+- The optional Rust frontend decoder (`--frontend-decoding`) links FFmpeg's compiled-in decoders and always decodes VP8/VP9 regardless of installed Python packages; backend decoding is what an install extends. Re-encoding an input to VP9 (`ffmpeg -i input.mp4 -c:v libvpx-vp9 -an output.webm`) is an alternative that needs no additional packages.
 
-## Hardware encode (NVENC)
+## Video Output and NVENC
 
 There is nothing to enable. Dynamo does not use NVENC on any path.
 
 Video **output** — the generation path — encodes VP9 on the CPU with the in-tree FFmpeg.
-That is deliberate and works everywhere: no datacenter GPU ships an encoder, so a
-hardware encode path would be unavailable on exactly the parts most deployments run. On
-workstation parts that do have NVENC (L4, L40S, RTX 6000 Ada) it simply stays unused.
+That is deliberate and works everywhere: A100, H100, H200, B200, and GB200 have no
+hardware encoder, so a hardware encode path would be unavailable on the GPUs most
+deployments run. On GPUs that do have NVENC (L4, L40S, RTX 6000 Ada) it stays unused.
 
 The same `video` driver capability governs both engines, so a container configured for
 NVDEC as above needs no additional change. Encode performance does not depend on it.
+
 
 ## Configuration
 
@@ -211,7 +289,9 @@ NVDEC as above needs no additional change. Encode performance does not depend on
 | `DYN_MM_VIDEO_NUM_FRAMES` | `32` | Frames sampled uniformly from each clip. |
 | `DYN_MM_MAX_FILE_SIZE_MB` | `64` | Maximum size in MiB for each remote image, audio, or video download. TensorRT-LLM uses its backend-specific `--max-file-size-mb` option (`DYN_TRTLLM_MAX_FILE_SIZE_MB`) instead. |
 
+
 ## Sources
 
 - [NVIDIA Video Encode and Decode GPU Support Matrix](https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new)
 - [NVDEC Application Note](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/nvdec-application-note/index.html)
+

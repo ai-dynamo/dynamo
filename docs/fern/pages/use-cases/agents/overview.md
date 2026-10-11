@@ -27,7 +27,7 @@ curl http://localhost:8000/v1/chat/completions \
 ```
 
 > [!IMPORTANT]
-> Session IDs identify work for tracing and opt-in consumers. Agent hints influence serving behavior. Neither enables sticky placement unless a separate routing policy is configured.
+> Session IDs identify work for tracing and opt-in consumers. Agent hints influence queueing and scheduling. Neither pins a session to a worker. For sticky placement, enable session affinity on the frontend; see [Session IDs › Sticky Placement](session-ids.mdx#sticky-placement).
 
 ## Choose Your Metadata
 
@@ -79,14 +79,14 @@ Set `DYN_REQUEST_TRACE=1` on the frontend to capture timing, tool calls, and ses
 ## Next Steps
 
 <CardGroup cols={3}>
+  <Card title="Agent Harnesses" icon="regular terminal" href="agent-harnesses.mdx">
+    Connect Codex, Pi, Claude Code, and other supported coding agents.
+  </Card>
   <Card title="Session IDs" icon="regular fingerprint" href="session-ids.mdx">
     Stable agent identity for tracing and opt-in consumers.
   </Card>
   <Card title="Agent Hints" icon="regular sliders" href="agent-hints.md">
     Per-request priority, expected output length, and speculative prefill.
-  </Card>
-  <Card title="Agent Harnesses" icon="regular terminal" href="agent-harnesses.mdx">
-    Connect Codex, Pi, Claude Code, and other supported coding agents.
   </Card>
   <Card title="Agent Tracing" icon="regular chart-line" href="agent-tracing.md">
     Request traces, inferred tool calls, and Perfetto conversion.
@@ -96,5 +96,11 @@ Set `DYN_REQUEST_TRACE=1` on the frontend to capture timing, tool calls, and ses
   </Card>
   <Card title="ThunderAgent Program Scheduler" icon="regular clock" href="thunderagent-program-scheduler.md">
     Experimental tool-boundary pause/resume scheduler on top of KV-aware routing.
+  </Card>
+  <Card title="Priority Scheduling" icon="regular arrow-up-wide-short" href="priority-scheduling.md">
+    How request priority is enforced across the router and each backend.
+  </Card>
+  <Card title="Agents on SGLang" icon="regular server" href="../../developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md">
+    SGLang engine flags, hint mapping, and session control for subagent KV isolation.
   </Card>
 </CardGroup>

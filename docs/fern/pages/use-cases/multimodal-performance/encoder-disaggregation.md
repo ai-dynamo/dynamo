@@ -23,7 +23,7 @@ Use encoder disaggregation when:
 - You want to run the vision encoder on different hardware (e.g., smaller GPUs for encoding, larger GPUs for LLM inference)
 - Your deployment handles high volumes of multimodal requests and encoding throughput is limiting
 
-For simple deployments or development/testing, the aggregated (EPD) pattern is easier to set up.
+For simple deployments or development and testing, the aggregated pattern (EPD, one worker) is easier to set up. See [Deployment Notation](overview.md#deployment-notation) for the layout names used on this page.
 
 ## Deployment Patterns
 
@@ -89,5 +89,5 @@ See the backend-specific documentation ([vLLM](../../developer-guide/knowledge-b
 | Backend | E/PD | E/P/D | Notes |
 |---------|------|-------|-------|
 | **vLLM** | <Badge intent="success" minimal>Yes</Badge> | <Badge intent="success" minimal>Yes</Badge> | Separate encode worker currently handles `image_url` inputs; `video_url` inputs stay on the prefill/PD path |
-| **TensorRT-LLM** | — | <Badge intent="success" minimal>Yes</Badge> | Supports image URLs (via `MultimodalEncoder`) and pre-computed embeddings (via NIXL) |
+| **TensorRT-LLM** | <Badge intent="success" minimal>Yes</Badge> | <Badge intent="success" minimal>Yes</Badge> | Supports image URLs (via `MultimodalEncoder`) and pre-computed embeddings (via NIXL) |
 | **SGLang** | <Badge intent="success" minimal>Yes</Badge> | <Badge intent="success" minimal>Yes</Badge> | NIXL for embeddings; bootstrap mechanism for P/D KV transfer |

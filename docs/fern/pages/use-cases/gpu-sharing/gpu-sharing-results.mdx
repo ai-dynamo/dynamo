@@ -15,7 +15,7 @@ Any performance results on this page are purely illustrative and are not indicat
 
 ## Setup
 
-We ran the same models on an 8× A100 node with Qwen3-4B, with a fixed input length of 2048 tokens, and a fixed output length of 256 tokens.
+All runs used one 8× A100-SXM4 40GB node serving Qwen3-4B, with a fixed input length of 2048 tokens and a fixed output length of 256 tokens. Baseline and GPU fractions ran on driver 615.71.09; HAMi ran on driver 595.91.07.
 
 The results are pessimistic: they assume no KV caching between requests, so the entire 2048-token input sequence length (ISL) is computed on every request.
 
@@ -133,7 +133,7 @@ Each configuration has its own deployment guide. The manifests and benchmark scr
 |---|---|
 | Baseline | [Deploy the Baseline Experiment](deploy-baseline.md) |
 | HAMi | [Deploy the KAI + HAMi Experiment](deploy-kai-hami.md) |
-| GPU fractions | [Build the KAI-Scheduler and GPU Fractioning Forks](build-gpu-fractioning-forks.md), then [Deploy the KAI + GPU Fractions Experiment](deploy-kai-gpu-fractions.md) |
+| GPU fractions | [Build the KAI + GPU Fractions Stack](build-gpu-fractioning-forks.md), then [Deploy the KAI + GPU Fractions Experiment](deploy-kai-gpu-fractions.md) |
 
 Scripts, manifests, and results: [@marckarp](https://github.com/marckarp) and [@scheckerNV](https://github.com/scheckerNV).
 
