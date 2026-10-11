@@ -31,16 +31,32 @@ native gRPC API.
 ![Dynamo Sidecar architecture. A client sends OpenAI-compatible HTTP to the Dynamo Frontend, which tokenizes, routes, and sends token IDs over the request plane to the Dynamo Sidecar.](../../../../../assets/img/sidecar-architecture.svg)
 
 The frontend and router discover sidecars and send requests to them over the
-Dynamo request plane. Each sidecar converts requests to the engine's native gRPC
-API and streams responses back.
+Dynamo request plane. Each sidecar converts ordinary inference requests to the
+engine's native gRPC API and streams responses back.
+
+> [!NOTE]
+> **SGLang native `/generate` uses HTTP.** When the frontend's opt-in native
+> SGLang `/generate` route (`DYN_SGLANG_ENABLE_GENERATE`) sends a request, the
+> SGLang sidecar posts it as JSON to the engine's own HTTP `/generate` endpoint
+> and streams the server-sent event (SSE) response back. The sidecar enables
+> this path only when SGLang's `GetServerInfo` reports an HTTP port with
+> `incremental_streaming_output` enabled and the HTTP `/health` check passes at
+> startup; only then does the worker advertise the `sglang_generate`
+> capability. If the HTTP endpoint is unavailable at startup, the sidecar still
+> serves ordinary gRPC traffic but does not advertise native generate. A native
+> generate request that reaches a sidecar without a ready HTTP endpoint fails,
+> and an HTTP request failure is returned to the caller. Neither case falls
+> back to gRPC. See the
+> [reinforcement learning implementation guide](../../../../use-cases/reinforcement-learning/implementation-guide.md)
+> to enable the route.
 
 ## Responsibilities
 
 | Layer | Responsibility |
 |---|---|
 | Dynamo frontend and router | OpenAI-compatible API, preprocessing, and routing to sidecars |
-| Dynamo sidecar | Engine registration and discovery, request forwarding over native gRPC, and event forwarding |
-| Inference engine | Native gRPC request serving, scheduling, sampling, token generation, KV cache, and GPU execution |
+| Dynamo sidecar | Engine registration and discovery, request forwarding over native gRPC (and over HTTP `/generate` for native SGLang generate requests), and event forwarding |
+| Inference engine | Native gRPC request serving (plus the HTTP `/generate` endpoint for native SGLang generate), scheduling, sampling, token generation, KV cache, and GPU execution |
 
 ## Container Packaging
 
