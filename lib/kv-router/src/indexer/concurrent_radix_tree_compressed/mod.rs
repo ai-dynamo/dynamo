@@ -23,7 +23,9 @@ use crate::lookup_update::{redirect_arc_lookup_for_keys, update_arc_lookup_for_k
 use crate::protocols::*;
 
 mod children;
+mod edge_index;
 mod node;
+mod state;
 mod types;
 use node::*;
 use types::*;

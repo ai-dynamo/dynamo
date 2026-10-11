@@ -6,11 +6,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::RwLock;
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::children::{ChildInsertResult, NodeChildren};
+use super::state::CrtcNodeState;
 use super::types::*;
-use crate::indexer::compressed_radix::NodeState;
 use crate::protocols::*;
 
 fn record_last_matched_hash(
@@ -40,21 +40,13 @@ pub(super) struct Node {
     /// Sticky logical-internal marker. Once true, this node is treated as
     /// internal even if cleanup removes all physical children later.
     internal: AtomicBool,
-    state: RwLock<NodeState>,
+    state: RwLock<CrtcNodeState>,
     children: NodeChildren,
 }
 
 impl Node {
     pub(super) fn new() -> Self {
-        Self::from_state_and_children(
-            NodeState {
-                edge: Vec::new(),
-                edge_index: FxHashMap::default(),
-                worker_cutoffs: FxHashMap::default(),
-                full_edge_workers: FxHashSet::default(),
-            },
-            FxHashMap::default(),
-        )
+        Self::from_state_and_children(CrtcNodeState::new(Vec::new()), FxHashMap::default())
     }
 
     pub(super) fn from_blocks_for_worker(
@@ -62,22 +54,8 @@ impl Node {
         worker: WorkerWithDpRank,
     ) -> Self {
         debug_assert!(!blocks.is_empty());
-
-        let edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)> = blocks
-            .iter()
-            .map(|block| (block.tokens_hash, block.block_hash))
-            .collect();
-        let edge_index = NodeState::edge_index_for(&edge);
-        let mut full_edge_workers = FxHashSet::with_capacity_and_hasher(1, FxBuildHasher);
-        full_edge_workers.insert(worker);
-
         Self::from_state_and_children(
-            NodeState {
-                edge,
-                edge_index,
-                worker_cutoffs: FxHashMap::default(),
-                full_edge_workers,
-            },
+            CrtcNodeState::for_blocks(blocks, worker),
             FxHashMap::default(),
         )
     }
@@ -86,28 +64,20 @@ impl Node {
         anchor_local_hash: LocalBlockHash,
         anchor_id: ExternalSequenceBlockHash,
     ) -> Self {
-        let edge = vec![(anchor_local_hash, anchor_id)];
-        let edge_index = NodeState::edge_index_for(&edge);
-
         Self::from_state_and_children(
-            NodeState {
-                edge,
-                edge_index,
-                worker_cutoffs: FxHashMap::default(),
-                full_edge_workers: FxHashSet::default(),
-            },
+            CrtcNodeState::new(vec![(anchor_local_hash, anchor_id)]),
             FxHashMap::default(),
         )
     }
 
     fn from_state_and_children(
-        state: NodeState,
+        state: CrtcNodeState,
         children: FxHashMap<LocalBlockHash, SharedNode>,
     ) -> Self {
         Self::from_state_and_node_children(state, NodeChildren::from_map(children))
     }
 
-    fn from_state_and_node_children(state: NodeState, children: NodeChildren) -> Self {
+    fn from_state_and_node_children(state: CrtcNodeState, children: NodeChildren) -> Self {
         let internal = !children.is_empty();
         Self {
             shape_gate: RwLock::new(()),
@@ -118,7 +88,7 @@ impl Node {
         }
     }
 
-    fn with_shape_plan<R>(&self, plan: impl FnOnce(&NodeState, &NodeChildren, u64) -> R) -> R {
+    fn with_shape_plan<R>(&self, plan: impl FnOnce(&CrtcNodeState, &NodeChildren, u64) -> R) -> R {
         // NOTE(perf): Replacing these shape-gated reads with state-only snapshots
         // was neutral or regressive, and profiling did not identify the RwLock
         // as a hotspot. Re-profile before removing this shape read.
@@ -139,7 +109,7 @@ impl Node {
     fn apply_metadata_update<R>(
         &self,
         expected_version: u64,
-        f: impl FnOnce(&mut NodeState) -> R,
+        f: impl FnOnce(&mut CrtcNodeState) -> R,
     ) -> Option<R> {
         self.validate_shape_read(expected_version, || {
             let mut state = self.state.write();
@@ -150,7 +120,7 @@ impl Node {
     fn apply_edge_shape_update<R>(
         &self,
         expected_version: u64,
-        f: impl FnOnce(&mut NodeState, &NodeChildren) -> (R, bool),
+        f: impl FnOnce(&mut CrtcNodeState, &NodeChildren) -> (R, bool),
     ) -> Option<R> {
         let _gate = self.shape_gate.write();
         if self.shape_version.load(Ordering::Acquire) != expected_version {
@@ -198,12 +168,12 @@ impl Node {
         let state = self.state.read();
         hashes
             .iter()
-            .take_while(|hash| state.edge_index.contains_key(hash))
+            .take_while(|&&hash| state.contains_hash(hash))
             .count()
     }
 
     pub(super) fn contains_edge_hash(&self, hash: ExternalSequenceBlockHash) -> bool {
-        self.state.read().edge_index.contains_key(&hash)
+        self.state.read().contains_hash(hash)
     }
 
     #[cfg(test)]
@@ -333,7 +303,7 @@ impl Node {
         direction: LookupRepairDirection,
     ) -> Vec<ExternalSequenceBlockHash> {
         let state = self.state.read();
-        let Some(&pos) = state.edge_index.get(&hash) else {
+        let Some(pos) = state.position(hash) else {
             return Vec::new();
         };
         let cutoff = state.current_cutoff(worker).min(state.edge.len());
@@ -358,7 +328,7 @@ impl Node {
     ) -> Option<UncoveredParent> {
         let _gate = self.shape_gate.read();
         let state = self.state.read();
-        let &pos = state.edge_index.get(&parent_hash)?;
+        let pos = state.position(parent_hash)?;
         if state.covers_pos(worker, pos) {
             return None;
         }
@@ -374,7 +344,7 @@ impl Node {
         blocks: &[KvCacheStoredBlockData],
     ) -> Option<ParentEdgePlan> {
         self.with_shape_plan(|state, _children, shape_version| {
-            let &parent_pos = state.edge_index.get(&parent_hash)?;
+            let parent_pos = state.position(parent_hash)?;
 
             let action = if state.tail_hash_is(parent_hash) {
                 ParentEdgePlanAction::InsertFromParent
@@ -545,7 +515,7 @@ impl Node {
             if let Some(hash) = last_ext_hash
                 && !state.tail_hash_is(hash)
             {
-                if state.edge_index.contains_key(&hash) {
+                if state.contains_hash(hash) {
                     return ParentChildPlan::InteriorParent { shape_version };
                 }
                 return ParentChildPlan::StaleParent { hash };
@@ -592,54 +562,13 @@ impl Node {
         }
     }
 
-    fn split_at_locked(&self, state: &mut NodeState, pos: usize) -> SplitLookupData {
-        debug_assert!(
-            pos > 0 && pos < state.edge.len(),
-            "split position {pos} out of range for edge length {}",
-            state.edge.len()
-        );
-
-        let suffix_edge = state.edge.split_off(pos);
-        let suffix_first_local = suffix_edge[0].0;
-        let prefix_len = pos;
-        let suffix_edge_index = NodeState::edge_index_for(&suffix_edge);
-
-        for &(_, hash) in &suffix_edge {
-            state.edge_index.remove(&hash);
-        }
-
-        let mut suffix_full =
-            FxHashSet::with_capacity_and_hasher(state.full_edge_workers.len(), FxBuildHasher);
-        let mut suffix_cutoffs =
-            FxHashMap::with_capacity_and_hasher(state.worker_cutoffs.len(), FxBuildHasher);
-        let mut to_promote: Vec<WorkerWithDpRank> = Vec::new();
-
-        for &worker in &state.full_edge_workers {
-            suffix_full.insert(worker);
-        }
-        for (&worker, &cutoff) in &state.worker_cutoffs {
-            if cutoff >= prefix_len {
-                to_promote.push(worker);
-                let suffix_cutoff = cutoff - prefix_len;
-                if suffix_cutoff > 0 {
-                    suffix_cutoffs.insert(worker, suffix_cutoff);
-                }
-            }
-        }
-        for worker in &to_promote {
-            state.worker_cutoffs.remove(worker);
-            state.full_edge_workers.insert(*worker);
-        }
-
+    fn split_at_locked(&self, state: &mut CrtcNodeState, pos: usize) -> SplitLookupData {
+        let suffix_state = state.split_off_suffix(pos);
+        let suffix_first_local = suffix_state.edge[0].0;
         let suffix_children = self.children.transfer_for_split();
 
         let suffix = Arc::new(Node::from_state_and_node_children(
-            NodeState {
-                edge: suffix_edge,
-                edge_index: suffix_edge_index,
-                worker_cutoffs: suffix_cutoffs,
-                full_edge_workers: suffix_full,
-            },
+            suffix_state,
             suffix_children,
         ));
         let _ = self.children.insert(suffix_first_local, suffix.clone());
@@ -659,7 +588,7 @@ impl Node {
         let mut unmatched_hashes = Vec::new();
 
         for &hash in block_hashes {
-            match state.edge_index.get(&hash).copied() {
+            match state.position(hash) {
                 Some(pos) => {
                     if min_match.is_none_or(|(min_pos, _)| pos < min_pos) {
                         min_match = Some((pos, hash));
