@@ -11,14 +11,14 @@ use crate::test_utils::{
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-type DirectLookup = FxHashMap<WorkerWithDpRank, WorkerLookup>;
+type DirectLookup = LaneLookup;
 
 fn worker(worker_id: u64) -> WorkerWithDpRank {
     WorkerWithDpRank::new(worker_id, 0)
 }
 
 fn direct_lookup() -> DirectLookup {
-    FxHashMap::default()
+    LaneLookup::default()
 }
 
 fn stored_data(event: RouterEvent) -> KvCacheStoreData {
@@ -29,7 +29,7 @@ fn stored_data(event: RouterEvent) -> KvCacheStoreData {
 }
 
 fn worker_lookup_len(lookup: &DirectLookup, worker: WorkerWithDpRank) -> Option<usize> {
-    lookup.get(&worker).map(|worker_lookup| worker_lookup.len())
+    lookup.block_count(worker)
 }
 
 fn lookup_contains(
@@ -37,9 +37,7 @@ fn lookup_contains(
     worker: WorkerWithDpRank,
     hash: ExternalSequenceBlockHash,
 ) -> bool {
-    lookup
-        .get(&worker)
-        .is_some_and(|worker_lookup| worker_lookup.contains_key(&hash))
+    lookup.contains(worker, hash)
 }
 
 async fn index_block_count(index: &ThreadPoolIndexer<ConcurrentRadixTreeCompressed>) -> usize {
@@ -74,6 +72,7 @@ fn apply_direct(
     event: RouterEvent,
 ) {
     index.apply_event(lookup, event, None).unwrap();
+    lookup.assert_invariants();
 }
 
 fn assert_direct_score(
@@ -894,9 +893,7 @@ mod remove_tests {
         );
         let remove_hashes = remove_hashes_with_parent(&[1, 2], &[3, 4, 5]);
         let group_node = lookup0
-            .get(&worker0)
-            .and_then(|worker_lookup| worker_lookup.get(&remove_hashes[0]))
-            .cloned()
+            .node(worker0, remove_hashes[0])
             .expect("remove hash should point to the pre-split group node");
 
         apply_direct(
@@ -950,9 +947,7 @@ mod remove_tests {
         );
         let remove_hashes = remove_hashes_with_parent(&[1, 2, 3], &[4, 5]);
         let group_node = lookup0
-            .get(&worker0)
-            .and_then(|worker_lookup| worker_lookup.get(&remove_hashes[0]))
-            .cloned()
+            .node(worker0, remove_hashes[0])
             .expect("remove hash should point to the pre-split group node");
 
         apply_direct(
@@ -1631,9 +1626,8 @@ fn successful_repair_does_not_restore_scrubbed_other_worker_entries() {
     // A resolve-miss remove scrubs lookup state but cannot update coverage on
     // the node it failed to find. Model that boundary directly while keeping
     // the resolved live node's coverage intact.
-    let scrubbed_lookup = shared_lookup.get_mut(&scrubbed_worker).unwrap();
-    for hash in &suffix_hashes {
-        scrubbed_lookup.remove(hash);
+    for &hash in &suffix_hashes {
+        shared_lookup.remove(scrubbed_worker, hash);
     }
     assert_eq!(worker_lookup_len(&shared_lookup, scrubbed_worker), Some(2));
     assert_direct_score(&index, &[1, 2, 3, 4], scrubbed_worker, 4);
@@ -1649,18 +1643,18 @@ fn successful_repair_does_not_restore_scrubbed_other_worker_entries() {
         )
         .expect("repairing worker should resolve the split suffix");
 
-    let repairing_lookup = shared_lookup.get(&repairing_worker).unwrap();
-    for hash in &suffix_hashes {
-        assert!(Arc::ptr_eq(repairing_lookup.get(hash).unwrap(), &resolved));
+    for &hash in &suffix_hashes {
+        let entry = shared_lookup.node(repairing_worker, hash).unwrap();
+        assert!(Arc::ptr_eq(&entry, &resolved));
     }
 
-    let scrubbed_lookup = shared_lookup.get(&scrubbed_worker).unwrap();
     for hash in suffix_hashes {
         assert!(
-            !scrubbed_lookup.contains_key(&hash),
+            !shared_lookup.contains(scrubbed_worker, hash),
             "repair for another worker restored a scrubbed lookup entry"
         );
     }
+    shared_lookup.assert_invariants();
 }
 
 mod lookup_redirect_tests {

@@ -25,13 +25,13 @@ impl ConcurrentRadixTreeCompressed {
     #[cfg_attr(feature = "profile", inline(never))]
     pub(super) fn apply_stored(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         op: KvCacheStoreData,
         id: u64,
         counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
-        lookup.entry(worker).or_default();
+        lookup.add_worker(worker);
 
         let parent_resolution = self.resolve_store_parent(lookup, worker, &op, id)?;
         let outcome = self.insert_for_resolved_parent(lookup, worker, parent_resolution, &op)?;
@@ -42,7 +42,7 @@ impl ConcurrentRadixTreeCompressed {
 
     fn resolve_store_parent(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         op: &KvCacheStoreData,
         id: u64,
@@ -59,7 +59,7 @@ impl ConcurrentRadixTreeCompressed {
 
     fn resolve_explicit_store_parent(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         parent_hash: ExternalSequenceBlockHash,
         op: &KvCacheStoreData,
@@ -99,7 +99,7 @@ impl ConcurrentRadixTreeCompressed {
 
     fn lookup_store_parent_node(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         parent_hash: ExternalSequenceBlockHash,
         op: &KvCacheStoreData,
@@ -131,7 +131,7 @@ impl ConcurrentRadixTreeCompressed {
 
     fn reject_uncovered_store_parent(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         node: &SharedNode,
         parent_hash: ExternalSequenceBlockHash,
@@ -150,8 +150,7 @@ impl ConcurrentRadixTreeCompressed {
             "Stale parent: worker no longer covers parent_hash; rejecting store"
         );
 
-        let wl = lookup.get_mut(&worker).unwrap();
-        wl.remove(&parent_hash);
+        lookup.remove(worker, parent_hash);
         self.release_hash(worker, parent_hash);
         Err(KvCacheEventError::ParentBlockNotFound)
     }
@@ -159,7 +158,7 @@ impl ConcurrentRadixTreeCompressed {
     #[cfg_attr(feature = "profile", inline(never))]
     fn insert_for_resolved_parent(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         parent_resolution: StoreParentResolution,
         op: &KvCacheStoreData,
@@ -194,14 +193,13 @@ impl ConcurrentRadixTreeCompressed {
 
     fn finish_with_lookup_update(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         blocks: &[KvCacheStoredBlockData],
         node: &SharedNode,
         duplicate_store: bool,
     ) -> StoreInsertOutcome {
-        let wl = lookup.get_mut(&worker).unwrap();
-        let lookup_changed = self.update_lookup_for_blocks(worker, wl, blocks, node);
+        let lookup_changed = self.update_lookup_for_blocks(worker, lookup, blocks, node);
 
         StoreInsertOutcome {
             duplicate_store: duplicate_store && !lookup_changed,
@@ -210,15 +208,14 @@ impl ConcurrentRadixTreeCompressed {
 
     fn finish_after_split_lookup(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         finish: SplitLookupFinish<'_>,
     ) -> StoreInsertOutcome {
         self.apply_split_lookup(lookup, finish.prefix_node, finish.split);
 
-        let wl = lookup.get_mut(&worker).unwrap();
-        self.update_lookup_for_blocks(worker, wl, finish.prefix_blocks, finish.prefix_node);
-        self.update_lookup_for_blocks(worker, wl, finish.tail_blocks, finish.tail_node);
+        self.update_lookup_for_blocks(worker, lookup, finish.prefix_blocks, finish.prefix_node);
+        self.update_lookup_for_blocks(worker, lookup, finish.tail_blocks, finish.tail_node);
 
         StoreInsertOutcome {
             duplicate_store: false,
@@ -239,7 +236,7 @@ impl ConcurrentRadixTreeCompressed {
 
     fn child_or_insert_remaining(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         cursor: StoreParentCursor<'_>,
         remaining: &[KvCacheStoredBlockData],
@@ -392,7 +389,7 @@ impl ConcurrentRadixTreeCompressed {
 
     fn insert_into_child(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         child: &SharedNode,
         remaining: &[KvCacheStoredBlockData],
@@ -465,9 +462,8 @@ impl ConcurrentRadixTreeCompressed {
                 duplicate_store = false;
             }
 
-            let wl = lookup.get_mut(&worker).unwrap();
             let lookup_changed =
-                self.update_lookup_for_blocks(worker, wl, &remaining[..scan.edge_len], child);
+                self.update_lookup_for_blocks(worker, lookup, &remaining[..scan.edge_len], child);
             if lookup_changed {
                 duplicate_store = false;
             }
@@ -483,7 +479,7 @@ impl ConcurrentRadixTreeCompressed {
     #[cfg_attr(feature = "profile", inline(never))]
     fn insert_blocks_from(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         parent: &SharedNode,
         parent_is_anchor: bool,
@@ -550,7 +546,7 @@ impl ConcurrentRadixTreeCompressed {
     #[cfg(test)]
     pub(super) fn insert_blocks_from_for_test(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         parent: &SharedNode,
         seed_hash: ExternalSequenceBlockHash,

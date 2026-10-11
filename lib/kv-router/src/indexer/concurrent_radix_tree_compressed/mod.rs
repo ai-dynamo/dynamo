@@ -19,14 +19,16 @@ use super::{
     MatchDetails, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::cleanup::{CleanupGuard, CleanupState};
-use crate::lookup_update::{redirect_arc_lookup_for_keys, update_arc_lookup_for_keys};
 use crate::protocols::*;
 
+mod block_lookup;
 mod children;
 mod edge_index;
+mod lane_lookup;
 mod node;
 mod state;
 mod types;
+use lane_lookup::LaneLookup;
 use node::*;
 use types::*;
 
@@ -184,13 +186,13 @@ impl ConcurrentRadixTreeCompressed {
 
     fn resolve_anchor_lookup(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         hash: ExternalSequenceBlockHash,
     ) -> Option<SharedNode> {
         let node = self.anchor_nodes.get(&hash)?.clone();
         node.promote_worker_to_full_edge(worker);
-        lookup.entry(worker).or_default().insert(hash, node.clone());
+        lookup.insert(worker, hash, &node);
         Some(node)
     }
 
@@ -213,7 +215,7 @@ impl ConcurrentRadixTreeCompressed {
     /// the write guard is dropped.
     fn apply_split_lookup(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         prefix: &SharedNode,
         split: SplitLookupData,
     ) {
@@ -221,25 +223,27 @@ impl ConcurrentRadixTreeCompressed {
         self.bench_metrics
             .node_splits
             .fetch_add(1, Ordering::Relaxed);
-        for (worker, hashes) in split.suffix.lookup_entries_by_worker() {
-            if let Some(wl) = lookup.get_mut(&worker) {
-                redirect_arc_lookup_for_keys(wl, hashes, prefix, &split.suffix);
-            }
+        if !lookup.names(prefix) {
+            return;
         }
+        let (hashes, cutoffs) = split.suffix.covered_prefixes(lookup.workers());
+        // `redirect` visits workers in `workers` order, matching `cutoffs`.
+        let mut cutoffs = cutoffs.into_iter();
+        lookup.redirect(prefix, &split.suffix, |_| {
+            let cutoff = cutoffs.next().unwrap_or(0);
+            hashes[..cutoff].iter().copied()
+        });
     }
 
     fn update_lookup_for_blocks(
         &self,
         worker: WorkerWithDpRank,
-        worker_lookup: &mut WorkerLookup,
+        lookup: &mut LaneLookup,
         blocks: &[KvCacheStoredBlockData],
         node: &SharedNode,
     ) -> bool {
-        let changed = update_arc_lookup_for_keys(
-            worker_lookup,
-            blocks.iter().map(|block| block.block_hash),
-            node,
-        ) > 0;
+        let changed =
+            lookup.upsert_all(worker, blocks.iter().map(|block| block.block_hash), node) > 0;
         if self.lifecycle.is_enabled() {
             for block in blocks {
                 self.lifecycle.insert(worker, block.block_hash);
@@ -255,7 +259,7 @@ impl ConcurrentRadixTreeCompressed {
     #[cfg_attr(feature = "profile", inline(never))]
     fn apply_event(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         event: RouterEvent,
         counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {

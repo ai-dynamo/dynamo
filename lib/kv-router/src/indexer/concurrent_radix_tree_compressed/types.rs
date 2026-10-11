@@ -11,13 +11,6 @@ use crate::protocols::*;
 /// Thread-safe shared reference to a Node.
 pub(super) type SharedNode = Arc<Node>;
 
-/// Per-worker block-hash -> node map.
-///
-/// Maps each `ExternalSequenceBlockHash` to the node whose `edge` contains it.
-/// Position within the edge is resolved via `Node::edge_index` (O(1)) rather than
-/// stored here, keeping the map compact and correct across concurrent splits.
-pub(super) type WorkerLookup = FxHashMap<ExternalSequenceBlockHash, SharedNode>;
-
 #[derive(Clone, Copy)]
 pub(super) enum WorkerRemovalTarget {
     WorkerId(WorkerId),

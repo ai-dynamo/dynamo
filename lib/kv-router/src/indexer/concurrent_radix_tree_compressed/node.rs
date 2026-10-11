@@ -275,25 +275,15 @@ impl Node {
             && state.has_any_workers()
     }
 
-    pub(super) fn lookup_entries_by_worker(
+    /// The edge's hashes and how far each of `workers` covers them, read under one lock.
+    pub(super) fn covered_prefixes(
         &self,
-    ) -> Vec<(WorkerWithDpRank, Vec<ExternalSequenceBlockHash>)> {
+        workers: impl Iterator<Item = WorkerWithDpRank>,
+    ) -> (Vec<ExternalSequenceBlockHash>, Vec<usize>) {
         let state = self.state.read();
-        let mut entries = Vec::new();
-
-        for &worker in &state.full_edge_workers {
-            entries.push((worker, state.edge.iter().map(|&(_, hash)| hash).collect()));
-        }
-        for (&worker, &cutoff) in &state.worker_cutoffs {
-            if cutoff > 0 {
-                entries.push((
-                    worker,
-                    state.edge[..cutoff].iter().map(|&(_, hash)| hash).collect(),
-                ));
-            }
-        }
-
-        entries
+        let cutoffs = workers.map(|worker| state.current_cutoff(worker)).collect();
+        let hashes = state.edge.iter().map(|&(_, hash)| hash).collect();
+        (hashes, cutoffs)
     }
 
     pub(super) fn lookup_hashes_for_worker_repair(

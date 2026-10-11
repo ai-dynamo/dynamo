@@ -28,12 +28,12 @@ impl ConcurrentRadixTreeCompressed {
     /// cross-thread splits. Returns the `SharedNode` whose edge contains `hash`.
     pub(super) fn resolve_lookup(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         hash: ExternalSequenceBlockHash,
         direction: LookupRepairDirection,
     ) -> Option<SharedNode> {
-        let node = lookup.get(&worker)?.get(&hash)?.clone();
+        let node = lookup.node(worker, hash)?;
 
         // Fast path: hash is still in this node's edge_index.
         if node.contains_edge_hash(hash) {
@@ -50,33 +50,23 @@ impl ConcurrentRadixTreeCompressed {
         Some(resolved)
     }
 
+    /// Repoints this lane's entries that still name `stale` at `resolved`, over the range
+    /// each worker covers on `resolved` in `direction` from `hash`.
     pub(super) fn repair_lookup_for_resolved_node(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         hash: ExternalSequenceBlockHash,
         stale: &SharedNode,
         resolved: &SharedNode,
         direction: LookupRepairDirection,
     ) {
-        #[cfg(feature = "bench")]
-        let mut changed_entries_total = 0u64;
-
-        for (&worker, worker_lookup) in lookup.iter_mut() {
-            let _changed_entries = redirect_arc_lookup_for_keys(
-                worker_lookup,
-                resolved.lookup_hashes_for_worker_repair(worker, hash, direction),
-                stale,
-                resolved,
-            );
-            #[cfg(feature = "bench")]
-            {
-                changed_entries_total += _changed_entries as u64;
-            }
-        }
+        let _changed_entries = lookup.redirect(stale, resolved, |worker| {
+            resolved.lookup_hashes_for_worker_repair(worker, hash, direction)
+        });
 
         #[cfg(feature = "bench")]
         self.bench_metrics
             .lookup_repair_entries
-            .fetch_add(changed_entries_total, Ordering::Relaxed);
+            .fetch_add(_changed_entries as u64, Ordering::Relaxed);
     }
 }
