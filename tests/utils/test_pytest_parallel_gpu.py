@@ -458,9 +458,7 @@ def test_simulation_conserves_work_and_respects_budget():
     assert makespan >= total_work / 8 - 1e-6
 
 
-# --------------------------------------------------------------------------- #
-# run_parallel stage deadline
-# --------------------------------------------------------------------------- #
+# --- run_parallel stage deadline ---
 _SLEEPER_TEST = """
 import os
 import subprocess

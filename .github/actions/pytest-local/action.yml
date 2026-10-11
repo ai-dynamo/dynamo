@@ -268,10 +268,8 @@ runs:
             VRAM_OPTS="--max-vram-gib=${MAX_VRAM_GIB}"
             DIST_OPTS=""
             echo "🧮 GPU-parallel mode: --max-vram-gib=${MAX_VRAM_GIB} (xdist replaced by VRAM-aware orchestrator)"
-            # GitHub's step timeout does not reliably stop the orchestrator
-            # inside the container, so it gets its own earlier deadline. The
-            # 10-minute margin covers the setup above, child teardown, the
-            # JUnit write, and the uploads that follow in this composite step.
+            # GitHub's step timeout does not reliably stop the orchestrator, so it gets its own
+            # deadline; the 10-minute margin covers teardown, the JUnit write, and the uploads.
             if [[ -n "${GPU_PARALLEL_STAGE_TIMEOUT_MINUTES}" ]]; then
               STAGE_MARGIN_MINUTES=10
               if (( GPU_PARALLEL_STAGE_TIMEOUT_MINUTES > STAGE_MARGIN_MINUTES )); then

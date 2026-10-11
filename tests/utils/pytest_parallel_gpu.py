@@ -272,12 +272,8 @@ _RETRYABLE_INIT_MARKERS = [
 ]
 _MAX_RETRIES = 3
 
-# Absolute wall-clock deadline (Unix epoch seconds) for one run_parallel()
-# call. An absolute time rather than a duration so the CI step can count from
-# its own start, which includes collection and model downloads before
-# run_parallel() begins. CI sets it before the step's timeout-minutes: when
-# GitHub cuts the step, this process is not reliably signalled, and it would
-# keep launching queued tests onto the GPU that the next stage is already using.
+# Absolute epoch deadline so CI counts from its step start. GitHub's step timeout does
+# not reliably signal this process, which would keep launching tests onto a busy GPU.
 _STAGE_DEADLINE_ENV = "DYN_GPU_PARALLEL_STAGE_DEADLINE"
 
 
