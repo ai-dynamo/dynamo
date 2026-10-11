@@ -23,7 +23,7 @@ from tests.serve.conftest import (
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
-from tests.utils.multimodal import make_image_payload_cached_tokens
+from tests.utils.multimodal import make_image_payload, make_image_payload_cached_tokens
 from tests.utils.payload_builder import (
     TEXT_PROMPT,
     chat_payload,
@@ -486,14 +486,14 @@ trtllm_configs = {
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
         delayed_start=120,
-        request_payloads=[
-            multimodal_payload_default(
-                text="Describe what you see in this image.",
-                expected_response=["mountain", "rock", "trees", "road"],
-            )
-        ],
+        # Serve the image from the local image_server fixture: a pre-merge test
+        # must not depend on an external download, and the encode worker's
+        # 30 s image fetch timeout matched the extra deployment lifetime of
+        # the flaky CI attempts (DYN-4539).
+        request_payloads=[make_image_payload(["green"])],
         env={
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
+            "DYN_MM_ALLOW_INTERNAL": "1",
         },
     ),
     # LLaVA raw-embeddings E/PD test
