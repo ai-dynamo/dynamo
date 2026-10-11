@@ -30,6 +30,7 @@ killed, and the run fails.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import subprocess
 import sys
@@ -38,6 +39,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import psutil
 
 _repo_root = str(Path(__file__).resolve().parents[2])
 if _repo_root not in sys.path:
@@ -278,15 +281,18 @@ _STAGE_DEADLINE_ENV = "DYN_GPU_PARALLEL_STAGE_DEADLINE"
 
 
 def _stage_deadline() -> float | None:
-    """Return the stage deadline from the environment, or None when unset."""
+    """Return the stage deadline from the environment, or None when unset.
+
+    Raises ValueError for a malformed or non-finite value rather than running
+    without the limit the caller asked for.
+    """
     raw = os.environ.get(_STAGE_DEADLINE_ENV, "").strip()
     if not raw:
         return None
-    try:
-        return float(raw)
-    except ValueError:
-        _print(f"WARNING: ignoring invalid {_STAGE_DEADLINE_ENV}={raw!r}")
-        return None
+    deadline = float(raw)
+    if not math.isfinite(deadline):
+        raise ValueError(f"{_STAGE_DEADLINE_ENV} must be finite, got {raw!r}")
+    return deadline
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -908,7 +914,11 @@ def run_parallel(
             for w_id, run_info in list(running.items()):
                 # Kills the child pytest and every descendant, including
                 # engine processes that moved to their own session.
-                terminate_process_tree(run_info.proc.pid)
+                try:
+                    terminate_process_tree(run_info.proc.pid)
+                except psutil.NoSuchProcess:
+                    # The test exited while its tree was being listed.
+                    pass
                 run_info.proc.wait()
                 if run_info.reader_thread is not None:
                     run_info.reader_thread.join(timeout=5)
@@ -963,7 +973,7 @@ def run_parallel(
                 batch.append(entry)
             batch.reverse()
 
-            for entry in batch:
+            for batch_idx, entry in enumerate(batch):
                 w_id = entry.w_id
                 gi = entry.assigned_gpu
                 assert gi is not None
@@ -979,6 +989,14 @@ def run_parallel(
                     wait = _VLLM_LAUNCH_STAGGER_S - (time.monotonic() - last_t)
                     if wait > 0:
                         time.sleep(wait)
+
+                # The stagger can cross the deadline; return the rest of the
+                # batch to the queue so the stage budget check reports it.
+                if stage_deadline is not None and time.time() >= stage_deadline:
+                    for unlaunched in batch[batch_idx:]:
+                        unlaunched.assigned_gpu = None
+                    pending[:0] = batch[batch_idx:]
+                    break
 
                 gpu_states[gi].budget_used += entry.profiled_gib
                 gpu_states[gi].running_count += 1

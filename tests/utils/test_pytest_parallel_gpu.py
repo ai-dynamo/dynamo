@@ -461,21 +461,21 @@ def test_simulation_conserves_work_and_respects_budget():
 # --- run_parallel stage deadline ---
 _SLEEPER_TEST = """
 import os
+import signal
 import subprocess
 import sys
-import time
 
 
 def test_sleeper():
     # Same shape as an engine started by ManagedProcess: its own session, so
     # it is not in the child pytest's process group.
     proc = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(600)"],
+        [sys.executable, "-c", "import signal; signal.pause()"],
         start_new_session=True,
     )
     with open(os.environ["GRANDCHILD_PID_FILE"], "w") as f:
         f.write(str(proc.pid))
-    time.sleep(600)
+    signal.pause()
 """
 
 _MARKER_TEST = """
@@ -527,24 +527,35 @@ def test_stage_deadline_kills_running_tree_and_skips_queued(tmp_path, monkeypatc
     }
 
     start = time.monotonic()
-    rc = run_parallel(
-        test_ids=[sleeper_id, marker_id],
-        meta=meta,
-        max_vram_gib=0,
-        num_slots=1,
-        extra_pytest_args=["-p", "no:cacheprovider"],
-    )
-    elapsed = time.monotonic() - start
+    try:
+        rc = run_parallel(
+            test_ids=[sleeper_id, marker_id],
+            meta=meta,
+            max_vram_gib=0,
+            num_slots=1,
+            extra_pytest_args=["-p", "no:cacheprovider"],
+        )
+        elapsed = time.monotonic() - start
 
-    assert pid_file.exists(), "sleeper test never started its grandchild"
-    grandchild_pid = int(pid_file.read_text())
-    alive = _pid_alive(grandchild_pid)
-    if alive:
-        psutil.Process(grandchild_pid).kill()
-    assert not alive, "grandchild in its own session survived the deadline"
+        assert pid_file.exists(), "sleeper test never started its grandchild"
+        grandchild_pid = int(pid_file.read_text())
+        assert not _pid_alive(
+            grandchild_pid
+        ), "grandchild in its own session survived the deadline"
+    finally:
+        # The grandchild blocks until signalled, so never leave it behind.
+        if pid_file.exists():
+            _kill_if_alive(int(pid_file.read_text()))
     assert not marker.exists(), "queued test started after the deadline"
     assert rc != 0
     assert elapsed < deadline_s + 45
+
+
+def _kill_if_alive(pid: int) -> None:
+    try:
+        psutil.Process(pid).kill()
+    except psutil.NoSuchProcess:
+        pass
 
 
 def _pid_alive(pid: int) -> bool:
@@ -554,3 +565,17 @@ def _pid_alive(pid: int) -> bool:
         return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
     except psutil.NoSuchProcess:
         return False
+
+
+@pytest.mark.parametrize("raw", ["soon", "nan", "inf", "-inf"])
+def test_stage_deadline_rejects_invalid_values(monkeypatch, raw):
+    monkeypatch.setenv("DYN_GPU_PARALLEL_STAGE_DEADLINE", raw)
+    with pytest.raises(ValueError):
+        pytest_parallel_gpu._stage_deadline()
+
+
+def test_stage_deadline_unset_or_valid(monkeypatch):
+    monkeypatch.delenv("DYN_GPU_PARALLEL_STAGE_DEADLINE", raising=False)
+    assert pytest_parallel_gpu._stage_deadline() is None
+    monkeypatch.setenv("DYN_GPU_PARALLEL_STAGE_DEADLINE", " 1700000000.5 ")
+    assert pytest_parallel_gpu._stage_deadline() == 1700000000.5
