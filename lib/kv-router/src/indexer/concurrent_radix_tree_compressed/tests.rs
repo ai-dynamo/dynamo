@@ -1019,7 +1019,8 @@ mod remove_tests {
     /// one block or a held run in either order, leaving mid-chain holes that
     /// later stores partially refill. The other workers share and split its
     /// edges but evict only leaves, so the documented equal-size skip in
-    /// `find_matches` cannot credit worker 0 past its prefix.
+    /// `find_matches` cannot credit worker 0 past its prefix. Workers are spread
+    /// over two event lanes, so splits also reach worker 0 through lazy repair.
     #[test]
     fn randomized_removes_never_overcount_held_prefix() {
         const SEEDS: u64 = 32;
@@ -1045,7 +1046,7 @@ mod remove_tests {
             }
 
             let index = ConcurrentRadixTreeCompressed::new();
-            let mut lookup = direct_lookup();
+            let mut lanes = [direct_lookup(), direct_lookup()];
             let mut held = vec![FxHashSet::<u64>::default(); WORKERS as usize];
 
             for step in 0..OPS {
@@ -1107,7 +1108,7 @@ mod remove_tests {
                     }
                     _ => continue,
                 };
-                let _ = index.apply_event(&mut lookup, event, None);
+                let _ = index.apply_event(&mut lanes[(w % 2) as usize], event, None);
 
                 for (doc, seq) in docs.iter().zip(&seqs) {
                     for len in 1..=doc.len() {

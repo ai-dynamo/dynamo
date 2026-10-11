@@ -195,8 +195,9 @@ impl Node {
 
     /// Number of leading `hashes` present in this node's edge whose worker
     /// lookup entry also names this node, read under one lock. A hash whose
-    /// entry names another node is covered there: this node can still contain
-    /// it after being unlinked, when the worker later re-stored it elsewhere.
+    /// entry names another node is left to its own removal: that node may hold
+    /// the worker's coverage, since this node can still contain the hash after
+    /// being unlinked when the worker later re-stored it elsewhere.
     pub(super) fn leading_edge_hash_count(
         &self,
         hashes: &[ExternalSequenceBlockHash],

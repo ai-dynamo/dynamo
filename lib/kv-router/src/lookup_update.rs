@@ -44,10 +44,10 @@ where
 /// Unlike [`update_arc_lookup_for_keys`], this neither inserts missing keys nor
 /// touches entries naming any other node. Absence is meaningful: a remove can
 /// scrub an entry before another worker on the same event thread repairs a
-/// stale lookup. An entry naming another node holds that worker's coverage of
-/// the key there, for example after the worker stored the key again on a live
-/// node while an unlinked node still contains it. Returns the number of
-/// entries changed.
+/// stale lookup. An entry naming another node either holds that worker's
+/// coverage of the key there, for example after the worker stored the key again
+/// on a live node while an unlinked node still contains it, or is stale and
+/// left to its own lazy repair. Returns the number of entries changed.
 pub(crate) fn redirect_arc_lookup_for_keys<K, T>(
     lookup: &mut FxHashMap<K, Arc<T>>,
     keys: impl IntoIterator<Item = K>,
@@ -57,9 +57,6 @@ pub(crate) fn redirect_arc_lookup_for_keys<K, T>(
 where
     K: Eq + Hash,
 {
-    if Arc::ptr_eq(from, to) {
-        return 0;
-    }
     let mut changed = 0;
 
     for key in keys {
