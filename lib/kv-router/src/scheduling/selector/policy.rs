@@ -141,6 +141,17 @@ impl WorkerSelectionPolicy {
         self
     }
 
+    /// Attach fixed per-rank resident block counts, for benchmarking the read path.
+    #[cfg(feature = "bench")]
+    pub fn with_fixed_resident_block_counts(
+        self,
+        counts: impl IntoIterator<Item = (crate::protocols::WorkerWithDpRank, usize)>,
+    ) -> Self {
+        let handle = ResidentBlockCountsHandle::default();
+        handle.publish(counts.into_iter().collect());
+        self.with_resident_block_counts(handle)
+    }
+
     pub(crate) fn declared_inputs(&self) -> WorkerInputs {
         match &self.state {
             #[cfg(any(test, feature = "bench"))]

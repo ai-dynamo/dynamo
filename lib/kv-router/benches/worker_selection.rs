@@ -125,6 +125,42 @@ impl WorkerScorer for IgnoringPreferenceScorer {
     }
 }
 
+/// `IgnoringPreferenceScorer` plus each candidate's resident block count.
+struct ResidentBlocksScorer;
+
+impl WorkerScorer for ResidentBlocksScorer {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::RESIDENT_BLOCKS
+    }
+
+    fn score(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let cache = candidate
+                .cache()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            // Real policies should treat None (no fresh counts) as neutral; failing keeps the bench honest.
+            let resident_blocks = candidate.resident_blocks().ok_or_else(|| {
+                WorkerSelectionPolicyError::failed("resident blocks input unavailable")
+            })?;
+            let uncached_blocks =
+                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+                + load.decode_cost_blocks()
+                + load.active_requests() as f64;
+            *cost = uncached_blocks + load_blocks + resident_blocks as f64;
+        }
+        Ok(())
+    }
+}
+
 struct LowestCostPicker;
 
 impl WorkerPicker for LowestCostPicker {
@@ -371,6 +407,60 @@ fn unused_preferred_taint_metadata(c: &mut Criterion) {
     group.finish();
 }
 
+fn resident_blocks_read(c: &mut Criterion) {
+    let config = KvRouterConfig {
+        router_temperature: 0.0,
+        ..Default::default()
+    };
+    let mut group = c.benchmark_group("resident_blocks_read");
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+
+    for worker_count in [2, 32, 1_024, 10_000] {
+        let (workers, request) = fixture(worker_count);
+        group.throughput(Throughput::Elements(worker_count as u64));
+        let without = WorkerSelectionPolicy::new(
+            config.clone(),
+            "prefill",
+            vec![Box::new(IgnoringPreferenceScorer)],
+            Box::new(LowestCostPicker),
+        );
+        let with = WorkerSelectionPolicy::new(
+            config.clone(),
+            "prefill",
+            vec![Box::new(ResidentBlocksScorer)],
+            Box::new(LowestCostPicker),
+        )
+        .with_fixed_resident_block_counts(
+            workers
+                .keys()
+                .map(|&worker_id| (WorkerWithDpRank::from_worker_id(worker_id), 4_096)),
+        );
+        for (name, policy) in [("without", &without), ("with", &with)] {
+            group.bench_with_input(
+                BenchmarkId::new(name, worker_count),
+                &worker_count,
+                |b, _| {
+                    b.iter(|| {
+                        black_box(
+                            policy
+                                .select_worker(WorkerSelectionInput::configured(
+                                    black_box(&workers),
+                                    black_box(&request),
+                                    request.eligibility(),
+                                    black_box(16),
+                                ))
+                                .unwrap(),
+                        )
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 fn default_policy_wrapper(c: &mut Criterion) {
     let config = KvRouterConfig {
         router_temperature: 0.0,
@@ -469,6 +559,7 @@ criterion_group!(
     worker_selection,
     custom_worker_selection,
     unused_preferred_taint_metadata,
+    resident_blocks_read,
     default_policy_wrapper,
     worker_projection
 );
