@@ -334,6 +334,8 @@ jobs:
           # orchestrator (tests/utils/pytest_parallel_gpu.py via tests/conftest.py)
           parallel_mode: 'auto'
           max_vram_gib: ${{ inputs.gpu_parallel_max_vram_gib }}
+          # Must match this step's timeout-minutes.
+          gpu_parallel_stage_timeout_minutes: ${{ inputs.gpu_test_timeout_minutes }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'
           verify_gpu: ${{ inputs.verify_gpu }}

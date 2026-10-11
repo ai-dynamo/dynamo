@@ -56,6 +56,10 @@ inputs:
     description: 'Per-test VRAM budget in GiB. When set together with parallel_mode!=none, runs GPU tests as VRAM-aware concurrent subprocesses via the orchestrator in tests/utils/pytest_parallel_gpu.py. Tests without @pytest.mark.profiled_vram_gib(N) are deselected by tests/conftest.py.'
     required: false
     default: ''
+  gpu_parallel_stage_timeout_minutes:
+    description: 'The calling step timeout-minutes. When set together with max_vram_gib, the GPU-parallel orchestrator stops launching tests and kills running ones 10 minutes before this limit, so no test outlives the step and overlaps the next stage on the GPU.'
+    required: false
+    default: ''
   cpu_limit:
     description: 'Maximum number of cores available to docker'
     required: false
@@ -98,6 +102,7 @@ runs:
         ENABLE_COVERAGE: ${{ inputs.enable_coverage }}
         PARALLEL_MODE: ${{ inputs.parallel_mode }}
         MAX_VRAM_GIB: ${{ inputs.max_vram_gib }}
+        GPU_PARALLEL_STAGE_TIMEOUT_MINUTES: ${{ inputs.gpu_parallel_stage_timeout_minutes }}
         NVME_DIR: ${{ inputs.nvme_dir }}
         REQUESTED_HF_HOME: ${{ inputs.hf_home }}
         GPU_TESTS: ${{ inputs.gpu_tests }}
@@ -263,6 +268,17 @@ runs:
             VRAM_OPTS="--max-vram-gib=${MAX_VRAM_GIB}"
             DIST_OPTS=""
             echo "🧮 GPU-parallel mode: --max-vram-gib=${MAX_VRAM_GIB} (xdist replaced by VRAM-aware orchestrator)"
+            # GitHub's step timeout does not reliably stop the orchestrator
+            # inside the container, so it gets its own earlier deadline. The
+            # 10-minute margin covers the setup above, child teardown, the
+            # JUnit write, and the uploads that follow in this composite step.
+            if [[ -n "${GPU_PARALLEL_STAGE_TIMEOUT_MINUTES}" ]]; then
+              STAGE_MARGIN_MINUTES=10
+              if (( GPU_PARALLEL_STAGE_TIMEOUT_MINUTES > STAGE_MARGIN_MINUTES )); then
+                export DYN_GPU_PARALLEL_STAGE_DEADLINE=$(( $(date +%s) + (GPU_PARALLEL_STAGE_TIMEOUT_MINUTES - STAGE_MARGIN_MINUTES) * 60 ))
+                echo "⏱️ GPU-parallel stage deadline: $((GPU_PARALLEL_STAGE_TIMEOUT_MINUTES - STAGE_MARGIN_MINUTES)) minutes from now"
+              fi
+            fi
           else
             # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
             DIST_OPTS="--dist=loadscope"

@@ -6,19 +6,25 @@
 Covers the pure scheduling core (``_select_launches`` / ``_priority_key``) and a
 discrete-event makespan simulation on the real ``job-log.txt`` workload, showing
 the VRAM-aware ordering beats the legacy timeout-sorted first-fit. No GPU or
-``pynvml`` required -- the scheduler core is pure arithmetic.
+``pynvml`` required -- the scheduler core is pure arithmetic, and the
+``run_parallel`` stage-deadline test fakes GPU detection and runs tiny
+generated tests as real subprocesses.
 """
 
 from __future__ import annotations
 
+import time
+
+import psutil
 import pytest
 
-from tests.utils import vram_utils
+from tests.utils import pytest_parallel_gpu, vram_utils
 from tests.utils.pytest_parallel_gpu import (
     _GpuState,
     _priority_key,
     _select_launches,
     _TestEntry,
+    run_parallel,
 )
 from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN
 
@@ -450,3 +456,103 @@ def test_simulation_conserves_work_and_respects_budget():
 
     assert makespan >= longest
     assert makespan >= total_work / 8 - 1e-6
+
+
+# --------------------------------------------------------------------------- #
+# run_parallel stage deadline
+# --------------------------------------------------------------------------- #
+_SLEEPER_TEST = """
+import os
+import subprocess
+import sys
+import time
+
+
+def test_sleeper():
+    # Same shape as an engine started by ManagedProcess: its own session, so
+    # it is not in the child pytest's process group.
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(600)"],
+        start_new_session=True,
+    )
+    with open(os.environ["GRANDCHILD_PID_FILE"], "w") as f:
+        f.write(str(proc.pid))
+    time.sleep(600)
+"""
+
+_MARKER_TEST = """
+import os
+
+
+def test_marker():
+    open(os.environ["QUEUED_MARKER_FILE"], "w").close()
+"""
+
+
+@pytest.mark.timeout(180)
+def test_stage_deadline_kills_running_tree_and_skips_queued(tmp_path, monkeypatch):
+    # The generated tests live outside the repository, with their own
+    # pytest.ini as rootdir, so the children do not load tests/conftest.py.
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    sleeper = tmp_path / "test_sleeper.py"
+    sleeper.write_text(_SLEEPER_TEST)
+    marker_test = tmp_path / "test_marker.py"
+    marker_test.write_text(_MARKER_TEST)
+    pid_file = tmp_path / "grandchild.pid"
+    marker = tmp_path / "queued.marker"
+    junit_dir = tmp_path / "junit"
+    junit_dir.mkdir()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GRANDCHILD_PID_FILE", str(pid_file))
+    monkeypatch.setenv("QUEUED_MARKER_FILE", str(marker))
+    monkeypatch.setattr(
+        pytest_parallel_gpu,
+        "detect_gpus",
+        lambda: [{"index": 0, "name": "fake", "total_mib": 80 * 1024}],
+    )
+    monkeypatch.setattr(pytest_parallel_gpu, "_get_gpu_used_gib", lambda gi=0: 0.0)
+    monkeypatch.setattr(pytest_parallel_gpu, "_JUNIT_DIR", str(junit_dir))
+    monkeypatch.setattr(
+        pytest_parallel_gpu, "_JUNIT_COMBINED", str(junit_dir / "combined.xml")
+    )
+    deadline_s = 15
+    monkeypatch.setenv("DYN_GPU_PARALLEL_STAGE_DEADLINE", str(time.time() + deadline_s))
+
+    sleeper_id = f"{sleeper}::test_sleeper"
+    marker_id = f"{marker_test}::test_marker"
+    # Zero-VRAM entries need no KV marker. The longer timeout schedules the
+    # sleeper first; one slot keeps the marker test queued behind it.
+    meta = {
+        sleeper_id: {"profiled_vram_gib": 0, "timeout": 90},
+        marker_id: {"profiled_vram_gib": 0, "timeout": 30},
+    }
+
+    start = time.monotonic()
+    rc = run_parallel(
+        test_ids=[sleeper_id, marker_id],
+        meta=meta,
+        max_vram_gib=0,
+        num_slots=1,
+        extra_pytest_args=["-p", "no:cacheprovider"],
+    )
+    elapsed = time.monotonic() - start
+
+    assert pid_file.exists(), "sleeper test never started its grandchild"
+    grandchild_pid = int(pid_file.read_text())
+    alive = _pid_alive(grandchild_pid)
+    if alive:
+        psutil.Process(grandchild_pid).kill()
+    assert not alive, "grandchild in its own session survived the deadline"
+    assert not marker.exists(), "queued test started after the deadline"
+    assert rc != 0
+    assert elapsed < deadline_s + 45
+
+
+def _pid_alive(pid: int) -> bool:
+    # An orphan killed inside a container may stay a zombie when PID 1 does
+    # not reap; it holds no resources, so count it as gone.
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False

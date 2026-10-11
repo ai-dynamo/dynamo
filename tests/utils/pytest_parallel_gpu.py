@@ -21,6 +21,10 @@ Flags:
 
 A 10-second cooldown between launches avoids the vLLM profiling race
 (bug #10643). Tests that fail due to profiling race are retried up to 3 times.
+
+Set DYN_GPU_PARALLEL_STAGE_DEADLINE (Unix epoch seconds) to bound the whole
+run: once it passes, queued tests are not started, running test trees are
+killed, and the run fails.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ _repo_root = str(Path(__file__).resolve().parents[2])
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
+from tests.utils.managed_process import terminate_process_tree  # noqa: E402
 from tests.utils.vram_utils import (  # noqa: E402
     VRAM_MULTI_PROC_MARGIN,
     auto_worker_count,
@@ -266,6 +271,26 @@ _RETRYABLE_INIT_MARKERS = [
     "exited with code -9 while waiting for health check",  # SIGKILL (OOM killer) during init
 ]
 _MAX_RETRIES = 3
+
+# Absolute wall-clock deadline (Unix epoch seconds) for one run_parallel()
+# call. An absolute time rather than a duration so the CI step can count from
+# its own start, which includes collection and model downloads before
+# run_parallel() begins. CI sets it before the step's timeout-minutes: when
+# GitHub cuts the step, this process is not reliably signalled, and it would
+# keep launching queued tests onto the GPU that the next stage is already using.
+_STAGE_DEADLINE_ENV = "DYN_GPU_PARALLEL_STAGE_DEADLINE"
+
+
+def _stage_deadline() -> float | None:
+    """Return the stage deadline from the environment, or None when unset."""
+    raw = os.environ.get(_STAGE_DEADLINE_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        _print(f"WARNING: ignoring invalid {_STAGE_DEADLINE_ENV}={raw!r}")
+        return None
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -649,6 +674,13 @@ def run_parallel(
 
     # --- Scheduling state ---
     t0 = time.monotonic()
+    stage_deadline = _stage_deadline()
+    if stage_deadline is not None:
+        _print(
+            f"Stage deadline in {stage_deadline - time.time():.0f}s "
+            f"({_STAGE_DEADLINE_ENV})"
+        )
+    not_run: list[_TestEntry] = []
     pending = list(tests)
     running: dict[int, _RunningTest] = {}
     next_status = t0 + 10
@@ -865,6 +897,48 @@ def run_parallel(
                     _print(ln)
                 next_status = now + 10
 
+        # --- Stage budget ---
+        # Checked after reaping so tests that just finished keep their result.
+        if stage_deadline is not None and time.time() >= stage_deadline:
+            _print(
+                f"\nStage deadline reached after {now - t0:.0f}s: "
+                f"not starting {len(pending)} queued test(s), "
+                f"killing {len(running)} running test(s)"
+            )
+            not_run = pending
+            pending = []
+            for test in not_run:
+                _print(f"[w{test.w_id}] {test.name} NOT RUN - stage budget exhausted")
+            for w_id, run_info in list(running.items()):
+                # Kills the child pytest and every descendant, including
+                # engine processes that moved to their own session.
+                terminate_process_tree(run_info.proc.pid)
+                run_info.proc.wait()
+                if run_info.reader_thread is not None:
+                    run_info.reader_thread.join(timeout=5)
+                test = run_info.test
+                duration = time.monotonic() - run_info.start_time
+                if not stream:
+                    for line in run_info.captured:
+                        _print(f"[w{w_id}] {line}")
+                _print(
+                    f"[w{w_id}] {test.name} FAILED [{duration:.0f}s]"
+                    " - killed: stage budget exhausted"
+                )
+                if test.assigned_gpu is not None:
+                    gpu_states[test.assigned_gpu].budget_used -= test.profiled_gib
+                    gpu_states[test.assigned_gpu].running_count -= 1
+                completed.append(
+                    _CompletedTest(
+                        test=test,
+                        duration=duration,
+                        passed=False,
+                        fail_reason="killed: stage budget exhausted",
+                    )
+                )
+                del running[w_id]
+            break
+
         # --- Launch pending tests ---
         # _select_launches packs VRAM tests up to budget (pairing a big test
         # with smaller ones), backfills spare slots with zero-VRAM fillers, and
@@ -986,6 +1060,8 @@ def run_parallel(
                 f"FAILED [w{w_id}] {test.name} "
                 f"[{duration}s/{timeout}s]{retry_str}{fail_str}"
             )
+    for test in sorted(not_run, key=lambda t: t.w_id):
+        _print(f"NOT RUN [w{test.w_id}] {test.name} - stage budget exhausted")
 
     n_summary_parts = []
     if n_failed:
@@ -993,6 +1069,8 @@ def run_parallel(
     n_summary_parts.append(f"{n_passed} passed")
     if n_skipped:
         n_summary_parts.append(f"{n_skipped} skipped")
+    if not_run:
+        n_summary_parts.append(f"{len(not_run)} not run")
 
     wall_int = int(wall_time)
     h, remainder = divmod(wall_int, 3600)
@@ -1015,7 +1093,7 @@ def run_parallel(
     if combined:
         _print(f"JUnit XML: {combined}")
 
-    return 0 if n_failed == 0 else 1
+    return 0 if n_failed == 0 and not not_run else 1
 
 
 # ---------------------------------------------------------------------------
