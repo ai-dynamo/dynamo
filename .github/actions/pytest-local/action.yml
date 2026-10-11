@@ -122,6 +122,10 @@ runs:
         TRITON_ARTIFACTORY_TOKEN: ${{ inputs.triton_artifactory_token }}
         VERIFY_GPU: ${{ inputs.verify_gpu }}
       run: |
+        # Taken first so the GPU-parallel stage deadline counts setup time
+        # against the step timeout.
+        STEP_START_EPOCH=$(date +%s)
+
         # Sanitize test_type for the JUnit and coverage filenames this step
         # writes: remove commas and spaces.
         STR_TEST_TYPE=$(echo "${TEST_TYPE}" | tr ', ' '_')
@@ -273,8 +277,8 @@ runs:
             if [[ -n "${GPU_PARALLEL_STAGE_TIMEOUT_MINUTES}" ]]; then
               STAGE_MARGIN_MINUTES=10
               if (( GPU_PARALLEL_STAGE_TIMEOUT_MINUTES > STAGE_MARGIN_MINUTES )); then
-                export DYN_GPU_PARALLEL_STAGE_DEADLINE=$(( $(date +%s) + (GPU_PARALLEL_STAGE_TIMEOUT_MINUTES - STAGE_MARGIN_MINUTES) * 60 ))
-                echo "⏱️ GPU-parallel stage deadline: $((GPU_PARALLEL_STAGE_TIMEOUT_MINUTES - STAGE_MARGIN_MINUTES)) minutes from now"
+                export DYN_GPU_PARALLEL_STAGE_DEADLINE=$(( STEP_START_EPOCH + (GPU_PARALLEL_STAGE_TIMEOUT_MINUTES - STAGE_MARGIN_MINUTES) * 60 ))
+                echo "⏱️ GPU-parallel stage deadline: $(( (DYN_GPU_PARALLEL_STAGE_DEADLINE - $(date +%s)) / 60 )) minutes from now"
               fi
             fi
           else
