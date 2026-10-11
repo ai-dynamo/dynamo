@@ -23,7 +23,15 @@ from aiohttp.test_utils import TestClient, TestServer
 from dynamo.frontend.profiling import hosting
 from dynamo.frontend.profiling.hosting import host, profiling_coordinator
 from dynamo.frontend.profiling.http import application
-from dynamo.profiling import Coordinator, adapters, agent, collectors, errors, nsys
+from dynamo.profiling import (
+    Coordinator,
+    adapters,
+    agent,
+    bundle,
+    collectors,
+    errors,
+    nsys,
+)
 from dynamo.profiling.adapters import CollectorRegistry
 from dynamo.profiling.artifacts import SharedFilesystemValidator
 from dynamo.profiling.clock import estimate_offset
@@ -1056,3 +1064,145 @@ async def test_nsys_accepts_cuda_memory_activity(tmp_path, with_kernels):
     assert result["status"] == "verified"
     assert result["events"]["CUPTI_ACTIVITY_KIND_MEMCPY"] == 1
     assert result["gpu_processes"] == [0]
+
+
+def test_bundle_selects_router_assigned_requests_and_aligns_kineto(tmp_path):
+    base = 1_700_000_000_000_000_000
+    trace = tmp_path / "native" / "capture_dp0.1.pt.trace.json.gz"
+    trace.parent.mkdir()
+    trace.write_bytes(
+        gzip.compress(
+            json.dumps(
+                {
+                    "baseTimeNanoseconds": base,
+                    "traceEvents": [
+                        {
+                            "ph": "M",
+                            "name": "process_name",
+                            "pid": 7,
+                            "tid": 0,
+                            "args": {"name": "EngineCore"},
+                        },
+                        {
+                            "ph": "X",
+                            "cat": "kernel",
+                            "name": "k",
+                            "pid": 7,
+                            "tid": 1,
+                            "ts": 1000.5,
+                            "dur": 2,
+                        },
+                    ],
+                }
+            ).encode()
+        )
+    )
+    session = tmp_path / "session"
+    session.mkdir()
+    worker_clock = {
+        "alignment": "estimated",
+        "offset_ns": 1000,
+        "hostname": "h",
+        "pid": 42,
+    }
+    (session / "manifest.json").write_text(
+        json.dumps(
+            {
+                "session_id": "s",
+                "state": "completed",
+                "artifact_status": "verified",
+                "plan": {"trace_ids": ["trigger"]},
+                "profiles": [
+                    {
+                        "target_id": "decode-0",
+                        "collector": "torch_profiler",
+                        "started_at_ns": base + 900_000,
+                    }
+                ],
+                "clock": {"workers": {"decode-0": {"start": worker_clock}}},
+                "artifact_validation": [
+                    {
+                        "target_id": "decode-0",
+                        "status": "verified",
+                        "artifacts": [
+                            {
+                                "location": str(trace),
+                                "rank_id": "dp0",
+                                "recording_bounds": {
+                                    "status": "observed",
+                                    "start_unix_ns": base + 1_000_000,
+                                    "end_unix_ns": base + 4_000_000,
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    def span(trace_id, span_id, parent, name, start, **attributes):
+        return {
+            "traceId": trace_id,
+            "spanId": span_id,
+            "parentSpanId": parent,
+            "name": name,
+            "startTimeUnixNano": str(base + start),
+            "endTimeUnixNano": str(base + start + 3_000_000),
+            "attributes": [
+                {"key": k, "value": {"stringValue": str(v)}}
+                for k, v in attributes.items()
+            ],
+        }
+
+    def request(trace_id, worker, pid, start):
+        # Span host attributes are not worker host identities; only the PID joins.
+        worker_attrs = {
+            "dynamo.process.epoch": f"{pid}:x",
+            "dynamo.instance.id": "other",
+        }
+        return [
+            span(trace_id, "a", "", "http-request", start),
+            span(
+                trace_id,
+                "b",
+                "a",
+                "kv_router.route_request",
+                start,
+                phase="Decode",
+                worker_id=worker,
+            ),
+            span(trace_id, "c", "b", "handle_payload", start, instance_id=worker),
+            span(trace_id, "d", "c", "worker.operation.decode", start, **worker_attrs),
+        ]
+
+    otel = tmp_path / "otel.jsonl"
+    spans = (
+        request("captured", "W1", 42, 2_000_000)
+        + request("uncaptured", "W2", 43, 2_000_000)
+        + request("after", "W1", 42, 9_000_000)
+    )
+    otel.write_text(
+        json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}) + "\n"
+    )
+    summary = bundle.build(session, [otel], tmp_path / "out")
+    index = json.loads((tmp_path / "out/lifecycle/trace-index.json").read_text())
+    assert index["router_targets"] == {"W1": "decode-0"}
+    assert [entry["trace_id"] for entry in index["requests"]] == ["captured"]
+    phase = index["requests"][0]["phases"][0]
+    assert (phase["target_id"], phase["recording_overlap_ns"]) == (
+        "decode-0",
+        2_000_000,
+    )
+    exported = (tmp_path / "out/lifecycle/traces.otlp.jsonl").read_text()
+    assert "captured" in exported and "uncaptured" not in exported
+    assert summary["coverage"]["lifecycle"]["trigger_traces_found"] == "0/1"
+    assert summary["coverage"]["native_timeline"]["decode-0"]["events"] == 1
+    events = json.loads(
+        gzip.decompress((tmp_path / "out/timeline.json.gz").read_bytes())
+    )
+    kernel = next(e for e in events["traceEvents"] if e.get("name") == "k")
+    # Raw base+1.0005 ms on the worker clock, minus its 1 us offset, from the
+    # earliest control event at base+0.9 ms.
+    assert kernel["ts"] == 99.5
+    assert all(isinstance(e.get("tid", 0), int) for e in events["traceEvents"])

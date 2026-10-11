@@ -125,6 +125,32 @@ OTel evidence consists of trigger trace/request IDs and an existing backend
 reference. Coverage is unknown; local archival and runtime verbosity changes are
 not required by the interface.
 
+## Investigation bundle
+
+After a session finishes, build its bundle outside the serving frontend:
+
+```bash
+python -m dynamo.profiling.bundle /private/profiling/sessions/<session-id> \
+  --otel-jsonl /otel/collector-export.jsonl
+```
+
+The command writes `<session>/bundle/` with `manifest.json`, `bundle.json`
+(file hashes and separate profiler/lifecycle coverage),
+`lifecycle/traces.otlp.jsonl` (selected traces in collector export-batch form),
+`lifecycle/trace-index.json`, `control/events.jsonl`, and `timeline.json.gz`
+for Perfetto. Native profiles stay in place and are referenced by path and hash.
+
+A request is selected when its `worker.operation.*` span ran on a captured
+target during that target's recording interval, or when the plan names its
+trace ID. Worker spans are assigned through the router decision
+(`kv_router.route_request` worker ID, equal to `handle_payload` instance ID)
+and joined to the captured process by the PID prefix of `dynamo.process.epoch`;
+a PID claimed by more than one target stays unmapped. Spans and native events
+share the coordinator clock using each target's measured offset. Engine work
+inside an operation span is shared batch work and is not attributed per kernel.
+Kineto traces are included in the timeline; Nsight targets are listed as
+pending until its reader is added.
+
 ## Callable API and hosting
 
 ```python
