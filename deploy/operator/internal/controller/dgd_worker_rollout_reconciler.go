@@ -64,14 +64,20 @@ func (t unsupportedWorkerHashTransition) needsCommit() bool {
 // controller.
 type dgdWorkerRolloutReconciler struct {
 	dgdResourceSyncer
+	// cachedReader reads from the shared informer cache, including the
+	// unstructured DynamoWorkerMetadata projections that the manager client
+	// would read from the API server.
+	cachedReader client.Reader
 }
 
 func newDGDWorkerRolloutReconciler(
 	kubeClient client.Client,
+	cachedReader client.Reader,
 	recorder events.EventRecorder,
 ) *dgdWorkerRolloutReconciler {
 	return &dgdWorkerRolloutReconciler{
 		dgdResourceSyncer: newDGDResourceSyncer(kubeClient, recorder),
+		cachedReader:      cachedReader,
 	}
 }
 
@@ -1008,16 +1014,16 @@ func (r *dgdWorkerRolloutReconciler) listDGDComponentPods(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	componentName string,
+	opts ...client.ListOption,
 ) ([]corev1.Pod, error) {
 	podList := &corev1.PodList{}
-	if err := r.List(
-		ctx,
-		podList,
+	opts = append([]client.ListOption{
 		client.InNamespace(dgd.Namespace),
 		client.MatchingFields{
 			dgdComponentPodIndex: dgdComponentPodIndexValue(dgd.Name, componentName),
 		},
-	); err != nil {
+	}, opts...)
+	if err := r.List(ctx, podList, opts...); err != nil {
 		return nil, fmt.Errorf("failed to list pods for DGD %s component %s: %w", dgd.Name, componentName, err)
 	}
 	return podList.Items, nil
@@ -1053,10 +1059,13 @@ type oldWorkerReplicaPlan struct {
 // servedByDCD counts, by DCD name, the available replicas that frontends
 // serve; missing entries count as zero. Replicas no frontend serves are
 // retired first, so without serving information retirement is oldest first.
+// With keepServed, a DCD with served replicas keeps at least one, so the
+// returned targets can exceed oldTarget.
 func allocateOldWorkerDCDReplicas(
 	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 	oldTarget int32,
 	servedByDCD map[string]int32,
+	keepServed bool,
 ) map[string]int32 {
 	plans := buildOldWorkerReplicaPlans(dcds, servedByDCD)
 	var servingTarget int32
@@ -1066,7 +1075,7 @@ func allocateOldWorkerDCDReplicas(
 
 	// if we have more available replicas currently than total desired replicas, remove the oldest DCD replicas first
 	if servingTarget > oldTarget {
-		removeAvailableReplicasOldestFirst(plans, servingTarget-oldTarget)
+		removeAvailableReplicasOldestFirst(plans, servingTarget-oldTarget, keepServed)
 		// if we have less available replicas currently than total desired replicas, add the newest DCD replicas first
 	} else if servingTarget < oldTarget {
 		addUnavailableReplicasNewestFirst(plans, oldTarget-servingTarget)
@@ -1097,7 +1106,7 @@ func buildOldWorkerReplicaPlans(
 	return plans
 }
 
-func removeAvailableReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasToRemove int32) {
+func removeAvailableReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasToRemove int32, keepServed bool) {
 	sort.Slice(plans, func(i, j int) bool {
 		if plans[i].createdAt.Time.Equal(plans[j].createdAt.Time) {
 			return plans[i].name < plans[j].name
@@ -1117,7 +1126,11 @@ func removeAvailableReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasTo
 		if replicasToRemove <= 0 {
 			break
 		}
-		removed := min(plans[i].target, replicasToRemove)
+		var floor int32
+		if keepServed {
+			floor = min(plans[i].served, 1)
+		}
+		removed := min(plans[i].target-floor, replicasToRemove)
 		plans[i].target -= removed
 		replicasToRemove -= removed
 	}
@@ -1445,128 +1458,247 @@ func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas i
 	return int32(surge), int32(unavail)
 }
 
-// buildRollingUpdateContext creates a RollingUpdateContext.
-func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
+// workerRolloutStep is one worker component's replica plan for a rollout step.
+type workerRolloutStep struct {
+	componentName string
+	oldDCDs       []*nvidiacomv1beta1.DynamoComponentDeployment
+	maxSurge      int32
+	minAvailable  int32
+	oldTarget     int32
+	newTarget     int32
+	// gated reports that a replacement replica counts only once every frontend
+	// serves it.
+	gated bool
+	// newAvailable counts the replacement replicas whose pods are available.
+	newAvailable int32
+	// newServed counts the replacement replicas every frontend serves.
+	newServed int32
+	// servedOld counts, by old DCD, the available replicas frontends serve.
+	servedOld map[string]int32
+}
+
+// strandsAnotherRole reports whether retiring the last served old replicas of
+// steps[i] would leave another role short. Roles pair only within one worker
+// generation, so the old replicas of every other role of that generation stop
+// serving once one of its roles is gone. That is safe only when each such role
+// already has its minimum available replicas among replacements.
+func strandsAnotherRole(steps []workerRolloutStep, i int) []string {
+	var short []string
+	for j := range steps {
+		other := &steps[j]
+		if j == i || !other.gated {
+			continue
+		}
+		servedOld := int32(0)
+		for _, served := range other.servedOld {
+			servedOld += served
+		}
+		if servedOld > 0 && other.newServed < other.minAvailable {
+			short = append(short, other.componentName)
+		}
+	}
+	return short
+}
+
+// planComponentStep plans the replica targets of one rolling worker component
+// whose previous generations run oldDCDs.
+func (r *dgdWorkerRolloutReconciler) planComponentStep(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) (dynamo.RollingUpdateContext, error) {
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldDCDs []*nvidiacomv1beta1.DynamoComponentDeployment,
+	oldState dcdComponentState,
+	newWorkerHash string,
+	admission frontendAdmissionView,
+) (workerRolloutStep, error) {
+	logger := log.FromContext(ctx)
+	componentName := spec.ComponentName
+	desired := int32(1)
+	if spec.Replicas != nil {
+		desired = *spec.Replicas
+	}
+
+	// Observe the replacement generation's DCD, if the DGD still owns it.
+	var newState dcdComponentState
+	newDCDName := dynamo.GetDCDResourceName(dgd, componentName, newWorkerHash)
+	newDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD); err == nil {
+		if metav1.IsControlledBy(newDCD, dgd) && newDCD.DeletionTimestamp == nil {
+			newState = dcdComponentStateFromDCD(newDCD)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return workerRolloutStep{}, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
+	}
+
+	annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, spec)
+	strategy := deploymentStrategyFromAnnotations(annotations)
+	step := workerRolloutStep{componentName: componentName, oldDCDs: oldDCDs}
+	var maxUnavailable int32
+	switch strategy {
+	case common.DeploymentStrategyRecreate:
+		// Recreate deliberately permits the full component to be unavailable.
+		// Keep declaring every old generation at zero until their controllers
+		// have observed the drain and every old workload pod is terminal; only
+		// then start the replacement generation.
+		maxUnavailable = desired
+		drained, err := r.oldWorkerComponentDrained(ctx, dgd, componentName, oldDCDs)
+		if err != nil {
+			return workerRolloutStep{}, err
+		}
+		if drained {
+			step.newTarget = desired
+		}
+	default:
+		step.maxSurge, maxUnavailable = resolveRollingUpdateParams(annotations, desired)
+		step.minAvailable = desired - maxUnavailable
+
+		// A replacement replica replaces old capacity only once every frontend serves it.
+		newAvailable := newState.Available
+		keepAvailableOld := false
+		if admission.gated {
+			serving, err := r.frontendServing(ctx, dgd, admission, componentName)
+			if err != nil {
+				return workerRolloutStep{}, fmt.Errorf("check frontend serving for component %s: %w", componentName, err)
+			}
+			if serving.registersModels {
+				step.gated = true
+				step.servedOld = serving.byAnyFrontend
+				step.newAvailable = newAvailable
+				served := serving.byEveryFrontend[newDCDName]
+				if admission.pending {
+					// Without knowing what every frontend serves, neither
+					// count replacements nor choose which old replicas serve.
+					served = 0
+					keepAvailableOld = true
+				}
+				if served < newAvailable {
+					logger.V(1).Info("Waiting for frontends to serve replacement workers before retiring old workers",
+						"component", componentName,
+						"availableReplacements", newAvailable,
+						"servedReplacements", served)
+					newAvailable = served
+				}
+				step.newServed = newAvailable
+			}
+		}
+
+		newUnavailable := max(int32(0), newState.Spec-newAvailable)
+		// maxScaledDown is the maximum number of old replicas that can be scaled down
+		maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-step.minAvailable-newUnavailable)
+		oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
+		// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
+		availableSurplus := max(int32(0), (oldState.Available+newAvailable)-step.minAvailable)
+		if keepAvailableOld {
+			availableSurplus = 0
+		}
+		step.oldTarget = max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
+
+		// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
+		scaleUpBudget := max(int32(0), desired+step.maxSurge-oldState.Spec-newState.Spec)
+		step.newTarget = min(desired, newState.Spec+scaleUpBudget)
+	}
+
+	logger.V(1).Info("Worker update replica calculation",
+		"component", componentName,
+		"strategy", strategy,
+		"desired", desired,
+		"maxSurge", step.maxSurge,
+		"maxUnavailable", maxUnavailable,
+		"minAvailable", step.minAvailable,
+		"old", oldState,
+		"new", newState,
+		"oldTarget", step.oldTarget,
+		"newTarget", step.newTarget)
+	return step, nil
+}
+
+// workerRolloutPlan is the replica plan of one rolling-update step and what
+// it waits for.
+type workerRolloutPlan struct {
+	context dynamo.RollingUpdateContext
+	// replacementsServed reports whether the ready frontends serve the
+	// available replacement workers; nil when no rolling component waits for
+	// them.
+	replacementsServed *metav1.Condition
+}
+
+// planRollingUpdate plans the replica targets of one rolling-update step.
+func (r *dgdWorkerRolloutReconciler) planRollingUpdate(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) (workerRolloutPlan, error) {
 	logger := log.FromContext(ctx)
 
 	desiredHashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
-		return dynamo.RollingUpdateContext{}, err
+		return workerRolloutPlan{}, err
 	}
 	newWorkerHash := r.activeWorkerHashForDCDGeneration(dgd, desiredHashes)
 
 	oldDCDsByComponent, oldStates, err := r.getOldWorkerDCDsByComponent(ctx, dgd, newWorkerHash)
 	if err != nil {
-		return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get old worker component states: %w", err)
+		return workerRolloutPlan{}, fmt.Errorf("failed to get old worker component states: %w", err)
+	}
+
+	// Read what the frontends serve once for every rolling component, and
+	// remember which frontend templates publish it.
+	var admission frontendAdmissionView
+	if len(oldDCDsByComponent) > 0 {
+		admission, err = r.resolveFrontendAdmission(ctx, dgd)
+		if err != nil {
+			return workerRolloutPlan{}, fmt.Errorf("read frontend admissions: %w", err)
+		}
+		if err := r.recordFrontendAdmissionTemplates(ctx, dgd, admission.templates); err != nil {
+			return workerRolloutPlan{}, err
+		}
+		if admission.pending {
+			logger.V(1).Info("Frontends are rolling out or lack current admission records; keeping available old workers",
+				"frontendsRolling", admission.frontendsRolling,
+				"readyFrontends", len(admission.admissions),
+				"unsyncedFrontends", admission.unsynced)
+		}
 	}
 
 	oldWorkerComponentReplicas := make(map[string]int32)
 	oldWorkerDCDReplicas := make(map[string]int32)
 	newWorkerReplicas := make(map[string]int32)
 
+	// Plan each rolling component on its own.
+	steps := make([]workerRolloutStep, 0, len(oldDCDsByComponent))
 	for i := range dgd.Spec.Components {
 		spec := &dgd.Spec.Components[i]
-		componentName := spec.ComponentName
-		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
+		oldDCDs := oldDCDsByComponent[spec.ComponentName]
+		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) || len(oldDCDs) == 0 {
 			continue
 		}
-
-		oldDCDs := oldDCDsByComponent[componentName]
-		if len(oldDCDs) == 0 {
-			continue
+		step, err := r.planComponentStep(ctx, dgd, spec, oldDCDs, oldStates[spec.ComponentName], newWorkerHash, admission)
+		if err != nil {
+			return workerRolloutPlan{}, err
 		}
+		steps = append(steps, step)
+	}
 
-		desired := int32(1)
-		if spec.Replicas != nil {
-			desired = *spec.Replicas
+	// Split each component's old target across its generations. Each served
+	// old generation keeps a replica of a role while another role it pairs with
+	// lacks served replacements; with surge room this cannot block the rollout.
+	for i := range steps {
+		step := &steps[i]
+		keepServed := false
+		if step.gated && !admission.pending && step.maxSurge > 0 {
+			if short := strandsAnotherRole(steps, i); len(short) > 0 {
+				keepServed = true
+				logger.V(1).Info("Keeping served old replicas whose generation still serves other roles",
+					"component", step.componentName,
+					"rolesAwaitingReplacements", short)
+			}
 		}
-
-		var newState dcdComponentState
-		newDCDName := dynamo.GetDCDResourceName(dgd, componentName, newWorkerHash)
-		newDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
-		if err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD); err == nil {
-			if metav1.IsControlledBy(newDCD, dgd) && newDCD.DeletionTimestamp == nil {
-				newState = dcdComponentStateFromDCD(newDCD)
-			}
-		} else if !apierrors.IsNotFound(err) {
-			return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
-		}
-
-		oldState := oldStates[componentName]
-		annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, spec)
-		strategy := deploymentStrategyFromAnnotations(annotations)
-
-		var oldTarget, newTarget, maxSurge, maxUnavailable, minAvailable int32
-		var servedOld map[string]int32
-		switch strategy {
-		case common.DeploymentStrategyRecreate:
-			// Recreate deliberately permits the full component to be unavailable.
-			// Keep declaring every old generation at zero until their controllers
-			// have observed the drain and every old workload pod is terminal; only
-			// then start the replacement generation.
-			maxUnavailable = desired
-			drained, err := r.oldWorkerComponentDrained(ctx, dgd, componentName, oldDCDs)
-			if err != nil {
-				return dynamo.RollingUpdateContext{}, err
-			}
-			if drained {
-				newTarget = desired
-			}
-		default:
-			maxSurge, maxUnavailable = resolveRollingUpdateParams(annotations, desired)
-			minAvailable = desired - maxUnavailable
-
-			// A replacement replica replaces old capacity only once every frontend serves it.
-			serving, gated, err := r.frontendServing(ctx, dgd, componentName)
-			if err != nil {
-				return dynamo.RollingUpdateContext{}, fmt.Errorf("check frontend serving for component %s: %w", componentName, err)
-			}
-			newAvailable := newState.Available
-			if gated {
-				servedOld = serving.byAnyFrontend
-				if served := serving.byEveryFrontend[newDCDName]; served < newAvailable {
-					logger.Info("Waiting for frontends to serve replacement workers before retiring old workers",
-						"component", componentName,
-						"availableReplacements", newAvailable,
-						"servedReplacements", served)
-					newAvailable = served
-				}
-			}
-
-			newUnavailable := max(int32(0), newState.Spec-newAvailable)
-			// maxScaledDown is the maximum number of old replicas that can be scaled down
-			maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
-			oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
-			// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
-			availableSurplus := max(int32(0), (oldState.Available+newAvailable)-minAvailable)
-			oldTarget = max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
-
-			// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
-			scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
-			newTarget = min(desired, newState.Spec+scaleUpBudget)
-		}
-
-		oldWorkerComponentReplicas[componentName] = oldTarget
-		newWorkerReplicas[componentName] = newTarget
-
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, oldTarget, servedOld) {
+		var oldTotal int32
+		for dcdName, target := range allocateOldWorkerDCDReplicas(step.oldDCDs, step.oldTarget, step.servedOld, keepServed) {
 			oldWorkerDCDReplicas[dcdName] = target
+			oldTotal += target
 		}
-
-		logger.V(1).Info("Worker update replica calculation",
-			"component", componentName,
-			"strategy", strategy,
-			"desired", desired,
-			"maxSurge", maxSurge,
-			"maxUnavailable", maxUnavailable,
-			"minAvailable", minAvailable,
-			"old", oldState,
-			"new", newState,
-			"oldTarget", oldTarget,
-			"newTarget", newTarget)
+		oldWorkerComponentReplicas[step.componentName] = oldTotal
+		newWorkerReplicas[step.componentName] = step.newTarget
 	}
 
 	// Components removed from the spec still have old DCDs that must be drained.
@@ -1575,16 +1707,19 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			continue
 		}
 		oldWorkerComponentReplicas[componentName] = 0
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, 0, nil) {
+		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, 0, nil, false) {
 			oldWorkerDCDReplicas[dcdName] = target
 		}
 	}
 
-	return dynamo.RollingUpdateContext{
-		NewWorkerHash:                      newWorkerHash,
-		OldWorkerReplicaTargetsByComponent: oldWorkerComponentReplicas,
-		OldWorkerReplicaTargetsByDCD:       oldWorkerDCDReplicas,
-		NewWorkerReplicaTargetsByComponent: newWorkerReplicas,
+	return workerRolloutPlan{
+		context: dynamo.RollingUpdateContext{
+			NewWorkerHash:                      newWorkerHash,
+			OldWorkerReplicaTargetsByComponent: oldWorkerComponentReplicas,
+			OldWorkerReplicaTargetsByDCD:       oldWorkerDCDReplicas,
+			NewWorkerReplicaTargetsByComponent: newWorkerReplicas,
+		},
+		replacementsServed: replacementsServedCondition(dgd.Generation, admission, steps),
 	}, nil
 }
 

@@ -272,11 +272,19 @@ struct PrefillBuildContext {
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
     fn set_target(&self, target: Option<WorkerSetTarget>);
+
+    /// Whether a prefill target is set but its binding is not active yet, so
+    /// requests skip remote prefill.
+    fn awaiting_activation(&self) -> bool;
 }
 
 impl PrefillRouterLifecycle for PrefillRouter {
     fn set_target(&self, target: Option<WorkerSetTarget>) {
         self.set_target(target);
+    }
+
+    fn awaiting_activation(&self) -> bool {
+        self.awaiting_activation()
     }
 }
 

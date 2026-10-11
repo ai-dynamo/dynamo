@@ -632,6 +632,13 @@ impl PrefillRouter {
         PrefillLifecycleState::from_atomic(self.lifecycle.load(Ordering::Acquire))
     }
 
+    /// Whether a target is set but its binding is not active yet. Reads the
+    /// lifecycle under the target lock, which every transition holds.
+    pub(crate) fn awaiting_activation(&self) -> bool {
+        let target = self.target.lock();
+        target.is_some() && self.lifecycle_state() != PrefillLifecycleState::Active
+    }
+
     #[cfg(test)]
     pub(crate) fn target_endpoint_id(&self) -> Option<dynamo_runtime::protocols::EndpointId> {
         self.target_tx

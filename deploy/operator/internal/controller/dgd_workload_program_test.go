@@ -565,7 +565,7 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 				}).
 				Build()
 			recorder := events.NewFakeRecorder(1)
-			reconciler := newDGDWorkerRolloutReconciler(kubeClient, recorder)
+			reconciler := newDGDWorkerRolloutReconciler(kubeClient, kubeClient, recorder)
 
 			t.Log("Advance the unsupported pathway hash")
 			transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd)
@@ -1026,7 +1026,7 @@ func TestComponentWorkloadsReconciler_FirstGenMultinodeStampsWorkerHash(t *testi
 
 	t.Log("Wire the component workloads reconciler backed by a fake client seeded with only the DGD")
 	r := createTestDGDReconcilerWithStatus(dgd)
-	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
+	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Client, r.Recorder)
 	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
 
 	t.Log("Reconcile: every generated worker DCD must carry the computed hash in its label and name")
@@ -1106,7 +1106,7 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 	})
 
 	r := createTestDGDReconcilerWithStatus(reducedDGD, withObjects(prefillOldDCD, decodeOldDCD))
-	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
+	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Client, r.Recorder)
 	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
 
 	t.Log("Reconcile: the removed decode component must be targeted at zero replicas")

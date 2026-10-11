@@ -40,7 +40,7 @@ type componentProgram struct {
 
 // newComponentProgram wires the DCD pathway at the DGD composition root.
 func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgram {
-	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
+	rollout := newDGDWorkerRolloutReconciler(r.Client, r.CachedReader, r.Recorder)
 	return &componentProgram{
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,

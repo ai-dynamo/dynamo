@@ -309,6 +309,13 @@ const (
 	// AnnotationCurrentWorkerHashV2 stores the active v2 worker generation hash.
 	AnnotationCurrentWorkerHashV2 = "nvidia.com/current-worker-hash-v2"
 
+	// AnnotationFrontendAdmissionTemplates records, on a DynamoGraphDeployment,
+	// the comma-separated pod-template-hash values of its frontend pods that
+	// publish which workers they serve. A worker rollout keeps waiting for a
+	// frontend of a recorded template whose records are missing, instead of
+	// retiring old workers on pod availability.
+	AnnotationFrontendAdmissionTemplates = "nvidia.com/frontend-admission-templates"
+
 	// LegacyWorkerHash is a sentinel value used during migration from pre-rolling-update
 	// operator versions. Legacy worker DCDs (those without a worker hash label) are tagged
 	// with this value so the existing rolling update machinery can manage the transition.

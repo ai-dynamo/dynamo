@@ -250,6 +250,14 @@ impl EncoderRouter {
         EncoderLifecycleState::load(self.lifecycle.load(Ordering::Acquire))
     }
 
+    /// Whether an Encode target is set but its binding is not active yet, so
+    /// requests skip the encoder. Reads the lifecycle under the target lock,
+    /// which every transition holds.
+    pub(crate) fn awaiting_activation(&self) -> bool {
+        let target = self.target.lock();
+        target.is_some() && self.lifecycle_state() != EncoderLifecycleState::Active
+    }
+
     /// Update the desired Encode endpoint. Clearing is synchronous so requests
     /// holding an older catalog snapshot stop using a removed endpoint before
     /// the new catalog is published.

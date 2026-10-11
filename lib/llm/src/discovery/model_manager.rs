@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
@@ -205,6 +205,25 @@ pub struct ModelManager {
     /// in steady state; held only across in-memory map reads/writes, never across
     /// an `.await`.
     reservation_lock: parking_lot::Mutex<()>,
+
+    /// Counts changes that can alter which workers requests can be routed to:
+    /// catalog publications and routable-instance changes of committed
+    /// WorkerSets. Subscribers recompute [`Self::serving_members`].
+    serving_state: tokio::sync::watch::Sender<u64>,
+}
+
+/// Instance IDs that request routing can reach, by `{namespace}/{component}/{endpoint}`.
+/// An endpoint path and a hex instance ID form the instance's base model-card key.
+pub(crate) type RoutableMembers = BTreeMap<String, BTreeSet<u64>>;
+
+/// The workers that request routing can reach.
+#[derive(Debug, Default)]
+pub(crate) struct ServingMembers {
+    pub(crate) members: RoutableMembers,
+    /// A complete namespace waits for a prefill or encoder hop to activate its
+    /// target. Activation finishes in the background without a change to
+    /// [`ModelManager::subscribe_serving_state`].
+    pub(crate) awaiting_activation: bool,
 }
 
 impl Default for ModelManager {
@@ -230,7 +249,32 @@ impl ModelManager {
             lora_controller_cancel: parking_lot::Mutex::new(None),
             alias_to_primary: DashMap::new(),
             reservation_lock: parking_lot::Mutex::new(()),
+            serving_state: tokio::sync::watch::channel(0).0,
         }
+    }
+
+    /// Reports a change that can alter which workers requests can be routed to.
+    pub(crate) fn notify_serving_state_changed(&self) {
+        self.serving_state
+            .send_modify(|changes| *changes = changes.wrapping_add(1));
+    }
+
+    /// Wakes after each [`Self::notify_serving_state_changed`].
+    pub(crate) fn subscribe_serving_state(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.serving_state.subscribe()
+    }
+
+    /// The workers that request routing can reach now.
+    ///
+    /// A worker is listed while its committed WorkerSet can be selected for a
+    /// request and every prefill or encoder hop of its namespace has activated
+    /// its target, so requests do not skip a hop the namespace needs.
+    pub(crate) fn serving_members(&self) -> ServingMembers {
+        let mut serving = ServingMembers::default();
+        for model in self.catalog.load().models.values() {
+            serving.awaiting_activation |= model.add_serving_members(&mut serving.members);
+        }
+        serving
     }
 
     fn publish_catalog_locked(&self) {
@@ -254,6 +298,7 @@ impl ModelManager {
             cards: Arc::new(cards),
             aliases: Arc::new(aliases),
         }));
+        self.notify_serving_state_changed();
     }
 
     fn lora_projection_locked(&self) -> EndpointLoraProjection {

@@ -119,8 +119,10 @@ func createTestDGDReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployme
 		opt(builder)
 	}
 
+	kubeClient := builder.Build()
 	return &DynamoGraphDeploymentReconciler{
-		Client:        builder.Build(),
+		Client:        kubeClient,
+		CachedReader:  kubeClient,
 		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &commonController.RuntimeConfig{},
@@ -137,7 +139,16 @@ func createTestReconcilerWithStatus(
 	opts ...testReconcilerOption,
 ) *dgdWorkerRolloutReconciler {
 	reconciler := createTestDGDReconcilerWithStatus(dgd, opts...)
-	return newDGDWorkerRolloutReconciler(reconciler.Client, reconciler.Recorder)
+	return newDGDWorkerRolloutReconciler(reconciler.Client, reconciler.Client, reconciler.Recorder)
+}
+
+// buildRollingUpdateContext returns the replica plan of one rolling-update step.
+func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) (dynamo.RollingUpdateContext, error) {
+	plan, err := r.planRollingUpdate(ctx, dgd)
+	return plan.context, err
 }
 
 func newTestComponentWorkloadsReconciler(
@@ -2911,7 +2922,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 
 		t.Log("Build the reconciler directly, bypassing the auto-ref helper, to keep the DCD ownerless")
 		dgdReconciler := createTestDGDReconcilerWithStatus(dgd, withObjects(ownerlessDCD))
-		r := newDGDWorkerRolloutReconciler(dgdReconciler.Client, dgdReconciler.Recorder)
+		r := newDGDWorkerRolloutReconciler(dgdReconciler.Client, dgdReconciler.Client, dgdReconciler.Recorder)
 
 		result, err := r.findLegacyWorkerDCDs(context.Background(), dgd)
 		require.NoError(t, err)
@@ -2949,7 +2960,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 		})
 
 		dgdReconciler := createTestDGDReconcilerWithStatus(dgd, withObjects(staleDCD))
-		r := newDGDWorkerRolloutReconciler(dgdReconciler.Client, dgdReconciler.Recorder)
+		r := newDGDWorkerRolloutReconciler(dgdReconciler.Client, dgdReconciler.Client, dgdReconciler.Recorder)
 
 		result, err := r.findLegacyWorkerDCDs(context.Background(), dgd)
 		require.NoError(t, err)
@@ -3635,7 +3646,7 @@ func TestAllocateOldWorkerDCDReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := allocateOldWorkerDCDReplicas(tt.dcds, tt.oldTarget, tt.served)
+			got := allocateOldWorkerDCDReplicas(tt.dcds, tt.oldTarget, tt.served, false)
 			assert.Equal(t, tt.want, got)
 		})
 	}

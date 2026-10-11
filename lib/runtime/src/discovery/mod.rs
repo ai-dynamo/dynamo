@@ -36,6 +36,13 @@ pub use utils::watch_and_extract_field;
 /// Largest publisher ID exactly representable by float64-backed JSON metadata.
 pub(crate) const MAX_JSON_SAFE_PUBLISHER_ID: u64 = (1 << 53) - 1;
 
+/// Maps `random_id` to a publisher ID that every discovery backend stores
+/// exactly: Kubernetes discovery keeps publisher IDs as float64-backed JSON
+/// numbers.
+pub fn discovery_safe_publisher_id(random_id: u64) -> u64 {
+    random_id & MAX_JSON_SAFE_PUBLISHER_ID
+}
+
 /// Transport kind for event plane - used for configuration and env var selection.
 ///
 /// This enum represents the *type* of transport without connection details.
@@ -1669,6 +1676,39 @@ pub trait Discovery: Send + Sync {
 
     /// Unregisters an instance from the discovery plane
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()>;
+
+    /// Replaces `current`, a registered event source, with a registration of
+    /// `replacement`, and returns the new instance.
+    ///
+    /// Readers see the original or the replacement, never neither. Backends that
+    /// store all of a process's registrations in one record, like Kubernetes,
+    /// make the change in one write. This default registers the replacement
+    /// before withdrawing the original, so readers may briefly see both. On error
+    /// the original stays registered; if withdrawing the original and then the
+    /// replacement both fail, the replacement stays registered too, and the
+    /// error says so.
+    async fn replace_event_source(
+        &self,
+        current: DiscoveryInstance,
+        replacement: DiscoverySpec,
+    ) -> Result<DiscoveryInstance> {
+        if !matches!(current, DiscoveryInstance::EventSource { .. })
+            || !matches!(replacement, DiscoverySpec::EventSource { .. })
+        {
+            anyhow::bail!("replace_event_source replaces an event source with an event source");
+        }
+        let registered = self.register(replacement).await?;
+        if let Err(error) = self.unregister(current).await {
+            if let Err(rollback) = self.unregister(registered.clone()).await {
+                return Err(error.context(format!(
+                    "the replacement event source {:?} also remains registered: {rollback:#}",
+                    registered.id()
+                )));
+            }
+            return Err(error);
+        }
+        Ok(registered)
+    }
 
     /// Returns a list of currently registered instances for the given discovery query
     /// This is a one-time snapshot without watching for changes

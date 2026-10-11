@@ -18,7 +18,9 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
+    discovery::{
+        LoadThresholdHandle, allocator::AllocatorTrimOnDrop, model_manager::RoutableMembers,
+    },
     kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
@@ -282,6 +284,12 @@ impl WorkerSet {
         self.endpoint_id.as_ref()
     }
 
+    /// Gives a test WorkerSet the discovery identity a committed target sets.
+    #[cfg(test)]
+    pub(crate) fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
+        self.endpoint_id = Some(endpoint_id);
+    }
+
     pub(crate) fn set_topology_target(&mut self, target: CommittedWorkerSetTarget) {
         self.endpoint_id = Some(target.endpoint.id());
         self.topology_target = Some(target);
@@ -451,6 +459,37 @@ impl WorkerSet {
     /// Must be called before the WorkerSet is wrapped in Arc.
     pub fn set_instance_watcher(&mut self, rx: watch::Receiver<Vec<u64>>) {
         self.instance_count_rx = Some(rx);
+    }
+
+    /// Adds every instance this set routes to under its endpoint path. In-process
+    /// sets have no discovery identity and add nothing.
+    pub(crate) fn add_routable_instances(&self, members: &mut RoutableMembers) {
+        let (Some(endpoint_id), Some(rx)) = (&self.endpoint_id, &self.instance_count_rx) else {
+            return;
+        };
+        let instances = rx.borrow();
+        if instances.is_empty() {
+            return;
+        }
+        members
+            .entry(format!(
+                "{}/{}/{}",
+                endpoint_id.namespace, endpoint_id.component, endpoint_id.name
+            ))
+            .or_default()
+            .extend(instances.iter().copied());
+    }
+
+    /// Whether a prefill or encoder hop of this set has a target it has not
+    /// activated yet. Until it does, requests skip the hop.
+    pub(crate) fn awaiting_hop_activation(&self) -> bool {
+        self.prefill_router
+            .as_ref()
+            .is_some_and(|router| router.awaiting_activation())
+            || self
+                .encoder_router
+                .as_ref()
+                .is_some_and(|router| router.awaiting_activation())
     }
 
     pub(crate) fn set_lifecycle_cancellation(&mut self, cancellation: CancellationToken) {

@@ -26,6 +26,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
 
@@ -45,6 +46,9 @@ type ReconcileResult struct {
 	Reason          Reason
 	Message         Message
 	ComponentStatus map[string]nvidiacomv1beta1.ComponentReplicaStatus
+	// ReplacementsServed is the condition of a rolling update that waits for
+	// frontends to serve its replacement workers; nil removes it.
+	ReplacementsServed *metav1.Condition
 }
 
 // clearComponentGPUShapes removes previously projected GPU shapes before a

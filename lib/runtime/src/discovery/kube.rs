@@ -300,6 +300,55 @@ impl Discovery for KubeDiscoveryClient {
         Ok(registered_instance)
     }
 
+    /// Replaces the event source in local metadata and persists both changes in
+    /// one write of this process's CR.
+    async fn replace_event_source(
+        &self,
+        current: DiscoveryInstance,
+        replacement: DiscoverySpec,
+    ) -> Result<DiscoveryInstance> {
+        let DiscoverySpec::EventSource { publisher_id, .. } = &replacement else {
+            anyhow::bail!("replace_event_source replaces an event source with an event source");
+        };
+        validate_kubernetes_publisher_id(*publisher_id)?;
+        let instance = replacement.into_instance(self.instance_id());
+
+        // Hold the write lock across the CR write, as register and unregister do.
+        let mut metadata = self.metadata.write().await;
+        let original_state = metadata.clone();
+        let replaced = metadata
+            .unregister_event_source(&current)
+            .and_then(|()| metadata.register_event_source(instance.clone()));
+        if let Err(error) = replaced {
+            *metadata = original_state;
+            return Err(error);
+        }
+        tracing::debug!(
+            current = ?current.id(),
+            replacement = ?instance.id(),
+            "Replacing event source"
+        );
+
+        let cr_name = self.pod_info.target.cr_name();
+        let persisted = match build_cr(
+            &cr_name,
+            &self.pod_info.pod_name,
+            &self.pod_info.pod_uid,
+            &metadata,
+        ) {
+            Ok(cr) => apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = persisted {
+            tracing::warn!(
+                "Failed to persist an event source replacement to the CR, rolling back local state: {error}"
+            );
+            *metadata = original_state;
+            return Err(error);
+        }
+        Ok(instance)
+    }
+
     async fn update_model_taints_internal(
         &self,
         id: ModelCardInstanceId,
@@ -657,6 +706,100 @@ mod tests {
         assert!(discovery.check_connection().await.is_ok());
         available.store(false, Ordering::Release);
         assert!(discovery.check_connection().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn replacing_an_event_source_writes_the_cr_once() {
+        use axum::{
+            body::Body,
+            http::{Request, Response, StatusCode},
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let writes = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let fail_writes = Arc::new(AtomicBool::new(false));
+        let (recorded, failing) = (writes.clone(), fail_writes.clone());
+        let service = tower::service_fn(move |request: Request<kube::client::Body>| {
+            let (recorded, failing) = (recorded.clone(), failing.clone());
+            async move {
+                assert_eq!(request.method(), "PATCH");
+                let body = axum::body::to_bytes(Body::new(request.into_body()), usize::MAX)
+                    .await
+                    .unwrap();
+                if failing.load(Ordering::Acquire) {
+                    return Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(Body::from(
+                                r#"{"kind":"Status","apiVersion":"v1","status":"Failure","code":500,"message":"unavailable"}"#,
+                            ))
+                            .unwrap(),
+                    );
+                }
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(&body).unwrap());
+                Ok(Response::new(Body::from(body)))
+            }
+        });
+        let discovery = KubeDiscoveryClient {
+            instance_id: 1,
+            metadata: Arc::new(RwLock::new(DiscoveryMetadata::new())),
+            list_state: Arc::new(RwLock::new(HashMap::new())),
+            event_tx: broadcast::channel(1).0,
+            daemon_state: watch::channel(DaemonState::Pending).1,
+            kube_client: KubeClient::new(service, "default"),
+            pod_info: PodInfo {
+                pod_name: "frontend".into(),
+                pod_namespace: "default".into(),
+                pod_uid: "uid".into(),
+                system_port: 0,
+                mode: KubeDiscoveryMode::Pod,
+                target: utils::KubeDiscoveryTarget::Pod("frontend".into()),
+            },
+        };
+        let source = |publisher_id: u64| DiscoverySpec::EventSource {
+            scope: EventScope::Namespace {
+                name: "ns".to_string(),
+            },
+            topic: "admission".to_string(),
+            publisher_id,
+            metadata: serde_json::json!({ "version": publisher_id }),
+        };
+        let persisted_versions = |write: &serde_json::Value| {
+            write["spec"]["data"]["event_sources"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|source| source["metadata"]["version"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        let first = discovery.register(source(1)).await.unwrap();
+        let second = discovery
+            .replace_event_source(first, source(2))
+            .await
+            .unwrap();
+        {
+            let writes = writes.lock().unwrap();
+            assert_eq!(writes.len(), 2, "registration plus one replacement write");
+            assert_eq!(persisted_versions(&writes[1]), vec![2]);
+        }
+
+        // A failed write leaves the persisted and local records unchanged.
+        fail_writes.store(true, Ordering::Release);
+        assert!(
+            discovery
+                .replace_event_source(second.clone(), source(3))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            discovery.metadata.read().await.get_all_event_sources(),
+            vec![second]
+        );
+        assert_eq!(writes.lock().unwrap().len(), 2);
     }
 
     fn endpoint_instance(instance_id: u64, transport: &str) -> DiscoveryInstance {

@@ -6,6 +6,9 @@
 package workermetadata
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
@@ -40,7 +44,7 @@ func TestProjectKeepsWhatTheOperatorReads(t *testing.T) {
 			"admission": map[string]any{
 				"type": "EventSource", "topic": FrontendAdmissionTopic, "publisher_id": int64(7),
 				"scope":    map[string]any{"kind": "namespace", "name": "graph"},
-				"metadata": map[string]any{"protocol": FrontendAdmissionProtocol, "capability": true},
+				"metadata": map[string]any{"protocol": FrontendAdmissionProtocol, "synced": true, "members": map[string]any{"graph-a1/backend/generate": []any{"1"}}},
 			},
 			"kv": map[string]any{"type": "EventSource", "topic": "kv-events"},
 		},
@@ -64,7 +68,7 @@ func TestProjectKeepsWhatTheOperatorReads(t *testing.T) {
 			"admission": map[string]any{
 				"type": "EventSource", "topic": FrontendAdmissionTopic, "publisher_id": int64(7),
 				"scope":    map[string]any{"kind": "namespace", "name": "graph"},
-				"metadata": map[string]any{"protocol": FrontendAdmissionProtocol, "capability": true},
+				"metadata": map[string]any{"protocol": FrontendAdmissionProtocol, "synced": true, "members": map[string]any{"graph-a1/backend/generate": []any{"1"}}},
 			},
 		},
 	}}, projected.Object["spec"])
@@ -79,48 +83,98 @@ func TestProjectKeepsWhatTheOperatorReads(t *testing.T) {
 	assert.Equal(t, map[string]struct{}{"graph-a1/backend/generate/1": {}}, cards)
 }
 
-func TestAddFrontendAdmissionReadsOnlyKnownRecords(t *testing.T) {
-	t.Log("Build a frontend resource with current, foreign-topic, and future-protocol records")
-	metadata := New()
-	metadata.Object["spec"] = map[string]any{"data": map[string]any{
-		"event_sources": map[string]any{
-			"capability": map[string]any{
-				"topic":    FrontendAdmissionTopic,
-				"scope":    map[string]any{"kind": "namespace", "name": "graph"},
-				"metadata": map[string]any{"protocol": FrontendAdmissionProtocol, "capability": true},
-			},
-			"members": map[string]any{
-				"topic": FrontendAdmissionTopic,
-				"scope": map[string]any{"kind": "namespace", "name": "graph-a1"},
-				"metadata": map[string]any{
-					"protocol": FrontendAdmissionProtocol,
-					"members":  []any{"graph-a1/prefill/generate/1", "graph-a1/backend/generate/2"},
-				},
-			},
-			"future": map[string]any{
-				"topic": FrontendAdmissionTopic,
-				"scope": map[string]any{"kind": "namespace", "name": "graph-b2"},
-				"metadata": map[string]any{
-					"protocol": "v2", "members": []any{"graph-b2/backend/generate/3"},
-				},
-			},
-			"kv": map[string]any{
-				"topic":    "kv-events",
-				"metadata": map[string]any{"protocol": FrontendAdmissionProtocol, "members": []any{"other"}},
-			},
+func TestAddFrontendAdmission(t *testing.T) {
+	record := func(protocol string, synced bool, members map[string]any) map[string]any {
+		return map[string]any{
+			"topic":    FrontendAdmissionTopic,
+			"scope":    map[string]any{"kind": "namespace", "name": "graph"},
+			"metadata": map[string]any{"protocol": protocol, "synced": synced, "members": members},
+		}
+	}
+	tests := []struct {
+		name    string
+		sources map[string]any
+		want    FrontendAdmission
+	}{
+		{
+			name: "a synced record lists the workers the frontend serves",
+			sources: map[string]any{"a": record(FrontendAdmissionProtocol, true, map[string]any{
+				"graph-a1/prefill/generate": []any{"1"},
+				"graph-a1/backend/generate": []any{"2"},
+			})},
+			want: FrontendAdmission{Capable: true, Synced: true, Members: map[string]struct{}{
+				"graph-a1/prefill/generate/1": {}, "graph-a1/backend/generate/2": {},
+			}},
 		},
-	}}
+		{
+			name:    "a frontend without live discovery is capable but not synced",
+			sources: map[string]any{"a": record(FrontendAdmissionProtocol, false, map[string]any{"graph-a1/backend/generate": []any{"2"}})},
+			want:    FrontendAdmission{Capable: true, Members: map[string]struct{}{"graph-a1/backend/generate/2": {}}},
+		},
+		{
+			name: "while one record replaces another, members merge and both must be synced",
+			sources: map[string]any{
+				"a": record(FrontendAdmissionProtocol, true, map[string]any{"graph-a1/backend/generate": []any{"2"}}),
+				"b": record(FrontendAdmissionProtocol, false, map[string]any{"graph-b2/backend/generate": []any{"3"}}),
+			},
+			want: FrontendAdmission{Capable: true, Members: map[string]struct{}{
+				"graph-a1/backend/generate/2": {}, "graph-b2/backend/generate/3": {},
+			}},
+		},
+		{
+			name: "records of other topics and protocols are ignored",
+			sources: map[string]any{
+				"future": record("v2", true, map[string]any{"graph-b2/backend/generate": []any{"3"}}),
+				"kv":     map[string]any{"topic": "kv-events", "metadata": map[string]any{"protocol": FrontendAdmissionProtocol, "synced": true}},
+			},
+			want: FrontendAdmission{Members: map[string]struct{}{}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a frontend resource with the records")
+			metadata := New()
+			metadata.Object["spec"] = map[string]any{"data": map[string]any{"event_sources": tt.sources}}
 
-	t.Log("Merge the records")
+			t.Log("Merge the records")
+			admission := FrontendAdmission{Members: map[string]struct{}{}}
+			AddFrontendAdmission(metadata, &admission)
+			assert.Equal(t, tt.want, admission)
+		})
+	}
+}
+
+// projectedTestRecords returns the projected resource of each process in the
+// golden discovery records that the Rust tests in
+// lib/llm/src/discovery/frontend_admission.rs produce.
+func projectedTestRecords(t *testing.T) map[string]*unstructured.Unstructured {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", "discovery_records.json"))
+	require.NoError(t, err)
+	var dataByProcess map[string]map[string]any
+	require.NoError(t, json.Unmarshal(raw, &dataByProcess))
+	resources := make(map[string]*unstructured.Unstructured, len(dataByProcess))
+	for process, data := range dataByProcess {
+		metadata := New()
+		metadata.Object["spec"] = map[string]any{"data": data}
+		resources[process] = Project(metadata)
+	}
+	return resources
+}
+
+func TestReadsTheRecordsDynamoPublishes(t *testing.T) {
+	t.Log("Load the frontend and worker records produced by Dynamo's discovery code")
+	resources := projectedTestRecords(t)
+
+	t.Log("The worker's base card counts and its adapter card does not")
+	cards := map[string]struct{}{}
+	AddBaseModelCards(resources["worker"], cards)
+	assert.Equal(t, map[string]struct{}{"graph-1/backend/generate/2a": {}}, cards)
+
+	t.Log("The frontend's synced record lists that base card")
 	admission := FrontendAdmission{Members: map[string]struct{}{}}
-	AddFrontendAdmission(metadata, &admission)
-
-	t.Log("The capability and the current members are read; the rest is ignored")
-	assert.True(t, admission.Capable)
-	assert.Equal(t, map[string]struct{}{
-		"graph-a1/prefill/generate/1": {},
-		"graph-a1/backend/generate/2": {},
-	}, admission.Members)
+	AddFrontendAdmission(resources["frontend"], &admission)
+	assert.Equal(t, FrontendAdmission{Capable: true, Synced: true, Members: cards}, admission)
 }
 
 func TestOwningPod(t *testing.T) {
@@ -128,9 +182,10 @@ func TestOwningPod(t *testing.T) {
 		name    string
 		owners  []metav1.OwnerReference
 		wantPod string
+		wantUID types.UID
 		wantOK  bool
 	}{
-		{name: "pod owner", owners: []metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: "worker-0"}}, wantPod: "worker-0", wantOK: true},
+		{name: "pod owner", owners: []metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: "worker-0", UID: "uid-0"}}, wantPod: "worker-0", wantUID: "uid-0", wantOK: true},
 		{name: "non-pod owner", owners: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs"}}},
 		{name: "no owner"},
 	}
@@ -138,8 +193,9 @@ func TestOwningPod(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			metadata := New()
 			metadata.SetOwnerReferences(tt.owners)
-			pod, ok := OwningPod(metadata)
+			pod, uid, ok := OwningPod(metadata)
 			assert.Equal(t, tt.wantPod, pod)
+			assert.Equal(t, tt.wantUID, uid)
 			assert.Equal(t, tt.wantOK, ok)
 		})
 	}

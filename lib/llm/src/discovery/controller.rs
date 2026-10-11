@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     panic::AssertUnwindSafe,
     sync::Arc,
     time::Duration,
@@ -20,26 +20,10 @@ use futures::{FutureExt, StreamExt};
 use tokio::{sync::watch, task::JoinSet, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::readiness::{ReadinessUnit, evaluate_readiness};
 use crate::{model_card::ModelDeploymentCard, namespace::NamespaceFilter};
 
 const DEFAULT_MAX_CONCURRENT_BUILDS: usize = 8;
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Worker model-card keys this frontend serves, by worker namespace.
-///
-/// A key appears only while its WorkerSet is committed and the WorkerSets of
-/// the same model and namespace form a complete serving topology. A rolling
-/// update can retire the previous worker generation once every frontend lists
-/// the replacement here.
-pub(crate) type ServingAdmissions = BTreeMap<String, BTreeSet<String>>;
-
-/// The committed WorkerSets of one model in one namespace.
-#[derive(Default)]
-struct CommittedTopology<'a> {
-    units: Vec<ReadinessUnit>,
-    members: Vec<&'a String>,
-}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub(crate) struct GroupKey {
@@ -156,9 +140,9 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
 
     fn discard_prepared(&self, prepared: Self::Prepared);
 
-    /// Receives the current serving admissions after every controller step, so
-    /// implementations must ignore an unchanged value.
-    fn publish_serving_admissions(&self, admissions: ServingAdmissions);
+    /// Called after the controller applies a full discovery snapshot, the
+    /// first of which completes its view of the registered workers.
+    fn discovery_synced(&self);
 
     async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>>;
 }
@@ -381,60 +365,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     self.release_due_retries();
                 }
             }
-            self.host
-                .publish_serving_admissions(self.serving_admissions());
         }
 
-        // Without discovery this frontend cannot admit replacements, so a rollout
-        // must not count on it.
-        self.host
-            .publish_serving_admissions(ServingAdmissions::new());
         self.shutdown_builds().await;
-    }
-
-    /// Committed members of every WorkerSet whose model and namespace form a
-    /// complete serving topology under the request plane's readiness contract.
-    ///
-    /// Readiness counts committed members rather than live connections: this is
-    /// what the frontend has admitted, which is what a rollout hands off to.
-    fn serving_admissions(&self) -> ServingAdmissions {
-        let mut topologies: HashMap<(&str, &str), CommittedTopology<'_>> = HashMap::new();
-        for (key, group) in &self.groups {
-            let Some(committed) = status_committed_members(&group.status) else {
-                continue;
-            };
-            let members = committed
-                .iter()
-                .filter(|member| self.desired.contains_key(*member))
-                .collect::<Vec<_>>();
-            let Some(representative) = members.first().and_then(|member| self.desired.get(*member))
-            else {
-                continue;
-            };
-            let topology = topologies
-                .entry((
-                    key.model_name.as_str(),
-                    representative.mcid.namespace.as_str(),
-                ))
-                .or_default();
-            topology.units.push(ReadinessUnit {
-                worker_type: representative.card.worker_type,
-                live_count: members.len(),
-                needs: representative.card.needs.clone(),
-            });
-            topology.members.extend(members);
-        }
-
-        let mut admissions = ServingAdmissions::new();
-        for ((_, namespace), topology) in topologies {
-            if evaluate_readiness(&topology.units).ready {
-                admissions
-                    .entry(namespace.to_string())
-                    .or_default()
-                    .extend(topology.members.into_iter().cloned());
-            }
-        }
-        admissions
     }
 
     fn apply_event(&mut self, event: DiscoveryEvent, namespace_filter: &NamespaceFilter) {
@@ -479,6 +412,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     },
                     namespace_filter,
                 );
+                self.host.discovery_synced();
                 false
             }
         };
@@ -1319,7 +1253,6 @@ mod tests {
     use tokio::sync::{Semaphore, mpsc};
 
     use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
-    use crate::worker_type::WorkerType;
 
     struct Prepared(u64);
 
@@ -1334,7 +1267,7 @@ mod tests {
         adapters: Mutex<HashMap<String, BTreeSet<String>>>,
         adapter_projections: Mutex<HashMap<String, HashMap<String, String>>>,
         admissions: Mutex<Vec<watch::Receiver<Vec<u64>>>>,
-        serving_admissions: watch::Sender<ServingAdmissions>,
+        synced: watch::Sender<bool>,
         removed_groups: AtomicUsize,
         discarded: AtomicUsize,
         prepared_replacements: AtomicUsize,
@@ -1355,7 +1288,7 @@ mod tests {
                     adapters: Mutex::new(HashMap::new()),
                     adapter_projections: Mutex::new(HashMap::new()),
                     admissions: Mutex::new(Vec::new()),
-                    serving_admissions: watch::channel(ServingAdmissions::new()).0,
+                    synced: watch::channel(false).0,
                     removed_groups: AtomicUsize::new(0),
                     discarded: AtomicUsize::new(0),
                     prepared_replacements: AtomicUsize::new(0),
@@ -1559,8 +1492,8 @@ mod tests {
             self.discarded.fetch_add(1, Ordering::SeqCst);
         }
 
-        fn publish_serving_admissions(&self, admissions: ServingAdmissions) {
-            self.serving_admissions.send_replace(admissions);
+        fn discovery_synced(&self) {
+            self.synced.send_replace(true);
         }
 
         async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
@@ -2384,160 +2317,8 @@ mod tests {
         assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
     }
 
-    /// Builds a worker in its own WorkerSet, identified by namespace and component.
-    fn role_instance(
-        namespace: &str,
-        component: &str,
-        id: u64,
-        worker_type: Option<WorkerType>,
-        needs: Vec<Vec<WorkerType>>,
-    ) -> DesiredInstance {
-        let mut card = ModelDeploymentCard::with_name_only("model");
-        card.source_path = Some("spec".to_string());
-        card.worker_type = worker_type;
-        card.needs = needs;
-        let mcid = ModelCardInstanceId {
-            namespace: namespace.to_string(),
-            component: component.to_string(),
-            endpoint: "generate".to_string(),
-            instance_id: id,
-            model_suffix: None,
-        };
-        DesiredInstance {
-            key: mcid.to_path(),
-            endpoint_id: EndpointId {
-                namespace: namespace.to_string(),
-                component: component.to_string(),
-                name: "generate".to_string(),
-            },
-            group_key: GroupKey {
-                model_name: "model".to_string(),
-                worker_set_key: format!("{namespace}/{component}"),
-            },
-            mdc_checksum: card.mdcsum().to_string(),
-            projection_fingerprint: "spec".to_string(),
-            video_contract: None,
-            mcid,
-            card,
-        }
-    }
-
-    fn prefill(namespace: &str, id: u64) -> DesiredInstance {
-        role_instance(
-            namespace,
-            "prefill",
-            id,
-            Some(WorkerType::Prefill),
-            vec![vec![WorkerType::Decode]],
-        )
-    }
-
-    fn decode(namespace: &str, id: u64) -> DesiredInstance {
-        role_instance(
-            namespace,
-            "backend",
-            id,
-            Some(WorkerType::Decode),
-            vec![vec![WorkerType::Prefill]],
-        )
-    }
-
-    async fn commit(
-        controller: &mut ModelDiscoveryController<FakeHost>,
-        host: &FakeHost,
-        starts: &mut mpsc::UnboundedReceiver<GroupSpec>,
-        instance: &DesiredInstance,
-    ) {
-        controller.apply_added(instance.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(controller).await;
-    }
-
-    fn admitted(entries: &[(&str, &[&DesiredInstance])]) -> ServingAdmissions {
-        entries
-            .iter()
-            .map(|(namespace, members)| {
-                (
-                    namespace.to_string(),
-                    members.iter().map(|member| member.key.clone()).collect(),
-                )
-            })
-            .collect()
-    }
-
     #[tokio::test]
-    async fn serving_admissions_wait_for_a_complete_disaggregated_generation() {
-        let (host, mut starts) = FakeHost::new();
-        let mut controller = ModelDiscoveryController::new(host.clone());
-        let old_prefill = prefill("graph-old", 1);
-        let old_decode = decode("graph-old", 2);
-        let new_prefill = prefill("graph-new", 3);
-        let new_decode = decode("graph-new", 4);
-
-        commit(&mut controller, &host, &mut starts, &old_prefill).await;
-        assert!(
-            controller.serving_admissions().is_empty(),
-            "a prefill worker alone cannot serve"
-        );
-        commit(&mut controller, &host, &mut starts, &old_decode).await;
-        let old_generation = ("graph-old", &[&old_prefill, &old_decode][..]);
-        assert_eq!(controller.serving_admissions(), admitted(&[old_generation]));
-
-        // A committed replacement role is not admitted until its own generation
-        // can serve, because prefill and decode pair only within a namespace.
-        commit(&mut controller, &host, &mut starts, &new_prefill).await;
-        assert_eq!(controller.serving_admissions(), admitted(&[old_generation]));
-        commit(&mut controller, &host, &mut starts, &new_decode).await;
-        let new_generation = ("graph-new", &[&new_prefill, &new_decode][..]);
-        assert_eq!(
-            controller.serving_admissions(),
-            admitted(&[new_generation, old_generation])
-        );
-
-        // Retiring one old role leaves the old generation unable to serve.
-        controller.apply_removed(&old_prefill.key);
-        assert_eq!(controller.serving_admissions(), admitted(&[new_generation]));
-    }
-
-    #[tokio::test]
-    async fn serving_admissions_track_commits_of_self_sufficient_workers() {
-        let (host, mut starts) = FakeHost::new();
-        let mut controller = ModelDiscoveryController::new(host.clone());
-        let aggregated = role_instance(
-            "graph",
-            "backend",
-            1,
-            Some(WorkerType::Aggregated),
-            Vec::new(),
-        );
-        let legacy = role_instance("legacy", "backend", 2, None, Vec::new());
-
-        controller.apply_added(aggregated.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        assert!(
-            controller.serving_admissions().is_empty(),
-            "a worker whose pipeline is still being built is not admitted"
-        );
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
-        commit(&mut controller, &host, &mut starts, &legacy).await;
-        assert_eq!(
-            controller.serving_admissions(),
-            admitted(&[("graph", &[&aggregated]), ("legacy", &[&legacy])])
-        );
-
-        controller.apply_removed(&aggregated.key);
-        assert_eq!(
-            controller.serving_admissions(),
-            admitted(&[("legacy", &[&legacy])])
-        );
-    }
-
-    #[tokio::test]
-    async fn run_publishes_serving_admissions_and_withdraws_them_when_discovery_ends() {
+    async fn run_reports_sync_once_discovery_delivers_its_snapshot() {
         let (host, mut starts) = FakeHost::new();
         let controller = ModelDiscoveryController::new(host.clone());
         let worker = instance(1, "spec");
@@ -2545,25 +2326,25 @@ mod tests {
         let stream: DiscoveryStream = Box::pin(
             tokio_stream::wrappers::UnboundedReceiverStream::new(events_rx),
         );
-        let mut published = host.serving_admissions.subscribe();
+        let mut synced = host.synced.subscribe();
         let run = tokio::spawn(controller.run(stream, NamespaceFilter::Global));
 
+        // An initial Added burst alone does not complete the view.
         events_tx
             .send(Ok(DiscoveryEvent::Added(discovery_instance(&worker))))
             .unwrap();
         starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        published
-            .wait_for(|admissions| {
-                admissions
-                    .get("namespace")
-                    .is_some_and(|members| members.contains(&worker.key))
-            })
-            .await
-            .unwrap();
+        assert!(!*synced.borrow());
 
+        events_tx
+            .send(Ok(DiscoveryEvent::Resync(vec![discovery_instance(
+                &worker,
+            )])))
+            .unwrap();
+        synced.wait_for(|synced| *synced).await.unwrap();
+
+        host.release.add_permits(1);
         drop(events_tx);
         run.await.unwrap();
-        assert!(published.borrow().is_empty());
     }
 }

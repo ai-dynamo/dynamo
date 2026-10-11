@@ -74,6 +74,9 @@ type rbacManager interface {
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
+	// CachedReader reads from the shared informer cache. Unlike Client, it
+	// serves unstructured objects, such as DynamoWorkerMetadata, from the cache.
+	CachedReader          client.Reader
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
@@ -326,7 +329,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	// replacement workers, so frontend readiness and discovery records requeue.
 	ctrlBuilder = ctrlBuilder.Watches(
 		&corev1.Pod{},
-		handler.EnqueueRequestsFromMapFunc(mapDGDFrontendPodToRequests),
+		handler.EnqueueRequestsFromMapFunc(r.mapDGDFrontendPodToRequests),
 		builder.WithPredicates(dgdFrontendPodEventPredicate()),
 	)
 	if _, err := mgr.GetRESTMapper().RESTMapping(workermetadata.GVK.GroupKind(), workermetadata.GVK.Version); err != nil {

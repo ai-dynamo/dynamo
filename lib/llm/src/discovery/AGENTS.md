@@ -79,16 +79,33 @@ input units, not for these different views of conflicting registrations.
 
 ## Rollout Handoff
 
-After every controller step the frontend publishes its serving admissions: the
-committed members of each WorkerSet whose model and namespace form a complete
-serving topology under the shared readiness evaluator. `frontend_admission.rs`
-registers them as discovery event sources on the `frontend-model-admission`
-topic, one record per worker namespace plus a capability record. Under
-Kubernetes discovery they land in the frontend pod's DynamoWorkerMetadata, and
-the Dynamo operator retires a previous worker generation only after every ready
-frontend lists the replacement. A worker in an incomplete generation is never
-listed, so its Ready pods do not count as replacement capacity.
+Under Kubernetes discovery the frontend publishes the workers it can route
+requests to as one discovery event source on the `frontend-model-admission`
+topic (`frontend_admission.rs`). No other discovery backend has a reader, so
+the frontend does not publish there. The record lists, for each endpoint path,
+the hex IDs of the routable instances of every WorkerSet whose namespace
+request selection would consider ready, as long as no prefill or encoder hop of
+that namespace is still activating its target: until a hop activates, requests
+skip it, and a disaggregated decode worker can reject them. An endpoint path
+and a hex ID form the instance's base model-card key. The record also says
+whether the frontend's discovery view is synced: false until the controller
+applies its first full discovery snapshot, and false again after the discovery
+stream ends, when the record stays so a rollout waits for this frontend.
 
-The operator reads these records in `deploy/operator/internal/workermetadata`.
-Change the topic, record fields, or protocol version on both sides together,
-and keep records readable across the N-2 window.
+The publisher recomputes the record when the catalog or a WorkerSet's routable
+instances change, polls while a hop activates, and replaces the record with one
+discovery write. Passes start at most every 200 ms, and no more often than keeps
+a frontend's writes under 1 MiB/s. A record costs about 19 bytes per routable
+instance, so a frontend that routes to tens of thousands of instances approaches
+the Kubernetes object size limit.
+
+The record lands in the frontend pod's DynamoWorkerMetadata. The Dynamo
+operator retires a previous worker generation only after every ready frontend
+lists the replacement, and keeps old workers while a frontend known to publish
+records has no synced record or while the frontends themselves roll out. It
+reads these records in
+`deploy/operator/internal/workermetadata`, whose
+`testdata/discovery_records.json` the tests in `frontend_admission.rs`
+regenerate with `UPDATE_GOLDEN=1`. Change the topic, record fields, or protocol
+version on both sides together, and keep records readable across the N-2
+window.

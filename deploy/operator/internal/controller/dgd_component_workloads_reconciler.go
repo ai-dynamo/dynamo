@@ -62,10 +62,11 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
-	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
+	rolloutPlan, err := r.rollout.planRollingUpdate(ctx, dgd)
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
 	}
+	rollingUpdateCtx := rolloutPlan.context
 
 	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
 	if err != nil {
@@ -121,6 +122,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	}
 
 	result := checkResourcesReadiness(resources)
+	result.ReplacementsServed = rolloutPlan.replacementsServed
 	if rollingUpdateCtx.InProgress() {
 		oldWorkerStatuses, err := r.rollout.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
 		if err != nil {

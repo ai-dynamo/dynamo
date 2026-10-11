@@ -145,6 +145,11 @@ func (r *workloadProgramResult) applyReconcileResult(
 		r.Status.State = nvidiacomv1beta1.DGDStatePending
 	}
 	meta.SetStatusCondition(&r.Status.Conditions, readyCondition(generation, r.Status, result))
+	if result.ReplacementsServed != nil {
+		meta.SetStatusCondition(&r.Status.Conditions, *result.ReplacementsServed)
+	} else {
+		meta.RemoveStatusCondition(&r.Status.Conditions, conditionTypeReplacementsServed)
+	}
 	r.Status.ObservedGeneration = generation
 }
 

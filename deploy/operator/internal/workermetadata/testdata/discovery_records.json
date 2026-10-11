@@ -1,0 +1,55 @@
+{
+  "frontend": {
+    "endpoints": {},
+    "event_channels": {},
+    "event_sources": {
+      "namespace/graph/topic/frontend-model-admission/7": {
+        "metadata": {
+          "members": {
+            "graph-1/backend/generate": [
+              "2a"
+            ]
+          },
+          "protocol": "v1",
+          "synced": true
+        },
+        "publisher_id": 7,
+        "scope": {
+          "kind": "namespace",
+          "name": "graph"
+        },
+        "topic": "frontend-model-admission",
+        "type": "EventSource"
+      }
+    },
+    "model_cards": {}
+  },
+  "worker": {
+    "endpoints": {},
+    "event_channels": {},
+    "event_sources": {},
+    "model_cards": {
+      "graph-1/backend/generate/2a": {
+        "card_json": {
+          "display_name": "Qwen/Qwen3-0.6B"
+        },
+        "component": "backend",
+        "endpoint": "generate",
+        "instance_id": 42,
+        "namespace": "graph-1",
+        "type": "Model"
+      },
+      "graph-1/backend/generate/2a/adapter": {
+        "card_json": {
+          "display_name": "Qwen/Qwen3-0.6B"
+        },
+        "component": "backend",
+        "endpoint": "generate",
+        "instance_id": 42,
+        "model_suffix": "adapter",
+        "namespace": "graph-1",
+        "type": "Model"
+      }
+    }
+  }
+}

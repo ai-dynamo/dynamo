@@ -63,14 +63,31 @@ use crate::{
 use super::readiness::normalize_legacy_prefill_topology;
 use super::{
     ModelManager,
-    controller::{
-        ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController,
-        ServingAdmissions,
-    },
+    controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
     frontend_admission::run_admission_publisher,
 };
 use crate::namespace::{GLOBAL_NAMESPACE, NamespaceFilter, NamespacePrefixMode};
 use tokio_util::sync::CancellationToken;
+
+/// Reports each change of a WorkerSet's routable instances to `manager` until
+/// `cancellation` fires, which happens when the WorkerSet is dropped.
+async fn forward_routable_changes(
+    mut routable: tokio::sync::watch::Receiver<Vec<u64>>,
+    manager: Arc<ModelManager>,
+    cancellation: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => return,
+            changed = routable.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                manager.notify_serving_state_changed();
+            }
+        }
+    }
+}
 
 /// Constructs a collision-free WorkerSet storage key from its exact endpoint,
 /// model type, and worker role.
@@ -196,7 +213,9 @@ pub struct ModelWatcher {
     model_update_tx: Option<Sender<ModelUpdate>>,
     model_update_dispatch:
         parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ModelUpdate>>>,
-    serving_admissions: tokio::sync::watch::Sender<ServingAdmissions>,
+    /// Whether this frontend's discovery view is live, published with its
+    /// admissions so a rollout can tell a missing view from an empty one.
+    admission_synced: tokio::sync::watch::Sender<bool>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     metrics: Arc<Metrics>,
@@ -315,7 +334,7 @@ impl ModelWatcher {
             notify_on_model: Notify::new(),
             model_update_tx: None,
             model_update_dispatch: parking_lot::Mutex::new(None),
-            serving_admissions: tokio::sync::watch::channel(ServingAdmissions::new()).0,
+            admission_synced: tokio::sync::watch::channel(false).0,
             chat_engine_factory,
             prefill_load_estimator,
             metrics,
@@ -396,32 +415,46 @@ impl ModelWatcher {
             })
         });
 
-        // Rollouts wait for every frontend to publish its admission of a replacement
-        // worker generation before retiring the previous one.
+        // Under Kubernetes discovery, rollouts wait for every frontend to publish its
+        // admission of a replacement worker generation before retiring the previous
+        // one. No other discovery backend has a reader for these records.
         let frontend_namespace = match &namespace_filter {
             NamespaceFilter::Exact(namespace) | NamespaceFilter::Prefix(namespace) => {
                 namespace.clone()
             }
             NamespaceFilter::Global => GLOBAL_NAMESPACE.to_string(),
         };
-        let admission_cancellation = CancellationToken::new();
-        let mut admission_publisher = tokio::spawn(run_admission_publisher(
-            self.drt.discovery(),
-            frontend_namespace,
-            self.serving_admissions.subscribe(),
-            admission_cancellation.clone(),
-        ));
+        let shutdown = self.drt.primary_token();
+        let admission_cancellation = shutdown.child_token();
+        let admission_publisher = self.drt.uses_kubernetes_discovery().then(|| {
+            tokio::spawn(run_admission_publisher(
+                self.drt.discovery(),
+                frontend_namespace,
+                self.manager.clone(),
+                self.admission_synced.subscribe(),
+                admission_cancellation.clone(),
+            ))
+        });
 
         ModelDiscoveryController::new(Arc::clone(&self))
             .run(discovery_stream, namespace_filter)
             .await;
 
-        admission_cancellation.cancel();
-        if tokio::time::timeout(Duration::from_secs(2), &mut admission_publisher)
-            .await
-            .is_err()
-        {
-            admission_publisher.abort();
+        if shutdown.is_cancelled() {
+            // Withdraw the admissions of a frontend that is going away.
+            admission_cancellation.cancel();
+            if let Some(mut admission_publisher) = admission_publisher
+                && tokio::time::timeout(Duration::from_secs(2), &mut admission_publisher)
+                    .await
+                    .is_err()
+            {
+                admission_publisher.abort();
+            }
+        } else {
+            // This frontend keeps serving its retained workers but can no longer
+            // admit replacements. Its record stays, marked unsynced, so a rollout
+            // waits for it rather than reading it as a frontend that serves nothing.
+            self.admission_synced.send_replace(false);
         }
         self.model_update_dispatch.lock().take();
         if let Some(mut dispatch_handle) = dispatch_handle
@@ -486,6 +519,12 @@ impl ModelWatcher {
             .await?
             .with_admitted_instances_and_cancellation(admitted_ids.clone(), cancellation.clone());
         let instance_watcher = client.instance_avail_watcher();
+        // Frontend admissions follow the instances this WorkerSet routes to.
+        tokio::spawn(forward_routable_changes(
+            instance_watcher.clone(),
+            self.manager.clone(),
+            cancellation.clone(),
+        ));
         tracing::debug!(
             model_name = card.name(),
             namespace = mcid.namespace,
@@ -1340,14 +1379,9 @@ impl ControllerHost for ModelWatcher {
         drop(prepared);
     }
 
-    fn publish_serving_admissions(&self, admissions: ServingAdmissions) {
-        self.serving_admissions.send_if_modified(|current| {
-            if *current == admissions {
-                return false;
-            }
-            *current = admissions;
-            true
-        });
+    fn discovery_synced(&self) {
+        self.admission_synced
+            .send_if_modified(|synced| !std::mem::replace(synced, true));
     }
 
     async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {

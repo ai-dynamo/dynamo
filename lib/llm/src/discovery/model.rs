@@ -6,6 +6,7 @@
 //!
 //! Requests are routed to a WorkerSet selected by weighted random (proportional to worker count).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -13,6 +14,7 @@ use rand::Rng;
 use serde::Serialize;
 
 use super::ModelManagerError;
+use super::model_manager::RoutableMembers;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
@@ -731,6 +733,49 @@ impl Model {
         }
     }
 
+    /// Namespaces whose WorkerSets in `snapshot` form a complete serving
+    /// topology. Request selection and [`Self::add_serving_members`] share this
+    /// check.
+    fn ready_namespaces<'a>(&self, snapshot: &'a [Arc<WorkerSet>]) -> HashSet<&'a str> {
+        let mut namespaces: Vec<&str> = snapshot.iter().map(|ws| ws.namespace()).collect();
+        namespaces.sort_unstable();
+        namespaces.dedup();
+        namespaces
+            .into_iter()
+            .filter(|ns| {
+                let in_ns: Vec<Arc<WorkerSet>> = snapshot
+                    .iter()
+                    .filter(|ws| ws.namespace() == *ns)
+                    .cloned()
+                    .collect();
+                self.evaluate_namespace(&in_ns).ready
+            })
+            .collect()
+    }
+
+    /// Adds to `members` the instances that request selection can reach, and
+    /// reports whether a complete namespace waits for a prefill or encoder hop to
+    /// activate its target.
+    ///
+    /// A namespace counts only when selection would consider it ready and none
+    /// of its hops is still activating: until then a request would skip remote
+    /// prefill or encoding, which a disaggregated decode worker can reject.
+    pub(crate) fn add_serving_members(&self, members: &mut RoutableMembers) -> bool {
+        let snapshot = self.worker_sets();
+        let mut awaiting_activation = false;
+        for namespace in self.ready_namespaces(&snapshot) {
+            let in_namespace = || snapshot.iter().filter(|ws| ws.namespace() == namespace);
+            if in_namespace().any(|ws| ws.awaiting_hop_activation()) {
+                awaiting_activation = true;
+                continue;
+            }
+            for ws in in_namespace() {
+                ws.add_routable_instances(members);
+            }
+        }
+        awaiting_activation
+    }
+
     // -- Internal selection --
 
     /// Select a WorkerSet and extract a value from it.
@@ -750,27 +795,8 @@ impl Model {
         // eligibility, so a concurrent add/remove can't make us treat a
         // namespace as complete while routing to a set that lost a peer. It also
         // avoids re-entering the DashMap mid-iteration, which can deadlock.
-        let snapshot: Vec<Arc<WorkerSet>> = self
-            .worker_sets
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
-
-        // Namespaces whose worker set is complete, evaluated against the snapshot.
-        let mut namespaces: Vec<&str> = snapshot.iter().map(|ws| ws.namespace()).collect();
-        namespaces.sort_unstable();
-        namespaces.dedup();
-        let ready_namespaces: std::collections::HashSet<&str> = namespaces
-            .into_iter()
-            .filter(|ns| {
-                let in_ns: Vec<Arc<WorkerSet>> = snapshot
-                    .iter()
-                    .filter(|ws| ws.namespace() == *ns)
-                    .cloned()
-                    .collect();
-                self.evaluate_namespace(&in_ns).ready
-            })
-            .collect();
+        let snapshot = self.worker_sets();
+        let ready_namespaces = self.ready_namespaces(&snapshot);
 
         // Fast path: single set (same zero-worker filtering as the multi-set path below)
         if snapshot.len() == 1 {
@@ -1331,6 +1357,124 @@ mod tests {
         let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
         ws.set_instance_watcher(rx);
         (Arc::new(ws), tx)
+    }
+
+    /// A hop whose activation the test controls.
+    struct ActivatingHop(std::sync::atomic::AtomicBool);
+
+    impl crate::kv_router::prefill_router::PrefillRouterLifecycle for ActivatingHop {
+        fn set_target(&self, _: Option<crate::discovery::WorkerSetTarget>) {}
+
+        fn awaiting_activation(&self) -> bool {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// A committed WorkerSet of `worker_type` at `{namespace}/{component}/generate`.
+    fn member_ws(
+        namespace: &str,
+        component: &str,
+        worker_type: WorkerType,
+        needs: Vec<Vec<WorkerType>>,
+        worker_ids: Vec<u64>,
+        prefill_hop: Option<Arc<ActivatingHop>>,
+    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        card.needs = needs;
+        let (tx, rx) = watch::channel(worker_ids);
+        let mut ws = WorkerSet::new(namespace.to_string(), format!("{component}-mdc"), card);
+        ws.set_instance_watcher(rx);
+        ws.set_endpoint_id(dynamo_runtime::protocols::EndpointId {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            name: "generate".to_string(),
+        });
+        ws.prefill_router = prefill_hop
+            .map(|hop| hop as Arc<dyn crate::kv_router::prefill_router::PrefillRouterLifecycle>);
+        (Arc::new(ws), tx)
+    }
+
+    /// The base model-card keys of the instances `model` can route to, and
+    /// whether a complete namespace waits for a hop to activate.
+    fn serving_members(model: &Model) -> (std::collections::BTreeSet<String>, bool) {
+        let mut members = RoutableMembers::new();
+        let awaiting = model.add_serving_members(&mut members);
+        let keys = members
+            .iter()
+            .flat_map(|(endpoint, ids)| ids.iter().map(move |id| format!("{endpoint}/{id:x}")))
+            .collect();
+        (keys, awaiting)
+    }
+
+    #[test]
+    fn serving_members_list_routable_workers_of_complete_namespaces() {
+        let model = Model::new("llama".to_string());
+        let hop = Arc::new(ActivatingHop(std::sync::atomic::AtomicBool::new(false)));
+        let (old_prefill, _old_prefill_tx) = member_ws(
+            "gen-old",
+            "prefill",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![0xa],
+            None,
+        );
+        let (old_decode, _old_decode_tx) = member_ws(
+            "gen-old",
+            "decode",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![0xb, 0xc],
+            Some(hop.clone()),
+        );
+        let (new_decode, new_decode_tx) = member_ws(
+            "gen-new",
+            "decode",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![0xd],
+            None,
+        );
+        model.add_worker_set("old-p".to_string(), old_prefill);
+        model.add_worker_set("old-d".to_string(), old_decode);
+        model.add_worker_set("new-d".to_string(), new_decode);
+        let old_generation = std::collections::BTreeSet::from([
+            "gen-old/prefill/generate/a".to_string(),
+            "gen-old/decode/generate/b".to_string(),
+            "gen-old/decode/generate/c".to_string(),
+        ]);
+
+        // A decode generation without its prefill role is not listed.
+        assert_eq!(serving_members(&model), (old_generation.clone(), false));
+
+        // A complete generation is held back while its prefill hop activates,
+        // because requests would skip remote prefill until then.
+        hop.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            serving_members(&model),
+            (std::collections::BTreeSet::new(), true)
+        );
+        hop.0.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // Only instances the decode client can route to are listed.
+        let (new_prefill, _new_prefill_tx) = member_ws(
+            "gen-new",
+            "prefill",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![0xe],
+            None,
+        );
+        model.add_worker_set("new-p".to_string(), new_prefill);
+        new_decode_tx.send_replace(Vec::new());
+        assert_eq!(serving_members(&model), (old_generation.clone(), false));
+        new_decode_tx.send_replace(vec![0xd]);
+        let mut both = old_generation;
+        both.extend([
+            "gen-new/prefill/generate/e".to_string(),
+            "gen-new/decode/generate/d".to_string(),
+        ]);
+        assert_eq!(serving_members(&model), (both, false));
     }
 
     #[test]

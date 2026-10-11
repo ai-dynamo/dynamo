@@ -1157,6 +1157,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacing_an_event_source_leaves_only_the_replacement() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        let spec = |publisher_id: u64| DiscoverySpec::EventSource {
+            scope: EventScope::Namespace {
+                name: "ns".to_string(),
+            },
+            topic: "admission".to_string(),
+            publisher_id,
+            metadata: serde_json::json!({ "version": publisher_id }),
+        };
+
+        let first = client.register(spec(1)).await.unwrap();
+        let second = client.replace_event_source(first, spec(2)).await.unwrap();
+        assert_eq!(
+            client
+                .list(DiscoveryQuery::EventSources(EventSourceQuery::all()))
+                .await
+                .unwrap(),
+            vec![second.clone()]
+        );
+
+        // Only event sources can be replaced.
+        let endpoint = DiscoverySpec::Endpoint {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            device_type: None,
+            request_plane_codec: None,
+            transport: TransportType::Tcp("127.0.0.1:1".to_string()),
+        };
+        assert!(client.replace_event_source(second, endpoint).await.is_err());
+    }
+
+    #[tokio::test]
     async fn test_kv_store_discovery_list() {
         let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();

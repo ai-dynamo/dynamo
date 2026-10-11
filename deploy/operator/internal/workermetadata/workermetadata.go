@@ -16,6 +16,7 @@ package workermetadata
 import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
@@ -29,9 +30,7 @@ const (
 )
 
 var (
-	// GVK identifies the DynamoWorkerMetadata kind.
-	GVK = schema.GroupVersionKind{Group: "nvidia.com", Version: "v1alpha1", Kind: "DynamoWorkerMetadata"}
-	// ListGVK identifies the DynamoWorkerMetadata list kind.
+	GVK     = schema.GroupVersionKind{Group: "nvidia.com", Version: "v1alpha1", Kind: "DynamoWorkerMetadata"}
 	ListGVK = schema.GroupVersionKind{Group: "nvidia.com", Version: "v1alpha1", Kind: "DynamoWorkerMetadataList"}
 )
 
@@ -109,15 +108,16 @@ func Project(obj *unstructured.Unstructured) *unstructured.Unstructured {
 	return obj
 }
 
-// OwningPod returns the name of the pod that owns obj, which is the process
-// that published it.
-func OwningPod(obj *unstructured.Unstructured) (string, bool) {
+// OwningPod returns the name and UID of the pod that owns obj, which is the
+// process that published it. A later pod can reuse the name while obj is still
+// visible, so a reader credits obj to a pod only when the UIDs match.
+func OwningPod(obj *unstructured.Unstructured) (string, types.UID, bool) {
 	for _, owner := range obj.GetOwnerReferences() {
 		if owner.APIVersion == "v1" && owner.Kind == "Pod" && owner.Name != "" {
-			return owner.Name, true
+			return owner.Name, owner.UID, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // AddBaseModelCards adds to cards the discovery keys of the model cards that
@@ -137,17 +137,25 @@ func AddBaseModelCards(obj *unstructured.Unstructured, cards map[string]struct{}
 	}
 }
 
-// FrontendAdmission is what one frontend process publishes about the workers
-// it serves.
+// FrontendAdmission is what a frontend pod publishes about the workers it
+// routes requests to.
 type FrontendAdmission struct {
 	// Capable reports that the frontend publishes admission records.
 	Capable bool
-	// Members holds the model-card keys of the workers the frontend serves.
+	// Synced reports that every admission record of the frontend reflects a
+	// live discovery view. A frontend that has not applied its first discovery
+	// snapshot, or whose discovery stream ended, is not synced, and its
+	// members say nothing about what it will serve.
+	Synced bool
+	// Members holds the base model-card keys of the workers the frontend serves.
 	Members map[string]struct{}
 }
 
 // AddFrontendAdmission merges the admission records that obj publishes into
-// admission. Records of unknown protocol versions are ignored.
+// admission, which must have a non-nil Members map. A frontend publishes one
+// record, but a reader can briefly see two while one replaces the other;
+// members are merged and the frontend is synced only if every record is.
+// Records of unknown protocol versions are ignored.
 func AddFrontendAdmission(obj *unstructured.Unstructured, admission *FrontendAdmission) {
 	for _, raw := range nestedMap(obj.Object, "spec", "data", "event_sources") {
 		source, ok := raw.(map[string]any)
@@ -158,13 +166,18 @@ func AddFrontendAdmission(obj *unstructured.Unstructured, admission *FrontendAdm
 		if !ok || metadata["protocol"] != FrontendAdmissionProtocol {
 			continue
 		}
-		if capability, ok := metadata["capability"].(bool); ok && capability {
-			admission.Capable = true
-		}
-		members, _ := metadata["members"].([]any)
-		for _, member := range members {
-			if key, ok := member.(string); ok {
-				admission.Members[key] = struct{}{}
+		synced, _ := metadata["synced"].(bool)
+		admission.Synced = synced && (admission.Synced || !admission.Capable)
+		admission.Capable = true
+		// Members list each endpoint's instances by hex ID; together they form
+		// the instances' base model-card keys.
+		members, _ := metadata["members"].(map[string]any)
+		for endpoint, raw := range members {
+			ids, _ := raw.([]any)
+			for _, id := range ids {
+				if hexID, ok := id.(string); ok {
+					admission.Members[endpoint+"/"+hexID] = struct{}{}
+				}
 			}
 		}
 	}

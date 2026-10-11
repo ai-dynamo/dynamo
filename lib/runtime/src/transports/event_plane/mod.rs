@@ -45,7 +45,7 @@ use crate::component::{Component, Endpoint, Namespace};
 use crate::config::environment_names::event_plane::DYN_EVENT_PLANE_HOST;
 use crate::discovery::{
     Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport,
-    MAX_JSON_SAFE_PUBLISHER_ID,
+    discovery_safe_publisher_id,
 };
 use crate::protocols::EndpointId;
 use crate::traits::DistributedRuntimeProvider;
@@ -303,11 +303,6 @@ impl Stream for DeduplicatingStream {
             }
         }
     }
-}
-
-/// Keep publisher IDs exactly representable in float64-backed JSON metadata.
-fn discovery_safe_publisher_id(random_id: u64) -> u64 {
-    random_id & MAX_JSON_SAFE_PUBLISHER_ID
 }
 
 /// Event publisher for a specific topic.
@@ -972,6 +967,7 @@ fn current_timestamp_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::config::environment_names::zmq_broker as broker_env;
+    use crate::discovery::MAX_JSON_SAFE_PUBLISHER_ID;
     use crate::utils::ip_resolver::test_support::StubResolver;
 
     #[test]
