@@ -1,0 +1,126 @@
+# FlashInfer PR #5267: sm107-stochastic-rounding
+# https://github.com/flashinfer-ai/flashinfer/pull/5267
+# Upstream commit: b02003d53b10b74ebdcfca72d4c42c31dc544d86
+# Runtime-only backport for flashinfer-python 0.7.0.post1 (installed wheel paths).
+# Patched JIT module names prevent reuse of unpatched prebuilt or mounted caches.
+# Use the original implementation commit; the merged diff omits the SM107 guards.
+
+diff --git a/utils.py b/utils.py
+--- a/utils.py
++++ b/utils.py
+@@ -691,23 +691,36 @@
+     return version_at_least(torch.version.cuda, min_cuda)
+ 
+ 
++# Keep this table in sync with FLASHINFER_MAMBA_HAS_CVT_RS in
++# include/flashinfer/mamba/conversion.cuh.
++CVT_RS_SUPPORTED_ARCHES = {
++    (10, 0): "sm_100a",
++    (10, 3): "sm_103a",
++    (10, 7): "sm_107a",
++}
++
++
++def cvt_rs_supported_arches_text() -> str:
++    """Return the supported stochastic-rounding targets in a stable order."""
++    return ", ".join(CVT_RS_SUPPORTED_ARCHES.values())
++
++
+ def is_cvt_rs_supported(device: torch.device = None) -> bool:
+     """Check if the GPU supports the PTX cvt.rs.f16x2.f32 instruction.
+ 
+-    Datacenter-Blackwell only: SM100 (B200, cc 10.0) and SM103 (B300, cc 10.3).
++    Supported targets are listed in CVT_RS_SUPPORTED_ARCHES.
+     ptxas REJECTS `.rs` on SM110a (cc 11.0) and it is absent on SM120 (consumer
+     Blackwell) — both must return False, else the kernels silently compile the
+     ~12-instruction software-emulation fallback and stochastic rounding runs
+     ~4x slower (measured on B300 when the CUDA-side guard omitted SM103a).
+     Keep this in lockstep with the FLASHINFER_MAMBA_HAS_CVT_RS guard in
+-    include/flashinfer/mamba/conversion.cuh (SM100_ALL || SM103_ALL).
++    include/flashinfer/mamba/conversion.cuh.
+     """
+     if device is None:
+         device = torch.device("cuda")
+-    # Match the CUDA guard exactly: only the arches where cvt.rs actually
+-    # assembles (verified via ptxas).  NOT a `major == 10/11` check — SM110a
+-    # (major 11) has no `.rs` feature.
+-    return get_compute_capability(device) in ((10, 0), (10, 3))
++    # Match the CUDA guard exactly: only the arches where cvt.rs is supported.
++    # NOT a `major == 10/11` check — SM110a (major 11) has no `.rs` feature.
++    return get_compute_capability(device) in CVT_RS_SUPPORTED_ARCHES
+ 
+ 
+ def determine_mla_backend(device: torch.device) -> str:
+diff --git a/data/include/flashinfer/mamba/conversion.cuh b/data/include/flashinfer/mamba/conversion.cuh
+--- a/data/include/flashinfer/mamba/conversion.cuh
++++ b/data/include/flashinfer/mamba/conversion.cuh
+@@ -158,10 +158,10 @@
+ }
+ 
+ // Hardware `cvt.rs.*` (stochastic-rounding convert) is available ONLY on the
+-// datacenter Blackwell "a" targets that actually carry the `.rs` PTX feature:
+-// sm_100a (B200) and sm_103a (B300).  There is NO generic CUDA feature macro for
+-// it — `__CUDA_ARCH_SPECIFIC__` is too broad (sm_120a defines it but ptxas
+-// rejects `.rs`), so the arches are enumerated here in ONE place.
++// datacenter Blackwell and Rubin "a" targets that carry the `.rs` PTX feature:
++// sm_100a (B200), sm_103a (B300), and sm_107a (Rubin). There is NO generic CUDA
++// feature macro for it — `__CUDA_ARCH_SPECIFIC__` is too broad (sm_120a defines
++// it but ptxas rejects `.rs`), so the arches are enumerated here in ONE place.
+ //
+ // The trap this guard exists to avoid: B300 is sm_103a and does NOT define
+ // `__CUDA_ARCH_FEAT_SM100_ALL`, so a SM100-only guard silently compiled the
+@@ -169,8 +169,10 @@
+ // +24% on B200 (2026-07-13).  sm_110a / sm_120a lack `.rs` (ptxas errors) → they
+ // correctly fall to the software path below.  Extend the list only after
+ // confirming `cvt.rs.f16x2.f32` assembles for the new arch.
+-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && \
+-    (defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL))
++// Keep this list in sync with CVT_RS_SUPPORTED_ARCHES in flashinfer/utils.py.
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 &&                             \
++    (defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL) || \
++     defined(__CUDA_ARCH_FEAT_SM107_ALL))
+ #define FLASHINFER_MAMBA_HAS_CVT_RS 1
+ #else
+ #define FLASHINFER_MAMBA_HAS_CVT_RS 0
+@@ -216,7 +218,7 @@
+ __device__ __forceinline__ uint32_t cvt_rs_f16x2_f32(float a, float b, uint32_t rbits);
+ 
+ // Stochastic rounding: convert one fp32 value to fp16 using 13 random bits.
+-// On sm_100a+: uses PTX cvt.rs.f16x2.f32 with a dummy zero second input.
++// On sm_100a/sm_103a/sm_107a: uses PTX cvt.rs.f16x2.f32 with a dummy zero second input.
+ // On other archs: software emulation.
+ __device__ __forceinline__ __half cvt_rs_f16_f32(float x, uint32_t rand13) {
+ #if FLASHINFER_MAMBA_HAS_CVT_RS
+@@ -231,7 +233,7 @@
+ }
+ 
+ // Stochastic rounding: convert two fp32 values to packed fp16x2 using random bits.
+-// On sm_100a+: uses PTX cvt.rs.f16x2.f32 instruction.
++// On sm_100a/sm_103a/sm_107a: uses PTX cvt.rs.f16x2.f32 instruction.
+ // On other archs: software emulation matching the hardware behavior.
+ //
+ // rbits layout (from PTX docs):
+diff --git a/jit/mamba/selective_state_update.py b/jit/mamba/selective_state_update.py
+--- a/jit/mamba/selective_state_update.py
++++ b/jit/mamba/selective_state_update.py
+@@ -62,7 +62,7 @@
+ ) -> str:
+     s = _filename_safe_dtype_map
+     uri = (
+-        f"selective_state_update_"
++        f"selective_state_update_pr5267_"
+         f"s_{s[state_dtype]}_i_{s[input_dtype]}_w_{s[weight_dtype]}_"
+         f"a_{s[matrixA_dtype]}_si_{s[stateIndex_dtype]}_"
+         f"d_{dim}_ds_{dstate}_nt_{ntokens_mtp}"
+diff --git a/jit/mamba/checkpointing_ssu.py b/jit/mamba/checkpointing_ssu.py
+--- a/jit/mamba/checkpointing_ssu.py
++++ b/jit/mamba/checkpointing_ssu.py
+@@ -91,7 +91,7 @@
+ ) -> str:
+     s = _filename_safe_dtype_map
+     uri = (
+-        f"checkpointing_ssu_"
++        f"checkpointing_ssu_pr5267_"
+         f"s_{s[state_dtype]}_i_{s[input_dtype]}_dt_{s[dt_dtype]}_w_{s[weight_dtype]}_"
+         f"a_{s[matrixA_dtype]}_si_{s[stateIndex_dtype]}_"
+         f"d_{dim}_ds_{dstate}_np_{npredicted}_mw_{max_window}_hpg_{heads_per_group}"

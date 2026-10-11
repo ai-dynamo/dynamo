@@ -1,0 +1,295 @@
+# FlashInfer PR #6331: multi-wave-kv-split
+# https://github.com/flashinfer-ai/flashinfer/pull/6331
+# Upstream commit: caaa4a549690b51c3cc26e92d1a9a5fc07962353
+# Runtime-only backport for flashinfer-python 0.7.0.post1 (installed wheel paths).
+# Patched JIT module names prevent reuse of unpatched prebuilt or mounted caches.
+# Preserve the installed ComputeLSEFromMD signature when porting the scratch guard.
+
+diff --git a/data/csrc/trtllm_fmha_kernel_launcher.cu b/data/csrc/trtllm_fmha_kernel_launcher.cu
+--- a/data/csrc/trtllm_fmha_kernel_launcher.cu
++++ b/data/csrc/trtllm_fmha_kernel_launcher.cu
+@@ -366,6 +366,7 @@
+     // scratch takes the rest of the workspace buffer
+     runner_params.multiCtasKvScratchPtr =
+         float_allocator.aligned_alloc<void>(0, 16, "trtllm_gen_scratch_workspace");
++    runner_params.mMultiCtasKvScratchBytes = float_allocator.remaining_space;
+   }
+ 
+   // Params for skipping softmax.
+diff --git a/data/include/flashinfer/trtllm/fmha/fmhaKernels.cuh b/data/include/flashinfer/trtllm/fmha/fmhaKernels.cuh
+--- a/data/include/flashinfer/trtllm/fmha/fmhaKernels.cuh
++++ b/data/include/flashinfer/trtllm/fmha/fmhaKernels.cuh
+@@ -81,6 +81,10 @@
+  public:
+   static constexpr int kDynamicNumTokensPerPageThreshold = 128;
+   static constexpr int kDynamicNumTokensPerPageKernelKey = 128;
++  // Waves of CTAs for multi-CTA KV when one wave gives at most 2 splits. Keep <= 4: the separate
++  // reduction kernel needs base CTAs <= 2 x SMs (runFmhaReduction in fmhaReduction.cu).
++  static constexpr int kMaxNumWavesForKvSplit = 4;
++  static_assert(kMaxNumWavesForKvSplit >= 1 && kMaxNumWavesForKvSplit <= 4);
+ 
+   // The parameters for launching the kernel.
+   // maxNumCtasQ, maxNumCtasKv, numCtasX, numCtasY, numCtasZ, clusterDimX
+@@ -97,6 +101,8 @@
+     int mNumCtasZ;
+     // The cluster size in the X dimension.
+     int mClusterDimX;
++    // True if the multi-wave rule changed mMaxNumCtasKv from the one-wave rule.
++    bool mMultiWaveKvSplit;
+   };
+ 
+  public:
+@@ -367,8 +373,24 @@
+ 
+   // start here
+   void run(RunnerParams const& params) const {
++    // Opt-in: FLASHINFER_TRTLLM_GEN_MULTI_WAVE_KV_SPLIT=1 lets the KV split use up to 4 waves.
++    // Enable it for long contexts, decode batches near the SM count, and CUDA graphs captured with
++    // a large max_seq_len. The split only sees max_seq_len, so short or similar KV lengths can be
++    // slower. Try it first; if it cannot launch, select again from a fresh state with the one-wave
++    // rule (the stock path).
++    static bool const enabled = getBoolEnv("FLASHINFER_TRTLLM_GEN_MULTI_WAVE_KV_SPLIT");
++    bool const allowMultiWaveKvSplit = enabled && params.mMultiCtasKvScratchBytes > 0;
++    if (!allowMultiWaveKvSplit || !tryRun(params, /*allowMultiWaveKvSplit=*/true)) {
++      tryRun(params, /*allowMultiWaveKvSplit=*/false);
++    }
++  }
++
++ private:
++  // One kernel selection and launch; all selection state is built here. Returns false before any
++  // launch only if a multi-wave split cannot launch; with allowMultiWaveKvSplit false it launches.
++  bool tryRun(RunnerParams const& params, bool allowMultiWaveKvSplit) const {
+     SelectKernelParams selectKernelParams{params};
+-    CtaLaunchParams ctaLaunchParams;
++    CtaLaunchParams ctaLaunchParams{};
+ 
+     // Kernel selection loop (bounded). Each pass may update selectKernelParams (e.g. switch
+     // MultiCtasKvMode to Disabled, upgrade to CgaSmemReduction, or reduce headDimPerCtaV) and
+@@ -380,7 +402,8 @@
+     for (int pass = 0; pass < kMaxKernelSelectionPasses; ++pass) {
+       selectKernel(params, selectKernelParams);
+       std::tie(func, kernelMeta) = loadKernel(params, selectKernelParams);
+-      computeCtaAndClusterConfig(ctaLaunchParams, params, kernelMeta, selectKernelParams);
++      computeCtaAndClusterConfig(ctaLaunchParams, params, kernelMeta, selectKernelParams,
++                                 allowMultiWaveKvSplit);
+       if (!selectKernelParams.mSelectNewKernel) {
+         break;
+       }
+@@ -389,9 +412,15 @@
+                        kMaxKernelSelectionPasses);
+     }
+ 
++    int32_t totalNumCtas = 0;
++    if (!fitsMultiCtasKvScratch(params, kernelMeta, ctaLaunchParams, totalNumCtas)) {
++      return false;
++    }
++
+     // Prepare the kernel parameters.
+-    auto kernelParams = KernelParams::setKernelParams(
+-        params, kernelMeta, ctaLaunchParams.mMaxNumCtasQ, ctaLaunchParams.mMaxNumCtasKv);
++    auto kernelParams =
++        KernelParams::setKernelParams(params, kernelMeta, ctaLaunchParams.mMaxNumCtasQ,
++                                      ctaLaunchParams.mMaxNumCtasKv, totalNumCtas);
+ 
+     // Override SageAttention parameters.
+     auto sageParamEncode = [](int blockSize) -> int32_t {
+@@ -410,7 +439,7 @@
+ 
+     void* kernelParamsList[] = {&kernelParams};
+     CUlaunchAttribute launch_attribute[4] = {};
+-    CUlaunchConfig launch_config;
++    CUlaunchConfig launch_config{};
+     buildLaunchConfig(launch_config, launch_attribute, kernelMeta, ctaLaunchParams, params);
+ 
+     // Debug info.
+@@ -443,19 +472,32 @@
+         selectKernelParams.mMultiCtasKvMode = MultiCtasKvMode::GmemReduction;
+         selectKernel(params, selectKernelParams);
+         std::tie(func, kernelMeta) = loadKernel(params, selectKernelParams);
+-        computeCtaAndClusterConfig(ctaLaunchParams, params, kernelMeta, selectKernelParams);
++        computeCtaAndClusterConfig(ctaLaunchParams, params, kernelMeta, selectKernelParams,
++                                   allowMultiWaveKvSplit);
++        if (allowMultiWaveKvSplit && selectKernelParams.mSelectNewKernel) {
++          return false;
++        }
+         FLASHINFER_CHECK(!selectKernelParams.mSelectNewKernel,
+                          "trtllm-gen kernel selection did not converge after CgaSmemReduction "
+                          "fallback to GmemReduction.");
++        if (!fitsMultiCtasKvScratch(params, kernelMeta, ctaLaunchParams, totalNumCtas)) {
++          return false;
++        }
+         // Rebuild kernelParams: setKernelParams uses kernelMeta (TMA descriptors, tile shapes)
+         // which changed when switching from CgaSmemReduction to GmemReduction kernel.
+-        kernelParams = KernelParams::setKernelParams(
+-            params, kernelMeta, ctaLaunchParams.mMaxNumCtasQ, ctaLaunchParams.mMaxNumCtasKv);
++        kernelParams =
++            KernelParams::setKernelParams(params, kernelMeta, ctaLaunchParams.mMaxNumCtasQ,
++                                          ctaLaunchParams.mMaxNumCtasKv, totalNumCtas);
+         buildLaunchConfig(launch_config, launch_attribute, kernelMeta, ctaLaunchParams, params);
+         setNonPortableClusterIfNeeded(func, ctaLaunchParams);
+       }
+     }
+ 
++    IKL_LOG_DEBUG(
++        "TRTLLM-Gen final launch: kernelName = %s, multiCtasKvMode = %d, numCtasX = %d, "
++        "numCtasY = %d, numCtasZ = %d",
++        kernelMeta.mFuncName, static_cast<int>(selectKernelParams.mMultiCtasKvMode),
++        ctaLaunchParams.mNumCtasX, ctaLaunchParams.mNumCtasY, ctaLaunchParams.mNumCtasZ);
+     cuErrCheck(cuLaunchKernelEx(&launch_config, func, kernelParamsList, nullptr));
+ 
+     // Run the separate reduction kernel if needed.
+@@ -467,9 +509,46 @@
+           params.softmaxStatsPtr, params.lsePtr, params.mSumOfSeqLensQ, params.mNumHeadsQ,
+           params.lseStrideTokens, params.lseStrideHeads, params.enable_pdl, params.stream));
+     }
+-  }
+-
+- private:
++    return true;
++  }
++
++  // Checks that the partials of a multi-wave KV split fit in the scratch. Partial stats are
++  // max(SMs, CTAs) x stepQ float2 and partial O is CTAs x stepQ x headDimPerCtaV (x2 for 2CtaMma)
++  // elements of 2 bytes (fmhaReduction.cu). The scratch capacity is taken after the LSE buffer and
++  // alignment, so they are not subtracted here. Products are checked in 64 bits before any
++  // narrowing. totalNumCtas is the CTA count to size the partial stats for: 0 (stock layout)
++  // unless the multi-wave rule changed the split.
++  bool fitsMultiCtasKvScratch(RunnerParams const& params, KernelMeta const& kernelMeta,
++                              CtaLaunchParams const& ctaLaunchParams, int32_t& totalNumCtas) const {
++    totalNumCtas = 0;
++    if (!ctaLaunchParams.mMultiWaveKvSplit) {
++      return true;
++    }
++    // acc *= x; false on int64 overflow.
++    auto const mulTo = [](int64_t& acc, int64_t x) {
++      return !__builtin_mul_overflow(acc, x, &acc);
++    };
++    int64_t numCtas = ctaLaunchParams.mNumCtasX;
++    if (!mulTo(numCtas, ctaLaunchParams.mNumCtasY) || !mulTo(numCtas, ctaLaunchParams.mNumCtasZ) ||
++        numCtas > INT32_MAX) {
++      return false;
++    }
++    int64_t statsBytes = std::max<int64_t>(params.mMultiProcessorCount, numCtas);
++    int64_t partialOBytes = numCtas;
++    int64_t bytes = 0;
++    if (!mulTo(statsBytes, kernelMeta.mStepQ) || !mulTo(statsBytes, sizeof(float2)) ||
++        !mulTo(partialOBytes, kernelMeta.mStepQ) ||
++        !mulTo(partialOBytes, kernelMeta.mHeadDimPerCtaV) ||
++        !mulTo(partialOBytes, kernelMeta.m2CtaMma ? 2 : 1) ||
++        !mulTo(partialOBytes, /*bytesPerPartialElt=*/2) ||
++        __builtin_add_overflow(statsBytes, partialOBytes, &bytes) ||
++        static_cast<uint64_t>(bytes) > params.mMultiCtasKvScratchBytes) {
++      return false;
++    }
++    totalNumCtas = static_cast<int32_t>(numCtas);
++    return true;
++  }
++
+   // Fill a CUlaunchConfig and its associated attribute array from the current kernel and CTA
+   // params. The caller owns the storage for launch_attribute (must be an array of at least 3
+   // elements) and is responsible for ensuring it outlives launch_config.
+@@ -551,14 +630,18 @@
+   }
+ 
+   // Compute the number of CTAs in X, Y and Z dimension and the cluster size in the X dimension.
++  // allowMultiWaveKvSplit is false for the tile-search probes, so the tile choice is stock.
+   void computeCtaAndClusterConfig(CtaLaunchParams& ctaLaunchParams, RunnerParams const& params,
+                                   KernelMeta const& kernelMeta,
+-                                  SelectKernelParams& selectKernelParams) const {
++                                  SelectKernelParams& selectKernelParams,
++                                  bool allowMultiWaveKvSplit = false) const {
+     bool isDsv3MinLatencyMode = params.mBatchSize == 1 && params.mMaxSeqLenQ >= 1 &&
+                                 params.mMaxSeqLenQ <= 16 && params.mHeadDimQk == 576 &&
+                                 params.mHeadDimV == 512;
+     // Do we need to select a new kernel ?
+     selectKernelParams.mSelectNewKernel = false;
++    // Set below only if the multi-wave rule changes numCtasPerSeqKv.
++    ctaLaunchParams.mMultiWaveKvSplit = false;
+ 
+     // The number of Ctas per Q sequence.
+     int numCtasPerSeqQ = (params.mMaxSeqLenQ + kernelMeta.mStepQ - 1) / kernelMeta.mStepQ;
+@@ -660,10 +743,27 @@
+           }
+         }
+       }
+-      // Compute numCtasPerSeqKv.
+-      numCtasPerSeqKv = std::min(
++      // Compute numCtasPerSeqKv. One wave leaves SMs idle when it gives only 1-2 splits, so use
++      // more waves: shorter CTAs also balance mixed KV lengths. Not for MLA (own rules). Base CTAs
++      // must not exceed the counters the launcher allocates: round_up(max(B x Hq, SMs), 8).
++      int64_t const baseNumCtas = static_cast<int64_t>(numCtasX) * numCtasY * numCtasZ;
++      int64_t const oneWaveSplits = params.mMultiProcessorCount / baseNumCtas;
++      int64_t const numCounters = std::max<int64_t>(
++          static_cast<int64_t>(params.mBatchSize) * params.mNumHeadsQ, params.mMultiProcessorCount);
++      bool const multiWave = allowMultiWaveKvSplit && oneWaveSplits <= 2 &&
++                             !isMlaGenKernel(params) && baseNumCtas <= (numCounters + 7) / 8 * 8;
++      int64_t const numWaves = multiWave ? kMaxNumWavesForKvSplit : 1;
++      int32_t const oneWaveNumCtasPerSeqKv = static_cast<int32_t>(
++          std::min<int64_t>(tunedMaxNumCtasPerSeqKv, std::max<int64_t>(1, oneWaveSplits)));
++      int64_t const multiWaveNumCtasPerSeqKv = std::min<int64_t>(
+           tunedMaxNumCtasPerSeqKv,
+-          std::max(1, int32_t(params.mMultiProcessorCount / (numCtasX * numCtasY * numCtasZ))));
++          std::max<int64_t>(1, numWaves * params.mMultiProcessorCount / baseNumCtas));
++      // The grid must fit in int32.
++      ctaLaunchParams.mMultiWaveKvSplit = multiWaveNumCtasPerSeqKv != oneWaveNumCtasPerSeqKv &&
++                                          multiWaveNumCtasPerSeqKv * baseNumCtas <= INT32_MAX;
++      numCtasPerSeqKv = ctaLaunchParams.mMultiWaveKvSplit
++                            ? static_cast<int32_t>(multiWaveNumCtasPerSeqKv)
++                            : oneWaveNumCtasPerSeqKv;
+       // Update the numCtasX.
+       numCtasX *= numCtasPerSeqKv;
+       // The current total number of CTAs.
+diff --git a/data/include/flashinfer/trtllm/fmha/fmhaRunnerParams.h b/data/include/flashinfer/trtllm/fmha/fmhaRunnerParams.h
+--- a/data/include/flashinfer/trtllm/fmha/fmhaRunnerParams.h
++++ b/data/include/flashinfer/trtllm/fmha/fmhaRunnerParams.h
+@@ -243,6 +243,8 @@
+   // The scratch space for each CtaKv when the multiCtasKv mode is enabled.
+   // PartialO, partialMax and partialSum will be stored to the scratch space.
+   void* multiCtasKvScratchPtr;
++  // The scratch space size in bytes. 0 (unknown) keeps the one-wave KV split rule.
++  size_t mMultiCtasKvScratchBytes;
+   // The softmax stats buffer.
+   // The softmax max/sum values will be stored to the buffer if it is not nullptr.
+   float2* softmaxStatsPtr;
+diff --git a/data/include/flashinfer/trtllm/fmha/kernelParams.h b/data/include/flashinfer/trtllm/fmha/kernelParams.h
+--- a/data/include/flashinfer/trtllm/fmha/kernelParams.h
++++ b/data/include/flashinfer/trtllm/fmha/kernelParams.h
+@@ -660,10 +660,12 @@
+     return desc;
+   }
+ 
+-  // Setup the kernel parameters.
++  // Setup the kernel parameters. totalNumCtas is the launched CTA count when it can exceed the SM
++  // count (multi-wave KV split), else 0.
+   template <class FmhaOptions_, class KernelMeta>
+   static KernelParams setKernelParams(FmhaOptions_ const& options, KernelMeta const& kernelMeta,
+-                                      int32_t maxNumCtasQ, int32_t maxNumCtasKv) {
++                                      int32_t maxNumCtasQ, int32_t maxNumCtasKv,
++                                      int32_t totalNumCtas) {
+     // Create the return struct.
+     KernelParams params;
+     // Memset the kernel parameters to 0.
+@@ -857,7 +859,10 @@
+     params.ptrAttentionSinks = options.ptrAttentionSinks;
+ 
+     // The partial buffers' pointers when the multiCtasKv mode is enabled.
+-    int64_t partialStatsBufferSize = options.mMultiProcessorCount * kernelMeta.mStepQ;
++    // Size the partial stats for every launched CTA when there are more CTAs than SMs.
++    int64_t partialStatsBufferSize =
++        static_cast<int64_t>(std::max(options.mMultiProcessorCount, totalNumCtas)) *
++        kernelMeta.mStepQ;
+     params.ptrMultiCtasKvCounter = options.multiCtasKvCounterPtr;
+     params.ptrPartialStats = reinterpret_cast<float2*>(options.multiCtasKvScratchPtr);
+     params.ptrPartialO = params.ptrPartialStats + partialStatsBufferSize;
+diff --git a/jit/attention/modules.py b/jit/attention/modules.py
+--- a/jit/attention/modules.py
++++ b/jit/attention/modules.py
+@@ -2066,7 +2066,7 @@
+     assert metainfo, f"{header_name}.h not found"
+ 
+     return gen_jit_spec(
+-        "fmha_gen",
++        "fmha_gen_pr6331",
+         [
+             jit_env.FLASHINFER_CSRC_DIR / "trtllm_fmha_kernel_launcher.cu",
+             jit_env.FLASHINFER_CSRC_DIR / "fmhaReduction.cu",
