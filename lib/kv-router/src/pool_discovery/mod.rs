@@ -10,8 +10,9 @@
 //!
 //! Only the parts that differ between modes are traits: [`PoolDirectory`],
 //! [`PoolRegistrar`], [`ReplicaDirectory`] and [`RelayAuthenticator`].
-//! Admission, the Relay's `RegisterPool` client, and the connections that
-//! carry pool state work the same in every mode, so they are concrete code.
+//! Admission and the Relay's `RegisterPool` client work the same in every
+//! mode, so they are concrete code. The state connections in [`connection`]
+//! are shown for the full picture and are subject to change.
 //!
 //! | Mode | Pool list stored in | Pools call |
 //! |---|---|---|
@@ -21,6 +22,7 @@
 //! | File | Static file (tests, first deployments) | Nothing |
 
 pub mod admission;
+pub mod connection;
 pub mod identity;
 pub mod mode;
 pub mod record;
@@ -29,6 +31,7 @@ pub mod replicas;
 pub mod watch;
 
 pub use admission::admit;
+pub use connection::{RelayDialer, RelayListener, StateConnection};
 pub use identity::{
     PeerCredentials, RelayAuthenticator, RelayIdentity, VerifiedRelayIdentity, verify,
 };
