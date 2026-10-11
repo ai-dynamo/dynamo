@@ -38,12 +38,13 @@ engine's native gRPC API and streams responses back.
 > [!NOTE]
 > **SGLang native `/generate` uses HTTP.** When the frontend's opt-in native
 > SGLang `/generate` route (`DYN_SGLANG_ENABLE_GENERATE`) sends a request, the
-> SGLang sidecar posts it as JSON to the engine's own HTTP `/generate` endpoint
-> and streams the server-sent event (SSE) response back. The sidecar enables
-> this path only when SGLang's `GetServerInfo` reports an HTTP port with
-> `incremental_streaming_output` enabled and the HTTP `/health` check passes at
-> startup; only then does the worker advertise the `sglang_generate`
-> capability. If the HTTP endpoint is unavailable at startup, the sidecar still
+> SGLang sidecar posts it as JSON to the engine's own HTTP `/generate` endpoint,
+> reads the engine's server-sent event (SSE) response, and streams the parsed
+> outputs back over the Dynamo request plane. It does not pass the raw SSE
+> stream to the caller. The sidecar enables this path only when SGLang's
+> `GetServerInfo` reports an HTTP port with `incremental_streaming_output`
+> enabled and the HTTP `/health` check passes at startup; only then does the
+> worker advertise the `sglang_generate` capability. If either condition is not met at startup, the sidecar still
 > serves ordinary gRPC traffic but does not advertise native generate. A native
 > generate request that reaches a sidecar without a ready HTTP endpoint fails,
 > and an HTTP request failure is returned to the caller. Neither case falls
