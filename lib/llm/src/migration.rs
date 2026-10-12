@@ -777,6 +777,7 @@ where
                 self.metrics
                     .inc_migration_max_seq_len_exceeded(&self.model_name);
                 self.retries_left = 0; // disable migration
+                self.release_replay_prompt_if_final();
                 return true;
             }
         }
@@ -1630,7 +1631,6 @@ mod tests {
         assert_eq!(responses, 10);
     }
 
-    /// With retries left, the prompt is replay state and must be kept.
     #[tokio::test]
     async fn test_retry_manager_keeps_prompt_while_retries_remain() {
         let (_retry_manager, prompt) = build_and_observe_prompt(MockBehavior::Success, 1).await;
@@ -1640,7 +1640,6 @@ mod tests {
         assert_eq!(*prompt, vec![1, 2, 3]);
     }
 
-    /// A retry that consumes the last attempt releases the prompt as well.
     #[tokio::test]
     async fn test_retry_manager_releases_prompt_after_last_retry() {
         let (mut retry_manager, prompt) =
@@ -2511,14 +2510,12 @@ mod tests {
 
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
 
-        // Tracked token_ids must equal exactly max_seq_len (5).
-        // The 2 tokens from the first stream were tracked (prompt 3 + gen 2 = 5).
-        // After migration the retry stream delivers remaining tokens, but the first
-        // new token would push to 6 > 5, so tracking stops and no more are appended.
-        assert_eq!(
-            retry_manager.request.token_ids.len(),
-            5,
-            "tracked token_ids should be exactly max_seq_len"
+        // The 2 tokens from the first stream were tracked (prompt 3 + gen 2 = 5). The first
+        // token of the retry stream pushes the sequence to 6 > 5, which disables migration,
+        // so no retry remains and the replay prompt is released.
+        assert!(
+            retry_manager.request.token_ids.is_empty(),
+            "replay prompt pinned after max_seq_len disabled migration"
         );
 
         // The limit was triggered once (first token of the retry stream exceeded 5).
