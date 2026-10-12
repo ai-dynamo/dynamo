@@ -15,14 +15,14 @@ from dynamo.sglang.capacity import (
     kv_event_block_size,
 )
 
-# SGLang is optional in containers that only collect the capacity tests.
-# Propagate missing dependencies within an installed SGLang instead of hiding them.
+# SGLang may be absent or partially stubbed during marker-only collection.
+# Keep import errors so the fixture still fails if a registration test runs.
+_register_import_error = None
 try:
     from dynamo.sglang import register as _register
-except ModuleNotFoundError as exc:
-    if exc.name != "sglang":
-        raise
+except ImportError as exc:
     _register = None
+    _register_import_error = exc
 
 pytestmark = [
     pytest.mark.unit,
@@ -36,8 +36,8 @@ pytestmark = [
 @pytest.fixture
 def register():
     """Provide registration code only to tests that require SGLang."""
-    if _register is None:
-        pytest.skip("SGLang is not installed")
+    if _register_import_error is not None:
+        raise _register_import_error
     return _register
 
 
