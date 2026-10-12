@@ -1289,6 +1289,10 @@ class HandlerBase(BaseGenerativeHandler):
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
         cache_salt = request_cache_salt(request)
 
+        # Raised before the try below so it reaches the client as a 4xx and
+        # does not take the fatal-error (worker shutdown) path.
+        self._check_prompt_within_max_num_tokens(processed_input, disaggregated_params)
+
         try:
             # NEW: Updated engine call to include multimodal data
             # Only pass conversation_params in affinity mode — older TRT-LLM builds'
@@ -1611,6 +1615,53 @@ class HandlerBase(BaseGenerativeHandler):
 
             # Initiate graceful shutdown
             await self._initiate_shutdown(e)
+
+    def _check_prompt_within_max_num_tokens(
+        self, processed_input: Any, disaggregated_params: Any
+    ) -> None:
+        """Reject a prompt the engine would refuse for exceeding max_num_tokens.
+
+        Mirrors the PyTorch-backend check in TRT-LLM's `LLM._check_arguments`,
+        which raises a plain `RequestError` that the frontend can only report
+        as a 500. Raising InvalidArgument here makes the frontend answer 400.
+        The conditions (backend, chunked prefill, generation-only, cp_size,
+        strict `>`) follow the engine so no request it accepts is rejected.
+        """
+        args = getattr(self.engine.llm, "args", None)
+        if getattr(args, "backend", None) != "pytorch":
+            return
+        if getattr(args, "enable_chunked_prefill", False):
+            return
+        max_num_tokens = getattr(args, "max_num_tokens", None)
+        if not max_num_tokens:
+            return
+        if (
+            disaggregated_params is not None
+            and getattr(disaggregated_params, "request_type", None) == "generation_only"
+        ):
+            return
+
+        if isinstance(processed_input, dict):
+            # Image placeholders expand inside the engine, so the token count
+            # here would undercount; leave those requests to the engine.
+            if self._request_has_images(processed_input):
+                return
+            prompt_token_ids = processed_input.get("prompt_token_ids")
+        else:
+            prompt_token_ids = processed_input
+        if prompt_token_ids is None:
+            return
+
+        parallel_config = getattr(args, "parallel_config", None)
+        cp_size = getattr(parallel_config, "cp_size", 1) or 1
+        limit = max_num_tokens * cp_size
+        prompt_len = len(prompt_token_ids)
+        if prompt_len > limit:
+            raise InvalidArgument(
+                f"This model's maximum prompt length is {limit} tokens. "
+                f"However, your prompt resulted in {prompt_len} tokens. "
+                "Please reduce the length of the messages."
+            )
 
     @staticmethod
     def _request_has_images(processed_input) -> bool:

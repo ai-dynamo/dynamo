@@ -1064,6 +1064,71 @@ class TestGenerateLocally:
         ]
         handler._initiate_shutdown.assert_not_awaited()
 
+    def _set_engine_args(self, handler, *, enable_chunked_prefill=False):
+        handler.engine.llm.args = SimpleNamespace(
+            backend="pytorch",
+            enable_chunked_prefill=enable_chunked_prefill,
+            max_num_tokens=4,
+            parallel_config=SimpleNamespace(cp_size=1),
+        )
+
+    @pytest.mark.asyncio
+    async def test_prompt_over_max_num_tokens_raises_invalid_argument(self):
+        handler = self._make_handler()
+        self._set_engine_args(handler)
+        handler.engine.llm.generate_async = MagicMock()
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3, 4, 5],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        # InvalidArgument is what makes the frontend answer 400, not 500.
+        with pytest.raises(InvalidArgument, match="maximum prompt length is 4"):
+            async for _ in handler.generate_locally(request, self._make_context()):
+                pass
+
+        handler.engine.llm.generate_async.assert_not_called()
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("token_ids", "chunked_prefill", "request_type"),
+        [
+            ([1, 2, 3, 4], False, None),
+            ([1, 2, 3, 4, 5], True, None),
+            ([1, 2, 3, 4, 5], False, "generation_only"),
+        ],
+        ids=["prompt-equal-to-limit", "chunked-prefill", "generation-only"],
+    )
+    async def test_prompt_accepted_by_engine_reaches_generate_async(
+        self, token_ids, chunked_prefill, request_type
+    ):
+        handler = self._make_handler()
+        self._set_engine_args(handler, enable_chunked_prefill=chunked_prefill)
+        if request_type is not None:
+            handler.disaggregation_mode = DisaggregationMode.DECODE
+            params = SimpleNamespace(request_type=request_type, disagg_request_id=None)
+            handler._setup_disaggregated_params_for_mode = MagicMock(
+                return_value=(params, None, {})
+            )
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result()
+        )
+
+        request = {
+            "token_ids": token_ids,
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks
+        handler.engine.llm.generate_async.assert_called_once()
+
     @pytest.mark.asyncio
     async def test_presubmit_signature_type_error_is_fatal(self):
         handler = self._make_handler()
