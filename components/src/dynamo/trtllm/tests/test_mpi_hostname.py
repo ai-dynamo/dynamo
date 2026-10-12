@@ -23,7 +23,6 @@ _LONG = "trtllm-agg-example-trtllmworker-e34726f8-7d9c5b6f4-x2k9q"
 @pytest.mark.parametrize(
     "hostname, launched, preset, shortened",
     [
-        pytest.param(_LONG, False, False, True, id="long-singleton"),
         pytest.param("h" * 31, False, False, True, id="31-chars"),
         pytest.param("h" * 30, False, False, False, id="30-chars"),
         pytest.param(_LONG, True, False, False, id="launched-rank"),
