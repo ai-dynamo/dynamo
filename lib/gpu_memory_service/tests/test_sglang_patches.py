@@ -86,19 +86,25 @@ def test_patch_static_state_for_gms_patches_weight_updater(monkeypatch):
     weight_updater = pytest.importorskip(
         "sglang.srt.managers.scheduler_components.weight_updater"
     )
+
+    def original_export(model):
+        return {"buffers": ["original"]}
+
+    def original_import(model, static_params):
+        raise AssertionError("original _import_static_state called")
+
     monkeypatch.setattr(patches, "_static_state_patched", False)
-    monkeypatch.setattr(
-        weight_updater, "_export_static_state", weight_updater._export_static_state
-    )
-    monkeypatch.setattr(
-        weight_updater, "_import_static_state", weight_updater._import_static_state
-    )
+    monkeypatch.setattr(weight_updater, "_export_static_state", original_export)
+    monkeypatch.setattr(weight_updater, "_import_static_state", original_import)
 
     patches.patch_static_state_for_gms()
 
     model = torch.nn.Linear(1, 1)
     model.register_buffer("stable", torch.zeros(1))
+    assert weight_updater._export_static_state is not original_export
+    assert weight_updater._import_static_state is not original_import
     assert weight_updater._export_static_state(model) == {"buffers": []}
+    assert weight_updater._import_static_state(model, {"buffers": []}) is None
 
 
 def _install_fake_sglang(monkeypatch):
