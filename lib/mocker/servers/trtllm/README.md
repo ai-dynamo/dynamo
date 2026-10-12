@@ -21,7 +21,7 @@ the recorder retains at most 256 accepted requests.
 ```bash
 cargo run -p dynamo-trtllm-mocker --bin dynamo-trtllm-mocker-server -- \
   --listen 127.0.0.1:50051 --model Qwen/Qwen3-0.6B --context-length 2048 \
-  --extra-engine-args '{"speedup_ratio":1000,"block_size":32}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000,"block_size":32}}'
 
 cargo run -p dynamo-trtllm-sidecar --bin dynamo-trtllm-sidecar -- \
   --grpc-endpoint http://127.0.0.1:50051 --model-path Qwen/Qwen3-0.6B
@@ -46,11 +46,11 @@ fetch rather than anywhere in this server.
 cargo run -p dynamo-trtllm-mocker --bin dynamo-trtllm-mocker-server -- \
   --listen 127.0.0.1:50051 --model Qwen/Qwen3-0.6B --context-length 2048 \
   --disaggregation-mode prefill \
-  --extra-engine-args '{"speedup_ratio":1000}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000}}'
 cargo run -p dynamo-trtllm-mocker --bin dynamo-trtllm-mocker-server -- \
   --listen 127.0.0.1:50052 --model Qwen/Qwen3-0.6B --context-length 2048 \
   --disaggregation-mode decode \
-  --extra-engine-args '{"speedup_ratio":1000}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000}}'
 
 cargo run -p dynamo-trtllm-sidecar --bin dynamo-trtllm-sidecar -- \
   --grpc-endpoint http://127.0.0.1:50051 --model-path Qwen/Qwen3-0.6B \
@@ -90,7 +90,10 @@ two legs' token accounting matches a real engine's.
 
 ## `--context-length` interacts with capacity
 
-The sidecar turns an omitted `max_tokens` into `context_length - prompt_len`.
+Explicit `max_tokens` values can be as large as 1,000,000, subject to the context
+limit. Model metadata keeps `max_output_tokens` at 32,768 so the sidecar's default
+budget stays unchanged. The sidecar turns an omitted `max_tokens` into
+`min(context_length - prompt_len, 32768)`.
 The scheduler caps that budget to the total KV-pool capacity minus the prompt
 length, then reserves through completion under `guaranteed_no_evict` without
 preemption. A prompt that leaves no room for output is rejected. Set an explicit
@@ -99,6 +102,7 @@ preemption. A prompt that leaves no room for output is rejected. Set an explicit
 ## Engine arguments
 
 `--extra-engine-args` takes inline JSON or a file path and is merged into
-`MockEngineArgs`. `engine_type` is forced to `trtllm`; passing anything else is
-an error. TensorRT-LLM requires `block_size >= 2` (default 32) and rejects
-`max_model_len` — use `--context-length` instead.
+the canonical AISimulate launch configuration. `engine.backend` defaults to `trtllm`;
+passing another backend is an error. Put scheduler settings such as `block_size`
+and `max_model_len` under `engine`. `--context-length` controls the context
+length advertised by the gRPC mock server.
