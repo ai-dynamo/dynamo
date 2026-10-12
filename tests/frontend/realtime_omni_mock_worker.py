@@ -77,6 +77,7 @@ class _MockAsyncOmni:
 
 
 async def main() -> None:
+    """Register and serve the mock realtime worker with an explicit ZMQ event plane."""
     # Pass event_plane explicitly: DYN_EVENT_PLANE alone does not stop an ambient
     # NATS_SERVER from forcing a NATS connection that retries for up to 120s.
     runtime = DistributedRuntime(
