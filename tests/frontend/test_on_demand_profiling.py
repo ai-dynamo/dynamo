@@ -1222,12 +1222,15 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
         e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"
     }
     assert [names[pid] for pid in sorted(order, key=order.get)] == [
-        "frontend · OTel spans",
-        "prefill worker W3 (not captured) · OTel spans",
-        "decode-0 · OTel spans",
+        "Request · OTel spans",
+        "Recording windows",
         "decode-0 · EngineCore (CPU)",
         "Control",
     ]
+    lanes = {e["name"]: e["args"]["process"] for e in events if e.get("cat") == "otel"}
+    assert lanes["worker.operation.prefill"] == "prefill worker W3 (not captured)"
+    assert lanes["worker.operation.decode"] == "decode-0"
+    assert lanes["kv_router.route_request"] == "frontend"
     assert [e["name"] for e in events if e.get("cat") == "kernel"] == [
         "inside_operation"
     ]
@@ -1381,9 +1384,9 @@ def test_bundle_reads_nsight_frontend_and_worker_exports(tmp_path):
         e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"
     }
     assert [names[pid] for pid in sorted(order, key=order.get)][:5] == [
-        "frontend · OTel spans",
+        "Request · OTel spans",
+        "Recording windows",
         "frontend · VLLM::EngineCore (CPU)",
-        "decode-0 · OTel spans",
         "decode-0 · VLLM::EngineCore (CPU)",
         "decode-0 · CUDA device 0 (GPU 0)",
     ]

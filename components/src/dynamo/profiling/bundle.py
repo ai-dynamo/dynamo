@@ -439,11 +439,13 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
         timeline = timelines[entry["trace_id"]] = Timeline(
             output / entry["timeline"], origin
         )
-        # Deployment flow: frontend, prefill and decode groups, each with its
-        # OTel spans first and that worker's native tracks directly below.
+        # One OTel span tree per request: worker spans stay nested under the
+        # frontend router decisions, each shifted onto its worker's clock.
         lanes = {}
         for span in spans.values():
-            worker_id, phase = router_decision(span, spans)
+            # A router decision span itself runs on the frontend.
+            parent = spans.get(span.get("parentSpanId"))
+            worker_id, phase = router_decision(parent, spans)
             lanes[span["spanId"]] = (
                 ("frontend", 0)
                 if worker_id is None
@@ -453,44 +455,39 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
                     {"prefill": 1, "decode": 2}.get(phase, 3),
                 )
             )
+        # Native tracks follow in flow order: frontend, prefill, decode.
         timeline.groups = dict(set(lanes.values()))
-        for lane, group in sorted(
-            timeline.groups.items(), key=lambda item: (item[1], item[0])
+        otel = timeline.pid(("otel",), "Request · OTel spans", sort=0)
+        recording = timeline.pid(("recording",), "Recording windows", sort=1)
+        for span in sorted(
+            spans.values(), key=lambda s: (start_end(s)[0], -start_end(s)[1])
         ):
-            timeline.pid(("otel", lane), f"{lane} · OTel spans", sort=group * 1000)
-        for span in sorted(spans.values(), key=lambda s: start_end(s)[0]):
-            worker_id = router_worker(span, spans)
             lane = lanes[span["spanId"]][0]
             start, end = start_end(span)
-            pid = timeline.pid(("otel", lane), f"{lane} · OTel spans")
             timeline.interval(
                 span["name"],
                 "otel",
                 start - offsets.get(lane, 0),
                 end - offsets.get(lane, 0),
-                pid,
-                timeline.tid(pid, "request"),
+                otel,
+                timeline.tid(otel, "spans"),
                 {
                     "span_id": span["spanId"],
+                    "process": lane,
                     "raw_start_unix_ns": start,
-                    "router_worker_id": worker_id,
+                    "router_worker_id": router_worker(
+                        spans.get(span.get("parentSpanId")), spans
+                    ),
                 },
             )
         roots = [s for s in spans.values() if s["name"] == "http-request"]
+        recorded = {}
         if "frontend" in intervals and roots:
             low, high = intervals["frontend"]
             start, end = start_end(roots[0])
             if start < high and end > low:
                 windows["frontend"].append((max(start, low), min(end, high), timeline))
-                pid = timeline.pid(("otel", "frontend"), "frontend · OTel spans")
-                timeline.interval(
-                    "frontend recording",
-                    "capture",
-                    low,
-                    high,
-                    pid,
-                    timeline.tid(pid, "native recording"),
-                )
+                recorded["frontend"] = (low, high)
         for phase in entry["phases"]:
             target = phase["target_id"]
             if phase["recording_overlap_ns"]:
@@ -502,15 +499,17 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
                         timeline,
                     )
                 )
-                pid = timeline.pid(("otel", target), f"{target} · OTel spans")
-                timeline.interval(
-                    f"{target} recording",
-                    "capture",
-                    low - offsets[target],
-                    high - offsets[target],
-                    pid,
-                    timeline.tid(pid, "native recording"),
-                )
+                recorded[target] = (low, high)
+        for target, (low, high) in recorded.items():
+            shift = offsets.get(target, 0)
+            timeline.interval(
+                f"{target} recording",
+                "capture",
+                low - shift,
+                high - shift,
+                recording,
+                timeline.tid(recording, target),
+            )
         for event in controls:
             timeline.emit(
                 {
