@@ -352,12 +352,15 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # source so we don't need to track distro package names (libvpx-dev on Debian
     # vs libvpx-devel via EPEL on RHEL/manylinux).
     # Retry googlesource (transient 503s), then fall back to the GitHub mirror.
-    ( for attempt in 1 2 3; do \
-          git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git && exit 0; \
-          if [ "$attempt" -lt 3 ]; then sleep 10; fi; \
-      done; \
-      echo "libvpx clone from googlesource failed, using GitHub mirror" >&2; \
-      git clone --depth 1 --branch ${LIBVPX_REF} https://github.com/webmproject/libvpx.git ) && \
+    for attempt in 1 2 3; do \
+        git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git && break; \
+        echo "libvpx clone attempt ${attempt}/3 failed" >&2; \
+        if [ "$attempt" -lt 3 ]; then sleep 10; fi; \
+    done; \
+    if [ ! -d libvpx ]; then \
+        echo "falling back to GitHub mirror" >&2; \
+        git clone --depth 1 --branch ${LIBVPX_REF} https://github.com/webmproject/libvpx.git; \
+    fi && \
     cd libvpx && \
     ./configure --prefix=/usr/local --enable-shared --disable-static --disable-examples --disable-unit-tests --disable-tools --disable-docs && \
     make -j$(nproc) && \
