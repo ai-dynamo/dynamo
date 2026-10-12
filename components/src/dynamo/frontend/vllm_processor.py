@@ -1143,6 +1143,7 @@ class VllmProcessor:
 
 
 def _import_parser_plugin(plugin: str) -> None:
+    """Import a parser plugin file to register a corresponding parser class"""
     try:
         module = import_plugin(plugin)
     except Exception as exc:

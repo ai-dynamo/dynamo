@@ -28,7 +28,7 @@ pytestmark = [
 
 @pytest.fixture
 def processor_module(monkeypatch):
-    # Import lazily so pytest collection does not import the processor.
+    """Import lazily so pytest collection does not import the processor."""
     module = importlib.import_module("dynamo.frontend.vllm_processor")
     # To avoid unnecessary errors in test target `EngineFactory.__init__()`,
     # clear an environment variable, which is used inside of `__init__()`.
@@ -82,6 +82,10 @@ def test_engine_factory_loads_configured_plugins(
     plugin_flags,
     expected_paths,
 ):
+    """
+    Test EngineFactory can properly handle multiple patterns of combination
+    of each plugin option and given value.
+    """
     # Return a real module object without executing plugin code or touching
     # vLLM's global parser registries.
     importer = Mock(side_effect=lambda _: ModuleType("test_parser_plugin"))
@@ -122,6 +126,10 @@ def test_engine_factory_rejects_plugin_import_failure(
     flag_name,
     failure,
 ):
+    """
+    Test EngineFactory can properly raise RuntimeError
+    when given parser plugin file has any issue.
+    """
     plugin_path = "./broken_parser.py"
     if failure is None:
         importer = Mock(return_value=failure)
