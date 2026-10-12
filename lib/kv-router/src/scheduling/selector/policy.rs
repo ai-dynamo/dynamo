@@ -577,6 +577,20 @@ mod tests {
                 Ok(0)
             }
         }
+        // Breaks equal scores toward the highest worker key, unlike the default order.
+        struct LastPicker;
+        impl WorkerPicker for LastPicker {
+            fn pick(
+                &mut self,
+                _: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                let candidates = input.candidates();
+                Ok((0..candidates.len())
+                    .max_by_key(|&row| candidates[row].worker)
+                    .unwrap())
+            }
+        }
         struct RejectAll(bool);
         impl WorkerFilter for RejectAll {
             fn keep(
@@ -607,11 +621,16 @@ mod tests {
             "filtered",
             "policy_error",
             "picker",
+            "tie",
         ] {
             let mut workers = HashMap::from([(
                 0,
                 SimpleWorkerConfig {
-                    data_parallel_size: if case == "affinity" { 4 } else { 1 },
+                    data_parallel_size: match case {
+                        "affinity" => 4,
+                        "tie" => 2,
+                        _ => 1,
+                    },
                     taints: HashSet::from(["preferred".into()]),
                     ..Default::default()
                 },
@@ -656,6 +675,12 @@ mod tests {
                     vec![],
                     Box::new(CachePicker),
                 )),
+                "tie" => Some(WorkerSelectionPolicy::new(
+                    KvRouterConfig::default(),
+                    "test",
+                    vec![Box::new(Scorer)],
+                    Box::new(LastPicker),
+                )),
                 _ => None,
             };
             let span = LifecycleTrace::frontend_request_without_session(case)
@@ -686,7 +711,11 @@ mod tests {
             }
             assert_eq!(
                 fields["dynamo.router.candidate.count"],
-                if result.is_ok() { "1" } else { "0" }
+                match case {
+                    "tie" => "2",
+                    _ if result.is_ok() => "1",
+                    _ => "0",
+                }
             );
             assert_eq!(
                 fields["dynamo.router.candidate.filtered.policy"],
@@ -698,6 +727,11 @@ mod tests {
             }
             if case == "overloaded" {
                 assert_eq!(fields["dynamo.router.candidate.filtered.overloaded"], "1");
+            }
+            if case == "tie" {
+                assert_eq!(fields["dynamo.router.selected.dp.rank"], "1");
+                assert_eq!(fields["dynamo.router.best.dp.rank"], "1");
+                assert_eq!(fields["dynamo.router.best.margin"], "0.0");
             }
             if matches!(case, "single" | "picker") {
                 let detail: serde_json::Value =

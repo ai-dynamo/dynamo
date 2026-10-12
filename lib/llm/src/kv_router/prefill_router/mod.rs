@@ -22,6 +22,7 @@ use dynamo_runtime::{
         ServerStreamingEngine, SingleIn, async_trait, propagate_first_response_guard,
     },
     protocols::{EndpointId, annotated::Annotated},
+    telemetry::{LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace},
 };
 use futures::stream::{self, StreamExt};
 
@@ -714,7 +715,8 @@ impl
 }
 
 /// Prefill must survive client cancellation once decode needs its KV transfer.
-/// Copy request identity and metadata, but keep a separate cancellation controller.
+/// Copy request identity, metadata, and lifecycle trace, but keep a separate
+/// cancellation controller.
 fn independent_prefill_context(
     request: PreprocessedRequest,
     source: &Context<()>,
@@ -722,6 +724,12 @@ fn independent_prefill_context(
     let mut prefill =
         Context::with_id_and_metadata(request, source.id().to_string(), source.metadata().clone());
     propagate_first_response_guard(source, &mut prefill)?;
+    if let Some(lifecycle) = source
+        .get_optional::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
+        .map_err(anyhow::Error::msg)?
+    {
+        prefill.insert(LIFECYCLE_TRACE_CONTEXT_KEY, lifecycle.as_ref().clone());
+    }
     Ok(prefill)
 }
 
@@ -1144,9 +1152,17 @@ mod tests {
             let request = query_only_request();
             let mut source = Context::new(());
             source.insert_metadata("traceparent", "test-trace");
+            let lifecycle = LifecycleTrace::new(true);
+            source.insert(LIFECYCLE_TRACE_CONTEXT_KEY, lifecycle.clone());
             let prefill = independent_prefill_context(request, &source).unwrap();
             assert_eq!(prefill.id(), source.id());
             assert_eq!(prefill.metadata(), source.metadata());
+            assert_eq!(
+                *prefill
+                    .get::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
+                    .unwrap(),
+                lifecycle
+            );
 
             if kill {
                 source.context().kill();

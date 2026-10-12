@@ -35,6 +35,7 @@ use dynamo_runtime::pipeline::{
     network::egress::route_span::{RouteTraceContext, attach_route_trace_context, error_type_name},
 };
 use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_runtime::telemetry::{LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace};
 
 /// Accessors the migration RetryManager needs from a response chunk.
 /// `token_ids` lets it replay already-delivered tokens; `worker_trace_link`
@@ -284,6 +285,9 @@ where
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(Error::msg)?
             .map(|session_id| session_id.as_ref().clone());
+        let lifecycle = context
+            .get_optional::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
+            .map_err(Error::msg)?;
         let retry_manager = RetryManager::build(
             engine_ctx,
             context.metadata().clone(),
@@ -294,6 +298,7 @@ where
             self.model_name.clone(),
             self.metrics.clone(),
             session_affinity,
+            lifecycle,
         )
         .await?;
         let response_stream = stream::unfold(retry_manager, move |mut retry_manager| async move {
@@ -329,6 +334,7 @@ where
     metadata: BTreeMap<String, String>,
     request: PreprocessedRequest,
     session_affinity: Option<SessionAffinityId>,
+    lifecycle: Option<Arc<LifecycleTrace>>,
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     next_stream: Option<ManyOut<Annotated<Resp>>>,
     retries_left: u64,
@@ -379,6 +385,7 @@ where
         model_name: Arc<String>,
         metrics: Arc<Metrics>,
         session_affinity: Option<SessionAffinityId>,
+        lifecycle: Option<Arc<LifecycleTrace>>,
     ) -> Result<Self> {
         // TODO: prompt_embeds take precedence over replayed token_ids. Disable migration for
         // embedding prompts until a retry can represent an embedding-based continuation.
@@ -433,6 +440,7 @@ where
             metadata,
             request: preprocessed_request,
             session_affinity,
+            lifecycle,
             next_generate: next,
             next_stream: None,
             retries_left: u64::from(retries_left) + 1, // +1 to account for the initial attempt
@@ -569,6 +577,9 @@ where
             );
             if let Some(session_affinity) = self.session_affinity.as_ref() {
                 request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
+            }
+            if let Some(lifecycle) = self.lifecycle.as_ref() {
+                request.insert(LIFECYCLE_TRACE_CONTEXT_KEY, lifecycle.as_ref().clone());
             }
             let attempt_context = request.context();
             self.context.link_child(attempt_context.clone());
@@ -1224,6 +1235,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1348,6 +1360,10 @@ mod tests {
                     .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
                     .expect("session affinity context missing after migration wrapper");
                 assert_eq!(actual.as_str(), "session-123");
+                let lifecycle = request
+                    .get::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
+                    .expect("lifecycle trace missing after migration wrapper");
+                assert!(lifecycle.is_enabled());
             }
             let (preprocessed_request, context) = request.transfer(());
 
@@ -1791,6 +1807,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1833,6 +1850,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
+            None,
             None,
         )
         .await
@@ -1914,7 +1932,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_migration_preserves_session_affinity_across_retry() {
+    async fn test_migration_preserves_session_affinity_and_lifecycle_across_retry() {
         let context_id = uuid::Uuid::new_v4().to_string();
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::FailThenSuccessWithAffinity,
@@ -1929,6 +1947,7 @@ mod tests {
             SESSION_AFFINITY_CONTEXT_KEY,
             SessionAffinityId::new("session-123"),
         );
+        request.insert(LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace::new(true));
 
         let migration = Migration::new(1, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
         let mut stream = migration.generate(request, mock_engine).await.unwrap();
@@ -2017,6 +2036,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -2078,6 +2098,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
             None,
         )
         .await
@@ -2172,6 +2193,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            None,
         )
         .await;
 
@@ -2221,6 +2243,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
             None,
         ) // 3 retries
         .await
@@ -2290,6 +2313,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
             None,
         ) // 3 retries
         .await
@@ -2373,6 +2397,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            None,
         )
         .await;
 
@@ -2425,6 +2450,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
             None,
         )
         .await;
@@ -2480,6 +2506,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
             None,
         )
         .await;
@@ -2561,6 +2588,7 @@ mod tests {
                 None,
                 Arc::new(TEST_MODEL.to_string()),
                 metrics.clone(),
+                None,
                 None,
             )
             .await
@@ -2689,6 +2717,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -2768,6 +2797,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -2841,6 +2871,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -2905,6 +2936,7 @@ mod tests {
             Some(2), // prompt(3) > max_seq_len(2) → migration disabled at build time
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
             None,
         )
         .await
@@ -2987,6 +3019,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics,
+            None,
             None,
         )
         .await
@@ -3103,6 +3136,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics,
             None,
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3208,6 +3242,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
+            None,
             None,
         )
         .await
@@ -3350,6 +3385,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
+            None,
             None,
         )
         .await
@@ -3499,6 +3535,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
             None,
         )
         .await
@@ -3682,6 +3719,7 @@ mod tests {
                     None,
                     Arc::new(TEST_MODEL.to_string()),
                     Arc::new(Metrics::new()),
+                    None,
                     None,
                 )
                 .await
@@ -3894,6 +3932,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics,
+            None,
             None,
         )
         .await
