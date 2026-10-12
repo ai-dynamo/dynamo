@@ -812,7 +812,9 @@ async def test_kimi_k3_dcp_defers_automatic_backend_until_engine_resolution(
         with pytest.raises(ValueError, match="decode attention backend 'fa3'"):
             config.use_resolved_server_args(engine_args)
     else:
-        assert config.use_resolved_server_args(engine_args) is engine_args
+        resolved = config.use_resolved_server_args(engine_args)
+        assert resolved.decode_attention_backend == "cutedsl_mla"
+        assert config.server_args is resolved
 
 
 def _raise_runtime_error(*_):
