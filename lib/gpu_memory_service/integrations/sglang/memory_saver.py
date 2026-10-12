@@ -105,9 +105,8 @@ class GMSMemorySaverImpl:
         **backup_options,
     ):
         """Use the tag's RW pool and publish pending weights after clean exit."""
-        # torch_memory_saver 0.0.10 forwards enable_disk_backup and
-        # cpu_backup_backend; accept newer keywords but reject any enabled
-        # backup because GMS owns the allocation and never offloads it.
+        # Accept torch_memory_saver 0.0.10 backup keywords but reject any enabled
+        # backup: GMS owns the allocation and never offloads it.
         enabled = [
             name
             for name, value in (

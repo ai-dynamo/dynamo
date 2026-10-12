@@ -219,9 +219,8 @@ def patch_static_state_for_gms() -> None:
                 weight_updater as _mixin,
             )
         except ImportError:
-            # Fallback for older SGLang that still ships
-            # scheduler_update_weights_mixin; remove once no supported image
-            # pins such a release.
+            # Older SGLang ships scheduler_update_weights_mixin; remove once
+            # no supported image pins such a release.
             from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
 
         def _export_noop(model):
