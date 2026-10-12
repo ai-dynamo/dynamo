@@ -29,6 +29,7 @@ from dynamo.common.utils.nixl_telemetry import (
     derive_nixl_prometheus_port,
     nixl_prometheus_base_port,
 )
+from dynamo.sglang.capacity import sglang_dp_layout
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +60,9 @@ def _node_local_rank_count(server_args: Any, *, dp_rank: int | None) -> int:
     """
     pp_size_per_node, tp_size_per_node = _node_local_launch_shape(server_args)
     ranks = pp_size_per_node * tp_size_per_node
-    if dp_rank is not None and not getattr(server_args, "enable_dp_attention", False):
-        ranks *= max(getattr(server_args, "dp_size", 1) or 1, 1)
+    dp_size, enable_dp_attention = sglang_dp_layout(server_args)
+    if dp_rank is not None and not enable_dp_attention:
+        ranks *= dp_size
 
     return ranks
 
@@ -94,7 +96,7 @@ def _node_local_rank(
     rank = (pp_rank % pp_size_per_node) * tp_size_per_node + (
         tp_rank % tp_size_per_node
     )
-    if dp_rank is not None and not getattr(server_args, "enable_dp_attention", False):
+    if dp_rank is not None and not sglang_dp_layout(server_args)[1]:
         rank += dp_rank * pp_size_per_node * tp_size_per_node
 
     return rank

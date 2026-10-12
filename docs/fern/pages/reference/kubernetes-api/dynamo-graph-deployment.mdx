@@ -48,6 +48,101 @@ spec:
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
 ```
 
+## Grove update strategy
+
+Set `metadata.annotations["nvidia.com/grove-update-strategy"]` on the DGD to select the generated Grove `PodCliqueSet` update strategy. Accepted values are `Coherent`, `RollingRecreate`, and `OnDelete`. This annotation belongs to the DGD's metadata; `spec.annotations` propagates annotations to child resources instead.
+
+Grove uses `RollingRecreate` unless this annotation explicitly selects another strategy. This applies to aggregated, disaggregated, and LPX deployments, regardless of operator origin version. Neither the deprecated component `minAvailable` nor a native minimum in `providerOverride` enables Coherent.
+
+To opt into Coherent, add:
+
+```yaml
+metadata:
+  annotations:
+    nvidia.com/grove-update-strategy: Coherent
+```
+
+Starting with Dynamo 1.6.0, new Grove-backed DGDs that omit all deprecated component minima default provider-native `minAvailable` to `1`. Existing DGDs retain their persisted legacy fields. This availability defaulting is independent of the rollout strategy: both forms use RollingRecreate without an annotation. Mixing the old and native minimum forms anywhere in the DGD is rejected; migrate all components in one update. An explicit strategy annotation applies to both PodCliqueSets in a hybrid graph.
+
+Grove v0.1.0-alpha.14 or later and its matching CRDs are required for Coherent updates. Upgrade externally managed Grove controllers and CRDs together. The operator writes the requested strategy and reports API validation or admission rejections through its normal failure condition and reconciliation retry path; it does not substitute a different strategy.
+
+Coherent recovery can stall when already-unavailable replicas exhaust the disruption budget, as tracked in [Grove issue #873](https://github.com/ai-dynamo/grove/issues/873). Review this limitation before opting in. Changing or removing the strategy annotation cannot unblock a stalled active update. See [Recover from a stalled Coherent update](../../kubernetes/model-deployment/deploy-with-dgd.md#recover-from-a-stalled-coherent-update) for the DGD recreation procedure and the limitations of pod deletion workarounds.
+
+Coherent coordinates compatible replacement capacity within one PodCliqueSet (PCS). Grove selects components whose rendered pod templates change and gang-schedules a minimum viable unit of their replacements. Separate PCSes, including the ordinary and LPX PCSes in a hybrid graph, roll independently.
+
+Dynamo includes a shared worker-generation hash in rendered worker templates. A pod-template edit to one worker can therefore roll every worker component, including workers whose authored pod template did not change. Non-worker components such as the frontend participate when their own rendered template changes. Coherent does not enforce traffic isolation between versions; Dynamo's discovery and routing must keep requests within compatible worker generations.
+
+### Coherent capacity and disruption
+
+| Setting | Meaning under Coherent |
+|---|---|
+| `minAvailable` | Size of this component's minimum viable unit (MVU): the number of pods or complete scaling-group replicas replaced together in the coordinated unit. It also retains its gang scheduling and availability role. |
+| `rollingUpdate.maxUnavailable` | Per-component ceiling on unavailable pods or scaling-group replicas during the rollout. It must be at least `minAvailable` and defaults to that value. Existing unavailable capacity consumes the budget. |
+
+Grove alpha.14 has no surge support: it removes old capacity before replacements become available. A larger `minAvailable` therefore requires a larger disruption budget; it is not a promise that this many replicas will remain serving throughout the update. Increasing `maxUnavailable` permits more unavailable capacity without reducing the MVU size. The budget gates further rollout deletions; unrelated failures can independently reduce availability.
+
+For a component with eight replicas:
+
+| `minAvailable` | `maxUnavailable` | Capacity implication |
+|---|---|---|
+| `1` | `1` (default) | The minimum replacement unit contains one replica, with a one-replica disruption budget. |
+| `4` | `4` (default) | A coordinated unit can remove four replicas before replacements become available, temporarily losing half the component's capacity. |
+| `4` | `6` | The minimum unit still contains four replicas; the larger budget permits up to six unavailable replicas. |
+
+Grove can roll replicas beyond the minimum unit through additional tail steps. Progress depends on scheduling and remaining availability budget; it does not always wait for every replica in the previous batch to become Ready. Coherent does not guarantee an exact P/D ratio at every instant or zero downtime. For the detailed step plan, see [Grove's coherent update design](https://github.com/ai-dynamo/grove/blob/v0.1.0-alpha.14/docs/proposals/393-coherent-rolling-updates/README.md).
+
+<Warning>
+  If `minAvailable == replicas`, the minimum unit can take the entire component offline. This also applies to a single-replica worker or frontend whose template changes. Unchanged frontends are not co-rolled solely because workers change. Replica counts alone do not establish whether the remaining workers can meet your latency and throughput service-level objectives (SLOs). Admission warns on creation and relevant rollout edits when an explicitly selected Coherent minimum could take the entire component offline. Replica-only edits warn when they introduce this risk; unrelated metadata updates and replica-only edits that leave existing risk unchanged do not repeat the warning. Pod-template edits still warn before a rollout that could take the component offline.
+</Warning>
+
+For new DGDs, use the provider-native `minAvailable: 1` default unless the application requires a larger viable unit. Keep the disruption budget at its default until the remaining capacity has been validated under representative traffic. Size spare serving capacity before a rollout; adding a larger budget does not add surge capacity. `minAvailable` is immutable after DGD creation, so review it before creating a deployment or opting an existing deployment into Coherent.
+
+Grove rejects replica changes throughout an active Coherent rollout. Before changing replicas, the Dynamo operator synchronizes the desired PodCliqueSet configuration and, after a write, waits for its cache to observe that configuration. For Coherent, it also waits until Grove acknowledges the current configuration (`status.observedGeneration` matches `metadata.generation`) and any active rollout completes. Missing progress or completed progress from an older generation does not acknowledge a new configuration. Initial configuration acknowledgement does not require pods to be Ready or LPX scheduler requests to exist. During this wait the operator continues observing workload readiness and component status and reports `ScalingDeferred` when a replica change is pending. PodCliqueSet watch events resume scaling. RollingRecreate rollouts do not block replica changes once the configuration is observed, even if Grove's observed generation lags. Unexpected API or admission failures use the normal reconciliation retry path and report `Failed` with `Ready=False` while the failure persists. A rejected scale write caused by lag between the Grove and Dynamo caches can therefore briefly report a failure until a retry succeeds. External scalers writing directly to Grove's scale subresources still receive the admission rejection; do not rely on autoscaling to supply capacity during an active Coherent rollout.
+
+For LPX workloads with explicit replica counts, scheduling deadline cleanup also waits until capacity can be reduced before deleting expired pipeline requests. Workloads with omitted replica counts retain external capacity ownership, and their expired requests can still be cleaned up during a rollout.
+
+For RollingRecreate, `maxUnavailable` defaults to `1`; rolling update configuration is rejected with OnDelete. See [Grove's defaulting implementation](https://github.com/ai-dynamo/grove/blob/v0.1.0-alpha.14/operator/internal/webhook/admission/pcs/defaulting/podcliqueset.go).
+
+DGD does not currently expose `maxUnavailable`. The Dynamo operator leaves it unset in generated PCS templates, so Grove supplies the defaults above. Upgrading Grove alone does not add this field to the DGD API.
+
+<Note>
+  An operator upgrade does not opt any DGD into Coherent. To opt an existing DGD into Coherent, set `metadata.annotations["nvidia.com/grove-update-strategy"]: Coherent`. A strategy-only change leaves pod templates and worker hashes unchanged and does not itself trigger a workload rollout. All strategy transitions, including annotation changes or removal, wait until an active Grove update finishes (`status.updateProgress.updateEndedAt` is set). For LPX deployments, editing the annotation also changes the LPX input revision and causes child reconciliation. See the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#v160).
+</Note>
+
+<Note>
+  Adding, removing, or migrating a minimum availability field does not select Coherent. Removing the Coherent annotation returns to RollingRecreate after any active Grove update finishes.
+</Note>
+
+### Configure native minimum availability
+
+Set an explicit minimum at component scope. Dynamo resolves the target when omitted, so generated PCS names are not required. An omitted minimum resolves to `1` during rendering; admission leaves an absent `providerOverride` absent and does not add availability fields to a topology-only override.
+
+| Component shape | Provider target | Native minimum path inside `value` |
+|---|---|---|
+| Standalone single-node component | `PodCliqueTemplateSpec` | `spec.minAvailable` |
+| Multinode, inter-pod GPU memory service, or forced scaling group | `PodCliqueScalingGroupConfig` | `minAvailable` |
+| LPX component with a conductor role | `PodCliqueScalingGroupConfig` | `minAvailable` |
+
+A standalone prefill component can specify:
+
+```yaml
+providerOverride:
+  apiVersion: grove.io/v1alpha1
+  value:
+    spec:
+      minAvailable: 1
+```
+
+For a scaling-group component, use `value.minAvailable: 1` instead. A shared LPX draft has no independent availability override; configure its target component. Root and multinode role overrides remain topology-only. LPX topology overrides remain unsupported.
+
+The effective minimum must be a positive integer and fit a positive replica count; ordinary Grove components may scale to zero without clearing their minimum. With omitted LPX replicas, the minimum seeds the initial scaling-group capacity.
+
+Admission returns a deprecation warning when a component introduces or changes the old `minAvailable` field, independently of the rollout strategy. Updates that leave the legacy value unchanged, including replica-only and metadata edits, do not repeat the warning. To migrate an existing DGD, remove every deprecated component `minAvailable` and put the same values in the corresponding component provider overrides in one update, including defaulted values on frontends and other components. Admission enforces effective-value immutability across both forms. Migration leaves the rollout strategy unchanged; select Coherent separately with the annotation. Moving the same values leaves worker hashes and rendered pod templates unchanged; subsequent workload updates use the selected strategy. Review the disruption implications before opting in.
+
+A shared LPX draft has a legacy minimum of `1` but no independent scaling group. Remove that legacy field without adding a draft override; its effective default remains `1`, and the target component owns the native workload minimum.
+
+Both fields retain their native hub/spoke conversion mapping. Converting between `v1alpha1` and `v1beta1` preserves the chosen form and does not migrate a deployment or select a strategy.
+
 ## Spec reference
 
 <ParamField path="components" type="[]DynamoComponentDeploymentSharedSpec">
@@ -261,7 +356,7 @@ A sparse provider-native fragment, supported only for Grove-backed DGD resources
 </ParamField>
 
 <ParamField path="value" type="object" required={true}>
-  Sparse fragment of the target schema. `PodCliqueSet` accepts only `spec.template.topologyConstraint`; `PodCliqueTemplateSpec` and `PodCliqueScalingGroupConfig` accept only `topologyConstraint`. Other fields are rejected.
+  Sparse fragment of the target schema. `PodCliqueSet` accepts only `spec.template.topologyConstraint`; embedded targets accept `topologyConstraint`. At component scope, `PodCliqueTemplateSpec` also accepts `spec.minAvailable`, and `PodCliqueScalingGroupConfig` accepts `minAvailable`. Root and role availability overrides and other fields are rejected. See [Configure native minimum availability](#configure-native-minimum-availability).
 </ParamField>
 
 ### ComponentReplicaStatus
