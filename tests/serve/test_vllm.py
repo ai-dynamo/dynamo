@@ -78,6 +78,9 @@ class VLLMConfig(EngineConfig):
     """Configuration for vLLM test scenarios"""
 
     stragglers: list[str] = field(default_factory=lambda: ["VLLM:EngineCore"])
+    # Env vars the launch script reads as extra listen ports. The fixture
+    # reserves one free port per name so fixed defaults cannot collide.
+    dynamic_port_env: list[str] = field(default_factory=list)
 
 
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
@@ -294,6 +297,9 @@ vllm_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         env={"LMCACHE_L1_SIZE_GB": "8"},
+        # `lmcache server` exits if its ZMQ or HTTP port (default 5555/8080)
+        # is taken.
+        dynamic_port_env=["LMCACHE_PORT", "LMCACHE_HTTP_PORT"],
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -838,19 +844,18 @@ vllm_configs = {
 def vllm_config_test(request):
     """Fixture that provides different vLLM test configurations"""
     config = vllm_configs[request.param]
-    if config.script_name != "agg_lmcache_mp.sh":
+    if not config.dynamic_port_env:
         yield config
         return
 
-    # `lmcache server` exits if its ZMQ or HTTP port (default 5555/8080) is
-    # taken, so hold both until the deployment is torn down.
-    with reserved_ports(2, DynamoPortRange.SERVE.value) as (zmq_port, http_port):
+    # Hold the ports until the deployment is torn down.
+    names = config.dynamic_port_env
+    with reserved_ports(len(names), DynamoPortRange.SERVE.value) as ports:
         yield dataclasses.replace(
             config,
             env={
                 **config.env,
-                "LMCACHE_PORT": str(zmq_port),
-                "LMCACHE_HTTP_PORT": str(http_port),
+                **{name: str(port) for name, port in zip(names, ports)},
             },
         )
 
