@@ -142,6 +142,30 @@ def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> Non
         assert_arch_tag(wheel, target_arch)
 
 
+GIT_COMMIT_RE = re.compile(r'^__git_commit__ = "([^"]*)"$', re.MULTILINE)
+
+
+def assert_git_commit(wheelhouse: Path, expected: str) -> None:
+    """Every dynamo/*/_version.py in the ai-dynamo wheel records the expected commit."""
+    ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
+    found: dict[str, str | None] = {}
+    with zipfile.ZipFile(ai_dynamo) as archive:
+        for name in archive.namelist():
+            if re.fullmatch(r"dynamo/[^/]+/_version\.py", name):
+                match = GIT_COMMIT_RE.search(archive.read(name).decode())
+                found[name] = match.group(1) if match else None
+    if not found:
+        raise AssertionError(f"{ai_dynamo.name} contains no dynamo/*/_version.py")
+    wrong = {name: value for name, value in found.items() if value != expected}
+    if wrong:
+        details = "\n".join(
+            f"  {name}: {value!r}" for name, value in sorted(wrong.items())
+        )
+        raise AssertionError(
+            f"{ai_dynamo.name} does not record __git_commit__ = {expected!r}:\n{details}"
+        )
+
+
 def assert_no_bundled_libraries(wheelhouse: Path) -> None:
     """The runtime wheel must not vendor shared libraries.
 

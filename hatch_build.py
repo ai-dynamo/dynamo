@@ -2,6 +2,7 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 import os
+import re
 import subprocess
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
@@ -31,6 +32,37 @@ def get_components():
     return components
 
 
+# CI passes the full source commit explicitly because the Docker build context
+# excludes .git (see .dockerignore), so `git rev-parse` cannot work there.
+GIT_COMMIT_ENV = "DYNAMO_GIT_COMMIT"
+_FULL_SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def resolve_git_commit(root):
+    """
+    Return the full source commit SHA: DYNAMO_GIT_COMMIT if set, else
+    `git rev-parse HEAD` in root, else "".
+    """
+    explicit = os.environ.get(GIT_COMMIT_ENV, "").strip().lower()
+    if explicit:
+        if not _FULL_SHA.fullmatch(explicit):
+            raise ValueError(
+                f"{GIT_COMMIT_ENV}={explicit!r} is not a full 40-character git commit SHA"
+            )
+        return explicit
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+
+
 class VersionWriterHook(BuildHookInterface):
     """
     A Hatch build hook to write the project version to a file.
@@ -56,7 +88,17 @@ class VersionWriterHook(BuildHookInterface):
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
 
-        version_content = f'#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n#  SPDX-License-Identifier: Apache-2.0\n\n# This file is auto-generated at build time\n__version__ = "{full_version}"\n'
+        git_commit = resolve_git_commit(self.root)
+        if not git_commit:
+            message = (
+                f"Could not determine the source commit: set {GIT_COMMIT_ENV} or "
+                'build from a git checkout. Writing __git_commit__ = "".'
+            )
+            if os.environ.get("CI", "").strip().lower() in ("1", "true", "yes"):
+                raise RuntimeError(message)
+            self.app.display_warning(message)
+
+        version_content = f'#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n#  SPDX-License-Identifier: Apache-2.0\n\n# This file is auto-generated at build time\n__version__ = "{full_version}"\n__git_commit__ = "{git_commit}"\n'
 
         for component in get_components():
             version_file_path = os.path.join(component, "_version.py")

@@ -591,7 +591,7 @@ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml 
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
+# Build ai-dynamo-runtime (maturin) wheel
 ARG USE_SCCACHE
 ARG TARGETARCH
 ARG ENABLE_MEDIA_FFMPEG
@@ -608,8 +608,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
     mkdir -p ${CARGO_TARGET_DIR} && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    cd /opt/dynamo && \
-    uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
 {% if framework == "sglang" and device == "xpu" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx" --out /opt/dynamo/dist && \
 {% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
@@ -648,6 +646,17 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx" --out /opt/dynamo/dist; \
     fi && \
 {% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+
+# Build ai-dynamo (pure Python) wheel. The build context excludes .git, so pass
+# the source commit to hatch_build.py, which records it as __git_commit__.
+# Declared after the maturin build so a new commit does not invalidate the Rust
+# build layer.
+ARG DYNAMO_COMMIT_SHA
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    cd /opt/dynamo && \
+    DYNAMO_GIT_COMMIT="${DYNAMO_COMMIT_SHA}" uv build --wheel --out-dir /opt/dynamo/dist
 
 # Complete the root Cargo workspace after the expensive runtime build. Planner
 # wheel metadata and optional source archival both validate every member.
