@@ -12,8 +12,9 @@ target during that target's recording interval, or when the plan named its
 trace ID. Worker spans are assigned through router decisions
 (`kv_router.route_request` worker_id = `handle_payload` instance_id) and joined
 to captured processes by the PID in `dynamo.process.epoch`. Each request gets
-its own Perfetto timeline: its lifecycle spans plus the native events of its
-assigned workers that overlap its operation spans. Engine work inside an
+its own Perfetto timeline: its lifecycle span tree plus the native events of its
+assigned workers that overlap its operation spans. The frontend recording
+window and control events are drawn; its detailed host trace is listed only. Engine work inside an
 operation span is shared batch work and is not attributed per kernel.
 """
 
@@ -480,13 +481,14 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
                     ),
                 },
             )
-        roots = [s for s in spans.values() if s["name"] == "http-request"]
+        # The frontend recording window and control events stay visible; only
+        # its detailed host trace is left off the timeline (see below).
         recorded = {}
+        roots = [s for s in spans.values() if s["name"] == "http-request"]
         if "frontend" in intervals and roots:
-            low, high = intervals["frontend"]
             start, end = start_end(roots[0])
+            low, high = intervals["frontend"]
             if start < high and end > low:
-                windows["frontend"].append((max(start, low), min(end, high), timeline))
                 recorded["frontend"] = (low, high)
         for phase in entry["phases"]:
             target = phase["target_id"]
@@ -532,6 +534,14 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
             None,
         )
         reader = NATIVE_READERS.get(collector)
+        if target == "frontend":
+            # The detailed frontend host trace is captured and listed but not
+            # drawn until it carries CPU samples or per-request ranges.
+            native[target] = {
+                "status": "excluded",
+                "reason": "frontend host trace detail",
+            }
+            continue
         if reader is None or item["status"] != "verified":
             native[target] = {
                 "status": "pending" if reader is None else "omitted",

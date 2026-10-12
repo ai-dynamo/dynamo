@@ -148,8 +148,10 @@ and joined to the captured process by the PID prefix of `dynamo.process.epoch`;
 a PID claimed by more than one target stays unmapped. Spans and native events
 share the coordinator clock using each target's measured offset. Engine work
 inside an operation span is shared batch work and is not attributed per kernel.
-Kineto traces are included in the timeline; Nsight targets are listed as
-pending until its reader is added.
+Kineto traces and Nsight SQLite exports of worker targets are drawn on each
+request timeline. For the frontend, the timeline shows its spans, recording
+window and control events; its detailed Nsight host trace is validated and listed
+in the bundle but not drawn yet.
 
 ## Callable API and hosting
 

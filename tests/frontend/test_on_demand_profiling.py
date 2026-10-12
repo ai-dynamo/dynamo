@@ -1241,7 +1241,7 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
     assert all(isinstance(e.get("tid", 0), int) for e in events)
 
 
-def test_bundle_reads_nsight_frontend_and_worker_exports(tmp_path):
+def test_bundle_reads_nsight_worker_exports(tmp_path):
     base, clock = 1_700_000_000_000_000_000, 5_000_000_000
     # Nsight event timestamps are relative to the session start (utcEpochNs).
 
@@ -1383,10 +1383,9 @@ def test_bundle_reads_nsight_frontend_and_worker_exports(tmp_path):
     names = {
         e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"
     }
-    assert [names[pid] for pid in sorted(order, key=order.get)][:5] == [
+    assert [names[pid] for pid in sorted(order, key=order.get)] == [
         "Request · OTel spans",
         "Recording windows",
-        "frontend · VLLM::EngineCore (CPU)",
         "decode-0 · VLLM::EngineCore (CPU)",
         "decode-0 · CUDA device 0 (GPU 0)",
     ]
@@ -1395,10 +1394,10 @@ def test_bundle_reads_nsight_frontend_and_worker_exports(tmp_path):
         for e in events
         if e.get("cat") in ("osrt", "pytorch", "kernel")
     )
-    # The kernel before the decode operation is excluded; the frontend
-    # OS-runtime call is included within the request's lifetime.
-    assert native == [
-        ("kernel", "gemm"),
-        ("osrt", "epoll_wait"),
-        ("pytorch", "forward"),
-    ]
+    # The kernel before the decode operation is excluded, and the frontend
+    # host trace is listed but not drawn.
+    assert native == [("kernel", "gemm"), ("pytorch", "forward")]
+    summary = json.loads((tmp_path / "out/bundle.json").read_text())
+    assert summary["coverage"]["native_timeline"]["frontend"]["status"] == "excluded"
+    recordings = {e["name"] for e in events if e.get("cat") == "capture"}
+    assert recordings == {"frontend recording", "decode-0 recording"}
