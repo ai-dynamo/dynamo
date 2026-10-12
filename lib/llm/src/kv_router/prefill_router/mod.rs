@@ -16,7 +16,7 @@ use dynamo_kv_router::{
     config::RouterConfigOverride, protocols::RoutingConstraints,
 };
 use dynamo_runtime::{
-    error::{ErrorType, match_error_chain},
+    error::{DynamoError, ErrorType, match_error_chain},
     pipeline::{
         AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream, RouterMode,
         ServerStreamingEngine, SingleIn, async_trait, propagate_first_response_guard,
@@ -320,6 +320,19 @@ impl
         // remains gated by the registered worker topology before the request reaches this stage.
         if self.lifecycle_state() != PrefillLifecycleState::Active {
             return next.generate(context.map(|_| req)).await;
+        }
+
+        if req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.lora_resolution_version)
+            .is_some()
+        {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message("runtime_lora_disaggregated_unsupported")
+                .build()
+                .into());
         }
 
         // Query-only requests are owned by the decode RoutingHost. In particular,
