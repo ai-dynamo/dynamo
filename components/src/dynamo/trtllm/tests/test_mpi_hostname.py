@@ -56,6 +56,8 @@ def test_importing_dynamo_trtllm_sets_short_pmix_hostname():
         "class _U:\n"
         f"    nodename = {_LONG!r}\n"
         "os.uname = lambda: _U()\n"
+        # Drop any name a startup .pth hook (the arm64 image) already set.
+        "os.environ.pop('PMIX_HOSTNAME', None)\n"
         "import dynamo.trtllm\n"
         "print(os.environ.get('PMIX_HOSTNAME', ''))\n"
     )
