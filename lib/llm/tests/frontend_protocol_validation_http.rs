@@ -970,6 +970,7 @@ async fn responses_reject_empty_input_and_required_tool_choice_without_tools() {
     .await;
 }
 
+/// Returns a validation error for empty tools before a request reaches the engine.
 #[tokio::test]
 #[serial]
 async fn chat_completions_reject_empty_tools() {
