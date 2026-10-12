@@ -223,3 +223,33 @@ def test_unreadable_existing_version_file_raises(
 
     with pytest.raises(IsADirectoryError):
         read_existing(components)
+
+
+def test_ignores_commit_of_enclosing_checkout(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Models an unpacked source tree placed inside an unrelated checkout.
+    outer = tree.parent
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(outer.parent))
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run([*git, "init", "-q"], cwd=outer, check=True)
+    subprocess.run(
+        [
+            *git,
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ],
+        cwd=outer,
+        check=True,
+    )
+
+    app = _FakeApp()
+    _load_hook(tree, monkeypatch, app).initialize("standard", {})
+
+    assert {commit for _, commit in _read_versions(tree).values()} == {""}
+    assert len(app.warnings) == 1

@@ -41,7 +41,7 @@ _FULL_SHA = re.compile(r"[0-9a-f]{40}")
 def resolve_git_commit(root):
     """
     Return the full source commit SHA: DYNAMO_GIT_COMMIT if set, else
-    `git rev-parse HEAD` in root, else "".
+    `git rev-parse HEAD` when root is the top of a git checkout, else "".
     """
     explicit = os.environ.get(GIT_COMMIT_ENV, "").strip().lower()
     if explicit:
@@ -52,15 +52,20 @@ def resolve_git_commit(root):
         return explicit
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "rev-parse", "--show-toplevel", "HEAD"],
             cwd=root,
             capture_output=True,
             text=True,
             check=True,
         )
-        return result.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return ""
+    toplevel, head = result.stdout.splitlines()
+    # Git searches parent directories, so an unpacked tree inside another
+    # checkout would otherwise report that checkout's commit.
+    if os.path.realpath(toplevel) != os.path.realpath(root):
+        return ""
+    return head
 
 
 _EXISTING_COMMIT = re.compile(r'^__git_commit__ = "([0-9a-f]{40})"$', re.MULTILINE)
