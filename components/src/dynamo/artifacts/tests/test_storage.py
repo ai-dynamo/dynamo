@@ -10,11 +10,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import aiohttp
-import opendal
 import pytest
 from yarl import URL
 
-from dynamo.artifacts.storage import (
+opendal = pytest.importorskip("opendal")
+
+from dynamo.artifacts.storage import (  # noqa: E402 -- optional dependency guard
     ArtifactStorageError,
     ManagedProfile,
     ManagedStoreTarget,
