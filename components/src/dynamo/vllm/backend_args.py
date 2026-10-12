@@ -602,7 +602,6 @@ class DynamoVllmConfig(ConfigBase):
     # Headless mode for multi-node TP/PP
     headless: bool = False
 
-    # Freeze the Dynamo worker process's GC heap before registration.
     freeze_gc_after_init: bool = False
 
     # ModelExpress P2P
