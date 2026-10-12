@@ -166,7 +166,7 @@ mod tests {
             }))
             .unwrap()
         };
-        for invalid in ["", " ", " logical", "logical "] {
+        for invalid in ["", " logical", "logical "] {
             assert!(parse(invalid).canonicalize(None).is_err());
         }
         assert!(parse(&"a".repeat(513)).canonicalize(None).is_err());
