@@ -351,7 +351,20 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # libvpx: BSD-licensed VP9 encoder needed for the WebM output path. Built from
     # source so we don't need to track distro package names (libvpx-dev on Debian
     # vs libvpx-devel via EPEL on RHEL/manylinux).
-    git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git && \
+    # Retry the clone and fall back to the official GitHub mirror: a bare clone
+    # fails the whole multi-arch build on a single transient 503 from
+    # chromium.googlesource.com ("RPC failed; HTTP 503 ... expected flush after
+    # ref listing"). Both remotes carry the same ${LIBVPX_REF} tag.
+    for attempt in 1 2 3 4 5; do \
+        for url in https://chromium.googlesource.com/webm/libvpx.git \
+                   https://github.com/webmproject/libvpx.git; do \
+            rm -rf libvpx; \
+            git clone --depth 1 --branch ${LIBVPX_REF} "$url" libvpx && break 2; \
+            echo "libvpx clone from ${url} attempt ${attempt}/5 failed" >&2; \
+        done; \
+        sleep 10; \
+    done && \
+    test -d libvpx/.git && \
     cd libvpx && \
     ./configure --prefix=/usr/local --enable-shared --disable-static --disable-examples --disable-unit-tests --disable-tools --disable-docs && \
     make -j$(nproc) && \
