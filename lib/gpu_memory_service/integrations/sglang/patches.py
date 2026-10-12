@@ -214,7 +214,15 @@ def patch_static_state_for_gms() -> None:
         return
 
     try:
-        from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
+        try:
+            from sglang.srt.managers.scheduler_components import (
+                weight_updater as _mixin,
+            )
+        except ImportError:
+            # Fallback for older SGLang that still ships
+            # scheduler_update_weights_mixin; remove once no supported image
+            # pins such a release.
+            from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
 
         def _export_noop(model):
             """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""

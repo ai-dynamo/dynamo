@@ -18,6 +18,7 @@ if not HAS_GMS:
 if not HAS_TORCH:
     pytest.skip("torch is required", allow_module_level=True)
 
+import torch
 from gpu_memory_service.integrations.sglang import patches
 
 pytestmark = [
@@ -79,3 +80,22 @@ def test_patch_model_runner_leaves_baseline_unchanged_without_preload(monkeypatc
 
     assert runner.alloc_memory_pool() == 10.0
     assert runner.pre_model_load_memory == 10.0
+
+
+def test_patch_static_state_for_gms_patches_weight_updater(monkeypatch):
+    weight_updater = pytest.importorskip(
+        "sglang.srt.managers.scheduler_components.weight_updater"
+    )
+    monkeypatch.setattr(patches, "_static_state_patched", False)
+    monkeypatch.setattr(
+        weight_updater, "_export_static_state", weight_updater._export_static_state
+    )
+    monkeypatch.setattr(
+        weight_updater, "_import_static_state", weight_updater._import_static_state
+    )
+
+    patches.patch_static_state_for_gms()
+
+    model = torch.nn.Linear(1, 1)
+    model.register_buffer("stable", torch.zeros(1))
+    assert weight_updater._export_static_state(model) == {"buffers": []}
