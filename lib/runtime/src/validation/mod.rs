@@ -32,6 +32,28 @@ pub use config::{GateCheck, GateSpec, HoldMode, ValidationConfig};
 /// held.
 pub type ReleaseHook = Box<dyn FnOnce() -> BoxFuture<'static, anyhow::Result<()>> + Send>;
 
+/// Environment passed to every gate.
+#[derive(Clone, Debug, Default)]
+pub struct GateEnv {
+    /// Loopback OpenAI-compatible endpoint serving this worker's model.
+    pub openai_base_url: Option<String>,
+    /// Model name to request from that endpoint.
+    pub model: Option<String>,
+}
+
+impl GateEnv {
+    fn vars(&self, gate: &str) -> Vec<(&'static str, String)> {
+        let mut vars = vec![("DYN_VALIDATION_GATE", gate.to_string())];
+        if let Some(url) = &self.openai_base_url {
+            vars.push(("OPENAI_BASE_URL", url.clone()));
+        }
+        if let Some(model) = &self.model {
+            vars.push(("DYN_VALIDATION_MODEL", model.clone()));
+        }
+        vars
+    }
+}
+
 enum HookSlot {
     Empty,
     Set(ReleaseHook),
@@ -54,6 +76,7 @@ pub struct WorkerValidation {
     release_hook: parking_lot::Mutex<HookSlot>,
     released: watch::Sender<bool>,
     started: AtomicBool,
+    local_endpoint_claimed: AtomicBool,
 }
 
 impl std::fmt::Debug for WorkerValidation {
@@ -78,6 +101,7 @@ impl WorkerValidation {
             release_hook: parking_lot::Mutex::new(HookSlot::Empty),
             released: watch::channel(false).0,
             started: AtomicBool::new(false),
+            local_endpoint_claimed: AtomicBool::new(false),
         })
     }
 
@@ -95,6 +119,12 @@ impl WorkerValidation {
         }
         *slot = HookSlot::Set(hook);
         true
+    }
+
+    /// Claim the loopback endpoint the gates check. Only the first caller gets
+    /// `true`: a worker serves one model to its gates.
+    pub fn claim_local_endpoint(&self) -> bool {
+        !self.local_endpoint_claimed.swap(true, Ordering::SeqCst)
     }
 
     /// True once every gate has passed. A released worker is never held again.
@@ -132,19 +162,20 @@ impl WorkerValidation {
 
     /// Start every gate, once; later calls do nothing. `cancel` stops the
     /// gates on shutdown, failing them.
-    pub fn start(self: &Arc<Self>, cancel: CancellationToken) {
+    pub fn start(self: &Arc<Self>, env: GateEnv, cancel: CancellationToken) {
         if self.started.swap(true, Ordering::SeqCst) {
             return;
         }
         let this = Arc::clone(self);
-        tokio::spawn(async move { this.run(cancel).await });
+        tokio::spawn(async move { this.run(env, cancel).await });
     }
 
-    async fn run(&self, cancel: CancellationToken) {
+    async fn run(&self, env: GateEnv, cancel: CancellationToken) {
         let runs = self.config.gates.iter().map(|gate| async {
             self.set_state(&gate.name, GateState::Running);
+            let vars = env.vars(&gate.name);
             let verdict = tokio::select! {
-                verdict = runner::run_gate(gate) => verdict,
+                verdict = runner::run_gate(gate, &vars) => verdict,
                 _ = cancel.cancelled() => Err("worker is shutting down".to_string()),
             };
             let passed = verdict.is_ok();
@@ -206,7 +237,7 @@ mod tests {
             r#"{"good": {"exec": ["true"], "timeout_secs": 5}, "bad": {"exec": ["sh", "-c", "echo broken >&2; exit 1"], "timeout_secs": 5}}"#.into(),
         ), None);
         let validation = WorkerValidation::new(config.unwrap().unwrap());
-        validation.start(CancellationToken::new());
+        validation.start(GateEnv::default(), CancellationToken::new());
         let status = settled(&validation).await;
         assert!(!validation.is_released());
         assert_eq!(status["gates"]["good"]["state"], "passed");
@@ -229,7 +260,7 @@ mod tests {
         assert!(validation.set_release_hook(Box::new(|| {
             Box::pin(async { Err(anyhow::anyhow!("discovery write failed")) })
         })));
-        validation.start(CancellationToken::new());
+        validation.start(GateEnv::default(), CancellationToken::new());
         settled(&validation).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!validation.is_released());

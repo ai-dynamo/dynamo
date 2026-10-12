@@ -412,10 +412,6 @@ impl DistributedRuntime {
             }
         }
 
-        if let Some(validation) = &distributed_runtime.worker_validation {
-            distributed_runtime.start_validation_on_first_local_engine(Arc::clone(validation));
-        }
-
         // Start health check manager if enabled
         if config.health_check_enabled {
             let health_check_config = crate::health_check::HealthCheckConfig {
@@ -505,22 +501,6 @@ impl DistributedRuntime {
              the engine can restart while this process and its verdicts live on"
         );
         Ok(Some(crate::validation::WorkerValidation::new(validation)))
-    }
-
-    /// Start the gates once this worker's first local engine is registered,
-    /// which is when a check can reach it.
-    fn start_validation_on_first_local_engine(
-        &self,
-        validation: Arc<crate::validation::WorkerValidation>,
-    ) {
-        let mut registrations = self.local_endpoint_registry.subscribe();
-        let cancel = self.runtime.child_token();
-        tokio::spawn(async move {
-            tokio::select! {
-                Ok(_) = registrations.wait_for(|count| *count > 0) => validation.start(cancel),
-                _ = cancel.cancelled() => {}
-            }
-        });
     }
 
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {

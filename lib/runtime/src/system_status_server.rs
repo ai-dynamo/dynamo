@@ -1845,32 +1845,6 @@ mod integration_tests {
         }
     }
 
-    /// An engine that answers nothing; only its registration matters.
-    struct StubEngine;
-
-    #[async_trait::async_trait]
-    impl
-        crate::engine::AsyncEngine<
-            crate::pipeline::SingleIn<serde_json::Value>,
-            crate::pipeline::ManyOut<crate::protocols::annotated::Annotated<serde_json::Value>>,
-            anyhow::Error,
-        > for StubEngine
-    {
-        async fn generate(
-            &self,
-            input: crate::pipeline::SingleIn<serde_json::Value>,
-        ) -> Result<
-            crate::pipeline::ManyOut<crate::protocols::annotated::Annotated<serde_json::Value>>,
-        > {
-            use crate::engine::AsyncEngineContextProvider;
-            let (_data, ctx) = input.into_parts();
-            Ok(crate::pipeline::ResponseStream::new(
-                Box::pin(futures::stream::empty()),
-                ctx.context(),
-            ))
-        }
-    }
-
     #[tokio::test]
     async fn test_validation_gates_hold_health_but_not_live() {
         for (check, released) in [("exit 0", true), ("echo bad >&2; exit 1", false)] {
@@ -1891,13 +1865,15 @@ mod integration_tests {
                         (status, response.json::<serde_json::Value>().await.unwrap())
                     };
 
-                    // Held until the gates run, which waits for a local engine.
+                    // Held until the gates run.
                     let (status, body) = get("/health").await;
                     assert_eq!(status, 503, "{body}");
                     assert_eq!(body["validation"]["gates"]["smoke"]["state"], "pending");
 
-                    drt.local_endpoint_registry()
-                        .register("generate".into(), Arc::new(StubEngine));
+                    drt.worker_validation().unwrap().start(
+                        crate::validation::GateEnv::default(),
+                        tokio_util::sync::CancellationToken::new(),
+                    );
                     let mut body = serde_json::Value::Null;
                     for _ in 0..100 {
                         body = get("/health").await.1;

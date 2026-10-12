@@ -16,11 +16,11 @@ const REASON_TAIL_BYTES: usize = 2048;
 /// Wait between attempts while a check runner is not reachable yet.
 const URL_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
-pub(super) async fn run_gate(gate: &GateSpec) -> Result<(), String> {
+pub(super) async fn run_gate(gate: &GateSpec, env: &[(&str, String)]) -> Result<(), String> {
     let run = async {
         match &gate.check {
-            GateCheck::Exec(argv) => run_exec(&gate.name, argv).await,
-            GateCheck::Url(url) => run_url(&gate.name, url).await,
+            GateCheck::Exec(argv) => run_exec(&gate.name, argv, env).await,
+            GateCheck::Url(url) => run_url(&gate.name, url, env).await,
         }
     };
     tokio::time::timeout(gate.timeout, run)
@@ -35,10 +35,10 @@ pub(super) async fn run_gate(gate: &GateSpec) -> Result<(), String> {
 
 /// Run the command; exit status 0 is a pass. The child is killed if the
 /// deadline drops this future.
-async fn run_exec(gate: &str, argv: &[String]) -> Result<(), String> {
+async fn run_exec(gate: &str, argv: &[String], env: &[(&str, String)]) -> Result<(), String> {
     let mut child = tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
-        .env("DYN_VALIDATION_GATE", gate)
+        .envs(env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -61,12 +61,15 @@ async fn run_exec(gate: &str, argv: &[String]) -> Result<(), String> {
 /// response a fail, with the end of the body as the reason. A runner that
 /// can't be reached yet, such as a sidecar still starting, is retried until
 /// the deadline.
-async fn run_url(gate: &str, url: &reqwest::Url) -> Result<(), String> {
+async fn run_url(gate: &str, url: &reqwest::Url, env: &[(&str, String)]) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| error.to_string())?;
-    let body = serde_json::json!({ "DYN_VALIDATION_GATE": gate });
+    let body: serde_json::Map<_, _> = env
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.clone().into()))
+        .collect();
     loop {
         match client.post(url.clone()).json(&body).send().await {
             Ok(response) if response.status() == reqwest::StatusCode::OK => return Ok(()),
@@ -121,8 +124,8 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        assert_eq!(run_gate(&gate("/pass")).await, Ok(()));
-        let reason = run_gate(&gate("/fail")).await.unwrap_err();
+        assert_eq!(run_gate(&gate("/pass"), &[]).await, Ok(()));
+        let reason = run_gate(&gate("/fail"), &[]).await.unwrap_err();
         assert!(
             reason.contains("500") && reason.contains("no tool call"),
             "{reason}"
@@ -137,7 +140,7 @@ mod tests {
             check: GateCheck::Exec(vec!["sleep".into(), "30".into()]),
             timeout: Duration::from_secs(1),
         };
-        let reason = run_gate(&gate).await.unwrap_err();
+        let reason = run_gate(&gate, &[]).await.unwrap_err();
         assert!(reason.contains("no verdict within"), "{reason}");
         assert!(started.elapsed() < Duration::from_secs(5));
     }

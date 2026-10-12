@@ -701,6 +701,10 @@ impl LocalModel {
         self.card.needs = needs;
         self.card.lora = lora_info.clone();
 
+        // Before the card's files are rewritten to URLs below: the validation
+        // endpoint loads the tokenizer and templates from local paths.
+        crate::entrypoint::input::local_openai::serve_if_gated(endpoint, &self.card).await?;
+
         let lora_name = self.card.lora.as_ref().map(|info| info.name.as_str());
         let model_suffix = derive_lora_suffix(lora_name);
 

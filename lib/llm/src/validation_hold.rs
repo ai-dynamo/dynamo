@@ -175,7 +175,7 @@ mod tests {
 
     async fn release(drt: &DistributedRuntime) {
         let validation = drt.worker_validation().unwrap();
-        validation.start(drt.child_token());
+        validation.start(Default::default(), drt.child_token());
         tokio::time::timeout(Duration::from_secs(10), validation.wait_released())
             .await
             .unwrap();
@@ -230,7 +230,7 @@ mod tests {
         drt.discovery().register(spec).await.unwrap();
 
         let validation = drt.worker_validation().unwrap();
-        validation.start(drt.child_token());
+        validation.start(Default::default(), drt.child_token());
         let shutdown = drt.primary_token();
         tokio::time::timeout(Duration::from_secs(10), shutdown.cancelled())
             .await
