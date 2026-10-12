@@ -17,7 +17,6 @@ chardet<6
 coverage[toml]==7.13.1
 # Generation artifact delivery tests exercise the optional storage authority.
 cryptography==50.0.0
-opendal==0.47.10
 # For IFEval dataset loading in kvbm tests
 datasets==4.4.1
 # Datadog Test Optimization pytest plugin (--ddtrace). Pre-installed rather than
@@ -53,6 +52,7 @@ nats-py==2.12.0
 # Router benchmark tests import graph synthesis during whole-tree collection.
 networkx
 openai==2.32.0  # for Fault Tolerance migration tests
+opendal==0.47.10
 # Protobuf definitions the OTLP parity receiver decodes; see grpcio above.
 # Version-matched to the opentelemetry-* pins in requirements.common.txt.
 opentelemetry-proto<=1.38.0
