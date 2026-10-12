@@ -3516,6 +3516,12 @@ spec:
                           - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                             message: startupProbe must define exactly one handler
                             fieldPath: .startupProbe
+                          - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                            message: livenessProbe must define exactly one handler
+                            fieldPath: .livenessProbe
+                          - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                            message: readinessProbe must define exactly one handler
+                            fieldPath: .readinessProbe
                       type: array
                       x-kubernetes-list-map-keys:
                         - name
@@ -5016,6 +5022,12 @@ spec:
                           - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                             message: startupProbe must define exactly one handler
                             fieldPath: .startupProbe
+                          - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                            message: livenessProbe must define exactly one handler
+                            fieldPath: .livenessProbe
+                          - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                            message: readinessProbe must define exactly one handler
+                            fieldPath: .readinessProbe
                       type: array
                       x-kubernetes-list-map-keys:
                         - name
@@ -6596,6 +6608,12 @@ spec:
                           - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                             message: startupProbe must define exactly one handler
                             fieldPath: .startupProbe
+                          - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                            message: livenessProbe must define exactly one handler
+                            fieldPath: .livenessProbe
+                          - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                            message: readinessProbe must define exactly one handler
+                            fieldPath: .readinessProbe
                       type: array
                       x-kubernetes-list-map-keys:
                         - name
@@ -8063,6 +8081,12 @@ spec:
                         - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                           message: startupProbe must define exactly one handler
                           fieldPath: .startupProbe
+                        - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                          message: livenessProbe must define exactly one handler
+                          fieldPath: .livenessProbe
+                        - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                          message: readinessProbe must define exactly one handler
+                          fieldPath: .readinessProbe
                     nodeName:
                       description: |-
                         NodeName indicates in which node this pod is scheduled.
@@ -13892,6 +13916,12 @@ spec:
                                     - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                                       message: startupProbe must define exactly one handler
                                       fieldPath: .startupProbe
+                                    - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                      message: livenessProbe must define exactly one handler
+                                      fieldPath: .livenessProbe
+                                    - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                      message: readinessProbe must define exactly one handler
+                                      fieldPath: .readinessProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -15392,6 +15422,12 @@ spec:
                                     - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                                       message: startupProbe must define exactly one handler
                                       fieldPath: .startupProbe
+                                    - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                      message: livenessProbe must define exactly one handler
+                                      fieldPath: .livenessProbe
+                                    - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                      message: readinessProbe must define exactly one handler
+                                      fieldPath: .readinessProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -16972,6 +17008,12 @@ spec:
                                     - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                                       message: startupProbe must define exactly one handler
                                       fieldPath: .startupProbe
+                                    - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                      message: livenessProbe must define exactly one handler
+                                      fieldPath: .livenessProbe
+                                    - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                      message: readinessProbe must define exactly one handler
+                                      fieldPath: .readinessProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -19762,6 +19804,12 @@ spec:
                   rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.replicas) && self.replicas < 1)'
                 - message: scalingAdapter is not supported when componentType is lpx
                   rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.scalingAdapter) && has(self.scalingAdapter.enabled) && self.scalingAdapter.enabled == true)'
+                - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                  message: livenessProbe must define exactly one handler
+                  fieldPath: .livenessProbe
+                - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                  message: readinessProbe must define exactly one handler
+                  fieldPath: .readinessProbe
             status:
               description: Status reflects the current observed state of the component deployment.
               properties:
@@ -22975,6 +23023,12 @@ spec:
                               - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                                 message: startupProbe must define exactly one handler
                                 fieldPath: .startupProbe
+                              - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                message: livenessProbe must define exactly one handler
+                                fieldPath: .livenessProbe
+                              - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                message: readinessProbe must define exactly one handler
+                                fieldPath: .readinessProbe
                           type: array
                           x-kubernetes-list-map-keys:
                             - name
@@ -24475,6 +24529,12 @@ spec:
                               - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                                 message: startupProbe must define exactly one handler
                                 fieldPath: .startupProbe
+                              - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                message: livenessProbe must define exactly one handler
+                                fieldPath: .livenessProbe
+                              - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                message: readinessProbe must define exactly one handler
+                                fieldPath: .readinessProbe
                           type: array
                           x-kubernetes-list-map-keys:
                             - name
@@ -26057,6 +26117,12 @@ spec:
                               - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                                 message: startupProbe must define exactly one handler
                                 fieldPath: .startupProbe
+                              - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                message: livenessProbe must define exactly one handler
+                                fieldPath: .livenessProbe
+                              - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                message: readinessProbe must define exactly one handler
+                                fieldPath: .readinessProbe
                           type: array
                           x-kubernetes-list-map-keys:
                             - name
@@ -31147,6 +31213,12 @@ spec:
                                     - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                                       message: startupProbe must define exactly one handler
                                       fieldPath: .startupProbe
+                                    - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                      message: livenessProbe must define exactly one handler
+                                      fieldPath: .livenessProbe
+                                    - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                      message: readinessProbe must define exactly one handler
+                                      fieldPath: .readinessProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -32647,6 +32719,12 @@ spec:
                                     - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                                       message: startupProbe must define exactly one handler
                                       fieldPath: .startupProbe
+                                    - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                      message: livenessProbe must define exactly one handler
+                                      fieldPath: .livenessProbe
+                                    - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                      message: readinessProbe must define exactly one handler
+                                      fieldPath: .readinessProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -34229,6 +34307,12 @@ spec:
                                     - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
                                       message: startupProbe must define exactly one handler
                                       fieldPath: .startupProbe
+                                    - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                      message: livenessProbe must define exactly one handler
+                                      fieldPath: .livenessProbe
+                                    - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                      message: readinessProbe must define exactly one handler
+                                      fieldPath: .readinessProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name

@@ -2199,7 +2199,13 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		}
 		base.Env = MergeEnvs(baseEnv, user.Env)
 
-		// Replace the complete startup probe so handlers cannot merge with the default.
+		// Replace complete probes so handlers cannot merge with the defaults.
+		if user.LivenessProbe != nil {
+			base.LivenessProbe = user.LivenessProbe.DeepCopy()
+		}
+		if user.ReadinessProbe != nil {
+			base.ReadinessProbe = user.ReadinessProbe.DeepCopy()
+		}
 		if user.StartupProbe != nil {
 			base.StartupProbe = user.StartupProbe.DeepCopy()
 		}

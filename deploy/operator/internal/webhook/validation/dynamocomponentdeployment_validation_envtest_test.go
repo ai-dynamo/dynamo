@@ -31,7 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
@@ -58,7 +58,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		}
 	)
 
-	tests := []struct {
+	type dcdAdmissionTestCase struct {
 		name               string
 		deployment         runtime.Object
 		oldDeployment      runtime.Object
@@ -70,7 +70,8 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		wantWarnings       []string
 		wantPodAnnotations map[string]string
 		wantRoleReplicas   map[string]int32
-	}{
+	}
+	tests := []dcdAdmissionTestCase{
 		{name: "DGD-owned vLLM multi-GPU automatic candidate is admitted without checkpointRef", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
 			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: k8sptr.To(true)}}
@@ -1568,68 +1569,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 
 		// Pair shared pod-template validation across both served source versions.
 		{
-			name: "v1beta1 frontend sidecar startup probe rejects multiple handlers",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.FrontendSidecar = k8sptr.To("frontend")
-				dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{
-					Name: "frontend", Image: frontendImage150,
-					StartupProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
-						Exec: &corev1.ExecAction{Command: []string{"true"}}, GRPC: &corev1.GRPCAction{Port: 8000},
-					}},
-				})
-			}),
-			wantCELErr: "spec.podTemplate.spec.containers[1].startupProbe: Invalid value: startupProbe must define exactly one handler",
-		},
-		{
-			name:          "v1beta1 update rejects a startup probe without a handler",
-			oldDeployment: betaDCDForAdmission(nil),
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.PodTemplate.Spec.Containers[0].StartupProbe = &corev1.Probe{PeriodSeconds: 5}
-			}),
-			wantCELErr: "spec.podTemplate.spec.containers[0].startupProbe: Invalid value: startupProbe must define exactly one handler",
-		},
-		{
-			name: "v1alpha1 startup probe rejects multiple handlers",
-			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.ExtraPodSpec.MainContainer.StartupProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
-					Exec: &corev1.ExecAction{Command: []string{"true"}}, GRPC: &corev1.GRPCAction{Port: 8000},
-				}}
-			}),
-			wantCELErr: "spec.extraPodSpec.mainContainer.startupProbe: Invalid value: startupProbe must define exactly one handler",
-		},
-		{
-			name: "v1beta1 exec startup probe is accepted",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.PodTemplate.Spec.Containers[0].StartupProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
-					Exec: &corev1.ExecAction{Command: []string{"true"}},
-				}}
-			}),
-		},
-		{
-			name: "v1beta1 HTTP startup probe is accepted",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.PodTemplate.Spec.Containers[0].StartupProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromInt(8000)},
-				}}
-			}),
-		},
-		{
-			name: "v1alpha1 TCP startup probe is accepted",
-			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.ExtraPodSpec.MainContainer.StartupProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
-					TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(8000)},
-				}}
-			}),
-		},
-		{
-			name: "v1alpha1 gRPC startup probe is accepted",
-			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.ExtraPodSpec.MainContainer.StartupProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
-					GRPC: &corev1.GRPCAction{Port: 8000},
-				}}
-			}),
-		},
-		{
 			name: "v1beta1 sidecar without image is rejected by CEL",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
@@ -2123,6 +2062,50 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				"spec.experimental.failover.numShadows: Invalid value: 2: is immutable for inter-pod GMS failover; delete and recreate the DynamoComponentDeployment to change it",
 			},
 		},
+	}
+
+	t.Log("Add complete-probe cases to the admission table for both API versions")
+	for _, placement := range []string{"main", "frontend sidecar", "role"} {
+		beta := betaDCDForAdmission(nil)
+		alpha := alphaDCDForAdmission(nil)
+		betaSpec := &beta.Spec.DynamoComponentDeploymentSharedSpec
+		alphaSpec := &alpha.Spec.DynamoComponentDeploymentSharedSpec
+		betaPath := field.NewPath("spec")
+		alphaPath := field.NewPath("spec")
+		betaContainer := &betaSpec.PodTemplate.Spec.Containers[0]
+		alphaContainer := alphaSpec.ExtraPodSpec.MainContainer
+
+		// Select a representative container in each source-version template.
+		switch placement {
+		case "main":
+			betaPath = betaPath.Child("podTemplate", "spec", "containers").Index(0)
+			alphaPath = alphaPath.Child("extraPodSpec", "mainContainer")
+		case "frontend sidecar":
+			betaSpec.FrontendSidecar = k8sptr.To("frontend")
+			betaSpec.PodTemplate.Spec.Containers = append(betaSpec.PodTemplate.Spec.Containers, corev1.Container{Name: "frontend", Image: frontendImage150})
+			betaContainer = &betaSpec.PodTemplate.Spec.Containers[1]
+			betaPath = betaPath.Child("podTemplate", "spec", "containers").Index(1)
+			alphaSpec.ExtraPodSpec.PodSpec = &corev1.PodSpec{Containers: []corev1.Container{{Name: "frontend", Image: frontendImage150}}}
+			alphaContainer = &alphaSpec.ExtraPodSpec.Containers[0]
+			alphaPath = alphaPath.Child("extraPodSpec", "containers").Index(0)
+		case "role":
+			setBetaExplicitMultinodeRoleTemplates(betaSpec, 2)
+			betaContainer = &betaSpec.Roles[1].PodTemplate.Spec.Containers[0]
+			betaPath = betaPath.Child("roles").Index(1).Child("podTemplate", "spec", "containers").Index(0)
+			setAlphaExplicitMultinodeRoleTemplates(alphaSpec, 2)
+			alphaContainer = &alphaSpec.Roles[0].PodTemplate.Spec.Containers[0]
+			alphaPath = alphaPath.Child("roles").Index(0).Child("podTemplate", "spec", "containers").Index(0)
+		}
+
+		// Keep the shared probe cases on the resource's production admission path.
+		probeCases := containerProbeAdmissionCases(beta, betaContainer, betaPath)
+		probeCases = append(probeCases, containerProbeAdmissionCases(alpha, alphaContainer, alphaPath)...)
+		for _, probeCase := range probeCases {
+			tests = append(tests, dcdAdmissionTestCase{
+				name: probeCase.name, deployment: probeCase.deployment,
+				oldDeployment: probeCase.oldDeployment, wantCELErr: probeCase.wantCELErr,
+			})
+		}
 	}
 
 	for _, tt := range tests {

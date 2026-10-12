@@ -51,7 +51,7 @@ func TestFrontendDefaultsStartupProbeVersionGate(t *testing.T) {
 	}
 }
 
-func TestFrontendSidecarStartupProbeOverride(t *testing.T) {
+func TestFrontendSidecarProbeOverride(t *testing.T) {
 	tests := []struct {
 		name    string
 		handler corev1.ProbeHandler
@@ -64,14 +64,17 @@ func TestFrontendSidecarStartupProbeOverride(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Provide a frontend sidecar startup probe on runtime 1.6.0")
+			t.Log("Provide complete frontend sidecar probes on runtime 1.6.0")
 			override := &corev1.Probe{ProbeHandler: tt.handler, PeriodSeconds: 5, FailureThreshold: 90}
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
 				RuntimeVersionOverride: "1.6.0", FrontendSidecar: ptr.To("frontend"),
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
 					{Name: commonconsts.MainContainerName, Image: "worker:1.6.0"},
-					{Name: "frontend", Image: "frontend:1.6.0", StartupProbe: override.DeepCopy()},
+					{
+						Name: "frontend", Image: "frontend:1.6.0",
+						StartupProbe: override.DeepCopy(), LivenessProbe: override.DeepCopy(), ReadinessProbe: override.DeepCopy(),
+					},
 				}}},
 			}
 
@@ -82,11 +85,13 @@ func TestFrontendSidecarStartupProbeOverride(t *testing.T) {
 				"worker", nil, staticContainerGPUCount(0),
 			)
 
-			t.Log("Preserve the complete startup probe override")
+			t.Log("Preserve each complete probe override")
 			require.NoError(t, err)
 			require.Len(t, pod.Containers, 2)
 			require.Equal(t, "frontend", pod.Containers[1].Name)
 			require.Equal(t, override, pod.Containers[1].StartupProbe)
+			require.Equal(t, override, pod.Containers[1].LivenessProbe)
+			require.Equal(t, override, pod.Containers[1].ReadinessProbe)
 		})
 	}
 }
