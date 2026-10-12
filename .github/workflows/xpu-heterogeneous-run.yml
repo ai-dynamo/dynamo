@@ -988,6 +988,7 @@ jobs:
       # GPU image to the second via dynamo.intel.com/node.
       XPU_NODE_LABEL: xpu_node
       NVIDIA_NODE_LABEL: nvidia_node
+      KUEUE_QUEUE: dynamo-queue
     steps:
       - name: Remove images from worker nodes
         shell: bash
@@ -1069,18 +1070,32 @@ jobs:
               # spliced together from shell text.
               # tolerations: operator Exists -- GPU nodes are commonly tainted,
               # and this pod must land on exactly the node it names.
+              #
+              # kueue.x-k8s.io/queue-name is mandatory: the cluster's
+              # enforce-kueue-labels ValidatingAdmissionPolicy rejects any pod
+              # without it. Same queue as the test pods in
+              # .ci/test/dynamo-heterog/k8s/tests/*.yaml.
+              #
+              # Pinned with a hostname nodeSelector, NOT nodeName: Kueue gates a
+              # labelled pod with a scheduling gate until it is admitted, and the
+              # API server rejects a pod that sets both nodeName and
+              # schedulingGates.
               jq -n \
                 --arg pod "${pod}" --arg node "${node}" --arg image "${image}" \
                 --arg helper "${CLEANUP_IMAGE}" --arg script "${NODE_SCRIPT}" \
-                --arg run "${GITHUB_RUN_ID}" \
+                --arg run "${GITHUB_RUN_ID}" --arg queue "${KUEUE_QUEUE}" \
                 '{
                   apiVersion: "v1", kind: "Pod",
                   metadata: {
                     name: $pod,
-                    labels: {"app.kubernetes.io/name": "xpu-heterog-image-cleanup", "github-run-id": $run}
+                    labels: {
+                      "app.kubernetes.io/name": "xpu-heterog-image-cleanup",
+                      "github-run-id": $run,
+                      "kueue.x-k8s.io/queue-name": $queue
+                    }
                   },
                   spec: {
-                    nodeName: $node,
+                    nodeSelector: {"kubernetes.io/hostname": $node},
                     restartPolicy: "Never",
                     tolerations: [{operator: "Exists"}],
                     containers: [{
@@ -1103,10 +1118,10 @@ jobs:
                 continue
               }
 
-              # 3 minutes covers pulling the helper image plus all six rmi
-              # attempts inside the pod.
+              # 5 minutes covers Kueue admission, pulling the helper image and
+              # all six rmi attempts inside the pod.
               phase=""
-              for _ in $(seq 1 36); do
+              for _ in $(seq 1 60); do
                 phase=$(kubectl get pod "${pod}" -n "${NS}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
                 [[ "${phase}" == "Succeeded" || "${phase}" == "Failed" ]] && break
                 sleep 5
@@ -1173,9 +1188,13 @@ jobs:
           # api METHOD URL OUTFILE -> prints the HTTP status, 000 if unreachable.
           # The Authorization header goes in through a file descriptor so the
           # credential never appears in the runner's process list.
+          #
+          # -r, not -f: the docker daemon reads certs.d as root, so the file can
+          # exist yet be unreadable by the runner user, and curl then fails with
+          # error 77 before sending anything. Fall back to the system store.
           api() {
-            local cacert=()
-            [[ -f "/etc/docker/certs.d/${host}/ca.crt" ]] && cacert=(--cacert "/etc/docker/certs.d/${host}/ca.crt")
+            local cacert=() ca="/etc/docker/certs.d/${host}/ca.crt"
+            [[ -r "${ca}" ]] && cacert=(--cacert "${ca}")
             curl -sS --max-time 60 -o "$3" -w '%{http_code}' -X "$1" \
               ${cacert+"${cacert[@]}"} \
               -H @<(printf 'Authorization: Basic %s\n' "${auth}") \
