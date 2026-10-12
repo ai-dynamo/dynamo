@@ -13614,6 +13614,7 @@ mod tests {
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
 
         let request = NvCreateCompletionRequest {
+            response_format: None,
             inner: dynamo_protocols::types::CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: dynamo_protocols::types::Prompt::IntegerArray(vec![1, 2, 3]),

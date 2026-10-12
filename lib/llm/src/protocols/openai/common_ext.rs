@@ -185,6 +185,19 @@ pub trait CommonExtProvider {
     /// Get a reference to the CommonExt struct if available
     fn common_ext(&self) -> Option<&CommonExt>;
 
+    /// Resolve the effective worker constraint for admission and sampling alike.
+    ///
+    /// Returns None for unconstrained generation and InvalidArgument for invalid
+    /// selections. The default preserves chat and legacy guided_* behavior;
+    /// endpoint implementations may supply their own response_format union.
+    /// Grammar compilation and backend support remain worker responsibilities.
+    fn resolve_guided_decoding(&self) -> anyhow::Result<Option<GuidedDecodingOptions>>
+    where
+        Self: Sized,
+    {
+        extract_guided_decoding_options(self)
+    }
+
     /// Return a typed response_format override, or None for endpoints without one.
     fn structured_response_format(&self) -> Option<&dynamo_protocols::types::ResponseFormat> {
         None

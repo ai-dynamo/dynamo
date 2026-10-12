@@ -96,20 +96,27 @@ impl StructuredOutputs {
             }
             Some(ResponseFormat::Text) | None => {}
         }
-        effective.validate_shape()?;
-        let json_schema = if effective.json_object == Some(true) {
+        effective.into_guided()
+    }
+
+    /// Consume an already selected/overridden constraint without cloning its schema.
+    /// Validates effective shape and returns canonical worker options, or the same
+    /// InvalidArgument errors as to_guided. Backend grammar compilation is deferred.
+    pub(super) fn into_guided(self) -> anyhow::Result<GuidedDecodingOptions> {
+        self.validate_shape()?;
+        let json_schema = if self.json_object == Some(true) {
             Some(json!({"type": "object"}))
         } else {
-            effective.json
+            self.json
         };
         let mut result = GuidedDecodingOptions::validated(
             json_schema,
-            effective.regex,
-            effective.choice,
-            effective.grammar,
+            self.regex,
+            self.choice,
+            self.grammar,
             None,
-            effective.whitespace_pattern,
-            effective.structural_tag.map(Value::String),
+            self.whitespace_pattern,
+            self.structural_tag.map(Value::String),
         )?;
         // Keep default/legacy wire output unchanged. Present modifiers are optional
         // additions; the pinned vLLM backend currently uses its server-level policy.
@@ -121,7 +128,7 @@ impl StructuredOutputs {
     /// Check the original selection before overrides, without compiling its content.
     /// A same-kind response_format may replace invalid content, but cannot repair
     /// missing/multiple constraints or an invalid JSON field's outer type.
-    fn validate_selection(&self) -> anyhow::Result<()> {
+    pub(super) fn validate_selection(&self) -> anyhow::Result<()> {
         let count = [
             self.json.is_some(),
             self.regex.is_some(),

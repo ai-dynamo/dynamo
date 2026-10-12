@@ -770,6 +770,7 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
     };
 
     NvCreateCompletionRequest {
+        response_format: None,
         inner,
         common: Default::default(),
         nvext: None,

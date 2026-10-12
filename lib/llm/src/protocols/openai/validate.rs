@@ -12,7 +12,7 @@ use dynamo_runtime::config::{
 use serde_json::Value;
 
 use super::{
-    common_ext::{CommonExt, CommonExtProvider, extract_guided_decoding_options},
+    common_ext::{CommonExt, CommonExtProvider},
     tools::{ToolChoiceError, validate_openai_tool_choice},
 };
 
@@ -1031,7 +1031,7 @@ pub fn validate_chat_template_args(
 /// for valid or absent constraints; errors reach the HTTP request-validation
 /// boundary as client errors. Does not mutate the request or compile backend grammars.
 pub fn validate_guided_decoding(request: &impl CommonExtProvider) -> Result<(), anyhow::Error> {
-    extract_guided_decoding_options(request)?;
+    request.resolve_guided_decoding()?;
     Ok(())
 }
 

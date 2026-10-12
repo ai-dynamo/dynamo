@@ -10,6 +10,57 @@
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use utoipa::ToSchema;
 
+/// The native HTTP export must expose completion's full format union and its
+/// required metadata/tag members. This checks declaration, not grammar execution.
+#[test]
+fn completion_response_format_exports_json_and_both_structural_tag_forms() {
+    use dynamo_llm::http::service::{RouteDoc, openapi_docs::generate_openapi_spec};
+    let spec = serde_json::to_value(generate_openapi_spec(&[RouteDoc::new(
+        axum::http::Method::POST,
+        "/v1/completions",
+    )]))
+    .unwrap();
+    let schemas = &spec["components"]["schemas"];
+    assert!(
+        schemas["NvCreateCompletionRequest"]
+            .to_string()
+            .contains("#/components/schemas/CompletionResponseFormat")
+    );
+    let format = &schemas["CompletionResponseFormat"]["oneOf"];
+    assert_eq!(format.as_array().unwrap().len(), 4);
+    for kind in ["text", "json_object", "json_schema", "structural_tag"] {
+        assert!(format.to_string().contains(kind), "missing {kind}");
+    }
+    assert_eq!(
+        schemas["CompletionJsonSchema"]["required"],
+        serde_json::json!(["name"])
+    );
+    let tags = &schemas["CompletionStructuralTag"]["anyOf"];
+    assert_eq!(tags.as_array().unwrap().len(), 2);
+    assert_eq!(tags[0]["required"], serde_json::json!(["format"]));
+    assert_eq!(
+        tags[1]["required"],
+        serde_json::json!(["structures", "triggers"])
+    );
+    // Both shapes can be present and must reach the backend without dropping
+    // either grammar. A oneOf export would misdescribe this accepted overlap.
+    let request: dynamo_llm::protocols::openai::completions::NvCreateCompletionRequest =
+        serde_json::from_value(serde_json::json!({
+            "model": "test", "prompt": "hello", "response_format": {
+                "type": "structural_tag", "format": {"type":"const_string", "value":"violet"},
+                "structures": [], "triggers": []
+            }
+        }))
+        .unwrap();
+    let encoded = serde_json::to_value(request.response_format).unwrap();
+    assert_eq!(encoded["structures"], serde_json::json!([]));
+    assert_eq!(encoded["triggers"], serde_json::json!([]));
+    assert_eq!(
+        encoded["format"],
+        serde_json::json!({"type":"const_string", "value":"violet"})
+    );
+}
+
 /// Both endpoints advertise the nested constraint without claiming that every
 /// JSON value is a schema. Semantic grammar validity still belongs to the backend.
 #[test]
