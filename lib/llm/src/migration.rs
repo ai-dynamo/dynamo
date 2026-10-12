@@ -532,7 +532,8 @@ where
             if let Some(session_affinity) = self.session_affinity.as_ref() {
                 request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
             }
-            self.context.link_child(request.context());
+            let attempt_context = request.context();
+            self.context.link_child(attempt_context.clone());
             if self.context.is_stopped() || self.context.is_killed() {
                 if let Some(cause) = migration {
                     tracing::info!(
@@ -590,7 +591,12 @@ where
                 Ok(next_stream) => {
                     // A dispatch cancelled before its response prologue returns `Ok` empty,
                     // so a stopped context here means the client left during the handshake.
-                    let outcome = if self.context.is_stopped() || self.context.is_killed() {
+                    // The parent stops its children before itself, so check the attempt too.
+                    let outcome = if self.context.is_stopped()
+                        || self.context.is_killed()
+                        || attempt_context.is_stopped()
+                        || attempt_context.is_killed()
+                    {
                         frontend_service::migration_outcome::CANCELLED
                     } else {
                         frontend_service::migration_outcome::SUCCESS
@@ -1101,6 +1107,8 @@ mod tests {
             mid_stream: bool,
             fail_after: usize,
             dispatched: Arc<tokio::sync::Notify>,
+            /// Stop only the attempt context, as a parent does before stopping itself
+            stop_attempt_only: bool,
         },
         /// One addressed worker rejects admission, then a replacement succeeds.
         WorkerOverloadSequence {
@@ -1257,10 +1265,14 @@ mod tests {
                     mid_stream,
                     fail_after,
                     dispatched,
+                    stop_attempt_only,
                 } => {
                     if call_num > 0 {
                         dispatched.notify_one();
                         let request_context = context.context();
+                        if *stop_attempt_only {
+                            request_context.stop_generating();
+                        }
                         request_context.stopped().await;
                         return Ok(dynamo_runtime::pipeline::ResponseStream::new(
                             Box::pin(stream::empty()),
@@ -2262,7 +2274,9 @@ mod tests {
     /// The client disconnects while the replacement worker is still in its
     /// response handshake. The addressed router turns that into an `Ok` empty
     /// stream, which must be recorded as `cancelled`, not `success`.
-    async fn run_cancel_during_handshake(mid_stream: bool) {
+    /// With `stop_attempt_only`, the router returns while only the attempt
+    /// context is stopped and the parent is stopped afterwards.
+    async fn run_cancel_during_handshake(mid_stream: bool, stop_attempt_only: bool) {
         dynamo_runtime::logging::init();
         let fail_after = 3;
         let migration_type = if mid_stream {
@@ -2277,6 +2291,7 @@ mod tests {
                 mid_stream,
                 fail_after,
                 dispatched: dispatched.clone(),
+                stop_attempt_only,
             },
             10,
             100,
@@ -2314,9 +2329,16 @@ mod tests {
             while let Some(response) = retry_manager.next().await {
                 responses.push(response);
             }
+            if stop_attempt_only {
+                assert!(!ctx.is_stopped());
+                ctx.stop_generating();
+            }
             responses
         };
         let disconnect = async {
+            if stop_attempt_only {
+                return;
+            }
             dispatched.notified().await;
             assert_eq!(
                 duration_counts(&metrics),
@@ -2358,12 +2380,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_manager_new_request_cancelled_during_handshake() {
-        run_cancel_during_handshake(false).await;
+        run_cancel_during_handshake(false, false).await;
     }
 
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_cancelled_during_handshake() {
-        run_cancel_during_handshake(true).await;
+        run_cancel_during_handshake(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_new_request_attempt_cancelled_before_parent() {
+        run_cancel_during_handshake(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_ongoing_request_attempt_cancelled_before_parent() {
+        run_cancel_during_handshake(true, true).await;
     }
 
     /// Test case 8: No migration for guided-decoding (structured-output) requests
