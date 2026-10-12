@@ -65,6 +65,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&DynamoGraphDeploymentScalingAdapterList{},
 		&DynamoModel{},
 		&DynamoModelList{},
+		&DynamoPoolRelay{},
+		&DynamoPoolRelayList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

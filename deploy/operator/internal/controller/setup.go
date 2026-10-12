@@ -10,6 +10,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	lpxcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lpx"
+	poolrelaycontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/poolrelay"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
@@ -142,6 +143,13 @@ func SetupDynamoModel(mgr ctrl.Manager, opts DynamoModelSetupOptions) error {
 		RuntimeConfig:  opts.RuntimeConfig,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoModel controller: %w", err)
+	}
+	return nil
+}
+
+func SetupDynamoPoolRelay(mgr ctrl.Manager, opts SetupOptions) error {
+	if err := poolrelaycontroller.Setup(mgr, opts.Config, opts.RuntimeConfig); err != nil {
+		return fmt.Errorf("unable to create DynamoPoolRelay controller: %w", err)
 	}
 	return nil
 }

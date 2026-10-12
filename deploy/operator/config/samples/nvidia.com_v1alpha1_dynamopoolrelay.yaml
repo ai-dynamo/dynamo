@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoPoolRelay
+metadata:
+  name: dc-a
+  namespace: dynamo
+spec:
+  clusterId: dc-a
+  replicas: 2
+  # Build an image from this revision with matching relay Python/Rust bindings.
+  podTemplate:
+    spec:
+      containers:
+        - name: main
+          image: REPLACE_WITH_RELAY_IMAGE
+  sources:
+    dgds:
+      # Select DGD metadata labels in this Kubernetes namespace.
+      labelSelector:
+        matchLabels:
+          relay-group: production
+      # Explicit references are unioned with the label selection.
+      refs:
+        - name: special-model

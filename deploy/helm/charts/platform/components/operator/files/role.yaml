@@ -11,6 +11,7 @@ rules:
   resources:
   - configmaps
   - events
+  - serviceaccounts
   - services
   verbs:
   - create
@@ -52,7 +53,6 @@ rules:
   - ""
   resources:
   - secrets
-  - serviceaccounts
   verbs:
   - create
   - get
@@ -81,6 +81,7 @@ rules:
   - apps
   resources:
   - daemonsets
+  - replicasets
   verbs:
   - get
   - list
@@ -288,6 +289,7 @@ rules:
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
+  - dynamopoolrelays/finalizers
   - lpxgraphdeployments/finalizers
   verbs:
   - update
@@ -299,6 +301,7 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
+  - dynamopoolrelays/status
   - lpxgraphdeployments/status
   verbs:
   - get
@@ -307,8 +310,18 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - podsnapshots
+  - dynamopoolrelays
   verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamoworkermetadatas
+  - snapshotjobs
+  verbs:
+  - create
   - delete
   - get
   - list
@@ -317,9 +330,8 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - snapshotjobs
+  - podsnapshots
   verbs:
-  - create
   - delete
   - get
   - list
@@ -337,21 +349,13 @@ rules:
   - rbac.authorization.k8s.io
   resources:
   - rolebindings
+  - roles
   verbs:
   - create
   - delete
   - get
   - list
-  - update
-  - watch
-- apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
-  - roles
-  verbs:
-  - create
-  - get
-  - list
+  - patch
   - update
   - watch
 - apiGroups:

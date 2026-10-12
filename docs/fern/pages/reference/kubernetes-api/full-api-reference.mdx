@@ -10,10 +10,10 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 172 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 179 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">76 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">74 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
@@ -37,6 +37,7 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 <Card title="DynamoGraphDeploymentRequest" href="#dynamographdeploymentrequest" />
 <Card title="DynamoGraphDeploymentScalingAdapter" href="#dynamographdeploymentscalingadapter" />
 <Card title="DynamoModel" href="#dynamomodel" />
+<Card title="DynamoPoolRelay" href="#dynamopoolrelay" />
 </CardGroup>
 
 <Accordion id="autoscaling" title="Autoscaling">
@@ -1184,6 +1185,194 @@ TotalEndpoints is the total count of endpoints
 
 <ParamField path="conditions" type="Condition array">
 Conditions represents the latest available observations of the model's state
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelay" title="DynamoPoolRelay">
+DynamoPoolRelay is an experimental, independently managed Pool Relay.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1alpha1`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`DynamoPoolRelay`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="DynamoPoolRelaySpec">
+See [DynamoPoolRelaySpec](#dynamopoolrelayspec).
+</ParamField>
+
+<ParamField path="status" type="DynamoPoolRelayStatus">
+See [DynamoPoolRelayStatus](#dynamopoolrelaystatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelaydgdref" title="DynamoPoolRelayDGDRef">
+DynamoPoolRelayDGDRef names an inference graph in the Relay's Kubernetes namespace.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoPoolRelayDGDSelection](#dynamopoolrelaydgdselection)
+
+<ParamField path="name" type="string">
+Name is the DGD metadata.name.
+**Validation:** MaxLength: 253  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelaydgdselection" title="DynamoPoolRelayDGDSelection">
+DynamoPoolRelayDGDSelection resolves the union of label selection and explicit references.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoPoolRelaySourcesSpec](#dynamopoolrelaysourcesspec)
+
+<ParamField path="labelSelector" type="LabelSelector">
+LabelSelector selects DGD metadata labels in this Kubernetes namespace. An explicit empty selector selects all DGDs. Results are unioned with Refs.
+See [LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#labelselector-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="refs" type="DynamoPoolRelayDGDRef array">
+Refs additionally selects named DGDs in this Kubernetes namespace. Missing references are reported in status and retried when they appear.
+See [DynamoPoolRelayDGDRef](#dynamopoolrelaydgdref).
+**Validation:** MaxItems: 64  MinItems: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelayservicespec" title="DynamoPoolRelayServiceSpec">
+DynamoPoolRelayServiceSpec configures publication without overriding ownership or selectors.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoPoolRelaySpec](#dynamopoolrelayspec)
+
+<ParamField path="ports" type="ServicePort array">
+Ports replace the default publication port. Named targets must exist in the Pod.
+See [ServicePort](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#serviceport-v1-core).
+**Validation:** MaxItems: 32  MinItems: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelaysourcesspec" title="DynamoPoolRelaySourcesSpec">
+DynamoPoolRelaySourcesSpec groups source selection independently of publication.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoPoolRelaySpec](#dynamopoolrelayspec)
+
+<ParamField path="dgds" type="DynamoPoolRelayDGDSelection">
+DGDs selects inference graphs in the Relay's Kubernetes namespace.
+See [DynamoPoolRelayDGDSelection](#dynamopoolrelaydgdselection).
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelayspec" title="DynamoPoolRelaySpec">
+DynamoPoolRelaySpec configures one namespace-local Pool Relay. Conversion is
+unaffected: DynamoPoolRelay is a new, single-version API with no hub or spoke.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoPoolRelay](#dynamopoolrelay)
+
+<ParamField path="clusterId" type="string">
+ClusterID is the stable discovery-cluster identity, retained across restarts.
+**Validation:** MaxLength: 128  MinLength: 1  Pattern: `^\S(.*\S)?$`
+</ParamField>
+
+<ParamField path="replicas" type="integer" default="2">
+Replicas is the number of active Relay processes. Each observes all selected sources and maintains independent state. Defaults to two; one disables redundancy.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="sources" type="DynamoPoolRelaySourcesSpec">
+Sources selects the DGDs observed by every Relay replica.
+See [DynamoPoolRelaySourcesSpec](#dynamopoolrelaysourcesspec).
+</ParamField>
+
+<ParamField path="podTemplate" type="PodTemplateSpec">
+PodTemplate configures the Relay Pod, like a DGD component. Exactly one container named main with a nonempty image is required; other containers are user-managed sidecars. Transport, identity and sources remain derived.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
+</ParamField>
+
+<ParamField path="service" type="DynamoPoolRelayServiceSpec">
+Service configures the generated ClusterIP ports. The port named grpc is the publication endpoint. Omission exposes the main listener on 5561.
+See [DynamoPoolRelayServiceSpec](#dynamopoolrelayservicespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelaystatus" title="DynamoPoolRelayStatus">
+DynamoPoolRelayStatus reports deployment availability, not pool or model readiness.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoPoolRelay](#dynamopoolrelay)
+
+<ParamField path="observedGeneration" type="integer">
+ObservedGeneration is the last successfully reconciled spec generation.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="endpoint" type="string">
+Endpoint is the internal Service address of the port named grpc.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="deploymentName" type="string">
+DeploymentName identifies the managed Deployment for logs and inspection.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="desiredSourcesRevision" type="string">
+DesiredSourcesRevision identifies the published source configuration.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="appliedSourcesRevision" type="string">
+AppliedSourcesRevision is set only when every requested current replica acknowledges DesiredSourcesRevision and no superseded active Pods remain.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="replicas" type="integer">
+Replicas is the number of non-terminated Deployment replicas.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="updatedReplicas" type="integer">
+UpdatedReplicas is the number of replicas at the desired Pod template.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="availableReplicas" type="integer">
+AvailableReplicas is the number of available Deployment replicas.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="sourcesAppliedReplicas" type="integer">
+SourcesAppliedReplicas counts current, non-terminating replicas that acknowledged the desired source and connection revisions with their own Pod UID.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="selectedDGDs" type="integer">
+SelectedDGDs reports the number of active objects in the resolved union.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+Conditions reports Ready when all requested current replicas are available; this does not imply model or KV recovery readiness.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

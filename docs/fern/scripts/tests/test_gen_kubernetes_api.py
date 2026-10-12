@@ -48,7 +48,9 @@ EXPECTED_TYPE_COUNTS = {
     # (PodReference, PodSnapshotSource/Spec/Status,
     # PodSnapshotContentSource/Spec/Status, PodSnapshotReference), which are
     # owned by github.com/ai-dynamo/snapshot.
-    "nvidia.com/v1alpha1": 69,
+    # Includes DynamoPoolRelay and its Spec, Status, DGDRef, ServiceSpec,
+    # SourcesSpec, and DGDSelection.
+    "nvidia.com/v1alpha1": 76,
     "nvidia.com/v1beta1": 74,
     "operator.config.dynamo.nvidia.com/v1alpha1": 29,
 }

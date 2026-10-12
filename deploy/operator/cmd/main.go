@@ -614,6 +614,11 @@ func registerControllers(
 	}); err != nil {
 		return err
 	}
+
+	if err := controller.SetupDynamoPoolRelay(mgr, setupOptions); err != nil {
+		return err
+	}
+
 	// PodSnapshot/PodSnapshotContent reconciliation is owned by the external
 	// Snapshot operator (github.com/ai-dynamo/snapshot).
 

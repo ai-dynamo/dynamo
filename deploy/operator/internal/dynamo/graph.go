@@ -2553,20 +2553,42 @@ var dgdPropagatedAnnotationKeys = []string{
 // downstream logic can read them uniformly. Component annotations override
 // defaults, while the immutable DGD origin remains controller-authoritative.
 func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
+	// Use the same annotation defaults for rendered workers and read-only consumers.
 	for _, podTemplate := range EnsureComponentPodTemplates(component) {
-		// Replace any component value with the authoritative DGD origin, including absence.
-		delete(podTemplate.Annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
-		if origin, exists := dgdAnnotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
-			podTemplate.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
-		}
-		for _, key := range dgdPropagatedAnnotationKeys {
-			if val, exists := dgdAnnotations[key]; exists {
-				if _, serviceHas := podTemplate.Annotations[key]; !serviceHas {
-					podTemplate.Annotations[key] = val
-				}
+		podTemplate.Annotations = withDGDAnnotationDefaults(dgdAnnotations, podTemplate.Annotations)
+	}
+}
+
+// GetDGDComponentPodAnnotations resolves graph, legacy service, and template
+// annotations with the same metadata defaults used when rendering workers.
+// dgd and component must be non-nil; neither input is mutated.
+func GetDGDComponentPodAnnotations(dgd *v1beta1.DynamoGraphDeployment, component *v1beta1.DynamoComponentDeploymentSharedSpec) map[string]string {
+	annotations := GetDGDComponentResourceAnnotations(dgd, component.ComponentName, component)
+	return withDGDAnnotationDefaults(dgd.Annotations, annotations)
+}
+
+// withDGDAnnotationDefaults returns an owned annotation map; nil maps mean no annotations.
+func withDGDAnnotationDefaults(dgdAnnotations, componentAnnotations map[string]string) map[string]string {
+	annotations := maps.Clone(componentAnnotations)
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+
+	// The immutable DGD origin is authoritative, including its absence.
+	delete(annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
+	if origin, exists := dgdAnnotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+		annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
+	}
+
+	// Authored template and spec annotations override DGD metadata defaults.
+	for _, key := range dgdPropagatedAnnotationKeys {
+		if value, exists := dgdAnnotations[key]; exists {
+			if _, authored := annotations[key]; !authored {
+				annotations[key] = value
 			}
 		}
 	}
+	return annotations
 }
 
 // propagateDGDSpecMetadata materializes graph and preserved v1alpha1 service

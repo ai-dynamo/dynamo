@@ -162,6 +162,8 @@ func projectTopologyVolumes(in []corev1.Volume) []corev1.Volume {
 
 func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 	return corev1.PodStatus{
+		// Relay scope acknowledgement addresses the owned Pod directly.
+		PodIP: in.PodIP,
 		// Failover, DGDR diagnostics, and Recreate drain barriers require the
 		// lifecycle phase.
 		Phase: in.Phase,
