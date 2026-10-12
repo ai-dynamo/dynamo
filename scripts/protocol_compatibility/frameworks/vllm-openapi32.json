@@ -1,0 +1,63 @@
+{
+  "framework_name": "vllm",
+  "purpose": "Pinned request/response candidate discovery; not a complete compatibility certification",
+  "source": {
+    "repository": "https://github.com/vllm-project/vllm",
+    "revision": "b04e80127bea278758743ca3277d40a234f73b09",
+    "pull_request": "https://github.com/vllm-project/vllm/pull/60926",
+    "precompiled_kernel_revision": "4cf1307e72cb1648e4e3c3ab4e0bf85d5616fcb3",
+    "precompiled_kernel_wheel": "https://wheels.vllm.ai/4cf1307e72cb1648e4e3c3ab4e0bf85d5616fcb3/vllm-0.31.1rc1.dev100%2Bg4cf1307e7-cp38-abi3-manylinux_2_28_x86_64.whl",
+    "observed_distribution_version": "0.1.dev4+gb04e80127.precompiled",
+    "identity_note": "The shallow editable distribution version is not a release identity; use the source and kernel revisions. No vLLM source edits."
+  },
+  "dynamo": {
+    "revision": "10641b1f8950b7cb3ad01bf693d3618624c5f7da",
+    "runtime_build": "Locked Cargo build with default Linux features",
+    "prerequisite": "https://github.com/ai-dynamo/dynamo/pull/16073",
+    "prerequisite_revision": "1f5429de07327ca36427bca90a64920d7d513a78",
+    "prerequisite_patch_sha256": "8f4d1cd0253cb94287cc66380494387b55ebf5434d703d6994f6b32ac2e71a3f",
+    "composition_dependencies": {"dynamo-protocols": "8.1.0", "async-openai": "0.42.1"}
+  },
+  "environment": {
+    "platform": "Linux x86_64",
+    "python": "3.12.3",
+    "torch": "2.13.0+cu130",
+    "fastapi": "0.136.3",
+    "pydantic": "2.13.5",
+    "driver": "580.178.04",
+    "gpu": "NVIDIA RTX 5880 Ada Generation",
+    "constraints": "vllm-openapi32-constraints.txt",
+    "note": "Observed version constraints exclude the three source-built Dynamo/vLLM distributions. Exact wheel/source hashes and commands accompany each retained execution. No published container image is claimed."
+  },
+  "model": {"name": "Qwen/Qwen3-0.6B", "revision": "c1899de289a04d12100db370d81485cdf75e47ca", "tokenizer_revision": "c1899de289a04d12100db370d81485cdf75e47ca"},
+  "serve": {
+    "served_model_name": "protocol-schema-probe",
+    "max_model_len": 512,
+    "max_num_seqs": 2,
+    "gpu_memory_utilization": 0.15,
+    "dtype": "bfloat16",
+    "seed": 0,
+    "enforce_eager": true,
+    "reasoning_parser": "qwen3",
+    "tool_call_parser": "hermes",
+    "vllm_enable_auto_tool_choice": true,
+    "dynamo_discovery": "file",
+    "dynamo_request_plane": "tcp",
+    "dynamo_event_plane": "zmq"
+  },
+  "captures": {
+    "vllm_sha256": "3c24921af20d6f414271dc9cebd8c6cfa483896dfbb5a350619e812a016feb6c",
+    "dynamo_sha256": "29b661410d4ab64167b1d010183f97a68ba6d8cb7f7886427e82a23c0bc8243f",
+    "openapi": "3.2.0",
+    "note": "Both are actual /openapi.json responses from real inference deployments. Native Dynamo import slots still require the pinned offline composition."
+  },
+  "assessment": {
+    "endpoints": ["/v1/chat/completions", "/v1/completions"],
+    "direction": "vLLM client to Dynamo with the same vLLM engine",
+    "request_location_groups": 147,
+    "response_status_groups": 15,
+    "coverage_gaps": 15,
+    "status": "incomplete",
+    "note": "Groups retain nested comparator deltas; counts are not independent bugs. Root-cause deduplication and candidate dispositions require paired E2E evidence."
+  }
+}

@@ -18,8 +18,10 @@ in this tooling package alongside independent request and response comparison.
 Native `/openapi.json` still contains explicit dependency import slots;
 composition does not modify the running frontend.
 
-For a concrete pinned backend, see the
-[vLLM acquisition and assessment recipe](../../lib/llm/docs/dynamo-vllm-protocol-assessment.md).
+For the current response-capable backend, see the
+[pinned vLLM OpenAPI 3.2 assessment](../../lib/llm/docs/dynamo-vllm-openapi32-assessment.md).
+The [vLLM 0.30 recipe](../../lib/llm/docs/dynamo-vllm-protocol-assessment.md)
+and its regression fragments remain historical request-only evidence.
 
 ## Installation
 
