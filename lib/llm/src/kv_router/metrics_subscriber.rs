@@ -30,8 +30,9 @@ use crate::{
 
 const MAX_PENDING_ACTIVE_LOADS: usize = 100_000;
 /// Every direct-ZMQ source task pushes into this mailbox. Sharding by worker spreads those
-/// producers over independent locks while keeping per-worker merging and ordering.
-const ACTIVE_LOAD_SHARDS: usize = 64;
+/// producers over independent locks while keeping per-worker merging and ordering. The
+/// consumer scans the shards for each load, so keep the count small.
+const ACTIVE_LOAD_SHARDS: usize = 16;
 
 pub(crate) struct KvMetricsSubscriber {
     inner: KvMetricsSubscriberInner,
