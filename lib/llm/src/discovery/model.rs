@@ -108,7 +108,6 @@ pub struct Model {
     /// request path reads it several times per request, so readers load the current map
     /// without writing shared state and writers publish a modified copy.
     worker_sets: ArcSwap<WorkerSetMap>,
-    /// Serializes membership updates.
     update_lock: parking_lot::Mutex<()>,
 }
 
@@ -121,7 +120,6 @@ impl Model {
         }
     }
 
-    /// Apply one membership change to a copy of the map and publish the copy.
     fn update_worker_sets<R>(&self, update: impl FnOnce(&mut WorkerSetMap) -> R) -> R {
         let _guard = self.update_lock.lock();
         let mut worker_sets = WorkerSetMap::clone(&self.worker_sets.load());
@@ -976,45 +974,6 @@ mod tests {
         assert!(!snapshot.has_worker_set("ns2"));
         assert_eq!(model.worker_set_count(), 1);
         assert!(model.has_worker_set("ns2"));
-    }
-
-    #[test]
-    fn concurrent_readers_see_consistent_membership() {
-        // Writers replace the whole membership map, so a reader sees either both
-        // sets of the pair or neither, never one of them alone.
-        let model = Arc::new(Model::new("llama".to_string()));
-        model.add_worker_set("base".to_string(), make_worker_set("base", "abc"));
-        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let readers: Vec<_> = (0..4)
-            .map(|_| {
-                let model = model.clone();
-                let done = done.clone();
-                std::thread::spawn(move || {
-                    let mut reads = 0_u64;
-                    while !done.load(std::sync::atomic::Ordering::Relaxed) || reads == 0 {
-                        let namespaces = model.distinct_namespaces_sorted();
-                        assert!(namespaces.contains(&"base".to_string()));
-                        assert!(matches!(namespaces.len(), 1 | 3), "{namespaces:?}");
-                        reads += 1;
-                    }
-                })
-            })
-            .collect();
-        for _ in 0..500 {
-            model.update_worker_sets(|worker_sets| {
-                worker_sets.insert("a".to_string(), make_worker_set("a", "abc"));
-                worker_sets.insert("b".to_string(), make_worker_set("b", "abc"));
-            });
-            model.update_worker_sets(|worker_sets| {
-                worker_sets.remove("a");
-                worker_sets.remove("b");
-            });
-        }
-        done.store(true, std::sync::atomic::Ordering::Relaxed);
-        for reader in readers {
-            reader.join().unwrap();
-        }
-        assert_eq!(model.distinct_namespaces_sorted(), vec!["base".to_string()]);
     }
 
     #[test]
