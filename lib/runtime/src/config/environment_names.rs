@@ -181,6 +181,9 @@ pub mod runtime {
         /// `{"url": "http://127.0.0.1:...", "timeout_secs": N}`. Unset
         /// disables validation.
         pub const DYN_WORKER_VALIDATION_GATES: &str = "DYN_WORKER_VALIDATION_GATES";
+
+        /// What a held worker keeps back: `card` (default) or `health`.
+        pub const DYN_WORKER_VALIDATION_HOLD: &str = "DYN_WORKER_VALIDATION_HOLD";
     }
 
     /// Canary deployment configuration
