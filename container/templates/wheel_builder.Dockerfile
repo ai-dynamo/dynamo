@@ -351,16 +351,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # libvpx: BSD-licensed VP9 encoder needed for the WebM output path. Built from
     # source so we don't need to track distro package names (libvpx-dev on Debian
     # vs libvpx-devel via EPEL on RHEL/manylinux).
-    # Retry googlesource (transient 503s), then fall back to the GitHub mirror.
-    for attempt in 1 2 3; do \
-        git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git && break; \
-        echo "libvpx clone attempt ${attempt}/3 failed" >&2; \
-        if [ "$attempt" -lt 3 ]; then sleep 10; fi; \
-    done; \
-    if [ ! -d libvpx ]; then \
-        echo "falling back to GitHub mirror" >&2; \
-        git clone --depth 1 --branch ${LIBVPX_REF} https://github.com/webmproject/libvpx.git; \
-    fi && \
+    # Fall back to the GitHub mirror if googlesource is unavailable (transient 503s).
+    git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git || git clone --depth 1 --branch ${LIBVPX_REF} https://github.com/webmproject/libvpx.git && \
     cd libvpx && \
     ./configure --prefix=/usr/local --enable-shared --disable-static --disable-examples --disable-unit-tests --disable-tools --disable-docs && \
     make -j$(nproc) && \
