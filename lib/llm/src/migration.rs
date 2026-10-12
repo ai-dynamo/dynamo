@@ -1095,11 +1095,8 @@ mod tests {
         },
         /// Fails on the first call, then generate returns a cancellation error
         FailThenGenerateCancelled,
-        /// Fails on the first call (before the stream when `mid_stream` is
-        /// false, after `fail_after` tokens when true). The replacement call
-        /// signals `dispatched`, waits until its request context is stopped,
-        /// then returns an `Ok` empty stream, as the addressed router does when
-        /// the client cancels before the response prologue.
+        /// Models the addressed router returning an `Ok` empty stream when the
+        /// client cancels before the replacement's response prologue
         FailThenCancelDuringHandshake {
             mid_stream: bool,
             fail_after: usize,
