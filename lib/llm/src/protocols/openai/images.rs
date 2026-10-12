@@ -104,6 +104,9 @@ pub enum ImageQuality {
     High,
     Medium,
     Low,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
     Auto,
 }
 
@@ -274,7 +277,7 @@ impl AnnotationsProvider for NvCreateImageRequest {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_protocols::types::{CreateImageRequest, ImagesResponse};
+    use dynamo_protocols::types::{self as openai, CreateImageRequest, ImagesResponse};
     use serde::de::DeserializeOwned;
 
     use super::*;
@@ -293,6 +296,37 @@ mod tests {
             (Err(_), Err(_)) => {}
             (openai, dynamo) => panic!("{json}: OpenAI type {openai:?}, Dynamo type {dynamo:?}"),
         }
+    }
+
+    /// The wire strings of the listed variants of the OpenAI enum `$ty`.
+    ///
+    /// The match has no wildcard arm, so a variant that a new async-openai
+    /// adds fails to compile here until it is listed, and the enum-value
+    /// tests then check that the Dynamo type accepts it.
+    macro_rules! openai_wire_values {
+        ($ty:ty { $($variant:ident),+ $(,)? }) => {{
+            type OpenAi = $ty;
+            let _exhaustive = |value: OpenAi| match value {
+                $(OpenAi::$variant)|+ => {}
+            };
+            [$(OpenAi::$variant),+]
+                .into_iter()
+                .map(|value| serde_json::to_value(value).unwrap().as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        }};
+    }
+
+    fn openai_image_qualities() -> Vec<String> {
+        openai_wire_values!(openai::ImageQuality {
+            Standard,
+            HD,
+            High,
+            Medium,
+            Low,
+            XHigh,
+            Max,
+            Auto
+        })
     }
 
     // --- Wire compatibility with the OpenAI types ---
@@ -315,16 +349,32 @@ mod tests {
 
     #[test]
     fn image_request_enum_values_match_the_openai_type() {
-        let fields: [(&str, &[&str]); 6] = [
+        let fields = [
+            ("quality", openai_image_qualities()),
             (
-                "quality",
-                &["standard", "hd", "high", "medium", "low", "auto"],
+                "response_format",
+                openai_wire_values!(openai::ImageResponseFormat { Url, B64Json }),
             ),
-            ("response_format", &["url", "b64_json"]),
-            ("output_format", &["png", "jpeg", "webp"]),
-            ("moderation", &["auto", "low"]),
-            ("background", &["auto", "transparent", "opaque"]),
-            ("style", &["vivid", "natural"]),
+            (
+                "output_format",
+                openai_wire_values!(openai::ImageOutputFormat { Png, Jpeg, Webp }),
+            ),
+            (
+                "moderation",
+                openai_wire_values!(openai::ImageModeration { Auto, Low }),
+            ),
+            (
+                "background",
+                openai_wire_values!(openai::ImageBackground {
+                    Auto,
+                    Transparent,
+                    Opaque
+                }),
+            ),
+            (
+                "style",
+                openai_wire_values!(openai::ImageStyle { Vivid, Natural }),
+            ),
         ];
         for (field, values) in fields {
             for value in values {
@@ -354,13 +404,19 @@ mod tests {
 
     #[test]
     fn image_response_enum_values_match_the_openai_type() {
-        let fields: [(&str, &[&str]); 3] = [
-            ("background", &["transparent", "opaque"]),
-            ("output_format", &["png", "jpeg", "webp"]),
+        let fields = [
             (
-                "quality",
-                &["standard", "hd", "high", "medium", "low", "auto"],
+                "background",
+                openai_wire_values!(openai::ImageResponseBackground {
+                    Transparent,
+                    Opaque
+                }),
             ),
+            (
+                "output_format",
+                openai_wire_values!(openai::ImageOutputFormat { Png, Jpeg, Webp }),
+            ),
+            ("quality", openai_image_qualities()),
         ];
         for (field, values) in fields {
             for value in values {

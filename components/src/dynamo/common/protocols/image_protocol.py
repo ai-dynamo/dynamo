@@ -111,7 +111,9 @@ class NvCreateImageRequest(BaseModel):
     The frontend rejects a value outside the range, so a worker never
     sees one and needs no range check of its own.
     """
-    quality: Literal['standard', 'hd', 'high', 'medium', 'low', 'auto'] | None = None
+    quality: Literal['standard', 'hd', 'high', 'medium', 'low', 'xhigh', 'max', 'auto'] | None = (
+        None
+    )
     response_format: Literal['url', 'b64_json'] | None = None
     output_format: Literal['png', 'jpeg', 'webp'] | None = None
     output_compression: conint(ge=0) | None = None
@@ -161,5 +163,7 @@ class NvImagesResponse(BaseModel):
     """
     Image size in WxH format
     """
-    quality: Literal['standard', 'hd', 'high', 'medium', 'low', 'auto'] | None = None
+    quality: Literal['standard', 'hd', 'high', 'medium', 'low', 'xhigh', 'max', 'auto'] | None = (
+        None
+    )
     usage: ImageUsage | None = None
