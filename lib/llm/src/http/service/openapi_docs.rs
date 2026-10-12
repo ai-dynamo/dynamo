@@ -62,7 +62,10 @@ use crate::http::service::RouteDoc;
             crate::protocols::openai::completions::NvCreateCompletionRequest,
             crate::protocols::openai::completions::NvCreateCompletionResponse,
             crate::protocols::openai::embeddings::NvCreateEmbeddingRequest,
-            crate::protocols::openai::responses::NvCreateResponse
+            crate::protocols::openai::responses::NvCreateResponse,
+            super::openai::ErrorMessage,
+            super::openai::ToolCallDispatchPayload<'static>,
+            super::openai::ReasoningDispatchPayload<'static>
         )
     )
 )]
@@ -72,7 +75,7 @@ struct ApiDoc;
 ///
 /// Use when no response-key override is needed. The `route_docs` contract, returned
 /// document, and panics are described by [`generate_openapi_spec_with_reasoning_field`].
-pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenApi {
+pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> serde_json::Value {
     generate_openapi_spec_with_reasoning_field(
         route_docs,
         crate::reasoning_field::ReasoningField::DEFAULT,
@@ -90,8 +93,10 @@ pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenAp
 ///
 /// # Returns
 ///
-/// An owned document for the supplied routes with native components and request-alias
-/// metadata. Dependency import slots remain unresolved; this is not a fully composed contract.
+/// An owned OpenAPI 3.2 JSON document with native components, request-alias metadata,
+/// and SSE event schemas. Dependency import slots remain unresolved; this is not a
+/// fully composed contract. Return JSON rather than Utoipa 5's typed document because
+/// its model cannot retain OpenAPI 3.2 fields. Do not deserialize this into that model.
 ///
 /// # Panics
 ///
@@ -100,7 +105,7 @@ pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenAp
 pub fn generate_openapi_spec_with_reasoning_field(
     route_docs: &[RouteDoc],
     reasoning_field: crate::reasoning_field::ReasoningField,
-) -> utoipa::openapi::OpenApi {
+) -> serde_json::Value {
     let mut openapi = ApiDoc::openapi();
     // Like input aliases below, response projection is a compiled-schema invariant.
     configure_response_schemas(&mut openapi, reasoning_field)
@@ -164,7 +169,81 @@ pub fn generate_openapi_spec_with_reasoning_field(
     // `http_export_describes_request_aliases` exercises this path in the
     // pre-merge Rust suite so schema changes must update the declarations too.
     annotate_request_aliases(&mut openapi).expect("request alias schema locations changed");
-    openapi
+    // Keep the dependency's Utoipa 5 derives, then cross the version boundary once.
+    // A round trip back through its typed model would discard itemSchema and cannot
+    // represent the 3.2 version. HTTP and file export share this final representation.
+    let mut document = serde_json::to_value(openapi).expect("native OpenAPI serialization failed");
+    document["openapi"] = serde_json::json!("3.2.0");
+    for (path, chunk, chat) in [
+        (
+            "/v1/chat/completions",
+            "NvCreateChatCompletionStreamResponse",
+            true,
+        ),
+        ("/v1/completions", "NvCreateCompletionResponse", false),
+    ] {
+        // Only registered POST routes have an SSE response to augment.
+        if let Some(media) = document["paths"][path]["post"]["responses"]["200"]["content"]
+            .get_mut("text/event-stream")
+        {
+            media["itemSchema"] = streaming_event_schema(chunk, chat);
+        }
+    }
+    document
+}
+
+/// Describe parsed data-bearing SSE events for a registered completion response.
+///
+/// `chunk` names a registered payload component; `chat` also enables the named tool
+/// and reasoning dispatch events emitted by the chat handler. The returned schema
+/// constrains event envelopes and string-encoded JSON, not ordering or termination.
+/// Consumers must explicitly validate `contentSchema`. Comment-only annotations and
+/// keep-alives have no dispatched data event and are omitted after SSE parsing.
+fn streaming_event_schema(chunk: &str, chat: bool) -> serde_json::Value {
+    use serde_json::json;
+
+    // disconnect.rs emits this error envelope before [DONE]; the shared error type
+    // also permits optional details used by unary errors, absent from stream errors.
+    let mut events = vec![json!({
+        "type": "object",
+        "required": ["data"],
+        "properties": {
+            "event": {"type": "string", "const": "message"},
+            "data": {
+                "type": "string",
+                "anyOf": [
+                    {"const": "[DONE]"},
+                    {"contentMediaType": "application/json", "contentSchema": {
+                        "$ref": format!("#/components/schemas/{chunk}")
+                    }},
+                    {"contentMediaType": "application/json", "contentSchema": {
+                        "type": "object",
+                        "required": ["error"],
+                        "properties": {"error": {"$ref": "#/components/schemas/ErrorMessage"}}
+                    }}
+                ]
+            }
+        }
+    })];
+    if chat {
+        for (event, payload) in [
+            ("tool_call_dispatch", "ToolCallDispatchPayload"),
+            ("reasoning_dispatch", "ReasoningDispatchPayload"),
+        ] {
+            events.push(json!({
+                "type": "object",
+                "required": ["event", "data"],
+                "properties": {
+                    "event": {"type": "string", "const": event},
+                    "data": {
+                        "type": "string", "contentMediaType": "application/json",
+                        "contentSchema": {"$ref": format!("#/components/schemas/{payload}")}
+                    }
+                }
+            }));
+        }
+    }
+    json!({"anyOf": events})
 }
 
 /// Add the Serde input-alias metadata that schema derivation does not supply.
@@ -358,13 +437,12 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
     operation.build()
 }
 
-/// Describe success payloads for chat/completion POSTs, or omit content otherwise.
+/// Describe success media types for chat/completion POSTs, or omit content otherwise.
 ///
 /// `method` and `path` select the response declaration: only POSTs to
-/// `/v1/chat/completions` and `/v1/completions` get JSON and SSE schema references.
-/// The SSE schema describes one successful JSON `data` payload, not the
-/// transport framing, error events, annotations, or the literal `[DONE]` marker.
-/// `x-dynamo-sse-data-schema: true` marks this payload-only convention for consumers.
+/// `/v1/chat/completions` and `/v1/completions` get a JSON schema and an SSE media
+/// type. The exporter adds itemSchema after serialization because Utoipa 5 cannot
+/// represent it; this intermediate response must not be published on its own.
 fn success_response(method: &str, path: &str) -> utoipa::openapi::Response {
     use utoipa::openapi::{ContentBuilder, Ref, ResponseBuilder};
 
@@ -372,22 +450,19 @@ fn success_response(method: &str, path: &str) -> utoipa::openapi::Response {
     if !method.eq_ignore_ascii_case("POST") {
         return response.build();
     }
-    let (unary, streaming) = match path {
-        "/v1/chat/completions" => (
-            "NvCreateChatCompletionResponse",
-            "NvCreateChatCompletionStreamResponse",
-        ),
-        // The legacy completion API serializes the same type for both modes.
-        "/v1/completions" => ("NvCreateCompletionResponse", "NvCreateCompletionResponse"),
+    let unary = match path {
+        "/v1/chat/completions" => "NvCreateChatCompletionResponse",
+        "/v1/completions" => "NvCreateCompletionResponse",
         _ => return response.build(),
     };
     response
         .description(
             "With stream=false, returns a JSON response. With stream=true, returns \
-             server-sent events; each successful JSON data payload follows the \
-             text/event-stream schema. The literal data: [DONE] terminates the \
-             stream and is not a JSON chunk. Error events and optional annotation \
-             events are outside this successful-payload schema.",
+             server-sent events described by itemSchema: JSON chunks, structured \
+             errors, and the [DONE] marker, plus optional named dispatch events \
+             for chat. Parse SSE before validating the string data's contentSchema. \
+             Comment-only annotations and keep-alives are not data events. Ordering, \
+             termination, and disconnect behavior require separate lifecycle checks.",
         )
         .content(
             "application/json",
@@ -395,17 +470,7 @@ fn success_response(method: &str, path: &str) -> utoipa::openapi::Response {
                 .schema(Some(Ref::from_schema_name(unary)))
                 .build(),
         )
-        .content(
-            "text/event-stream",
-            ContentBuilder::new()
-                .schema(Some(Ref::from_schema_name(streaming)))
-                .extensions(Some(
-                    [("x-dynamo-sse-data-schema", serde_json::json!(true))]
-                        .into_iter()
-                        .collect(),
-                ))
-                .build(),
-        )
+        .content("text/event-stream", ContentBuilder::new().build())
         .build()
 }
 
@@ -587,7 +652,7 @@ fn generate_description_for_path(path: &str) -> String {
                 .to_string()
         }
         "/openapi.json" => {
-            "Returns the OpenAPI 3.0 specification for this API in JSON format."
+            "Returns the OpenAPI 3.2 specification for this API in JSON format."
                 .to_string()
         }
         "/docs" => {
@@ -639,7 +704,9 @@ pub fn openapi_router_with_reasoning_field(
 
     // Create Swagger UI with the OpenAPI spec
     // SwaggerUi automatically serves both the spec at /openapi.json and the UI at /docs
-    let swagger_ui = SwaggerUi::new("/docs").url(openapi_path, openapi_spec);
+    // The serialized document deliberately includes fields outside Utoipa 5's
+    // model. Serve it unchanged; the export tests guard the 3.2 representation.
+    let swagger_ui = SwaggerUi::new("/docs").external_url_unchecked(openapi_path, openapi_spec);
 
     // SwaggerUi handles both routes internally, so we just merge it
     let router = Router::new().merge(swagger_ui);
@@ -725,12 +792,13 @@ mod tests {
         let spec = generate_openapi_spec(&routes);
 
         // Verify basic structure
-        assert!(!spec.info.title.is_empty());
-        assert!(!spec.info.version.is_empty());
+        assert!(!spec["info"]["title"].as_str().unwrap().is_empty());
+        assert!(!spec["info"]["version"].as_str().unwrap().is_empty());
+        assert_eq!(spec["openapi"], "3.2.0");
 
         // Verify paths were added
-        assert!(spec.paths.paths.contains_key("/v1/chat/completions"));
-        assert!(spec.paths.paths.contains_key("/v1/models"));
+        assert!(spec["paths"].get("/v1/chat/completions").is_some());
+        assert!(spec["paths"].get("/v1/models").is_some());
     }
 
     // Two methods on one path (e.g. built-in GET+POST /busy_threshold, or an
