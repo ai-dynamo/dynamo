@@ -87,7 +87,10 @@ an ordinary text prompt can remain in the unconstrained reasoning phase.
 The [reference's constraint gate](https://github.com/vllm-project/vllm/blob/b04e80127bea278758743ca3277d40a234f73b09/vllm/v1/structured_output/__init__.py#L235)
 checks that reasoning has ended before applying the grammar. The controlled
 completion succeeds on vLLM and receives 400 from Dynamo. This is a confirmed
-admission incompatibility on both endpoints, with no fix yet.
+admission incompatibility on both endpoints. The subsequent admission fix is
+stacked in [#16209](https://github.com/ai-dynamo/dynamo/pull/16209), with independent
+constraint-effect and parent-fail/fix-pass evidence; this paragraph describes the
+original baseline rather than that fixed source.
 
 Do not infer more from this batch than it tests. Choice/regex/grammar results
 equal the unconstrained baseline text, so they establish admission differences
@@ -96,6 +99,81 @@ constraints; that does not dispose the entire field as a false positive. vLLM's
 JSON `response_format` overrides `structured_outputs.json` in the tested case.
 Whitespace modifiers still allow spaces in the observed output, so acceptance
 does not prove their effect. Other combinations remain uninvestigated.
+
+### Token controls: missing schema does not establish a missing implementation
+
+These location groups share a schema-coverage cause:
+
+| Field | Chat candidate | Completion candidate |
+| --- | --- | --- |
+| `allowed_token_ids` | `REQUEST-daa10a71a365` | `REQUEST-74a4562b4175` |
+| `stop_token_ids` | `REQUEST-dff55ecef0ea` | `REQUEST-f4a7cade9c25` |
+
+On Dynamo `03209940e586ae54786bc01e561ea1d985e8640e` plus the pinned startup
+prerequisite, both fields work but are absent from the native request schemas.
+The unchanged reference is vLLM `b04e80127bea278758743ca3277d40a234f73b09` with
+the profile's model/tokenizer revision. Both use the same generation settings.
+
+Reproduce with the model alias `structured-output-test`, temperature 0, seed 0
+and `max_tokens: 4`. Chat sends the user message `Reply with exactly the word hello.`
+and `chat_template_kwargs: {"enable_thinking": false}`. Completion sends the same
+instruction inside the Qwen chat template, ending with
+`<|im_start|>assistant\n<think>\n\n</think>\n\n`. The pinned tokenizer maps `7` to
+token 22; do not reuse that ID with a different tokenizer.
+
+| Request change from the baseline | Direct vLLM | Dynamo |
+| --- | --- | --- |
+| None | `Hello!` | `Hello!` |
+| `allowed_token_ids: [22]` | `7777`, length finish | `7777`, length finish |
+| Also `stop_token_ids: [22]` | Immediate stop; no visible text | Immediate stop; no visible text |
+
+Unary and streaming requests demonstrate restriction and stopping effects, not
+merely acceptance. Raw unary chat bodies differ on immediate stop: the reference
+returns `content: ""`, Dynamo returns `content: null`. This record does not treat
+those response shapes as equal. Streaming completes with `[DONE]` on both.
+
+The false inference is **“the missing property proves the runtime does not support
+this field.”** It is disproved only for the demonstrated inputs. The comparator
+correctly reports the declared-schema omission; suppressing all missing-property
+findings would hide real admission defects such as the original `bad_words` case.
+The cause is verified in [extra-field validation](../src/protocols/openai/validate.rs):
+these fields are explicitly admitted and consumed, but their catch-all map is
+skipped by serialization-based schema derivation. The export needs an input-only
+view; the runtime does not need a second field or a new passthrough path.
+
+The [real-server regression](../../../tests/serve/test_vllm_structured_outputs.py)
+`test_token_controls_are_effective_and_declared` retains requests, raw bodies,
+HTTP status/headers, launch arguments and live schemas. It checks inference before
+declarations, so its parent failure distinguishes a missing schema from failed
+generation. Run it against each server with the profile's pinned sources:
+
+```bash
+python -m pytest tests/serve/test_vllm_structured_outputs.py \
+  -k token_controls_are_effective_and_declared -v \
+  -o tmp_path_retention_policy=all
+```
+
+Remaining findings must not be collapsed into that false inference:
+
+- Dynamo's deliberate 32-entry stop-ID limit rejects 33 entries, including
+  duplicates; the reference accepts them. This schema change preserves the
+  existing limit and declares it. Any policy change is separate.
+- For an ordinary stop ID, `include_stop_str_in_output: true` retains the token
+  in vLLM but not Dynamo. This is a request-semantic mismatch, not a schema-only
+  false positive. String-stop inclusion does work in the tested cases.
+- The reference coerces boolean/string list items; Dynamo requires integer IDs.
+  Those coercions are outside the reference's declared integer-item schema.
+- Empty allowlists and invalid IDs can fail in different HTTP/SSE phases, and
+  error bodies differ. Null/empty handling alone does not certify a whole field.
+- Combining a sole allowed token with a matching stop ID and positive `min_tokens`
+  creates conflicting constraints. Both servers emitted tokens outside the
+  allowlist in that probe; it is not evidence of supported composition.
+
+A future tooling regression should keep the missing-property candidate while
+distinguishing declared-schema coverage from runtime admission/effect. The native
+export regression checks both request roots and the actual frontend count limit.
+Neither that regression nor these finite probes establish every tokenizer,
+backend, numeric bound, field combination or response contract.
 
 Other endpoints and model-specific capabilities remain outside this text-model
 execution evidence. Missing response-body contracts, unsupported schema features,

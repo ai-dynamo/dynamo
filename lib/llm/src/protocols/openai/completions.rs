@@ -14,7 +14,9 @@ use super::{
     ContentProvider, OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider,
     OpenAIStopConditionsProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
-    common_ext::{CommonExt, CommonExtProvider, extract_guided_decoding_options},
+    common_ext::{
+        CommonExt, CommonExtProvider, GenerationCommonExt, extract_guided_decoding_options,
+    },
     structured_outputs::{StructuredOutputs, invalid},
     validate,
 };
@@ -147,6 +149,7 @@ pub struct NvCreateCompletionRequest {
     pub inner: dynamo_protocols::types::CreateCompletionRequest,
 
     #[serde(flatten)]
+    #[schema(value_type = GenerationCommonExt)]
     pub common: CommonExt,
 
     /// Replace the matching structured_outputs constraint. Null/text leave it

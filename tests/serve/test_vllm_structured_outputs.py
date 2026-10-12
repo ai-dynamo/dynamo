@@ -22,6 +22,7 @@ from uuid import uuid4
 
 import pytest
 import requests
+from transformers import AutoTokenizer
 
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import reserved_ports
@@ -177,10 +178,13 @@ def structured_server(request, tmp_path):
         yield base, tmp_path
 
 
-def _generate(base, path, payload, evidence, expected_status=200):
+def _generate(
+    base, path, payload, evidence, expected_status=200, expected_finish="stop"
+):
     """Save raw HTTP evidence and return content, or None for an expected HTTP error.
 
-    Streaming must end with [DONE] and a stop finish reason; malformed chunks,
+    Streaming must end with [DONE] and expected_finish (normally stop; use length
+    when deliberately exhausting max_tokens). Malformed chunks,
     error events, truncation and non-200 statuses fail rather than being normalized
     away. Only content fragments are assembled, not IDs, timestamps or tool calls.
     For pre-header rejection checks, pass expected_status=400: require JSON rather
@@ -203,7 +207,7 @@ def _generate(base, path, payload, evidence, expected_status=200):
         chat = path == "/v1/chat/completions"
         if not payload["stream"]:
             choice = response.json()["choices"][0]
-            assert choice["finish_reason"] == "stop", choice
+            assert choice["finish_reason"] == expected_finish, choice
             return choice["message"]["content"] if chat else choice["text"]
         assert response.headers["Content-Type"].startswith("text/event-stream")
         events = [
@@ -219,7 +223,7 @@ def _generate(base, path, payload, evidence, expected_status=200):
             choice["finish_reason"]
             for choice in choices
             if choice.get("finish_reason") is not None
-        ] == ["stop"]
+        ] == [expected_finish]
         return "".join(
             (
                 (choice.get("delta", {}).get("content") or "")
@@ -334,6 +338,102 @@ def test_structured_outputs_constrain_chat_and_completion(structured_server):
                         assert isinstance(json.loads(result), dict), result
                     else:
                         assert result == "violet", result
+
+
+def _root_property(document, node, name):
+    """Find a request-root property through these exports' acyclic local refs/allOf.
+
+    Return None for an absent property. Do not descend into arbitrary properties:
+    a same-named field inside messages or tools does not describe this request root.
+    Broken local refs raise KeyError instead of becoming evidence of absence.
+    """
+    if name in node.get("properties", {}):
+        return node["properties"][name]
+    if "$ref" in node:
+        reference = node["$ref"]
+        assert reference.startswith("#/"), reference
+        resolved = document
+        for part in reference[2:].split("/"):
+            resolved = resolved[part.replace("~1", "/").replace("~0", "~")]
+        return _root_property(document, resolved, name)
+    for part in node.get("allOf", []):
+        found = _root_property(document, part, name)
+        if found is not None:
+            return found
+    return None
+
+
+def test_token_controls_are_effective_and_declared(structured_server):
+    """Separate existing token-control effects from missing OpenAPI declarations.
+
+    First prove restriction and stopping with real inference on both transports;
+    then require each admitted root field in that server's live schema. On the
+    schema-deficient parent, inference passes but the declaration assertion fails.
+    This does not certify count limits, coercion, or error/empty-content parity.
+    Immediate stops may be an empty string or unary chat null; preserve raw bodies
+    and check only that the stop token is not emitted, not response-shape equality.
+    """
+    base, evidence = structured_server
+    tokenizer = AutoTokenizer.from_pretrained(
+        "Qwen/Qwen3-0.6B", revision="c1899de289a04d12100db370d81485cdf75e47ca"
+    )
+    digit = tokenizer.encode("7", add_special_tokens=False)
+    assert len(digit) == 1 and tokenizer.decode(digit) == "7", digit
+    spec = json.loads((evidence / "openapi.json").read_text())
+    paths = ["/v1/chat/completions", "/v1/completions"]
+    for path in paths:
+        chat = path == paths[0]
+        endpoint = "chat" if chat else "completion"
+        instruction = "Reply with exactly the word hello."
+        payload = {
+            "model": "structured-output-test",
+            "temperature": 0,
+            "seed": 0,
+            "max_tokens": 4,
+            "stream": False,
+        }
+        if chat:
+            payload.update(
+                messages=[{"role": "user", "content": instruction}],
+                chat_template_kwargs={"enable_thinking": False},
+            )
+        else:
+            payload["prompt"] = (
+                f"<|im_start|>user\n{instruction}<|im_end|>\n"
+                "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            )
+        baseline = _generate(base, path, payload, evidence / f"{endpoint}-ids-control")
+        assert baseline != "7777", baseline
+        for stream in (False, True):
+            restricted = {**payload, "stream": stream, "allowed_token_ids": digit}
+            result = _generate(
+                base,
+                path,
+                restricted,
+                evidence / f"{endpoint}-ids-allowed-{stream}",
+                expected_finish="length",
+            )
+            assert result == "7777", result
+            result = _generate(
+                base,
+                path,
+                {**restricted, "stop_token_ids": digit},
+                evidence / f"{endpoint}-ids-stop-{stream}",
+            )
+            assert result in ("", None), result
+    for path in paths:
+        root = spec["paths"][path]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]
+        for name in ("allowed_token_ids", "stop_token_ids"):
+            field = _root_property(spec, root, name)
+            assert field is not None, f"{path} accepts {name} but does not declare it"
+            arms = field.get("anyOf", [field])
+            assert any(
+                "array" in arm.get("type", [])
+                and arm.get("items", {}).get("type") == "integer"
+                for arm in arms
+            ), field
 
 
 def test_bad_words_exclude_baseline_words(structured_server):

@@ -118,6 +118,26 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "logprob_token_ids",
 ];
 
+/// Schema-only declarations for token controls captured in the extra-field map.
+///
+/// Keep these beside their admission validation: they are not new runtime fields
+/// and must not steal values from existing stop/sampling extraction. Null means
+/// omission. Model vocabulary checks and backend-specific failures remain outside
+/// this structural schema; declaring a field does not imply all backend support.
+#[derive(utoipa::ToSchema)]
+#[allow(dead_code)]
+pub(crate) struct PassthroughTokenControls {
+    /// Restrict generation to these token IDs. Null/omission adds no restriction.
+    /// The backend validates vocabulary membership and rejects an empty allowlist.
+    #[schema(inline)]
+    allowed_token_ids: Option<Vec<crate::types::TokenIdType>>,
+    /// Stop when any listed token is generated. Null/omission adds no stop IDs;
+    /// an empty list adds none. Backend/model stop defaults still apply.
+    // Utoipa requires a literal; the export regression checks MAX_STOP_SEQUENCES.
+    #[schema(inline, max_items = 32)]
+    stop_token_ids: Option<Vec<crate::types::TokenIdType>>,
+}
+
 /// Treat null passthrough fields as omitted while preserving unknown fields for validation.
 pub(super) fn deserialize_extra_fields<'de, D>(
     deserializer: D,
