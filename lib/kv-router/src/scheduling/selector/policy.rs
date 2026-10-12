@@ -359,7 +359,13 @@ impl<C: WorkerConfigLike + Sync> WorkerSelector<C> for WorkerSelectionPolicy {
             WorkerSelectionPolicyState::Reference(..) => WorkerInputs::CACHE | WorkerInputs::LOAD,
             WorkerSelectionPolicyState::Composed(state) => {
                 let state = state.borrow();
-                state.filter_inputs | state.scorer_picker_inputs
+                let inputs = state.filter_inputs | state.scorer_picker_inputs;
+                // Fetch sources come from the host's KV index, which runs only for CACHE.
+                if self.kv_transfer.is_some() {
+                    inputs | WorkerInputs::CACHE
+                } else {
+                    inputs
+                }
             }
         }
     }
@@ -421,6 +427,37 @@ mod tests {
         ) -> Result<usize, WorkerSelectionPolicyError> {
             Ok(0)
         }
+    }
+
+    #[test]
+    fn kv_transfer_policy_requests_cache_inputs() {
+        use crate::plugins::worker_selection::experimental::kv_hints::{
+            KvTransferAction, KvTransferInput,
+        };
+
+        struct KeepDefault;
+
+        impl KvTransferPolicy for KeepDefault {
+            fn decide(&mut self, _input: KvTransferInput<'_>) -> KvTransferAction {
+                KvTransferAction::Default
+            }
+        }
+
+        let inputs = |policy: &WorkerSelectionPolicy| {
+            <WorkerSelectionPolicy as WorkerSelector<TaintedWorkerConfig>>::required_worker_inputs(
+                policy,
+            )
+        };
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(FirstPicker),
+        );
+        assert_eq!(inputs(&policy), WorkerInputs::NONE);
+        // Without CACHE the host runs no KV index, so no fetch source would ever reach the policy.
+        let policy = policy.with_kv_transfer_policy(Box::new(KeepDefault));
+        assert_eq!(inputs(&policy), WorkerInputs::CACHE);
     }
 
     #[test]

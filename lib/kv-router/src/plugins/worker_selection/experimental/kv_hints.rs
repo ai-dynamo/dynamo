@@ -9,7 +9,8 @@
 //! plugin keep, redirect, or drop that fetch:
 //!
 //! 1. The plugin factory builds its [`WorkerSelectionPolicy`] as usual and attaches the fetch
-//!    policy with [`with_kv_transfer_policy`].
+//!    policy with [`with_kv_transfer_policy`]. An attached policy makes the host keep its KV
+//!    index, as if a component declared [`WorkerInputs::CACHE`].
 //! 2. Filters, scorers, and the picker select a worker. The fetch policy cannot change it.
 //! 3. When at least one eligible source holds a longer prefix than the selected worker, the router
 //!    calls [`KvTransferPolicy::decide`] with every eligible source, longest prefix first.
@@ -44,6 +45,8 @@
 //! ```
 
 use crate::kv_hints::KvTransferCandidateSource;
+#[cfg(doc)]
+use crate::plugins::worker_selection::WorkerInputs;
 use crate::plugins::worker_selection::inputs::WorkerTable;
 use crate::plugins::worker_selection::{WorkerMetadata, WorkerSelectionPolicy};
 use crate::protocols::WorkerWithDpRank;

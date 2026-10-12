@@ -369,7 +369,7 @@ Each worker policy is constructed once per routing partition. An empty bundle re
 
 Worker identity and ordinary request metadata are always available. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
 
-Routing cache resources start only if a component requests `CACHE`. `serve_indexer` and `enable_session_prefix_index` also require `CACHE`.
+Routing cache resources start only if a component requests `CACHE` or the policy attaches a [KV fetch-hint policy](#experimental-kv-fetch-hint-policy). `serve_indexer` and `enable_session_prefix_index` also require `CACHE`.
 
 ### Request Context
 
