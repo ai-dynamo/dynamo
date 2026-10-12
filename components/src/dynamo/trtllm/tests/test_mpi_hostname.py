@@ -47,6 +47,8 @@ def test_short_pmix_hostname_differs_per_host():
     assert a != b
 
 
+# Above the child's 60 s subprocess timeout, so that one fires first.
+@pytest.mark.timeout(90)
 def test_importing_dynamo_trtllm_sets_short_pmix_hostname():
     # A fresh interpreter, so the package __init__ really runs, with a fake
     # long nodename installed before the import.
