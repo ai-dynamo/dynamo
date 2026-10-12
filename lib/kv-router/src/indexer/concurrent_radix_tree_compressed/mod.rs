@@ -19,7 +19,7 @@ use super::{
     MatchDetails, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::cleanup::{CleanupGuard, CleanupState};
-use crate::lookup_update::{update_arc_lookup_for_keys, update_existing_arc_lookup_for_keys};
+use crate::lookup_update::{redirect_arc_lookup_for_keys, update_arc_lookup_for_keys};
 use crate::protocols::*;
 
 mod children;
@@ -204,11 +204,15 @@ impl ConcurrentRadixTreeCompressed {
 
     /// Apply deferred lookup updates after `Node::split_at`.
     ///
-    /// Updates worker lookup maps so entries for blocks that moved to the suffix now
-    /// point to the suffix node. Must be called **after** the write guard is dropped.
+    /// Repoints this lane's lookup entries that still name `prefix` at the suffix,
+    /// for the blocks each worker covers there. An entry naming another node is
+    /// left alone: an unlinked node can keep a worker's stale coverage after the
+    /// worker stored those blocks again on a live node. Must be called **after**
+    /// the write guard is dropped.
     fn apply_split_lookup(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        prefix: &SharedNode,
         split: SplitLookupData,
     ) {
         #[cfg(feature = "bench")]
@@ -217,9 +221,7 @@ impl ConcurrentRadixTreeCompressed {
             .fetch_add(1, Ordering::Relaxed);
         for (worker, hashes) in split.suffix.lookup_entries_by_worker() {
             if let Some(wl) = lookup.get_mut(&worker) {
-                for hash in hashes {
-                    wl.insert(hash, split.suffix.clone());
-                }
+                redirect_arc_lookup_for_keys(wl, hashes, prefix, &split.suffix);
             }
         }
     }
