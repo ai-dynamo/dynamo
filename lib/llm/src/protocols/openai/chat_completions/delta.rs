@@ -257,6 +257,13 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         &mut self,
         delta: crate::protocols::common::llm_backend::BackendOutput,
     ) -> anyhow::Result<NvCreateChatCompletionStreamResponse> {
+        self.state
+            .options()
+            .response_fields
+            .validate_metadata_upload_result(
+                delta.finish_reason.as_ref(),
+                delta.engine_data.as_ref(),
+            )?;
         self.state.update_usage_from_backend_output(&delta);
 
         let logprobs = self.create_logprobs(
@@ -834,6 +841,23 @@ mod tests {
             .expect("choice generation");
 
         assert!(response.nvext.is_none());
+    }
+
+    #[test]
+    fn metadata_upload_chat_result_is_opaque_and_required() {
+        let nvext = serde_json::from_value(serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "inline_base64"}})).unwrap();
+        let request = make_request_with_nvext(nvext);
+        let mut generator = request.response_generator("artifact-result".into());
+        assert!(
+            generator
+                .choice_from_postprocessor(final_backend_output())
+                .is_err()
+        );
+        let mut output = final_backend_output();
+        let result = serde_json::json!({"kind": "generation_artifact", "mode": "inline_base64", "inline": {"encoding": "base64", "data": "AQI="}, "backend_specific": {"a": [1, 2]}});
+        output.engine_data = Some(serde_json::json!({"metadata_upload": result}));
+        let response = generator.choice_from_postprocessor(output).unwrap();
+        assert_eq!(response.nvext.unwrap()["metadata_upload"], result);
     }
 
     #[tokio::test]

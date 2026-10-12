@@ -7695,7 +7695,7 @@ impl
             tool_processing_route.uses_legacy_jail(),
         )?;
 
-        tracing::trace!(request = ?common_request, ?prompt_injected_reasoning, "Pre-processed request");
+        tracing::trace!(model = %common_request.model, token_count = common_request.token_ids.len(), ?prompt_injected_reasoning, "Pre-processed request");
         let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
             &tracker,
@@ -12657,6 +12657,22 @@ mod tests {
             extra_args["sampling_options"]["logprob_token_ids"],
             serde_json::json!([14, 15])
         );
+    }
+
+    #[test]
+    fn metadata_upload_artifact_passes_to_backend_without_rewriting_grant() {
+        let upload = serde_json::json!({
+            "kind": "generation_artifact", "contents": ["moe_routes"], "mode": "object_store",
+            "destination": {"kind": "presigned_http_put", "url": "https://storage.example/a%2Fb?sig=secret&x=2&x=1", "required_headers": {"X-Token": "secret"}, "expires_at": "2030-01-01T00:00:00Z", "max_bytes": 1024, "object_id": "object-1"}
+        });
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model", "messages": [{"role": "user", "content": "hi"}],
+            "nvext": {"metadata_upload": upload}
+        }))
+        .unwrap();
+        let extra_args = OpenAIPreprocessor::backend_extra_args(&request, false, None).unwrap();
+        assert_eq!(extra_args["nvext"]["metadata_upload"], upload);
+        assert!(extra_args["nvext"].get("generation_artifact").is_none());
     }
 
     #[test]

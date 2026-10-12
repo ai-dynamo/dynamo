@@ -17,6 +17,7 @@ use super::{
 };
 use crate::protocols::common::extensions::{
     NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
+    validate_metadata_upload_single_choice,
 };
 
 pub mod aggregator;
@@ -644,6 +645,10 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_max_completion_tokens(self.inner.max_completion_tokens)?;
         validate::validate_n(self.inner.n)?;
         validate_completion_token_ids_single_choice(
+            self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_single_choice(
             self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;
