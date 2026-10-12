@@ -91,7 +91,7 @@ def get_model_weight_size_from_hub(
 ) -> float:
     """Return model size in MB by querying Hugging Face Hub API."""
     try:
-        info = model_info(model_name, token=token)
+        info = model_info(model_name, token=token, files_metadata=True)
 
         # Filter for model weight files (safetensors or pytorch bin files)
         # Also filter out files with None size

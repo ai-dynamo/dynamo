@@ -7,6 +7,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from huggingface_hub import ModelInfo as HubModelInfo
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -19,9 +20,61 @@ try:
     from dynamo.profiler.utils.model_info import (
         get_mamba_cache_align_block_size,
         get_model_context_length,
+        get_model_weight_size_from_hub,
     )
 except ImportError as e:
     pytest.skip(f"Skip (missing dependency): {e}", allow_module_level=True)
+
+
+@pytest.mark.parametrize(
+    "weight_files",
+    [
+        [("model.safetensors", 768148704)],
+        [
+            ("model-00001-of-00002.safetensors", 512 * 1024**2),
+            ("model-00002-of-00002.safetensors", 256 * 1024**2),
+        ],
+    ],
+)
+def test_hub_weight_size_uses_checkpoint_metadata(monkeypatch, weight_files) -> None:
+    def hub_model_info(model_name, *, token=None, files_metadata=False):
+        assert model_name == "test/quantized-model"
+        assert token == "test-token"
+        siblings = [
+            {"rfilename": filename, **({"size": size} if files_metadata else {})}
+            for filename, size in weight_files
+        ]
+        siblings.append({"rfilename": "tokenizer.json", "size": 1024**2})
+        # Packed integer parameter counts do not represent checkpoint bytes.
+        return HubModelInfo(
+            id=model_name,
+            siblings=siblings,
+            safetensors={"parameters": {"I32": 1000000000}, "total": 1000000000},
+        )
+
+    monkeypatch.setattr("dynamo.profiler.utils.model_info.model_info", hub_model_info)
+
+    expected_mib = sum(size for _, size in weight_files) / 1024**2
+    assert (
+        get_model_weight_size_from_hub("test/quantized-model", token="test-token")
+        == expected_mib
+    )
+
+
+@pytest.mark.parametrize("siblings", [None, [{"rfilename": "model.safetensors"}]])
+def test_hub_weight_size_falls_back_when_sizes_are_unavailable(
+    monkeypatch, siblings
+) -> None:
+    info = HubModelInfo(
+        id="test/model",
+        siblings=siblings,
+        safetensors={"parameters": {"BF16": 1024**2}, "total": 1024**2},
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.model_info", lambda *args, **kwargs: info
+    )
+
+    assert get_model_weight_size_from_hub("test/model") == 2
 
 
 def test_mamba_cache_align_block_size_from_local_config(tmp_path) -> None:
