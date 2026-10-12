@@ -154,10 +154,8 @@ async def test_dcp_events_match_configured_block_size(monkeypatch, runtime):
             next_send = 0.0
             seq = 0
             while True:
-                # The router's subscription to the worker publisher is not
-                # observable here, so one publish can be lost before it connects.
-                # Resending the same blocks either applies or triggers gap recovery.
-                # Each resend uses the next engine sequence, as a real engine would.
+                # The router's subscription is not observable, so an early publish can be
+                # lost; resend with the next engine sequence, as a real engine would.
                 if asyncio.get_running_loop().time() >= next_send:
                     await socket.send_multipart(
                         [b"kv-events", seq.to_bytes(8, "big"), payload]
