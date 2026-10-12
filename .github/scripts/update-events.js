@@ -66,8 +66,16 @@ async function main() {
   const events = await ical.async.fromURL(ICS_URL);
   const now = new Date();
 
+  // Collapse identical calendar entries before they consume the limited table slots.
+  const seen = new Set();
   const all = Object.values(events)
     .filter(e => e.type === 'VEVENT' && e.start && e.summary && String(e.status || '').toUpperCase() !== 'CANCELLED')
+    .filter(e => {
+      const key = JSON.stringify([buildAddToCalendarURL(e), e.datetype]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .sort((a, b) => a.start - b.start);
 
   const past = all.filter(e => (e.end || e.start) < now).slice(-2);
