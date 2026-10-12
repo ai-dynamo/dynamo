@@ -227,6 +227,13 @@ func validateOverrideIdentity(
 		}
 	}
 
+	// Only the complete component owns a rolling-update budget.
+	if scope != ScopeComponent {
+		if _, exists := GroveMaxUnavailable(override.Value.Raw); exists {
+			return fmt.Errorf("rollingUpdate is supported only at component scope; member cliques use the owning scaling group's budget")
+		}
+	}
+
 	// Recheck value ownership before the controller mutates provider resources.
 	if valueErrs := ValidateValue(override.Target, override.Value.Raw); len(valueErrs) != 0 {
 		return fmt.Errorf("value is invalid: %s", valueErrs[0].Error())
@@ -267,6 +274,9 @@ func setNamedGroveOverride(
 		// Availability is already resolved while rendering; preserve the full PodClique spec.
 		if topology, exists := value["topologyConstraint"]; exists {
 			item["topologyConstraint"] = topology
+		}
+		if rolling, exists := value["rollingUpdate"]; exists {
+			item["rollingUpdate"] = rolling
 		}
 		items[i] = item
 		return unstructured.SetNestedSlice(result.Object, items, path...)
