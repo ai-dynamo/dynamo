@@ -85,7 +85,6 @@ def test_patch_model_runner_leaves_baseline_unchanged_without_preload(monkeypatc
 
 
 def test_patch_static_state_for_gms_patches_weight_updater(monkeypatch):
-    """Replace the installed module's functions without hiding broken imports."""
     try:
         weight_updater = importlib.import_module(
             "sglang.srt.managers.scheduler_components.weight_updater"
