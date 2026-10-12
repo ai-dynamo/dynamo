@@ -118,9 +118,9 @@ def test_pixels_are_unchanged_for_a_clip_that_never_overflowed(
     xx = np.arange(width, dtype=np.uint16)[None, :]
     yy = np.arange(height, dtype=np.uint16)[:, None]
 
-    assert (fps * seconds - 1) * max(speed_x, speed_y) <= np.iinfo(np.uint16).max, (
-        "this configuration must stay inside uint16, or it is not a control"
-    )
+    assert (fps * seconds - 1) * max(speed_x, speed_y) <= np.iinfo(
+        np.uint16
+    ).max, "this configuration must stay inside uint16, or it is not a control"
 
     for frame_idx in range(fps * seconds):
         expected = np.empty((height, width, 3), dtype=np.uint8)
