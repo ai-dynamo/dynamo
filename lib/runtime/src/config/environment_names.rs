@@ -177,8 +177,9 @@ pub mod runtime {
 
     /// Worker validation gates
     pub mod validation {
-        /// JSON map of gate name to `{"exec": [...], "timeout_secs": N}`.
-        /// Unset disables validation.
+        /// JSON map of gate name to `{"exec": [...], "timeout_secs": N}` or
+        /// `{"url": "http://127.0.0.1:...", "timeout_secs": N}`. Unset
+        /// disables validation.
         pub const DYN_WORKER_VALIDATION_GATES: &str = "DYN_WORKER_VALIDATION_GATES";
     }
 

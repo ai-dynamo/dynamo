@@ -9,13 +9,18 @@ use tokio::io::AsyncReadExt;
 
 use super::{GateCheck, GateSpec};
 
-/// How much of a failed check's stderr is kept as its reason.
-const STDERR_TAIL_BYTES: usize = 2048;
+/// How much of a failed check's stderr, or a check runner's response, is kept
+/// as its reason.
+const REASON_TAIL_BYTES: usize = 2048;
+
+/// Wait between attempts while a check runner is not reachable yet.
+const URL_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub(super) async fn run_gate(gate: &GateSpec) -> Result<(), String> {
     let run = async {
         match &gate.check {
             GateCheck::Exec(argv) => run_exec(&gate.name, argv).await,
+            GateCheck::Url(url) => run_url(&gate.name, url).await,
         }
     };
     tokio::time::timeout(gate.timeout, run)
@@ -47,17 +52,82 @@ async fn run_exec(gate: &str, argv: &[String]) -> Result<(), String> {
     if status.success() {
         return Ok(());
     }
-    let tail = String::from_utf8_lossy(&stderr[stderr.len().saturating_sub(STDERR_TAIL_BYTES)..])
-        .trim()
-        .to_string();
+    let tail = tail(&stderr);
     tracing::warn!(gate, %status, stderr = %tail, "Validation check failed");
     Err(format!("{status}: {tail}"))
+}
+
+/// POST the gate to its check runner. A `200` is a pass and any other
+/// response a fail, with the end of the body as the reason. A runner that
+/// can't be reached yet, such as a sidecar still starting, is retried until
+/// the deadline.
+async fn run_url(gate: &str, url: &reqwest::Url) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())?;
+    let body = serde_json::json!({ "DYN_VALIDATION_GATE": gate });
+    loop {
+        match client.post(url.clone()).json(&body).send().await {
+            Ok(response) if response.status() == reqwest::StatusCode::OK => return Ok(()),
+            Ok(response) => {
+                let status = response.status();
+                let body = response.bytes().await.unwrap_or_default();
+                let reason = tail(&body);
+                tracing::warn!(gate, %status, %reason, "Validation check failed");
+                return Err(format!("check runner returned {status}: {reason}"));
+            }
+            Err(error) => {
+                tracing::debug!(gate, %error, "Check runner not reachable yet; retrying");
+                tokio::time::sleep(URL_RETRY_INTERVAL).await;
+            }
+        }
+    }
+}
+
+fn tail(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(REASON_TAIL_BYTES)..])
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn url_gate_waits_for_its_runner_and_takes_its_status() {
+        use axum::{Router, http::StatusCode, routing::post};
+
+        // Reserve a port, then start the runner only after the gate is trying.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let gate = |path: &str| GateSpec {
+            name: "g".into(),
+            check: GateCheck::Url(format!("http://{addr}{path}").parse().unwrap()),
+            timeout: Duration::from_secs(10),
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let app = Router::new()
+                .route("/pass", post(|| async { StatusCode::OK }))
+                .route(
+                    "/fail",
+                    post(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "no tool call") }),
+                );
+            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        assert_eq!(run_gate(&gate("/pass")).await, Ok(()));
+        let reason = run_gate(&gate("/fail")).await.unwrap_err();
+        assert!(
+            reason.contains("500") && reason.contains("no tool call"),
+            "{reason}"
+        );
+    }
 
     #[tokio::test]
     async fn a_hung_check_fails_at_its_deadline() {

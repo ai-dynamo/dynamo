@@ -19,6 +19,9 @@ use crate::config::environment_names::runtime::validation as env_validation;
 pub enum GateCheck {
     /// Run this command in the worker container. Exit status 0 is a pass.
     Exec(Vec<String>),
+    /// POST to a check runner in the same pod, such as a sidecar with its
+    /// own image. A `200` is a pass; any other status is a fail.
+    Url(reqwest::Url),
 }
 
 /// One configured gate.
@@ -40,7 +43,8 @@ pub struct ValidationConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawGate {
-    exec: Vec<String>,
+    exec: Option<Vec<String>>,
+    url: Option<String>,
     timeout_secs: u64,
 }
 
@@ -58,7 +62,7 @@ impl ValidationConfig {
         let raw: BTreeMap<String, RawGate> = serde_json::from_str(&gates).with_context(|| {
             format!(
                 "{} must be a JSON object of gate name to \
-                 {{\"exec\": [...], \"timeout_secs\": N}}",
+                 {{\"exec\": [...] or \"url\": \"...\", \"timeout_secs\": N}}",
                 env_validation::DYN_WORKER_VALIDATION_GATES
             )
         })?;
@@ -71,21 +75,47 @@ impl ValidationConfig {
         let gates = raw
             .into_iter()
             .map(|(name, gate)| {
-                if gate.exec.first().is_none_or(|program| program.is_empty()) {
-                    bail!("validation gate {name:?}: \"exec\" must be a non-empty command");
-                }
+                let check = match (gate.exec, gate.url) {
+                    (Some(argv), None)
+                        if argv.first().is_some_and(|program| !program.is_empty()) =>
+                    {
+                        GateCheck::Exec(argv)
+                    }
+                    (None, Some(url)) => GateCheck::Url(
+                        loopback_url(&url).with_context(|| format!("validation gate {name:?}"))?,
+                    ),
+                    _ => bail!(
+                        "validation gate {name:?}: set exactly one of a non-empty \"exec\" \
+                         command or a \"url\""
+                    ),
+                };
                 if gate.timeout_secs == 0 {
                     bail!("validation gate {name:?}: \"timeout_secs\" must be greater than zero");
                 }
                 Ok(GateSpec {
                     name,
-                    check: GateCheck::Exec(gate.exec),
+                    check,
                     timeout: Duration::from_secs(gate.timeout_secs),
                 })
             })
             .collect::<Result<_>>()?;
         Ok(Some(ValidationConfig { gates }))
     }
+}
+
+/// `url` gates may only reach a check runner in the same pod.
+fn loopback_url(url: &str) -> Result<reqwest::Url> {
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("invalid \"url\" {url:?}"))?;
+    let loopback = match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if parsed.scheme() != "http" || !loopback {
+        bail!("\"url\" must be http on loopback (127.0.0.1, ::1 or localhost), got {url:?}");
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -101,12 +131,16 @@ mod tests {
         assert_eq!(ValidationConfig::parse(None).unwrap(), None);
         let config = parse(
             r#"{"smoke": {"exec": ["python", "/checks/smoke.py"], "timeout_secs": 900},
-                "basic": {"exec": ["true"], "timeout_secs": 60}}"#,
+                "basic": {"url": "http://127.0.0.1:9100/validate", "timeout_secs": 60}}"#,
         )
         .unwrap()
         .unwrap();
         let names: Vec<_> = config.gates.iter().map(|gate| gate.name.as_str()).collect();
         assert_eq!(names, ["basic", "smoke"]);
+        assert_eq!(
+            config.gates[0].check,
+            GateCheck::Url("http://127.0.0.1:9100/validate".parse().unwrap())
+        );
         assert_eq!(
             config.gates[1].check,
             GateCheck::Exec(vec!["python".into(), "/checks/smoke.py".into()])
@@ -119,12 +153,17 @@ mod tests {
         for (gates, expected) in [
             ("not json", "must be a JSON object"),
             ("{}", "at least one gate"),
-            (r#"{"a": {"timeout_secs": 1}}"#, "must be a JSON object"),
-            (r#"{"a": {"exec": ["true"]}}"#, "must be a JSON object"),
+            (r#"{"a": {"timeout_secs": 1}}"#, "exactly one"),
             (
-                r#"{"a": {"exec": [], "timeout_secs": 1}}"#,
-                "non-empty command",
+                r#"{"a": {"exec": ["true"], "url": "http://127.0.0.1/", "timeout_secs": 1}}"#,
+                "exactly one",
             ),
+            (
+                r#"{"a": {"url": "http://10.0.0.1:9100/", "timeout_secs": 1}}"#,
+                "on loopback",
+            ),
+            (r#"{"a": {"exec": ["true"]}}"#, "must be a JSON object"),
+            (r#"{"a": {"exec": [], "timeout_secs": 1}}"#, "exactly one"),
             (
                 r#"{"a": {"exec": ["true"], "timeout_secs": 0}}"#,
                 "greater than zero",
