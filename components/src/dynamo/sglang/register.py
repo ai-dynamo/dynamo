@@ -343,7 +343,7 @@ def _parse_hicache_storage_extra_config(
                 parsed = json.loads(raw_extra_config)
         except (OSError, ValueError, yaml.YAMLError) as e:
             logging.warning(
-                f"Failed to parse hicache_storage_backend_extra_config: {e}"
+                "Failed to parse hicache_storage_backend_extra_config: %s", e
             )
             return {}
 
