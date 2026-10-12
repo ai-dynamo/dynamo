@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Protocol compatibility tooling
 
-Compare Dynamo and framework OpenAPI 3.1 JSON request schemas for
+Compare Dynamo and framework OpenAPI 3.1/3.2 request and response contracts for
 `/v1/chat/completions` and `/v1/completions`. Read the
 [OpenAPI request-contract comparison guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md)
 for scope, provenance, normalization, aliases, and interpretation. Schema agreement
@@ -14,8 +14,7 @@ does not establish actual acceptance or behavioral compatibility.
 This package composes and compares schemas from the independent native export;
 see the [composition guide](../../lib/llm/docs/protocol-openapi-composition.md).
 Native schema export is an independent prerequisite. Offline composition lives
-in this tooling package alongside request comparison; the comparator remains
-request-only even though the native export includes response schemas.
+in this tooling package alongside independent request and response comparison.
 Native `/openapi.json` still contains explicit dependency import slots;
 composition does not modify the running frontend.
 
@@ -103,6 +102,8 @@ Start with `assessment/report.md`. Retain the entire assessment directory:
 | `*.requests.json` | Original request projections |
 | `*.requests.normalized.json`, `normalization.json` | Comparison inputs and equivalent-representation audit |
 | `oasdiff.json` | Complete comparator delta on normalized inputs |
+| `*.responses.json`, `*.responses.normalized.json` | Response projections and comparator inputs |
+| `response-oasdiff.json`, `response-normalization.json` | Response deltas and equivalent-representation audit |
 | `alias-matches.json` | Alias-name matches, parent constraints, and value-schema comparison results |
 
 The directory also retains input and composition/coverage evidence. Invalid capture
@@ -117,6 +118,47 @@ checksums, pinned OpenAI checksum mismatches, and unresolved imports fail visibl
 None of these statuses proves runtime parity. The current coverage catalog prevents
 a complete-coverage result until its known limitations are resolved.
 
+## Response comparison boundaries
+
+The report lists request candidates first and response candidates separately.
+Both compare the framework export to Dynamo; a structural delta is a candidate,
+not a compatibility decision. To establish that a framework client can use Dynamo,
+verify request acceptance and semantics and whether Dynamo responses meet that
+client's expectations. Reverse-direction and additive differences need separate
+interpretation, not automatic fixes.
+
+Response comparison keeps status codes, media types and JSON body schemas. For
+SSE it requires OpenAPI 3.2 `text/event-stream.itemSchema`: a parsed event object
+with string `data`. A JSON data branch uses `contentMediaType: application/json`
+and `contentSchema`; a literal marker uses `const: "[DONE]"`.
+
+The pinned comparison engine does not consume these new media keywords directly.
+The tooling therefore creates an explicitly comparison-only OpenAPI 3.1 copy:
+`itemSchema` becomes an event `schema`, and data becomes an object tagged with
+`encoding: json` plus its decoded `value`, or `encoding: literal` plus the marker.
+This makes the embedded payload constraints visible to the comparator without
+confusing the literal `[DONE]` marker with JSON containing the string `"[DONE]"`.
+Raw server exports remain unchanged. Real-binary tests check that changes inside
+`contentSchema` and to the marker produce deltas, while equivalent inline/local
+event references do not.
+
+Only these explicit data encodings are supported. Encoded-string constraints,
+unsupported keywords or media types, unresolved references/imports, and missing
+body schemas are reported as coverage gaps. A description-only error response is
+not proof that the body is empty. Response headers, other endpoints, event ordering,
+termination timing and cancellation are outside this comparison's coverage.
+Generic JSON Schema validation does not assert JSON inside a `contentSchema`:
+real-server tests must parse SSE, decode and validate JSON data explicitly, and
+check stream lifecycle separately. Neither the comparison projection nor the
+success-payload fixtures replace that E2E evidence.
+
+After parsing a data-bearing SSE event, call
+`assessment.responses.validate_sse_event(document, item_schema, event)` to check
+its envelope and encoded content. Supply a composed document with local payload
+references and the endpoint's `itemSchema`; `event["data"]` must still be a string.
+The helper returns `None` on success and raises on invalid or unsupported input.
+It does not parse raw frames, count events, or establish a valid stream lifecycle.
+
 ## Validation
 
 ```bash
@@ -125,6 +167,8 @@ OASDIFF_BIN=/absolute/path/to/oasdiff \
 cargo test --locked -p dynamo-llm --no-default-features \
   --test openapi_request_schema --test openapi_request_fidelity
 python -m scripts.protocol_compatibility.tests.composition.fidelity \
+  --spec assessment/dynamo.composed.json
+python -m scripts.protocol_compatibility.tests.composition.response_fidelity \
   --spec assessment/dynamo.composed.json
 ```
 

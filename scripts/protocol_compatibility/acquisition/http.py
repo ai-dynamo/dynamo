@@ -41,14 +41,15 @@ def read_limited(stream) -> bytes:
 
 
 def parse_document(raw: bytes) -> dict:
+    """Parse retained JSON/YAML bytes; reject non-3.1/3.2 documents, without resolving refs."""
     try:
         document = json.loads(raw)
     except json.JSONDecodeError:
         document = yaml.safe_load(raw)
     if not isinstance(document, dict) or not str(
         document.get("openapi", "")
-    ).startswith("3.1."):
-        raise ValueError("Expected an OpenAPI 3.1 JSON or YAML document")
+    ).startswith(("3.1.", "3.2.")):
+        raise ValueError("Expected an OpenAPI 3.1 or 3.2 JSON or YAML document")
     return document
 
 

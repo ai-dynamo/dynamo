@@ -17,8 +17,15 @@ from scripts.protocol_compatibility.assessment.openapi import (
     request_differences,
     request_document,
 )
+from scripts.protocol_compatibility.assessment.responses import (
+    response_differences,
+    response_document,
+)
 from scripts.protocol_compatibility.tests.assessment import test_openapi as fixtures
 from scripts.protocol_compatibility.tests.assessment.test_openapi import document
+from scripts.protocol_compatibility.tests.assessment.test_responses import (
+    streaming_document,
+)
 
 
 class ComparatorIntegrationTests(unittest.TestCase):
@@ -44,6 +51,66 @@ class ComparatorIntegrationTests(unittest.TestCase):
             paths.append(path)
         result, _ = compare(self.binary, *paths, flatten=True)
         return request_differences(result)
+
+    def response_deltas(self, native, dynamo):
+        """Compare decoded responses with the real pinned binary; require complete fixture coverage."""
+        paths = []
+        for name, raw in (("native", native), ("dynamo", dynamo)):
+            scoped, gaps = response_document(raw)
+            self.assertFalse(gaps)
+            path = self.root / f"{name}.responses.json"
+            write_json(path, scoped)
+            paths.append(path)
+        result, _ = compare(self.binary, *paths, flatten=True)
+        return response_differences(result)
+
+    def test_identical_json_and_sse_contracts_have_no_response_delta(self):
+        """The decoded projection must not manufacture a difference by server identity."""
+        raw = streaming_document()
+        self.assertEqual(self.response_deltas(raw, copy.deepcopy(raw)), [])
+
+    def test_sse_content_schema_is_compared_even_when_unary_schema_is_unchanged(self):
+        """A change hidden inside SSE data.contentSchema must reach the actual comparator."""
+        native = streaming_document()
+        dynamo = copy.deepcopy(native)
+        data = dynamo["paths"]["/v1/chat/completions"]["post"]["responses"]["200"][
+            "content"
+        ]["text/event-stream"]["itemSchema"]["properties"]["data"]
+        data["anyOf"][1]["contentSchema"] = {"type": "integer"}
+        self.assertTrue(self.response_deltas(native, dynamo))
+
+    def test_sse_literal_terminator_change_is_not_ignored_as_an_annotation(self):
+        """Changing the literal data marker must produce a candidate, not a false pass."""
+        native = streaming_document()
+        dynamo = copy.deepcopy(native)
+        data = dynamo["paths"]["/v1/chat/completions"]["post"]["responses"]["200"][
+            "content"
+        ]["text/event-stream"]["itemSchema"]["properties"]["data"]
+        data["anyOf"][0]["const"] = "[FINISHED]"
+        self.assertTrue(self.response_deltas(native, dynamo))
+
+    def test_response_status_and_media_removal_are_compared(self):
+        """Status and media selection are contracts, not only the nested JSON payload."""
+        for change in ("status", "media"):
+            native = streaming_document()
+            dynamo = copy.deepcopy(native)
+            responses = dynamo["paths"]["/v1/chat/completions"]["post"]["responses"]
+            if change == "status":
+                responses["201"] = responses.pop("200")
+            else:
+                del responses["200"]["content"]["text/event-stream"]
+            with self.subTest(change=change):
+                self.assertTrue(self.response_deltas(native, dynamo))
+
+    def test_equivalent_event_reference_is_not_a_response_difference(self):
+        """Inlining versus referencing the same SSE envelope must compare equivalently."""
+        native = streaming_document()
+        dynamo = copy.deepcopy(native)
+        for path in dynamo["paths"].values():
+            media = path["post"]["responses"]["200"]["content"]["text/event-stream"]
+            dynamo["components"]["schemas"]["Event"] = media["itemSchema"]
+            media["itemSchema"] = {"$ref": "#/components/schemas/Event"}
+        self.assertEqual(self.response_deltas(native, dynamo), [])
 
     def test_response_and_unreachable_components_are_outside_scope(self):
         native = document()

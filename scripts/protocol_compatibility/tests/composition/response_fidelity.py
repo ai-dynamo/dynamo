@@ -12,20 +12,36 @@ from openapi_spec_validator import validate
 from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
 
+from scripts.protocol_compatibility.assessment.responses import (
+    response_document,
+    validate_sse_event,
+)
 from scripts.protocol_compatibility.composition.openai import MARKER
 
 
 def check(spec: dict) -> int:
+    """Validate actual Serde fixtures against unary schemas and decoded SSE data.
+
+    `spec` must be the composed OpenAPI 3.2 export. Returns the number of fixtures;
+    missing imports, unsupported success contracts or invalid payloads raise.
+    This is success-payload fidelity, not error, ordering or real-server E2E coverage.
+    """
     scoped = copy.deepcopy(spec)
     scoped["paths"] = {
-        path: spec["paths"][path]
+        path: scoped["paths"][path]
         for path in ("/v1/chat/completions", "/v1/completions")
     }
     validate(scoped)
     assert not any(
         MARKER in schema for schema in spec["components"]["schemas"].values()
     ), "Unresolved dependency import"
-    resource = Resource.from_contents(spec, default_specification=DRAFT202012)
+    # These fixtures cover successful serialization only. Description-only error
+    # responses remain coverage gaps in the full assessment, not in this suite.
+    for path in scoped["paths"].values():
+        path["post"]["responses"] = {"200": path["post"]["responses"]["200"]}
+    projected, gaps = response_document(scoped)
+    assert not gaps, gaps
+    resource = Resource.from_contents(projected, default_specification=DRAFT202012)
     registry = Registry().with_resource("urn:dynamo:response", resource)
     validators = {}
     for kind, endpoint, media in (
@@ -42,6 +58,13 @@ def check(spec: dict) -> int:
             + "/schema"
         )
         validators[kind] = Draft202012Validator({"$ref": pointer}, registry=registry)
+
+    def payload(kind: str, output: dict) -> dict:
+        """Wrap already-decoded Serde stream output in the comparison representation."""
+        if kind in {"stream", "completion_stream"}:
+            return {"data": {"encoding": "json", "value": output}}
+        return output
+
     cases = json.loads(
         (
             Path(__file__).parents[4] / "lib/llm/tests/fixtures/openapi/responses.json"
@@ -49,13 +72,25 @@ def check(spec: dict) -> int:
     )["cases"]
     for case in cases:
         validator = validators[case["kind"]]
-        validator.validate(case["output"])
+        validator.validate(payload(case["kind"], case["output"]))
+        if case["kind"] in {"stream", "completion_stream", "completion"}:
+            endpoint = (
+                "/v1/chat/completions"
+                if case["kind"] == "stream"
+                else "/v1/completions"
+            )
+            item = spec["paths"][endpoint]["post"]["responses"]["200"]["content"][
+                "text/event-stream"
+            ]["itemSchema"]
+            validate_sse_event(spec, item, {"data": json.dumps(case["output"])})
         if case["kind"] == "completion":
-            validators["completion_stream"].validate(case["output"])
+            validators["completion_stream"].validate(
+                payload("completion_stream", case["output"])
+            )
         # The schema must reject omission of the shared required envelope key.
         invalid = copy.deepcopy(case["output"])
         del invalid["id"]
-        assert not validator.is_valid(invalid), case["name"]
+        assert not validator.is_valid(payload(case["kind"], invalid)), case["name"]
     # Required-and-nullable is different from optional: these keys must exist.
     for case_index, pointer in (
         (0, ("choices", 0, "message", "refusal")),
@@ -70,7 +105,9 @@ def check(spec: dict) -> int:
         for part in pointer[:-1]:
             parent = parent[part]
         del parent[pointer[-1]]
-        assert not validators[case["kind"]].is_valid(invalid), pointer
+        assert not validators[case["kind"]].is_valid(
+            payload(case["kind"], invalid)
+        ), pointer
     return len(cases)
 
 
