@@ -8,7 +8,8 @@
 //! separately pin actual Serde output; this suite does not validate that output with a
 //! JSON Schema validator. Dependency import slots are resolved by offline composition.
 //! These checks do not prove framework compatibility, inference, or SSE ordering and
-//! termination: the streaming schema describes successful JSON data payloads only.
+//! termination. itemSchema describes parsed events; content-aware validation lives
+//! in the downstream tooling tests, not in these structural assertions.
 //!
 //! Run: `cargo test -p dynamo-llm --no-default-features --test protocols openapi_response_schema::`.
 
@@ -23,8 +24,9 @@ use dynamo_llm::{
 };
 use serde_json::{Value, json};
 
+/// Export the native test routes with the chosen client-facing reasoning spelling.
 fn document(field: ReasoningField) -> Value {
-    serde_json::to_value(openapi_docs::generate_openapi_spec_with_reasoning_field(
+    openapi_docs::generate_openapi_spec_with_reasoning_field(
         &[
             RouteDoc::new(Method::POST, "/v1/chat/completions"),
             RouteDoc::new(Method::POST, "/v1/completions"),
@@ -32,13 +34,14 @@ fn document(field: ReasoningField) -> Value {
             RouteDoc::new(Method::POST, "/v1/embeddings"),
         ],
         field,
-    ))
-    .unwrap()
+    )
 }
 
+/// Consumers can distinguish a unary body from parsed SSE events and resolve their payloads.
 #[test]
-fn successful_media_types_reference_registered_payloads_only() {
+fn success_contracts_distinguish_json_bodies_from_sse_events() {
     let spec = document(ReasoningField::DEFAULT);
+    assert_eq!(spec["openapi"], "3.2.0");
     // A derived component is not sufficient: each supported success response must
     // reference the correct registered type for unary JSON and streaming payloads.
     for (path, unary, stream) in [
@@ -55,22 +58,34 @@ fn successful_media_types_reference_registered_payloads_only() {
     ] {
         let success = &spec["paths"][path]["post"]["responses"]["200"];
         assert!(success["description"].as_str().unwrap().contains("[DONE]"));
-        // A machine-readable marker distinguishes a successful SSE data payload
-        // schema from a schema for the whole transport body. Unary JSON is unmarked.
-        assert_eq!(
-            success["content"]["text/event-stream"]["x-dynamo-sse-data-schema"],
-            true
-        );
+        let sse = &success["content"]["text/event-stream"];
         assert!(
-            success["content"]["application/json"]
-                .get("x-dynamo-sse-data-schema")
-                .is_none()
+            sse.get("schema").is_none(),
+            "a chunk is not the whole stream"
         );
-        for (media, name) in [("application/json", unary), ("text/event-stream", stream)] {
-            assert_eq!(
-                success["content"][media]["schema"]["$ref"],
-                format!("#/components/schemas/{name}")
-            );
+        assert!(sse.get("x-dynamo-sse-data-schema").is_none());
+        assert_eq!(
+            success["content"]["application/json"]["schema"]["$ref"],
+            format!("#/components/schemas/{unary}")
+        );
+        let event = &sse["itemSchema"]["anyOf"][0];
+        assert_eq!(event["type"], "object");
+        assert_eq!(event["required"], json!(["data"]));
+        let data = &event["properties"]["data"];
+        assert_eq!(data["type"], "string", "SSE parsing does not decode JSON");
+        assert_eq!(data["anyOf"][0]["const"], "[DONE]");
+        assert_eq!(data["anyOf"][1]["contentMediaType"], "application/json");
+        assert_eq!(
+            data["anyOf"][1]["contentSchema"]["$ref"],
+            format!("#/components/schemas/{stream}")
+        );
+        let error = &data["anyOf"][2]["contentSchema"];
+        assert_eq!(error["required"], json!(["error"]));
+        assert_eq!(
+            error["properties"]["error"]["$ref"],
+            "#/components/schemas/ErrorMessage"
+        );
+        for name in [unary, stream, "ErrorMessage"] {
             assert!(spec["components"]["schemas"].get(name).is_some());
         }
     }
@@ -104,6 +119,40 @@ fn successful_media_types_reference_registered_payloads_only() {
             ["type"],
         "CreateCompletionResponse"
     );
+}
+
+/// Optional chat dispatches have distinct payloads; completions must not advertise them.
+#[test]
+fn named_chat_dispatch_events_reference_the_serialized_payload_types() {
+    // The configured reasoning key changes completion chunks, not the separately
+    // serialized reasoning_dispatch payload, which always uses reasoning_content.
+    for field in [ReasoningField::Reasoning, ReasoningField::ReasoningContent] {
+        let spec = document(field);
+        let events = &spec["paths"]["/v1/chat/completions"]["post"]["responses"]["200"]["content"]
+            ["text/event-stream"]["itemSchema"]["anyOf"];
+        assert_eq!(events.as_array().unwrap().len(), 3);
+        for (index, event, payload) in [
+            (1, "tool_call_dispatch", "ToolCallDispatchPayload"),
+            (2, "reasoning_dispatch", "ReasoningDispatchPayload"),
+        ] {
+            assert_eq!(events[index]["required"], json!(["event", "data"]));
+            assert_eq!(events[index]["properties"]["event"]["const"], event);
+            assert_eq!(
+                events[index]["properties"]["data"]["contentSchema"]["$ref"],
+                format!("#/components/schemas/{payload}")
+            );
+            assert!(spec["components"]["schemas"].get(payload).is_some());
+        }
+        let reasoning = &spec["components"]["schemas"]["ReasoningDispatchPayload"];
+        assert_eq!(
+            reasoning["properties"]["reasoning_content"]["type"],
+            "string"
+        );
+        assert!(reasoning["properties"].get("reasoning").is_none());
+        let completion_events = &spec["paths"]["/v1/completions"]["post"]["responses"]["200"]["content"]
+            ["text/event-stream"]["itemSchema"]["anyOf"];
+        assert_eq!(completion_events.as_array().unwrap().len(), 1);
+    }
 }
 
 #[test]

@@ -15,6 +15,7 @@ from scripts.protocol_compatibility.acquisition.http import (
     NoRedirect,
     acquire,
     load_capture,
+    parse_document,
     read_limited,
     server_name,
     write_json,
@@ -22,6 +23,11 @@ from scripts.protocol_compatibility.acquisition.http import (
 
 
 class AcquisitionTests(unittest.TestCase):
+    def test_openapi32_capture_does_not_discard_item_schema(self):
+        """Parsing retained exports must preserve new keywords without reinterpretation."""
+        raw = b'{"openapi":"3.2.0","itemSchema":{"type":"object"}}'
+        self.assertEqual(parse_document(raw)["itemSchema"], {"type": "object"})
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

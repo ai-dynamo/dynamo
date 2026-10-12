@@ -71,6 +71,37 @@ def document():
 
 
 class RequestProjectionTests(unittest.TestCase):
+    def test_default_reference_is_literal_data_and_never_fetched(self):
+        """Schema validation must not resolve a literal $ref in a default object."""
+        raw = document()
+        literal = {"value": "x", "$ref": "https://example.invalid/not-a-schema"}
+        raw["components"]["schemas"]["Request"]["default"] = literal
+        with patch(
+            "urllib.request.OpenerDirector.open", side_effect=AssertionError("network")
+        ):
+            projected, gaps = request_document(raw)
+            normalized, _ = normalize_nullable_strings(projected)
+        self.assertFalse(gaps)
+        self.assertEqual(
+            normalized["components"]["schemas"]["Request"]["default"], literal
+        )
+        self.assertEqual(raw["components"]["schemas"]["Request"]["default"], literal)
+
+    def test_openapi32_request_projection_preserves_constraints_not_export_version(
+        self,
+    ):
+        """A 3.2 input remains retained; only the bounded comparator copy uses 3.1."""
+        raw = document()
+        expected, _ = request_document(raw)
+        raw["openapi"] = "3.2.0"
+        raw[
+            "jsonSchemaDialect"
+        ] = "https://spec.openapis.org/oas/3.2/dialect/2025-09-17"
+        actual, gaps = request_document(raw)
+        self.assertFalse(gaps)
+        self.assertEqual(actual, expected)
+        self.assertEqual(raw["openapi"], "3.2.0")
+
     def test_custom_dialect_is_not_silently_replaced_by_default(self):
         raw = document()
         raw["jsonSchemaDialect"] = "https://example.invalid/custom-dialect"

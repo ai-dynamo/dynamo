@@ -77,6 +77,39 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "changed after acquisition"):
             load_capture(self.root / "dynamo", "dynamo")
 
+    @patch("scripts.protocol_compatibility.assessment.openapi_workflow.compare")
+    def test_response_only_difference_is_reported_separately_and_fails_gate(
+        self, compare
+    ):
+        """An unchanged request diff cannot hide a response mismatch in the workflow."""
+        delta = {"deleted": ["200"]}
+        response_diff = {
+            "paths": {
+                "modified": {
+                    "/v1/chat/completions": {
+                        "operations": {"modified": {"POST": {"responses": delta}}}
+                    }
+                }
+            }
+        }
+        compare.side_effect = [
+            ({}, ["mock-request"]),
+            (response_diff, ["mock-response"]),
+        ]
+        self.assertEqual(assess(self.args), 1)
+        report = json.loads((self.args.output_dir / "report.json").read_text())
+        self.assertEqual(report["differences"], [])
+        self.assertEqual(report["response_differences"][0]["delta"], delta)
+        self.assertEqual(report["comparator"]["response_command"], ["mock-response"])
+        self.assertEqual(
+            json.loads((self.args.output_dir / "response-oasdiff.json").read_text()),
+            response_diff,
+        )
+        self.assertIn(
+            "Declared response differences",
+            (self.args.output_dir / "report.md").read_text(),
+        )
+
     @patch(
         "scripts.protocol_compatibility.assessment.openapi_workflow.compare",
         return_value=({}, ["mock"]),
@@ -99,7 +132,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Dynamo versus example-engine", markdown)
         with self.assertRaises(FileExistsError):
             assess(self.args)
-        self.assertEqual(compare.call_count, 1)
+        self.assertEqual(compare.call_count, 2)
 
     @patch(
         "scripts.protocol_compatibility.assessment.openapi_workflow.compare",
@@ -118,7 +151,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(
             report["inputs"]["dynamo"]["provenance"]["dependencies"], {"fixture": "1"}
         )
-        self.assertEqual(compare.call_count, 1)
+        self.assertEqual(compare.call_count, 2)
 
     @patch(
         "scripts.protocol_compatibility.assessment.openapi_workflow.compare",
@@ -202,7 +235,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(
             (self.args.output_dir / "framework.requests.normalized.json").exists()
         )
-        self.assertEqual(compare.call_count, 1)
+        self.assertEqual(compare.call_count, 2)
 
     @patch(
         "scripts.protocol_compatibility.assessment.openapi_workflow.compare",
@@ -220,7 +253,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(assess(self.args), 1)
         result = json.loads((self.args.output_dir / "report.json").read_text())
         self.assertEqual(result["status"], "incomplete_coverage")
-        self.assertEqual(compare.call_count, 3)
+        self.assertEqual(compare.call_count, 4)
         self.assertEqual(len(result["alias_matches"]), 2)
         for match in result["alias_matches"]:
             self.assertEqual(match["compatibility"], "not_established_by_name_match")
@@ -262,7 +295,7 @@ class WorkflowTests(unittest.TestCase):
             normalized["components"]["schemas"]["Request"]["properties"]["value"],
             {"type": ["string", "null"]},
         )
-        self.assertEqual(compare.call_args.args[1], normalized_path)
+        self.assertEqual(compare.call_args_list[0].args[1], normalized_path)
         report = json.loads((self.args.output_dir / "report.json").read_text())
         self.assertEqual(
             report["representation_normalizations"][0]["side"], "framework"

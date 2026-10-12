@@ -237,7 +237,7 @@ fn terminal_outcome_for_error_type(error_type: ErrorType) -> TerminalOutcome {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, utoipa::ToSchema)]
 pub(crate) struct ErrorMessage {
     message: String,
     #[serde(rename = "type")]
@@ -3261,14 +3261,14 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
     response
 }
 
-#[derive(Serialize)]
-struct ToolCallDispatchPayload<'a> {
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct ToolCallDispatchPayload<'a> {
     choice_index: u32,
     tool_call: &'a ChatCompletionMessageToolCallChunk,
 }
 
-#[derive(Serialize)]
-struct ReasoningDispatchPayload<'a> {
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct ReasoningDispatchPayload<'a> {
     index: u32,
     reasoning_content: &'a str,
 }

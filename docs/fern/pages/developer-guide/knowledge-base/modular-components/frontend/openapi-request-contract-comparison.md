@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: OpenAPI Request-Contract Comparison
-subtitle: Compare declared request schemas without treating schema agreement as support
+subtitle: Compare declared request and response schemas without treating agreement as support
 ---
 
-The OpenAPI workflow compares NVIDIA Dynamo's declared request schemas with a selected
+The OpenAPI workflow compares NVIDIA Dynamo's declared request and response schemas with a selected
 framework server's declarations. It is a practical companion to
 [Protocol Field Handling](protocol-field-handling.md), which remains authoritative for
 the source contract, semantic ownership, complete field lifecycle, and the two acceptance layers.
 
 This workflow implements only part of
 [source-contract conformance](protocol-field-handling.md#verify-source-contract-and-behavioral-conformance):
-declared request-schema comparison. It does not prove actual request acceptance,
+declared schema comparison. It does not prove actual request acceptance,
 forwarding or backend effects, response or error conformance, streaming behavior, or
 behavioral compatibility. A schema match does not redefine what it means to support a field.
 
@@ -21,10 +21,15 @@ For installation, CLI arguments, runnable examples, output files, and exit codes
 
 ## Comparison Scope
 
-Both inputs must be OpenAPI 3.1 documents containing JSON POST request schemas for
+Both inputs must be OpenAPI 3.1 or 3.2 documents containing JSON POST request schemas for
 `/v1/chat/completions` and `/v1/completions`. Chat completion is primary; completion is
 included for compatibility. Missing endpoints, unresolved references, or remote schema
 references fail visibly rather than producing an empty success.
+
+Responses are compared separately by status code, media type, and payload schema.
+SSE comparison requires OpenAPI 3.2 `itemSchema` and explicit data encoding; older
+payload-only streaming declarations produce coverage gaps. Headers, other endpoints,
+ordering, cancellation, and termination behavior are outside this comparison.
 
 The workflow is framework-neutral within this bounded surface, not a comparator for arbitrary
 APIs. The framework name is a provenance and reporting identity, not an adapter selector or a
@@ -137,9 +142,17 @@ without these extensions cannot establish alias coverage.
 
 ## Reading the Result
 
-Assessment projects only the two POST JSON request bodies and their reference closure.
+Assessment creates separate projections for the two POST JSON request bodies and
+their declared responses, each with its reachable schema components.
 Raw exports and the composed Dynamo document remain separate retained inputs. Scoped
 validation does not certify unrelated routes or the full API document.
+
+The response projection makes SSE `itemSchema` and embedded JSON `contentSchema`
+visible to the pinned comparator, which does not consume those media keywords
+directly. It preserves the event envelope and tags decoded data as JSON or a literal
+marker. These comparison-only objects are not server payloads. The
+[response comparison boundaries](https://github.com/ai-dynamo/dynamo/blob/main/scripts/protocol_compatibility/README.md#response-comparison-boundaries)
+describe the supported representation, retained artifacts, and required E2E checks.
 
 The comparator is pinned to oasdiff 1.33.0 with external reference fetching disabled.
 It flattens `allOf` only when the coverage scan finds no unsupported constructs; otherwise
@@ -147,13 +160,17 @@ those constructs stay in the inputs and appear as gaps. This is not a general JS
 equivalence prover.
 
 The comparison direction is framework → Dynamo: additions are Dynamo-only, deletions are
-framework-only. Start with `report.md`, then inspect the complete delta and the normalization
+framework-only. That orientation alone does not classify compatibility: requests a
+framework client sends must retain their meaning, and Dynamo responses must meet
+that client's expectations. Keep reverse-direction and additive differences separate.
+Start with `report.md`, then inspect the complete delta and the normalization
 and alias audits. Review three outcomes separately:
 
 - Declared differences are candidates for source-contract investigation, not proof of
   runtime incompatibility.
-- Coverage gaps identify what the export or comparison cannot establish. The current seven
-  catalogued gaps prevent a complete-coverage result, even if no new differences are found.
+- Coverage gaps identify what the export or comparison cannot establish. Catalogued
+  request gaps and input-specific response gaps prevent a complete-coverage result,
+  even if no new differences are found.
 - Intentional exclusions, such as the contents of Dynamo-specific `nvext`, are outside the
   comparison claim, not declarations of compatibility.
 
@@ -172,8 +189,10 @@ an upstream-only version diff is supporting context, not a replacement.
 
 Python tests exercise the pipeline with synthetic framework identities and the real pinned
 comparator. Shared Rust and composed-schema tests currently cover 48 aligned cases and six
-known-gap witnesses; they are not exhaustive acceptance tests. The tooling README lists the
-commands.
+known-gap witnesses, plus seven successful response fixtures. SSE projection tests
+verify payload constraints and literal-marker distinctions; real-comparator tests
+verify differences reach the engine. These are not real-server or stream-lifecycle
+tests. The tooling README lists the commands.
 
 The root pre-merge Rust job runs schema generation after its tests using its default features.
 Generation failure fails that job. Its 14-day `frontend-openapi-<sha>` artifact retains the

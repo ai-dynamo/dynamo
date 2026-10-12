@@ -32,6 +32,20 @@ Use the OpenAI YAML from async-openai's published 0.42.1 source revision
 A dependency upgrade must revalidate both runtime consumers and these schema
 corrections; successful composition alone does not prove runtime compatibility.
 
+Native HTTP and CLI exports use OpenAPI 3.2. The exporter keeps Utoipa 5's typed
+component derivation (shared with dynamo-protocols), then serializes once and adds
+SSE `itemSchema` in the JSON representation. Do not deserialize the final document
+back into Utoipa 5: its model cannot preserve those fields. This version boundary
+does not resolve the deferred upstream import slots.
+
+SSE events retain string `data`, with JSON payloads described through
+`contentSchema` and literal `[DONE]` represented separately. Composition resolves
+payload references without replacing the event envelope. HTTP serves this native,
+uncomposed document; offline composition does not change `/docs`. The pinned
+Swagger UI can load OpenAPI 3.2 but does not fully render `itemSchema`
+([upstream issue](https://github.com/swagger-api/swagger-ui/issues/11065)). Inspect
+`/openapi.json` for the complete declaration.
+
 ## Composition invariants
 
 1. Preserve raw inputs; produce a separate composed Dynamo document.
