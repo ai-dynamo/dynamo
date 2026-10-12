@@ -185,6 +185,9 @@ class Timeline:
             {},
             0,
         )
+        self.groups: dict[
+            str, int
+        ] = {}  # lane -> flow order (frontend, prefill, decode)
 
     def emit(self, event: dict) -> None:
         self.stream.write(
@@ -192,9 +195,10 @@ class Timeline:
         )
         self.first, self.count = False, self.count + 1
 
-    def pid(self, key, name: str, metadata=()) -> int:
+    def pid(self, key, name: str, metadata=(), sort: int | None = None) -> int:
         if key not in self.pids:
             self.pids[key] = pid = len(self.pids) + 1
+            sort = 1_000_000 + pid if sort is None else sort
             self.emit(
                 {"ph": "M", "name": "process_name", "pid": pid, "args": {"name": name}}
             )
@@ -203,7 +207,7 @@ class Timeline:
                     "ph": "M",
                     "name": "process_sort_index",
                     "pid": pid,
-                    "args": {"sort_index": pid},
+                    "args": {"sort_index": sort},
                 }
             )
             for event in metadata:
@@ -336,7 +340,8 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
         timeline = timelines[entry["trace_id"]] = Timeline(
             output / entry["timeline"], origin
         )
-        # Deployment flow: frontend, then prefill, then decode workers.
+        # Deployment flow: frontend, prefill and decode groups, each with its
+        # OTel spans first and that worker's native tracks directly below.
         lanes = {}
         for span in spans.values():
             worker_id, phase = router_decision(span, spans)
@@ -349,13 +354,16 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
                     {"prefill": 1, "decode": 2}.get(phase, 3),
                 )
             )
-        for lane, _ in sorted(set(lanes.values()), key=lambda lane: (lane[1], lane[0])):
-            timeline.pid(("otel", lane), f"OTel {lane}")
+        timeline.groups = dict(set(lanes.values()))
+        for lane, group in sorted(
+            timeline.groups.items(), key=lambda item: (item[1], item[0])
+        ):
+            timeline.pid(("otel", lane), f"{lane} · OTel spans", sort=group * 1000)
         for span in sorted(spans.values(), key=lambda s: start_end(s)[0]):
             worker_id = router_worker(span, spans)
             lane = lanes[span["spanId"]][0]
             start, end = start_end(span)
-            pid = timeline.pid(("otel", lane), f"OTel {lane}")
+            pid = timeline.pid(("otel", lane), f"{lane} · OTel spans")
             timeline.interval(
                 span["name"],
                 "otel",
@@ -386,14 +394,14 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
                         timeline,
                     )
                 )
-                pid = timeline.pid(("capture", target), f"Recording {target}")
+                pid = timeline.pid(("otel", target), f"{target} · OTel spans")
                 timeline.interval(
                     f"{target} recording",
                     "capture",
                     low - offsets[target],
                     high - offsets[target],
                     pid,
-                    1,
+                    timeline.tid(pid, "native recording"),
                 )
         for event in controls:
             timeline.emit(
@@ -427,13 +435,15 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
             continue
         shift, routed, read = offsets.get(target, 0), 0, 0
         for artifact in item.get("artifacts", []):
-            names, threads = {}, defaultdict(list)
+            names, labels, threads = {}, {}, defaultdict(list)
             for event in reader(Path(artifact["location"])):
                 read += 1
                 key = (target, artifact.get("rank_id"), event.get("pid"))
                 if event.get("ph") == "M":
                     if event.get("name") == "process_name":
                         names[key] = event["args"].get("name")
+                    elif event.get("name") == "process_labels":
+                        labels[key] = event["args"].get("labels")
                     elif event.get("name", "").startswith("thread_"):
                         threads[key].append(event)
                     continue
@@ -442,11 +452,16 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
                 start, end = event.pop("start_ns"), event.pop("end_ns")
                 for low, high, timeline in windows[target]:
                     if start < high and max(end, start + 1) > low:
-                        label = f"{target} {artifact.get('rank_id')} · {names.get(key, 'pid')} {event.get('pid')}"
+                        label = f"{target} · {names.get(key, 'native')} ({labels.get(key, event.get('pid'))})"
+                        group = (
+                            timeline.groups.get(target, 3) * 1000
+                            + 100
+                            + len(timeline.pids)
+                        )
                         timeline.emit(
                             {
                                 **event,
-                                "pid": timeline.pid(key, label, threads[key]),
+                                "pid": timeline.pid(key, label, threads[key], group),
                                 "ts": (start - shift - origin) / 1000,
                             }
                         )

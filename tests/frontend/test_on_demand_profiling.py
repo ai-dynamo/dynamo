@@ -1082,7 +1082,23 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
         }
         for name, ts in (("before_operation", 1000), ("inside_operation", 2500.5))
     ]
-    native = {"baseTimeNanoseconds": base, "traceEvents": kernels}
+    metadata = [
+        {
+            "ph": "M",
+            "name": "process_name",
+            "pid": 7,
+            "tid": 0,
+            "args": {"name": "EngineCore"},
+        },
+        {
+            "ph": "M",
+            "name": "process_labels",
+            "pid": 7,
+            "tid": 0,
+            "args": {"labels": "CPU"},
+        },
+    ]
+    native = {"baseTimeNanoseconds": base, "traceEvents": metadata + kernels}
     trace.write_bytes(gzip.compress(json.dumps(native).encode()))
     session = tmp_path / "session"
     session.mkdir()
@@ -1197,11 +1213,20 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
     assert summary["coverage"]["native_timeline"]["decode-0"]["events_written"] == 1
     timeline = tmp_path / "out" / index["requests"][0]["timeline"]
     events = json.loads(gzip.decompress(timeline.read_bytes()))["traceEvents"]
-    processes = [e["args"]["name"] for e in events if e.get("name") == "process_name"]
-    assert processes[:3] == [
-        "OTel frontend",
-        "OTel prefill worker W3 (not captured)",
-        "OTel decode-0",
+    order = {
+        e["pid"]: e["args"]["sort_index"]
+        for e in events
+        if e.get("name") == "process_sort_index"
+    }
+    names = {
+        e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"
+    }
+    assert [names[pid] for pid in sorted(order, key=order.get)] == [
+        "frontend · OTel spans",
+        "prefill worker W3 (not captured) · OTel spans",
+        "decode-0 · OTel spans",
+        "decode-0 · EngineCore (CPU)",
+        "Control",
     ]
     assert [e["name"] for e in events if e.get("cat") == "kernel"] == [
         "inside_operation"
