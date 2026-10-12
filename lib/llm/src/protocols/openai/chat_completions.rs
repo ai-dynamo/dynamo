@@ -1753,6 +1753,20 @@ mod tests {
         }))
         .expect("Failed to deserialize request");
         ValidateRequest::validate(&request).expect("omitted tools should validate");
+
+        // System-message tools make the effective tool set non-empty.
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "system", "content": "", "tools": [{"name": "lookup"}]},
+                {"role": "user", "content": "Hello"}
+            ],
+            "tools": [],
+            "tool_choice": "required"
+        }))
+        .expect("Failed to deserialize request");
+        ValidateRequest::validate(&request)
+            .expect("empty tools with system-message tools should validate");
     }
 
     #[test]
