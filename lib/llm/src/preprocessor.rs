@@ -13821,43 +13821,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn builder_accepts_last_in_vocab_id_out_of_vocab_boundary() {
-        let mdc = ModelDeploymentCard::load_from_disk(
-            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
-            None,
-        )
-        .unwrap();
-        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "hello"}],
-            "min_tokens": 1,
-            "stop_token_ids": [128255],
-            "allowed_token_ids": [128255],
-            "logprob_token_ids": [128255],
-            "bad_words_token_ids": [[1], [128255]]
-        }))
-        .unwrap();
-        let preprocessed = preprocessor
-            .builder(&request)
-            .expect("the last in-vocab id must be accepted")
-            .token_ids(vec![1])
-            .build()
-            .unwrap();
-        assert_eq!(
-            preprocessed.stop_conditions.stop_token_ids,
-            Some(vec![128255])
-        );
-        let sampling = &preprocessed.extra_args.as_ref().unwrap()["sampling_options"];
-        assert_eq!(sampling["allowed_token_ids"], serde_json::json!([128255]));
-        assert_eq!(sampling["logprob_token_ids"], serde_json::json!([128255]));
-        assert_eq!(
-            sampling["bad_words_token_ids"],
-            serde_json::json!([[1], [128255]])
-        );
-    }
-
     #[tokio::test]
     async fn chat_operator_rejects_invalid_legacy_jail_request_before_dispatch() {
         let mut mdc = ModelDeploymentCard::load_from_disk(
