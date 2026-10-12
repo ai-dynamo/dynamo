@@ -10,7 +10,7 @@ import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
@@ -775,6 +775,44 @@ async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
     assert "Use --dcp-size 1." in message
     assert "flashinfer" not in message
     assert ("automatically" in message) is not overrides
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decode_backend", ["cutedsl_mla", "fa3"])
+async def test_kimi_k3_dcp_defers_automatic_backend_until_engine_resolution(
+    monkeypatch, mock_sglang_cli, tmp_path, decode_backend
+):
+    """Do not reject Kimi-K3 using Hopper's generic default; check resolved decode."""
+    platform_default = Mock(return_value="fa3")
+    monkeypatch.setattr(
+        "dynamo.sglang._compat.sglang_get_default_attn_backend", platform_default
+    )
+    hf_config = SimpleNamespace(architectures=["KimiK3ForConditionalGeneration"])
+    server_args = _dcp_server_args_stub(
+        dcp_size=2,
+        use_mla_backend=lambda: True,
+        get_model_config=lambda: SimpleNamespace(
+            is_multimodal=False, hf_config=hf_config
+        ),
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args is server_args
+    assert server_args.decode_attention_backend is None
+    platform_default.assert_not_called()
+    engine_args = SimpleNamespace(**vars(server_args))
+    engine_args.prefill_attention_backend = "trtllm_mla"
+    engine_args.decode_attention_backend = decode_backend
+    if decode_backend == "fa3":
+        with pytest.raises(ValueError, match="decode attention backend 'fa3'"):
+            config.use_resolved_server_args(engine_args)
+    else:
+        assert config.use_resolved_server_args(engine_args) is engine_args
 
 
 def _raise_runtime_error(*_):

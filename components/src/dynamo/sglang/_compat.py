@@ -142,11 +142,18 @@ def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
         return None
     try:
         model_config = get_sglang_model_config(server_args)
+        hf_config = getattr(model_config, "hf_config", None)
+        if "KimiK3ForConditionalGeneration" in (
+            getattr(hf_config, "architectures", None) or []
+        ):
+            # Kimi-K3 resolves separate prefill/decode backends for DCP. The
+            # platform default (fa3 on Hopper) is not its decode backend.
+            # Defer to the engine's resolved configuration instead of guessing
+            # or running SGLang's kernel capability checks during CLI parsing.
+            return None
         # SGLang's DeepSeek-family override picks dsa for DSA models before
         # it falls back to the platform default.
-        if sglang_is_dsa_model is not None and sglang_is_dsa_model(
-            getattr(model_config, "hf_config", None)
-        ):
+        if sglang_is_dsa_model is not None and sglang_is_dsa_model(hf_config):
             return "dsa"
         backend = sglang_get_default_attn_backend(server_args, True, model_config)
     except Exception as exc:
