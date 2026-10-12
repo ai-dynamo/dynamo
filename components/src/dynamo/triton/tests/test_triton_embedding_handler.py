@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import tritonclient.grpc.model_config_pb2 as mc
 
-from dynamo.triton.pooling_handlers import EmbeddingWorkerHandler
+from dynamo.triton.embedding_handler import EmbeddingWorkerHandler
 
 pytestmark = [
     pytest.mark.unit,

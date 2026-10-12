@@ -111,7 +111,7 @@ def test_register_and_serve_registers_and_serves(patched_worker, tmp_path):
 
 
 def test_register_and_serve_classify_task_wires_classify_handler(monkeypatch, tmp_path):
-    from dynamo.triton.pooling_handlers import ClassifyWorkerHandler
+    from dynamo.triton.classify_handler import ClassifyWorkerHandler
 
     register_model = AsyncMock(name="register_model")
     monkeypatch.setattr(main, "register_model", register_model)
@@ -163,7 +163,7 @@ def test_register_and_serve_classify_task_wires_classify_handler(monkeypatch, tm
 
 
 def test_register_and_serve_embed_task_wires_embedding_handler(monkeypatch, tmp_path):
-    from dynamo.triton.pooling_handlers import EmbeddingWorkerHandler
+    from dynamo.triton.embedding_handler import EmbeddingWorkerHandler
 
     register_model = AsyncMock(name="register_model")
     monkeypatch.setattr(main, "register_model", register_model)

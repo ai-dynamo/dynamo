@@ -21,6 +21,8 @@ from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.triton.backend_args import DynamoTritonConfig, parse_args
+from dynamo.triton.classify_handler import ClassifyWorkerHandler
+from dynamo.triton.embedding_handler import EmbeddingWorkerHandler
 from dynamo.triton.handlers import RequestHandler
 from dynamo.triton.health_check import TritonHealthCheckPayload
 from dynamo.triton.metrics import (
@@ -28,7 +30,6 @@ from dynamo.triton.metrics import (
     _register_triton_metrics_bridge,
     _stop_triton_server,
 )
-from dynamo.triton.pooling_handlers import ClassifyWorkerHandler, EmbeddingWorkerHandler
 from dynamo.triton.util import create_triton_log_callback, endpoint_slug
 
 logger = logging.getLogger(__name__)

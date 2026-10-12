@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for dynamo.triton.pooling_handlers.ClassifyWorkerHandler:
+"""Unit tests for dynamo.triton.classify_handler.ClassifyWorkerHandler:
 config-driven input/output resolution, request/response translation for the
 OpenAI /v1/classify wire, id2label lookup, and validation of unsupported
 inputs (token-ID variants, pooling requests, empty payloads)."""
@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import tritonclient.grpc.model_config_pb2 as mc
 
-from dynamo.triton.pooling_handlers import ClassifyWorkerHandler
+from dynamo.triton.classify_handler import ClassifyWorkerHandler
 
 pytestmark = [
     pytest.mark.unit,
