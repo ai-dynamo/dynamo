@@ -19,7 +19,7 @@ use aisimulate_core::replay::{
 };
 
 #[derive(Debug, Default)]
-pub(in crate::replay) struct RouterEventBatch(pub Vec<RouterEvent>);
+pub struct RouterEventBatch(pub Vec<RouterEvent>);
 
 impl EngineEventBatch for RouterEventBatch {
     #[inline]
@@ -34,7 +34,7 @@ impl EngineEventBatch for RouterEventBatch {
 }
 
 #[derive(Debug, Default)]
-pub(in crate::replay) struct RouterEventObservation;
+pub struct RouterEventObservation;
 
 impl ReplayEngineObservation for RouterEventObservation {
     type Batch = RouterEventBatch;

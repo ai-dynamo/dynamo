@@ -156,7 +156,7 @@ pub(in crate::replay) fn provider_spec() -> ProviderSpec {
 /// Dynamo-owned metadata used by KV-aware placement. AISimulate only defines
 /// the neutral admission-metadata contract and never imports Router types.
 #[derive(Debug, Default)]
-pub(in crate::replay) struct KvReplayMetadata {
+pub struct KvReplayMetadata {
     hashes: Option<ReplayRequestHashes>,
     max_output_tokens_override: Option<usize>,
 }
@@ -428,12 +428,12 @@ pub(crate) struct OfflineReplayRouter {
     lagged_kv_events: VecDeque<(f64, Vec<RouterEvent>)>,
 }
 
-pub(in crate::replay) struct KvRouterPlacement {
+pub struct KvRouterPlacement {
     router: OfflineReplayRouter,
 }
 
 impl KvRouterPlacement {
-    pub(in crate::replay) fn new_with_selector_seed(
+    pub fn new_with_selector_seed(
         args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,

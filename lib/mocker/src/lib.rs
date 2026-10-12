@@ -20,3 +20,10 @@ pub mod replay;
 pub mod scheduler;
 pub mod services;
 pub mod sglang;
+
+/// Probe-only facade (mirrors dynamo branch ajc/kvrouter-steppable 72ce93629).
+pub mod placement {
+    pub use crate::common::protocols::MockerConfig;
+    pub use crate::replay::offline::extensions::kv_events::{RouterEventBatch, RouterEventObservation};
+    pub use crate::replay::offline::extensions::kv_router::{KvReplayMetadata, KvRouterPlacement};
+}
