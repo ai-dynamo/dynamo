@@ -68,10 +68,24 @@ impl ConcurrentRadixTreeCompressed {
                 LookupRepairDirection::TowardHead,
             ) {
                 Some(node) => {
-                    let grouped = lookup.get(&worker).map_or(0, |worker_lookup| {
-                        node.leading_edge_hash_count(&block_hashes[index + 1..], worker_lookup)
+                    // Group only the following hashes whose entries name `node` and that
+                    // its edge still holds. A hash whose entry names another node is left
+                    // to its own removal: that node may hold the worker's coverage, since
+                    // `node` can still contain the hash after being unlinked when the
+                    // worker later re-stored it elsewhere. The entries are lane-local, so
+                    // they are checked before taking the node's lock.
+                    let following = &block_hashes[index + 1..];
+                    let named = lookup.get(&worker).map_or(0, |worker_lookup| {
+                        following
+                            .iter()
+                            .take_while(|hash| {
+                                worker_lookup
+                                    .get(hash)
+                                    .is_some_and(|entry| Arc::ptr_eq(entry, &node))
+                            })
+                            .count()
                     });
-                    let end = index + 1 + grouped;
+                    let end = index + 1 + node.leading_edge_hash_count(&following[..named]);
                     self.apply_removed_group(lookup, worker, &node, &block_hashes[index..end], id);
                     index = end;
                 }

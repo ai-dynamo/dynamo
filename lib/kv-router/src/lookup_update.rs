@@ -57,6 +57,10 @@ pub(crate) fn redirect_arc_lookup_for_keys<K, T>(
 where
     K: Eq + Hash,
 {
+    debug_assert!(
+        !Arc::ptr_eq(from, to),
+        "redirect source and target must differ"
+    );
     let mut changed = 0;
 
     for key in keys {

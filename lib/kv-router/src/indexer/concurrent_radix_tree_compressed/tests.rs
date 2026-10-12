@@ -32,6 +32,16 @@ fn worker_lookup_len(lookup: &DirectLookup, worker: WorkerWithDpRank) -> Option<
     lookup.get(&worker).map(|worker_lookup| worker_lookup.len())
 }
 
+fn lookup_contains(
+    lookup: &DirectLookup,
+    worker: WorkerWithDpRank,
+    hash: ExternalSequenceBlockHash,
+) -> bool {
+    lookup
+        .get(&worker)
+        .is_some_and(|worker_lookup| worker_lookup.contains_key(&hash))
+}
+
 async fn index_block_count(index: &ThreadPoolIndexer<ConcurrentRadixTreeCompressed>) -> usize {
     index
         .shard_sizes()
@@ -1002,6 +1012,11 @@ mod remove_tests {
         }
 
         assert_direct_score(&index, &[1, 2, 20], worker(0), 2);
+        // Neither evicted entry leaks; 1, 2 and the never-evicted 30 remain.
+        for hash in remove_hashes_with_parent(&[1, 2], &[20, 21]) {
+            assert!(!lookup_contains(&lookup, worker(0), hash));
+        }
+        assert_eq!(worker_lookup_len(&lookup, worker(0)), Some(3));
     }
 
     #[test]
@@ -1109,6 +1124,22 @@ mod remove_tests {
                     _ => continue,
                 };
                 let _ = index.apply_event(&mut lanes[(w % 2) as usize], event, None);
+
+                // A lookup entry for a block the worker no longer holds is a leak.
+                for (lw, held_lw) in held.iter().enumerate() {
+                    let lane = &lanes[lw % 2];
+                    for &hash in seqs.iter().flatten() {
+                        assert!(
+                            held_lw.contains(&hash)
+                                || !lookup_contains(
+                                    lane,
+                                    worker(lw as u64),
+                                    ExternalSequenceBlockHash(hash)
+                                ),
+                            "seed={seed} step={step}: worker {lw} keeps a lookup entry for {hash}"
+                        );
+                    }
+                }
 
                 for (doc, seq) in docs.iter().zip(&seqs) {
                     for len in 1..=doc.len() {
@@ -1672,6 +1703,11 @@ mod lookup_redirect_tests {
         }
 
         assert_direct_score(&index, &[1, 2, 20], worker(0), 2);
+        // Neither evicted entry leaks; 1, 2 and the never-evicted 30 remain.
+        for hash in tail {
+            assert!(!lookup_contains(&lanes[0], worker(0), hash));
+        }
+        assert_eq!(worker_lookup_len(&lanes[0], worker(0)), Some(3));
     }
 
     /// The splitting lane also holds worker 0, so the split's own lookup update
