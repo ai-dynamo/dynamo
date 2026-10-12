@@ -99,3 +99,36 @@ def test_patch_static_state_for_gms_patches_weight_updater(monkeypatch):
     model = torch.nn.Linear(1, 1)
     model.register_buffer("stable", torch.zeros(1))
     assert weight_updater._export_static_state(model) == {"buffers": []}
+
+
+def test_patch_static_state_for_gms_falls_back_to_legacy_mixin(monkeypatch):
+    def original_export(model):
+        return {"buffers": ["original"]}
+
+    def original_import(model, static_params):
+        raise AssertionError("original _import_static_state called")
+
+    mixin_name = "sglang.srt.managers.scheduler_update_weights_mixin"
+    mixin = ModuleType(mixin_name)
+    mixin._export_static_state = original_export
+    mixin._import_static_state = original_import
+    managers = ModuleType("sglang.srt.managers")
+    managers.scheduler_update_weights_mixin = mixin
+    for name, module in (
+        ("sglang", ModuleType("sglang")),
+        ("sglang.srt", ModuleType("sglang.srt")),
+        ("sglang.srt.managers", managers),
+        (mixin_name, mixin),
+    ):
+        module.__path__ = getattr(module, "__path__", [])
+        monkeypatch.setitem(sys.modules, name, module)
+    # A None entry makes the newer weight_updater import raise ImportError.
+    monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler_components", None)
+    monkeypatch.setattr(patches, "_static_state_patched", False)
+
+    patches.patch_static_state_for_gms()
+
+    assert patches._static_state_patched
+    assert mixin._export_static_state is not original_export
+    assert mixin._export_static_state(object()) == {"buffers": []}
+    assert mixin._import_static_state(object(), {"buffers": []}) is None
