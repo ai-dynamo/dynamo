@@ -12,19 +12,24 @@ import os
 import uuid
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
-from dynamo.artifacts.relay import MooncakeByteRelay, RelayError
-from dynamo.artifacts.vllm.format import (
+mooncake = pytest.importorskip("mooncake.store", exc_type=ImportError)
+np = pytest.importorskip("numpy")
+pytest.importorskip("msgspec")
+pytest.importorskip("zstandard")
+
+from dynamo.artifacts.relay import (  # noqa: E402 -- optional dependency guards
+    MooncakeByteRelay,
+    RelayError,
+)
+from dynamo.artifacts.vllm.format import (  # noqa: E402 -- optional dependency guards
     GenerationArtifactChoice,
     GenerationArtifactView,
     Tensor,
     decode_generation_artifact,
     encode_generation_artifact,
 )
-
-mooncake = pytest.importorskip("mooncake.store", exc_type=ImportError)
 
 pytestmark = [
     pytest.mark.integration,
