@@ -1795,35 +1795,6 @@ fn ensure_token_ids_in_vocab(
     Ok(())
 }
 
-/// Bound the token-id sampling extensions that pass through to the backend
-/// unchanged. `validate.rs` owns their shape, so a value that does not
-/// deserialize here is left for it to reject.
-fn ensure_sampling_token_ids_in_vocab(
-    fields: Option<&std::collections::HashMap<String, serde_json::Value>>,
-    bound: Option<usize>,
-) -> anyhow::Result<()> {
-    let (Some(fields), Some(_)) = (fields, bound) else {
-        return Ok(());
-    };
-    for field in ["allowed_token_ids", "logprob_token_ids"] {
-        if let Some(Ok(ids)) = fields
-            .get(field)
-            .map(<Vec<TokenIdType> as serde::Deserialize>::deserialize)
-        {
-            ensure_token_ids_in_vocab(field, &ids, bound)?;
-        }
-    }
-    if let Some(Ok(lists)) = fields
-        .get("bad_words_token_ids")
-        .map(<Vec<Vec<TokenIdType>> as serde::Deserialize>::deserialize)
-    {
-        for ids in &lists {
-            ensure_token_ids_in_vocab("bad_words_token_ids", ids, bound)?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 fn resolve_qwen_video_processor_contract(
     runtime_config: &ModelRuntimeConfig,
@@ -3164,12 +3135,11 @@ impl OpenAIPreprocessor {
         builder.model(request.model());
 
         let mut stop_conditions = request.extract_stop_conditions()?;
-        // Client ids only; hidden EOS ids are added below. An out-of-vocab stop id
-        // can crash an engine that indexes with it (SGLang's min-new-tokens penalizer).
+        // SGLang indexes a GPU tensor with stop ids and does not check their range
+        // (sgl-project/sglang#31597). Hidden EOS ids come from the model card.
         if let Some(ids) = stop_conditions.stop_token_ids.as_deref() {
             ensure_token_ids_in_vocab("stop_token_ids", ids, self.token_id_bound)?;
         }
-        ensure_sampling_token_ids_in_vocab(request.unsupported_fields(), self.token_id_bound)?;
         let eos_token_ids = self.model_info.eos_token_ids();
         let hidden_eos_token_ids = eos_token_ids.clone();
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
@@ -13706,17 +13676,15 @@ mod tests {
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
     }
 
-    fn assert_out_of_vocab_rejection(err: &Error, field: &str) {
+    fn assert_out_of_vocab_stop_rejection(err: &Error) {
         let dynamo_err = err
             .downcast_ref::<DynamoError>()
             .expect("error should preserve the DynamoError type");
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
         let message = dynamo_err.to_string();
         assert!(
-            message.contains(&format!(
-                "{field} token id 128256 is out of range (must be < 128256)"
-            )),
-            "unexpected message for {field}: {message}"
+            message.contains("stop_token_ids token id 128256 is out of range (must be < 128256)"),
+            "unexpected message: {message}"
         );
     }
 
@@ -13747,7 +13715,7 @@ mod tests {
         let Err(err) = result else {
             panic!("an out-of-vocab stop token id should fail before dispatch");
         };
-        assert_out_of_vocab_rejection(&err, "stop_token_ids");
+        assert_out_of_vocab_stop_rejection(&err);
     }
 
     #[tokio::test]
@@ -13758,23 +13726,16 @@ mod tests {
         )
         .unwrap();
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
-        // Both client forms: the integer `stop` array and top-level
-        // `stop_token_ids`.
-        for stop_fields in [
-            serde_json::json!({"stop": [128256]}),
-            serde_json::json!({"stop_token_ids": [128256]}),
-        ] {
-            let mut value = serde_json::json!({
+        // Completions accept stop ids as an integer `stop` array or as `stop_token_ids`.
+        for stop_field in ["stop", "stop_token_ids"] {
+            let mut request = serde_json::json!({
                 "model": "test-model",
                 "prompt": "hello",
                 "max_tokens": 4,
                 "min_tokens": 1
             });
-            value
-                .as_object_mut()
-                .unwrap()
-                .extend(stop_fields.as_object().unwrap().clone());
-            let request: NvCreateCompletionRequest = serde_json::from_value(value).unwrap();
+            request[stop_field] = serde_json::json!([128256]);
+            let request: NvCreateCompletionRequest = serde_json::from_value(request).unwrap();
             let next: Arc<
                 dyn AsyncEngine<
                         SingleIn<PreprocessedRequest>,
@@ -13787,36 +13748,9 @@ mod tests {
                 Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next)
                     .await;
             let Err(err) = result else {
-                panic!("{stop_fields}: an out-of-vocab stop token id should fail before dispatch");
+                panic!("{stop_field}: an out-of-vocab stop token id should fail before dispatch");
             };
-            assert_out_of_vocab_rejection(&err, "stop_token_ids");
-        }
-    }
-
-    #[test]
-    fn builder_rejects_out_of_vocab_sampling_token_ids() {
-        let mdc = ModelDeploymentCard::load_from_disk(
-            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
-            None,
-        )
-        .unwrap();
-        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
-        for (field, value) in [
-            ("allowed_token_ids", serde_json::json!([1, 128256])),
-            ("logprob_token_ids", serde_json::json!([1, 128256])),
-            ("bad_words_token_ids", serde_json::json!([[1], [128256]])),
-        ] {
-            let mut request = serde_json::json!({
-                "model": "test-model",
-                "messages": [{"role": "user", "content": "hello"}]
-            });
-            request[field] = value;
-            let request: NvCreateChatCompletionRequest = serde_json::from_value(request).unwrap();
-            let err = preprocessor
-                .builder(&request)
-                .err()
-                .unwrap_or_else(|| panic!("{field}: out-of-vocab id should be rejected"));
-            assert_out_of_vocab_rejection(&err, field);
+            assert_out_of_vocab_stop_rejection(&err);
         }
     }
 
