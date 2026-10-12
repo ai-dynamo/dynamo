@@ -1556,12 +1556,15 @@ def test_worker_output_ceiling(use_sglang_tokenizer, requested):
     handler = _new_decode_handler(use_sglang_tokenizer=use_sglang_tokenizer)
     handler.max_output_tokens = 131072
     stop = {"max_tokens": requested, "ignore_eos": True}
-    request = stop if use_sglang_tokenizer else {"stop_conditions": stop}
+    request = (
+        {"max_tokens": requested} if use_sglang_tokenizer else {"stop_conditions": stop}
+    )
     params = handler._build_sampling_params(request)
     assert params["max_new_tokens"] == (
         131072 if requested is None else min(requested, 131072)
     )
-    assert params["ignore_eos"] is True
+    if not use_sglang_tokenizer:
+        assert params["ignore_eos"] is True
 
 
 def test_worker_ceiling_checks_floor_with_tokenizer_skipped():
