@@ -15,6 +15,10 @@
 #
 # LLaDA 2.0 diffusion-language-model serving with SGLang. This is the
 # Kubernetes equivalent of launch/diffusion_llada.sh.
+#
+# Usage:
+#   export NAMESPACE=<your-namespace> DYNAMO_VERSION=1.5.1
+#   envsubst '${DYNAMO_VERSION}' < agg_llm_diffusion.yaml | kubectl apply -n ${NAMESPACE} -f -
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -30,7 +34,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:${DYNAMO_VERSION}
   - name: DiffusionLanguageWorker
     type: worker
     replicas: 1
@@ -39,7 +43,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:${DYNAMO_VERSION}
           command:
           - python3
           - -m
