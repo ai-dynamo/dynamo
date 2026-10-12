@@ -24,8 +24,8 @@ import pytest
 import requests
 
 from tests.utils.gpu_args import build_gpu_mem_args
+from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.port_utils import allocate_port, deallocate_port
-from tests.utils.test_output import resolve_test_output_path
 
 # ============================================================================
 # Module Availability Checks

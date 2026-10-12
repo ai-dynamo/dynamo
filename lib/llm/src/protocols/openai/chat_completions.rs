@@ -284,6 +284,14 @@ pub struct NvCreateChatCompletionResponse {
     pub nvext: Option<serde_json::Value>,
 }
 
+/// Parser lifecycle evidence carried between serving components, never to OpenAI clients.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallCompletion {
+    pub choice_index: u32,
+    pub tool_index: u32,
+    pub complete: bool,
+}
+
 /// A response structure for streamed chat completions, embedding OpenAI's
 /// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -300,6 +308,9 @@ pub struct NvCreateChatCompletionStreamResponse {
     /// client-facing OpenAI-compatible streams.
     #[serde(default, skip_serializing)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
+    /// Internal transport evidence; the HTTP chat converter removes it before SSE serialization.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_call_completion: Vec<ToolCallCompletion>,
 }
 
 /// Synthetic chunks reuse a real response envelope but consume no backend data.
@@ -313,6 +324,7 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     let data = response.data.as_mut()?;
     data.inner.usage = None;
     data.llm_metrics = None;
+    data.tool_call_completion.clear();
     data.nvext = None;
     data.prompt_logprobs = None;
     Some(())

@@ -22,7 +22,7 @@ const CONTEXT_ONLY: &str = "context_only";
 
 pub(super) const DEFAULT_MAX_NEW_TOKENS: u32 = 20;
 // Bound the synthetic token plan and full-response delivery buffer.
-pub(super) const MAX_NEW_TOKENS: u32 = 32_768;
+pub(super) const MAX_NEW_TOKENS: u32 = 1_000_000;
 pub(super) const MAX_CANDIDATES: usize = 20;
 
 #[derive(Debug)]
