@@ -160,21 +160,61 @@ def schema_nodes(document: dict, schema: dict | bool, location: str, seen=None):
             )
 
 
-def request_document(document: dict) -> tuple[dict, list[dict]]:
-    """Keep both POST JSON request contracts and their schema reference closure."""
-    if document.get("openapi") not in {"3.1.0", "3.1.1"}:
-        raise ValueError("This workflow requires OpenAPI 3.1 server exports")
-    if (
-        document.get(
-            "jsonSchemaDialect", "https://spec.openapis.org/oas/3.1/dialect/base"
-        )
-        != "https://spec.openapis.org/oas/3.1/dialect/base"
-    ):
+def check_schema_dialect(document: dict) -> None:
+    """Reject unsupported document versions/dialects before comparison projection.
+
+    Accept the standard 3.1 and 3.2 dialects, both based on JSON Schema 2020-12.
+    Keyword coverage is checked separately on each reachable schema. This does not
+    validate document structure or fetch a caller-provided dialect.
+    """
+    version = document.get("openapi", "")
+    if version not in {"3.1.0", "3.1.1", "3.1.2", "3.2.0", "3.2.1"}:
+        raise ValueError("This workflow requires OpenAPI 3.1 or 3.2 server exports")
+    dialect = (
+        "https://spec.openapis.org/oas/3.2/dialect/2025-09-17"
+        if version.startswith("3.2.")
+        else "https://spec.openapis.org/oas/3.1/dialect/base"
+    )
+    if document.get("jsonSchemaDialect", dialect) != dialect:
         raise ValueError(
             "Custom OpenAPI schema dialects need explicit comparison support"
         )
+
+
+def validate_comparison_document(document: dict, roots: list[str]) -> None:
+    """Validate a projected document without interpreting default data as refs.
+
+    `roots` contains its schema-root JSON pointers. The schema-aware walk verifies
+    local references and removes only default annotations from a validation copy;
+    the original defaults remain in comparator inputs. Defaults are not JSON Schema
+    assertions. The pinned validator's extra default-value check incorrectly follows
+    literal `$ref` keys in that data, so it must not see them. Missing schema refs,
+    unsupported external refs and malformed documents raise; input is unchanged.
+    """
+    checked = copy.deepcopy(document)
+    seen = set()
+    for location in roots:
+        schema = jsonpointer.resolve_pointer(checked, location[1:])
+        for location, node in schema_nodes(checked, schema, location, seen):
+            if isinstance(node, dict) and "default" in node:
+                replacement = {
+                    key: value for key, value in node.items() if key != "default"
+                }
+                jsonpointer.set_pointer(checked, location[1:], replacement)
+    validate(checked)
+
+
+def request_document(document: dict) -> tuple[dict, list[dict]]:
+    """Copy scoped request contracts into a 3.1 comparator input, reporting gaps.
+
+    Standard 3.2 request schema keywords use the same 2020-12 semantics here. The
+    projection is not a server export: responses and other API surfaces are removed.
+    Original documents remain untouched. Missing contracts or unresolved imports
+    raise; unsupported reachable schema keywords are retained with coverage gaps.
+    """
+    check_schema_dialect(document)
     result = {
-        "openapi": document["openapi"],
+        "openapi": "3.1.0",
         "info": {"title": "Request contracts", "version": "1"},
         "paths": {},
         "components": {"schemas": {}},
@@ -213,23 +253,34 @@ def request_document(document: dict) -> tuple[dict, list[dict]]:
                 "responses": {"200": {"description": "Outside assessment scope"}},
             }
         }
-    validate(result)
+    validate_comparison_document(
+        result, [request_pointer(endpoint) for endpoint in ENDPOINTS]
+    )
     return result, gaps
 
 
-def normalize_nullable_strings(document: dict) -> tuple[dict, list[dict]]:
-    """Canonicalize only bare string/null unions on a copy of scoped requests.
+def normalize_nullable_strings(
+    document: dict, *, locations: list[str] | None = None
+) -> tuple[dict, list[dict]]:
+    """Canonicalize bare string/null unions on a copy of a comparison document.
 
     ``anyOf: [{type: string}, {type: null}]`` and a string/null type array
     have the same validation meaning. Keep sibling constraints and annotations;
     do not simplify constrained/ref branches, oneOf, or other primitive unions.
     The schema-aware walker leaves defaults, examples and extensions untouched.
+    `locations` selects schema-root JSON pointers; omitted means the two request
+    roots. Return the copied document and an audit of rewrites. Missing pointers
+    or invalid output documents raise rather than returning a partial result.
     """
     result = copy.deepcopy(document)
     changes = []
     seen = set()
-    for endpoint in ENDPOINTS:
-        location = request_pointer(endpoint)
+    roots = (
+        locations
+        if locations is not None
+        else [request_pointer(endpoint) for endpoint in ENDPOINTS]
+    )
+    for location in roots:
         schema = jsonpointer.resolve_pointer(result, location[1:])
         for location, node in schema_nodes(result, schema, location, seen):
             if not isinstance(node, dict):
@@ -259,7 +310,7 @@ def normalize_nullable_strings(document: dict) -> tuple[dict, list[dict]]:
                     "after": {"type": ["string", "null"]},
                 }
             )
-    validate(result)
+    validate_comparison_document(result, roots)
     return result, changes
 
 

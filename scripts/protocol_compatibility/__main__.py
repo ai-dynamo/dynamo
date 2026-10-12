@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Acquire OpenAPI documents and assess Dynamo/framework request contracts."""
+"""Acquire OpenAPI documents and assess Dynamo/framework request and response contracts."""
 
 import argparse
 import subprocess
@@ -38,7 +38,8 @@ def main(argv=None) -> int:
     capture.add_argument("--output-dir", type=Path, required=True)
     capture.set_defaults(run=acquire)
     assessment = commands.add_parser(
-        "assess", help="Compose Dynamo and compare its requests to a framework server"
+        "assess",
+        help="Compose Dynamo and compare request/response contracts to a framework server",
     )
     assessment.add_argument(
         "--dynamo",

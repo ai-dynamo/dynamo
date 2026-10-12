@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""A compact reading order around the complete library-produced request diff."""
+"""A request-first reading order around retained library-produced contract diffs."""
 
 import json
 
 
 def render(report: dict) -> str:
+    """Render the assessment report as Markdown with coverage and wire-evidence limits."""
     framework = report["framework_name"]
     lines = [
-        f"# Dynamo versus {framework} request-contract assessment",
+        f"# Dynamo versus {framework} request/response-contract assessment",
         "",
         f"Status: **{report['status']}**. Behavioral conformance: **not assessed**.",
         "",
@@ -42,7 +43,7 @@ def render(report: dict) -> str:
     )
     for gap in report["coverage_gaps"]:
         lines.append(
-            f"- **{gap['side']} {gap['endpoint']}** `{gap.get('field', '*')}`: "
+            f"- **{gap.get('kind', 'request')} {gap['side']} {gap['endpoint']}** `{gap.get('field', '*')}`: "
             f"{gap['reason']} Location: `{gap['location']}`."
         )
     if not report["coverage_gaps"]:
@@ -100,8 +101,9 @@ def render(report: dict) -> str:
     lines.extend(
         [
             "",
-            "Responses, inference behavior, forwarding, runtime defaults and "
-            "streaming behavior are outside this request-schema assessment.",
+            "Inference behavior, forwarding, runtime defaults and stream lifecycle "
+            "are outside this declared-contract assessment. Response headers and "
+            "endpoints other than chat/completions and completions are not compared.",
             "",
             "## Declared request differences",
             "",
@@ -180,6 +182,41 @@ def render(report: dict) -> str:
     if not report["differences"]:
         lines.append(
             "No declared request-body differences reported. Coverage gaps still apply."
+        )
+    lines.extend(
+        [
+            "",
+            "## Declared response differences",
+            "",
+            "See [response-oasdiff.json](response-oasdiff.json) for the complete response diff. "
+            "Original exports are retained separately. `*.responses.json` and "
+            "`*.responses.normalized.json` are comparison-only projections: unary JSON "
+            "retains its schema; SSE itemSchema becomes an event schema with encoding-tagged "
+            "decoded data. JSON contentSchema is therefore compared explicitly, not ignored "
+            "as an annotation. Literal `[DONE]` remains distinct from a JSON string containing it.",
+            "",
+            "Status and media-type differences remain visible. This structural comparison "
+            "does not establish client compatibility, event ordering, termination, keep-alive "
+            "handling or cancellation. Reproduce each candidate against real servers.",
+            "",
+        ]
+    )
+    for finding in report.get("response_differences", []):
+        lines.extend(
+            [
+                f"### POST {finding['endpoint']}",
+                "",
+                f"Response location: `{finding['location']}`.",
+                "",
+                "```json",
+                json.dumps(finding["delta"], indent=2, sort_keys=True),
+                "```",
+                "",
+            ]
+        )
+    if not report.get("response_differences"):
+        lines.append(
+            "No declared response differences reported. Response coverage gaps still apply."
         )
     lines.extend(
         [
