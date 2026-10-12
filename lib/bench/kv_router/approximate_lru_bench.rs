@@ -10,15 +10,16 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use dynamo_bench::kv_router_common::args::CommonArgs;
-use dynamo_bench::kv_router_common::issuer::{pin_current_thread, pin_current_thread_to_cpus};
-use dynamo_bench::kv_router_common::replay::{
-    WorkerReplayArtifacts, generate_replay_artifacts, process_mooncake_trace,
+use dynamo_bench::kv_router_common::issuer::{
+    parse_cpu_list, pin_current_thread, pin_current_thread_to_cpus,
 };
+use dynamo_bench::kv_router_common::replay::{WorkerReplayArtifacts, generate_replay_artifacts};
 use dynamo_kv_router::indexer::{
-    ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruLease, ApproximateLruRequestId,
-    ApproximateLruStats, ApproximateRetentionConfig, KvIndexerInterface, KvIndexerMetrics,
+    ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruLease, ApproximateLruStats,
+    ApproximateRetentionConfig, KvIndexerInterface, KvIndexerMetrics,
 };
 use dynamo_kv_router::protocols::{LocalBlockHash, WorkerWithDpRank};
+use dynamo_kv_router::scheduling::AttemptId;
 use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer, approx::PruneConfig};
 use dynamo_tokens::SequenceHash;
 use serde::Serialize;
@@ -127,7 +128,7 @@ struct LogicalOperation {
 }
 
 struct PreparedRequest {
-    lru_request_id: ApproximateLruRequestId,
+    attempt_id: AttemptId,
     lookup_hashes: Vec<LocalBlockHash>,
     local_hashes: Vec<LocalBlockHash>,
     sequence_hashes: Vec<SequenceHash>,
@@ -348,7 +349,7 @@ fn prepare_trial(
                     .checked_add(source.private_blocks)
                     .context("private prompt-block count overflow")?;
                 requests.push(PreparedRequest {
-                    lru_request_id: ApproximateLruRequestId::for_benchmark(attempt_value),
+                    attempt_id: AttemptId::for_benchmark(attempt_value),
                     lookup_hashes: source.local_hashes.clone(),
                     local_hashes: source.local_hashes.clone(),
                     sequence_hashes: source.sequence_hashes.clone(),
@@ -553,7 +554,7 @@ async fn execute_payload(
                     let Some(lease) = indexer.begin_approximate_lru_request(
                         worker,
                         RANK_INCARNATION,
-                        request.lru_request_id,
+                        request.attempt_id,
                     ) else {
                         return (None, Some("LRU lease unavailable".to_string()));
                     };
@@ -1068,14 +1069,7 @@ async fn async_main(args: Args, backend_cpus: Option<Vec<usize>>) -> anyhow::Res
         .mooncake_trace_path
         .as_deref()
         .context("mooncake trace path is required")?;
-    let traces = process_mooncake_trace(
-        trace_path,
-        args.common.block_size,
-        args.common.trace_length_factor,
-        args.common.trace_duplication_factor,
-        args.common.num_unique_inference_workers,
-        args.common.seed,
-    )?;
+    let traces = args.common.load_mooncake_trace(trace_path)?;
     let artifacts = generate_replay_artifacts(
         &traces,
         args.common.num_gpu_blocks,
@@ -1149,32 +1143,6 @@ fn main() -> anyhow::Result<()> {
         runtime.worker_threads(cpus.len());
     }
     runtime.build()?.block_on(async_main(args, backend_cpus))
-}
-
-fn parse_cpu_list(value: &str) -> anyhow::Result<Vec<usize>> {
-    let mut cpus = Vec::new();
-    for part in value
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        if let Some((start, end)) = part.split_once('-') {
-            let start = start.parse::<usize>()?;
-            let end = end.parse::<usize>()?;
-            if start > end {
-                anyhow::bail!("invalid descending CPU range {part}");
-            }
-            cpus.extend(start..=end);
-        } else {
-            cpus.push(part.parse::<usize>()?);
-        }
-    }
-    cpus.sort_unstable();
-    cpus.dedup();
-    if cpus.is_empty() {
-        anyhow::bail!("CPU list is empty");
-    }
-    Ok(cpus)
 }
 
 async fn quiesce(milliseconds: u64) {
@@ -1319,6 +1287,7 @@ mod tests {
                 test: false,
                 num_gpu_blocks: 16,
                 block_size: 4,
+                trace_block_size: 8,
                 trace_simulation_duration_ms: None,
                 benchmark_duration_ms: 1_000,
                 num_unique_inference_workers: 1,

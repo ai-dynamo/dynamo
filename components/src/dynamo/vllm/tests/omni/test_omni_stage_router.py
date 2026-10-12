@@ -88,16 +88,15 @@ def test_router_loads_stage_configs_from_model_deploy_config():
 
     with (
         patch(
-            "dynamo.vllm.omni.stage_router.load_and_resolve_stage_configs",
-            return_value=("/deploy/glm_image.yaml", stage_configs, None),
-        ) as load_and_resolve_stage_configs,
+            "dynamo.vllm.omni.stage_router.resolve_stage_configs",
+            return_value=("/deploy/glm_image.yaml", stage_configs),
+        ) as resolve_stage_configs,
         patch("dynamo.vllm.omni.stage_router.OutputFormatter") as output_formatter,
     ):
         router = stage_router.OmniStageRouter(config, "/deploy/glm_image.yaml")
 
-    load_and_resolve_stage_configs.assert_called_once_with(
+    resolve_stage_configs.assert_called_once_with(
         config.model,
-        kwargs={},
         trust_remote_code=False,
         deploy_config_path="/deploy/glm_image.yaml",
     )

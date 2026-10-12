@@ -19,6 +19,7 @@ from dynamo.common.configuration.utils import (
     add_negatable_bool_argument,
     parse_bool,
 )
+from dynamo.common.utils.nixl_telemetry import nixl_prometheus_base_port
 
 from . import __version__
 from .benchmark_points import (
@@ -32,7 +33,6 @@ from .constants import DisaggregationMode, EmbeddingTransferMode
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 MAX_PORT = 65535
-DEFAULT_NIXL_PROMETHEUS_PORT = 19090
 
 
 def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int | None:
@@ -45,18 +45,6 @@ def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int 
     except ValueError:
         return None
     return port if 0 < port <= MAX_PORT else None
-
-
-def _nixl_prometheus_port() -> int | None:
-    """Return the NIXL Prometheus listener port when it is enabled."""
-    enabled = os.environ.get("NIXL_TELEMETRY_ENABLE", "").strip().lower()
-    exporter = os.environ.get("NIXL_TELEMETRY_EXPORTER", "prometheus")
-    if enabled != "y" or exporter.strip().lower() != "prometheus":
-        return None
-    return _configured_fixed_port(
-        "NIXL_TELEMETRY_PROMETHEUS_PORT",
-        default=DEFAULT_NIXL_PROMETHEUS_PORT,
-    )
 
 
 def _is_intra_pod_failover_engine() -> bool:
@@ -267,7 +255,8 @@ class DynamoVllmArgGroup(ArgGroup):
             default=False,
             help="Serve a ModelType.Realtime bidirectional endpoint through "
             "the OpenAI /v1/realtime protocol. Standard vLLM currently "
-            "supports transcription sessions only. Aggregated workers only.",
+            "supports text-only realtime and transcription sessions. "
+            "Aggregated workers only.",
         )
 
         add_negatable_bool_argument(
@@ -481,6 +470,31 @@ class DynamoVllmArgGroup(ArgGroup):
                     "Legacy values are translated to the new sampling limit."
                 ),
             )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--benchmark-randomize-kda-state",
+            env_var="DYN_BENCHMARK_RANDOMIZE_KDA_STATE",
+            default=False,
+            help=(
+                "Initialize private KDA/Mamba decode benchmark states with bounded "
+                "random values. Requires decode or agg benchmark mode and the standard "
+                "vLLM GPU worker. These are synthetic states, not real context history."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--benchmark-hybrid-live-state",
+            env_var="DYN_BENCHMARK_HYBRID_LIVE_STATE",
+            default=False,
+            help=(
+                "Hybrid (KDA/Mamba) models: let the real-KV decode warm-up run with "
+                "recurrent-state groups forked from the parked chain's live state block "
+                "instead of skipping the warm-up. Attention KV is the chain's real prefix; "
+                "the recurrent state is a valid but deeper-context state (shallow points "
+                "read a few percent fast). Mutually exclusive with "
+                "--benchmark-randomize-kda-state."
+            ),
+        )
         add_argument(
             g,
             flag_name="--benchmark-warmup-iterations",
@@ -523,6 +537,21 @@ class DynamoVllmArgGroup(ArgGroup):
                 "After the limit, the current measured iteration finishes, "
                 "partial results are returned, and engine startup continues. "
                 "A bounded cleanup grace still fails closed if no result is written."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-max-batch-size",
+            env_var="DYN_BENCHMARK_MAX_BATCH_SIZE",
+            default=None,
+            arg_type=int,
+            help=(
+                "Cap the decode benchmark batch-size axis without changing the "
+                "engine's own limits. Points above the cap are never generated "
+                "(not measured, not skipped). Decoupled from --max-num-seqs: keep "
+                "the engine at its deployment concurrency while sweeping only the "
+                "batch range the performance model needs; setting --max-num-seqs "
+                "to at least twice this cap keeps every swept rung warmable."
             ),
         )
 
@@ -571,9 +600,12 @@ class DynamoVllmConfig(ConfigBase):
     # Benchmark / self-profiling
     benchmark_mode: Optional[BenchmarkMode] = None
     benchmark_points_file: Optional[str] = None
+    benchmark_randomize_kda_state: bool = False
+    benchmark_hybrid_live_state: bool = False
     benchmark_warmup_iterations: int = 5
     benchmark_output_path: str = "/tmp/benchmark_results.json"
     benchmark_timeout: int = 900
+    benchmark_max_batch_size: Optional[int] = None
     prefill_max_new_token_samples: int = 64
     prefill_max_kv_read_token_samples: int = 16
     decode_max_kv_read_token_samples: int = 128
@@ -693,6 +725,25 @@ class DynamoVllmConfig(ConfigBase):
             setattr(self, replacement_name, mapped_value)
 
     def _validate_benchmark_sampling(self) -> None:
+        if self.benchmark_hybrid_live_state and self.benchmark_randomize_kda_state:
+            raise ValueError(
+                "--benchmark-hybrid-live-state and --benchmark-randomize-kda-state "
+                "are mutually exclusive"
+            )
+        if self.benchmark_hybrid_live_state and self.benchmark_mode not in (
+            "decode",
+            "agg",
+        ):
+            raise ValueError(
+                "--benchmark-hybrid-live-state requires --benchmark-mode decode or agg"
+            )
+        if self.benchmark_randomize_kda_state and self.benchmark_mode not in (
+            "decode",
+            "agg",
+        ):
+            raise ValueError(
+                "--benchmark-randomize-kda-state requires --benchmark-mode decode or agg"
+            )
         if self.benchmark_mode is None:
             return
         if self._benchmark_points is None:
@@ -893,7 +944,7 @@ class DynamoVllmConfig(ConfigBase):
             if fpm_port is not None:
                 reservations.append(("DYN_FORWARDPASS_METRIC_PORT", fpm_port, fpm_port))
 
-        nixl_port = _nixl_prometheus_port()
+        nixl_port = nixl_prometheus_base_port()
         if nixl_port is not None:
             reservations.append(
                 ("NIXL_TELEMETRY_PROMETHEUS_PORT", nixl_port, nixl_port)

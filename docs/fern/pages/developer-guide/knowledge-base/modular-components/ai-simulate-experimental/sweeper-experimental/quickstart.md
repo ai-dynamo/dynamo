@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Sweeper Quickstart
 subtitle: Run a backend-neutral sweep with an injected replay runtime
@@ -9,11 +9,14 @@ subtitle: Run a backend-neutral sweep with an injected replay runtime
 > **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 > planning.
 
-Install AI Simulate:
+From the Dynamo checkout root, install the AISimulate dependency declared by that checkout:
 
 ```bash
-python -m pip install "aisimulate==0.1.0.dev1"
+python3 -m pip install -r container/deps/requirements.aisimulate.txt
 ```
+
+If you use the Dynamo replay runner, complete [Dynamo Sweeper Integration](dynamo-integration.md#install)
+to build bindings against the matching AISimulate Rust crate.
 
 Sweeper requires a `RunnerFactory` supplied by the application that owns replay execution:
 

@@ -43,7 +43,9 @@ fn drive_moved_jail(
             a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                 inner,
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             })
         })
 }
@@ -70,6 +72,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -140,6 +143,7 @@ fn build_backend_output(text: &str) -> BackendOutput {
         worker_trace_link: None,
         engine_data: None,
         routing_data: None,
+        jailed_text: None,
     }
 }
 
@@ -250,6 +254,7 @@ async fn test_required_tool_choice_parses_json_array() {
             .as_deref(),
         Some(r#"{"topic":"memory"}"#)
     );
+    assert_responses_preserves_forced_calls(response).await;
 }
 
 #[tokio::test]
@@ -312,6 +317,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         };
 
         let response = generator
@@ -383,6 +389,7 @@ async fn test_streaming_required_tool_parallel() {
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         };
 
         let response = generator
@@ -456,6 +463,7 @@ fn test_no_tool_choice_outputs_normal_text() {
         worker_trace_link: None,
         engine_data: None,
         routing_data: None,
+        jailed_text: None,
     };
 
     let response = generator
@@ -514,7 +522,9 @@ fn make_text_chunk(
             service_tier: None,
         },
         nvext: None,
+        prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 
@@ -657,7 +667,9 @@ async fn apply_structural_tag_jail_with_parser_and_choice(
         a.data.map(|inner| NvCreateChatCompletionStreamResponse {
             inner,
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         })
     })
     .collect()
@@ -1099,4 +1111,37 @@ async fn test_harmony_tool_choice_named_wrong_tool_filtered() {
         calls.is_empty(),
         "wrong tool must be filtered; got {calls:?}"
     );
+}
+
+async fn assert_responses_preserves_forced_calls(response: NvCreateChatCompletionStreamResponse) {
+    use dynamo_llm::protocols::{
+        Annotated,
+        openai::{
+            ParsingOptions,
+            chat_completions::{
+                NvCreateChatCompletionResponse, aggregator::ChatCompletionAggregator,
+            },
+            responses::{ResponseParams, chat_completion_to_response},
+        },
+    };
+    use dynamo_protocols::types::responses::OutputItem;
+
+    let expected = response.inner.choices[0].delta.tool_calls.clone().unwrap();
+    let chat = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([Annotated::from_data(response)]),
+        ParsingOptions::default(),
+    )
+    .await
+    .unwrap();
+    let response = chat_completion_to_response(chat, &ResponseParams::default(), None).unwrap();
+    assert_eq!(response.inner.output.len(), expected.len());
+    for (item, expected) in response.inner.output.iter().zip(expected) {
+        let OutputItem::FunctionCall(call) = item else {
+            panic!("expected a guided tool call without a model parser");
+        };
+        assert_eq!(Some(&call.call_id), expected.id.as_ref());
+        let function = expected.function.unwrap();
+        assert_eq!(Some(call.name.as_str()), function.name.as_deref());
+        assert_eq!(Some(call.arguments.as_str()), function.arguments.as_deref());
+    }
 }

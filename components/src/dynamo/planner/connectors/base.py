@@ -14,6 +14,7 @@ import inspect
 from typing import TYPE_CHECKING, Optional, Protocol, TypeGuard, runtime_checkable
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.core.types import WorkerCounts
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 if TYPE_CHECKING:
@@ -120,6 +121,33 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
 
 
 @runtime_checkable
+class StartupAwareConnector(Protocol):
+    """Optional inventory that distinguishes pending startup from other scaling."""
+
+    async def get_worker_inventory(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> Optional[WorkerCounts]:
+        """Return serving counts and verified pending startup counts by role.
+
+        Return None when optional startup reads are forbidden. The caller may
+        use legacy inventory, or power-aware inventory when power checks apply.
+        Names select the DGD components; an omitted name excludes that role.
+        ``WorkerCounts.pending_num_*`` may be positive only after ruling out
+        drain, rollout, and unobserved spec changes across the deployment.
+        A connector that also implements ``PowerAwareConnector`` must provide
+        the same rollout and terminating-Pod guarantees as its power-aware
+        counts, using the same snapshot for serving and pending inventory.
+        """
+        ...
+
+
+def is_startup_aware_connector(obj: object) -> TypeGuard[StartupAwareConnector]:
+    return callable(inspect.getattr_static(obj, "get_worker_inventory", None))
+
+
+@runtime_checkable
 class PowerAwareConnector(Protocol):
     """Narrow read-only power capability — Kubernetes-specific, not part of PlannerConnector.
 
@@ -187,6 +215,8 @@ def is_power_aware_connector(obj: object) -> TypeGuard[PowerAwareConnector]:
 __all__ = [
     "PlannerConnector",
     "PowerAwareConnector",
+    "StartupAwareConnector",
     "WorkerInfoProvider",
     "is_power_aware_connector",
+    "is_startup_aware_connector",
 ]

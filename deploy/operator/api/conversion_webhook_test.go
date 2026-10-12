@@ -33,16 +33,20 @@ func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
 	}
 	handler := webhookconversion.NewWebhookHandler(scheme, webhookconversion.NewRegistry())
 
-	for _, kind := range []string{
-		"DynamoGraphDeployment",
-		"DynamoComponentDeployment",
-		"DynamoGraphDeploymentRequest",
+	alphaVersion, betaVersion := v1alpha1.GroupVersion.String(), v1beta1.GroupVersion.String()
+	for _, test := range []struct {
+		kind, sourceVersion, destinationVersion string
+	}{
+		{"DynamoGraphDeployment", alphaVersion, betaVersion},
+		{"DynamoComponentDeployment", alphaVersion, betaVersion},
+		{"DynamoGraphDeploymentRequest", alphaVersion, betaVersion},
+		{"DynamoGraphDeployment", betaVersion, alphaVersion},
 	} {
-		t.Run(kind, func(t *testing.T) {
-			t.Log("Build a partial v1alpha1 object with an empty metadata envelope")
+		t.Run(test.kind+"/"+test.destinationVersion, func(t *testing.T) {
+			t.Logf("Build a partial %s object with an empty metadata envelope", test.sourceVersion)
 			source := map[string]any{
-				"apiVersion": v1alpha1.GroupVersion.String(),
-				"kind":       kind,
+				"apiVersion": test.sourceVersion,
+				"kind":       test.kind,
 				"metadata":   map[string]any{},
 			}
 			sourceRaw, err := json.Marshal(source)
@@ -57,8 +61,8 @@ func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
 					Kind:       "ConversionReview",
 				},
 				Request: &apiextensionsv1.ConversionRequest{
-					UID:               types.UID("partial-" + kind),
-					DesiredAPIVersion: v1beta1.GroupVersion.String(),
+					UID:               types.UID("partial-" + test.kind),
+					DesiredAPIVersion: test.destinationVersion,
 					Objects: []runtime.RawExtension{
 						{Raw: sourceRaw},
 					},
@@ -76,7 +80,7 @@ func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
 				t.Fatalf("conversion webhook status = %d, body = %s", recorder.Code, recorder.Body)
 			}
 
-			t.Log("Verify the converted v1beta1 object retains an empty metadata envelope")
+			t.Logf("Verify the converted %s object retains an empty metadata envelope", test.destinationVersion)
 			var response apiextensionsv1.ConversionReview
 			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 				t.Fatalf("unmarshal conversion response: %v", err)
@@ -94,6 +98,10 @@ func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
 			var converted map[string]any
 			if err := json.Unmarshal(response.Response.ConvertedObjects[0].Raw, &converted); err != nil {
 				t.Fatalf("unmarshal converted object: %v", err)
+			}
+			if converted["apiVersion"] != test.destinationVersion || converted["kind"] != test.kind {
+				t.Fatalf("converted type = %v %v, want %s %s",
+					converted["apiVersion"], converted["kind"], test.destinationVersion, test.kind)
 			}
 			metadata, found := converted["metadata"]
 			if !found {

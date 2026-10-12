@@ -12,7 +12,11 @@ from typing import Optional
 
 import pytest
 
-from dynamo.thunderagent_router.program_state import ProgramLifecycle, ProgramStatus
+from dynamo.thunderagent_router.program_state import (
+    ProgramLifecycle,
+    ProgramStatus,
+    ReplicaKey,
+)
 from dynamo.thunderagent_router.router import ThunderAgentConfig, ThunderAgentScheduler
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
@@ -20,22 +24,22 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 @dataclass
 class FakeCapacity:
-    """Stand-in for WorkerCapacityProvider with configurable worker state."""
+    """Stand-in for WorkerCapacityProvider with configurable replica state."""
 
-    workers: dict[int, int] = field(default_factory=dict)
+    workers: dict[ReplicaKey, int] = field(default_factory=dict)
     live_workers: Optional[set[int]] = None
 
-    def snapshot(self) -> dict[int, int]:
+    def snapshot(self) -> dict[ReplicaKey, int]:
         return dict(self.workers)
 
     def live_worker_ids(self) -> set[int]:
         if self.live_workers is not None:
             return set(self.live_workers)
-        return set(self.workers)
+        return {worker_id for worker_id, _ in self.workers}
 
 
 def make_router(
-    capacity_workers: Optional[dict[int, int]] = None,
+    capacity_workers: Optional[dict[ReplicaKey, int]] = None,
     config: Optional[ThunderAgentConfig] = None,
 ) -> tuple[ThunderAgentScheduler, FakeCapacity]:
     capacity = FakeCapacity(workers=capacity_workers or {})
@@ -46,6 +50,17 @@ def make_router(
         soft_demote_threshold=0.80,
     )
     return ThunderAgentScheduler(capacity, cfg), capacity  # type: ignore[arg-type]
+
+
+def place(router: ThunderAgentScheduler, program_id: str, replica: ReplicaKey) -> None:
+    """Put a program on a replica directly: ``assign_worker`` is the guarded back-fill and
+    refuses an already-placed program, so it would silently do nothing here."""
+    router._table.programs[program_id].assigned_replica = replica
+
+
+def usage(router: ThunderAgentScheduler):
+    """The per-replica usage map the scheduler phases consume."""
+    return router._replica_usage_locked(router._capacity.snapshot())
 
 
 @pytest.mark.asyncio
@@ -69,8 +84,8 @@ async def test_after_request_records_real_tokens():
 @pytest.mark.asyncio
 async def test_status_snapshot_reports_programs_and_worker_utilization():
     workers = {
-        1: 1000,
-        2: 500,
+        (1, 0): 1000,
+        (2, 0): 500,
     }
     router, _ = make_router(capacity_workers=workers)
 
@@ -85,9 +100,11 @@ async def test_status_snapshot_reports_programs_and_worker_utilization():
     assert snapshot["lifecycle_counts"]["active"] == 2
     assert snapshot["status_counts"]["acting"] == 1
     assert snapshot["status_counts"]["reasoning"] == 1
-    assert snapshot["workers"]["1"]["capacity"] == 1000
-    assert snapshot["workers"]["1"]["used"] == 225
-    assert snapshot["workers"]["1"]["active_programs"] == 1
+    assert snapshot["workers"]["1:0"]["worker_id"] == 1
+    assert snapshot["workers"]["1:0"]["dp_rank"] == 0
+    assert snapshot["workers"]["1:0"]["capacity"] == 1000
+    assert snapshot["workers"]["1:0"]["used"] == 225
+    assert snapshot["workers"]["1:0"]["active_programs"] == 1
     assert {
         (program["program_id"], program["assigned_worker_id"])
         for program in snapshot["programs"]
@@ -96,7 +113,7 @@ async def test_status_snapshot_reports_programs_and_worker_utilization():
 
 @pytest.mark.asyncio
 async def test_metrics_snapshot_reports_lifecycle_counters_and_gauges():
-    router, _ = make_router(capacity_workers={1: 1000})
+    router, _ = make_router(capacity_workers={(1, 0): 1000})
 
     await router.before_request("p1", estimated_prompt_tokens=100)
     await router.after_request("p1", prompt_tokens=100, completion_tokens=20)
@@ -128,40 +145,101 @@ async def test_before_request_records_exact_prompt_estimate_before_admission():
 
 
 @pytest.mark.asyncio
-async def test_assigned_worker_hint_reflects_sticky_assignment():
+async def test_back_fill_records_the_replica_the_engine_chose():
+    """Cold start: no MDC, so admission places nothing and the response decides."""
     router, _ = make_router()
-    await router.before_request("p1", estimated_prompt_tokens=100)
-    await router.assign_worker("p1", 3)
     decision = await router.before_request("p1", estimated_prompt_tokens=100)
-    assert decision.assigned_worker_hint == 3
+    assert decision.assigned_replica_hint is None
+
+    recorded = await router.assign_worker(
+        "p1", (7, 2), admission_epoch=decision.admission_epoch
+    )
+
+    assert recorded is True
+    next_turn = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert next_turn.assigned_replica_hint == (7, 2)
+
+
+@pytest.mark.asyncio
+async def test_back_fill_rejects_a_response_without_a_rank():
+    """A worker without a rank is not a replica: storing one leaves the program uncounted
+    and, with the worker id set, never re-placed. Unplaced keeps admission able to fix it.
+    """
+    router, capacity = make_router()
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+
+    recorded = await router.assign_worker(
+        "p1", None, admission_epoch=decision.admission_epoch
+    )
+
+    assert recorded is False
+    assert router._table.programs["p1"].assigned_replica is None
+
+    capacity.workers = {(1, 0): 1000}
+    repaired = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert repaired.assigned_replica_hint == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_back_fill_from_a_superseded_turn_is_ignored():
+    """Turn N goes out unplaced, the MDC lands, turn N+1 reserves -- then turn N's first
+    chunk arrives. Without the epoch check it overwrites the reservation."""
+    router, capacity = make_router()
+    stale = await router.before_request("p1", estimated_prompt_tokens=100)
+
+    capacity.workers = {(1, 0): 1000}
+    await router.before_request("p1", estimated_prompt_tokens=100)
+    reserved = router._table.programs["p1"].assigned_replica
+
+    recorded = await router.assign_worker(
+        "p1", (9, 9), admission_epoch=stale.admission_epoch
+    )
+
+    assert recorded is False
+    assert router._table.programs["p1"].assigned_replica == reserved
+
+
+@pytest.mark.asyncio
+async def test_back_fill_does_not_override_an_admission_placement():
+    """Admission is authoritative; the response only fills a gap it left."""
+    router, _ = make_router(capacity_workers={(1, 0): 1000})
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_replica_hint == (1, 0)
+
+    recorded = await router.assign_worker(
+        "p1", (2, 3), admission_epoch=decision.admission_epoch
+    )
+
+    assert recorded is False
+    assert router._table.programs["p1"].assigned_replica == (1, 0)
 
 
 @pytest.mark.asyncio
 async def test_stale_worker_assignment_moves_to_replacement():
-    router, capacity = make_router(capacity_workers={1: 1000})
+    router, capacity = make_router(capacity_workers={(1, 0): 1000})
     decision = await router.before_request("p1", estimated_prompt_tokens=100)
-    assert decision.assigned_worker_hint == 1
+    assert decision.assigned_replica_hint == (1, 0)
 
     capacity.workers = {}
     decision = await router.before_request("p1", estimated_prompt_tokens=100)
-    assert decision.assigned_worker_hint == 1
+    assert decision.assigned_replica_hint == (1, 0)
 
-    capacity.workers = {2: 1000}
+    capacity.workers = {(2, 0): 1000}
     capacity.live_workers = {1, 2}
     decision = await router.before_request("p1", estimated_prompt_tokens=100)
-    assert decision.assigned_worker_hint == 1
+    assert decision.assigned_replica_hint == (1, 0)
 
     capacity.live_workers = {2}
     decision = await router.before_request("p1", estimated_prompt_tokens=100)
-    assert decision.assigned_worker_hint == 2
+    assert decision.assigned_replica_hint == (2, 0)
     assert router._stat_worker_assignments == 2
 
 
 @pytest.mark.asyncio
 async def test_stale_replacement_bypasses_new_program_fairness_gate():
-    router, capacity = make_router(capacity_workers={1: 300})
+    router, capacity = make_router(capacity_workers={(1, 0): 300})
     decision = await router.before_request("active", estimated_prompt_tokens=100)
-    assert decision.assigned_worker_hint == 1
+    assert decision.assigned_replica_hint == (1, 0)
 
     waiter = asyncio.create_task(
         router.before_request("waiting", estimated_prompt_tokens=100)
@@ -170,10 +248,10 @@ async def test_stale_replacement_bypasses_new_program_fairness_gate():
         await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
     assert router._table.programs["waiting"].lifecycle == ProgramLifecycle.PAUSED
 
-    capacity.workers = {2: 1000}
+    capacity.workers = {(2, 0): 1000}
     capacity.live_workers = {2}
     decision = await router.before_request("active", estimated_prompt_tokens=100)
-    assert decision.assigned_worker_hint == 2
+    assert decision.assigned_replica_hint == (2, 0)
 
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -189,7 +267,7 @@ async def test_pause_acting_then_before_request_blocks_until_resume():
     router, _ = make_router(config=cfg)
 
     await router.before_request("p1")
-    await router.assign_worker("p1", 0)
+    place(router, "p1", (0, 0))
     await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
     await router._pause_acting("p1")
     assert router._table.programs["p1"].lifecycle == ProgramLifecycle.PAUSED
@@ -199,14 +277,15 @@ async def test_pause_acting_then_before_request_blocks_until_resume():
         await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
 
     async with router._lock:
-        router._resume_program(router._table.programs["p1"], target_worker_id=1)
+        router._resume_program(router._table.programs["p1"], (1, 0))
 
     decision = await asyncio.wait_for(waiter, timeout=1.0)
     assert decision.was_paused is True
     assert decision.priority_jump == cfg.resume_priority_boost
-    assert decision.assigned_worker_hint == 1
+    assert decision.assigned_replica_hint == (1, 0)
     metrics = await router.metrics_snapshot()
-    assert metrics["counters"]["worker_assignments_total"] == 2
+    # One: the resume. The setup placed the program directly, not via assign_worker.
+    assert metrics["counters"]["worker_assignments_total"] == 1
 
 
 @pytest.mark.asyncio
@@ -217,7 +296,7 @@ async def test_forced_resume_after_timeout():
     )
     router, _ = make_router(config=cfg)
     await router.before_request("p1")
-    await router.assign_worker("p1", 0)
+    place(router, "p1", (0, 0))
     await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
     await router._pause_acting("p1")
     decision = await router.before_request("p1")
@@ -235,11 +314,11 @@ async def test_new_program_queues_before_first_request_when_capacity_full():
         resume_hysteresis=0.0,
     )
     workers = {
-        1: 1000,
+        (1, 0): 1000,
     }
     router, _ = make_router(capacity_workers=workers, config=cfg)
     await router.before_request("existing", estimated_prompt_tokens=950)
-    await router.assign_worker("existing", 1)
+    place(router, "existing", (1, 0))
 
     waiter = asyncio.create_task(
         router.before_request("new", estimated_prompt_tokens=100)
@@ -249,7 +328,7 @@ async def test_new_program_queues_before_first_request_when_capacity_full():
     assert router._table.programs["new"].lifecycle == ProgramLifecycle.PAUSED
 
     async with router._lock:
-        router._resume_program(router._table.programs["new"], target_worker_id=1)
+        router._resume_program(router._table.programs["new"], (1, 0))
     decision = await asyncio.wait_for(waiter, timeout=1.0)
     assert decision.was_paused is True
 
@@ -262,7 +341,7 @@ async def test_cold_start_admits_without_sticky_pin():
     router, _ = make_router(capacity_workers={})
     decision = await router.before_request("cold_start")
     assert decision.was_paused is False
-    assert decision.assigned_worker_hint is None
+    assert decision.assigned_replica_hint is None
     program = router._table.programs["cold_start"]
     assert program.lifecycle == ProgramLifecycle.ACTIVE
 
@@ -275,16 +354,16 @@ async def test_soft_demote_marks_borderline_workers():
         pause_threshold=0.95,
     )
     workers = {
-        1: 1000,
+        (1, 0): 1000,
     }
     router, _ = make_router(capacity_workers=workers, config=cfg)
     await router.before_request("p1")
-    await router.assign_worker("p1", 1)
+    place(router, "p1", (1, 0))
     await router.after_request("p1", prompt_tokens=750, completion_tokens=0)
     await router.before_request("p1")
-    await router.assign_worker("p1", 1)
+    place(router, "p1", (1, 0))
 
-    router._apply_soft_demotes(router._capacity.snapshot())
+    router._apply_soft_demotes(usage(router))
     program = router._table.programs["p1"]
     assert program.soft_demoted_until > time.monotonic()
 
@@ -303,19 +382,19 @@ async def test_pause_until_safe_pauses_smallest_acting_first():
         scheduler_interval_seconds=10.0,
     )
     workers = {
-        1: 1000,
+        (1, 0): 1000,
     }
     router, _ = make_router(capacity_workers=workers, config=cfg)
 
     # Used = 600 + 100 + 2*100 = 900; pausing small leaves 700 <= target.
     for pid, prompt_tokens in [("big", 600), ("small", 100)]:
         await router.before_request(pid)
-        await router.assign_worker(pid, 1)
+        place(router, pid, (1, 0))
         await router.after_request(
             pid, prompt_tokens=prompt_tokens, completion_tokens=0
         )
 
-    await router._pause_until_safe(router._capacity.snapshot())
+    router._pause_until_safe_locked(usage(router))
 
     assert router._table.programs["small"].lifecycle == ProgramLifecycle.PAUSED
     assert router._table.programs["big"].lifecycle == ProgramLifecycle.ACTIVE
@@ -330,8 +409,8 @@ async def test_pause_until_safe_is_scoped_to_overloaded_worker():
         scheduler_interval_seconds=10.0,
     )
     workers = {
-        1: 1000,
-        2: 1000,
+        (1, 0): 1000,
+        (2, 0): 1000,
     }
     router, _ = make_router(capacity_workers=workers, config=cfg)
 
@@ -341,16 +420,63 @@ async def test_pause_until_safe_is_scoped_to_overloaded_worker():
         ("cold", 2, 700),
     ]:
         await router.before_request(pid)
-        await router.assign_worker(pid, worker_id)
+        place(router, pid, (worker_id, 0))
         await router.after_request(
             pid, prompt_tokens=prompt_tokens, completion_tokens=0
         )
 
-    await router._pause_until_safe(router._capacity.snapshot())
+    router._pause_until_safe_locked(usage(router))
 
     assert router._table.programs["hot_small"].lifecycle == ProgramLifecycle.PAUSED
     assert router._table.programs["hot_big"].lifecycle == ProgramLifecycle.ACTIVE
     assert router._table.programs["cold"].lifecycle == ProgramLifecycle.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_pause_until_safe_is_scoped_to_one_dp_rank_of_a_worker():
+    """Each rank has its own KV pool, so pressure on one must not pause the other."""
+    cfg = ThunderAgentConfig(
+        pause_threshold=0.95,
+        pause_target=0.80,
+        acting_token_weight=1.0,
+        scheduler_interval_seconds=10.0,
+    )
+    router, _ = make_router(capacity_workers={(1, 0): 1000, (1, 1): 1000}, config=cfg)
+
+    for pid, dp_rank, prompt_tokens in [
+        ("rank0_big", 0, 700),
+        ("rank0_small", 0, 200),
+        ("rank1", 1, 700),
+    ]:
+        await router.before_request(pid)
+        place(router, pid, (1, dp_rank))
+        await router.after_request(
+            pid, prompt_tokens=prompt_tokens, completion_tokens=0
+        )
+
+    router._pause_until_safe_locked(usage(router))
+
+    assert router._table.programs["rank0_small"].lifecycle == ProgramLifecycle.PAUSED
+    assert router._table.programs["rank0_big"].lifecycle == ProgramLifecycle.ACTIVE
+    assert router._table.programs["rank1"].lifecycle == ProgramLifecycle.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_admission_spreads_programs_across_dp_ranks_of_one_worker():
+    """Ranks of one worker are separate capacity units, so admission fills both."""
+    router, _ = make_router(capacity_workers={(1, 0): 1000, (1, 1): 1000})
+
+    first = await router.before_request("p1", estimated_prompt_tokens=100)
+    second = await router.before_request("p2", estimated_prompt_tokens=100)
+
+    assert {first.assigned_replica_hint, second.assigned_replica_hint} == {
+        (1, 0),
+        (1, 1),
+    }
+
+    snapshot = await router.status_snapshot()
+    assert snapshot["workers"]["1:0"]["active_programs"] == 1
+    assert snapshot["workers"]["1:1"]["active_programs"] == 1
 
 
 @pytest.mark.asyncio
@@ -362,17 +488,14 @@ async def test_pause_drives_util_to_pause_target_not_threshold():
         acting_token_weight=1.0,
         scheduler_interval_seconds=10.0,
     )
-    workers = {
-        1: 1_000_000,
-    }
-    router, _ = make_router(capacity_workers=workers, config=cfg)
+    router, _ = make_router(capacity_workers={(1, 0): 1_000_000}, config=cfg)
     for i in range(10):
         pid = f"p{i}"
         await router.before_request(pid)
-        await router.assign_worker(pid, 1)
+        place(router, pid, (1, 0))
         await router.after_request(pid, prompt_tokens=100_000, completion_tokens=0)
 
-    await router._pause_until_safe(router._capacity.snapshot())
+    router._pause_until_safe_locked(usage(router))
 
     paused = sum(
         1
@@ -397,7 +520,7 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
         scheduler_interval_seconds=10.0,
     )
     workers = {
-        1: 1000,
+        (1, 0): 1000,
     }
     router, capacity = make_router(config=cfg)
 
@@ -406,7 +529,7 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
     for i in range(10):
         pid = f"p{i}"
         await router.before_request(pid)
-        await router.assign_worker(pid, 1)
+        place(router, pid, (1, 0))
         await router.after_request(pid, prompt_tokens=100, completion_tokens=0)
         router._table.programs[pid].acting_since = time.monotonic() - 10.0
 
@@ -431,11 +554,11 @@ async def test_cancelled_admission_of_new_program_leaves_no_trace():
         pause_target=1.0,
         resume_hysteresis=0.0,
     )
-    router, _ = make_router(capacity_workers={1: 1000}, config=cfg)
+    router, _ = make_router(capacity_workers={(1, 0): 1000}, config=cfg)
 
     decision = await router.before_request("existing", estimated_prompt_tokens=850)
-    assert decision.assigned_worker_hint == 1
-    assert router._worker_used(1) == 950
+    assert decision.assigned_replica_hint == (1, 0)
+    assert usage(router)[(1, 0)].used == 950
 
     waiter = asyncio.create_task(
         router.before_request("new", estimated_prompt_tokens=50)
@@ -456,13 +579,13 @@ async def test_cancelled_admission_of_new_program_leaves_no_trace():
         router.before_request("other", estimated_prompt_tokens=50), timeout=1.5
     )
     assert decision.was_paused is False
-    assert decision.assigned_worker_hint == 1
+    assert decision.assigned_replica_hint == (1, 0)
 
     assignments_before_tick = router._stat_worker_assignments
     await router._scheduler_tick()
 
     assert "new" not in router._table.programs
-    assert router._worker_used(1) == 150
+    assert usage(router)[(1, 0)].used == 150
     assert router._stat_worker_assignments == assignments_before_tick
 
 
@@ -476,7 +599,7 @@ async def test_cancelled_admission_of_existing_program_restores_prior_turn():
     router, _ = make_router(config=cfg)
 
     await router.before_request("p1")
-    await router.assign_worker("p1", 1)
+    place(router, "p1", (1, 0))
     await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
     await router._pause_acting("p1")
 
@@ -485,7 +608,7 @@ async def test_cancelled_admission_of_existing_program_restores_prior_turn():
     assert program.status == ProgramStatus.ACTING
     assert program.step_count == 1
     assert program.token_total == 110
-    assert program.assigned_worker_id is None
+    assert program.assigned_replica is None
     assert "p1" in router._table.paused
     waiting_before = program.waiting
     acting_since_before = program.acting_since
@@ -507,7 +630,7 @@ async def test_cancelled_admission_of_existing_program_restores_prior_turn():
     assert program.status == ProgramStatus.ACTING
     assert program.step_count == 1
     assert program.token_total == 110
-    assert program.assigned_worker_id is None
+    assert program.assigned_replica is None
     assert program.acting_since == acting_since_before
     assert "p1" in router._table.paused
     assert program.waiting is waiting_before
@@ -524,10 +647,10 @@ async def test_cancelled_admission_does_not_strand_a_concurrent_waiter():
         pause_target=1.0,
         resume_hysteresis=0.0,
     )
-    router, _ = make_router(capacity_workers={1: 1000}, config=cfg)
+    router, _ = make_router(capacity_workers={(1, 0): 1000}, config=cfg)
 
     decision = await router.before_request("existing", estimated_prompt_tokens=850)
-    assert decision.assigned_worker_hint == 1
+    assert decision.assigned_replica_hint == (1, 0)
 
     first = asyncio.create_task(
         router.before_request("shared", estimated_prompt_tokens=50)
@@ -559,7 +682,7 @@ async def test_cancelled_admission_does_not_strand_a_concurrent_waiter():
 
     decision = await asyncio.wait_for(second, timeout=1.5)
     assert decision.was_paused is True
-    assert decision.assigned_worker_hint == 1
+    assert decision.assigned_replica_hint == (1, 0)
 
 
 @pytest.mark.fault_tolerance
@@ -572,7 +695,7 @@ async def test_cancelled_admission_serializes_a_later_turn():
     router, _ = make_router(config=cfg)
 
     await router.before_request("p1")
-    await router.assign_worker("p1", 1)
+    place(router, "p1", (1, 0))
     await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
     await router._pause_acting("p1")
     program = router._table.programs["p1"]
@@ -621,7 +744,7 @@ async def test_two_cancelled_admissions_of_new_program_leave_no_trace():
         pause_target=1.0,
         resume_hysteresis=0.0,
     )
-    router, _ = make_router(capacity_workers={1: 1000}, config=cfg)
+    router, _ = make_router(capacity_workers={(1, 0): 1000}, config=cfg)
 
     await router.before_request("existing", estimated_prompt_tokens=850)
 
@@ -660,10 +783,10 @@ async def test_rollback_completes_when_cancellation_is_redelivered():
         pause_target=1.0,
         resume_hysteresis=0.0,
     )
-    router, _ = make_router(capacity_workers={1: 1000}, config=cfg)
+    router, _ = make_router(capacity_workers={(1, 0): 1000}, config=cfg)
 
     decision = await router.before_request("existing", estimated_prompt_tokens=850)
-    assert decision.assigned_worker_hint == 1
+    assert decision.assigned_replica_hint == (1, 0)
 
     waiter = asyncio.create_task(
         router.before_request("new", estimated_prompt_tokens=50)

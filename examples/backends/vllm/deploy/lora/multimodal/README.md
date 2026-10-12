@@ -209,7 +209,7 @@ kubectl get pods -n ${NAMESPACE}
 
 # Watch worker logs
 kubectl logs -f -n "${NAMESPACE}" \
-  -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=VllmWorker"
+  -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=worker"
 ```
 
 Wait for the worker to show "Application startup complete".
@@ -359,7 +359,7 @@ running these commands.
 1. **Check MinIO connectivity from worker**:
    ```bash
    WORKER_POD=$(kubectl get pods -n "${NAMESPACE}" \
-     -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=VllmWorker" \
+     -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=worker" \
      -o jsonpath='{.items[0].metadata.name}')
    kubectl exec -it -n "${NAMESPACE}" "${WORKER_POD}" -- \
      curl http://minio:9000/minio/health/live
@@ -374,7 +374,7 @@ running these commands.
 3. **Check worker logs**:
    ```bash
    kubectl logs -n "${NAMESPACE}" \
-     -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=VllmWorker"
+     -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=worker"
    ```
 
 4. **Verify adapter compatibility**: Ensure the LoRA adapter was trained for the same base model architecture (Qwen3-VL-2B) and that `max-lora-rank` (default 64) is >= the adapter's rank.

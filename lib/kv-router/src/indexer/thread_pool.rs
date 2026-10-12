@@ -15,11 +15,12 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
+use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::{
     ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation,
-    ApproximateLruLease, ApproximateLruRequestId, ApproximateLruStats, ApproximateLruTask,
-    ApproximateRetentionConfig, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
-    ShardSizeSnapshot, SyncIndexer, WorkerLookupStats, WorkerTask, panic_payload_message,
+    ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
+    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
+    WorkerLookupStats, WorkerTask, panic_payload_message,
 };
 #[cfg(feature = "bench")]
 use super::{
@@ -28,6 +29,7 @@ use super::{
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
+use crate::scheduling::AttemptId;
 use dynamo_tokens::SequenceHash;
 #[cfg(feature = "bench")]
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -361,10 +363,10 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         &self,
         worker: WorkerWithDpRank,
         incarnation: ApproximateLruIncarnation,
-        lru_request_id: ApproximateLruRequestId,
+        attempt_id: AttemptId,
     ) -> Option<ApproximateLruLease> {
         let client = self.approximate_lru_client_for_worker(worker)?;
-        Some(client.begin_request(worker, incarnation, lru_request_id))
+        Some(client.begin_request(worker, incarnation, attempt_id))
     }
 
     pub async fn set_approximate_lru_capacity(
@@ -748,7 +750,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// NOTE: Rank-to-queue assignment is stable for the indexer's lifetime. Replacement reset
     /// depends on removal and acknowledgement using that same FIFO lane before activation. This
     /// proves queue progress only; ordinary event errors are logged by the worker.
-    async fn flush_worker_lane_and_wait(
+    #[doc(hidden)]
+    pub async fn flush_worker_lane_and_wait(
         &self,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
@@ -1087,6 +1090,32 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     ) -> Result<(), KvRouterError> {
         self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
             .await
+    }
+}
+
+impl ThreadPoolIndexer<ConcurrentRadixTreeCompressed> {
+    pub async fn contains_worker_block(
+        &self,
+        worker: WorkerWithDpRank,
+        block_hash: ExternalSequenceBlockHash,
+    ) -> Result<bool, KvRouterError> {
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker,
+            self.num_workers,
+        );
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::ContainsWorkerBlock {
+                worker,
+                block_hash,
+                resp: resp_tx,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
 }
 

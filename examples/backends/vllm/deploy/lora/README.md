@@ -235,7 +235,7 @@ kubectl get pods -n ${NAMESPACE}
 
 # Watch worker logs
 kubectl logs -f -n "${NAMESPACE}" \
-  -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=VllmDecodeWorker"
+  -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=worker"
 ```
 
 Wait for the worker to show "Application startup complete".
@@ -342,7 +342,7 @@ commands.
 1. **Check MinIO connectivity from worker**:
    ```bash
    WORKER_POD=$(kubectl get pods -n "${NAMESPACE}" \
-     -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=VllmDecodeWorker" \
+     -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=worker" \
      -o jsonpath='{.items[0].metadata.name}')
    kubectl exec -it -n "${NAMESPACE}" "${WORKER_POD}" -- \
      curl http://minio:9000/minio/health/live
@@ -357,7 +357,7 @@ commands.
 3. **Check worker logs**:
    ```bash
    kubectl logs -n "${NAMESPACE}" \
-     -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=VllmDecodeWorker"
+     -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=worker"
    ```
 
 ### Sync Job Fails

@@ -15,6 +15,8 @@ import random
 import socket
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,7 +41,7 @@ class ServicePorts:
 
     frontend_port: int
     system_ports: list[int]
-    kv_event_port: int = 0
+    kv_event_ports: list[int] = field(default_factory=list)
     fpm_port: int = 0
     # Per-worker VLLM_NIXL_SIDE_CHANNEL_PORT values; unique per deployment so
     # parallel (xdist) deployments on one host don't collide.
@@ -334,6 +336,16 @@ def allocate_port(start_port: int) -> int:
         int: An available port number between start_port and 32767 (i16 max)
     """
     return allocate_ports(1, start_port)[0]
+
+
+@contextmanager
+def reserved_ports(count: int, start_port: int) -> Iterator[list[int]]:
+    """Reserve ports for a context and always release their registry entries."""
+    ports = allocate_ports(count, start_port)
+    try:
+        yield ports
+    finally:
+        deallocate_ports(ports)
 
 
 def deallocate_ports(ports: list[int]) -> None:

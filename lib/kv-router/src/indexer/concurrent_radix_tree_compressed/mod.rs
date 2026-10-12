@@ -19,7 +19,7 @@ use super::{
     MatchDetails, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::cleanup::{CleanupGuard, CleanupState};
-use crate::lookup_update::update_arc_lookup_for_keys;
+use crate::lookup_update::{redirect_arc_lookup_for_keys, update_arc_lookup_for_keys};
 use crate::protocols::*;
 
 mod children;
@@ -45,6 +45,7 @@ pub struct ConcurrentRadixTreeCompressed {
 
     anchor_nodes: DashMap<ExternalSequenceBlockHash, SharedNode, FxBuildHasher>,
     cleanup: CleanupState,
+    lifecycle: super::HashLifecycle,
     #[cfg(feature = "bench")]
     bench_metrics: CrtcBenchMetrics,
 }
@@ -93,11 +94,29 @@ impl Drop for ConcurrentRadixTreeCompressed {
 }
 
 impl ConcurrentRadixTreeCompressed {
+    pub fn new_with_delegate(delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
+        Self::with_lifecycle(super::HashLifecycle::new(delegate))
+    }
+
+    pub(super) fn with_lifecycle(lifecycle: super::HashLifecycle) -> Self {
+        let mut backend = Self::new();
+        backend.lifecycle = lifecycle;
+        backend
+    }
+
+    fn release_hash(&self, worker: WorkerWithDpRank, hash: ExternalSequenceBlockHash) {
+        // Synthetic branch anchors borrow router-owned prefixes, not backend ownership.
+        if self.lifecycle.is_enabled() && !self.anchor_nodes.contains_key(&hash) {
+            self.lifecycle.remove(worker, hash);
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             root: Arc::new(Node::new()),
             anchor_nodes: DashMap::with_hasher(FxBuildHasher),
             cleanup: CleanupState::new(),
+            lifecycle: super::HashLifecycle::default(),
             #[cfg(feature = "bench")]
             bench_metrics: CrtcBenchMetrics::new(),
         }
@@ -185,11 +204,15 @@ impl ConcurrentRadixTreeCompressed {
 
     /// Apply deferred lookup updates after `Node::split_at`.
     ///
-    /// Updates worker lookup maps so entries for blocks that moved to the suffix now
-    /// point to the suffix node. Must be called **after** the write guard is dropped.
+    /// Repoints this lane's lookup entries that still name `prefix` at the suffix,
+    /// for the blocks each worker covers there. An entry naming another node is
+    /// left alone: an unlinked node can keep a worker's stale coverage after the
+    /// worker stored those blocks again on a live node. Must be called **after**
+    /// the write guard is dropped.
     fn apply_split_lookup(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        prefix: &SharedNode,
         split: SplitLookupData,
     ) {
         #[cfg(feature = "bench")]
@@ -198,23 +221,29 @@ impl ConcurrentRadixTreeCompressed {
             .fetch_add(1, Ordering::Relaxed);
         for (worker, hashes) in split.suffix.lookup_entries_by_worker() {
             if let Some(wl) = lookup.get_mut(&worker) {
-                for hash in hashes {
-                    wl.insert(hash, split.suffix.clone());
-                }
+                redirect_arc_lookup_for_keys(wl, hashes, prefix, &split.suffix);
             }
         }
     }
 
     fn update_lookup_for_blocks(
+        &self,
+        worker: WorkerWithDpRank,
         worker_lookup: &mut WorkerLookup,
         blocks: &[KvCacheStoredBlockData],
         node: &SharedNode,
     ) -> bool {
-        update_arc_lookup_for_keys(
+        let changed = update_arc_lookup_for_keys(
             worker_lookup,
             blocks.iter().map(|block| block.block_hash),
             node,
-        ) > 0
+        ) > 0;
+        if self.lifecycle.is_enabled() {
+            for block in blocks {
+                self.lifecycle.insert(worker, block.block_hash);
+            }
+        }
+        changed
     }
 
     // ------------------------------------------------------------------

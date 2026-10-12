@@ -22,6 +22,7 @@ from tests.utils.payloads import (
     ImageTokenMetricsPayload,
     KvEventMetricsPayload,
     LMCacheMetricsPayload,
+    LoraTestChatPayload,
     MetricsPayload,
     PoolingPayload,
     ResponsesPayload,
@@ -153,6 +154,40 @@ def cached_tokens_chat_payload(
         or ["Aeloria", "Eldoria", "explorer", "ancient", "character", "background"],
         min_cached_tokens=min_cached_tokens,
         router_nvext_expectation=router_nvext_expectation,
+    )
+
+
+def lora_chat_payload(
+    lora_name: str,
+    s3_uri: str,
+    system_port: int = DefaultPort.SYSTEM1.value,
+    repeat_count: int = 2,
+    expected_response: Optional[list] = None,
+    expected_log: Optional[list] = None,
+    max_tokens: int = 100,
+    temperature: float = 0.0,
+) -> LoraTestChatPayload:
+    """Create a LoRA-enabled chat payload for testing."""
+    return LoraTestChatPayload(
+        body={
+            "model": lora_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is deep learning? Answer in one sentence.",
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        },
+        lora_name=lora_name,
+        s3_uri=s3_uri,
+        system_port=system_port,
+        repeat_count=repeat_count,
+        expected_response=expected_response
+        or ["learning", "neural", "network", "AI", "model"],
+        expected_log=expected_log or [],
     )
 
 
@@ -603,19 +638,23 @@ def make_chat_health_check(port: int, model: str):
             stream=False,
         ).with_model(model)
         payload.port = port
-        try:
-            resp = send_request(
-                payload.url(),
-                payload.body,
-                timeout=min(max(1.0, remaining_timeout), 5.0),
-                method=payload.method,
-                log_level=10,
+        # Let ManagedProcess log the actual health-check failure.
+        resp = send_request(
+            payload.url(),
+            payload.body,
+            timeout=min(max(1.0, remaining_timeout), 5.0),
+            method=payload.method,
+            log_level=10,
+        )
+        # raise_for_status() omits the response body.
+        if not resp.ok:
+            raise RuntimeError(
+                f"chat health check got HTTP {resp.status_code} from {resp.url}: "
+                f"{resp.text[:500]!r}"
             )
-            # Validate structure only; expected_response is empty
-            _ = payload.response_handler(resp)
-            return True
-        except Exception:
-            return False
+        # Validate structure only; expected_response is empty
+        payload.response_handler(resp)
+        return True
 
     return _check_chat_endpoint
 
@@ -630,20 +669,26 @@ def make_completions_health_check(port: int, model: str):
             stream=False,
         ).with_model(model)
         payload.port = port
-        try:
-            resp = send_request(
-                payload.url(),
-                payload.body,
-                timeout=min(max(1.0, remaining_timeout), 5.0),
-                method=payload.method,
-                log_level=10,
+        # See make_chat_health_check: no try/except, so ManagedProcess._check_func's
+        # own exception logging can surface the real failure reason.
+        resp = send_request(
+            payload.url(),
+            payload.body,
+            timeout=min(max(1.0, remaining_timeout), 5.0),
+            method=payload.method,
+            log_level=10,
+        )
+        # See make_chat_health_check: surface the response body, since
+        # raise_for_status() alone only reports the status line.
+        if not resp.ok:
+            raise RuntimeError(
+                f"completions health check got HTTP {resp.status_code} from "
+                f"{resp.url}: {resp.text[:500]!r}"
             )
-            out = payload.response_handler(resp)
-            if not out:
-                raise ValueError("")
-            return True
-        except Exception:
-            return False
+        out = payload.response_handler(resp)
+        if not out:
+            raise ValueError(f"completions health check got empty response: {out!r}")
+        return True
 
     return _check_completions_endpoint
 
