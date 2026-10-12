@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from dynamo.common.http import url_validator
+from dynamo.common.http import HttpStatusError, url_validator
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -719,3 +719,26 @@ def test_describe_error_detail_redacts_a_presigned_url_in_the_text() -> None:
         assert signature not in label
         assert "X-Amz" not in label
         assert "bucket.s3.amazonaws.com/clip.wav" in label
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://[2606:4700::1111]/img.png",
+        "https://bucket.s3.amazonaws.com/a(1)/img.png",
+    ],
+    ids=["ipv6_host", "parenthesis_in_path"],
+)
+def test_presigned_url_with_brackets_stays_out_of_http_errors(url) -> None:
+    """A bracketed IPv6 host or a parenthesis in the path must not end the
+    match early and leave the query unredacted."""
+    signed = f"{url}?X-Amz-Expires=900&X-Amz-Signature={'0123456789abcdef' * 16}"
+    error = HttpStatusError(400, f"Connection error loading image: '{signed}'", signed)
+
+    for text in (
+        describe_error_detail(f"Invalid URL: {signed}"),
+        str(error),
+        error.message,
+    ):
+        assert "0123456789abcdef" not in text
+        assert "X-Amz" not in text
