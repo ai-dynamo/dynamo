@@ -2193,6 +2193,39 @@ mod worker_metrics_tests {
             "same-rank updates should be coalesced"
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn publish_replays_every_rank_for_late_subscribers() {
+        let publisher = WorkerMetricsPublisher::new().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let start = tokio::time::Instant::now();
+        publisher.start_metrics_publishing_with(ChannelSink(tx), 42);
+        publisher.publish(Some(0), None, Some(100)).unwrap();
+        publisher.publish(Some(1), Some(7), None).unwrap();
+
+        let mut next_two = async || {
+            let mut loads = Vec::new();
+            for _ in 0..2 {
+                loads.push(
+                    tokio::time::timeout(Duration::from_secs(60), rx.recv())
+                        .await
+                        .expect("timed out waiting for rank metrics")
+                        .expect("metrics publishing task stopped"),
+                );
+            }
+            loads.sort_unstable_by_key(|load| load.dp_rank);
+            loads
+        };
+        let changed = next_two().await;
+        assert!(start.elapsed() < Duration::from_secs(1));
+
+        // Nothing changed, yet both ranks are republished unchanged.
+        let replayed = next_two().await;
+        assert_eq!(start.elapsed(), Duration::from_secs(10));
+        assert_eq!(replayed, changed);
+        assert_eq!(replayed[0].kv_used_blocks, Some(100));
+        assert_eq!(replayed[1].active_decode_blocks, Some(7));
+    }
 }
 
 #[cfg(all(test, feature = "integration"))]

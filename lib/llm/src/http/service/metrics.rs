@@ -26,6 +26,7 @@ use std::{
 };
 
 use crate::discovery::ModelManager;
+use crate::frontend_load::{FrontendLoadTracker, RequestOutcome, TrackedRequest};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 use crate::protocols::{
@@ -594,6 +595,7 @@ struct MetricsHandlerState {
 }
 
 pub struct Metrics {
+    frontend_load: Arc<FrontendLoadTracker>,
     request_started_counter: IntCounterVec,
     request_counter: IntCounterVec,
     /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility.
@@ -655,6 +657,7 @@ pub struct HttpQueueGuard {
 /// the counter with `status` label [`frontend_service::status::SUCCESS`]
 pub struct InflightGuard {
     metrics: Arc<Metrics>,
+    tracked: TrackedRequest,
     model: String,
     endpoint: Endpoint,
     request_type: RequestType,
@@ -775,6 +778,7 @@ pub enum ErrorType {
 /// Track response-specific metrics
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
+    tracked: TrackedRequest,
     model: String,
     // Per-model metric handles cached for the request. Most are resolved at construction;
     // ITL is resolved lazily on its first observation so requests that never produce ITL
@@ -1286,6 +1290,7 @@ impl Metrics {
         .unwrap();
 
         Metrics {
+            frontend_load: Arc::default(),
             request_started_counter,
             request_counter,
             inflight_gauge,
@@ -1664,9 +1669,8 @@ impl Metrics {
         )
     }
 
-    /// Create a new [`ResponseMetricCollector`] for collecting per-response metrics (i.e., TTFT, ITL)
-    pub fn create_response_collector(self: Arc<Self>, model: &str) -> ResponseMetricCollector {
-        ResponseMetricCollector::new(self, model.to_string())
+    pub(crate) fn frontend_load(&self) -> &Arc<FrontendLoadTracker> {
+        &self.frontend_load
     }
 
     /// Create a new [`HttpQueueGuard`] for tracking HTTP processing queue
@@ -1703,6 +1707,7 @@ impl InflightGuard {
         request_id: String,
     ) -> Self {
         let timer = Instant::now();
+        let tracked = metrics.frontend_load.start_request(&model);
         metrics.inc_inflight_gauge(&model);
         metrics.inc_request_started_counter(&model, &endpoint, &request_type);
 
@@ -1718,6 +1723,7 @@ impl InflightGuard {
 
         InflightGuard {
             metrics,
+            tracked,
             model,
             endpoint,
             request_type,
@@ -1746,6 +1752,19 @@ impl InflightGuard {
     }
     pub fn elapsed_ms(&self) -> u128 {
         self.timer.elapsed().as_millis()
+    }
+
+    pub(crate) fn tracked_request(&self) -> &TrackedRequest {
+        &self.tracked
+    }
+
+    /// Create the [`ResponseMetricCollector`] for this request's responses.
+    pub(crate) fn response_collector(&self) -> ResponseMetricCollector {
+        ResponseMetricCollector::new(
+            self.metrics.clone(),
+            self.model.clone(),
+            self.tracked.clone(),
+        )
     }
 
     pub(crate) fn mark_ok(&mut self) {
@@ -1785,6 +1804,11 @@ impl Drop for InflightGuard {
             .observe(duration);
 
         let completion = self.request_completion();
+        self.tracked.finish(match completion {
+            RequestCompletion::Success => RequestOutcome::Completed,
+            RequestCompletion::Cancelled => RequestOutcome::Cancelled,
+            RequestCompletion::Error => RequestOutcome::Failed,
+        });
         self.span.record("request.outcome", completion.as_str());
 
         let elapsed_ms = (duration * 1000.0) as u64;
@@ -1932,7 +1956,7 @@ impl std::fmt::Display for ErrorType {
 }
 
 impl ResponseMetricCollector {
-    fn new(metrics: Arc<Metrics>, model: String) -> Self {
+    fn new(metrics: Arc<Metrics>, model: String, tracked: TrackedRequest) -> Self {
         // Resolve the per-model handles once (cheap clones of the vec entries) so the
         // per-chunk / per-token hot path in `observe_response` does no label hashing.
         let output_tokens_counter = metrics.output_tokens_counter.with_label_values(&[&model]);
@@ -1947,6 +1971,7 @@ impl ResponseMetricCollector {
             .with_label_values(&[&model]);
         ResponseMetricCollector {
             metrics,
+            tracked,
             model,
             output_tokens_counter,
             time_to_first_token,
@@ -2132,6 +2157,8 @@ impl ResponseMetricCollector {
 
     /// Observe a response with input sequence length and number of new tokens
     pub fn observe_response(&mut self, isl: usize, num_tokens: usize) {
+        self.tracked.observe_input_tokens(isl);
+        self.tracked.add_output_tokens(num_tokens);
         if num_tokens == 0 {
             return;
         }
@@ -2581,6 +2608,14 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 mod tests {
     use super::*;
 
+    fn response_collector(metrics: &Arc<Metrics>, model: &str) -> ResponseMetricCollector {
+        ResponseMetricCollector::new(
+            metrics.clone(),
+            model.to_string(),
+            metrics.frontend_load.start_request(model),
+        )
+    }
+
     fn model_ready_value_with_name(
         registry: &Registry,
         metric_name: &str,
@@ -3025,7 +3060,7 @@ mod tests {
         let registry = prometheus::Registry::new();
         metrics.register(&registry).unwrap();
         let model = "test-model";
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
         let mut guard = None;
 
         #[allow(deprecated)]
@@ -3086,7 +3121,7 @@ mod tests {
         let model = "test-model";
 
         // Create response collector
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
 
         // Simulate first chunk (5 tokens)
         collector.observe_response(100, 5);
@@ -3120,11 +3155,50 @@ mod tests {
     }
 
     #[test]
+    fn test_inflight_guard_feeds_frontend_load() {
+        let metrics = Arc::new(Metrics::new());
+        let model = "frontend-load-model";
+        let load = || {
+            let view = crate::discovery::CommittedModelView {
+                name: model.to_string(),
+                aliases: Vec::new(),
+            };
+            let mut frame = metrics.frontend_load().next_frame(0, true, vec![view]);
+            frame.models.remove(0)
+        };
+        let mut inflight =
+            metrics
+                .clone()
+                .create_inflight_guard(model, Endpoint::Completions, true, "");
+        let mut collector = inflight.response_collector();
+
+        collector.observe_response(10, 0);
+        let awaiting = load();
+        assert_eq!(awaiting.gauges.requests_awaiting_first_token, 1);
+        assert_eq!(awaiting.gauges.awaiting_first_token_input_tokens, 10);
+
+        // Output chunks are deltas; the repeated input count is not re-added.
+        collector.observe_response(10, 3);
+        collector.observe_response(10, 2);
+        let generating = load();
+        assert_eq!(generating.gauges.requests_generating, 1);
+        assert_eq!(generating.gauges.inflight_input_tokens, 10);
+
+        inflight.mark_ok();
+        drop(inflight);
+        let finished = load();
+        assert_eq!(finished.gauges, Default::default());
+        assert_eq!(finished.totals.requests_completed, 1);
+        assert_eq!(finished.totals.input_tokens, 10);
+        assert_eq!(finished.totals.output_tokens, 5);
+    }
+
+    #[test]
     fn test_local_itl_histogram_is_initialized_lazily() {
         let metrics = Arc::new(Metrics::new());
         let model = "lazy-local-itl-model";
         let global = metrics.inter_token_latency.with_label_values(&[model]);
-        let mut collector = metrics.create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
 
         assert!(collector.inter_token_latency.is_none());
 
@@ -3165,7 +3239,7 @@ mod tests {
         metrics.register(&registry).unwrap();
         let model = "cached-handle-model";
 
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
         // First chunk (3 tokens): TTFT + ISL observed once; no ITL yet.
         collector.observe_response(42, 3);
         // Second chunk (4 tokens): ITL observed once per token via the cached handle.
@@ -3212,7 +3286,7 @@ mod tests {
         let model = "local-itl-flush-model";
         let global = metrics.inter_token_latency.with_label_values(&[model]);
 
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
         collector.observe_response(10, 1); // TTFT only.
         assert!(collector.inter_token_latency.is_none());
         collector.observe_response(10, 63);
@@ -3254,7 +3328,7 @@ mod tests {
     #[test]
     fn test_worker_metadata_is_latched_without_replacement() {
         let metrics = Arc::new(Metrics::new());
-        let mut collector = metrics.create_response_collector("worker-latch-model");
+        let mut collector = response_collector(&metrics, "worker-latch-model");
         let first = LLMMetricAnnotation {
             prefill_worker_id: Some(11),
             prefill_dp_rank: Some(1),
@@ -3302,7 +3376,7 @@ mod tests {
         metrics.register(&registry).unwrap();
         let model = "mm-counts-model";
 
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
         // Repeated calls simulate the same counts arriving on each streamed chunk.
         collector.observe_multimodal_metrics(2, 1, 0, Some(1290));
         collector.observe_multimodal_metrics(2, 1, 0, Some(1290));
@@ -3340,7 +3414,7 @@ mod tests {
         metrics.register(&registry).unwrap();
         let model = "text-only-model";
 
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
         collector.observe_multimodal_counts(0, 0, 0);
 
         let img = metrics.images_per_request.with_label_values(&[model]);
@@ -3368,7 +3442,7 @@ mod tests {
         // Distinctive worker id so this never collides with other tests on the
         // process-global WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.
         let worker_id: u64 = 9_876_543_210;
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
         collector.set_worker_info(
             None,
             None,
@@ -3405,7 +3479,7 @@ mod tests {
         metrics.register(&registry).unwrap();
 
         let model = "test-model";
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
 
         // Simulate chunk with zero tokens (should not increment)
         collector.observe_response(100, 0);
@@ -3448,8 +3522,8 @@ mod tests {
         let model2 = "model-2";
 
         // Create collectors for different models
-        let mut collector1 = metrics.clone().create_response_collector(model1);
-        let mut collector2 = metrics.clone().create_response_collector(model2);
+        let mut collector1 = response_collector(&metrics, model1);
+        let mut collector2 = response_collector(&metrics, model2);
 
         // Increment model1
         collector1.observe_response(100, 10);
@@ -3511,7 +3585,7 @@ mod tests {
 
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
 
         // Create histogram handle first
         let _histogram = metrics.cached_tokens.with_label_values(&[model]);
@@ -3571,7 +3645,7 @@ mod tests {
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
         let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
 
         // Create a metrics annotation event (event without SSE data payload)
         let mut annotated = Annotated::<
@@ -3680,7 +3754,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
         metrics.register(&registry).unwrap();
-        let mut collector = metrics.clone().create_response_collector("test-model");
+        let mut collector = response_collector(&metrics, "test-model");
 
         let llm_metrics = LLMMetricAnnotation {
             input_tokens: 7,
@@ -3820,7 +3894,7 @@ mod tests {
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
         let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
         let mut annotated = make_chat_stream_annotated("hello");
         annotated.data.as_mut().unwrap().llm_metrics = Some(LLMMetricAnnotation {
             input_tokens: 10,
@@ -3963,7 +4037,7 @@ mod tests {
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
         let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = response_collector(&metrics, model);
 
         // Create a metrics annotation event
         let mut annotated = Annotated::<
@@ -4277,7 +4351,7 @@ mod tests {
             true,
             "req-case",
         );
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = _inflight.response_collector();
         collector.observe_response(100, 1);
         let _queue = metrics.clone().create_http_queue_guard(model);
 
@@ -4498,7 +4572,7 @@ mod tests {
         annotated: crate::types::Annotated<String>,
     ) -> Result<Option<Event>, axum::Error> {
         let metrics = Arc::new(Metrics::new());
-        let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
+        let mut collector = response_collector(&metrics, "test-model");
         let mut http_queue_guard: Option<HttpQueueGuard> = None;
         process_response_using_event_converter_and_observe_metrics(
             EventConverter::from(annotated),
@@ -4513,7 +4587,7 @@ mod tests {
         >,
     ) -> Result<Option<Event>, axum::Error> {
         let metrics = Arc::new(Metrics::new());
-        let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
+        let mut collector = response_collector(&metrics, "test-model");
         let mut http_queue_guard: Option<HttpQueueGuard> = None;
         process_chat_response_using_event_converter_and_observe_metrics(
             EventConverter::from(annotated),
@@ -5065,7 +5139,7 @@ mod tests {
             let metrics = Arc::new(Metrics::new_with_prefix(None));
             let registry = Registry::new();
             metrics.register(&registry).unwrap();
-            let mut collector = metrics.create_response_collector(MODEL);
+            let mut collector = response_collector(&metrics, MODEL);
             let mut http_queue_guard = None;
 
             let observed = stream.inspect(move |response| {

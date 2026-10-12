@@ -116,6 +116,7 @@ affected stream state and requires reconnecting; it is not proof that cached sta
 | `SubscribeKvPool` | server stream | CKF snapshot + deltas for one exact producer generation |
 | `SubscribeServingReadiness` | server stream | Complete namespace topology projections |
 | `SubscribeKvPoolLoad` | server stream | Complete pool-load windows |
+| `SubscribeServingLoad` | server stream | Complete scheduler-load and frontend-load windows |
 
 Streaming requests require a non-empty `subscriber_id` (≤ 128 UTF-8 bytes,
 no control characters). It is a diagnostic label, not an authentication identity or resume
@@ -245,8 +246,52 @@ heartbeats or rank-scoped freshness metadata.
 
 An empty `pools` list is a valid idle window. Use local receive time to track WAN stream freshness;
 `observed_ms` is producer wall-clock metadata, not a cross-data-center freshness guarantee.
-Router-local decode and prefill scheduler events are excluded because they have no publisher
-identity and cannot be aggregated authoritatively across router replicas.
+Router scheduler load is published separately by `SubscribeServingLoad`.
+
+### SubscribeServingLoad
+
+Emits complete `ServingLoadUpdate` windows (`window_sequence`, `observed_ms`, `window_ms`) at
+the same cadence and with the same fanout bound as `SubscribeKvPoolLoad`; a lagging subscriber
+is terminated with `SUBSCRIBER_LAGGED`. Its subscriber limit is independent. A pool or model
+absent from the next window is gone.
+
+| Entry | Key | Contents |
+| --- | --- | --- |
+| `PoolServingLoad` | `ProducerIdentity` | Every catalog pool, including pools without data. Router scheduler load (`active_prefill_tokens`, `active_decode_blocks`) and deployment facts. `requests` is unset. |
+| `ModelServingLoad` | `(namespace, canonical_model_id)` | Every model a catalog pool registers in the namespace or a recently published frontend serves there. Frontend request lifecycle and token load, frontend coverage, and stable `serving_pools` links. |
+
+Each `LoadView.status` states coverage of its expected sources:
+
+| Status | Pools (router schedulers) | Models (frontends in the namespace) |
+| --- | --- | --- |
+| `COMPLETE` | Every expected router has a recent view of every declared rank. | Discovery succeeded and every expected frontend published recently. |
+| `DEGRADED` | Some views are missing, or scheduler discovery failed. | Some expected frontends are silent, or frontend discovery failed. |
+| `UNAVAILABLE` | No router reported recently. | No frontend published recently. |
+
+Expected sources are the publishers registered in discovery plus every source that reported
+within three publish intervals, so broker-mode publishers, which skip registration, still count.
+Gauges (`active_*`, `requests_awaiting_first_token`, `requests_generating`, and the in-flight
+token counts) are set exactly when the view is `COMPLETE`: a partial sum would read as lower load.
+Model `*_total` counters are always set. They accumulate over every frontend heard during one
+`relay_incarnation` and absorb frontend restarts. A new `relay_incarnation` starts from each
+frontend's own running totals when it is first heard, so the values are neither zero nor
+continuous across incarnations; compute rates only within one incarnation.
+Fields that belong to the other view kind are never set. `PoolDeploymentStatus` fields are unset
+while the pool's runtime configuration is invalid or, for `max_concurrency`, while a worker
+does not declare its limit.
+
+Within one scheduler group, views overlap, so the Relay takes each rank's maximum. Distinct
+groups are disjoint, so it sums them. A standalone router that reconnects counts only its latest
+view. Frontends are heard in every namespace that holds a catalog pool or a served model, and in
+the Relay's own namespace, where frontends without an exact namespace publish.
+
+Validate with `validate_serving_load_update` before applying a window: an invalid envelope,
+a missing relay identity, a pool without an identifiable producer, or a duplicate pool or model
+key invalidates the whole serving-load plane. Then validate each entry with
+`validate_pool_serving_load` or `validate_model_serving_load`. An unknown `DataStatus` or
+unsupported pool identity (`is_unsupported()`) quarantines that entry only; a malformed entry
+with a trustworthy key, including a presence-rule violation, is also quarantined. Never read an
+unset gauge as zero.
 
 ## Consumer lifecycle rules
 
@@ -262,7 +307,7 @@ identity and cannot be aggregated authoritatively across router replicas.
 Pool presence and serving readiness are separate facts. Their snapshots can temporarily
 disagree; neither stream updates the other atomically. Consumers decide how to use these facts.
 
-Keep catalog, pool filters, readiness, and load as independent state machines. Install a filter
+Keep catalog, pool filters, readiness, pool load, and serving load as independent state machines. Install a filter
 only after validating its complete snapshot; apply deltas only when Relay identity, producer
 identity, format, and base sequence match the installed state. A gap, malformed CBI1 frame, or
 identity drift invalidates only the affected pool replica. Replace readiness from the first

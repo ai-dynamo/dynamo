@@ -1101,6 +1101,32 @@ pub struct WorkerSelectionResult {
     pub potential_decode_blocks: usize,
 }
 
+/// One router scheduler's view of a worker rank's in-flight load.
+///
+/// Routers publish this on the scheduler-load subject; workers never do.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SchedulerLoad {
+    pub worker_id: WorkerId,
+    #[serde(default)]
+    pub dp_rank: DpRank,
+    pub active_decode_blocks: u64,
+    pub active_prefill_tokens: u64,
+    pub group: SchedulerGroup,
+}
+
+/// Which schedulers' views describe the same requests.
+///
+/// Views within one group overlap, so consumers take their maximum; views from
+/// different groups are disjoint, so consumers sum them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SchedulerGroup {
+    /// A scheduler that only knows the requests it routed itself.
+    Standalone { scheduler_id: u64 },
+    /// Schedulers that replicate request state, so each reports the group's full load.
+    ReplicaGroup { group_id: String },
+}
+
 /// Active load metrics for a worker, used for overload detection.
 ///
 /// Published by workers (with `kv_used_blocks`) and by the scheduler (with
@@ -2847,5 +2873,38 @@ mod tests {
             serde_json::to_string(&load).unwrap(),
             r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4,"active_requests":2}"#
         );
+    }
+
+    #[test]
+    fn scheduler_load_round_trips_json_and_event_plane_msgpack() {
+        let load = |group| SchedulerLoad {
+            worker_id: 7,
+            dp_rank: 2,
+            active_decode_blocks: 10,
+            active_prefill_tokens: 20,
+            group,
+        };
+        let cases = [
+            (
+                load(SchedulerGroup::Standalone { scheduler_id: 42 }),
+                r#"{"worker_id":7,"dp_rank":2,"active_decode_blocks":10,"active_prefill_tokens":20,"group":{"kind":"standalone","scheduler_id":42}}"#,
+            ),
+            (
+                load(SchedulerGroup::ReplicaGroup {
+                    group_id: "ns/backend/generate".to_string(),
+                }),
+                r#"{"worker_id":7,"dp_rank":2,"active_decode_blocks":10,"active_prefill_tokens":20,"group":{"kind":"replica_group","group_id":"ns/backend/generate"}}"#,
+            ),
+        ];
+
+        for (load, json) in cases {
+            assert_eq!(serde_json::to_string(&load).unwrap(), json);
+            assert_eq!(serde_json::from_str::<SchedulerLoad>(json).unwrap(), load);
+            let msgpack = rmp_serde::to_vec_named(&load).unwrap();
+            assert_eq!(
+                rmp_serde::from_slice::<SchedulerLoad>(&msgpack).unwrap(),
+                load
+            );
+        }
     }
 }

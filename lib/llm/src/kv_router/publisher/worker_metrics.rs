@@ -12,8 +12,13 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 
 use crate::kv_router::KV_METRICS_SUBJECT;
+use crate::utils::retry::FailureStreak;
 
 const PUBLISH_DEBOUNCE: Duration = Duration::from_millis(1);
+/// Changes are published after [`PUBLISH_DEBOUNCE`]; this full republish of every dp rank only
+/// lets late subscribers converge on a worker whose load has stopped changing. No consumer ages
+/// out worker metrics, so it need not be frequent.
+const METRICS_REPLAY_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Default, PartialEq)]
 struct WorkerMetrics {
@@ -83,7 +88,7 @@ impl WorkerMetricsDebouncer {
 }
 
 #[async_trait::async_trait]
-pub(super) trait WorkerMetricsSink: Send + 'static {
+pub(super) trait WorkerMetricsSink: Send + Sync + 'static {
     async fn publish(&self, active_load: ActiveLoad) -> Result<()>;
 }
 
@@ -105,6 +110,9 @@ impl WorkerMetricsPublisher {
         Ok(Self { tx, rx })
     }
 
+    /// Records a complete sample for `dp_rank` (default 0), replacing its previous one.
+    ///
+    /// `None` means the metric is not reported; consumers keep their previous value for it.
     pub fn publish(
         &self,
         dp_rank: Option<DpRank>,
@@ -159,6 +167,12 @@ impl WorkerMetricsPublisher {
             let mut debouncer = WorkerMetricsDebouncer::new(PUBLISH_DEBOUNCE);
             let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
             tokio::pin!(publish_timer);
+            let mut replay = tokio::time::interval_at(
+                tokio::time::Instant::now() + METRICS_REPLAY_INTERVAL,
+                METRICS_REPLAY_INTERVAL,
+            );
+            replay.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut failures = FailureStreak::default();
 
             loop {
                 tokio::select! {
@@ -178,25 +192,49 @@ impl WorkerMetricsPublisher {
                     }
                     _ = &mut publish_timer, if debouncer.next_deadline().is_some() => {
                         for metrics in debouncer.take_due(tokio::time::Instant::now()) {
-                            let active_load = ActiveLoad {
-                                worker_id,
-                                dp_rank: metrics.dp_rank,
-                                active_decode_blocks: metrics.active_decode_blocks,
-                                active_prefill_tokens: None,
-                                kv_used_blocks: metrics.kv_used_blocks,
-                            };
-
-                            if let Err(e) = sink.publish(active_load).await {
-                                tracing::warn!("Failed to publish metrics: {}", e);
-                            }
+                            publish_metrics(&sink, worker_id, &metrics, &mut failures).await;
                         }
 
                         if let Some(deadline) = debouncer.next_deadline() {
                             publish_timer.as_mut().reset(deadline);
                         }
                     }
+                    _ = replay.tick(), if !debouncer.last_metrics.is_empty() => {
+                        for metrics in debouncer.last_metrics.values() {
+                            publish_metrics(&sink, worker_id, metrics, &mut failures).await;
+                        }
+                    }
                 }
             }
         });
+    }
+}
+
+async fn publish_metrics<S: WorkerMetricsSink>(
+    sink: &S,
+    worker_id: u64,
+    metrics: &WorkerMetrics,
+    failures: &mut FailureStreak,
+) {
+    let active_load = ActiveLoad {
+        worker_id,
+        dp_rank: metrics.dp_rank,
+        active_decode_blocks: metrics.active_decode_blocks,
+        active_prefill_tokens: None,
+        kv_used_blocks: metrics.kv_used_blocks,
+    };
+
+    match sink.publish(active_load).await {
+        Ok(()) => {
+            if let Some(failures) = failures.recover() {
+                tracing::info!(worker_id, failures, "Worker metrics publishing recovered");
+            }
+        }
+        Err(error) if failures.fail() => {
+            tracing::warn!(worker_id, dp_rank = metrics.dp_rank, %error, "Failed to publish worker metrics");
+        }
+        Err(error) => {
+            tracing::debug!(worker_id, dp_rank = metrics.dp_rank, %error, failures = failures.failures(), "Worker metrics publishing still failing");
+        }
     }
 }

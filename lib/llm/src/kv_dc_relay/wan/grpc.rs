@@ -11,6 +11,7 @@ mod load;
 pub mod protocol;
 mod server;
 mod service;
+mod serving_load;
 mod source;
 
 pub use config::KvDcRelayGrpcConfig;

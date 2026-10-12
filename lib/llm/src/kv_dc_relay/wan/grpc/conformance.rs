@@ -19,7 +19,7 @@ use dynamo_runtime::{
     DistributedRuntime, Runtime, distributed::DistributedConfig, traits::DistributedRuntimeProvider,
 };
 use tokio::net::TcpStream;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use tonic::Streaming;
 use tonic::transport::{Channel, Endpoint};
@@ -40,6 +40,7 @@ use crate::kv_dc_relay::pool_registry::{
     PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolServingFacts,
 };
 use crate::kv_dc_relay::publication::RegistryPublicationSource;
+use crate::kv_dc_relay::serving_load::ServingLoadSnapshot;
 use crate::kv_dc_relay::topology::TopologyPublisher;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
@@ -55,6 +56,7 @@ struct RelayFixture {
     topology: Arc<TopologyPublisher>,
     attachment: Option<PoolAttachment>,
     pool_id: PoolId,
+    serving_load: watch::Sender<Arc<ServingLoadSnapshot>>,
 }
 
 impl RelayFixture {
@@ -119,7 +121,8 @@ impl RelayFixture {
             config.max_pool_streams_total,
             Duration::from_millis(config.snapshot_progress_timeout_ms),
         ));
-        let transport = GrpcTransport::start(publication, lifecycle, config)
+        let (serving_load, serving_load_rx) = watch::channel(Arc::default());
+        let transport = GrpcTransport::start(publication, serving_load_rx, lifecycle, config)
             .await
             .unwrap();
         let address = transport
@@ -133,6 +136,7 @@ impl RelayFixture {
             topology,
             attachment: Some(attachment),
             pool_id,
+            serving_load,
         }
     }
 
@@ -691,5 +695,132 @@ async fn application_error_reasons_cross_the_grpc_boundary() {
     let mut stream = subscribe_pool(&mut client, producer.clone()).await.unwrap();
     receive_snapshot(&mut stream, &producer).await;
     drop((stream, client));
+    fixture.shutdown().await;
+}
+
+fn serving_load_request(contract_marker: u32) -> proto::SubscribeServingLoadRequest {
+    proto::SubscribeServingLoadRequest {
+        subscriber_id: "serving-load-test".to_string(),
+        contract_marker,
+    }
+}
+
+async fn next_serving_load(
+    stream: &mut Streaming<proto::ServingLoadUpdate>,
+) -> proto::ServingLoadUpdate {
+    let update = tokio::time::timeout(IO_TIMEOUT, stream.message())
+        .await
+        .expect("serving-load stream timed out")
+        .expect("serving-load stream failed")
+        .expect("serving-load stream ended");
+    proto::validate_serving_load_update(&update).expect("valid serving-load window");
+    for pool in &update.pools {
+        proto::validate_pool_serving_load(pool).expect("valid pool serving load");
+    }
+    for model in &update.models {
+        proto::validate_model_serving_load(model).expect("valid model serving load");
+    }
+    update
+}
+
+#[tokio::test]
+async fn serving_load_streams_complete_windows_from_the_aggregate() {
+    let fixture = RelayFixture::start(|config| config.load_window_ms = 10).await;
+    let mut client = fixture.client().await;
+    let (_catalog, producer) = initial_catalog(&mut client).await;
+
+    let status = client
+        .subscribe_serving_load(serving_load_request(0))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        proto::relay_error_reason(&status),
+        Some(proto::RelayErrorReason::ContractMismatch)
+    );
+    let status = client
+        .subscribe_serving_load(proto::SubscribeServingLoadRequest {
+            subscriber_id: String::new(),
+            contract_marker: proto::RELAY_CONTRACT_MARKER,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        proto::relay_error_reason(&status),
+        Some(proto::RelayErrorReason::InvalidRequest)
+    );
+
+    let mut stream = client
+        .subscribe_serving_load(serving_load_request(proto::RELAY_CONTRACT_MARKER))
+        .await
+        .unwrap()
+        .into_inner();
+    // The aggregate starts empty, before it has seen the catalog.
+    let first = next_serving_load(&mut stream).await;
+    assert!(first.pools.is_empty() && first.models.is_empty());
+
+    fixture
+        .serving_load
+        .send_replace(Arc::new(ServingLoadSnapshot {
+            pools: fixture
+                .registry
+                .serving_pool_loads(&HashMap::new(), std::time::Instant::now()),
+            models: Vec::new(),
+        }));
+    let window = loop {
+        let window = next_serving_load(&mut stream).await;
+        assert!(window.window_sequence > first.window_sequence);
+        if !window.pools.is_empty() {
+            break window;
+        }
+    };
+    assert_eq!(window.window_ms, 10);
+    assert_eq!(window.pools.len(), 1);
+    let pool = &window.pools[0];
+    assert_eq!(pool.producer.as_ref(), Some(&producer));
+    // No router reported, so the pool is listed without scheduler load.
+    let load = pool.load.as_ref().unwrap();
+    assert_eq!(load.status, proto::DataStatus::Unavailable as i32);
+    assert_eq!(load.tokens.as_ref().unwrap().active_decode_blocks, None);
+    assert_eq!(
+        pool.deployment,
+        Some(proto::PoolDeploymentStatus {
+            live_workers: Some(1),
+            max_concurrency: None,
+        })
+    );
+
+    drop((client, stream));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn serving_load_has_an_independent_subscriber_limit() {
+    let fixture = RelayFixture::start(|config| config.max_serving_load_subscribers = 1).await;
+    let mut client = fixture.client().await;
+    let request = || serving_load_request(proto::RELAY_CONTRACT_MARKER);
+    let mut first = client
+        .subscribe_serving_load(request())
+        .await
+        .unwrap()
+        .into_inner();
+    next_serving_load(&mut first).await;
+
+    let rejected = client.subscribe_serving_load(request()).await.unwrap_err();
+    assert_eq!(rejected.code(), tonic::Code::ResourceExhausted);
+    assert_eq!(
+        proto::relay_error_reason(&rejected),
+        Some(proto::RelayErrorReason::ResourceLimit)
+    );
+    // Pool-load streams are admitted separately.
+    client
+        .subscribe_kv_pool_load(proto::SubscribeKvPoolLoadRequest {
+            subscriber_id: "load-test".to_string(),
+            contract_marker: proto::RELAY_CONTRACT_MARKER,
+        })
+        .await
+        .unwrap();
+
+    drop((client, first));
     fixture.shutdown().await;
 }

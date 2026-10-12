@@ -1,12 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use dynamo_kv_router::indexer::cuckoo::ProducerIdentity;
-use dynamo_kv_router::protocols::{ActiveLoad, WorkerId, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{
+    ActiveLoad, SchedulerGroup, SchedulerLoad, WorkerId, WorkerWithDpRank,
+};
+use dynamo_runtime::transports::event_plane::EventEnvelope;
 
+use super::serving_load::{SOURCE_RETENTION, freshness};
+use crate::kv_router::sequence::SCHEDULER_LOAD_PUBLISH_INTERVAL;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+
+/// How long a router scheduler's view counts.
+const SCHEDULER_FRESHNESS: Duration = freshness(SCHEDULER_LOAD_PUBLISH_INTERVAL);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct LoadCapacity {
@@ -28,8 +38,9 @@ pub(super) enum LoadObservationOutcome {
 
 /// DC-wide load derived from worker-authoritative `kv_used_blocks` reports.
 ///
-/// Router-local active decode and prefill lanes are intentionally excluded until
-/// their events carry publisher identity and can be aggregated across replicas.
+/// Router scheduler views (`active_decode_blocks`, `active_prefill_tokens`) are
+/// not part of this snapshot; [`SchedulerLoadState`] aggregates them from the
+/// scheduler-load subject, where each view carries its scheduler group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolLoadSnapshot {
     pub producer: ProducerIdentity,
@@ -98,15 +109,23 @@ impl PoolLoadState {
             return LoadObservationOutcome::UnknownRank;
         }
         let Some(kv_used_blocks) = load.kv_used_blocks else {
-            // active_decode_blocks and active_prefill_tokens can be emitted by
-            // multiple router replicas without publisher identity. They are not a
-            // globally authoritative DC load signal and are intentionally ignored.
+            // active_decode_blocks and active_prefill_tokens on this subject are
+            // emitted by router replicas without a scheduler group, so they cannot
+            // be aggregated; SchedulerLoadState consumes the scheduler-load subject.
             // Return a distinct accepted outcome so the collector does not
             // misdiagnose an advisory report as an unknown-rank event.
             return LoadObservationOutcome::IgnoredAdvisory;
         };
         self.observations.insert(rank, kv_used_blocks);
         LoadObservationOutcome::Updated
+    }
+
+    pub(super) fn declares(&self, rank: &WorkerWithDpRank) -> bool {
+        self.capacities.contains_key(rank)
+    }
+
+    pub(super) fn declared_ranks(&self) -> usize {
+        self.capacities.len()
     }
 
     pub(super) fn clear_observations(&mut self) -> bool {
@@ -192,6 +211,229 @@ fn load_ranks_from_configs(
         }
     }
     Ok(ranks)
+}
+
+/// How much of an aggregate's expected sources reported recently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Coverage<T> {
+    /// Every expected source reported; the aggregate is exact.
+    Complete(T),
+    /// Some expected sources reported. A partial sum would read as lower load,
+    /// so no aggregate is exposed.
+    Partial,
+    /// No expected source reported.
+    Missing,
+}
+
+/// One pool's in-flight load as the routers' schedulers see it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct SchedulerTotals {
+    pub(super) active_decode_blocks: u64,
+    pub(super) active_prefill_tokens: u64,
+}
+
+impl SchedulerTotals {
+    fn of(load: &SchedulerLoad) -> Self {
+        Self {
+            active_decode_blocks: load.active_decode_blocks,
+            active_prefill_tokens: load.active_prefill_tokens,
+        }
+    }
+
+    fn max(self, other: Self) -> Self {
+        Self {
+            active_decode_blocks: self.active_decode_blocks.max(other.active_decode_blocks),
+            active_prefill_tokens: self.active_prefill_tokens.max(other.active_prefill_tokens),
+        }
+    }
+
+    fn saturating_add(self, other: Self) -> Self {
+        Self {
+            active_decode_blocks: self
+                .active_decode_blocks
+                .saturating_add(other.active_decode_blocks),
+            active_prefill_tokens: self
+                .active_prefill_tokens
+                .saturating_add(other.active_prefill_tokens),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SchedulerLoadSnapshot {
+    pub(super) coverage: Coverage<SchedulerTotals>,
+    /// Oldest publish time among the counted views; 0 when none.
+    pub(super) source_observed_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SchedulerView {
+    load: SchedulerLoad,
+    published_at_ms: u64,
+    received_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PublisherProgress {
+    last_sequence: u64,
+    last_seen: Instant,
+}
+
+/// Router scheduler views of one pool's worker ranks, from the scheduler-load
+/// subject. Views expire after [`SCHEDULER_FRESHNESS`]; routers republish every
+/// view each publish interval, so a lost report is repaired by the next one.
+#[derive(Debug, Default)]
+pub(super) struct SchedulerLoadState {
+    /// Latest view per rank and publishing router.
+    views: HashMap<(WorkerWithDpRank, u64), SchedulerView>,
+    /// Kept for [`SOURCE_RETENTION`] so duplicate or reordered deliveries from a
+    /// briefly silent router are still recognized.
+    publishers: HashMap<u64, PublisherProgress>,
+}
+
+impl SchedulerLoadState {
+    /// Records one view. Duplicate and out-of-order deliveries from a publisher
+    /// are ignored; gaps are accepted.
+    pub(super) fn observe(
+        &mut self,
+        envelope: &EventEnvelope,
+        load: SchedulerLoad,
+        received_at: Instant,
+    ) {
+        let progress = PublisherProgress {
+            last_sequence: envelope.sequence,
+            last_seen: received_at,
+        };
+        match self.publishers.entry(envelope.publisher_id) {
+            Entry::Occupied(entry) if envelope.sequence <= entry.get().last_sequence => return,
+            Entry::Occupied(mut entry) => {
+                entry.insert(progress);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(progress);
+            }
+        }
+        let rank = WorkerWithDpRank::new(load.worker_id, load.dp_rank);
+        self.views.insert(
+            (rank, envelope.publisher_id),
+            SchedulerView {
+                load,
+                published_at_ms: envelope.published_at,
+                received_at,
+            },
+        );
+    }
+
+    /// Forgets every view, e.g. after the subscription failed and reports may
+    /// have been lost. Publisher progress is kept: publisher ids belong to one
+    /// publisher incarnation, so resubscribing never rewinds a sequence.
+    pub(super) fn clear(&mut self) {
+        self.views.clear();
+    }
+
+    /// Drops expired views and publishers silent for [`SOURCE_RETENTION`].
+    pub(super) fn prune(&mut self, now: Instant) {
+        self.views
+            .retain(|_, view| is_fresh(view.received_at, SCHEDULER_FRESHNESS, now));
+        self.publishers
+            .retain(|_, progress| is_fresh(progress.last_seen, SOURCE_RETENTION, now));
+    }
+
+    /// Views of one replica group overlap, so each rank takes the group's
+    /// maximum. A standalone scheduler that reconnected publishes under a new
+    /// publisher id while its previous view is still fresh, so each rank takes
+    /// its latest view. Groups are disjoint, so the pool total sums every group
+    /// of every rank. A missing scheduler would silently undercount, so the
+    /// total is exposed only when every expected scheduler (`discovered` plus
+    /// any with a fresh view) has a fresh view of every rank `declared` by the
+    /// pool. Failed discovery (`None`) cannot prove that.
+    pub(super) fn snapshot(
+        &self,
+        declared: &PoolLoadState,
+        discovered: Option<&HashSet<u64>>,
+        now: Instant,
+    ) -> SchedulerLoadSnapshot {
+        let mut per_group =
+            HashMap::<(WorkerWithDpRank, &SchedulerGroup), (SchedulerTotals, u64)>::new();
+        let mut ranks_per_publisher = HashMap::<u64, usize>::new();
+        let mut oldest = None::<u64>;
+        for ((rank, publisher), view) in &self.views {
+            if !declared.declares(rank) || !is_fresh(view.received_at, SCHEDULER_FRESHNESS, now) {
+                continue;
+            }
+            *ranks_per_publisher.entry(*publisher).or_default() += 1;
+            oldest = Some(oldest.map_or(view.published_at_ms, |at| at.min(view.published_at_ms)));
+            let load = SchedulerTotals::of(&view.load);
+            let group = &view.load.group;
+            per_group
+                .entry((*rank, group))
+                .and_modify(|(total, latest)| match group {
+                    SchedulerGroup::ReplicaGroup { .. } => *total = total.max(load),
+                    SchedulerGroup::Standalone { .. } => {
+                        if view.published_at_ms > *latest {
+                            (*total, *latest) = (load, view.published_at_ms);
+                        }
+                    }
+                })
+                .or_insert((load, view.published_at_ms));
+        }
+        let Some(source_observed_ms) = oldest else {
+            return SchedulerLoadSnapshot {
+                coverage: Coverage::Missing,
+                source_observed_ms: 0,
+            };
+        };
+        let ranks = declared.declared_ranks();
+        let complete = discovered.is_some_and(|discovered| {
+            discovered
+                .iter()
+                .chain(ranks_per_publisher.keys())
+                .all(|publisher| ranks_per_publisher.get(publisher) == Some(&ranks))
+        });
+        let coverage = if complete {
+            Coverage::Complete(
+                per_group
+                    .into_values()
+                    .map(|(total, _)| total)
+                    .fold(SchedulerTotals::default(), SchedulerTotals::saturating_add),
+            )
+        } else {
+            Coverage::Partial
+        };
+        SchedulerLoadSnapshot {
+            coverage,
+            source_observed_ms,
+        }
+    }
+}
+
+fn is_fresh(at: Instant, window: Duration, now: Instant) -> bool {
+    now.saturating_duration_since(at) <= window
+}
+
+/// Worker facts from a pool's runtime configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PoolDeployment {
+    pub(super) live_workers: u64,
+    /// Sum over workers of `max_num_seqs * data_parallel_size`; `None` while a
+    /// worker does not declare `max_num_seqs`.
+    pub(super) max_concurrency: Option<u64>,
+}
+
+impl PoolDeployment {
+    pub(super) fn from_runtime_configs(
+        runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+    ) -> Self {
+        Self {
+            live_workers: runtime_configs.len() as u64,
+            max_concurrency: runtime_configs.values().try_fold(0_u64, |total, config| {
+                let per_worker = config
+                    .max_num_seqs?
+                    .saturating_mul(u64::from(config.data_parallel_size));
+                Some(total.saturating_add(per_worker))
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -414,5 +656,252 @@ mod tests {
         assert_eq!(snapshot.kv_capacity_ranks, 0);
         assert_eq!(snapshot.kv_expected_ranks, 0);
         assert!(snapshot.has_degraded_coverage());
+    }
+
+    fn envelope(publisher_id: u64, sequence: u64, published_at: u64) -> EventEnvelope {
+        EventEnvelope {
+            publisher_id,
+            sequence,
+            published_at,
+            topic: String::new(),
+            payload: Default::default(),
+        }
+    }
+
+    fn standalone(scheduler_id: u64) -> SchedulerGroup {
+        SchedulerGroup::Standalone { scheduler_id }
+    }
+
+    fn replicas(group_id: &str) -> SchedulerGroup {
+        SchedulerGroup::ReplicaGroup {
+            group_id: group_id.to_string(),
+        }
+    }
+
+    fn view(dp_rank: u32, group: SchedulerGroup, decode: u64, prefill: u64) -> SchedulerLoad {
+        SchedulerLoad {
+            worker_id: 9,
+            dp_rank,
+            active_decode_blocks: decode,
+            active_prefill_tokens: prefill,
+            group,
+        }
+    }
+
+    /// Delivers `views` from `publisher`, one sequence each, starting at 1.
+    fn publish(
+        state: &mut SchedulerLoadState,
+        publisher: u64,
+        views: impl IntoIterator<Item = SchedulerLoad>,
+        now: Instant,
+    ) {
+        for (sequence, load) in (1..).zip(views) {
+            state.observe(&envelope(publisher, sequence, publisher * 10), load, now);
+        }
+    }
+
+    fn ranks(rank_count: u32) -> PoolLoadState {
+        PoolLoadState::from_runtime_configs(&HashMap::from([(
+            9,
+            config(0, rank_count, Some(100), None),
+        )]))
+        .unwrap()
+    }
+
+    fn totals(decode: u64, prefill: u64) -> Coverage<SchedulerTotals> {
+        Coverage::Complete(SchedulerTotals {
+            active_decode_blocks: decode,
+            active_prefill_tokens: prefill,
+        })
+    }
+
+    #[test]
+    fn scheduler_load_takes_the_rank_maximum_within_a_group_and_sums_groups_and_ranks() {
+        let now = Instant::now();
+        let declared = ranks(2);
+        let mut state = SchedulerLoadState::default();
+        // Replicas 1 and 2 share group "a"; each lags on something.
+        publish(
+            &mut state,
+            1,
+            [view(0, replicas("a"), 12, 30), view(1, replicas("a"), 4, 5)],
+            now,
+        );
+        publish(
+            &mut state,
+            2,
+            [view(0, replicas("a"), 10, 34), view(1, replicas("a"), 6, 7)],
+            now,
+        );
+        // A standalone router only knows the requests it routed itself.
+        publish(
+            &mut state,
+            3,
+            [view(0, standalone(3), 1, 2), view(1, standalone(3), 3, 4)],
+            now,
+        );
+
+        let snapshot = state.snapshot(&declared, Some(&HashSet::from([1, 2, 3])), now);
+        assert_eq!(snapshot.coverage, totals(12 + 6 + 1 + 3, 34 + 7 + 2 + 4));
+        assert_eq!(snapshot.source_observed_ms, 10);
+    }
+
+    #[test]
+    fn reconnected_standalone_scheduler_counts_only_its_latest_view() {
+        let now = Instant::now();
+        let mut state = SchedulerLoadState::default();
+        // Router 1 reconnected as publisher 2 while its old view is still fresh.
+        publish(&mut state, 1, [view(0, standalone(1), 30, 40)], now);
+        publish(&mut state, 2, [view(0, standalone(1), 3, 4)], now);
+        assert_eq!(
+            state
+                .snapshot(&ranks(1), Some(&HashSet::from([2])), now)
+                .coverage,
+            totals(3, 4)
+        );
+    }
+
+    #[test]
+    fn scheduler_load_is_partial_until_every_expected_scheduler_covers_every_rank() {
+        let now = Instant::now();
+        let declared = ranks(2);
+        let mut state = SchedulerLoadState::default();
+        let discovered = HashSet::from([1, 2]);
+        assert_eq!(
+            state.snapshot(&declared, Some(&discovered), now).coverage,
+            Coverage::Missing
+        );
+
+        publish(
+            &mut state,
+            1,
+            [view(0, standalone(1), 1, 1), view(1, standalone(1), 1, 1)],
+            now,
+        );
+        // Router 2 is discovered but silent.
+        assert_eq!(
+            state.snapshot(&declared, Some(&discovered), now).coverage,
+            Coverage::Partial
+        );
+        // Router 2 reports only one of the two ranks.
+        publish(&mut state, 2, [view(0, standalone(2), 1, 1)], now);
+        assert_eq!(
+            state.snapshot(&declared, Some(&discovered), now).coverage,
+            Coverage::Partial
+        );
+        publish(&mut state, 2, [view(1, standalone(2), 1, 1)], now);
+        // Sequence 1 again: the duplicate is dropped, so rank 1 is still missing.
+        assert_eq!(
+            state.snapshot(&declared, Some(&discovered), now).coverage,
+            Coverage::Partial
+        );
+        state.observe(&envelope(2, 2, 20), view(1, standalone(2), 1, 1), now);
+        assert_eq!(
+            state.snapshot(&declared, Some(&discovered), now).coverage,
+            totals(4, 4)
+        );
+        // Failed discovery cannot prove completeness.
+        assert_eq!(
+            state.snapshot(&declared, None, now).coverage,
+            Coverage::Partial
+        );
+    }
+
+    #[test]
+    fn undiscovered_schedulers_fall_back_to_recent_publishers() {
+        // Broker-mode publishers skip discovery registration.
+        let now = Instant::now();
+        let declared = ranks(1);
+        let mut state = SchedulerLoadState::default();
+        publish(&mut state, 1, [view(0, standalone(1), 12, 34)], now);
+        publish(&mut state, 2, [view(0, standalone(2), 5, 7)], now);
+        let nobody = HashSet::new();
+        assert_eq!(
+            state.snapshot(&declared, Some(&nobody), now).coverage,
+            totals(17, 41)
+        );
+
+        // A router that stops publishing ages out of the expected set.
+        let later = now + SCHEDULER_FRESHNESS + Duration::from_millis(1);
+        state.observe(&envelope(1, 2, 30), view(0, standalone(1), 12, 34), later);
+        assert_eq!(
+            state.snapshot(&declared, Some(&nobody), later).coverage,
+            totals(12, 34)
+        );
+    }
+
+    #[test]
+    fn scheduler_views_expire_and_undeclared_ranks_do_not_count() {
+        let now = Instant::now();
+        let mut state = SchedulerLoadState::default();
+        publish(
+            &mut state,
+            1,
+            [
+                view(0, standalone(1), 12, 34),
+                view(5, standalone(1), 99, 99),
+            ],
+            now,
+        );
+        let discovered = HashSet::from([1]);
+        assert_eq!(
+            state.snapshot(&ranks(1), Some(&discovered), now).coverage,
+            totals(12, 34)
+        );
+
+        let expired = now + SCHEDULER_FRESHNESS + Duration::from_millis(1);
+        assert_eq!(
+            state.snapshot(&ranks(1), Some(&discovered), expired),
+            SchedulerLoadSnapshot {
+                coverage: Coverage::Missing,
+                source_observed_ms: 0,
+            }
+        );
+
+        // Long-silent publishers are forgotten, so a restarted router's
+        // sequence space is accepted again.
+        let retired = now + SOURCE_RETENTION + Duration::from_secs(1);
+        state.prune(retired);
+        assert!(state.views.is_empty() && state.publishers.is_empty());
+        publish(&mut state, 1, [view(0, standalone(1), 1, 1)], retired);
+        assert_eq!(
+            state
+                .snapshot(&ranks(1), Some(&discovered), retired)
+                .coverage,
+            totals(1, 1)
+        );
+        state.clear();
+        assert_eq!(
+            state
+                .snapshot(&ranks(1), Some(&discovered), retired)
+                .coverage,
+            Coverage::Missing
+        );
+    }
+
+    #[test]
+    fn deployment_counts_workers_and_requires_every_concurrency_limit() {
+        let limited = |rank_count| ModelRuntimeConfig {
+            max_num_seqs: Some(8),
+            ..config(0, rank_count, Some(100), None)
+        };
+        assert_eq!(
+            PoolDeployment::from_runtime_configs(&HashMap::from([
+                (9, limited(2)),
+                (10, limited(1))
+            ])),
+            PoolDeployment {
+                live_workers: 2,
+                max_concurrency: Some(24),
+            }
+        );
+        assert_eq!(
+            PoolDeployment::from_runtime_configs(&HashMap::from([
+                (9, limited(2)),
+                (10, config(0, 1, Some(100), None)),
+            ]))
+            .max_concurrency,
+            None
+        );
     }
 }

@@ -54,6 +54,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{self, Instrument};
 
+use crate::frontend_load::TrackedRequest;
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::{
     ModelRuntimeConfig, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
@@ -7654,6 +7655,9 @@ impl
             )
             .instrument(preprocessing.clone())
             .await?;
+        if let Some(tracked) = TrackedRequest::from_context(&context) {
+            tracked.add_input_tokens(common_request.token_ids.len());
+        }
         attach_request_context_metadata(&mut common_request, &context);
 
         let guided_tool_constraint = self.apply_tool_choice_guided_decoding(
@@ -7883,6 +7887,9 @@ impl
 
         let mut common_request = builder.build()?;
         Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
+        if let Some(tracked) = TrackedRequest::from_context(&context) {
+            tracked.add_input_tokens(common_request.token_ids.len());
+        }
         attach_request_context_metadata(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
@@ -13711,6 +13718,93 @@ mod tests {
             .expect("error should preserve the DynamoError type");
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
         assert!(dynamo_err.to_string().contains("legacy tool-call parsing"));
+    }
+
+    /// Records each dispatched prompt's length, then fails before any output.
+    #[derive(Default)]
+    struct PromptRecordingBackend(std::sync::Mutex<Vec<usize>>);
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for PromptRecordingBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            self.0.lock().unwrap().push(request.token_ids.len());
+            anyhow::bail!("stop before any output")
+        }
+    }
+
+    fn awaiting_first_token_input_tokens(
+        tracker: &crate::frontend_load::FrontendLoadTracker,
+    ) -> u64 {
+        let view = crate::discovery::CommittedModelView {
+            name: "test-model".to_string(),
+            aliases: Vec::new(),
+        };
+        tracker.next_frame(0, true, vec![view]).models[0]
+            .gauges
+            .awaiting_first_token_input_tokens
+    }
+
+    fn mock_llama_preprocessor() -> Arc<OpenAIPreprocessor> {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    #[tokio::test]
+    async fn chat_operator_reports_prompt_tokens_before_first_output() {
+        let preprocessor = mock_llama_preprocessor();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "What is the weather?"}],
+        }))
+        .unwrap();
+        let tracker = crate::frontend_load::FrontendLoadTracker::default();
+        let mut context = PipelineContext::new(request);
+        tracker.start_request("test-model").attach_to(&mut context);
+        let backend = Arc::new(PromptRecordingBackend::default());
+
+        let result = Operator::generate(preprocessor.as_ref(), context, backend.clone()).await;
+
+        assert!(result.is_err());
+        let dispatched = backend.0.lock().unwrap().clone();
+        assert_eq!(dispatched.len(), 1);
+        assert!(dispatched[0] > 0);
+        assert_eq!(
+            awaiting_first_token_input_tokens(&tracker),
+            dispatched[0] as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_operator_sums_batched_prompts_on_one_request() {
+        let preprocessor = mock_llama_preprocessor();
+        let tracker = crate::frontend_load::FrontendLoadTracker::default();
+        let tracked = tracker.start_request("test-model");
+        let backend = Arc::new(PromptRecordingBackend::default());
+
+        for prompt in [vec![1, 2, 3], vec![4, 5]] {
+            let request: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "prompt": prompt,
+                "max_tokens": 8,
+            }))
+            .unwrap();
+            let mut context = PipelineContext::new(request);
+            tracked.attach_to(&mut context);
+            let result = Operator::generate(preprocessor.as_ref(), context, backend.clone()).await;
+            assert!(result.is_err());
+        }
+
+        assert_eq!(*backend.0.lock().unwrap(), [3, 2]);
+        assert_eq!(awaiting_first_token_input_tokens(&tracker), 5);
     }
 
     fn test_prompt_formatter(template: &str) -> Arc<dyn OAIPromptFormatter> {
