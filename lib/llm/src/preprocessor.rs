@@ -3164,9 +3164,8 @@ impl OpenAIPreprocessor {
         builder.model(request.model());
 
         let mut stop_conditions = request.extract_stop_conditions()?;
-        // Client ids only: the hidden set is filled from the model's own EOS
-        // ids below. An out-of-vocab stop id can crash an engine that uses it
-        // as an index (e.g. SGLang's min-new-tokens penalizer).
+        // Client ids only; hidden EOS ids are added below. An out-of-vocab stop id
+        // can crash an engine that indexes with it (SGLang's min-new-tokens penalizer).
         if let Some(ids) = stop_conditions.stop_token_ids.as_deref() {
             ensure_token_ids_in_vocab("stop_token_ids", ids, self.token_id_bound)?;
         }
