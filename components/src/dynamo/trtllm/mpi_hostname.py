@@ -21,7 +21,8 @@ runs dynamo.trtllm, not only images built from trtllm_runtime.Dockerfile.
 
 This is the in-package copy of container/deps/trtllm/_dynamo_pmix_hostname.py,
 which covers other Python processes in the arm64 runtime image. Keep the two
-rules identical, and remove both when the image's Open MPI has the upstream fix,
+rules identical. Remove both, along with this module's tests and the import and
+call in __init__.py, when the image's Open MPI has the upstream fix,
 open-mpi/ompi#14398 (v5.0.x backport: open-mpi/ompi#14409). Open MPI 5.0.11
 and HPC-X v2.50 do not have it.
 """

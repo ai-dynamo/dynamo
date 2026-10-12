@@ -26,7 +26,8 @@ has to set the name.
 
 components/src/dynamo/trtllm/mpi_hostname.py applies the same rule when
 dynamo.trtllm is imported, for images that do not install this hook. Keep the
-two rules identical and remove them together.
+two rules identical and remove them together; removing that copy also means
+removing its import and call in components/src/dynamo/trtllm/__init__.py.
 
 Remove this module, its install step in trtllm_runtime.Dockerfile and its
 tests in tests/dependencies/test_trtllm_mpi.py when the image's Open MPI has
