@@ -70,7 +70,7 @@ def mark_forwarded_mm_hashes_for_routing(
         if len(prefix) != 16 or any(
             char not in "0123456789abcdefABCDEF" for char in prefix
         ):
-            raise ValueError(
+            raise InvalidArgument(
                 "forwarded multimodal routing hashes must start with 16 hex characters"
             )
         marked_hashes.append(prefix + "0" * 48)
@@ -134,13 +134,13 @@ def _video_media_io_kwargs(request: dict) -> dict:
     if media_io_kwargs is None:
         return {}
     if not isinstance(media_io_kwargs, dict):
-        raise ValueError("media_io_kwargs must be an object")
+        raise InvalidArgument("media_io_kwargs must be an object")
 
     video_kwargs = media_io_kwargs.get("video")
     if video_kwargs is None:
         return {}
     if not isinstance(video_kwargs, dict):
-        raise ValueError("media_io_kwargs['video'] must be an object")
+        raise InvalidArgument("media_io_kwargs['video'] must be an object")
     return video_kwargs
 
 
@@ -153,22 +153,22 @@ def _build_user_mm_uuids(
 ) -> Optional[dict[str, list[str | None]]]:
     """Map Dynamo media keys to vLLM cache identities."""
     if use_audio_in_video and (explicit_audio_count is None or video_count is None):
-        raise ValueError(
+        raise InvalidArgument(
             "explicit_audio_count and video_count are required when "
             "use_audio_in_video is enabled"
         )
     if raw_uuids is None:
         return None
     if not isinstance(raw_uuids, dict):
-        raise ValueError("multi_modal_uuids must be an object")
+        raise InvalidArgument("multi_modal_uuids must be an object")
 
     mm_uuids: dict[str, list[str | None]] = {}
     for modality, values in raw_uuids.items():
         if not isinstance(values, list):
-            raise ValueError(f"multi_modal_uuids[{modality!r}] must be a list")
+            raise InvalidArgument(f"multi_modal_uuids[{modality!r}] must be a list")
         for index, value in enumerate(values):
             if value is not None and (not isinstance(value, str) or not value):
-                raise ValueError(
+                raise InvalidArgument(
                     f"multi_modal_uuids[{modality!r}] entries must be non-empty "
                     f"strings or null; got invalid entry at index {index}"
                 )
@@ -229,7 +229,7 @@ def _placeholder_range_from_extra_arg(value: Any) -> PlaceholderRange:
             else torch.as_tensor(is_embed_raw, dtype=torch.bool)
         )
         if is_embed is not None and is_embed.numel() != length:
-            raise ValueError(
+            raise InvalidArgument(
                 "forwarded mm placeholder is_embed length "
                 f"{is_embed.numel()} does not match placeholder length {length}"
             )
@@ -254,7 +254,7 @@ def compute_mm_uuids(
         if not isinstance(chunks, list):
             chunks = [chunks]
         if not all(chunk is None or isinstance(chunk, dict) for chunk in chunks):
-            raise ValueError("vision_chunk entries must be objects or null")
+            raise InvalidArgument("vision_chunk entries must be objects or null")
         images = [None if chunk is None else chunk.get("image") for chunk in chunks]
     elif isinstance(images, dict):
         # Pre-computed embedding dictionaries do not have a stable raw-image
@@ -268,7 +268,7 @@ def compute_mm_uuids(
     if not images:
         return None
     if any(image is None for image in images):
-        raise ValueError(
+        raise InvalidArgument(
             "UUID-only image slots require aligned multi_modal_uuids; "
             "no cache UUID was provided"
         )
@@ -447,7 +447,7 @@ class VllmMultimodalRequestProcessor:
                 break
 
         if len(pad_positions) != expected:
-            raise ValueError(
+            raise InvalidArgument(
                 f"Kimi-K3 prompt carries {len(pad_positions)} <|media_pad|> "
                 f"token(s) but {expected} image(s) were supplied; refusing to "
                 "expand."
@@ -653,7 +653,7 @@ class VllmMultimodalRequestProcessor:
                 for item in video_items:
                     url = item.get(URL_VARIANT_KEY) if isinstance(item, dict) else None
                     if not url:
-                        raise ValueError(
+                        raise InvalidArgument(
                             "use_audio_in_video requires all video items to be "
                             "URL-based. Got a non-URL video item (e.g. frontend-"
                             "decoded). Audio extraction from decoded video data "
