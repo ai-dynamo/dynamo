@@ -439,6 +439,7 @@ jobs:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
           arch: ${{ inputs.platform }}
+          fresh_builder: ${{ inputs.fresh_builder }}
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Generate Dockerfile
         id: gen-dockerfile
@@ -570,6 +571,7 @@ jobs:
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
+          fresh_builder: ${{ inputs.fresh_builder }}
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Compliance extract
         if: ${{ (inputs.compliance_only || inputs.inline_compliance) && inputs.target != 'dev' && inputs.target != 'local-dev' }}
@@ -614,6 +616,7 @@ jobs:
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
+          fresh_builder: ${{ inputs.fresh_builder }}
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Build and Push Test Image
         if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
