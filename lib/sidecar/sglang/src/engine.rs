@@ -384,12 +384,18 @@ impl LLMEngine for SglangSidecarEngine {
                 yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
                 return;
             }
+            // Hoisted: `stopped()` is an async-trait method, so re-creating it per
+            // streamed chunk costs a boxed future and a waker registration on every
+            // token.
+            let stopped_ctx = ctx.inner_arc();
+            let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
+            let mut shutdown_cancellation = Box::pin(async move { cancel.cancelled().await });
 
             tracing::debug!(request_id = %ctx.id(), "sending request to SGLang gRPC");
             let opened = tokio::select! {
                 biased;
-                _ = ctx.stopped() => None,
-                _ = cancel.cancelled() => None,
+                _ = &mut request_cancellation => None,
+                _ = &mut shutdown_cancellation => None,
                 response = grpc_client.generate(grpc_request) => Some(response),
             };
             let Some(opened) = opened else {
@@ -423,12 +429,12 @@ impl LLMEngine for SglangSidecarEngine {
             loop {
                 tokio::select! {
                     biased;
-                    _ = ctx.stopped() => {
+                    _ = &mut request_cancellation => {
                         yield Ok(LLMEngineOutput::cancelled()
                             .with_usage(usage(observed_prompt_tokens, generated)));
                         break;
                     }
-                    _ = cancel.cancelled() => {
+                    _ = &mut shutdown_cancellation => {
                         yield Ok(LLMEngineOutput::cancelled()
                             .with_usage(usage(observed_prompt_tokens, generated)));
                         break;
