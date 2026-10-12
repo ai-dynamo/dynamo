@@ -59,13 +59,43 @@ Do not interpret native Dynamo's unresolved dependency slots as absent contracts
 - A frozen first request batch ran 22 cases on each real server. Omitted/null model
   selects the served model and infers in vLLM, but Dynamo returns 400 during
   deserialization; tracked in [#16192](https://github.com/ai-dynamo/dynamo/issues/16192).
-  Chat `structured_outputs` produces the requested JSON in vLLM but is rejected
-  by Dynamo. Neither finding has a passing Dynamo fix yet.
+  **Dynamo intentionally retains its required `model` contract.** This difference
+  is excluded from fixes in this assessment, not classified as fixed or a false
+  positive. Clients must supply an explicit model.
 - The same batch deliberately retains inconclusive probes. Both servers reject
   `n=2` with greedy sampling. A lowercase stop string did not match the generated
   uppercase text, so acceptance does not prove stop semantics. Completion
   `structured_outputs` returned 200 from vLLM without satisfying the JSON constraint;
-  that is not proof of a Dynamo-only semantic failure.
+  the follow-up below isolates the relevant reasoning configuration.
+
+### Structured-output follow-up
+
+A second frozen batch ran 33 requests per server, covering JSON, JSON-object,
+choice, regex and grammar forms, unary/SSE, invalid combinations, null, modifiers
+and response-format precedence. Its matrix SHA-256 is
+`86f04cf1ae6fa21d9dd7847dfae94be22f1ce891f2c45b9404b5d70931f31c66`.
+The Dynamo Python checkout is `7ea83425e380fdc5339d7fc9584c310d9913fecb` plus the
+same pinned prerequisite. The runtime wheel remains the profile-pinned build:
+the intervening source changes affect only assessment documentation and profiles.
+
+The shared admission finding covers `REQUEST-aa87261f811c` (chat) and
+`REQUEST-81b3c4424bd8` (completion): Dynamo rejects the root-level
+`structured_outputs` field, including null. Direct vLLM generates JSON satisfying
+the requested schema on chat unary/SSE. For completion with the configured Qwen
+reasoner, a prompt ending after `</think>` also produces the required JSON;
+an ordinary text prompt can remain in the unconstrained reasoning phase.
+The [reference's constraint gate](https://github.com/vllm-project/vllm/blob/b04e80127bea278758743ca3277d40a234f73b09/vllm/v1/structured_output/__init__.py#L235)
+checks that reasoning has ended before applying the grammar. The controlled
+completion succeeds on vLLM and receives 400 from Dynamo. This is a confirmed
+admission incompatibility on both endpoints, with no fix yet.
+
+Do not infer more from this batch than it tests. Choice/regex/grammar results
+equal the unconstrained baseline text, so they establish admission differences
+but not independent constraint effects. Both servers reject empty/conflicting
+constraints; that does not dispose the entire field as a false positive. vLLM's
+JSON `response_format` overrides `structured_outputs.json` in the tested case.
+Whitespace modifiers still allow spaces in the observed output, so acceptance
+does not prove their effect. Other combinations remain uninvestigated.
 
 Other endpoints and model-specific capabilities remain outside this text-model
 execution evidence. Missing response-body contracts, unsupported schema features,
