@@ -27,6 +27,7 @@ server. See the [sidecar overview](../README.md) for installation.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Image, video, and audio input | Yes, with an SGLang gRPC server that lists `multimodal_inputs` in `grpc_features` |
 
 ## Run locally
 

@@ -32,7 +32,7 @@ use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
     build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
-    meta_u32, output_ids_to_u32, terminal_from_meta,
+    meta_u32, output_ids_to_u32, require_media_support, terminal_from_meta,
 };
 
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
@@ -53,6 +53,7 @@ struct StartedState {
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
+    supports_multimodal_inputs: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -327,12 +328,14 @@ impl LLMEngine for SglangSidecarEngine {
         if combined_token_limit.is_none() {
             tracing::warn!("requests without max_tokens keep SGLang's 128-token default");
         }
+        let supports_multimodal_inputs = client::supports_multimodal_inputs(&discovery.server_info);
         self.state
             .set(StartedState {
                 pool,
                 native_http,
                 kv_event_sources,
                 combined_token_limit,
+                supports_multimodal_inputs,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -340,6 +343,7 @@ impl LLMEngine for SglangSidecarEngine {
             mode = ?self.disaggregation_mode,
             connections = connection_count,
             kv_event_sources = kv_event_source_count,
+            supports_multimodal_inputs,
             "sglang sidecar started"
         );
         Ok(config)
@@ -389,6 +393,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
+        require_media_support(&grpc_request, state.supports_multimodal_inputs)?;
         let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params

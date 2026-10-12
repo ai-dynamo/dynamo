@@ -26,6 +26,7 @@ for the architecture.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Image, video, and audio input | Yes, with an SGLang gRPC server that lists `multimodal_inputs` in `grpc_features` |
 
 ## Launch Locally
 

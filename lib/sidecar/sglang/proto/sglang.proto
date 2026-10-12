@@ -152,6 +152,10 @@ message GenerateRequest
   optional KVHintsEnvelope kv_hints = 17;
   // Also return the detokenized text, as HTTP /generate does; off by default.
   optional bool return_text = 18;
+  repeated string image_data = 19;
+  repeated string video_data = 20;
+  repeated string audio_data = 21;
+  repeated string mm_hashes = 22;
 }
 
 // Versioned KV-hint envelope forwarded from a trusted orchestrator.

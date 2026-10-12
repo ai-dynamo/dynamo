@@ -529,6 +529,17 @@ pub(crate) fn discovery_mode(server_info: &Value) -> Result<DisaggregationMode, 
     }
 }
 
+pub(crate) fn supports_multimodal_inputs(server_info: &Value) -> bool {
+    server_info
+        .get("grpc_features")
+        .and_then(Value::as_array)
+        .is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("multimodal_inputs"))
+        })
+}
+
 fn parse_json_object(label: &str, raw: &str) -> Result<Value, DynamoError> {
     let value: Value = serde_json::from_str(raw)
         .map_err(|err| protocol_error(format!("invalid {label}: {err}")))?;
@@ -619,7 +630,8 @@ mod tests {
 
     use super::{
         NodeMetadata, client_from_channel, discover, discovery_mode, json_u32, json_u64,
-        parse_discovery, rpc_with_deadline, status_to_dynamo, worker_group_id_from_addresses,
+        parse_discovery, rpc_with_deadline, status_to_dynamo, supports_multimodal_inputs,
+        worker_group_id_from_addresses,
     };
     use crate::proto as pb;
 
@@ -880,6 +892,21 @@ mod tests {
                     .to_string()
                     .contains("unsupported SGLang disaggregation_mode")
             );
+        }
+    }
+
+    #[test]
+    fn multimodal_inputs_need_the_grpc_feature() {
+        assert!(supports_multimodal_inputs(
+            &json!({"grpc_features": ["other", "multimodal_inputs"]})
+        ));
+        for info in [
+            json!({}),
+            json!({"grpc_features": []}),
+            json!({"grpc_features": "multimodal_inputs"}),
+            json!({"grpc_features": [null, 1]}),
+        ] {
+            assert!(!supports_multimodal_inputs(&info), "{info}");
         }
     }
 

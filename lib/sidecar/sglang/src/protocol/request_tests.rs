@@ -152,7 +152,7 @@ fn request_refusal_is_public() {
     .unwrap_err();
     assert_eq!(
         error.public_message(),
-        Some("multimodal payloads are not supported by SGLang's native Generate RPC")
+        Some("mm_processor_kwargs are not supported by SGLang's native Generate RPC")
     );
 
     let mut embeds = request();
@@ -457,8 +457,10 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
     for field in [
         "token_ids",
         "prompt_embeds",
-        "multimodal",
         "mm_processor_kwargs",
+        "media_io_kwargs",
+        "multi_modal_uuids",
+        "encoder_result",
     ] {
         let mut request = request();
         let message = match field {
@@ -470,13 +472,24 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
                 request.prompt_embeds = Some("encoded".to_string());
                 "prompt_embeds"
             }
-            "multimodal" => {
-                request.multi_modal_data = Some(Default::default());
-                "multimodal"
-            }
             "mm_processor_kwargs" => {
                 request.mm_processor_kwargs = Some(json!({}));
-                "multimodal"
+                "mm_processor_kwargs"
+            }
+            "media_io_kwargs" => {
+                request.media_io_kwargs = Some(json!({"video": {"fps": 1}}));
+                "media_io_kwargs"
+            }
+            "multi_modal_uuids" => {
+                request.multi_modal_uuids = Some(HashMap::from([(
+                    "image_url".to_string(),
+                    vec![None, Some("image-a".to_string())],
+                )]));
+                "media uuids"
+            }
+            "encoder_result" => {
+                request.encoder_result = Some(json!({}));
+                "encoder_result"
             }
             _ => unreachable!(),
         };
@@ -484,6 +497,123 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
             build_generate_request(&request, field, DisaggregationMode::Aggregated, None, None)
                 .unwrap_err();
         assert_invalid(error, message);
+    }
+}
+
+fn url(source: &str) -> MultimodalData {
+    MultimodalData::Url(url::Url::parse(source).unwrap())
+}
+
+fn with_media(key: &str, items: Vec<MultimodalData>) -> PreprocessedRequest {
+    let mut request = request();
+    request.multi_modal_data = Some(HashMap::from([(key.to_string(), items)]));
+    request
+}
+
+fn aggregated(request: &PreprocessedRequest) -> Result<pb::GenerateRequest, DynamoError> {
+    build_generate_request(
+        request,
+        "rid-mm",
+        DisaggregationMode::Aggregated,
+        None,
+        None,
+    )
+}
+
+#[test]
+fn media_maps_to_sglang_fields_in_request_order() {
+    let mut request = request();
+    request.multi_modal_data = Some(HashMap::from([
+        (
+            "image_url".to_string(),
+            vec![
+                url("https://example.com/a.png"),
+                MultimodalData::RawUrl("data:image/png;base64,AAAA".to_string()),
+            ],
+        ),
+        (
+            "video_url".to_string(),
+            vec![url("http://example.com/v.mp4")],
+        ),
+        (
+            "audio_url".to_string(),
+            vec![MultimodalData::RawUrl(
+                "data:audio/wav;base64,UklGRg==".to_string(),
+            )],
+        ),
+    ]));
+    // Empty uuid slots carry no cache identity, and the sidecar does not forward mm_hashes yet.
+    request.multi_modal_uuids = Some(HashMap::from([("image_url".to_string(), vec![None, None])]));
+    request.extra_args = Some(json!({"mm_hashes": ["00112233aabbccdd", "ffeeddcc44332211"]}));
+
+    let mapped = aggregated(&request).unwrap();
+    assert_eq!(
+        mapped.image_data,
+        ["https://example.com/a.png", "data:image/png;base64,AAAA"]
+    );
+    assert_eq!(mapped.video_data, ["http://example.com/v.mp4"]);
+    assert_eq!(mapped.audio_data, ["data:audio/wav;base64,UklGRg=="]);
+    assert!(mapped.mm_hashes.is_empty());
+}
+
+#[test]
+fn unsupported_media_is_refused_publicly() {
+    let decoded: MultimodalData = serde_json::from_value(json!({"Decoded": {
+        "nixl_metadata": "",
+        "nixl_descriptor": {"addr": 0, "size": 3, "mem_type": "Dram", "device_id": 0},
+        "shape": [1, 1, 3],
+        "dtype": "UINT8",
+        "metadata": null,
+    }}))
+    .unwrap();
+    let scheme = "the SGLang sidecar accepts media only as http://, https://, or data: URLs";
+    for (key, item, message) in [
+        (
+            "image_url",
+            decoded,
+            "the SGLang sidecar cannot read frontend-decoded media; configure URL passthrough",
+        ),
+        (
+            "image_url",
+            MultimodalData::UuidOnly("cached-image".to_string()),
+            "the SGLang sidecar needs a media URL and cannot resolve UUID-only media",
+        ),
+        ("image_url", url("file:///etc/hosts"), scheme),
+        (
+            "video_url",
+            MultimodalData::RawUrl("/tmp/clip.mp4".to_string()),
+            scheme,
+        ),
+        ("audio_url", url("s3://bucket/a.wav"), scheme),
+        (
+            "vision_chunk",
+            url("https://example.com/a.png"),
+            "SGLang's native Generate RPC accepts only image, video, and audio media",
+        ),
+    ] {
+        let error = aggregated(&with_media(key, vec![item])).unwrap_err();
+        assert_eq!(error.public_message(), Some(message), "{key}");
+    }
+}
+
+#[test]
+fn media_needs_server_support() {
+    let media = aggregated(&with_media(
+        "video_url",
+        vec![url("https://example.com/v.mp4")],
+    ))
+    .unwrap();
+    require_media_support(&media, true).unwrap();
+    let error = require_media_support(&media, false).unwrap_err();
+    assert_eq!(
+        error.public_message(),
+        Some(
+            "this SGLang server does not accept image, video, or audio inputs over gRPC; upgrade SGLang"
+        )
+    );
+
+    for text in [request(), with_media("image_url", Vec::new())] {
+        require_media_support(&aggregated(&text).unwrap(), false).unwrap();
     }
 }
 
