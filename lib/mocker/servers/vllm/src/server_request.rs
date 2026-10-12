@@ -77,6 +77,13 @@ impl PreparedRequest {
         block_size: usize,
         max_model_len: Option<u32>,
     ) -> BoxedStatusResult<Self> {
+        if !config.supports_multimodal && !request.media.is_empty() {
+            return Err(Status::unimplemented(
+                "media is disabled; start the mock server with --supports-multimodal",
+            )
+            .into());
+        }
+        validate_media(&request.media)?;
         if !request.lora_name.is_empty() {
             return Err(Status::unimplemented("LoRA is not supported by the mock server").into());
         }
@@ -399,6 +406,45 @@ impl PreparedRequest {
             ]),
         }
     }
+}
+
+/// Check the media envelope without fetching, decoding, or retaining its payload.
+/// Image features do not change the mock's token accounting or synthetic output.
+fn validate_media(media: &[pb::MediaItem]) -> BoxedStatusResult<()> {
+    use pb::media_item::Source;
+
+    for item in media {
+        match pb::Modality::try_from(item.modality) {
+            Ok(pb::Modality::Image) => {}
+            Ok(pb::Modality::Audio | pb::Modality::Video) => {
+                return Err(
+                    Status::invalid_argument("the mock server supports image media only").into(),
+                );
+            }
+            Ok(pb::Modality::Unspecified) | Err(_) => {
+                return Err(
+                    Status::invalid_argument("media modality must be specified and valid").into(),
+                );
+            }
+        }
+        let has_payload = match item.source.as_ref() {
+            Some(Source::Url(value) | Source::DataUri(value)) => !value.trim().is_empty(),
+            Some(Source::RawBytes(value)) => !value.is_empty(),
+            Some(Source::Features(value)) => {
+                !value.identifier.trim().is_empty()
+                    && value.length > 0
+                    && value.kwargs.as_ref().is_some_and(|data| !data.is_empty())
+            }
+            None => false,
+        };
+        if !has_payload {
+            return Err(Status::invalid_argument(
+                "image media requires a non-empty source; features require kwargs, identifier, and length",
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 impl KvTransferRole {
