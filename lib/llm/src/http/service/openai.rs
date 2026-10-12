@@ -100,7 +100,7 @@ use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
 use dynamo_protocols::types::responses::{
-    CountInputTokensRequest, CountInputTokensResponse, ErrorObject,
+    CountInputTokensRequest, CountInputTokensResponse, ResponseError, ResponseErrorCode,
 };
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
@@ -415,11 +415,11 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
     }
 }
 
-fn responses_error_code(status_code: StatusCode) -> &'static str {
+fn responses_error_code(status_code: StatusCode) -> ResponseErrorCode {
     match status_code {
-        StatusCode::TOO_MANY_REQUESTS => "rate_limit_exceeded",
-        code if code.is_client_error() => "invalid_prompt",
-        _ => "server_error",
+        StatusCode::TOO_MANY_REQUESTS => ResponseErrorCode::RateLimitExceeded,
+        code if code.is_client_error() => ResponseErrorCode::InvalidPrompt,
+        _ => ResponseErrorCode::ServerError,
     }
 }
 
@@ -4196,7 +4196,7 @@ async fn responses(
         instructions: request.inner.instructions.clone(),
         reasoning: request.inner.reasoning.clone(),
         text: request.inner.text.clone(),
-        service_tier: request.inner.service_tier,
+        service_tier: request.inner.service_tier.clone(),
         include: request.inner.include.clone(),
         truncation: request.inner.truncation,
         // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
@@ -4392,8 +4392,9 @@ async fn responses(
                             producer_error_signal
                                 .set(extract_error_type_from_response(&error_response));
                         }
-                        backend_error = Some(ErrorObject {
-                            code: responses_error_code(error_response.0).to_string(),
+                        backend_error = Some(ResponseError {
+                            misalignment: None,
+                            code: responses_error_code(error_response.0),
                             message: error_response.1.message.clone(),
                         });
                     }
@@ -5119,15 +5120,7 @@ async fn images_with_request(
         .inner
         .model
         .as_ref()
-        .map(|m| match m {
-            dynamo_protocols::types::ImageModel::DallE2 => "dall-e-2".to_string(),
-            dynamo_protocols::types::ImageModel::DallE3 => "dall-e-3".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage1 => "gpt-image-1".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage1dot5 => "gpt-image-1.5".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage1Mini => "gpt-image-1-mini".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage2 => "gpt-image-2".to_string(),
-            dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
-        })
+        .map(ToString::to_string)
         .unwrap_or_else(|| "diffusion".to_string());
 
     // Per-model serving readiness gate (now that we have a resolved model
@@ -10996,12 +10989,14 @@ mod tests {
             prompt_tokens_details: Some(PromptTokensDetails {
                 audio_tokens: Some(1),
                 cached_tokens: Some(2),
+                ..Default::default()
             }),
             completion_tokens_details: Some(CompletionTokensDetails {
                 accepted_prediction_tokens: Some(1),
                 audio_tokens: None,
                 reasoning_tokens: Some(2),
                 rejected_prediction_tokens: Some(0),
+                ..Default::default()
             }),
         };
         let second_usage = CompletionUsage {
@@ -11011,12 +11006,14 @@ mod tests {
             prompt_tokens_details: Some(PromptTokensDetails {
                 audio_tokens: Some(2),
                 cached_tokens: Some(3),
+                ..Default::default()
             }),
             completion_tokens_details: Some(CompletionTokensDetails {
                 accepted_prediction_tokens: Some(2),
                 audio_tokens: Some(1),
                 reasoning_tokens: None,
                 rejected_prediction_tokens: Some(1),
+                ..Default::default()
             }),
         };
 

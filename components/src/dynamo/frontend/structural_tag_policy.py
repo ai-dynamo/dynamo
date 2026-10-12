@@ -14,6 +14,13 @@ def runtime_structural_tag_options(
     """Read structural-tag policy from a model-card runtime config."""
     if not isinstance(runtime_config, dict):
         return "off", "auto", "auto"
+    # New cards project legacy fields for old readers. Prefer the canonical
+    # setting here, including its explicit disabled value, when present.
+    if "structural_tag" in runtime_config:
+        config = runtime_config["structural_tag"]
+        if not isinstance(config, dict):
+            return "off", "auto", "auto"
+        return "on", config.get("scope", "auto"), config.get("schema", "auto")
     return (
         runtime_config.get("structural_tag_mode", "off"),
         runtime_config.get("structural_tag_scope", "auto"),
