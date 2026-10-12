@@ -19,3 +19,14 @@ The local file adds SPDX and temporary-copy comments and applies Dynamo's
 `clang-format` style; these changes do not alter the protobuf descriptor. The
 SGLang sidecar generates both client and server types and temporarily exposes
 them to the Mocker server.
+
+The local file also adds `GenerateRequest` fields 18 to 21 (`image_data`,
+`video_data`, `audio_data`, and `mm_hashes`) from SGLang pull requests that are
+not merged yet:
+[sgl-project/sglang#42833](https://github.com/sgl-project/sglang/pull/42833)
+adds the three media fields, and a follow-up change adds `mm_hashes` and the
+`multimodal_inputs` entry in the `GetServerInfo` `grpc_features` list. Until
+these changes merge, the local descriptor does not match the commit above. When
+they merge, copy the file again from the SGLang merge commit and update the
+commit and the SHA-256. The sidecar sends media only to servers that list
+`multimodal_inputs`, because older servers drop unknown fields silently.

@@ -27,6 +27,7 @@ for the architecture.
 | Disaggregated | Yes |
 | KV routing | Yes |
 | Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Experimental |
+| Image, video, and audio input | Yes, with an SGLang gRPC server that lists `multimodal_inputs` in `grpc_features` |
 
 ## Launch Locally
 

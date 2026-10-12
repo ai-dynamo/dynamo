@@ -40,3 +40,23 @@ fn release_0522_fields_keep_their_wire_tags() {
     // status_code is optional field 3.
     assert_eq!(chunk.encode_to_vec(), [0x18, 0x94, 0x03]);
 }
+
+#[test]
+fn generate_request_keeps_pending_media_wire_tags() {
+    let request = dynamo_sglang_sidecar::proto::GenerateRequest {
+        image_data: vec!["i".to_string()],
+        video_data: vec!["v".to_string()],
+        audio_data: vec!["a".to_string()],
+        mm_hashes: vec!["h".to_string()],
+        ..Default::default()
+    };
+    // Repeated string fields 19 to 22 come from unmerged SGLang changes; check
+    // them again against the merged upstream file.
+    assert_eq!(
+        request.encode_to_vec(),
+        [
+            0x9a, 0x01, 0x01, b'i', 0xa2, 0x01, 0x01, b'v', 0xaa, 0x01, 0x01, b'a', 0xb2, 0x01,
+            0x01, b'h'
+        ]
+    );
+}
