@@ -588,9 +588,8 @@ where
             let response_stream = self.next_generate.generate(request).await;
             match response_stream {
                 Ok(next_stream) => {
-                    // A dispatch cancelled before its response prologue returns
-                    // an `Ok` empty stream, so a stopped context here means the
-                    // client left during the handshake.
+                    // A dispatch cancelled before its response prologue returns `Ok` empty,
+                    // so a stopped context here means the client left during the handshake.
                     let outcome = if self.context.is_stopped() || self.context.is_killed() {
                         frontend_service::migration_outcome::CANCELLED
                     } else {
