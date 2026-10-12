@@ -238,13 +238,15 @@ async fn vllm_failed_and_interrupted_startup_leave_no_registration() {
 
 async fn failed_and_interrupted_startup_leave_no_registration<F: ProcessFixture>() {
     let env = Environment::new().await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    // Reserve the unavailable endpoint so another parallel mock cannot acquire it.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = format!("http://{}", socket.local_addr().unwrap());
     let mut child = env.spawn::<F>(&endpoint, DisaggregationMode::Aggregated, 1);
     assert!(!child.exit().await.success(), "{}", child.logs());
     assert!(env.cards().await.is_empty());
     assert!(env.registrations("backend").await.is_empty());
+    drop(socket);
     for is_interrupted in [false, true] {
         let env = Environment::new().await;
         let mut gate = Gate::new("http://127.0.0.1:1").await;

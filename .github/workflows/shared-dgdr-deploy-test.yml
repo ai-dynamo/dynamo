@@ -6,6 +6,11 @@ name: Shared DGDR Deploy Test
 on:
   workflow_call:
     inputs:
+      dd_env:
+        description: 'Datadog env tag for test sessions (DD_ENV). Datadog Test Optimization settings (auto test retries, PR comments, etc.) are scoped per (service, env), so use a distinct value (e.g. "nightly", "post-merge") to configure those workflows independently of PR/pre-merge.'
+        required: false
+        type: string
+        default: 'ci'
       namespace:
         description: 'Host namespace where the vCluster lives'
         type: string
@@ -23,6 +28,9 @@ on:
         type: string
         required: true
     secrets:
+      DD_API_KEY:
+        description: 'Datadog API key for Test Optimization. Optional.'
+        required: false
       AZURE_ACR_HOSTNAME:
         required: true
       HF_TOKEN:
@@ -151,6 +159,8 @@ jobs:
       - name: Run CPU DGDR tests
         uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: ${{ inputs.dd_env }}
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: ${{ env.DGDR_NAMESPACE }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
