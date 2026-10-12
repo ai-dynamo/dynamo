@@ -1795,6 +1795,35 @@ fn ensure_token_ids_in_vocab(
     Ok(())
 }
 
+/// Bound the token-id sampling extensions that pass through to the backend
+/// unchanged. `validate.rs` owns their shape, so a value that does not
+/// deserialize here is left for it to reject.
+fn ensure_sampling_token_ids_in_vocab(
+    fields: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    bound: Option<usize>,
+) -> anyhow::Result<()> {
+    let (Some(fields), Some(_)) = (fields, bound) else {
+        return Ok(());
+    };
+    for field in ["allowed_token_ids", "logprob_token_ids"] {
+        if let Some(Ok(ids)) = fields
+            .get(field)
+            .map(<Vec<TokenIdType> as serde::Deserialize>::deserialize)
+        {
+            ensure_token_ids_in_vocab(field, &ids, bound)?;
+        }
+    }
+    if let Some(Ok(lists)) = fields
+        .get("bad_words_token_ids")
+        .map(<Vec<Vec<TokenIdType>> as serde::Deserialize>::deserialize)
+    {
+        for ids in &lists {
+            ensure_token_ids_in_vocab("bad_words_token_ids", ids, bound)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 fn resolve_qwen_video_processor_contract(
     runtime_config: &ModelRuntimeConfig,
@@ -3135,6 +3164,13 @@ impl OpenAIPreprocessor {
         builder.model(request.model());
 
         let mut stop_conditions = request.extract_stop_conditions()?;
+        // Client ids only: the hidden set is filled from the model's own EOS
+        // ids below. An out-of-vocab stop id can crash an engine that uses it
+        // as an index (e.g. SGLang's min-new-tokens penalizer).
+        if let Some(ids) = stop_conditions.stop_token_ids.as_deref() {
+            ensure_token_ids_in_vocab("stop_token_ids", ids, self.token_id_bound)?;
+        }
+        ensure_sampling_token_ids_in_vocab(request.unsupported_fields(), self.token_id_bound)?;
         let eos_token_ids = self.model_info.eos_token_ids();
         let hidden_eos_token_ids = eos_token_ids.clone();
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
@@ -13669,6 +13705,157 @@ mod tests {
             .downcast_ref::<DynamoError>()
             .expect("error should preserve the DynamoError type");
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
+    }
+
+    fn assert_out_of_vocab_rejection(err: &Error, field: &str) {
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should preserve the DynamoError type");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
+        let message = dynamo_err.to_string();
+        assert!(
+            message.contains(&format!(
+                "{field} token id 128256 is out of range (must be < 128256)"
+            )),
+            "unexpected message for {field}: {message}"
+        );
+    }
+
+    // The mock card's vocab_size is 128256, so 128256 is the first
+    // out-of-vocab id.
+    #[tokio::test]
+    async fn chat_operator_rejects_out_of_vocab_stop_token_ids() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 4,
+            "min_tokens": 1,
+            "stop_token_ids": [128256]
+        }))
+        .unwrap();
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(UnreachableBackend);
+
+        let result =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
+        let Err(err) = result else {
+            panic!("an out-of-vocab stop token id should fail before dispatch");
+        };
+        assert_out_of_vocab_rejection(&err, "stop_token_ids");
+    }
+
+    #[tokio::test]
+    async fn completion_operator_rejects_out_of_vocab_stop_token_ids() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        // Both client forms: the integer `stop` array and top-level
+        // `stop_token_ids`.
+        for stop_fields in [
+            serde_json::json!({"stop": [128256]}),
+            serde_json::json!({"stop_token_ids": [128256]}),
+        ] {
+            let mut value = serde_json::json!({
+                "model": "test-model",
+                "prompt": "hello",
+                "max_tokens": 4,
+                "min_tokens": 1
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(stop_fields.as_object().unwrap().clone());
+            let request: NvCreateCompletionRequest = serde_json::from_value(value).unwrap();
+            let next: Arc<
+                dyn AsyncEngine<
+                        SingleIn<PreprocessedRequest>,
+                        ManyOut<Annotated<BackendOutput>>,
+                        Error,
+                    >,
+            > = Arc::new(UnreachableBackend);
+
+            let result =
+                Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next)
+                    .await;
+            let Err(err) = result else {
+                panic!("{stop_fields}: an out-of-vocab stop token id should fail before dispatch");
+            };
+            assert_out_of_vocab_rejection(&err, "stop_token_ids");
+        }
+    }
+
+    #[test]
+    fn builder_rejects_out_of_vocab_sampling_token_ids() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        for (field, value) in [
+            ("allowed_token_ids", serde_json::json!([1, 128256])),
+            ("logprob_token_ids", serde_json::json!([1, 128256])),
+            ("bad_words_token_ids", serde_json::json!([[1], [128256]])),
+        ] {
+            let mut request = serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hello"}]
+            });
+            request[field] = value;
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(request).unwrap();
+            let err = preprocessor
+                .builder(&request)
+                .err()
+                .unwrap_or_else(|| panic!("{field}: out-of-vocab id should be rejected"));
+            assert_out_of_vocab_rejection(&err, field);
+        }
+    }
+
+    #[test]
+    fn builder_accepts_last_in_vocab_id_out_of_vocab_boundary() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "min_tokens": 1,
+            "stop_token_ids": [128255],
+            "allowed_token_ids": [128255],
+            "logprob_token_ids": [128255],
+            "bad_words_token_ids": [[1], [128255]]
+        }))
+        .unwrap();
+        let preprocessed = preprocessor
+            .builder(&request)
+            .expect("the last in-vocab id must be accepted")
+            .token_ids(vec![1])
+            .build()
+            .unwrap();
+        assert_eq!(
+            preprocessed.stop_conditions.stop_token_ids,
+            Some(vec![128255])
+        );
+        let sampling = &preprocessed.extra_args.as_ref().unwrap()["sampling_options"];
+        assert_eq!(sampling["allowed_token_ids"], serde_json::json!([128255]));
+        assert_eq!(sampling["logprob_token_ids"], serde_json::json!([128255]));
+        assert_eq!(
+            sampling["bad_words_token_ids"],
+            serde_json::json!([[1], [128255]])
+        );
     }
 
     #[tokio::test]
