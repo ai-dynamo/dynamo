@@ -3135,11 +3135,6 @@ impl OpenAIPreprocessor {
         builder.model(request.model());
 
         let mut stop_conditions = request.extract_stop_conditions()?;
-        // SGLang indexes a GPU tensor with stop ids and does not check their range
-        // (sgl-project/sglang#31597). Hidden EOS ids come from the model card.
-        if let Some(ids) = stop_conditions.stop_token_ids.as_deref() {
-            ensure_token_ids_in_vocab("stop_token_ids", ids, self.token_id_bound)?;
-        }
         let eos_token_ids = self.model_info.eos_token_ids();
         let hidden_eos_token_ids = eos_token_ids.clone();
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
@@ -3175,6 +3170,12 @@ impl OpenAIPreprocessor {
 
         // apply ignore eos if not already set
         stop_conditions.apply_ignore_eos();
+
+        // SGLang indexes a GPU tensor with stop ids and does not check their range
+        // (sgl-project/sglang#31597). Hidden EOS ids come from the model card.
+        if let Some(ids) = stop_conditions.stop_token_ids.as_deref() {
+            ensure_token_ids_in_vocab("stop_token_ids", ids, self.token_id_bound)?;
+        }
 
         if !stop_conditions.ignore_eos.unwrap_or(false) {
             builder.eos_token_ids(eos_token_ids);
@@ -13742,6 +13743,47 @@ mod tests {
             panic!("an out-of-vocab integer stop should fail before dispatch");
         };
         assert_out_of_vocab_stop_rejection(&err);
+    }
+
+    #[test]
+    fn builder_discards_out_of_vocab_stop_ids_when_ignoring_eos() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 4,
+            "min_tokens": 1,
+            "ignore_eos": true,
+            "stop_token_ids": [128256]
+        }))
+        .unwrap();
+        let completion: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "prompt": "hello",
+            "max_tokens": 4,
+            "min_tokens": 1,
+            "ignore_eos": true,
+            "stop": [128256]
+        }))
+        .unwrap();
+
+        for builder in [
+            preprocessor.builder(&chat),
+            preprocessor.builder(&completion),
+        ] {
+            let preprocessed = builder
+                .expect("ignored stop ids should not be validated")
+                .token_ids(vec![1])
+                .build()
+                .unwrap();
+            assert_eq!(preprocessed.stop_conditions.ignore_eos, Some(true));
+            assert!(preprocessed.stop_conditions.stop_token_ids.is_none());
+        }
     }
 
     #[tokio::test]
