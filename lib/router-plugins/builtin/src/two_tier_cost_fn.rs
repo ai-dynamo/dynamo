@@ -26,10 +26,19 @@
 //! Ties between equally ranked workers resolve on candidate row order, which the host leaves
 //! unspecified. This matches the ported implementation; note that Dynamo's built-in selector
 //! instead samples uniformly among ties.
+//!
+//! Experimental: when workers consume KV fetch hints, the router lets the selected worker fetch a
+//! longer cached prefix from another worker. The load tier is where this matters, because it moves
+//! a request away from the worker that holds its prefix. `kv_fetch` and `kv_fetch_min_blocks`
+//! gate that fetch through the experimental fetch-policy API; their defaults keep the router's
+//! behavior unchanged.
 
 use std::sync::Arc;
 
 use dynamo_kv_router::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::experimental::{
+    KvTransferAction, KvTransferInput, KvTransferPolicy, with_kv_transfer_policy,
+};
 use dynamo_kv_router::plugins::worker_selection::{
     WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
     WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
@@ -63,6 +72,12 @@ struct Parameters {
     balance_abs_threshold: usize,
     /// Minimum ratio of largest to smallest active-request count before the load tier applies.
     balance_rel_threshold: f64,
+    /// Experimental. Whether the selected worker may fetch a longer cached prefix from another
+    /// worker through the router's KV fetch hint.
+    kv_fetch: bool,
+    /// Experimental. The smallest number of KV blocks a fetch must add beyond the selected
+    /// worker's own prefix.
+    kv_fetch_min_blocks: u32,
 }
 
 impl Default for Parameters {
@@ -71,6 +86,8 @@ impl Default for Parameters {
             cache_threshold: DEFAULT_CACHE_THRESHOLD,
             balance_abs_threshold: DEFAULT_BALANCE_ABS_THRESHOLD,
             balance_rel_threshold: DEFAULT_BALANCE_REL_THRESHOLD,
+            kv_fetch: true,
+            kv_fetch_min_blocks: 0,
         }
     }
 }
@@ -88,6 +105,11 @@ impl Parameters {
             ));
         }
         Ok(())
+    }
+
+    /// Whether these parameters change the router's default fetch-hint behavior.
+    fn gates_kv_fetch(&self) -> bool {
+        !self.kv_fetch || self.kv_fetch_min_blocks > 0
     }
 }
 
@@ -159,6 +181,27 @@ impl WorkerPicker for TwoTierCostFnPicker {
     }
 }
 
+/// Keeps or skips the router's KV fetch hint for the selected worker.
+struct TwoTierKvFetch {
+    enabled: bool,
+    min_blocks: u32,
+}
+
+impl KvTransferPolicy for TwoTierKvFetch {
+    fn decide(&mut self, input: KvTransferInput<'_>) -> KvTransferAction {
+        kv_fetch_action(self.enabled, self.min_blocks, input.additional_blocks())
+    }
+}
+
+/// Fetch from the router's default source when fetching is enabled and adds enough blocks.
+fn kv_fetch_action(enabled: bool, min_blocks: u32, additional_blocks: u32) -> KvTransferAction {
+    if enabled && additional_blocks >= min_blocks {
+        KvTransferAction::Default
+    } else {
+        KvTransferAction::Skip
+    }
+}
+
 fn provider(
     parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
@@ -167,11 +210,21 @@ fn provider(
 
     Ok(Arc::new(
         move |config: &KvRouterConfig, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
+            let policy = WorkerSelectionPolicy::new(
                 config.clone(),
                 worker_type.as_str(),
                 Vec::new(),
                 Box::new(TwoTierCostFnPicker { parameters }),
+            );
+            if !parameters.gates_kv_fetch() {
+                return policy;
+            }
+            with_kv_transfer_policy(
+                policy,
+                Box::new(TwoTierKvFetch {
+                    enabled: parameters.kv_fetch,
+                    min_blocks: parameters.kv_fetch_min_blocks,
+                }),
             )
         },
     ))
@@ -327,6 +380,28 @@ mod tests {
         assert!(cache(-0.1).is_err() && cache(1.1).is_err() && cache(f64::NAN).is_err());
         assert!(ratio(0.9).is_err() && ratio(f64::NAN).is_err());
         assert!(Parameters::default().validate().is_ok());
+    }
+
+    #[test]
+    fn default_parameters_keep_the_router_fetch_behavior() {
+        assert!(!Parameters::default().gates_kv_fetch());
+        let disabled = Parameters {
+            kv_fetch: false,
+            ..Parameters::default()
+        };
+        let thresholded = Parameters {
+            kv_fetch_min_blocks: 64,
+            ..Parameters::default()
+        };
+        assert!(disabled.gates_kv_fetch() && thresholded.gates_kv_fetch());
+    }
+
+    #[test]
+    fn kv_fetch_honors_the_switch_and_the_minimum() {
+        assert_eq!(kv_fetch_action(true, 0, 1), KvTransferAction::Default);
+        assert_eq!(kv_fetch_action(true, 64, 64), KvTransferAction::Default);
+        assert_eq!(kv_fetch_action(true, 64, 63), KvTransferAction::Skip);
+        assert_eq!(kv_fetch_action(false, 0, 1000), KvTransferAction::Skip);
     }
 
     #[test]

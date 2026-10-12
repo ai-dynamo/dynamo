@@ -5,13 +5,14 @@
 
 mod config;
 mod context;
+pub mod experimental;
 mod inputs;
 
 pub use context::WorkerSelectionContext;
 pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData};
 pub use inputs::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
-    WorkerInputView, WorkerInputs, WorkerLoadInput,
+    WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerMetadata,
 };
 
 pub use super::registry::{

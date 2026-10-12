@@ -220,6 +220,8 @@ experimental router exactly. Add any subset to tune it:
 | `cache_threshold` | `0.5` | Fraction of the request's blocks that must be device-resident on the best worker before the cache tier applies. Compared strictly. Must be in `[0.0, 1.0]`. |
 | `balance_abs_threshold` | `32` | Minimum active-request spread before the load tier applies. |
 | `balance_rel_threshold` | `1.1` | Minimum ratio of largest to smallest active-request count before the load tier applies. Must be at least `1.0`. |
+| `kv_fetch` | `true` | Experimental. Whether the selected worker may fetch a longer cached prefix from another worker through the router's KV fetch hint. Applies only when workers consume KV hints. `false` attaches no fetch hint. |
+| `kv_fetch_min_blocks` | `0` | Experimental. The smallest number of KV blocks a fetch must add beyond the selected worker's own prefix. With the defaults of both fetch parameters, the router attaches a fetch hint whenever another worker holds a longer prefix. |
 
 Both load gates must hold before the load tier displaces the cache tier. Parameters are validated at
 startup, so an out-of-range value or an unknown key fails the process immediately, naming the key,

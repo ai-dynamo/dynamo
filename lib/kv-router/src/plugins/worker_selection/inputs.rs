@@ -3,7 +3,8 @@
 
 //! Worker input groups, stored snapshots, and component-scoped borrowed views.
 
-use crate::protocols::{SharedCacheHits, WorkerWithDpRank};
+use crate::protocols::{SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use std::collections::{HashMap, HashSet};
 use std::ops::BitOr;
 
 /// Host-owned row materialized once for the union of component input requirements.
@@ -368,5 +369,55 @@ impl<'a> WorkerInputView<'a> {
     /// Return index-aligned active-load inputs when the picker requested them.
     pub fn load(self) -> Option<&'a [WorkerLoadInput]> {
         self.load
+    }
+}
+
+/// Facts a worker advertised when it registered. Borrowed from the host's worker table for one
+/// callback; nothing is copied per request. Values change only when the worker re-registers.
+#[derive(Clone, Copy)]
+pub struct WorkerMetadata<'a> {
+    pub(crate) config: &'a (dyn WorkerConfigLike + Sync),
+}
+
+impl<'a> WorkerMetadata<'a> {
+    /// Advertised KV-cache capacity per data-parallel rank, in blocks of
+    /// [`WorkerSelectionContext::block_size`](super::WorkerSelectionContext::block_size) tokens.
+    /// None when not advertised or advertised as zero. This is configured capacity, not free
+    /// blocks; some backends derive it from aggregate or representative-rank data.
+    pub fn total_kv_blocks(self) -> Option<u64> {
+        self.config.total_kv_blocks().filter(|blocks| *blocks > 0)
+    }
+
+    /// Advertised per-step prefill token budget. None when not advertised or advertised as zero.
+    pub fn max_num_batched_tokens(self) -> Option<u64> {
+        self.config
+            .max_num_batched_tokens()
+            .filter(|tokens| *tokens > 0)
+    }
+
+    /// Topology labels, such as `{"zone": "us-east-1a", "rack": "rack1"}`.
+    pub fn topology_domains(self) -> Option<&'a HashMap<String, String>> {
+        self.config.topology_domains()
+    }
+
+    /// The KV transfer domain this worker belongs to, if advertised.
+    pub fn kv_transfer_domain(self) -> Option<&'a str> {
+        self.config.kv_transfer_domain()
+    }
+
+    /// The worker's routing taints.
+    pub fn taints(self) -> &'a HashSet<String> {
+        self.config.taints()
+    }
+}
+
+/// The host's worker table, as seen by a selection context.
+pub(crate) trait WorkerTable {
+    fn get(&self, worker_id: WorkerId) -> Option<&(dyn WorkerConfigLike + Sync)>;
+}
+
+impl<C: WorkerConfigLike + Sync> WorkerTable for HashMap<WorkerId, C> {
+    fn get(&self, worker_id: WorkerId) -> Option<&(dyn WorkerConfigLike + Sync)> {
+        HashMap::get(self, &worker_id).map(|config| config as _)
     }
 }

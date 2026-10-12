@@ -386,6 +386,19 @@ Routing cache resources start only if a component requests `CACHE`. `serve_index
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
 | `router_temperature_override()` | Optional per-request router temperature override |
+| `worker(worker)` | Optional facts the worker advertised at registration, described below. `None` for a worker the host does not know |
+
+### Worker Metadata
+
+`worker(worker)` reads the host's worker table on each call; nothing is copied per request, so policies that never call it pay nothing. The values change only when the worker re-registers.
+
+| Accessor | Meaning |
+|---|---|
+| `total_kv_blocks()` | Advertised KV-cache capacity per data-parallel rank, in blocks of `block_size()` tokens. `None` when not advertised or advertised as zero. Configured capacity, not free blocks |
+| `max_num_batched_tokens()` | Advertised per-step prefill token budget. `None` when not advertised or advertised as zero |
+| `topology_domains()` | Optional topology labels, such as zone or rack |
+| `kv_transfer_domain()` | Optional KV transfer domain |
+| `taints()` | The worker's routing taints |
 
 ### Session Context
 

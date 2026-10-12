@@ -492,6 +492,7 @@ impl SelectionCore {
                 response.best_worker,
                 response.target_cached_prefix_blocks,
                 response.kv_transfer_candidates.as_ref(),
+                entry.kv_transfer_policy.as_ref(),
             )
             .map(|payload| {
                 KvHint::new(
