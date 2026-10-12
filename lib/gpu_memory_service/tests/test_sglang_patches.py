@@ -151,11 +151,12 @@ def test_patch_static_state_for_gms_falls_back_to_legacy_mixin(
 ):
     mixin, original_export = _install_fake_sglang(monkeypatch)
     components_name = "sglang.srt.managers.scheduler_components"
-    components = None
     if has_components_package:
         components = ModuleType(components_name)
         components.__path__ = []
-    monkeypatch.setitem(sys.modules, components_name, components)
+        monkeypatch.setitem(sys.modules, components_name, components)
+    else:
+        monkeypatch.delitem(sys.modules, components_name, False)
     monkeypatch.delitem(sys.modules, f"{components_name}.weight_updater", False)
 
     patches.patch_static_state_for_gms()
