@@ -2909,7 +2909,6 @@ mod tests {
         let pools = registry();
         let unchanged = DcMembershipView {
             endpoints: Arc::new(HashMap::from([(endpoint.clone(), member.clone())])),
-            ..Default::default()
         };
         retire_departed_endpoint_slots(&unchanged, &mut slots, &mut retired_slots, &pools);
         assert_eq!(slots.len(), 1);
@@ -2919,7 +2918,6 @@ mod tests {
         member.namespace = "logical-b".into();
         let changed = DcMembershipView {
             endpoints: Arc::new(HashMap::from([(endpoint.clone(), member)])),
-            ..Default::default()
         };
         retire_departed_endpoint_slots(&changed, &mut slots, &mut retired_slots, &pools);
         assert!(slots.is_empty());
