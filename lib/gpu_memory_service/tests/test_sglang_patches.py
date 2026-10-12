@@ -150,7 +150,6 @@ def _install_fake_sglang(monkeypatch):
 def test_patch_static_state_for_gms_falls_back_to_legacy_mixin(
     monkeypatch, has_components_package
 ):
-    """Patch the legacy module when either the new package or module is absent."""
     mixin, original_export = _install_fake_sglang(monkeypatch)
     components_name = "sglang.srt.managers.scheduler_components"
     components = None
@@ -171,7 +170,6 @@ def test_patch_static_state_for_gms_falls_back_to_legacy_mixin(
 def test_patch_static_state_for_gms_keeps_weight_updater_dependency_errors(
     monkeypatch, tmp_path, caplog
 ):
-    """Report the missing dependency without patching the legacy module."""
     mixin, original_export = _install_fake_sglang(monkeypatch)
     (tmp_path / "weight_updater.py").write_text("import gms_test_missing_dependency\n")
     components = ModuleType("sglang.srt.managers.scheduler_components")
