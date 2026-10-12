@@ -34,10 +34,14 @@ class EngineMetrics(ABC):
 
     @staticmethod
     def samples(
-        body: str, name: str, labels: dict[str, str] | None = None
+        body: str,
+        name: str,
+        labels: dict[str, str] | None = None,
+        *,
+        is_required: bool = True,
     ) -> list[float]:
         values = find_metric_samples(body, name, labels or {})
-        assert values, f"Missing engine metric {name}: {body}"
+        assert values or not is_required, f"Missing engine metric {name}: {body}"
         assert all(
             math.isfinite(value) and value >= 0 for value in values
         ), f"Invalid engine metric {name}: {values}"
@@ -188,4 +192,9 @@ class SGLangMetricsChecker(EngineMetrics):
         self._wait_for_progress(before=before, minimum=max_tokens - 1, maximum=math.inf)
 
     def transfer_progress(self) -> float:
-        return sum(self.samples(self.scrape(), "sglang:kv_transfer_total_mb_sum"))
+        # SGLang creates the labeled histogram on its first completed transfer.
+        return sum(
+            self.samples(
+                self.scrape(), "sglang:kv_transfer_total_mb_sum", is_required=False
+            )
+        )

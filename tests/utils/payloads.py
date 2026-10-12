@@ -385,12 +385,16 @@ class KvTransferPayload(DisaggregatedChatPayload):
         ):
             metrics.bind_environment(env)
 
+    def body_for_iteration(self, iteration: int) -> Dict[str, Any]:
+        body = deepcopy(super().body_for_iteration(iteration))
+        message = body["messages"][0]
+        message["content"] = f"Request {uuid.uuid4()}. " + message["content"]
+        return body
+
     def before_request(self) -> None:
         self.prefill_metrics.wait_for_scheduler()
         self.decode_metrics.wait_for_scheduler()
         self._transfer_before = self.transfer_metrics.transfer_progress()
-        message = self.body["messages"][0]
-        message["content"] = f"Request {uuid.uuid4()}. " + message["content"]
 
     def validate(self, response: Any, content: str) -> None:
         super().validate(response, content)
@@ -440,14 +444,70 @@ def _validate_chat_logprobs(content_logprobs) -> None:
 
 @dataclass
 class ChatPayloadWithLogprobs(ChatPayload):
-    """Chat payload that validates requested selected and candidate logprobs."""
+    """Chat payload that validates logprobs in response."""
 
     def validate(self, response: Any, content: str) -> None:
+        """Validate response contains logprobs fields."""
         super().validate(response, content)
-        logprobs = response.json()["choices"][0]["logprobs"]
-        content_logprobs = (logprobs or {}).get("content")
-        if self.body.get("logprobs") or content_logprobs:
-            _validate_chat_logprobs(content_logprobs)
+
+        result = response.json()
+        choice = result["choices"][0]
+
+        # Validate logprobs field exists
+        assert "logprobs" in choice, "Missing 'logprobs' in choice"
+
+        logprobs_data = choice["logprobs"]
+        if logprobs_data is not None:
+            assert "content" in logprobs_data, "Missing 'content' in logprobs"
+            content_logprobs = logprobs_data["content"]
+
+            if content_logprobs:
+                # Validate structure of logprobs
+                for item in content_logprobs:
+                    assert "token" in item, "Missing 'token' in logprobs content"
+                    assert "logprob" in item, "Missing 'logprob' in logprobs content"
+                    assert (
+                        "top_logprobs" in item
+                    ), "Missing 'top_logprobs' in logprobs content"
+
+                    # Sanity check: logprob should be valid (not nan/inf/positive)
+                    logprob_val = item["logprob"]
+                    assert not math.isnan(logprob_val), "logprob is NaN"
+                    assert not math.isinf(logprob_val), "logprob is infinite"
+                    assert (
+                        logprob_val <= 0
+                    ), f"logprob should be <= 0, got {logprob_val}"
+
+                    # Validate bytes field is populated for the selected token
+                    assert "bytes" in item, "Missing 'bytes' in logprobs content item"
+                    token_str = item["token"]
+                    if token_str:
+                        assert (
+                            item["bytes"] is not None
+                        ), f"'bytes' should be populated for non-empty token {token_str!r}"
+                        assert isinstance(
+                            item["bytes"], list
+                        ), f"'bytes' should be a list, got {type(item['bytes'])}"
+
+                    # Validate top_logprobs entries have token, logprob, and bytes
+                    for top_lp in item["top_logprobs"]:
+                        assert (
+                            "token" in top_lp
+                        ), "Missing 'token' in top_logprobs entry"
+                        assert (
+                            "logprob" in top_lp
+                        ), "Missing 'logprob' in top_logprobs entry"
+                        assert (
+                            "bytes" in top_lp
+                        ), "Missing 'bytes' in top_logprobs entry"
+                        if top_lp["token"]:
+                            assert (
+                                top_lp["bytes"] is not None
+                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
+
+                logger.info(
+                    f"Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
+                )
 
 
 @dataclass
