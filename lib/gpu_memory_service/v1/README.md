@@ -113,9 +113,16 @@ rank-local socket is the control-plane trust boundary.
 
 The checkpoint saver with `DYN_GMS_USE_V1=true` connects RO to the rank-local `weights`
 socket, enumerates the committed allocation IDs and aligned sizes, temporarily
-imports them, and writes raw shard bytes through
-`snapshot.disk.write_device_shards`. Its manifest contains only a version and,
-for each allocation, its exact ID, aligned size, shard path, and shard offset.
+imports them, and writes raw shard bytes through the shared snapshot disk writer.
+The weight-artifact schema is versioned independently from the GMS protocol. Its
+manifest contains each allocation's exact ID, aligned size, shard path, and
+shard offset, plus the size and SHA-256 digest of every physical shard. The
+digest is calculated while the device bytes are staged through host memory, so
+save does not reread the shard.
+
+New checkpoints use schema version 2. The loader checks each weight file against its saved SHA-256 digest before restoring it, so even corruption that leaves the file size unchanged is detected.
+
+Old checkpoints (schema version 1) remain loadable with their existing allocation, path, size, and extent checks. Each legacy load logs a warning that SHA-256 integrity verification is unavailable: these checkpoints cannot detect same-length corruption. Recapture with the current saver to get this protection. Computing a digest of an old file now cannot prove that it still contains the originally captured bytes.
 
 Without `--sharded-ssd-roots`, shard paths remain relative to the device
 artifact directory. With sharded roots, files are distributed across the
@@ -127,6 +134,7 @@ On restore, the checkpoint loader with `DYN_GMS_USE_V1=true` connects RW to a fr
 `FileTransferSource` and `GMSTransferTarget` records. Backend selection goes
 through `snapshot.transfer.create_transfer_backend`; `nixl`, `nixl-gds`, and
 `sharded-ssd` use the same implementations and configuration as V0. The loader
+verifies every schema-version-2 shard digest before creating a transfer backend or allocating restore targets. Missing or invalid version-2 digests are errors; they never fall back to legacy loading. Keep checkpoint files unchanged during verification and transfer. Verification reads each shard once before the restore backend reads it for transfer. The loader
 synchronizes, releases its temporary mappings, commits the same socket RW to
 RO, closes its lease, and exits. The server retains the committed backing while
 the restored worker acquires a new RO lease and remaps its preserved VAs.
