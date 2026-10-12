@@ -421,5 +421,5 @@ The [nvidia-peermem-reloader](https://github.com/Azure/aks-rdma-infiniband/tree/
 - [Azure AKS RDMA InfiniBand — GitHub](https://github.com/Azure/aks-rdma-infiniband)
 - [Set up InfiniBand on Azure HPC VMs — Microsoft Learn](https://learn.microsoft.com/en-us/azure/virtual-machines/setup-infiniband)
 - [Enable InfiniBand VM extension — Microsoft Learn](https://learn.microsoft.com/en-us/azure/virtual-machines/extensions/enable-infiniband)
-- [NVIDIA Network Operator Documentation](https://docs.nvidia.com/networking/display/kubernetes25100/index.html)
+- [NVIDIA Network Operator Deployment Guide](https://docs.nvidia.com/networking/display/kubernetes25100/deployment-guide-kubernetes.html)
 - [RDMA Setup](overview.md) — transport requirements and platform guides
