@@ -8,17 +8,22 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import opendal
 import pytest
 import pytest_asyncio
-from cryptography.fernet import Fernet
 
-from dynamo.artifacts.runtime import (
+opendal = pytest.importorskip("opendal")
+fernet = pytest.importorskip("cryptography.fernet")
+Fernet = fernet.Fernet
+
+from dynamo.artifacts.runtime import (  # noqa: E402 -- optional dependency guards
     ArtifactRuntime,
     close_configured_artifact_runtime,
     configured_artifact_runtime,
 )
-from dynamo.artifacts.storage import ArtifactStorageError, ManagedProfile
+from dynamo.artifacts.storage import (  # noqa: E402 -- optional dependency guards
+    ArtifactStorageError,
+    ManagedProfile,
+)
 
 pytestmark = [
     pytest.mark.unit,
