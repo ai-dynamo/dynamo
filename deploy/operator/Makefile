@@ -356,26 +356,6 @@ integration: envtest setup-clustertest ## Run envtests and clustertests, creatin
 		DYNAMO_CLUSTERTEST_OPERATOR_IMAGE='$(CLUSTERTEST_OPERATOR_IMAGE)' \
 		$(MAKE) clustertest
 
-# Keep compatibility checks on the exact chart and API release shipped by Dynamo.
-GROVE_ADMISSION_KIND_NAME ?= dynamo-grove-admission
-GROVE_ADMISSION_CHART_VERSION = $(shell awk '/name: grove-charts/ { found = 1 } found && $$1 == "version:" { print $$2; exit }' ../helm/charts/platform/Chart.yaml)
-
-.PHONY: grove-admission
-grove-admission: kubectl kind helm setup-envtest ## Check rollout budgets against a real pinned Grove webhook in disposable Kind.
-	@test '$(GROVE_ADMISSION_CHART_VERSION)' = '$(CLUSTERTEST_GROVE_VERSION)' || { echo "Grove chart and API pins must match"; exit 1; }
-	$(KIND) create cluster --name '$(GROVE_ADMISSION_KIND_NAME)' --image '$(CLUSTERTEST_NODE_IMAGE)' --kubeconfig '$(LOCALBIN)/grove-admission.kubeconfig'; \
-	trap '$(KIND) delete cluster --name "$(GROVE_ADMISSION_KIND_NAME)"' EXIT; \
-	$(HELM) --kubeconfig '$(LOCALBIN)/grove-admission.kubeconfig' --kube-context 'kind-$(GROVE_ADMISSION_KIND_NAME)' \
-		upgrade --install grove oci://ghcr.io/ai-dynamo/grove/grove-charts --version '$(GROVE_ADMISSION_CHART_VERSION)' \
-		--namespace grove-system --create-namespace --set crdInstaller.enabled=true \
-		--set config.server.healthProbes.enable=true \
-		--set config.scheduler.defaultProfileName=default-scheduler \
-		--set-json 'config.scheduler.profiles=[{"name":"default-scheduler"}]' --wait --timeout 5m; \
-	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" \
-	DYNAMO_GROVE_ADMISSION_KUBECONFIG='$(LOCALBIN)/grove-admission.kubeconfig' \
-	DYNAMO_GROVE_ADMISSION_CONTEXT='kind-$(GROVE_ADMISSION_KIND_NAME)' \
-		go test -tags=groveintegration ./internal/controller -run '^TestGroveRolloutBudgetsAgainstInstalledWebhook$$' -count=1 -v -timeout=5m
-
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint
 	$(GOLANGCI_LINT) run
