@@ -92,6 +92,7 @@ SOURCES: dict[str, str] = {
     "Photoroom": "www.photoroom.com",
     "Pinterest": "www.pinterest.com",
     "Prime Intellect": "www.primeintellect.ai",
+    "PyTorch": "pytorch.org",
     "Rafay": "rafay.co",
     "Red Hat": "www.redhat.com",
     "SemiAnalysis / InferenceX": "semianalysis.com",
