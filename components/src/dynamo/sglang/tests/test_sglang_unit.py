@@ -1213,8 +1213,9 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
 
 
 @pytest.mark.asyncio
-async def test_rerank_worker_disables_radix_cache(mock_sglang_cli):
+async def test_rerank_worker_disables_radix_cache(monkeypatch, mock_sglang_cli):
     """Rerank workers must run each sequence in one forward: no cached prefix, no chunks."""
+    monkeypatch.setattr(sglang_args, "fetch_model", AsyncMock())
     mock_sglang_cli("--model", "Qwen/Qwen3-0.6B", "--rerank-worker")
 
     config = await parse_args(sys.argv[1:])
