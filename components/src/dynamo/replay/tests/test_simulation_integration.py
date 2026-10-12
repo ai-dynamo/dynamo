@@ -239,10 +239,8 @@ def test_real_static_path_preserves_goodput() -> None:
 def test_sweeper_runs_real_dynamo_replay_in_spawned_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Each spawned worker otherwise starts an OpenBLAS pool sized to the visible
-    # CPUs, which can exhaust a container CPU quota and slow tests running
-    # beside this one under xdist. The AISimulate CLI supervisor already pins
-    # these pools to one thread; match it here.
+    # Spawned workers otherwise size OpenBLAS pools to the visible CPUs, which can
+    # exhaust a container CPU quota; the AISimulate CLI supervisor also pins them to 1.
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
     monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
     config = _config(
