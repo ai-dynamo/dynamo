@@ -75,10 +75,11 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 	if err != nil {
 		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
-	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
+	rolloutPlan, err := r.rollout.planRollingUpdate(ctx, dgd)
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
 	}
+	rollingUpdateCtx := rolloutPlan.context
 	selection, reason := selectDisaggregatedSetComponents(dgd)
 	if reason != "" {
 		return ReconcileResult{}, fmt.Errorf("failed to select DisaggregatedSet roles: %s", reason)
@@ -180,6 +181,7 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 
 	resources := append([]Resource{syncedDSResource}, nonSelectedResources...)
 	result := checkResourcesReadiness(resources)
+	result.ReplacementsServed = rolloutPlan.replacementsServed
 	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
 		if err := r.stableResources.DeleteStale(ctx, dgd, selectedServiceNames); err != nil {
 			return ReconcileResult{}, err
