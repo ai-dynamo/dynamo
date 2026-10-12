@@ -1725,7 +1725,6 @@ mod tests {
             .expect("omitted function parameters should remain valid");
     }
 
-    /// Rejects explicitly empty tools unless system messages provide effective tools.
     #[test]
     fn test_validate_rejects_empty_tools_array() {
         const EMPTY_TOOLS: &str =
