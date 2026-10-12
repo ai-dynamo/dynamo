@@ -1143,6 +1143,40 @@ mod tests {
         while stream.next().await.is_some() {}
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_followed_by_stream_drop_still_aborts() {
+        const REQUESTS: usize = 64;
+        let (engine, _release, abort_calls) = ParkedEngine::new();
+        let engine_lifetime = Arc::downgrade(&engine);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+
+        // Exercise the monitor's randomized select order with both signals ready.
+        for _ in 0..REQUESTS {
+            let input = Context::new(make_request(vec![1]));
+            let ctrl = input.context();
+            let mut stream = adapter.generate(input).await.unwrap();
+            assert!(futures::poll!(stream.next()).is_pending());
+            tokio::task::yield_now().await;
+
+            ctrl.stop_generating();
+            drop(stream);
+        }
+        drop(adapter);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while engine_lifetime.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancellation monitors did not finish");
+        assert_eq!(
+            abort_calls.load(Ordering::SeqCst),
+            REQUESTS,
+            "every cancelled request must call engine.abort despite stream teardown"
+        );
+    }
+
     /// Engine that fires the side-channel first-token notify on entry and
     /// then parks, modelling an engine (e.g. TRT-LLM reading an aqueue) that
     /// observes first-token before the main `generate` stream yields anything.

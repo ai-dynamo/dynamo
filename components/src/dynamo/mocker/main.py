@@ -94,18 +94,19 @@ async def worker():
         ):
             local_model_path = await prefetch_model(args.model_path)
 
-        engine_args = load_mocker_engine_args(args)
-        logger.info(
-            "Loaded MockEngineArgs from JSON file"
-            if args.extra_engine_args
-            else "Created MockEngineArgs from CLI arguments"
-        )
-
         # Auto-compute kv_bytes_per_token from model config if not explicitly set
         if args.kv_bytes_per_token is None and args.model_path:
             args.kv_bytes_per_token = compute_kv_bytes_per_token(
                 local_model_path or args.model_path, args.kv_cache_dtype
             )
+
+        engine_args = load_mocker_engine_args(args)
+        logger.info(
+            "Loaded canonical engine config from JSON file"
+            if args.extra_engine_args
+            else "Created canonical engine config from CLI arguments"
+        )
+
         engine_args = apply_worker_engine_args_overrides(
             engine_args, kv_bytes_per_token=args.kv_bytes_per_token
         )
@@ -172,7 +173,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         args.bootstrap_ports_list
         or args.zmq_kv_events_ports_list
         or args.zmq_replay_ports_list
-        or base_engine_args.ais_nextn is not None
+        or base_engine_args["engine"]["aic_nextn"] is not None
     )
 
     # An advertised router config rides in this worker set's model deployment
@@ -217,8 +218,8 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
                     else None
                 ),
                 ais_mtp_seed=(
-                    (base_engine_args.ais_mtp_seed + worker_id) % (1 << 64)
-                    if base_engine_args.ais_nextn is not None
+                    (base_engine_args["engine"]["aic_mtp_seed"] + worker_id) % (1 << 64)
+                    if base_engine_args["engine"]["aic_nextn"] is not None
                     else None
                 ),
             )

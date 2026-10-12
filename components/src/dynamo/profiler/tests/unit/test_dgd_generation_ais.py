@@ -358,10 +358,11 @@ class TestInjectMockerAicArgs:
         engine = build_mocker_engine_args(
             parse_args(_inject_mocker_ais_args(args, spec, pick))
         )
-        assert engine.num_gpu_blocks > 0
-        assert engine.ais_perf_config["tp"] == 2
-        assert engine.ais_perf_config["moe_tp_size"] is None
-        model = RustForwardPassPerfModel.best_available(engine.ais_perf_config)
+        assert engine["engine"]["num_gpu_blocks"] > 0
+        perf_config = engine["engine"]["timing_model"]["config"]
+        assert perf_config["tp"] == 2
+        assert perf_config["moe_tp_size"] is None
+        model = RustForwardPassPerfModel.best_available(perf_config)
         assert model.diagnostics()["readiness"] == "ready"
 
 

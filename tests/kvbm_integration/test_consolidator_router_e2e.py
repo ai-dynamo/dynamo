@@ -25,7 +25,7 @@ import yaml
 
 from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.test_output import resolve_test_output_path
+from tests.utils.output_paths import resolve_test_output_path
 
 # Check if engines are available and build list of available engines
 from .common import check_module_available

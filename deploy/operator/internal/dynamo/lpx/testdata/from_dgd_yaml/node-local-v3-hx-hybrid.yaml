@@ -2,6 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 data:
+  lpu_servers: lpx-${GROVE_PCSG_INDEX}-agt-0
+immutable: true
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+  name: node-local-v3-hx-hybrid-be18-decode-734ce683f6b7ea5f
+  namespace: test
+---
+data:
   nodes_per_partition: "1"
   partition_ids: "1"
   partition_indices: "0"
@@ -192,6 +203,7 @@ spec:
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
+        nvidia.com/extra-resources-hash: 734ce683f6b7ea5f7b0c0172b07d5e1ed45773120ab8c7d834967d180c62cea2
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7e83588247b43a23ee36804263cb03b154bb05e6d07b1e6ba96b4c94c267469d
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
@@ -319,6 +331,9 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
+          - configMap:
+              name: node-local-v3-hx-hybrid-be18-decode-734ce683f6b7ea5f
+            name: config
         replicas: 1
         roleName: cond
         startsAfter:

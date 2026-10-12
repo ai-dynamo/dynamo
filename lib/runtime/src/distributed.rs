@@ -62,6 +62,16 @@ mod unit_tests {
 
     #[tokio::test]
     async fn completed_runtime_initialization_rejects_shutdown_before_http_bind() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::completed_runtime_initialization_rejects_shutdown_before_http_bind"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         use super::{DistributedConfig, DistributedRuntime, Runtime};
         use crate::system_status_server::SystemProbePolicy;
 
@@ -238,14 +248,7 @@ impl DistributedRuntime {
             None => ResponsePlaneMode::configured()?,
         };
 
-        let config = match policy {
-            system_status_server::SystemProbePolicy::Worker => {
-                crate::config::RuntimeConfig::from_settings().unwrap_or_default()
-            }
-            system_status_server::SystemProbePolicy::RuntimeOnly => {
-                crate::config::RuntimeConfig::from_settings()?
-            }
-        };
+        let config = crate::config::RuntimeConfig::from_settings()?;
         let nats_client = match nats_config {
             Some(nc) => Some(
                 nc.connect_with_cancellation(runtime.primary_token())
@@ -846,6 +849,33 @@ impl DistributedRuntime {
     }
 }
 
+#[cfg(test)]
+mod parser_env_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn distributed_runtime_rejects_invalid_parser_version() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::distributed_runtime_rejects_invalid_parser_version"
+            ),
+            &[(
+                crate::config::environment_names::llm::DYN_PARSER_VERSION,
+                "v3",
+            )],
+        ) {
+            return;
+        }
+
+        let runtime = Runtime::from_current().unwrap();
+        let error = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .expect_err("invalid parser configuration must fail runtime construction");
+        assert!(error.to_string().contains("DYN_PARSER_VERSION"));
+    }
+}
+
 /// Selects which discovery backend to use and, for KV store backends, which KV store.
 #[derive(Clone, Debug)]
 pub enum DiscoveryBackend {
@@ -1222,6 +1252,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_disabled() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_drt_uptime_after_delay_system_disabled"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         use crate::config::environment_names::runtime::system as env_system;
         // Test uptime with system status server disabled
         temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
@@ -1249,9 +1289,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_enabled() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_drt_uptime_after_delay_system_enabled"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         use crate::config::environment_names::runtime::system as env_system;
         // Test uptime with system status server enabled
-        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, Some("8081"))], async {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, Some("0"))], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 
