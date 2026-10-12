@@ -74,6 +74,14 @@ export interface Publication {
 
 export const PUBLICATIONS: Publication[] = [
   {
+    title: "Session-Aware Agentic Inference with NVIDIA Dynamo",
+    url: "https://pytorch.org/blog/session-aware-agentic-inference-with-nvidia-dynamo/",
+    partner: "PyTorch",
+    date: "Oct 8, 2026",
+    iso: "2026-10-08",
+    tags: ["Agentic", "Routing"],
+  },
+  {
     title: "Turning GPU-Hours Into Tokens: How Viettel Cloud Serves Multiple LLM Families With NVIDIA Dynamo",
     url: "https://viettelcloud.vn/en/tech-blog/4/142",
     partner: "Viettel Cloud",
