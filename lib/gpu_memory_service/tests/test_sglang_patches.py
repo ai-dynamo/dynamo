@@ -3,6 +3,8 @@
 
 """CPU-only tests for SGLang ModelRunner memory accounting patches."""
 
+import importlib
+import logging
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -83,9 +85,21 @@ def test_patch_model_runner_leaves_baseline_unchanged_without_preload(monkeypatc
 
 
 def test_patch_static_state_for_gms_patches_weight_updater(monkeypatch):
-    weight_updater = pytest.importorskip(
-        "sglang.srt.managers.scheduler_components.weight_updater"
-    )
+    """Replace the installed module's functions without hiding broken imports."""
+    try:
+        weight_updater = importlib.import_module(
+            "sglang.srt.managers.scheduler_components.weight_updater"
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name not in {
+            "sglang",
+            "sglang.srt",
+            "sglang.srt.managers",
+            "sglang.srt.managers.scheduler_components",
+            "sglang.srt.managers.scheduler_components.weight_updater",
+        }:
+            raise
+        pytest.skip(f"SGLang weight_updater is unavailable: {exc.name}")
 
     def original_export(model):
         return {"buffers": ["original"]}
@@ -132,10 +146,19 @@ def _install_fake_sglang(monkeypatch):
     return mixin, original_export
 
 
-def test_patch_static_state_for_gms_falls_back_to_legacy_mixin(monkeypatch):
+@pytest.mark.parametrize("has_components_package", [False, True])
+def test_patch_static_state_for_gms_falls_back_to_legacy_mixin(
+    monkeypatch, has_components_package
+):
+    """Patch the legacy module when either the new package or module is absent."""
     mixin, original_export = _install_fake_sglang(monkeypatch)
-    # A None entry makes the newer weight_updater import raise ImportError.
-    monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler_components", None)
+    components_name = "sglang.srt.managers.scheduler_components"
+    components = None
+    if has_components_package:
+        components = ModuleType(components_name)
+        components.__path__ = []
+    monkeypatch.setitem(sys.modules, components_name, components)
+    monkeypatch.delitem(sys.modules, f"{components_name}.weight_updater", False)
 
     patches.patch_static_state_for_gms()
 
@@ -148,6 +171,7 @@ def test_patch_static_state_for_gms_falls_back_to_legacy_mixin(monkeypatch):
 def test_patch_static_state_for_gms_keeps_weight_updater_dependency_errors(
     monkeypatch, tmp_path, caplog
 ):
+    """Report the missing dependency without patching the legacy module."""
     mixin, original_export = _install_fake_sglang(monkeypatch)
     (tmp_path / "weight_updater.py").write_text("import gms_test_missing_dependency\n")
     components = ModuleType("sglang.srt.managers.scheduler_components")
@@ -155,7 +179,12 @@ def test_patch_static_state_for_gms_keeps_weight_updater_dependency_errors(
     monkeypatch.setitem(sys.modules, components.__name__, components)
     monkeypatch.delitem(sys.modules, f"{components.__name__}.weight_updater", False)
 
-    patches.patch_static_state_for_gms()
+    # Capture directly so SGLang's logger settings cannot hide the warning.
+    monkeypatch.setattr(patches.logger, "disabled", False)
+    monkeypatch.setattr(patches.logger, "propagate", False)
+    monkeypatch.setattr(patches.logger, "handlers", [caplog.handler])
+    with caplog.at_level(logging.WARNING, logger=patches.logger.name):
+        patches.patch_static_state_for_gms()
 
     assert not patches._static_state_patched
     assert mixin._export_static_state is original_export

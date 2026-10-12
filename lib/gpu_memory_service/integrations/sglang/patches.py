@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 from contextlib import contextmanager
 from typing import Optional
@@ -215,8 +216,8 @@ def patch_static_state_for_gms() -> None:
 
     try:
         try:
-            from sglang.srt.managers.scheduler_components import (
-                weight_updater as _mixin,
+            _mixin = importlib.import_module(
+                "sglang.srt.managers.scheduler_components.weight_updater"
             )
         except ModuleNotFoundError as exc:
             # Only a missing new module means an older SGLang layout. Report
