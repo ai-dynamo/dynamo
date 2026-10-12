@@ -156,7 +156,6 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .router_config_override
                     .as_ref()
                     .and_then(|config| config.router_temperature),
-                workers: None,
             },
             max_raw_cached_tokens: Cell::new(request.mode.is_tracked().then_some(0)),
         }
@@ -359,7 +358,7 @@ fn log_selection<C: WorkerConfigLike>(
 #[inline(always)]
 // DefaultWorkerSelector and SelectionService both converge here. Only the scorer/picker stage is
 // dispatched; eligibility outcomes and result construction stay host-owned and shared.
-fn select_worker_with_policy<C: WorkerConfigLike + Sync>(
+fn select_worker_with_policy<C: WorkerConfigLike>(
     worker_type: &'static str,
     state: WorkerSelectionPolicyStateRef<'_>,
     workers: &HashMap<WorkerId, C>,
@@ -383,7 +382,6 @@ fn select_worker_with_policy<C: WorkerConfigLike + Sync>(
 
     let mut input = MaterializedSelectionInput::new(request, block_size);
     input.context.pinned_worker = eligibility.pinned_worker();
-    input.context.workers = Some(workers);
     let selected = match state {
         #[cfg(any(test, feature = "bench"))]
         WorkerSelectionPolicyStateRef::Reference(kv_router_config, picker) => {

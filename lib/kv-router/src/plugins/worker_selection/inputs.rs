@@ -421,3 +421,94 @@ impl<C: WorkerConfigLike + Sync> WorkerTable for HashMap<WorkerId, C> {
         HashMap::get(self, &worker_id).map(|config| config as _)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct AdvertisedConfig {
+        total_kv_blocks: Option<u64>,
+        max_num_batched_tokens: Option<u64>,
+        taints: HashSet<String>,
+        topology_domains: HashMap<String, String>,
+        kv_transfer_domain: Option<String>,
+    }
+
+    impl WorkerConfigLike for AdvertisedConfig {
+        fn data_parallel_start_rank(&self) -> u32 {
+            0
+        }
+
+        fn data_parallel_size(&self) -> u32 {
+            1
+        }
+
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            self.max_num_batched_tokens
+        }
+
+        fn total_kv_blocks(&self) -> Option<u64> {
+            self.total_kv_blocks
+        }
+
+        fn taints(&self) -> &HashSet<String> {
+            &self.taints
+        }
+
+        fn topology_domains(&self) -> Option<&HashMap<String, String>> {
+            Some(&self.topology_domains)
+        }
+
+        fn kv_transfer_domain(&self) -> Option<&str> {
+            self.kv_transfer_domain.as_deref()
+        }
+    }
+
+    #[test]
+    fn worker_metadata_reads_the_worker_table() {
+        let workers: HashMap<WorkerId, AdvertisedConfig> = HashMap::from([
+            (
+                0,
+                AdvertisedConfig {
+                    total_kv_blocks: Some(0),
+                    max_num_batched_tokens: Some(0),
+                    taints: HashSet::new(),
+                    topology_domains: HashMap::new(),
+                    kv_transfer_domain: None,
+                },
+            ),
+            (
+                1,
+                AdvertisedConfig {
+                    total_kv_blocks: Some(4096),
+                    max_num_batched_tokens: Some(8192),
+                    taints: HashSet::from(["b200".to_string()]),
+                    topology_domains: HashMap::from([("rack".to_string(), "r1".to_string())]),
+                    kv_transfer_domain: Some("nvl72-a".to_string()),
+                },
+            ),
+        ]);
+        let metadata = |worker_id| {
+            WorkerTable::get(&workers, worker_id).map(|config| WorkerMetadata { config })
+        };
+
+        let advertised = metadata(1).expect("known worker");
+        assert_eq!(advertised.total_kv_blocks(), Some(4096));
+        assert_eq!(advertised.max_num_batched_tokens(), Some(8192));
+        assert!(advertised.taints().contains("b200"));
+        assert_eq!(
+            advertised
+                .topology_domains()
+                .and_then(|domains| domains.get("rack"))
+                .map(String::as_str),
+            Some("r1")
+        );
+        assert_eq!(advertised.kv_transfer_domain(), Some("nvl72-a"));
+
+        // Advertised zero reads as not advertised.
+        let zero = metadata(0).expect("known worker");
+        assert_eq!(zero.total_kv_blocks(), None);
+        assert_eq!(zero.max_num_batched_tokens(), None);
+        assert!(metadata(9).is_none());
+    }
+}
