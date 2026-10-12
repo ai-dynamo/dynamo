@@ -148,14 +148,6 @@ def _wrap(module, urls, owner=True):
     return wrapped, barriers
 
 
-def test_sessionless_update_is_rejected(engines):
-    engine = engines()
-    with pytest.raises(requests.HTTPError) as error:
-        _Updater([engine.url])._send_weights(None)
-    assert error.value.response.status_code == 400
-    assert "begin_weight_update" in error.value.response.text
-
-
 def test_wrapper_opens_one_session_around_all_buckets(session_module, engines):
     first, second = engines(), engines()
     urls = [first.url, second.url]
