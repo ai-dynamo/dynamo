@@ -22,6 +22,7 @@ from dynamo.common.lora.manager import LoRAInfo  # noqa: E402
 from dynamo.llm import ModelType, WorkerType  # noqa: E402
 from dynamo.vllm import handlers as handlers_mod  # noqa: E402
 from dynamo.vllm.cache_info import DYNAMO_KV_EVENT_BLOCK_SIZE_KEY  # noqa: E402
+from dynamo.vllm.lora_state import RuntimeLoRAInfo  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
@@ -298,6 +299,44 @@ async def test_legacy_unload_unregisters_before_engine_removal(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_admin_unload_rejects_resident_request_time_adapter(monkeypatch):
+    handler = _make_prefill_handler()
+    adapter_key = "dyn-lora-0123456789abcdef0123456789abcdef"
+    handler._lora_state.loaded_loras = {
+        adapter_key: LoRAInfo(id=123, path="/cache/runtime-adapter")
+    }
+    handler._lora_state.runtime_loras = {
+        adapter_key: RuntimeLoRAInfo(
+            adapter_key=adapter_key,
+            full_identity_digest=bytes(32),
+            base_model_name="/models/base",
+            source_revision="immutable-revision",
+            id=123,
+            path="/cache/runtime-adapter",
+        )
+    }
+    handler._engine_loaded_loras = {adapter_key}
+    unregister = AsyncMock()
+    monkeypatch.setattr(handlers_mod, "unregister_model", unregister)
+
+    results = [
+        result async for result in handler.unload_lora({"lora_name": adapter_key})
+    ]
+
+    assert results == [
+        {
+            "status": "error",
+            "message": "'dyn-lora-' names are reserved for request-time adapters",
+        }
+    ]
+    assert adapter_key in handler._lora_state.loaded_loras
+    assert adapter_key in handler._lora_state.runtime_loras
+    assert adapter_key in handler._engine_loaded_loras
+    unregister.assert_not_awaited()
+    handler.engine_client.remove_lora.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_legacy_prefill_unload_skips_engine_removal_for_metadata_only_adapter(
     monkeypatch,
 ):
@@ -403,8 +442,11 @@ async def test_legacy_lora_request_admission_serializes_with_unload(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
+@pytest.mark.parametrize("runtime_lora", [False, True])
 @pytest.mark.parametrize("cancel_cleanup", [False, True])
-async def test_legacy_lora_request_closes_engine_generator_before_drain(cancel_cleanup):
+async def test_lora_request_closes_engine_generator_before_drain(
+    runtime_lora, cancel_cleanup
+):
     handler = _make_prefill_handler()
     handler._lora_state.loaded_loras = {
         "adapterA": LoRAInfo(id=123, path="/cache/adapter")
@@ -412,6 +454,13 @@ async def test_legacy_lora_request_closes_engine_generator_before_drain(cancel_c
     cleanup_started = asyncio.Event()
     allow_cleanup = asyncio.Event()
     engine_generator_closed = asyncio.Event()
+    release = AsyncMock()
+    handler._runtime_lora_coordinator = SimpleNamespace(
+        activate_pending_admission=AsyncMock(
+            return_value=handler._resolve_lora_request("adapterA")
+        ),
+        release_active_admission=release,
+    )
 
     async def _generate(_lora_request):
         try:
@@ -424,6 +473,8 @@ async def test_legacy_lora_request_closes_engine_generator_before_drain(cancel_c
     admission = handler._generate_with_lora_admission_lock(
         handler._resolve_lora_request("adapterA"),
         _generate,
+        request_id="request-1",
+        runtime_lora=runtime_lora,
     )
 
     await anext(admission)
@@ -434,12 +485,13 @@ async def test_legacy_lora_request_closes_engine_generator_before_drain(cancel_c
 
     assert handler._lora_state.active_requests == {"adapterA": 1}
     assert not close_task.done()
-
+    release.assert_not_awaited()
     if cancel_cleanup:
         close_task.cancel()
         await asyncio.sleep(0)
         assert handler._lora_state.active_requests == {"adapterA": 1}
         assert not close_task.done()
+        release.assert_not_awaited()
 
     allow_cleanup.set()
     if cancel_cleanup:
@@ -449,6 +501,10 @@ async def test_legacy_lora_request_closes_engine_generator_before_drain(cancel_c
         await close_task
     assert engine_generator_closed.is_set()
     assert handler._lora_state.active_requests == {}
+    if runtime_lora:
+        release.assert_awaited_once_with("adapterA")
+    else:
+        release.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -572,7 +628,8 @@ async def test_lora_download_allows_other_adapter_admission(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
-async def test_lora_admission_waits_for_pause_and_rejects_when_paused():
+@pytest.mark.parametrize("runtime_lora", [False, True])
+async def test_lora_admission_waits_for_pause_and_rejects_when_paused(runtime_lora):
     handler = _make_prefill_handler()
     handler._lora_state.loaded_loras = {
         "adapterA": LoRAInfo(id=123, path="/cache/adapter")
@@ -580,6 +637,11 @@ async def test_lora_admission_waits_for_pause_and_rejects_when_paused():
     pause_started = asyncio.Event()
     allow_pause = asyncio.Event()
     generation_started = asyncio.Event()
+    activate = AsyncMock(return_value=handler._resolve_lora_request("adapterA"))
+    handler._runtime_lora_coordinator = SimpleNamespace(
+        activate_pending_admission=activate,
+        release_active_admission=AsyncMock(),
+    )
 
     async def _pause_generation(**_kwargs):
         pause_started.set()
@@ -596,6 +658,8 @@ async def test_lora_admission_waits_for_pause_and_rejects_when_paused():
     admission = handler._generate_with_lora_admission_lock(
         handler._resolve_lora_request("adapterA"),
         _generate,
+        request_id="request-1",
+        runtime_lora=runtime_lora,
     )
     admission_task = asyncio.create_task(anext(admission))
     await asyncio.sleep(0)
@@ -611,6 +675,38 @@ async def test_lora_admission_waits_for_pause_and_rejects_when_paused():
 
     assert handler._lora_state.active_requests == {}
     assert not generation_started.is_set()
+    activate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_runtime_lora_active_request_rejects_keep_pause():
+    handler = _make_prefill_handler()
+    handler._lora_state.loaded_loras["adapterA"] = LoRAInfo(
+        id=123, path="/cache/adapter"
+    )
+    lora_request = handler._resolve_lora_request("adapterA")
+    handler._runtime_lora_coordinator = SimpleNamespace(
+        activate_pending_admission=AsyncMock(return_value=lora_request),
+        release_active_admission=AsyncMock(),
+    )
+    handler.engine_client.pause_generation = AsyncMock()
+
+    async def generate(_request):
+        yield SimpleNamespace()
+
+    admission = handler._generate_with_lora_admission_lock(
+        lora_request, generate, request_id="request-1", runtime_lora=True
+    )
+    try:
+        await anext(admission)
+        result = await handler.pause_generation({"mode": "keep"})
+        assert result["status"] == "error"
+        assert "active LoRA requests" in result["message"]
+        handler.engine_client.pause_generation.assert_not_awaited()
+        assert handler._paused is False
+    finally:
+        await admission.aclose()
 
 
 @pytest.mark.asyncio

@@ -79,7 +79,7 @@ def _handler_with_responses(responses):
     # These delta-streaming tests exercise base-model requests only. Model the
     # no-LoRA branch without constructing the full legacy worker handler.
     handler._generate_with_lora_admission_lock = (
-        lambda lora_request, create_generator: create_generator(lora_request)
+        lambda lora_request, create_generator, **_kwargs: create_generator(lora_request)
     )
     return handler
 
