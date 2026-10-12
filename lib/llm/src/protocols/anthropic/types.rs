@@ -59,6 +59,7 @@ fn system_message_content(content: &AnthropicMessageContent) -> String {
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
+    /// Converts an Anthropic request to chat format, treating empty tools as omitted.
     fn try_from(req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
         let mut messages = Vec::new();
 
@@ -1191,6 +1192,7 @@ mod tests {
         }
     }
 
+    /// Preserves tool definitions and accepts an empty Anthropic tool list after conversion.
     #[test]
     fn test_tools_conversion() {
         let req = AnthropicCreateMessageRequest {
