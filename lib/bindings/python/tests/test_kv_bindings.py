@@ -203,6 +203,32 @@ def test_radix_tree_thread_safety(
     ), f"Expected {expected_blocks_after_removal} block events after removal, got {len(blocks_after_removal)}"
 
 
+@pytest.mark.timeout(5)
+def test_radix_tree_apply_event_errors():
+    """Failures in the RadixTree worker thread surface as Python exceptions."""
+    import json
+
+    radix_tree = RadixTree()
+
+    with pytest.raises(ValueError, match="Failed to deserialize KvCacheEvent"):
+        radix_tree.apply_event(0, b"not a kv cache event")
+
+    orphan_store = {
+        "event_id": 1,
+        "data": {
+            "stored": {
+                "parent_hash": 12345,
+                "blocks": [{"block_hash": 1, "tokens_hash": 1}],
+            }
+        },
+    }
+    with pytest.raises(RuntimeError, match="Failed to apply event"):
+        radix_tree.apply_event(0, json.dumps(orphan_store).encode("utf-8"))
+
+    # The worker is still serving requests after both failures.
+    assert radix_tree.find_matches([1]).scores == {}
+
+
 _RADIX_TREE_EXIT_DURING_CALL = """
 import json
 import sys
