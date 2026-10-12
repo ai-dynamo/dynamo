@@ -114,8 +114,7 @@ class VersionWriterHook(BuildHookInterface):
             components
         )
         if not git_commit:
-            # Warn rather than fail: `uv build` / `python -m build` build the wheel
-            # from the unpacked sdist, so a CI-only failure here would break them.
+            # Warn, not fail: `uv build` builds the wheel from the unpacked sdist.
             # The wheel-smoke test fails CI when a published wheel has no commit.
             self.app.display_warning(
                 f"Could not determine the source commit: set {GIT_COMMIT_ENV} or "

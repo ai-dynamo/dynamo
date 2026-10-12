@@ -647,10 +647,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
 {% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
-# Build ai-dynamo (pure Python) wheel. The build context excludes .git, so pass
-# the source commit to hatch_build.py, which records it as __git_commit__.
-# Declared after the maturin build so a new commit does not invalidate the Rust
-# build layer.
+# Build ai-dynamo (pure Python) wheel; the context excludes .git, so pass the commit.
+# Declared after the maturin build so a new commit keeps the Rust layer cached.
 ARG DYNAMO_COMMIT_SHA
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
