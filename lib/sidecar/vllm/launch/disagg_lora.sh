@@ -35,6 +35,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to both managed vLLM engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                           Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  LORA_NAME                       Example adapter (default: codelion/Qwen3-0.6B-accuracy-recovery-lora)"
             echo "  MAX_LORAS                       GPU-resident adapter capacity (default: 4)"
@@ -63,6 +64,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar vllm SIDECAR_CMD
 
 KV_EVENT_DIR=""
 if [[ -z "${VLLM_PREFILL_KV_EVENT_ENDPOINT:-}" ]]; then
@@ -171,12 +174,12 @@ vllm-rs serve "$MODEL" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_DECODE_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_PREFILL_GRPC_PORT}" \
     --component prefill \
     --disaggregation-mode prefill &
