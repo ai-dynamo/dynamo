@@ -11,11 +11,12 @@ import ipaddress
 import math
 import re
 import socket
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -23,9 +24,9 @@ import opendal
 from aiohttp.abc import AbstractResolver
 from yarl import URL
 
-try:
+if sys.version_info >= (3, 11):
     from asyncio import timeout as _timeout
-except ImportError:
+else:
     from async_timeout import timeout as _timeout
 
 MAX_SINGLE_PUT_BYTES = 64 * 1024 * 1024
@@ -287,7 +288,9 @@ class _PolicyResolver(AbstractResolver):
         self.delegate = aiohttp.ThreadedResolver()
 
     async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET):
-        records = await self.delegate.resolve(host, port, family)
+        records = await self.delegate.resolve(
+            host, port, cast(socket.AddressFamily, family)
+        )
         if not records:
             raise ArtifactStorageError(
                 "destination_denied", "destination has no allowed address"
