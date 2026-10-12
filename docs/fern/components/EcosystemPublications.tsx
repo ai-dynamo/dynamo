@@ -18,6 +18,8 @@
  * Card styles live in PublicationsStyles.tsx, shared with ResearchPublications;
  * a page rendering this must render <BlogStyles /> and <PublicationsStyles />.
  */
+"use client";
+
 import { useState } from "react";
 import {
   PUBLICATIONS,
