@@ -24,6 +24,10 @@ A PMIX_HOSTNAME that is already set is left alone, even when it is too long.
 This runs in every Python process, so it imports nothing beyond os unless it
 has to set the name.
 
+components/src/dynamo/trtllm/mpi_hostname.py applies the same rule when
+dynamo.trtllm is imported, for images that do not install this hook. Keep the
+two rules identical and remove them together.
+
 Remove this module, its install step in trtllm_runtime.Dockerfile and its
 tests in tests/dependencies/test_trtllm_mpi.py when the image's Open MPI has
 the upstream fix, open-mpi/ompi#14398 (v5.0.x backport: open-mpi/ompi#14409).

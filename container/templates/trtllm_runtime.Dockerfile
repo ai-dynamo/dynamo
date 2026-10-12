@@ -147,7 +147,8 @@ RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
 #   When the base image's /opt/hpcx/VERSION names a later HPC-X, run a spawn
 #   with a 46-character hostname (docker run --hostname) in an image without
 #   the hook. If it passes, delete the hook, its install step here, and its
-#   tests in tests/dependencies/test_trtllm_mpi.py. Tracked in
+#   tests in tests/dependencies/test_trtllm_mpi.py, together with its
+#   in-package copy, components/src/dynamo/trtllm/mpi_hostname.py. Tracked in
 #   NVIDIA/TensorRT-LLM#19607.
 # - The amd64 ompi4 selection, the ENV entries and the test's per-architecture
 #   expectation. Delete them only when ompi5 spawns on amd64 without the hook,
