@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -884,6 +885,7 @@ def nsys_report(path, activity="cpu", processes=1):
 async def test_nsys_repeated_client_capture_without_subprocess(tmp_path, monkeypatch):
     pending = []
     handles = []
+    loop = asyncio.get_running_loop()
     prefix = str(tmp_path / "frontend")
 
     def begin(**kwargs):
@@ -901,7 +903,8 @@ async def test_nsys_repeated_client_capture_without_subprocess(tmp_path, monkeyp
             if len(handles) == 1:
                 nsys_report(tmp_path / "frontend-other.1.nsys-rep")
 
-        pending.append(asyncio.create_task(export()))
+        # Range transitions run in a worker thread; schedule on the loop.
+        loop.call_soon_threadsafe(lambda: pending.append(asyncio.create_task(export())))
 
     async def forbidden(*args, **kwargs):
         raise AssertionError("Nsight runtime control cannot invoke subprocesses")
@@ -1401,3 +1404,56 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
     assert summary["coverage"]["native_timeline"]["frontend"]["status"] == "excluded"
     recordings = {e["name"] for e in events if e.get("cat") == "capture"}
     assert recordings == {"frontend recording", "decode-0 recording"}
+
+
+@pytest.mark.asyncio
+async def test_slow_frontend_range_end_does_not_delay_worker_stop(
+    tmp_path, monkeypatch
+):
+    ended, stopped = [], []
+
+    def end_range(handle):
+        time.sleep(0.3)  # Nsight blocking while it ends the capture range
+        ended.append(time.monotonic())
+
+    monkeypatch.setattr(
+        nsys,
+        "nvtx",
+        SimpleNamespace(start_range=lambda **kw: object(), end_range=end_range),
+    )
+    monkeypatch.setattr(nsys, "process_epoch", lambda pid: "epoch")
+    worker = SimpleNamespace(
+        evidence={"target_id": "decode-0", "collector": "torch_profiler"},
+        start=AsyncMock(),
+        stop=AsyncMock(side_effect=lambda: stopped.append(time.monotonic())),
+    )
+    runtime = RuntimeSnapshot(
+        os.getpid(), "epoch", "host", [Worker("decode-0", "epoch", "vllm", "http://w")]
+    )
+    registry = CollectorRegistry()
+    registry.register(
+        "nsys",
+        lambda config, runtime, plan, directory: [
+            nsys.NsysFrontendCollector(runtime, str(tmp_path / "frontend")),
+            worker,
+        ],
+    )
+    controller = Coordinator(
+        Config("unused", str(tmp_path / "sessions")),
+        runtime,
+        registry=registry,
+        artifact_validator=SimpleNamespace(
+            validate=AsyncMock(return_value={"status": "verified"})
+        ),
+    )
+    session = controller.submit(
+        Plan(
+            "slow-end",
+            [Target("frontend", "epoch"), Target("decode-0", "epoch")],
+            50,
+            mode="nsys",
+        )
+    )
+    await asyncio.wait_for(session.task, 5)
+    assert session.state == "completed", session.errors
+    assert stopped and ended and stopped[0] < ended[0]

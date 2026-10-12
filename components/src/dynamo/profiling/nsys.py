@@ -75,13 +75,18 @@ class NsysFrontendCollector:
         ):
             raise CollectionError("NVTX frontend capture requires an embedded host")
         prepare_reports(self.evidence)
-        self.range_handle = nvtx.start_range(message="ROI", domain="app")
+        # Nsight can block range transitions while it starts or ends a capture;
+        # keep that off the serving loop so worker controls are not delayed.
+        self.evidence["start_requested_at_ns"] = time.time_ns()
+        self.range_handle = await asyncio.to_thread(
+            nvtx.start_range, message="ROI", domain="app"
+        )
         self.evidence.update(started_at_ns=time.time_ns(), coverage="recording")
 
     async def stop(self) -> None:
         if self.range_handle is not None:
             self.evidence["stop_requested_at_ns"] = time.time_ns()
-            nvtx.end_range(self.range_handle)
+            await asyncio.to_thread(nvtx.end_range, self.range_handle)
             self.range_handle = None
             self.evidence.update(
                 stopped_at_ns=time.time_ns(), coverage="export_pending"
