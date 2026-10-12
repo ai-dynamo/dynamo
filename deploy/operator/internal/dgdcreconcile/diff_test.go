@@ -49,19 +49,20 @@ func createIDs(a Actions) []string {
 
 func TestComputeActions(t *testing.T) {
 	tests := []struct {
-		name        string
-		desired     []DesiredCandidate
-		current     []CurrentDGDC
-		wantCreates []string
-		wantDeletes []string
+		name           string
+		desired        []DesiredCandidate
+		current        []CurrentDGDC
+		wantCreates    []string
+		wantIncomplete []string
+		wantDeletes    []string
 	}{
-		{"empty both", nil, nil, nil, nil},
-		{"all new", d("a", "b"), nil, []string{"a", "b"}, nil},
-		{"all gone", nil, c("n-a", "a", "n-b", "b"), nil, []string{"n-a", "n-b"}},
-		{"steady state needs no action", d("a", "b"), c("n-a", "a", "n-b", "b"), nil, nil},
-		{"reordering desired needs no action", d("b", "a"), c("n-a", "a", "n-b", "b"), nil, nil},
-		{"incomplete DGDC is ensured again", d("a", "b"), []CurrentDGDC{{Name: "n-a", ID: "a"}, {Name: "n-b", ID: "b", Incomplete: true}}, []string{"b"}, nil},
-		{"mixed", d("a", "c"), c("n-a", "a", "n-b", "b"), []string{"c"}, []string{"n-b"}},
+		{"empty both", nil, nil, nil, nil, nil},
+		{"all new", d("a", "b"), nil, []string{"a", "b"}, nil, nil},
+		{"all gone", nil, c("n-a", "a", "n-b", "b"), nil, nil, []string{"n-a", "n-b"}},
+		{"steady state needs no action", d("a", "b"), c("n-a", "a", "n-b", "b"), nil, nil, nil},
+		{"reordering desired needs no action", d("b", "a"), c("n-a", "a", "n-b", "b"), nil, nil, nil},
+		{"incomplete DGDC gets its status finished, not a new spec", d("a", "b"), []CurrentDGDC{{Name: "n-a", ID: "a"}, {Name: "n-b", ID: "b", Incomplete: true}}, nil, []string{"b"}, nil},
+		{"mixed", d("a", "c"), c("n-a", "a", "n-b", "b"), []string{"c"}, nil, []string{"n-b"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,6 +72,13 @@ func TestComputeActions(t *testing.T) {
 			}
 			if !reflect.DeepEqual(createIDs(got), tc.wantCreates) {
 				t.Errorf("creates = %v, want %v", createIDs(got), tc.wantCreates)
+			}
+			var gotIncomplete []string
+			for _, x := range got.Incomplete {
+				gotIncomplete = append(gotIncomplete, x.ID)
+			}
+			if !reflect.DeepEqual(gotIncomplete, tc.wantIncomplete) {
+				t.Errorf("incomplete = %v, want %v", gotIncomplete, tc.wantIncomplete)
 			}
 			if !reflect.DeepEqual(got.Deletes, tc.wantDeletes) {
 				t.Errorf("deletes = %v, want %v", got.Deletes, tc.wantDeletes)
