@@ -705,3 +705,17 @@ def test_describe_error_detail_bounds_from_both_ends() -> None:
     assert label.startswith("head-of-the-message")
     assert label.endswith("tail-of-the-message")
     assert str(len(detail)) in label  # true size stays visible
+
+
+def test_describe_error_detail_redacts_a_presigned_url_in_the_text() -> None:
+    signature = "0123456789abcdef" * 16
+    url = (
+        "https://bucket.s3.amazonaws.com/clip.wav?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        f"&X-Amz-Expires=900&X-Amz-Signature={signature}"
+    )
+    for detail in (url, f"Invalid URL: '{url}'", f"Bad request to {url} (closed)"):
+        label = describe_error_detail(detail)
+
+        assert signature not in label
+        assert "X-Amz" not in label
+        assert "bucket.s3.amazonaws.com/clip.wav" in label

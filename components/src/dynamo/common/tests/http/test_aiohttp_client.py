@@ -184,6 +184,34 @@ async def test_fetch_bytes_maps_connection_error() -> None:
         await client.fetch_bytes("https://h/x", 30.0)
 
 
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        lambda url: aiohttp.InvalidURL(url),
+        lambda url: aiohttp.ClientConnectionError(f"Cannot connect to {url}"),
+    ],
+    ids=["client_error", "connection_error"],
+)
+async def test_fetch_bytes_error_keeps_a_presigned_url_out(exc_factory) -> None:
+    """aiohttp errors can quote the request URL; its signature must not reach
+    the error that is logged and returned to the client."""
+    signature = "0123456789abcdef" * 16
+    url = (
+        "https://bucket.s3.amazonaws.com/img.png?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        f"&X-Amz-Expires=900&X-Amz-Signature={signature}"
+    )
+    session = MagicMock(spec=aiohttp.ClientSession)
+    session.closed = False
+    session.get = _cm_raising(lambda: exc_factory(url))
+    client = _make_client_with_session(session)
+    with pytest.raises(mm_http.HttpConnectionError) as exc:
+        await client.fetch_bytes(url, 30.0)
+    # The bounded error text keeps both of its ends, so check for any fragment
+    # of the signature, not only the whole of it.
+    assert "0123456789abcdef" not in str(exc.value)
+    assert "X-Amz-Signature" not in str(exc.value)
+
+
 async def test_redirect_resolved_through_policy_path() -> None:
     """302 → absolute next URL is parsed correctly when the SSRF policy
     drives the redirect loop. Verifies relative-Location resolution

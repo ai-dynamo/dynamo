@@ -18,6 +18,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import re
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -155,6 +156,11 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     return source
 
 
+# A URL embedded in free text: a scheme, then everything up to whitespace, a
+# quote or a closing bracket (how exception messages delimit a URL).
+_URL_IN_TEXT: Final = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>)\]]+")
+
+
 def describe_error_detail(detail: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     """Bound a backend exception's text, keeping both ends.
 
@@ -162,9 +168,15 @@ def describe_error_detail(detail: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     end: aiohttp renders the client-supplied host *before* the errno, so a
     head-only truncation would keep the attacker's string and drop the
     diagnosis.
+
+    Any URL inside the text is first rendered with :func:`describe_media_source`.
+    Some exceptions (an invalid URL, for one) quote the full request URL, and
+    keeping the end of the text would otherwise keep the end of a presigned
+    URL: its signature.
     """
     if not isinstance(detail, str):
         return "<non-string error detail>"
+    detail = _URL_IN_TEXT.sub(lambda match: describe_media_source(match[0]), detail)
     if len(detail) <= limit:
         return detail
     # The marker comes out of the budget, not on top of it: a caller that sizes

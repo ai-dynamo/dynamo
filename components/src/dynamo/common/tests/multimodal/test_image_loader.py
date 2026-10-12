@@ -1353,9 +1353,12 @@ async def test_load_image_failure_keeps_signed_url_out(
     loader: ImageLoader, fetch: AsyncMock, caplog
 ) -> None:
     url = _SIGNED_URL.format(name="img.png")
-    with patch(_FETCH_BYTES_PATH, fetch), caplog.at_level(logging.DEBUG):
-        with pytest.raises((HttpStatusError, ValueError)) as exc_info:
-            await loader.load_image(url)
+    with (
+        patch(_FETCH_BYTES_PATH, fetch),
+        caplog.at_level(logging.DEBUG),
+        pytest.raises((HttpStatusError, ValueError)) as exc_info,
+    ):
+        await loader.load_image(url)
 
     assert _SIGNATURE not in str(exc_info.value)
     assert _SIGNATURE not in caplog.text
