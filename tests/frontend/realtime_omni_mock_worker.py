@@ -77,7 +77,14 @@ class _MockAsyncOmni:
 
 
 async def main() -> None:
-    runtime = DistributedRuntime(asyncio.get_running_loop(), "file", "tcp")
+    # event_plane="zmq" must be passed explicitly (not just via DYN_EVENT_PLANE):
+    # the runtime's NATS gating only treats the event plane as "no nats" when the
+    # event_plane argument is set, so an ambient NATS_SERVER (as in CI) would
+    # otherwise force a NATS connection that retries for up to 120s before the
+    # worker registers.
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
+    )
     endpoint = runtime.endpoint(ENDPOINT_PATH)
     handler = RealtimeOmniHandler(
         engine_client=_MockAsyncOmni(),
