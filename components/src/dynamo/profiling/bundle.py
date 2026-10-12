@@ -452,7 +452,12 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
                 start, end = event.pop("start_ns"), event.pop("end_ns")
                 for low, high, timeline in windows[target]:
                     if start < high and max(end, start + 1) > low:
-                        label = f"{target} · {names.get(key, 'native')} ({labels.get(key, event.get('pid'))})"
+                        # Kineto keeps profiler bookkeeping in unnamed pseudo-processes.
+                        label = (
+                            f"{target} · {names[key]} ({labels.get(key, event.get('pid'))})"
+                            if key in names
+                            else f"{target} · Kineto profiler ({event.get('pid')})"
+                        )
                         group = (
                             timeline.groups.get(target, 3) * 1000
                             + 100
