@@ -41,11 +41,8 @@ pytestmark = [
 ]
 
 
-# Interpreter start-up and the planner imports (scikit-learn, SciPy, kubernetes) dominate the
-# child's run time. They take about 2 s on an idle host but more than 25 s when the CPU is
-# heavily contended, while the scenario itself takes about 1-2 s. The child bounds the scenario
-# and teardown with its own watchdog, armed after imports, so a real hang still fails at the
-# old 30 s budget with every thread's stack. The parent budget only has to cover slow start-up.
+# The child's own watchdog bounds the scenario after imports; the parent budget also covers
+# interpreter and planner-import start-up, which can exceed 25 s on a contended CPU.
 _SCENARIO_TIMEOUT_S = 30
 _CHILD_TIMEOUT_S = 120
 
