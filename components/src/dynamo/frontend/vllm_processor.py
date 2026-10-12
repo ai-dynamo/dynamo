@@ -45,6 +45,7 @@ from dynamo.llm.exceptions import HttpError
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
 from .utils import (
     as_error_envelope,
@@ -412,19 +413,6 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     if type(context_length) is not int or context_length <= 0:
         return None
     return context_length
-
-
-def _runtime_config_structural_tag_options(
-    mdc: ModelDeploymentCard,
-) -> tuple[str, str, str]:
-    runtime_config = mdc.runtime_config()
-    if not isinstance(runtime_config, dict):
-        return "off", "auto", "auto"
-    return (
-        runtime_config.get("structural_tag_mode", "off"),
-        runtime_config.get("structural_tag_scope", "auto"),
-        runtime_config.get("structural_tag_schema", "auto"),
-    )
 
 
 def _ensure_chat_template(
@@ -1600,11 +1588,33 @@ class EngineFactory:
         else:
             reasoning_parser_class = None
         default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
+        runtime_config = mdc.runtime_config()
         (
             structural_tag_mode,
             structural_tag_scope,
             structural_tag_schema,
-        ) = _runtime_config_structural_tag_options(mdc)
+        ) = runtime_structural_tag_options(runtime_config)
+        structural_tag = (
+            runtime_config.get("structural_tag")
+            if isinstance(runtime_config, dict)
+            else None
+        )
+        if isinstance(structural_tag, dict):
+            unsupported_options = [
+                name
+                for name, default in (
+                    ("allow_tool_calls_with_structured_output", False),
+                    ("exclude_special_tokens", None),
+                    ("reasoning_boundary", "auto"),
+                    ("tool_arguments_any_order", False),
+                )
+                if structural_tag.get(name, default) != default
+            ]
+            if unsupported_options:
+                logger.warning(
+                    "vLLM chat processor ignores unsupported structural-tag option(s): %s",
+                    ", ".join(unsupported_options),
+                )
 
         block_size = self.config.kv_cache_block_size or 16
 

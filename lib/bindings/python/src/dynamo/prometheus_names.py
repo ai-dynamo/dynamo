@@ -191,6 +191,9 @@ class frontend_service:
     # Active prefill tokens per worker
     # Gauge metric tracking current queued prefill tokens for each worker
     WORKER_ACTIVE_PREFILL_TOKENS = "worker_active_prefill_tokens"
+    # Active requests booked per worker, labeled by request phase
+    # Gauge metric split into `prefill` (not yet marked prefill-complete) and `decode`
+    WORKER_ACTIVE_REQUESTS = "worker_active_requests"
     # Last observed time to first token per worker (in seconds)
     # Gauge metric tracking the most recent TTFT for each worker
     WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS = "worker_last_time_to_first_token_seconds"
@@ -396,6 +399,10 @@ class labels:
     MODEL_NAME = "model_name"
     # Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     WORKER_TYPE = "worker_type"
+    # Label for where a booked request is in its lifecycle: "prefill" until it is
+    # marked prefill-complete, "decode" after. Distinct from `phase`, which names
+    # the serving leg ("aggregated", "prefill", "decode").
+    REQUEST_PHASE = "request_phase"
     # Label for router instance (discovery.instance_id() of the frontend)
     ROUTER_ID = "router_id"
 

@@ -124,6 +124,7 @@ fn load_test_data(file_path: &str) -> TestData {
                 nvext: None,
                 prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             };
 
             Annotated {
@@ -1434,6 +1435,7 @@ mod tests {
                 nvext: None,
                 prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
             event: None,
             comment: None,
@@ -2204,6 +2206,7 @@ fn make_glm47_chunk(
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }),
         event: None,
         comment: None,
@@ -2427,6 +2430,7 @@ fn deepseek_v4_partial_invoke_chunk() -> Annotated<NvCreateChatCompletionStreamR
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }),
         event: None,
         comment: None,

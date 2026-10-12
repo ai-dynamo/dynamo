@@ -59,6 +59,8 @@ pub type PotentialLoadMaps = (
 pub(super) struct WorkerLoadSnapshot {
     pub(super) active_blocks: usize,
     pub(super) active_requests: usize,
+    /// Requests not yet marked prefill-complete; the rest are decoding.
+    pub(super) prefill_requests: usize,
     pub(super) prefill: PrefillLoadSnapshot,
 }
 
@@ -442,6 +444,7 @@ mod tests {
         WorkerLoadSnapshot {
             active_blocks,
             active_requests: 0,
+            prefill_requests: 0,
             prefill: PrefillLoadSnapshot::default(),
         }
     }
@@ -456,6 +459,7 @@ mod tests {
         WorkerLoadSnapshot {
             active_blocks,
             active_requests: 0,
+            prefill_requests: 0,
             prefill: PrefillLoadSnapshot {
                 prefill_full_tokens_sum,
                 anchored_prefill: Some(AnchoredPrefillSnapshot {
