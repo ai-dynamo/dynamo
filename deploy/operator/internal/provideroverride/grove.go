@@ -230,7 +230,7 @@ func validateOverrideIdentity(
 	// Only the complete component owns a rolling-update budget.
 	if scope != ScopeComponent {
 		if _, exists := GroveMaxUnavailable(override.Value.Raw); exists {
-			return fmt.Errorf("rollingUpdate is supported only at component scope; member cliques use the owning scaling group's budget")
+			return fmt.Errorf("rollingUpdate is supported only at component scope; member cliques use the owning component's rollingUpdate budget")
 		}
 	}
 

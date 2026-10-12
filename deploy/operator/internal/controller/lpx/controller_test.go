@@ -4435,3 +4435,101 @@ func TestLPXScalingWaitsForCachedConfigurationAndCoherentCompletion(t *testing.T
 		})
 	}
 }
+
+func TestLPXRolloutBudgetEditsPreservePodCliqueSetAndRequests(t *testing.T) {
+	for _, strategy := range []grovev1alpha1.UpdateStrategyType{grovev1alpha1.RollingRecreateStrategy, grovev1alpha1.CoherentStrategy} {
+		t.Run(string(strategy), func(t *testing.T) {
+			ctx := t.Context()
+			t.Log("Publish a workload with a two-replica seed and three live replicas")
+			_, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			component := dgd.GetComponentByName("lpx")
+			component.Replicas = ptr.To(int32(3))
+			component.MinAvailable = nil
+			component.ProviderOverride = &v1beta1.ProviderOverride{APIVersion: "grove.io/v1alpha1", Target: "PodCliqueScalingGroupConfig", Value: apiextensionsv1.JSON{Raw: []byte(`{"minAvailable":2}`)}}
+			if dgd.Annotations == nil {
+				dgd.Annotations = map[string]string{}
+			}
+			dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = string(strategy)
+			child := newLPXTestDeployment(t, dgd)
+			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+			createLPXTestObjects(t, ctx, r.Client, objects...)
+			publishSelectedLPXForTest(t, ctx, r, child, selected)
+			pcs := observedLPXTestPodCliqueSet(t, ctx, r, child, selected)
+			initialTemplates := pcs.Spec.Template.DeepCopy()
+			requests, err := r.getPipelineRequests(ctx, pcs)
+			require.NoError(t, err)
+			require.NotEmpty(t, requests)
+			expectedDefault := int32(1)
+			if strategy == grovev1alpha1.CoherentStrategy {
+				expectedDefault = 2
+			}
+			requestWrites := 0
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				Create: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+					if _, ok := object.(*lpxv1alpha1.LPUPipelineRequest); ok {
+						requestWrites++
+					}
+					return delegated.Create(ctx, object, opts...)
+				},
+				Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+					if _, ok := object.(*lpxv1alpha1.LPUPipelineRequest); ok {
+						requestWrites++
+					}
+					return delegated.Delete(ctx, object, opts...)
+				},
+				Update: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
+					if _, ok := object.(*lpxv1alpha1.LPUPipelineRequest); ok {
+						requestWrites++
+					}
+					if desired, ok := object.(*grovev1alpha1.PodCliqueSet); ok {
+						// Model Grove's defaulted response without reproducing its validation.
+						for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
+							group := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]
+							if group.RollingUpdate == nil {
+								group.RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(expectedDefault)}
+							}
+						}
+					}
+					return delegated.Update(ctx, object, opts...)
+				},
+			})
+			pcsUID := pcs.UID
+			key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+			for _, step := range []struct {
+				name, fragment string
+				want           int32
+			}{
+				{name: "add a budget above the template seed", fragment: `{"minAvailable":2,"rollingUpdate":{"maxUnavailable":4}}`, want: 4},
+				{name: "change an existing budget", fragment: `{"minAvailable":2,"rollingUpdate":{"maxUnavailable":3}}`, want: 3},
+				{name: "remove the budget while retaining the minimum", fragment: `{"minAvailable":2}`, want: expectedDefault},
+			} {
+				t.Log(step.name)
+				previousRevision := child.Spec.InputRevision
+				component.ProviderOverride.Value.Raw = []byte(step.fragment)
+				updateTestDGD(t, r, child, dgd)
+				require.NotEqual(t, previousRevision, child.Spec.InputRevision)
+				for range 2 {
+					result, err := r.Reconcile(ctx, key)
+					require.NoError(t, err)
+					require.Zero(t, result)
+				}
+				current, err := getPodCliqueSet(ctx, r.Client, child)
+				require.NoError(t, err)
+				require.NotNil(t, current)
+				require.Equal(t, pcsUID, current.UID)
+				require.True(t, current.DeletionTimestamp.IsZero())
+				require.Equal(t, step.want, *current.Spec.Template.PodCliqueScalingGroupConfigs[0].RollingUpdate.MaxUnavailable)
+				templates := current.Spec.Template.DeepCopy()
+				for i := range templates.PodCliqueScalingGroupConfigs {
+					templates.PodCliqueScalingGroupConfigs[i].RollingUpdate = nil
+				}
+				require.Equal(t, initialTemplates, templates)
+				retained, err := r.getPipelineRequests(ctx, current)
+				require.NoError(t, err)
+				require.Equal(t, requests, retained)
+				require.Zero(t, requestWrites, "policy changes preserve all published scheduler requests")
+			}
+		})
+	}
+}

@@ -223,25 +223,21 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
-	// Coherent can consume the whole component even with the conservative default of one.
-	if options.grovePathway && options.groveUpdateStrategy == grovev1alpha1.CoherentStrategy && len(allErrs) == 0 && !(spec.IsLPX() && (spec.Replicas == nil || spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil)) {
+	// Explicit RollingRecreate budgets introduce outage risk beyond its established default.
+	warnForStrategy := options.groveUpdateStrategy == grovev1alpha1.CoherentStrategy
+	if options.groveUpdateStrategy == grovev1alpha1.RollingRecreateStrategy && spec.ProviderOverride != nil {
+		_, warnForStrategy = provideroverride.GroveMaxUnavailable(spec.ProviderOverride.Value.Raw)
+	}
+
+	// Warn for complete-component disruption only when admission knows the serving capacity.
+	if options.grovePathway && warnForStrategy && len(allErrs) == 0 && !(spec.IsLPX() && (spec.Replicas == nil || spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil)) {
 		replicas := k8sptr.Deref(spec.Replicas, 1)
 		minimum := provideroverride.EffectiveGroveMinAvailable(spec)
-		budget := minimum
-		if spec.ProviderOverride != nil {
-			if configured, exists := provideroverride.GroveMaxUnavailable(spec.ProviderOverride.Value.Raw); exists {
-				budget = configured
-			}
-		}
+		budget := provideroverride.EffectiveGroveMaxUnavailable(spec, options.groveUpdateStrategy)
 		old := options.oldComponent
 		relevantChange := old == nil || options.groveStrategyChanged
 		if old != nil {
-			oldBudget := provideroverride.EffectiveGroveMinAvailable(old)
-			if old.ProviderOverride != nil {
-				if configured, exists := provideroverride.GroveMaxUnavailable(old.ProviderOverride.Value.Raw); exists {
-					oldBudget = configured
-				}
-			}
+			oldBudget := provideroverride.EffectiveGroveMaxUnavailable(old, options.groveUpdateStrategy)
 			oldReplicas := k8sptr.Deref(old.Replicas, 1)
 			// Replica-only edits warn when they introduce full-component disruption risk.
 			replicaRiskIntroduced := oldReplicas != replicas && (oldReplicas <= 0 || oldBudget < oldReplicas)
@@ -249,7 +245,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				!apiequality.Semantic.DeepEqual(old.PodTemplate, spec.PodTemplate) || !apiequality.Semantic.DeepEqual(old.Roles, spec.Roles)
 		}
 		if relevantChange && replicas > 0 && budget >= replicas && minimum > 0 {
-			v.warnf("%s (%q): Coherent updates may temporarily make this entire component unavailable (replicas=%d, minAvailable=%d, maxUnavailable=%d); provision spare serving capacity before updating", fldPath.String(), spec.ComponentName, replicas, minimum, budget)
+			if options.groveUpdateStrategy == grovev1alpha1.CoherentStrategy {
+				v.warnf("%s (%q): Coherent updates may temporarily make this entire component unavailable (replicas=%d, minAvailable=%d, maxUnavailable=%d); provision spare serving capacity before updating", fldPath.String(), spec.ComponentName, replicas, minimum, budget)
+			} else {
+				v.warnf("%s (%q): RollingRecreate updates may temporarily make this entire component unavailable (replicas=%d, maxUnavailable=%d); provision spare serving capacity before updating", fldPath.String(), spec.ComponentName, replicas, budget)
+			}
 		}
 	}
 

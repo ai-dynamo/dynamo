@@ -340,7 +340,8 @@ func validateComponentValue(root map[string]json.RawMessage, target string) []Va
 
 	// Keep sparse topology-only fragments valid, but reject empty fragments.
 	_, hasAvailability := root[availabilityKey]
-	if _, topology := root["topologyConstraint"]; !topology && !hasAvailability && root["rollingUpdate"] == nil {
+	_, hasRollingUpdate := root["rollingUpdate"]
+	if _, topology := root["topologyConstraint"]; !topology && !hasAvailability && !hasRollingUpdate {
 		errs = append(errs, ValueError{Path: "topologyConstraint", Detail: "topologyConstraint, minAvailable or rollingUpdate is required"})
 	}
 	// Validate maxUnavailable independently from the optional minimum and topology.
@@ -381,19 +382,4 @@ func validateComponentValue(root map[string]json.RawMessage, target string) []Va
 		errs = append(errs, ValueError{Path: availabilityPath, Detail: "must be a positive 32-bit integer"})
 	}
 	return errs
-}
-
-// GroveMaxUnavailable returns the configured budget, if present and well-formed.
-// Shape and value errors are reported by ValidateValue.
-func GroveMaxUnavailable(raw []byte) (int32, bool) {
-	// Decode only the supported knob without modifying the raw provider fragment.
-	var value struct {
-		RollingUpdate *struct {
-			MaxUnavailable *int32 `json:"maxUnavailable"`
-		} `json:"rollingUpdate"`
-	}
-	if err := json.Unmarshal(raw, &value); err != nil || value.RollingUpdate == nil || value.RollingUpdate.MaxUnavailable == nil {
-		return 0, false
-	}
-	return *value.RollingUpdate.MaxUnavailable, true
 }

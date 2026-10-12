@@ -409,6 +409,9 @@ jobs:
     - name: Run operator envtests
       working-directory: deploy/operator
       run: make envtest
+    - name: Check rollout budgets against pinned Grove admission
+      working-directory: deploy/operator
+      run: make grove-admission
 
   rust-tests:
     needs: changed-files
