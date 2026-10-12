@@ -13726,7 +13726,6 @@ mod tests {
         )
         .unwrap();
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
-        // Completions accept stop ids as an integer `stop` array or as `stop_token_ids`.
         for stop_field in ["stop", "stop_token_ids"] {
             let mut request = serde_json::json!({
                 "model": "test-model",
