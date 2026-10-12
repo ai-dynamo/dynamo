@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Router replicas from EndpointSlices. One type serves both sides: the
-//! router reads its own Service's slices in the hub, and the Relay reads the
-//! slices MCS imports into its cluster.
+//! Relay side: router replicas from the EndpointSlices MCS imports into the
+//! Relay's cluster. The router itself lists its replicas through the hub's
+//! Dynamo runtime discovery, like every mode.
 
 use async_trait::async_trait;
 use dynamo_kv_router::pool_discovery::watch::{Directory, Snapshot, WatchStream};
@@ -26,18 +26,12 @@ pub struct RouterService {
 
 pub struct EndpointSliceReplicaDirectory {
     slices: Api<EndpointSlice>,
-    /// From `kubernetes.io/service-name` locally, or
-    /// [`super::mcs::service_selector`] for an import.
+    /// From [`super::mcs::service_selector`].
     selector: String,
     port_name: String,
 }
 
 impl EndpointSliceReplicaDirectory {
-    /// The router's own slices, in the hub.
-    pub fn local(hub: Client, router: &RouterService) -> Self {
-        todo!()
-    }
-
     /// The router's slices as MCS imports them into a workload cluster.
     pub fn imported(workload: Client, router: &RouterService, mcs: McsImplementation) -> Self {
         todo!()

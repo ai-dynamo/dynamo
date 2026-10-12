@@ -12,13 +12,14 @@
 //! Every router replica watches the imported EndpointSlices: in the hub for
 //! standard MCS, or on the Karmada control plane. The hub exports the
 //! router's Service, so each Relay finds every router replica in its own
-//! cluster. No registrar, no announcer, no leases.
+//! cluster. No registrar, no announcer, no leases. Router replicas still
+//! register with the hub's Dynamo runtime discovery, as in every mode.
 //!
 //! Router replica in the hub:
 //!
 //! ```ignore
 //! let discovery = McsPoolDiscovery {
-//!     hub, imports, mcs, pool_service_suffix, router,
+//!     replicas, imports, mcs, pool_service_suffix,
 //!     relay_auth: RelayAuth::TrustedNetwork, locations,
 //! }
 //! .build()

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use dynamo_kv_router::global_view::PoolKey;
@@ -12,18 +13,17 @@ use dynamo_kv_router::global_view::state::PoolLocation;
 use dynamo_kv_router::pool_discovery::watch::{Directory, Snapshot, WatchStream};
 use dynamo_kv_router::pool_discovery::{
     BuildPoolDiscovery, McsImplementation, PeerCredentials, PoolDiscovery, PoolDiscoveryError,
-    PoolRecord, RelayAuthenticator, RelayIdentity,
+    PoolRecord, RelayAuthenticator, RelayIdentity, ReplicaDirectory,
 };
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
 
-use super::endpoints::RouterService;
-
 /// Startup for Kubernetes mode. `registrar` is `None`.
 pub struct McsPoolDiscovery {
-    /// The router's own cluster, for its replica slices.
-    pub hub: Client,
+    /// This router's replicas, from the hub's Dynamo runtime discovery. Shared
+    /// with the other modes; Kubernetes mode itself does not read it.
+    pub replicas: Arc<ReplicaDirectory>,
     /// Where the imported pool slices are. The hub for standard MCS. For
     /// Karmada, the Karmada control plane: Karmada collects every exported
     /// Service's slices there, so no per-pool `ServiceImport` is needed.
@@ -31,7 +31,6 @@ pub struct McsPoolDiscovery {
     pub mcs: McsImplementation,
     /// See `PoolDiscoveryMode::Kubernetes`.
     pub pool_service_suffix: String,
-    pub router: RouterService,
     pub relay_auth: RelayAuth,
     /// Keyed by About API cluster ID. ClusterProfile properties can fill it.
     pub locations: HashMap<String, PoolLocation>,
