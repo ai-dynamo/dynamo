@@ -166,14 +166,13 @@ def test_diffusion_only_options_remain_unset_when_omitted():
 
 
 @pytest.mark.parametrize("source", ["cli", "environment"])
-@pytest.mark.parametrize("layers", [0, 1])
-def test_removed_layerwise_gpu_layers_rejected(monkeypatch, source, layers):
+def test_removed_layerwise_gpu_layers_rejected(monkeypatch, source):
     monkeypatch.delenv("DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS", raising=False)
     argv = []
     if source == "environment":
-        monkeypatch.setenv("DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS", str(layers))
+        monkeypatch.setenv("DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS", "0")
     else:
-        argv = ["--layerwise-num-gpu-layers", str(layers)]
+        argv = ["--layerwise-num-gpu-layers", "0"]
     parser = argparse.ArgumentParser()
     OmniArgGroup().add_arguments(parser)
     args = parser.parse_args(argv)

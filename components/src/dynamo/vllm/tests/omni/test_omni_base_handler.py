@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the configuration passed from Dynamo to vLLM-Omni."""
-
 import dataclasses
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
