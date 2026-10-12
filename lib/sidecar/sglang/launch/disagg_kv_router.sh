@@ -34,6 +34,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to all four SGLang engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                              Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  SGLANG_PYTHON                      Python with SGLang installed (default: python3)"
             echo "  DYN_HTTP_PORT                      Dynamo frontend port (default: 8000)"
@@ -72,6 +73,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar sglang SIDECAR_CMD
 
 trap dynamo_exit_trap EXIT
 
@@ -188,21 +191,21 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE2_GPU" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_PREFILL1_GRPC_PORT}" \
     --bootstrap-host "$SGLANG_BOOTSTRAP_HOST" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_PREFILL2_GRPC_PORT}" \
     --bootstrap-host "$SGLANG_BOOTSTRAP_HOST" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT3:-8083}" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_DECODE1_GRPC_PORT}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT4:-8084}" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_DECODE2_GRPC_PORT}" &
 
 wait_any_exit
