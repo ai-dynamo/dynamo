@@ -590,6 +590,29 @@ impl State {
         self.service_observer.is_ready()
     }
 
+    /// Check the model's local HTTP routes independently of process readiness.
+    /// Tensor-only models have no HTTP inference route. Every HTTP engine
+    /// registered for this model must have its corresponding route enabled.
+    pub(crate) fn model_http_routes_ready(&self, model: &crate::discovery::Model) -> bool {
+        let routes = [
+            (model.has_chat_engine(), EndpointType::Chat),
+            (model.has_completions_engine(), EndpointType::Completion),
+            (model.has_embeddings_engine(), EndpointType::Embedding),
+            (model.has_classify_engine(), EndpointType::Classify),
+            (model.has_pooling_engine(), EndpointType::Pooling),
+            (model.has_rerank_engine(), EndpointType::Rerank),
+            (model.has_images_engine(), EndpointType::Images),
+            (model.has_videos_engine(), EndpointType::Videos),
+            (model.has_audios_engine(), EndpointType::Audios),
+            (model.has_realtime_engine(), EndpointType::Realtime),
+            (model.has_generate_engine(), EndpointType::Generate),
+        ];
+        routes.iter().any(|(has_engine, _)| *has_engine)
+            && routes
+                .iter()
+                .all(|(has_engine, endpoint)| !*has_engine || self.flags.get(endpoint))
+    }
+
     pub fn start_draining(&self) {
         self.service_observer.start_draining();
     }
@@ -1897,6 +1920,282 @@ mod tests {
             error.to_string(),
             "TLS must be enabled when a client CA certificate is configured"
         );
+    }
+
+    struct ReadinessOnlyEngine;
+
+    #[async_trait::async_trait]
+    impl<Req, Resp>
+        dynamo_runtime::engine::AsyncEngine<
+            dynamo_runtime::pipeline::SingleIn<Req>,
+            dynamo_runtime::pipeline::ManyOut<Resp>,
+            dynamo_runtime::pipeline::Error,
+        > for ReadinessOnlyEngine
+    where
+        Req: Send + Sync + 'static,
+        Resp: dynamo_runtime::engine::Data,
+    {
+        async fn generate(
+            &self,
+            _request: dynamo_runtime::pipeline::SingleIn<Req>,
+        ) -> Result<dynamo_runtime::pipeline::ManyOut<Resp>, dynamo_runtime::pipeline::Error>
+        {
+            unreachable!("model readiness must not dispatch inference")
+        }
+    }
+
+    #[tokio::test]
+    async fn model_readiness_waits_for_topology_engine_and_routes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
+        let state = service.state_clone();
+        let control = service.clone();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+        let model_name = "test/model";
+        let ready_url = format!("{base}/v1/models/{model_name}/ready");
+        let encoded_ready_url = format!("{base}/v1/models/test%2Fmodel/ready");
+        assert_eq!(
+            client.get(&ready_url).send().await.unwrap().status(),
+            reqwest::StatusCode::NOT_FOUND
+        );
+
+        let mut card = crate::model_card::ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.needs = Vec::new();
+        let mut workers =
+            crate::discovery::WorkerSet::new("test-ns".to_string(), "worker".to_string(), card);
+        let (members, receiver) = tokio::sync::watch::channel::<Vec<u64>>(vec![]);
+        workers.set_instance_watcher(receiver);
+        state
+            .manager()
+            .add_worker_set(model_name, "test-ns", workers);
+
+        let response = client.get(&ready_url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["namespaces"]["test-ns"]["ready"], false);
+        assert!(
+            body["reason"]
+                .as_str()
+                .unwrap()
+                .contains("required worker types")
+        );
+        members.send(vec![1]).unwrap();
+        let response = client.get(&ready_url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["namespaces"]["test-ns"]["ready"], true);
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["reason"], "model has no usable serving engine");
+
+        state
+            .manager()
+            .add_chat_completions_model(
+                model_name,
+                "worker",
+                Arc::new(crate::engines::StreamingEngineAdapter::new(
+                    crate::engines::make_echo_engine(),
+                )),
+            )
+            .unwrap();
+        let response = client.get(&ready_url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["reason"],
+            "model HTTP inference routes are not ready"
+        );
+        // Model readiness must not change process-level health or liveness.
+        for path in ["/health", "/live"] {
+            assert_eq!(
+                client
+                    .get(format!("{base}{path}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                reqwest::StatusCode::OK
+            );
+        }
+        control
+            .enable_model_endpoint(EndpointType::Chat, true)
+            .unwrap();
+        let response = client.get(&ready_url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["model"], model_name);
+        assert_eq!(body["ready"], true);
+        assert_eq!(body["reason"], serde_json::Value::Null);
+        let response = client.get(&encoded_ready_url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let encoded_body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(encoded_body["model"], model_name);
+        assert_eq!(encoded_body["ready"], true);
+        assert!(
+            body["namespaces"]
+                .as_object()
+                .unwrap()
+                .contains_key("test-ns")
+        );
+        assert_eq!(client.post(format!("{base}/v1/chat/completions")).json(&serde_json::json!({"model": model_name, "messages": [{"role": "user", "content": "test"}]})).send().await.unwrap().status(), reqwest::StatusCode::OK);
+        control
+            .enable_model_endpoint(EndpointType::Chat, false)
+            .unwrap();
+        assert_eq!(
+            client.get(&ready_url).send().await.unwrap().status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        state.manager().remove_model(model_name);
+        assert_eq!(
+            client.get(&ready_url).send().await.unwrap().status(),
+            reqwest::StatusCode::NOT_FOUND
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn model_readiness_rejects_tensor_only_without_blocking_other_models() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
+        let state = service.state_clone();
+        let control = service.clone();
+        state
+            .manager()
+            .add_tensor_model("tensor-only", "worker", Arc::new(ReadinessOnlyEngine))
+            .unwrap();
+        state
+            .manager()
+            .add_chat_completions_model(
+                "http-model",
+                "worker",
+                Arc::new(crate::engines::StreamingEngineAdapter::new(
+                    crate::engines::make_echo_engine(),
+                )),
+            )
+            .unwrap();
+        control
+            .enable_model_endpoint(EndpointType::Chat, true)
+            .unwrap();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+        let response = client
+            .get(format!("{base}/v1/models/tensor-only/ready"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["ready"], false);
+        assert!(
+            body["namespaces"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|ns| ns["ready"] == true)
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/v1/models/http-model/ready"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/health"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        state.start_draining();
+        let response = client
+            .get(format!("{base}/v1/models/http-model/ready"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["reason"],
+            "frontend is draining"
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/live"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn model_readiness_waits_for_generate_route_without_dispatching_inference() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .enable_engine_apis(true)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let control = service.clone();
+        state
+            .manager()
+            .add_generate_model("generate-only", "worker", Arc::new(ReadinessOnlyEngine))
+            .unwrap();
+        control
+            .enable_model_endpoint(EndpointType::Generate, false)
+            .unwrap();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/v1/models/generate-only/ready");
+        let response = client.get(&url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["ready"],
+            false
+        );
+        control
+            .enable_model_endpoint(EndpointType::Generate, true)
+            .unwrap();
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::OK
+        );
+        control
+            .enable_model_endpoint(EndpointType::Generate, false)
+            .unwrap();
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        handle.abort();
     }
 
     #[test]
