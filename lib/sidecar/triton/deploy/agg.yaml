@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EXPERIMENTAL: engine-primary Triton Inference Server with the Dynamo native sidecar
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: triton-sidecar-agg
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+          ports:
+          - containerPort: 8001
+          - containerPort: 8790
+          - containerPort: 8788
+          - containerPort: 8081   # DYN_SYSTEM_PORT, /metrics
+          readinessProbe:
+            failureThreshold: 120
+            periodSeconds: 10
+            tcpSocket:
+              port: 8001
+  - name: worker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        initContainers:
+        - name: sidecar
+          image: <your-registry>/dynamo-sidecar:1.6.0
+          command:
+          - dynamo-triton-sidecar
+          args:
+          - --grpc-endpoint
+          - 127.0.0.1:9345
+          restartPolicy: Always
+        containers:
+        - name: triton
+          command:
+          - tritonserver
+          - --model-repository=/models
+          - --grpc-port=9345
+          - --grpc-infer-thread-count=4
+          image: nvcr.io/nvidia/tritonserver:26.09-py3
+          readinessProbe:
+            failureThreshold: 120
+            periodSeconds: 10
+            tcpSocket:
+              port: 9345
+          resources:
+            limits:
+              cpu: 8
+              memory: 32Gi
+              ephemeral-storage: 16Gi
+              nvidia.com/gpu: 1
+            requests:
+              cpu: 8
+              ephemeral-storage: 16Gi
+              memory: 32Gi
+              nvidia.com/gpu: 1
+  backendFramework: triton

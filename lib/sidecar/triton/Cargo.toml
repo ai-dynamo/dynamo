@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-triton-sidecar"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Rust sidecar for NVIDIA Triton Inference Server"
+
+[[bin]]
+name = "dynamo-triton-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+dynamo-backend-common = { workspace = true }
+dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-runtime = { workspace = true }
+dynamo-sidecar-common = { workspace = true }
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+futures = { workspace = true }
+prost = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+validator = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
