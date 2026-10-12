@@ -156,7 +156,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
     runtimes = []
     shutdown_requested = False
 
-    def on_worker_done(worker_id: int, future: asyncio.Future) -> None:
+    def on_worker_done(worker_num: int, future: asyncio.Future) -> None:
         # Workers serve until shutdown, so one that stops earlier has failed. Report it
         # here: the gather below waits for every worker and keeps no errors.
         if shutdown_requested or future.cancelled():
@@ -164,7 +164,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         error = future.exception()
         logger.error(
             "Mocker worker %d stopped before shutdown: %s",
-            worker_id,
+            worker_num,
             error if error is not None else "run_input returned",
         )
 
@@ -264,7 +264,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
 
         # run_input returns a Rust Future (not a Python coroutine)
         future = run_input(runtime, args.endpoint, engine_config)
-        future.add_done_callback(functools.partial(on_worker_done, worker_id))
+        future.add_done_callback(functools.partial(on_worker_done, worker_id + 1))
         futures.append(future)
 
         # Stagger worker launches for large deployments
