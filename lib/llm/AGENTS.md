@@ -1,3 +1,10 @@
+# Protocol Field Handling
+
+Before changing request or response fields, validation, preprocessing, backend translation, or
+response projection, read the
+[protocol field handling contract](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md).
+Identify every semantic owner and preserve the field's documented end-to-end behavior.
+
 # N-2 Worker / Frontend Compatibility
 
 Assume N-2 mixed-version operation between workers and frontends during rolling

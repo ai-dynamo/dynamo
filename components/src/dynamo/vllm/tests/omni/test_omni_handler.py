@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
+import io
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -15,7 +18,13 @@ try:
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
     import dynamo.common.http as dynamo_http
-    from dynamo.common.http import AiohttpClient
+    from dynamo.common.http import (
+        AiohttpClient,
+        HttpConfigurationError,
+        HttpError,
+        HttpStatusError,
+    )
+    from dynamo.common.multimodal import ImageLoader
     from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
@@ -69,6 +78,7 @@ def _make_handler(stage_types=("diffusion",)):
             defaults.append(llm_default)
 
     engine_client = MagicMock()
+    engine_client.engine.od_config = SimpleNamespace(model_class_name=None)
     engine_client.default_sampling_params_list = defaults
     engine_client.engine.get_stage_metadata.side_effect = lambda i: SimpleNamespace(
         stage_type=stage_types[i]
@@ -1304,33 +1314,271 @@ class TestImageGenerationSizeValidation:
         assert image_generation_size_from_request({"size": 1024}) == (1024, 1024)
 
 
+@pytest.fixture
+def image_request_handler():
+    handler = _make_handler()
+    handler.config.output_modalities = ["image"]
+    handler._image_loader = ImageLoader()
+    handler._image_loader.load_image = AsyncMock(wraps=handler._image_loader.load_image)
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    handler.engine_client.generate.return_value.__aiter__.return_value = []
+    return handler
+
+
+class TestImageReferenceInputs:
+    @pytest.mark.asyncio
+    async def test_rejected_controls_do_not_load_reference(self, image_request_handler):
+        handler = image_request_handler
+        handler._image_loader.load_image.side_effect = AssertionError(
+            "Invalid controls must be rejected before image loading"
+        )
+        request = {
+            "prompt": "edit",
+            "input_reference": "https://example.com/ref.png",
+            "extra_args": {"media_passthrough": {"guardrails": False}},
+        }
+
+        with pytest.raises(InvalidArgument, match="cannot be set per request"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        handler._image_loader.load_image.assert_not_awaited()
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "model_class_name, image_modality, edit_prompt",
+        [
+            (None, "image", "a teapot"),
+            ("QwenImageEditPipeline", "image", "a teapot"),
+            (
+                "BagelPipeline",
+                "img2img",
+                "<|fim_middle|><|im_start|>a teapot<|im_end|>",
+            ),
+            ("MingImagePipeline", "img2img", "a teapot"),
+        ],
+    )
+    async def test_references_reach_engine_and_do_not_leak(
+        self, image_request_handler, model_class_name, image_modality, edit_prompt
+    ):
+        handler = image_request_handler
+        handler.engine_client.engine.od_config.model_class_name = model_class_name
+        # Text-only recovery bypasses the model-specific image builder.
+        colors = (
+            ("red", "green", None) if model_class_name is None else ("red", "green")
+        )
+        for index, color in enumerate(colors):
+            request = {
+                "prompt": "a teapot",
+                "size": "512x768",
+                "nvext": {"negative_prompt": "blurry"},
+            }
+            if color is not None:
+                reference = Image.new("RGB", (8, 8), color=color)
+                with io.BytesIO() as buffer:
+                    reference.save(buffer, format="PNG")
+                    encoded = base64.b64encode(buffer.getvalue()).decode()
+                request["input_reference"] = f"data:image/png;base64,{encoded}"
+
+            chunks = [
+                chunk
+                async for chunk in handler._generate_openai_mode(
+                    request, None, f"req-{index}"
+                )
+            ]
+            assert chunks == []
+            prompt = handler.engine_client.generate.call_args.kwargs["prompt"]
+            assert prompt["negative_prompt"] == "blurry"
+            processor_kwargs = {"target_h": 768, "target_w": 512}
+            if color is None:
+                assert prompt["prompt"] == request["prompt"]
+                assert prompt["modalities"] == ["image"]
+                assert "multi_modal_data" not in prompt
+            else:
+                assert prompt["prompt"] == edit_prompt
+                assert prompt["modalities"] == [image_modality]
+                assert set(prompt["multi_modal_data"]) == {image_modality}
+                images = prompt["multi_modal_data"][image_modality]
+                assert len(images) == 1
+                assert images[0].size == reference.size
+                assert images[0].tobytes() == reference.tobytes()
+                if image_modality == "img2img":
+                    processor_kwargs["modalities"] = ["img2img"]
+            assert prompt["mm_processor_kwargs"] == processor_kwargs
+
+        assert handler.engine_client.generate.call_count == len(colors)
+        assert handler._image_loader.load_image.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reference",
+        [
+            "data:image/png;base64,%%%",
+            "",
+        ],
+        ids=["invalid-base64", "empty-reference"],
+    )
+    async def test_invalid_reference_rejected_before_generation(
+        self, image_request_handler, reference
+    ):
+        handler = image_request_handler
+        request = {"prompt": "a teapot", "input_reference": reference}
+
+        with pytest.raises(InvalidArgument, match="Failed to load input_reference"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_oversized_reference_rejected_before_generation(
+        self, image_request_handler
+    ):
+        handler = image_request_handler
+        handler._image_loader = ImageLoader(max_bytes=1)
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (8, 8), color="red").save(buffer, format="PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode()
+        request = {
+            "prompt": "a teapot",
+            "input_reference": f"data:image/png;base64,{encoded}",
+        }
+
+        with pytest.raises(InvalidArgument) as exc_info:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        assert str(exc_info.value) == "Failed to load input_reference"
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unsupported_reference_preserves_status(self, image_request_handler):
+        handler = image_request_handler
+        request = {
+            "prompt": "a teapot",
+            "input_reference": "data:image/png;base64,bm90IGFuIGltYWdl",
+        }
+
+        with pytest.raises(HttpStatusError) as exc_info:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        assert exc_info.value.status == 415
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            HttpStatusError(503, "Service Unavailable", "https://example.com/image"),
+            HttpConfigurationError("Untrusted configured egress proxy"),
+            HttpError("fetch failed"),
+        ],
+        ids=["origin-unavailable", "configuration", "fetch"],
+    )
+    async def test_reference_http_error_preserved_before_generation(
+        self, image_request_handler, error
+    ):
+        handler = image_request_handler
+        handler._image_loader.load_image.side_effect = error
+        request = {
+            "prompt": "a teapot",
+            "input_reference": "https://example.com/reference.png",
+        }
+
+        with pytest.raises(type(error)) as exc_info:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        assert exc_info.value is error
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["https", "data"])
+    async def test_truncated_reference_preserves_loader_error_contract(
+        self, image_request_handler, source
+    ):
+        handler = image_request_handler
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (64, 64), color="red").save(buffer, format="JPEG")
+            truncated = buffer.getvalue()[:-20]
+        reference = "https://8.8.8.8/reference.jpg"
+        expected_error = OSError
+        if source == "data":
+            reference = "data:image/jpeg;base64," + base64.b64encode(truncated).decode()
+            expected_error = HttpStatusError
+
+        with patch(
+            "dynamo.common.multimodal.image_loader.fetch_bytes",
+            new=AsyncMock(return_value=truncated),
+        ) as fetch:
+            with pytest.raises(expected_error) as exc_info:
+                async for _ in handler._generate_openai_mode(
+                    {"prompt": "a teapot", "input_reference": reference}, None, "req-1"
+                ):
+                    pass
+
+        if source == "data":
+            assert exc_info.value.status == 400
+            fetch.assert_not_awaited()
+        else:
+            fetch.assert_awaited_once()
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reference_exceeding_pixel_limit_rejected(
+        self, image_request_handler, monkeypatch
+    ):
+        handler = image_request_handler
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 16)
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (8, 8)).save(buffer, format="PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode()
+        request = {
+            "prompt": "a teapot",
+            "input_reference": f"data:image/png;base64,{encoded}",
+        }
+
+        with pytest.raises(InvalidArgument, match="Failed to load input_reference"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        handler.engine_client.generate.assert_not_called()
+
+
 class TestImageEndpointSizeValidation:
     """/v1/images/generations takes the same bound as the chat path."""
 
-    def test_rejects_out_of_range_size(self):
+    @pytest.mark.asyncio
+    async def test_rejects_out_of_range_size(self):
         handler = _make_handler()
         req = NvCreateImageRequest(prompt="x", size="99999x99999")
         with pytest.raises(ValueError, match=r"width in size='99999x99999'"):
-            handler._engine_inputs_from_image(req)
+            await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
 
-    def test_accepts_a_supported_size(self):
+    @pytest.mark.asyncio
+    async def test_accepts_a_supported_size(self):
         handler = _make_handler()
         req = NvCreateImageRequest(prompt="x", size="1024x768")
-        inputs = handler._engine_inputs_from_image(req)
+        inputs = await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
         assert inputs.prompt["mm_processor_kwargs"] == {
             "target_h": 768,
             "target_w": 1024,
         }
 
     @pytest.mark.asyncio
-    async def test_rejection_propagates_instead_of_yielding_a_chat_chunk(self):
-        """The images route has no failure shape, so a rejection must not be
-        yielded as a chat.completion.chunk. It leaves the handler as
-        InvalidArgument, the registered binding exception the HTTP layer answers
-        with a 400."""
-        handler = _make_handler()
-        handler.config.output_modalities = ["image"]
+    @pytest.mark.parametrize("reference", [None, "https://example.com/reference.png"])
+    async def test_rejection_propagates_instead_of_yielding_a_chat_chunk(
+        self, image_request_handler, reference
+    ):
+        handler = image_request_handler
+        handler._image_loader.load_image.side_effect = AssertionError(
+            "Invalid dimensions must be rejected before image loading"
+        )
         request = {"prompt": "x", "size": "99999x99999"}
+        if reference is not None:
+            request["input_reference"] = reference
 
         with pytest.raises(InvalidArgument) as excinfo:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
@@ -1341,6 +1589,8 @@ class TestImageEndpointSizeValidation:
         assert str(excinfo.value) == (
             "width in size='99999x99999' must be between 1 and 4096"
         )
+        handler._image_loader.load_image.assert_not_awaited()
+        handler.engine_client.generate.assert_not_called()
 
 
 class TestVideoEndpointValidation:
