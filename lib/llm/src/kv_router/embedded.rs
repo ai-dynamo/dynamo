@@ -23,7 +23,7 @@ use dynamo_kv_router::scheduling::{
     NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, QueueLimitKind, QueueRejection,
     WorkerAvailabilityProvider,
 };
-use dynamo_kv_router::sequences::ReplicaWorkerPolicy;
+use dynamo_kv_router::sequences::{LocalWorkerLoad, ReplicaWorkerPolicy};
 use dynamo_kv_router::services::selection::{
     CatalogObserver, CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad,
     HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost,
@@ -200,14 +200,8 @@ impl dynamo_kv_router::services::selection::SchedulerLoadSink for SenderLoadSink
         self.sender.publish_batch(snapshots);
     }
 
-    fn observe_local_load(&self, worker: &WorkerWithDpRank, blocks: usize, tokens: usize) {
-        WORKER_LOAD_METRICS.observe(
-            worker.worker_id,
-            worker.dp_rank,
-            self.worker_type,
-            blocks,
-            tokens,
-        );
+    fn observe_local_load(&self, worker: &WorkerWithDpRank, load: LocalWorkerLoad) {
+        WORKER_LOAD_METRICS.observe(worker.worker_id, worker.dp_rank, self.worker_type, load);
     }
 }
 
@@ -717,28 +711,26 @@ mod tests {
             ),
             worker_type: "decode",
         };
-        sink.observe_local_load(&WorkerWithDpRank::new(3, 1), 5, 7);
+        sink.observe_local_load(
+            &WorkerWithDpRank::new(3, 1),
+            LocalWorkerLoad {
+                active_blocks: 5,
+                active_tokens: 7,
+                active_requests: 4,
+                prefill_requests: 1,
+            },
+        );
+        let m = &*WORKER_LOAD_METRICS;
         let labels = ["3", "1", "decode"];
-        assert_eq!(
-            WORKER_LOAD_METRICS
-                .active_decode_blocks
-                .with_label_values(&labels)
-                .get(),
-            5
-        );
-        assert_eq!(
-            WORKER_LOAD_METRICS
-                .active_prefill_tokens
-                .with_label_values(&labels)
-                .get(),
-            7
-        );
-        let _ = WORKER_LOAD_METRICS
-            .active_decode_blocks
-            .remove_label_values(&labels);
-        let _ = WORKER_LOAD_METRICS
-            .active_prefill_tokens
-            .remove_label_values(&labels);
+        let requests = |phase| {
+            m.active_requests
+                .with_label_values(&["3", "1", "decode", phase])
+                .get()
+        };
+        assert_eq!(m.active_decode_blocks.with_label_values(&labels).get(), 5);
+        assert_eq!(m.active_prefill_tokens.with_label_values(&labels).get(), 7);
+        assert_eq!((requests("prefill"), requests("decode")), (1, 3));
+        m.remove(3, 1, "decode");
     }
 
     #[test]

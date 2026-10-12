@@ -48,7 +48,7 @@ class OmniDiffusionKwargs:
     """
 
     enable_layerwise_offload: Optional[bool] = None
-    layerwise_num_gpu_layers: int = 1
+    layerwise_num_gpu_layers: Optional[int] = None
     vae_use_slicing: Optional[bool] = None
     vae_use_tiling: Optional[bool] = None
     boundary_ratio: Optional[float] = None
@@ -127,9 +127,12 @@ class OmniArgGroup(ArgGroup):
             g,
             flag_name="--layerwise-num-gpu-layers",
             env_var="DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS",
-            default=1,
+            default=None,
             arg_type=int,
-            help="Number of ready layers (blocks) to keep on GPU during generation.",
+            help=(
+                "Unsupported legacy option. Remove it and use "
+                "--enable-layerwise-offload without a layer-count override."
+            ),
         )
         add_negatable_bool_argument(
             g,
@@ -490,6 +493,12 @@ class OmniConfig(DynamoRuntimeConfig):
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
+        if self.diffusion.layerwise_num_gpu_layers is not None:
+            raise ValueError(
+                "--layerwise-num-gpu-layers is no longer supported by vLLM-Omni. "
+                "Remove it or unset DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS; use "
+                "--enable-layerwise-offload without a layer-count override."
+            )
         if self.default_video_fps <= 0:
             raise ValueError("--default-video-fps must be > 0")
         if self.parallel.ulysses_degree <= 0:
