@@ -458,7 +458,6 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
         "token_ids",
         "prompt_embeds",
         "mm_processor_kwargs",
-        "media_io_kwargs",
         "multi_modal_uuids",
         "encoder_result",
     ] {
@@ -475,10 +474,6 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
             "mm_processor_kwargs" => {
                 request.mm_processor_kwargs = Some(json!({}));
                 "mm_processor_kwargs"
-            }
-            "media_io_kwargs" => {
-                request.media_io_kwargs = Some(json!({"video": {"fps": 1}}));
-                "media_io_kwargs"
             }
             "multi_modal_uuids" => {
                 request.multi_modal_uuids = Some(HashMap::from([(
@@ -597,6 +592,20 @@ fn unsupported_media_is_refused_publicly() {
 }
 
 #[test]
+fn media_io_kwargs_are_refused_only_with_media() {
+    let mut text = request();
+    text.media_io_kwargs = Some(json!({"video": {"fps": 1}}));
+    assert!(aggregated(&text).is_ok());
+
+    let mut video = with_media("video_url", vec![url("https://example.com/v.mp4")]);
+    video.media_io_kwargs = text.media_io_kwargs;
+    assert_eq!(
+        aggregated(&video).unwrap_err().public_message(),
+        Some("media_io_kwargs are not supported by SGLang's native Generate RPC")
+    );
+}
+
+#[test]
 fn media_needs_server_support() {
     let media = aggregated(&with_media(
         "video_url",
@@ -608,7 +617,7 @@ fn media_needs_server_support() {
     assert_eq!(
         error.public_message(),
         Some(
-            "this SGLang server does not accept image, video, or audio inputs over gRPC; upgrade SGLang"
+            "this SGLang server does not accept image, video, or audio inputs over gRPC; serve a multimodal model with an SGLang version that supports gRPC media"
         )
     );
 
