@@ -18,6 +18,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 <input className="dynamo-filter-input" type="radio" id="provider-moonshot" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-deepseek" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-qwen" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-minimax" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-nvidia" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-google" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-thinkingmachines" name="provider" />
@@ -56,6 +57,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 <label className="dynamo-recipe-chip" htmlFor="provider-moonshot">Moonshot</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-deepseek">DeepSeek</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-qwen">Qwen</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-minimax">MiniMax</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-nvidia">NVIDIA</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-google">Google</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-thinkingmachines">Thinking Machines</label>
@@ -146,6 +148,14 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <p className="dynamo-model-summary">Kimi-K3 recipes for vLLM on H200, GB200, and GB300, plus SGLang on GB200 and GB300.</p>
     <div className="dynamo-model-tags"><span>SGLang · vLLM</span><span>H200 · GB200 · GB300</span><span>Day-0</span></div>
   <a className="dynamo-card-link" href="kimi-k3.mdx" aria-label="Open the Kimi-K3 recipe">Open recipe</a>
+  </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="minimax" data-runtime="vllm" data-hardware="gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
+    <div className="dynamo-model-card-top">
+      <div><h3>MiniMax M3</h3><p>MiniMax / NVIDIA</p></div>
+    </div>
+    <p className="dynamo-model-summary">vLLM recipes for MiniMax M3 on GB200: aggregated or prefill/decode disaggregated, with KV-aware routing, EAGLE3 speculation and NVFP4 quantization.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>GB200</span><span>up to 1M context</span></div>
+  <a className="dynamo-card-link" href="minimax-m3.mdx" aria-label="Open the MiniMax M3 recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="sglang vllm" data-hardware="gb200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">

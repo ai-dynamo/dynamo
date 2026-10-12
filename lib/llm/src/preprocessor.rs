@@ -1706,6 +1706,7 @@ pub struct OpenAIPreprocessor {
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
+    structural_tag_reasoning_boundary: structural_tag::ResolvedReasoningBoundary,
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
@@ -2582,6 +2583,8 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        let structural_tag_reasoning_boundary =
+            structural_tag::validate_runtime_config(&runtime_config)?;
         let token_budget = match runtime_config
             .get_engine_specific::<TokenBudget>(TOKEN_BUDGET_RUNTIME_KEY)
         {
@@ -2894,6 +2897,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             lora_name,
             runtime_config,
+            structural_tag_reasoning_boundary,
             kv_cache_block_size,
             tool_call_parser,
             parser_requires_special_tokens,
@@ -5154,11 +5158,11 @@ impl OpenAIPreprocessor {
             && tool_parser_v2::enabled()
             && selected_version == tool_parser_v2::ParserVersion::V2
             && tool_parser_v2::supports_family(parser_name)
-            && !uses_tool_call_structural_tag
-            && matches!(
-                request.inner.tool_choice.as_ref(),
-                None | Some(ChatCompletionToolChoiceOption::Auto)
-            )
+            && (uses_tool_call_structural_tag
+                || matches!(
+                    request.inner.tool_choice.as_ref(),
+                    None | Some(ChatCompletionToolChoiceOption::Auto)
+                ))
         {
             let parser_name = match parser_name {
                 "deepseek-v4" | "deepseekv4" => "deepseek_v4",
