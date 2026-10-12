@@ -4,3 +4,4 @@
 0004-ptx-kda-sm100.patch
 0005-pd-retraction-queue-time.patch
 0006-pd-mamba-slot-cleanup.patch
+0007-glm-vision-downsample-disable-cudnn.patch

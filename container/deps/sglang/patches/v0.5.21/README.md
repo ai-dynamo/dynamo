@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # SGLang v0.5.21 GLM-5.3-Flash backports
 
-The CUDA SGLang image build applies these six unmodified upstream diffs to
+The CUDA SGLang image build applies six unmodified upstream diffs and one local cuDNN workaround to
 `lmsysorg/sglang:v0.5.21-cu130-runtime`. The required SGLang source revision is
 `e00930c5489053f26d86b179cee0d087f846acbb`.
 
@@ -17,10 +17,18 @@ The CUDA SGLang image build applies these six unmodified upstream diffs to
 | 4 | PTX KDA support for SM100 | [57c81258](https://github.com/sgl-project/sglang/commit/57c81258d493a08953407ceabf2cf73b1307ff8b) |
 | 5 | Prefill/decode retraction queue timestamps | [28c5e7f5](https://github.com/sgl-project/sglang/commit/28c5e7f5cbac8bb1a4e645579dbf56d83f442cbc) |
 | 6 | Mamba slot cleanup before decode preallocation | [aec4b799](https://github.com/sgl-project/sglang/commit/aec4b799e61af971701d960e19d9d3062a6eb5ee) |
+| 7 | Disable cuDNN for the GLM vision downsample convolution | Local workaround; no upstream commit |
 
 `series` records application order. `SHA256SUMS` covers the patches and `series`.
-Keep the upstream patch files byte-for-byte intact, including their regression
+Keep the six upstream patch files byte-for-byte intact, including their regression
 tests. These source changes do not upgrade FlashInfer, Mooncake, or sgl-kernel.
+
+Patch 7 wraps only `GlmOcrVisionModel`'s `self.downsample(x)` call in
+`torch.backends.cudnn.flags(enabled=False)` to avoid the cuDNN convolution crash
+in the GLM-5.3-Flash vision encoder. The context manager restores the previous
+cuDNN settings on exit, including when the convolution raises. Reshaping and the
+merger run outside the context. This is the same scoped change exercised in
+multimodal serving; it does not disable cuDNN globally.
 
 The build runs `apply.sh --apply` as root before Python bytecode compilation and
 verifies that Python resolves SGLang to `/sgl-workspace/sglang/python`. No startup

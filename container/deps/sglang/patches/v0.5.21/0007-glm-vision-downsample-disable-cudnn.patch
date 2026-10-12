@@ -1,0 +1,14 @@
+diff --git a/python/sglang/srt/models/glm_ocr.py b/python/sglang/srt/models/glm_ocr.py
+--- a/python/sglang/srt/models/glm_ocr.py
++++ b/python/sglang/srt/models/glm_ocr.py
+@@ -269,7 +269,9 @@
+         x = self.post_layernorm(x)
+         x = x.view(-1, self.spatial_merge_size, self.spatial_merge_size, x.shape[-1])
+         x = x.permute(0, 3, 1, 2)
+-        x = self.downsample(x).view(-1, self.out_hidden_size)
++        with torch.backends.cudnn.flags(enabled=False):
++            x = self.downsample(x)
++        x = x.view(-1, self.out_hidden_size)
+         x = self.merger(x)
+ 
+         return x

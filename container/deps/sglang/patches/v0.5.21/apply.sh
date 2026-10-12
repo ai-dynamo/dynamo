@@ -35,13 +35,13 @@ while IFS= read -r name; do
   }
   patches+=("$bundle/$name")
 done < "$bundle/series"
-[[ ${#patches[@]} == 6 ]] || { echo 'Expected six patches.' >&2; exit 1; }
+[[ ${#patches[@]} == 7 ]] || { echo 'Expected seven patches.' >&2; exit 1; }
 # Check the complete series against the clean index, including added-file collisions.
 git -C "$target" apply --check --index "${patches[@]}"
 if [[ $mode == --apply ]]; then
   # No --reject/--3way: fail rather than leave partially applied hunks.
   git -C "$target" apply "${patches[@]}"
-  echo 'Applied all six patches; HEAD and index are unchanged.'
+  echo 'Applied all seven patches; HEAD and index are unchanged.'
 else
-  echo 'All six patches apply cleanly; target unchanged.'
+  echo 'All seven patches apply cleanly; target unchanged.'
 fi
