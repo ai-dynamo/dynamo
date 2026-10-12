@@ -61,16 +61,20 @@ type CurrentDGDC struct {
 	Name string
 	ID   string
 	// Incomplete means the DGDC exists but its initial status was never populated (for
-	// example the process stopped between creating it and writing its status).
+	// example the process stopped between creating it and writing its status). Its spec
+	// is immutable, so only the status is completed.
 	Incomplete bool
 }
 
 // Actions is what the caller must apply. There are no updates: DGDCs are immutable.
 type Actions struct {
-	// Creates are idempotent "ensure" calls: they also cover a desired candidate whose
-	// DGDC exists but is Incomplete, so its status is finished before it is referenced.
+	// Creates are desired candidates with no DGDC yet.
 	Creates []DesiredCandidate
-	Deletes []string // DGDC names
+	// Incomplete are desired candidates whose DGDC exists but whose initial status was
+	// never populated. The caller finishes the status (never the spec) before the
+	// candidate is referenced from the run.
+	Incomplete []DesiredCandidate
+	Deletes    []string // DGDC names
 }
 
 // ComputeActions diffs desired against current. Output order follows the input order
@@ -101,8 +105,10 @@ func ComputeActions(desired []DesiredCandidate, current []CurrentDGDC) (Actions,
 
 	var actions Actions
 	for _, candidate := range desired {
-		if _, exists := currentIDs[candidate.ID]; !exists || incomplete[candidate.ID] {
+		if _, exists := currentIDs[candidate.ID]; !exists {
 			actions.Creates = append(actions.Creates, candidate)
+		} else if incomplete[candidate.ID] {
+			actions.Incomplete = append(actions.Incomplete, candidate)
 		}
 	}
 	for _, existing := range current {
