@@ -114,7 +114,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 strum = { workspace = true }
-sysinfo = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tmq = { workspace = true }
@@ -233,6 +232,9 @@ llm-multimodal = { version = "=1.9.0", optional = true }
 # model_dir's `tokenizer.json` can be passed to the
 # `ModelRegistry::lookup` for image-placeholder token-id resolution.
 llm-tokenizer = { version = "=1.6.0", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+sysinfo = { workspace = true }
 
 [dev-dependencies]
 dynamo-kv-router = { workspace = true, features = ["testing"] }
