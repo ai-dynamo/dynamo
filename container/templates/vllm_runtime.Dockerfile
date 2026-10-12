@@ -305,13 +305,8 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 {% endif %}
 
 {% if device == "cuda" %}
-# Backport merged-but-unreleased upstream vLLM fixes onto the installed vLLM
-# tree for every CUDA target (currently vllm-project/vllm#45022, Voxtral
-# realtime boot OOM). Runs after the Omni layer so nothing reinstalls vLLM
-# over the patched files.
-# --fuzz=0 --forward: a vLLM bump that already contains a fix fails here with
-# "Reversed (or previously applied) patch detected"; delete that patch then.
-# `patch` is installed only if the base image lacks it, and removed again.
+# Backport upstream vLLM fixes; runs after the Omni layer so nothing reinstalls vLLM.
+# A vLLM bump that already has a fix fails here (reversed patch); delete that patch.
 RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm_patches \
     set -eux; \
     VLLM_SITE="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))')"; \
