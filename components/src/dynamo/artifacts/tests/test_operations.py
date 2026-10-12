@@ -8,10 +8,17 @@ import sqlite3
 import threading
 
 import pytest
-from cryptography.fernet import Fernet
 
-from dynamo.artifacts.operations import ArtifactOperationStore, ArtifactService
-from dynamo.artifacts.storage import ArtifactStorageError
+fernet = pytest.importorskip("cryptography.fernet")
+pytest.importorskip("opendal")
+
+from dynamo.artifacts.operations import (  # noqa: E402
+    ArtifactOperationStore,
+    ArtifactService,
+)
+from dynamo.artifacts.storage import ArtifactStorageError  # noqa: E402
+
+Fernet = fernet.Fernet
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -332,6 +339,43 @@ async def test_repeated_delivery_cancellation_settles_failed_writer(
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await delivery
+    assert store.get(pending["operation_id"], "owner")["state"] == "failed"
+    assert store.grant(pending["operation_id"]) is None
+    assert service.source_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_drains_transfer_cleanup_before_release(tmp_path):
+    entered = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+
+    async def transfer(data, target):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_entered.set()
+            await release_cleanup.wait()
+
+    service = ArtifactService(store, transfer, None)
+    pending = await service.submit(b"owned", "owner", [], {})
+    await entered.wait()
+    delivery = next(iter(service._tasks))
+    delivery.cancel()
+    await cleanup_entered.wait()
+    delivery.cancel()
+    draining = asyncio.create_task(service.drain())
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(delivery), timeout=0.05)
+        assert not draining.done()
+        assert service.source_bytes == len(b"owned")
+        assert store.get(pending["operation_id"], "owner")["state"] == "pending"
+    finally:
+        release_cleanup.set()
+        await draining
     assert store.get(pending["operation_id"], "owner")["state"] == "failed"
     assert store.grant(pending["operation_id"]) is None
     assert service.source_bytes == 0

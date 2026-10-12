@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import hashlib
 import socket
 from dataclasses import replace
@@ -9,11 +10,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import aiohttp
-import opendal
 import pytest
 from yarl import URL
 
-from dynamo.artifacts.storage import (
+opendal = pytest.importorskip("opendal")
+
+from dynamo.artifacts.storage import (  # noqa: E402 -- optional dependency guard
     ArtifactStorageError,
     ManagedProfile,
     ManagedStoreTarget,
@@ -246,9 +248,14 @@ async def test_http_non_success_is_not_ready(
 
 
 @pytest.mark.asyncio
-async def test_http_lost_ack_is_safe_ambiguous(target, policy, http_transport):
+@pytest.mark.parametrize(
+    "exception", [aiohttp.ClientConnectionError, asyncio.TimeoutError]
+)
+async def test_http_lost_ack_is_safe_ambiguous(
+    target, policy, http_transport, exception
+):
     _, context, _, _, _ = http_transport
-    context.__aenter__.side_effect = aiohttp.ClientConnectionError("bearer-secret")
+    context.__aenter__.side_effect = exception("bearer-secret")
     with pytest.raises(ArtifactStorageError) as error:
         await put_artifact(b"abc", target, policy=policy)
     assert error.value.outcome == "ambiguous"
@@ -263,6 +270,7 @@ async def test_http_lost_ack_is_safe_ambiguous(target, policy, http_transport):
         (opendal.exceptions.ConditionNotMatch, "ambiguous"),
         (opendal.exceptions.Unexpected, "ambiguous"),
         (TimeoutError, "ambiguous"),
+        (asyncio.TimeoutError, "ambiguous"),
     ],
 )
 @pytest.mark.asyncio
@@ -280,6 +288,32 @@ async def test_managed_failures_are_sanitized(exception, outcome):
         )
     assert error.value.outcome == outcome
     assert "bearer-secret" not in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_managed_timeout_settles_write_and_requires_reconciliation():
+    cleanup = asyncio.Event()
+
+    async def write(*args, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup.set()
+
+    operator = SimpleNamespace(
+        capability=lambda: SimpleNamespace(write_with_if_not_exists=True), write=write
+    )
+    with pytest.raises(ArtifactStorageError) as error:
+        await put_artifact(
+            b"opaque",
+            ManagedStoreTarget("approved", "runs/a"),
+            policy=StoragePolicy(timeout_seconds=0.01),
+            profiles={"approved": ManagedProfile(operator, ("runs",))},
+        )
+    assert error.value.outcome == "ambiguous"
+    assert error.value.code == "commit_unknown"
+    assert cleanup.is_set()
 
 
 @pytest.mark.parametrize(
