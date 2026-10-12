@@ -23,6 +23,11 @@ import opendal
 from aiohttp.abc import AbstractResolver
 from yarl import URL
 
+try:
+    from asyncio import timeout as _timeout
+except ImportError:
+    from async_timeout import timeout as _timeout
+
 MAX_SINGLE_PUT_BYTES = 64 * 1024 * 1024
 _HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
 _PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
@@ -378,7 +383,7 @@ async def _put_presigned(
                         outcome="ambiguous" if ambiguous else "rejected",
                     )
                 return response.headers.get("x-amz-version-id")
-    except (aiohttp.ClientError, TimeoutError, OSError):
+    except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError, OSError):
         raise ArtifactStorageError(
             "commit_unknown", "presigned PUT outcome is unknown", outcome="ambiguous"
         ) from None
@@ -417,7 +422,7 @@ async def _put_managed(
     if len(data) > profile.max_bytes:
         raise ArtifactStorageError("too_large", "blob exceeds profile byte limit")
     try:
-        async with asyncio.timeout(policy.timeout_seconds):
+        async with _timeout(policy.timeout_seconds):
             await profile.operator.write(target.object_key, data, if_not_exists=True)
     except (
         opendal.exceptions.PermissionDenied,
@@ -438,6 +443,7 @@ async def _put_managed(
         opendal.exceptions.RateLimited,
         opendal.exceptions.Unexpected,
         TimeoutError,
+        asyncio.TimeoutError,
     ):
         raise ArtifactStorageError(
             "commit_unknown",
