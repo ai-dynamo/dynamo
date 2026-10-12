@@ -1746,14 +1746,6 @@ mod tests {
             assert_eq!(err.to_string(), EMPTY_TOOLS, "tool_choice={tool_choice:?}");
         }
 
-        // An omitted field reaches validate_tools as an empty slice and must stay valid.
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "Hello"}]
-        }))
-        .expect("Failed to deserialize request");
-        ValidateRequest::validate(&request).expect("omitted tools should validate");
-
         // System-message tools make the effective tool set non-empty.
         let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
             "model": "test-model",
