@@ -459,6 +459,102 @@ func TestBuildRollingUpdateContext_RollForwardKeepsTheServedGeneration(t *testin
 	assert.Equal(t, int32(0), result.OldWorkerReplicaTargetsByDCD[failedDCD.Name])
 }
 
+func TestServingOldGeneration(t *testing.T) {
+	older := metav1.NewTime(metav1.Now().Add(-time.Hour))
+	newer := metav1.Now()
+	dcd := func(name, hash string, created metav1.Time) *nvidiacomv1beta1.DynamoComponentDeployment {
+		return &nvidiacomv1beta1.DynamoComponentDeployment{ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			CreationTimestamp: created,
+			Labels:            map[string]string{consts.KubeLabelDynamoWorkerHash: hash},
+		}}
+	}
+	step := func(gated bool, servedA, servedB int32) workerRolloutStep {
+		return workerRolloutStep{
+			gated:     gated,
+			oldDCDs:   []*nvidiacomv1beta1.DynamoComponentDeployment{dcd("role-a", "hasha", older), dcd("role-b", "hashb", newer)},
+			servedOld: map[string]int32{"role-a": servedA, "role-b": servedB},
+		}
+	}
+	tests := []struct {
+		name      string
+		steps     []workerRolloutStep
+		want      string
+		wantFound bool
+	}{
+		{name: "the most served generation keeps serving", steps: []workerRolloutStep{step(true, 2, 1), step(true, 1, 1)}, want: "hasha", wantFound: true},
+		{name: "the newest generation keeps serving on a tie", steps: []workerRolloutStep{step(true, 1, 1), step(true, 1, 1)}, want: "hashb", wantFound: true},
+		{name: "components that do not wait for frontends do not count", steps: []workerRolloutStep{step(true, 1, 1), step(false, 5, 0)}, want: "hashb", wantFound: true},
+		{name: "no generation is kept when frontends serve no old replica", steps: []workerRolloutStep{step(true, 0, 0)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Pick the old generation that keeps serving")
+			got, found := servingOldGeneration(tt.steps)
+			assert.Equal(t, tt.wantFound, found)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestBuildRollingUpdateContext_RollForwardFromTwoServedGenerationsFreesSurge(t *testing.T) {
+	const (
+		partialHash  = "partialh2"
+		cardAPrefill = "test-dgd-a/prefill/generate/1"
+		cardADecode  = "test-dgd-a/decode/generate/2"
+		cardBPrefill = "test-dgd-b/prefill/generate/3"
+		cardBDecode  = "test-dgd-b/decode/generate/4"
+	)
+	t.Log("Build a DGD with one prefill and two decode replicas rolling with maxSurge=1, maxUnavailable=0")
+	dgd := admissionTestRollingDGD(1, "0", map[string]int32{
+		consts.ComponentTypePrefill: 1,
+		consts.ComponentTypeDecode:  2,
+	})
+	createdA := metav1.NewTime(metav1.Now().Add(-time.Hour))
+	createdB := metav1.NewTime(metav1.Now().Add(-30 * time.Minute))
+
+	t.Log("Generations A and B each serve one prefill and one decode; B's second decode failed")
+	prefillA := admissionTestRolloutDCD(t, dgd, "prefill", consts.ComponentTypePrefill, testOldWorkerHash, 1, 1, createdA)
+	decodeA := admissionTestRolloutDCD(t, dgd, "decode", consts.ComponentTypeDecode, testOldWorkerHash, 1, 1, createdA)
+	prefillB := admissionTestRolloutDCD(t, dgd, "prefill", consts.ComponentTypePrefill, partialHash, 1, 1, createdB)
+	decodeB := admissionTestRolloutDCD(t, dgd, "decode", consts.ComponentTypeDecode, partialHash, 2, 1, createdB)
+	podPrefillA := admissionTestPod("prefill-a", "prefill", consts.ComponentTypePrefill, testOldWorkerHash, prefillA.Name, true)
+	podDecodeA := admissionTestPod("decode-a", "decode", consts.ComponentTypeDecode, testOldWorkerHash, decodeA.Name, true)
+	podPrefillB := admissionTestPod("prefill-b", "prefill", consts.ComponentTypePrefill, partialHash, prefillB.Name, true)
+	podDecodeB := admissionTestPod("decode-b", "decode", consts.ComponentTypeDecode, partialHash, decodeB.Name, true)
+	frontend := admissionTestFrontendPod("frontend-0", admissionTestTemplate, true)
+	r := createTestReconcilerWithStatus(dgd, withObjects(
+		prefillA, decodeA, prefillB, decodeB, podPrefillA, podDecodeA, podPrefillB, podDecodeB, frontend,
+		admissionTestMetadata(podPrefillA, admissionTestCards(cardAPrefill)),
+		admissionTestMetadata(podDecodeA, admissionTestCards(cardADecode)),
+		admissionTestMetadata(podPrefillB, admissionTestCards(cardBPrefill)),
+		admissionTestMetadata(podDecodeB, admissionTestCards(cardBDecode)),
+		admissionTestMetadata(frontend, admissionTestRecord(true, cardAPrefill, cardADecode, cardBPrefill, cardBDecode)),
+	))
+
+	t.Log("The first step toward generation C retires A's prefill and keeps B serving")
+	result, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), result.OldWorkerReplicaTargetsByDCD[prefillA.Name])
+	assert.Equal(t, int32(1), result.OldWorkerReplicaTargetsByDCD[prefillB.Name])
+	assert.Equal(t, int32(1), result.OldWorkerReplicaTargetsByDCD[decodeB.Name])
+
+	t.Log("Once A's prefill is gone the frontend serves only B, and C's prefill gets the surge room")
+	prefillA = admissionTestRolloutDCD(t, dgd, "prefill", consts.ComponentTypePrefill, testOldWorkerHash, 0, 0, createdA)
+	decodeB = admissionTestRolloutDCD(t, dgd, "decode", consts.ComponentTypeDecode, partialHash, 1, 1, createdB)
+	r = createTestReconcilerWithStatus(dgd, withObjects(
+		prefillA, decodeA, prefillB, decodeB, podDecodeA, podPrefillB, podDecodeB, frontend,
+		admissionTestMetadata(podDecodeA, admissionTestCards(cardADecode)),
+		admissionTestMetadata(podPrefillB, admissionTestCards(cardBPrefill)),
+		admissionTestMetadata(podDecodeB, admissionTestCards(cardBDecode)),
+		admissionTestMetadata(frontend, admissionTestRecord(true, cardBPrefill, cardBDecode)),
+	))
+	result, err = r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), result.NewWorkerReplicaTargetsByComponent["prefill"])
+	assert.Equal(t, int32(1), result.OldWorkerReplicaTargetsByDCD[prefillB.Name])
+}
+
 func TestDGDFrontendPodEventPredicate(t *testing.T) {
 	t.Log("Build ready and unready frontends and a worker")
 	unready := admissionTestPod("frontend", "frontend", consts.ComponentTypeFrontend, "", "", false)

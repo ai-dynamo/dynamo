@@ -3579,8 +3579,38 @@ func TestAllocateOldWorkerDCDReplicas(t *testing.T) {
 		oldTarget int32
 		dcds      []*nvidiacomv1beta1.DynamoComponentDeployment
 		served    map[string]int32
-		want      map[string]int32
+		// kept names the DCD whose generation keeps serving other roles.
+		kept string
+		want map[string]int32
 	}{
+		{
+			name:      "another served generation retires before the kept one",
+			oldTarget: 1,
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("test-dgd-worker-hashaaaa", earlier, 1, 1),
+				dcd("test-dgd-worker-hashbbbb", now, 1, 1),
+			},
+			served: map[string]int32{"test-dgd-worker-hashaaaa": 1, "test-dgd-worker-hashbbbb": 1},
+			kept:   "test-dgd-worker-hashaaaa",
+			want: map[string]int32{
+				"test-dgd-worker-hashaaaa": 1,
+				"test-dgd-worker-hashbbbb": 0,
+			},
+		},
+		{
+			name:      "only the kept generation keeps a served replica beyond the target",
+			oldTarget: 0,
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("test-dgd-worker-hashaaaa", earlier, 1, 1),
+				dcd("test-dgd-worker-hashbbbb", now, 2, 2),
+			},
+			served: map[string]int32{"test-dgd-worker-hashaaaa": 1, "test-dgd-worker-hashbbbb": 2},
+			kept:   "test-dgd-worker-hashbbbb",
+			want: map[string]int32{
+				"test-dgd-worker-hashaaaa": 0,
+				"test-dgd-worker-hashbbbb": 1,
+			},
+		},
 		{
 			name:      "unserved newer generation retires before the served original",
 			oldTarget: 1,
@@ -3646,7 +3676,7 @@ func TestAllocateOldWorkerDCDReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := allocateOldWorkerDCDReplicas(tt.dcds, tt.oldTarget, tt.served, false)
+			got := allocateOldWorkerDCDReplicas(tt.dcds, tt.oldTarget, tt.served, tt.kept)
 			assert.Equal(t, tt.want, got)
 		})
 	}

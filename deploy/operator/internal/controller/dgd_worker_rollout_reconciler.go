@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1059,13 +1060,15 @@ type oldWorkerReplicaPlan struct {
 // servedByDCD counts, by DCD name, the available replicas that frontends
 // serve; missing entries count as zero. Replicas no frontend serves are
 // retired first, so without serving information retirement is oldest first.
-// With keepServed, a DCD with served replicas keeps at least one, so the
-// returned targets can exceed oldTarget.
+// keptDCD, when not empty, names the DCD of the old generation that keeps
+// serving while replacements catch up: its served replicas retire after those
+// of every other generation, and it keeps one, so the returned targets can
+// exceed oldTarget.
 func allocateOldWorkerDCDReplicas(
 	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 	oldTarget int32,
 	servedByDCD map[string]int32,
-	keepServed bool,
+	keptDCD string,
 ) map[string]int32 {
 	plans := buildOldWorkerReplicaPlans(dcds, servedByDCD)
 	var servingTarget int32
@@ -1075,7 +1078,7 @@ func allocateOldWorkerDCDReplicas(
 
 	// if we have more available replicas currently than total desired replicas, remove the oldest DCD replicas first
 	if servingTarget > oldTarget {
-		removeAvailableReplicasOldestFirst(plans, servingTarget-oldTarget, keepServed)
+		removeAvailableReplicasOldestFirst(plans, servingTarget-oldTarget, keptDCD)
 		// if we have less available replicas currently than total desired replicas, add the newest DCD replicas first
 	} else if servingTarget < oldTarget {
 		addUnavailableReplicasNewestFirst(plans, oldTarget-servingTarget)
@@ -1106,7 +1109,7 @@ func buildOldWorkerReplicaPlans(
 	return plans
 }
 
-func removeAvailableReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasToRemove int32, keepServed bool) {
+func removeAvailableReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasToRemove int32, keptDCD string) {
 	sort.Slice(plans, func(i, j int) bool {
 		if plans[i].createdAt.Time.Equal(plans[j].createdAt.Time) {
 			return plans[i].name < plans[j].name
@@ -1122,17 +1125,24 @@ func removeAvailableReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasTo
 		replicasToRemove -= removed
 	}
 
-	for i := range plans {
-		if replicasToRemove <= 0 {
-			break
+	// Then retire served replicas, oldest first. The kept DCD goes last and keeps
+	// one served replica for the roles its generation still pairs with.
+	for _, kept := range []bool{false, true} {
+		for i := range plans {
+			if replicasToRemove <= 0 {
+				return
+			}
+			if (plans[i].name == keptDCD) != kept {
+				continue
+			}
+			var floor int32
+			if kept {
+				floor = min(plans[i].served, 1)
+			}
+			removed := min(plans[i].target-floor, replicasToRemove)
+			plans[i].target -= removed
+			replicasToRemove -= removed
 		}
-		var floor int32
-		if keepServed {
-			floor = min(plans[i].served, 1)
-		}
-		removed := min(plans[i].target-floor, replicasToRemove)
-		plans[i].target -= removed
-		replicasToRemove -= removed
 	}
 }
 
@@ -1500,6 +1510,66 @@ func strandsAnotherRole(steps []workerRolloutStep, i int) []string {
 	return short
 }
 
+// servingOldGeneration picks the old worker generation, by worker hash, that
+// keeps serving while replacements catch up: the one whose replicas frontends
+// serve the most across rolling components, the newest on a tie. It reports
+// false when frontends serve no old replica.
+func servingOldGeneration(steps []workerRolloutStep) (string, bool) {
+	type generation struct {
+		served    int32
+		createdAt time.Time
+	}
+
+	// Sum each generation's served replicas across the rolling components.
+	generations := make(map[string]*generation)
+	for i := range steps {
+		step := &steps[i]
+		if !step.gated {
+			continue
+		}
+		for _, dcd := range step.oldDCDs {
+			hash := dcd.Labels[consts.KubeLabelDynamoWorkerHash]
+			g, ok := generations[hash]
+			if !ok {
+				g = &generation{}
+				generations[hash] = g
+			}
+			g.served += step.servedOld[dcd.Name]
+			if dcd.CreationTimestamp.After(g.createdAt) {
+				g.createdAt = dcd.CreationTimestamp.Time
+			}
+		}
+	}
+
+	// Choose the most served generation, then the newest, then by hash so the
+	// choice does not depend on map order.
+	var chosen string
+	var best *generation
+	for hash, g := range generations {
+		if g.served == 0 {
+			continue
+		}
+		better := best == nil || g.served > best.served ||
+			(g.served == best.served && g.createdAt.After(best.createdAt)) ||
+			(g.served == best.served && g.createdAt.Equal(best.createdAt) && hash > chosen)
+		if better {
+			chosen, best = hash, g
+		}
+	}
+	return chosen, best != nil
+}
+
+// oldDCDOfGeneration returns the name of the DCD in dcds that runs the worker
+// generation with hash workerHash, or an empty string when none does.
+func oldDCDOfGeneration(dcds []*nvidiacomv1beta1.DynamoComponentDeployment, workerHash string) string {
+	for _, dcd := range dcds {
+		if dcd.Labels[consts.KubeLabelDynamoWorkerHash] == workerHash {
+			return dcd.Name
+		}
+	}
+	return ""
+}
+
 // planComponentStep plans the replica targets of one rolling worker component
 // whose previous generations run oldDCDs.
 func (r *dgdWorkerRolloutReconciler) planComponentStep(
@@ -1678,22 +1748,25 @@ func (r *dgdWorkerRolloutReconciler) planRollingUpdate(
 		steps = append(steps, step)
 	}
 
-	// Split each component's old target across its generations. Each served
-	// old generation keeps a replica of a role while another role it pairs with
-	// lacks served replacements; with surge room this cannot block the rollout.
+	// Split each component's old target across its generations. One served old
+	// generation keeps a replica of a role while another role it pairs with
+	// lacks served replacements. Other old generations retire first, so their
+	// replicas do not hold the surge room the replacements need.
+	servingGeneration, hasServingGeneration := servingOldGeneration(steps)
 	for i := range steps {
 		step := &steps[i]
-		keepServed := false
-		if step.gated && !admission.pending && step.maxSurge > 0 {
+		keptDCD := ""
+		if hasServingGeneration && step.gated && !admission.pending && step.maxSurge > 0 {
 			if short := strandsAnotherRole(steps, i); len(short) > 0 {
-				keepServed = true
+				keptDCD = oldDCDOfGeneration(step.oldDCDs, servingGeneration)
 				logger.V(1).Info("Keeping served old replicas whose generation still serves other roles",
 					"component", step.componentName,
+					"workerHash", servingGeneration,
 					"rolesAwaitingReplacements", short)
 			}
 		}
 		var oldTotal int32
-		for dcdName, target := range allocateOldWorkerDCDReplicas(step.oldDCDs, step.oldTarget, step.servedOld, keepServed) {
+		for dcdName, target := range allocateOldWorkerDCDReplicas(step.oldDCDs, step.oldTarget, step.servedOld, keptDCD) {
 			oldWorkerDCDReplicas[dcdName] = target
 			oldTotal += target
 		}
@@ -1707,7 +1780,7 @@ func (r *dgdWorkerRolloutReconciler) planRollingUpdate(
 			continue
 		}
 		oldWorkerComponentReplicas[componentName] = 0
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, 0, nil, false) {
+		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, 0, nil, "") {
 			oldWorkerDCDReplicas[dcdName] = target
 		}
 	}
