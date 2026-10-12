@@ -352,14 +352,14 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # source so we don't need to track distro package names (libvpx-dev on Debian
     # vs libvpx-devel via EPEL on RHEL/manylinux).
     # Retry and fall back to the GitHub mirror: googlesource returns transient 503s.
-    for attempt in 1 2 3 4 5; do \
+    for attempt in 1 2 3; do \
         for url in https://chromium.googlesource.com/webm/libvpx.git \
                    https://github.com/webmproject/libvpx.git; do \
             rm -rf libvpx; \
             git clone --depth 1 --branch ${LIBVPX_REF} "$url" libvpx && break 2; \
-            echo "libvpx clone from ${url} attempt ${attempt}/5 failed" >&2; \
+            echo "libvpx clone from ${url} attempt ${attempt}/3 failed" >&2; \
         done; \
-        sleep 10; \
+        if [ "$attempt" -lt 3 ]; then sleep 10; fi; \
     done && \
     test -d libvpx/.git && \
     cd libvpx && \
