@@ -354,7 +354,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # Retry googlesource (transient 503s), then fall back to the GitHub mirror.
     ( for attempt in 1 2 3; do \
           git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git && exit 0; \
-          rm -rf libvpx; \
           if [ "$attempt" -lt 3 ]; then sleep 10; fi; \
       done; \
       echo "libvpx clone from googlesource failed, using GitHub mirror" >&2; \
