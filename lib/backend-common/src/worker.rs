@@ -350,6 +350,13 @@ impl EngineKind {
         }
     }
 
+    fn tensor_model_config(&self) -> Option<dynamo_llm::protocols::tensor::TensorModelConfig> {
+        match self {
+            EngineKind::Llm(_) => None,
+            EngineKind::Raw(engine) => engine.tensor_model_config(),
+        }
+    }
+
     async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.supported_controls().await,
@@ -1017,8 +1024,13 @@ impl Worker {
         } else {
             None
         };
-        let mut local_model =
-            build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
+        let mut local_model = build_local_model_with_tensor_config(
+            &self.config,
+            engine_config,
+            self.engine.is_raw(),
+            self.engine.tensor_model_config(),
+        )
+        .await?;
         tracing::debug!("local model built");
 
         // Hand the engine its serving endpoint before registering the model
@@ -2139,10 +2151,20 @@ fn validate_model_input(model_input: ModelInput, engine: &EngineKind) -> Result<
     }
 }
 
+#[cfg(test)]
 async fn build_local_model(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
     name_only: bool,
+) -> Result<LocalModel, DynamoError> {
+    build_local_model_with_tensor_config(config, engine_config, name_only, None).await
+}
+
+async fn build_local_model_with_tensor_config(
+    config: &WorkerConfig,
+    engine_config: &EngineConfig,
+    name_only: bool,
+    tensor_model_config: Option<dynamo_llm::protocols::tensor::TensorModelConfig>,
 ) -> Result<LocalModel, DynamoError> {
     let served_name = resolve_served_name(config, engine_config)
         .or_else(|| Some(engine_config.model.clone()))
@@ -2219,6 +2241,7 @@ async fn build_local_model(
         .custom_template_path(config.custom_jinja_template.clone())
         .media_decoder(config.media_decoder.clone())
         .media_fetcher(config.media_fetcher.clone())
+        .tensor_model_config(tensor_model_config)
         .runtime_config(rt_cfg);
 
     // Resolve model_name to a local path. Empty string or a raw media engine
@@ -2621,6 +2644,33 @@ mod tests {
         build_local_model(&config, &engine_config, true)
             .await
             .expect("name-only build must not fetch");
+    }
+
+    #[tokio::test]
+    async fn build_local_model_carries_tensor_model_config() {
+        let tensor_model_config = dynamo_llm::protocols::tensor::TensorModelConfig {
+            name: "identity".to_string(),
+            triton_model_config: Some(vec![1, 2, 3]),
+            ..Default::default()
+        };
+        let engine_config = EngineConfig {
+            model: "identity".to_string(),
+            ..Default::default()
+        };
+
+        let local_model = build_local_model_with_tensor_config(
+            &WorkerConfig::default(),
+            &engine_config,
+            true,
+            Some(tensor_model_config.clone()),
+        )
+        .await
+        .expect("tensor model card");
+
+        assert_eq!(
+            local_model.card().tensor_model_config.as_ref(),
+            Some(&tensor_model_config)
+        );
     }
 
     #[tokio::test]

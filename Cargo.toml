@@ -34,6 +34,7 @@ members = [
     "lib/sidecar/common",
     "lib/sidecar/testkit",
     "lib/sidecar/vllm",
+    "lib/sidecar/triton",
     "lib/mocker/servers/vllm",
     "lib/sidecar/sglang",
     "lib/mocker/servers/sglang",

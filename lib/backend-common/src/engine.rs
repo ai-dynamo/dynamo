@@ -424,13 +424,13 @@ pub trait LLMEngine: Send + Sync + 'static {
     }
 }
 
-/// Raw media-generation engine trait — the non-token sibling of [`LLMEngine`].
+/// Raw non-token engine trait — the sibling of [`LLMEngine`] used for tensor
+/// and media requests.
 ///
 /// Where [`LLMEngine`] sits behind the tokenizer/detokenizer pipeline
-/// (`PreprocessedRequest` → `LLMEngineOutput`), `RawEngine` serves modalities
-/// the frontend forwards verbatim (image/video/audio): request and response
-/// are plain [`serde_json::Value`]s. The contract is modality-neutral, so a
-/// new media modality is a new engine, not a new framework path.
+/// (`PreprocessedRequest` → `LLMEngineOutput`), `RawEngine` serves requests the
+/// frontend forwards as plain [`serde_json::Value`]s. The contract is
+/// modality-neutral, so tensor, image, video, and audio engines share it.
 ///
 /// Lifecycle is identical to [`LLMEngine`] (same `Worker` orchestrator); the
 /// only differences are `generate`'s request/response shape and the absence of
@@ -442,10 +442,9 @@ pub trait RawEngine: Send + Sync + 'static {
     /// the KV-related `EngineConfig` fields unset.
     async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError>;
 
-    /// Yield response object(s) for a single media-generation request.
+    /// Yield response object(s) for a single raw request.
     ///
-    /// `request` is the raw OpenAI-shaped request body. Yield the response
-    /// body as JSON: exactly one (terminal) object for non-streaming
+    /// Yield the response body as JSON: exactly one object for non-streaming
     /// modalities, or intermediate progress objects ending with a terminal
     /// one for streaming modalities (e.g. video progress).
     ///
@@ -483,6 +482,14 @@ pub trait RawEngine: Send + Sync + 'static {
     /// default `None`). See [`LLMEngine::health_check_payload`].
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
         Ok(None)
+    }
+
+    /// Tensor-serving metadata to publish on the model deployment card.
+    ///
+    /// Raw media engines leave this unset. Generic tensor engines may expose
+    /// their KServe schema or a serialized Triton `ModelConfig`.
+    fn tensor_model_config(&self) -> Option<dynamo_llm::protocols::tensor::TensorModelConfig> {
+        None
     }
 }
 

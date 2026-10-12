@@ -12,6 +12,7 @@ Engines:
   vllm     Run the vLLM sidecar
   sglang   Run the SGLang sidecar
   trtllm   Run the TensorRT-LLM sidecar
+  triton   Run the Triton Inference Server sidecar
 EOF
 }
 
@@ -29,6 +30,10 @@ case "$engine" in
     trtllm)
         shift
         exec dynamo-trtllm-sidecar "$@"
+        ;;
+    triton)
+        shift
+        exec dynamo-triton-sidecar "$@"
         ;;
     help | -h | --help)
         usage
