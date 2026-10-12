@@ -73,7 +73,7 @@ var (
 			BypassUsers: []string{legacySeedUsername},
 		},
 		SetupWebhooks:     setupAdmissionWebhooks,
-		OperatorVersion:   "1.1.0",
+		OperatorVersion:   "1.6.0",
 		OperatorPrincipal: admissionOperatorPrincipal,
 	})
 )
