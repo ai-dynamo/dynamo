@@ -57,6 +57,9 @@ fn bs_event(hashes: Vec<u64>, tokens: Vec<u32>, block_size: usize) -> RawKvEvent
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+        session_id: None,
     }
 }
 
@@ -67,6 +70,8 @@ fn br_event(hashes: Vec<u64>) -> RawKvEvent {
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
     }
 }
 

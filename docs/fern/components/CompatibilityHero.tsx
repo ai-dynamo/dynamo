@@ -217,7 +217,7 @@ export function CompatibilityHero() {
       <section className="dynref-panel" aria-labelledby="compatibility-selection-title">
         <div className="dynref-hero-header">
           <div>
-            <p className="dynref-eyebrow">Compatibility by version</p>
+            <p className="dynref-eyebrow">Compatibility by Version</p>
             <div className="dynref-hero-title" id="compatibility-selection-title">
               {isMain ? "Dynamo main branch" : `Dynamo ${selectedRelease?.version ?? selectedVersion}`}
               <span className={`dynref-badge dynref-badge--${badge.variant}`}>{badge.label}</span>
@@ -243,7 +243,7 @@ export function CompatibilityHero() {
 
         <p className="dynref-muted dynref-hero-meta">
           {isMain ? (
-            "Unreleased dependency pins from the tip of the main branch."
+            "Unreleased pins from the tip of main. These move without notice — use a release for anything you intend to keep running."
           ) : (
             <>
               Released {selectedRelease?.date ?? "date unavailable"}
@@ -291,7 +291,7 @@ export function CompatibilityHero() {
                 ))}
                 {backendCuda.length === 0 && (
                   <p className="dynref-hero-empty">
-                    {isMain ? "CUDA and driver requirements are published at release." : "No CUDA requirement recorded for this build."}
+                    {isMain ? "CUDA and driver requirements are published at release, so main does not list them yet." : "No CUDA requirement is recorded for this build."}
                   </p>
                 )}
               </div>
@@ -312,15 +312,14 @@ export function CompatibilityHero() {
             <div className="dynref-hero-req-values">
               {PLATFORM.os.map((row) => (
                 <span
-                  className={
-                    row.status === "Experimental"
-                      ? "dynref-chip dynref-chip--amber dynref-chip--exp"
-                      : `dynref-chip dynref-chip--${row.chip}`
-                  }
+                  className={`dynref-chip dynref-chip--${row.chip}`}
                   key={`${row.name} ${row.version}`}
+                  title={`${row.scope} · ${row.arch}`}
                 >
                   {row.name} {row.version}
-                  {row.status === "Experimental" ? " · experimental" : ""}
+                  {row.scope === "Wheels only" && (
+                    <span className="dynref-muted"> · wheels only</span>
+                  )}
                 </span>
               ))}
             </div>
@@ -338,7 +337,7 @@ export function CompatibilityHero() {
         {selectedRelease?.delta && <p className="dynref-muted dynref-grid-note">{selectedRelease.delta}</p>}
 
         <p className="dynref-muted dynref-grid-note">
-          Backend versions listed are the versions tested and supported for the selected release.
+          These are the backend versions tested and supported for this release.
           TensorRT-LLM does not support Python 3.11.
         </p>
       </section>

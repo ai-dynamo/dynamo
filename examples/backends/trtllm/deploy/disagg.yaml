@@ -1,65 +1,73 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: trtllm-disagg
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
-    prefill:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: prefill
-      replicas: 1
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
-          workingDir: /workspace/
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: my-registry/tensorrtllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: decode
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --extra-engine-args
+          - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
+          - --disaggregation-mode
+          - decode
           command:
           - python3
           - -m
           - dynamo.trtllm
-          args:
-            - --model-path
-            - Qwen/Qwen3-0.6B
-            - --served-model-name
-            - Qwen/Qwen3-0.6B
-            - --extra-engine-args
-            - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
-            - --disaggregation-mode
-            - prefill
-    decode:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: decode
-      replicas: 1
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        mainContainer:
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: my-registry/tensorrtllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
           workingDir: /workspace/
+    replicas: 1
+    type: decode
+  - name: prefill
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --extra-engine-args
+          - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
+          - --disaggregation-mode
+          - prefill
           command:
           - python3
           - -m
           - dynamo.trtllm
-          args:
-            - --model-path
-            - Qwen/Qwen3-0.6B
-            - --served-model-name
-            - Qwen/Qwen3-0.6B
-            - --extra-engine-args
-            - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
-            - --disaggregation-mode
-            - decode
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/tensorrtllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/
+    replicas: 1
+    type: prefill

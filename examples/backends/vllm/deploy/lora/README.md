@@ -12,12 +12,15 @@ from Hugging Face Hub or through S3-compatible storage backed by MinIO.
 
 The examples cover direct Hugging Face Hub downloads and an HF-to-MinIO synchronization workflow.
 
+The DynamoGraphDeployment (DGD) manifests use `nvidia.com/v1beta1`. `DynamoModel` does not have a
+`v1beta1` API and continues to use `nvidia.com/v1alpha1`.
+
 ## Prerequisites
 
 - Kubernetes cluster with GPU support
 - Helm 3.x installed
 - `kubectl` configured to access your cluster
-- Dynamo Kubernetes Platform installed ([Installation Guide](../../../../../docs/fern/kubernetes/installation-guide.md))
+- Dynamo Kubernetes Platform installed ([Installation Guide](../../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md))
 - Hugging Face token for downloading private base models and LoRA adapters
 
 ## Files in This Directory
@@ -186,12 +189,12 @@ env:
 
 #### Update the Image
 
-Edit `v1beta1/agg_lora.yaml` to use your container image:
+Edit `agg_lora.yaml` to use your container image:
 
 ```bash
 # Using yq to update the image
 export FRAMEWORK_RUNTIME_IMAGE=your-registry/your-image:tag
-yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' v1beta1/agg_lora.yaml > v1beta1/agg_lora_updated.yaml
+yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' agg_lora.yaml > agg_lora_updated.yaml
 ```
 
 #### Deploy the LoRA-Enabled vLLM Graph
@@ -207,7 +210,7 @@ kubectl apply -f agg_lora_updated.yaml -n ${NAMESPACE}
 kubectl get pods -n ${NAMESPACE}
 
 # Watch worker logs
-kubectl logs -f deployment/vllm-agg-lora-vllmdecode-worker -n ${NAMESPACE}
+kubectl logs -f deployment/vllm-agg-lora-worker -n ${NAMESPACE}
 ```
 
 Wait for the worker to show "Application startup complete".
@@ -297,7 +300,7 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 1. **Check MinIO connectivity from worker**:
    ```bash
-   kubectl exec -it deployment/vllm-agg-lora-vllmdecode-worker -n ${NAMESPACE} -- \
+   kubectl exec -it deployment/vllm-agg-lora-worker -n ${NAMESPACE} -- \
      curl http://minio:9000/minio/health/live
    ```
 
@@ -309,7 +312,7 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 3. **Check worker logs**:
    ```bash
-   kubectl logs deployment/vllm-agg-lora-vllmdecode-worker -n ${NAMESPACE}
+   kubectl logs deployment/vllm-agg-lora-worker -n ${NAMESPACE}
    ```
 
 ### Sync Job Fails
@@ -338,5 +341,5 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 ## Further Reading
 
 - [vLLM Deployment Guide](../README.md) - Other deployment patterns
-- [Dynamo Kubernetes Guide](../../../../../docs/fern/kubernetes/quickstart.mdx) - Platform setup
-- [Installation Guide](../../../../../docs/fern/kubernetes/installation-guide.md) - Platform installation
+- [Dynamo Kubernetes Guide](../../../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx) - Platform setup
+- [Installation Guide](../../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md) - Platform installation

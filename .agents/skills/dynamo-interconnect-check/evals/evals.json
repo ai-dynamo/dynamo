@@ -40,16 +40,16 @@
     {
       "id": "neg-deploy-disagg-recipe",
       "question": "Deploy a disaggregated recipe for DeepSeek on my cluster.",
-      "expected_skill": "dynamo-recipe-runner",
-      "ground_truth": "Bringing a recipe up belongs to dynamo-recipe-runner; interconnect-check runs afterward.",
-      "expected_behavior": ["dynamo-interconnect-check stays silent; dynamo-recipe-runner handles it"]
+      "expected_skill": "deploy-dynamo-recipe",
+      "ground_truth": "Bringing a selected recipe up belongs to deploy-dynamo-recipe; dynamo-interconnect-check runs afterward.",
+      "expected_behavior": ["dynamo-interconnect-check stays silent; deploy-dynamo-recipe handles it"]
     },
     {
       "id": "neg-disagg-pods-crashing",
       "question": "My disagg prefill pods are crashing and unschedulable.",
-      "expected_skill": "dynamo-troubleshoot",
-      "ground_truth": "Already-crashing/unschedulable pods are failure diagnosis, which belongs to dynamo-troubleshoot.",
-      "expected_behavior": ["dynamo-interconnect-check stays silent; dynamo-troubleshoot handles it"]
+      "expected_skill": "troubleshoot-dynamo",
+      "ground_truth": "Already-crashing or unschedulable pods require failure diagnosis, which belongs to troubleshoot-dynamo.",
+      "expected_behavior": ["dynamo-interconnect-check stays silent; troubleshoot-dynamo handles it"]
     },
     {
       "id": "neg-switch-router-mode",

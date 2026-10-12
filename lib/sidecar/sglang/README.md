@@ -1,33 +1,89 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Note to AI agents: keep this README minimal (intro, support matrix, launch example,
+Kubernetes example, topologies). Do not edit it unless the user explicitly asks
+you to.
+-->
+
 # SGLang sidecar
 
-`dynamo-sglang-sidecar` connects Dynamo's unified worker lifecycle to an
-out-of-process SGLang engine through SGLang's native gRPC service. It is a
-standalone Rust executable and is also compiled into `ai-dynamo-runtime` for
-the importable `dynamo.sglang.sidecar` launcher.
+> [!WARNING]
+> **Experimental.** The sidecars and their deployment examples are
+> experimental. Manifests, flags, and behavior may change without notice.
 
-Build and run it directly from the Dynamo workspace:
+`dynamo-sglang-sidecar` connects a Dynamo worker to SGLang's native gRPC
+server. See the [sidecar overview](../README.md) for installation.
+
+> [!TIP]
+> For the best and latest support, use the upstream SGLang nightly image,
+> which carries the latest gRPC server updates: [`lmsysorg/sglang:dev`](https://hub.docker.com/r/lmsysorg/sglang/tags?name=dev).
+
+## Support matrix
+
+| Feature | Supported |
+|---------|-----------|
+| Aggregated | Yes |
+| Disaggregated | Yes |
+| KV routing | Yes |
+
+## Run locally
+
+See [`launch/`](launch/) for all topologies. For example, aggregated serving on
+one GPU:
 
 ```bash
-cargo build --release -p dynamo-sglang-sidecar
-./target/release/dynamo-sglang-sidecar \
-    --sglang-endpoint http://127.0.0.1:30001
+export DYN_DISCOVERY_BACKEND=file   # single host: no etcd or NATS needed
+lib/sidecar/sglang/launch/agg.sh
 ```
 
-Distribution and container packaging for the standalone executable are
-intentionally deferred to a follow-up change.
-
-## SGLang-managed module contract
-
-SGLang can load the Python entry point and supply the gRPC endpoint arguments:
+In a second terminal:
 
 ```bash
-python3 -m sglang.launch_server \
-    <args> \
-    --grpc-port 30001 \
-    --sidecar dynamo.sglang.sidecar
+curl -s localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
 ```
 
-The entry point configures Dynamo logging when `main()` runs, then calls the
-private `dynamo._core.backend._run_sglang_sidecar(argv)` binding. The binding
-prepends the executable name expected by clap, releases the GIL, and runs the
-same unified worker lifecycle as the standalone executable.
+## Deploy on Kubernetes
+
+Before applying, replace `<your-registry>/dynamo-sidecar` in the manifest with a
+[sidecar image](../README.md#docker) and create the `hf-token-secret`
+Secret that the manifest reads.
+
+See [`deploy/`](deploy/) for all manifests. For example, aggregated serving:
+
+```bash
+kubectl create secret generic hf-token-secret -n <namespace> \
+  --from-literal=HF_TOKEN=<your-hf-token>
+kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
+kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
+```
+
+## Topologies
+
+The frontend reaches each sidecar over Dynamo's request, discovery, and event
+planes; the sidecar reaches the engine over its native gRPC API. Dashed arrows
+carry KV events.
+
+### Single-Node TP
+
+One engine on one node, with one sidecar.
+
+![On one node, a request reaches the SGLang tensor-parallel ranks through the Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar.](../../../docs/fern/assets/img/sidecar-sglang-single-node-tp.svg)
+
+### Multi-Node TP
+
+One engine spans two nodes. Only the leader node has a sidecar; the follower
+node holds the remaining TP ranks.
+
+![When one SGLang engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../docs/fern/assets/img/sidecar-sglang-multinode-tp.svg)
+
+### Multi-Node DP
+
+The leader sidecar registers every DP rank and serves all requests; SGLang
+dispatches each one to the right scheduler. The follower sidecar
+accepts no requests and relays its node's KV events directly to the frontend.
+
+![SGLang data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local SGLang over native gRPC.](../../../docs/fern/assets/img/sidecar-sglang-multinode-dp.svg)

@@ -7,7 +7,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
-from dynamo._core import AicPerfConfig as AicPerfConfig
+from dynamo._core import AisPerfConfig as AisPerfConfig
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import FpmDirectPublisher as FpmDirectPublisher
@@ -23,6 +23,9 @@ from dynamo._core import KvDcRelay as KvDcRelay
 from dynamo._core import KvEventPublisher as KvEventPublisher
 from dynamo._core import KvRouter as KvRouter
 from dynamo._core import KvRouterConfig as KvRouterConfig
+from dynamo._core import KvStateAgentHost as KvStateAgentHost
+from dynamo._core import KvStateAttachmentOwner as KvStateAttachmentOwner
+from dynamo._core import LoadThresholdConfig as LoadThresholdConfig
 from dynamo._core import LoRADownloader as LoRADownloader
 from dynamo._core import MediaDecoder as MediaDecoder
 from dynamo._core import MediaFetcher as MediaFetcher
@@ -51,12 +54,16 @@ from dynamo._core import run_kv_indexer as run_kv_indexer
 from dynamo._core import run_select_service as run_select_service
 from dynamo._core import run_slot_tracker as run_slot_tracker
 from dynamo._core import unregister_model as unregister_model
+from dynamo._core import update_model_taints as update_model_taints
 
 try:
     from dynamo._core import SelectionService as SelectionService
 except ImportError:
     pass
 
+from ._unary import LLMUnaryClient as LLMUnaryClient
+from ._unary import UnaryChatModel as UnaryChatModel
+from ._unary import with_engine_data as with_engine_data
 from .exceptions import HttpError
 from .exceptions import RouterQueueLimitExceeded as RouterQueueLimitExceeded
 

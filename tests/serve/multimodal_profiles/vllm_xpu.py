@@ -4,6 +4,7 @@
 import pytest
 
 from tests.serve.common import WORKSPACE_DIR
+from tests.serve.conftest import MULTIMODAL_VIDEO_EXPECTED
 from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
@@ -105,7 +106,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 tests=[
                     MmCase(
-                        payload=make_video_payload(["red", "static", "still"]),
+                        payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED),
                         env={"DYN_MM_LOCAL_PATH": WORKSPACE_DIR},
                     )
                 ],
@@ -114,6 +115,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py
             # (post_merge).
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.pre_merge, pytest.mark.xpu_2],
                 gpu_marker="xpu_2",
                 timeout_s=400,
@@ -132,6 +134,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # SINGLE_GPU=true packs both workers onto GPU 0 to match the
             # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge, pytest.mark.xpu_2],
                 gpu_marker="xpu_2",
                 timeout_s=400,
@@ -176,6 +179,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2.5-vl-3b",
         topologies={
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 gpu_marker="xpu_2",
@@ -191,6 +195,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2-vl-2b",
         topologies={
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 gpu_marker="xpu_2",

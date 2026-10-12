@@ -78,6 +78,46 @@ pub mod openai {
             ServerStreamingEngine<NvCreateEmbeddingRequest, Annotated<NvCreateEmbeddingResponse>>;
     }
 
+    pub mod classify {
+        use super::*;
+
+        pub use protocols::openai::classify::{NvCreateClassifyRequest, NvCreateClassifyResponse};
+
+        /// A [`UnaryEngine`] implementation for the `/classify` API
+        pub type OpenAIClassifyUnaryEngine =
+            UnaryEngine<NvCreateClassifyRequest, NvCreateClassifyResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the `/classify` API
+        pub type OpenAIClassifyStreamingEngine =
+            ServerStreamingEngine<NvCreateClassifyRequest, Annotated<NvCreateClassifyResponse>>;
+    }
+
+    pub mod pooling {
+        use super::*;
+
+        pub use protocols::openai::pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse};
+
+        /// A [`UnaryEngine`] implementation for the `/pooling` API
+        pub type OpenAIPoolingUnaryEngine =
+            UnaryEngine<NvCreatePoolingRequest, NvCreatePoolingResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the `/pooling` API
+        pub type OpenAIPoolingStreamingEngine =
+            ServerStreamingEngine<NvCreatePoolingRequest, Annotated<NvCreatePoolingResponse>>;
+    }
+
+    pub mod rerank {
+        use super::*;
+
+        pub use protocols::openai::rerank::{NvCreateRerankRequest, NvCreateRerankResponse};
+
+        pub type OpenAIRerankUnaryEngine =
+            UnaryEngine<NvCreateRerankRequest, NvCreateRerankResponse>;
+
+        pub type OpenAIRerankStreamingEngine =
+            ServerStreamingEngine<NvCreateRerankRequest, Annotated<NvCreateRerankResponse>>;
+    }
+
     pub mod images {
         use super::*;
 
@@ -152,18 +192,20 @@ pub mod generic {
     pub mod realtime {
         use super::*;
 
-        pub use dynamo_protocols::types::realtime::{RealtimeClientEvent, RealtimeServerEvent};
+        pub use dynamo_protocols::types::realtime::{
+            DynamoRealtimeClientEvent, RealtimeServerEvent,
+        };
 
         /// A [`BidirectionalStreamingEngine`] implementation for the OpenAI
         /// Realtime API.
         ///
-        /// Many-in / many-out: the client streams a sequence of [`RealtimeClientEvent`]
+        /// Many-in / many-out: the client streams a sequence of [`DynamoRealtimeClientEvent`]
         /// frames over the lifetime of one session and receives a stream of
         /// [`RealtimeServerEvent`] frames back. Used by the experimental
         /// `/v1/realtime` WebSocket endpoint. The canonical concrete implementor of
         /// the input side is [`dynamo_runtime::pipeline::RequestStream`].
         pub type RealtimeBidirectionalEngine =
-            BidirectionalStreamingEngine<RealtimeClientEvent, Annotated<RealtimeServerEvent>>;
+            BidirectionalStreamingEngine<DynamoRealtimeClientEvent, Annotated<RealtimeServerEvent>>;
     }
 }
 

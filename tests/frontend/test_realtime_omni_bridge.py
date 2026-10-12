@@ -30,6 +30,10 @@ import requests
 
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import ServicePorts
+from tests.utils.vllm_omni import vllm_omni_skip_reason
+
+if _omni_skip_reason := vllm_omni_skip_reason():
+    pytest.skip(_omni_skip_reason, allow_module_level=True)
 
 logger = logging.getLogger(__name__)
 
@@ -37,19 +41,6 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "omni-realtime-mock"
 ENDPOINT_PATH = "test_omni_ws_e2e.realtime.generate"
 MOCK_TRANSCRIPT = "mock omni transcript"
-
-# The vllm-runtime image bumped to vLLM 0.24.0 (PR #11076) but still pins
-# vLLM-Omni 0.23.0rc1, whose vllm_omni/platforms/__init__.py imports
-# `supports_xccl` from vllm.utils.torch_utils — a symbol 0.24.0 removed. So
-# `import vllm_omni` fails image-wide and this test's mock worker (which
-# hard-imports vLLM-Omni) crashes on startup. Skip the whole module up front —
-# no point importing vLLM-Omni when we know it can't load.
-# TODO: remove this skip once vLLM-Omni is bumped to a vLLM-0.24-compatible release.
-pytest.skip(
-    "vLLM-Omni 0.23.0rc1 is incompatible with the image's vLLM 0.24.0 "
-    "(missing supports_xccl); re-enable when the vLLM-Omni pin is realigned.",
-    allow_module_level=True,
-)
 
 pytestmark = [
     pytest.mark.pre_merge,

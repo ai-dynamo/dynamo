@@ -362,8 +362,33 @@ def test_normalize_drops_nulls_and_empties_recursively():
 
 
 REPO_ROOT = _Path(__file__).resolve().parents[3]
+V1ALPHA1_FIXTURE_ROOT = _Path(__file__).with_name("fixtures") / "v1alpha1"
 
-CONFORMANCE_NAMES = ["agg", "disagg", "disagg_router", "disagg_planner"]
+CONFORMANCE_NAMES = ("agg", "disagg", "disagg_router", "disagg_planner")
+
+
+def test_examples_default_to_v1beta1():
+    """All published DGD examples and samples use v1beta1."""
+    manifest_paths = sorted(REPO_ROOT.glob("examples/**/*.yaml"))
+    manifest_paths.extend(sorted(REPO_ROOT.glob("deploy/operator/samples/**/*.yaml")))
+    checked_manifests = 0
+
+    for manifest_path in manifest_paths:
+        manifest_text = manifest_path.read_text()
+        if "kind: DynamoGraphDeployment" not in manifest_text:
+            continue
+
+        versions = {
+            doc["apiVersion"]
+            for doc in c.load_docs(manifest_text)
+            if doc.get("kind") == "DynamoGraphDeployment"
+        }
+        if not versions:
+            continue
+        assert versions == {"nvidia.com/v1beta1"}, manifest_path
+        checked_manifests += 1
+
+    assert checked_manifests > 0
 
 
 def _cluster_available() -> bool:
@@ -391,12 +416,10 @@ requires_cluster = pytest.mark.skipif(
 @requires_cluster
 @pytest.mark.timeout(60)
 @pytest.mark.parametrize("name", CONFORMANCE_NAMES)
-def test_conformance_vllm_example_pair(name):
-    """Conformance vllm example pair."""
-    alpha_path = REPO_ROOT / f"examples/backends/vllm/deploy/{name}.yaml"
-    beta_path = REPO_ROOT / f"examples/backends/vllm/deploy/v1beta1/{name}.yaml"
-    if not alpha_path.exists() or not beta_path.exists():
-        pytest.skip(f"missing example pair for {name}")
+def test_conformance_vllm_fixture_pair(name):
+    """Conformance vLLM fixture pair."""
+    alpha_path = V1ALPHA1_FIXTURE_ROOT / f"{name}.yaml"
+    beta_path = REPO_ROOT / f"examples/backends/vllm/deploy/{name}.yaml"
 
     converted = c.convert_docs(
         c.load_docs(alpha_path.read_text()), target="nvidia.com/v1beta1"

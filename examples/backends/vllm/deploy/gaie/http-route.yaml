@@ -22,6 +22,12 @@ spec:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: inference-gateway
+      # The installer creates the Gateway in agentgateway-system (co-located with
+      # its controller) with a listener that allows routes from any namespace, so
+      # name the Gateway's namespace + listener for cross-namespace attachment.
+      # Otherwise this route (applied in the workload namespace) stays unattached.
+      namespace: agentgateway-system
+      sectionName: http
   rules:
     - backendRefs:
         - group: inference.networking.k8s.io

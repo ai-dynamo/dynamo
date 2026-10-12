@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: glm-5-2
+title: GLM-5.3/5.2
+page: pages/recipes/model-recipes/glm-5-2.mdx
+provider: zai
+model:
+  name: GLM-5.3/5.2
+  hf_id: RadixArk/GLM-5.3-NVFP4 (B200) / nvidia/GLM-5.2-NVFP4 (B200) / zai-org/GLM-5.3 (H200) / zai-org/GLM-5.2-FP8 (H200)
+  precision: NVFP4 + FP8 KV (B200) / FP8 + FP8 KV (H200)
+status: validated
+artifacts:
+  recipe_specific_image_periods:
+  - image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
+    source_revision: 9ab57d7ecefdd2a2af2e2a2c889724a157457cd6
+    effective_to: "2026-10-04"
+    source_kind: github-release
+    release_tag: v1.3.0-glm-5.2-dev.1
+    release_state: prerelease
+targets:
+- id: sglang-agg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 16
+  runtime:
+    framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1
+  topology: aggregated
+  techniques:
+  - nvfp4
+  - fp8-kv-cache
+  - eagle-mtp-spec-dec
+  - kv-aware-routing
+  - hicache-cpu-offload
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 64
+  deploy:
+    asset: recipes/glm-5.3/sglang/agg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/glm-5.3/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 190.05 output tok/s/GPU, 61.92 user tok/s P50, TTFT P50 228.7 ms at concurrency 64 (4 workers, 15% agentic trace subset)
+- id: sglang-disagg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 20
+  runtime:
+    framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - nvfp4
+  - fp8-kv-cache
+  - eagle-mtp-spec-dec
+  - kv-aware-routing
+  - hicache-cpu-offload
+  - mooncake
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 128
+  deploy:
+    asset: recipes/glm-5.3/sglang/disagg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/glm-5.3/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 323.82 output tok/s/GPU, 63.13 user tok/s P50, TTFT P50 1280.1 ms at concurrency 128 (3P1D, 15% agentic trace subset)
+- id: sglang-agg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 24
+  runtime:
+    framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1
+  topology: aggregated
+  techniques:
+  - fp8
+  - fp8-kv-cache
+  - eagle-mtp-spec-dec
+  - kv-aware-routing
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 32
+  deploy:
+    asset: recipes/glm-5.3/sglang/agg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/glm-5.3/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 60.87 output tok/s/GPU, 57.33 user tok/s P50, TTFT P50 1158.2 ms at concurrency 32 (3 workers, 15% agentic trace subset)
+- id: sglang-disagg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - fp8
+  - fp8-kv-cache
+  - eagle-mtp-spec-dec
+  - kv-aware-routing
+  - mooncake
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 24
+  deploy:
+    asset: recipes/glm-5.3/sglang/disagg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/glm-5.3/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 84.33 output tok/s/GPU, 61.46 user tok/s P50, TTFT P50 1309.6 ms at concurrency 24 (1P1D, 15% agentic trace subset)
+related_benchmarks: []
+maintainer: milesial
+gaps:
+- Full 1M context not supported out of the box (B200 capped at 500K, H200 at 250K)
+- n>1 requests unsupported on the disaggregated targets

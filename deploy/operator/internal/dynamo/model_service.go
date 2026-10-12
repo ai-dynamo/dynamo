@@ -88,6 +88,8 @@ func ReconcileModelServicesForComponents(
 			func(ctx context.Context) (*corev1.Service, bool, error) {
 				return headlessService, false, nil
 			},
+			// Components that serve the same base model share this Service.
+			commonController.WithSharedOwnership(),
 		)
 		if err != nil {
 			logger.Error(err, "Failed to sync headless service for model",
@@ -110,7 +112,7 @@ func ReconcileModelServicesForComponents(
 			err = reconciler.Update(ctx, syncedService)
 			if err != nil {
 				logger.Error(err, fmt.Sprintf("Failed to update model service %s.", componentName))
-				reconciler.GetRecorder().Eventf(owner, corev1.EventTypeWarning, "UpdateService", "Failed to update model Service %s: %s", componentName, err)
+				reconciler.GetRecorder().Eventf(owner, syncedService, corev1.EventTypeWarning, "UpdateService", "Update", "Failed to update model Service %s: %s", componentName, err)
 				return fmt.Errorf("failed to update main component service %s: %w", componentName, err)
 			}
 		}
@@ -122,6 +124,13 @@ func ReconcileModelServicesForComponents(
 	}
 
 	return nil
+}
+
+// GenerateModelServiceForGraph returns a model Service private to one graph.
+// Graph-scoped callers must use this identity because the Service is owned by
+// the graph deployment. The legacy model-only helper remains for DCD/Grove.
+func GenerateModelServiceForGraph(namespace, baseModelName, graphName string, annotations map[string]string) *corev1.Service {
+	return generateHeadlessServiceForGraph(namespace, baseModelName, graphName, annotations)
 }
 
 // GenerateHeadlessServiceForModel creates a headless service for model endpoint discovery
@@ -182,6 +191,16 @@ func generateHeadlessServiceForModel(
 		},
 	}
 
+	return service
+}
+
+func generateHeadlessServiceForGraph(namespace, baseModelName, graphName string, annotations map[string]string) *corev1.Service {
+	service := generateHeadlessServiceForModel(namespace, baseModelName, annotations)
+	modelHash := HashModelName(baseModelName)
+	graphHash := HashModelName(graphName)
+	service.Name = fmt.Sprintf("dynamo-model-%s-%s", modelHash, graphHash)
+	service.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = graphName
+	service.Spec.Selector[commonconsts.KubeLabelDynamoGraphDeploymentName] = graphName
 	return service
 }
 

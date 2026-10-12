@@ -26,8 +26,8 @@ A shared GlobalPlanner enforces a cluster-wide GPU cap.
 
 ```
 DGD gp-ctrl:    GlobalPlanner (--max-total-gpus)
-DGD model-a:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_A)
-DGD model-b:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_B)
+DGD model-a:    Frontend + prefill + decode + Planner  (MODEL_A)
+DGD model-b:    Frontend + prefill + decode + Planner  (MODEL_B)
 ```
 
 - No GlobalRouter needed — each model has its own endpoint.
@@ -41,9 +41,9 @@ A GlobalRouter selects the best pool for each request.
 
 ```
 DGD gp-ctrl:      Frontend + GlobalRouter + GlobalPlanner
-DGD gp-prefill-0: LocalRouter + VllmPrefillWorker (TP1) + Planner
-DGD gp-prefill-1: LocalRouter + VllmPrefillWorker (TP2) + Planner
-DGD gp-decode-0:  LocalRouter + VllmDecodeWorker  (TP1) + Planner
+DGD gp-prefill-0: LocalRouter + prefill (TP1) + Planner
+DGD gp-prefill-1: LocalRouter + prefill (TP2) + Planner
+DGD gp-decode-0:  LocalRouter + decode  (TP1) + Planner
 ```
 
 - GlobalRouter routes prefill requests by (ISL, TTFT target) and decode by (context length, ITL target).
@@ -51,7 +51,7 @@ DGD gp-decode-0:  LocalRouter + VllmDecodeWorker  (TP1) + Planner
 
 ## Prerequisites
 
-- Dynamo Kubernetes Platform installed (see [Kubernetes Quickstart](../../docs/fern/kubernetes/quickstart.mdx))
+- Dynamo Kubernetes Platform installed (see [Kubernetes Quickstart](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx))
 - Cluster Prometheus scraping router metrics via PodMonitor
 - HuggingFace token secret:
   ```bash
@@ -165,6 +165,8 @@ Key fields for GlobalPlanner delegation:
 | Flag | Description |
 |------|-------------|
 | `--max-total-gpus N` | Reject requests that would exceed N total GPUs across all managed DGDs. `0` = no GPU scaling allowed, `-1` (default) = unlimited |
+| `--min-total-gpus N` | Deny scale-down requests that would drop below N total GPUs unless they can be paired with a pending scale-up. `-1` (default) disables the floor |
+| `--intent-cache-ttl-seconds N` | Keep scale intents eligible for pairing for N seconds. Defaults to `360`, which covers two default throughput-scaling ticks |
 | `--managed-namespaces NS...` | Only accept scale requests from listed Dynamo namespaces (default: accept all). See *Management Modes* below |
 | `--no-operation` | Log scale requests without executing them (useful for dry-run testing) |
 
@@ -189,7 +191,7 @@ This is why planner configs and router endpoints use the full `${K8S_NAMESPACE}-
 
 ## Further Reading
 
-- [Global Planner Deployment Guide](../../docs/fern/components/planner/global-planner.md)
+- [Global Planner Deployment Guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md)
 - [Global Planner README](../../components/src/dynamo/global_planner/README.md)
-- [Planner Configuration Guide](../../docs/fern/components/planner/planner-guide.md)
+- [Planner Configuration Guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md)
 - [Global Router README](../../components/src/dynamo/global_router/README.md)

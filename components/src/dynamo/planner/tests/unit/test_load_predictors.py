@@ -462,6 +462,35 @@ class TestKalmanPredictor:
         result = predictor.predict_next()
         assert result >= 0.0
 
+    def test_predict_returns_non_negative_on_declining_traffic(self):
+        """Declining traffic can drive the forecast negative; load clamps at zero."""
+        predictor = KalmanPredictor(_make_config(load_predictor_log1p=False))
+        results = []
+        for v in [10.0, 15.0, 20.0, 15.0, 10.0, 5.0, 2.0, 1.0, 0.0]:
+            predictor.add_data_point(v)
+            # Once fresh, once from the cached forecast: both return sites.
+            results.append(predictor.predict_next())
+            results.append(predictor.predict_next())
+        assert (
+            min(results) >= 0.0
+        ), f"predict_next() returned negative values: {results}"
+
+    def test_uses_last_value_until_minimum_points(self):
+        """Forecasting starts only after kalman_min_points observations."""
+        predictor = KalmanPredictor(_make_config(kalman_min_points=3))
+
+        predictor.add_data_point(10.0)
+        assert predictor.predict_next() == 10.0
+        assert not predictor._has_cached_pred
+
+        predictor.add_data_point(20.0)
+        assert predictor.predict_next() == 20.0
+        assert not predictor._has_cached_pred
+
+        predictor.add_data_point(30.0)
+        predictor.predict_next()
+        assert predictor._has_cached_pred
+
     def test_caches_prediction_between_observations(self):
         """Calling predict_next() twice without new data returns the same value."""
         predictor = KalmanPredictor(_make_config())

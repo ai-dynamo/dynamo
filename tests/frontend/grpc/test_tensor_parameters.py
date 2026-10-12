@@ -10,21 +10,197 @@
 
 """Test gRPC parameter passing with tensor models."""
 
+import builtins
 import logging
 import os
-import shutil
+import runpy
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 import pytest
+from packaging.requirements import Requirement
+from packaging.version import Version
+
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 
 try:
-    import tritonclient.grpc as grpcclient
+    from google.protobuf import any_pb2, empty_pb2, json_format
 except ImportError:
-    grpcclient = None
+    any_pb2 = empty_pb2 = json_format = None
 
-from tests.utils.managed_process import ManagedProcess
+TRITON_SKIP_REASON = "tritonclient.grpc is not installed"
+try:
+    import tritonclient.grpc as grpcclient
+    from tritonclient.grpc import service_pb2
+except ImportError:
+    grpcclient = service_pb2 = None
+except RuntimeError as exc:
+    if not (
+        str(exc).startswith("The grpc package installed is at version ")
+        and "grpc_service_pb2_grpc.py depends on grpcio>=" in str(exc)
+    ):
+        raise
+    grpcclient = service_pb2 = None
+    TRITON_SKIP_REASON = str(exc)
 
 logger = logging.getLogger(__name__)
+
+
+def _requirement(text: str, package: str) -> Requirement:
+    pins = []
+    for line in text.splitlines():
+        value = line.partition("#")[0].strip()
+        if not value or value.startswith("-"):
+            continue
+        requirement = Requirement(value)
+        if requirement.name == package:
+            pins.append(requirement)
+    assert len(pins) == 1, f"Expected one {package} requirement, found {len(pins)}"
+    return pins[0]
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parallel
+@pytest.mark.parametrize("component", ["common", "frontend", "planner"])
+def test_protobuf_requirements_exclude_vulnerable_versions(component: str) -> None:
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "container/deps"
+        / f"requirements.{component}.txt"
+    )
+    requirement = _requirement(path.read_text(encoding="utf-8"), "protobuf")
+    assert requirement.marker is None and requirement.url is None, str(path)
+    specifiers = list(requirement.specifier)
+    assert len(specifiers) == 1, f"{path} must use one exact protobuf pin"
+    specifier = specifiers[0]
+    assert specifier.operator == "==" and "*" not in specifier.version, str(path)
+    version = Version(specifier.version)
+    assert not version.is_prerelease and not version.is_devrelease, str(path)
+    assert Version("6.33.6") <= version < Version("7.0.0"), f"{path} pins {version}"
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parallel
+@pytest.mark.skipif(json_format is None, reason="protobuf is not installed")
+def test_protobuf_any_json_recursion_limit() -> None:
+    message = any_pb2.Any()
+    message.Pack(empty_pb2.Empty())
+    payload = json_format.MessageToDict(message)
+    assert (
+        json_format.ParseDict(payload, any_pb2.Any(), max_recursion_depth=5) == message
+    )
+    for _ in range(10):
+        payload = {"@type": "type.googleapis.com/google.protobuf.Any", "value": payload}
+    with pytest.raises(json_format.ParseError, match="[Rr]ecursion"):
+        json_format.ParseDict(payload, any_pb2.Any(), max_recursion_depth=5)
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parallel
+@pytest.mark.skipif(grpcclient is None, reason=TRITON_SKIP_REASON)
+def test_triton_protobuf_json_roundtrip() -> None:
+    response = service_pb2.ModelInferResponse(model_name="identity", id="roundtrip")
+    response.parameters["processed"].bool_param = True
+    response.outputs.add(name="OUTPUT", datatype="INT32", shape=[2])
+    response.raw_output_contents.append(np.array([3, 7], dtype=np.int32).tobytes())
+    wire_response = service_pb2.ModelInferResponse.FromString(
+        response.SerializeToString()
+    )
+    result = grpcclient.InferResult(wire_response)
+    assert result.get_response(as_json=True)["parameters"]["processed"]["bool_param"]
+    assert result.get_response().id == "roundtrip"
+    np.testing.assert_array_equal(result.as_numpy("OUTPUT"), [3, 7])
+
+
+def _load_with_triton_error(error: Exception) -> dict[str, Any]:
+    original_import = builtins.__import__
+
+    def import_with_error(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "tritonclient.grpc":
+            raise error
+        return original_import(name, *args, **kwargs)
+
+    with patch.object(builtins, "__import__", side_effect=import_with_error):
+        return runpy.run_path(__file__)
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parallel
+class TestDependencyGuards:
+    @pytest.mark.parametrize(
+        "pin",
+        [
+            "protobuf==6.33.6",
+            "protobuf==6.33.7",
+            "  protobuf==6.34.0  # patched runtime",
+        ],
+    )
+    def test_patched_protobuf_pins(self, pin: str) -> None:
+        with patch.object(Path, "read_text", return_value=pin):
+            test_protobuf_requirements_exclude_vulnerable_versions("frontend")
+
+    @pytest.mark.parametrize(
+        "pin",
+        [
+            "protobuf==3.20.3",
+            "protobuf==5.29.5",
+            "protobuf==6.33.4",
+            "protobuf==6.33.5",
+            "protobuf==7.0.0",
+            "protobuf==7.0.0rc1",
+            "protobuf==6.33.*",
+            "protobuf>=6.33.6",
+            "protobuf==6.33.6; python_version >= '3.12'",
+            "protobuf==6.33.6\nprotobuf==6.33.7",
+        ],
+    )
+    def test_unsafe_or_nonexact_protobuf_pins(self, pin: str) -> None:
+        with patch.object(Path, "read_text", return_value=pin):
+            with pytest.raises(AssertionError):
+                test_protobuf_requirements_exclude_vulnerable_versions("frontend")
+
+    def test_missing_protobuf_pin(self) -> None:
+        with patch.object(Path, "read_text", return_value="# no protobuf pin"):
+            with pytest.raises(AssertionError, match="Expected one protobuf"):
+                test_protobuf_requirements_exclude_vulnerable_versions("frontend")
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ModuleNotFoundError("No module named 'tritonclient'"),
+            RuntimeError(
+                "The grpc package installed is at version 1.76.0, but the generated "
+                "code in grpc_service_pb2_grpc.py depends on grpcio>=1.81.1. "
+                "Please upgrade your grpc module to grpcio>=1.81.1."
+            ),
+        ],
+    )
+    def test_unavailable_triton_preserves_requirement_tests(
+        self, error: Exception
+    ) -> None:
+        namespace = _load_with_triton_error(error)
+        assert namespace["grpcclient"] is None
+        assert namespace["service_pb2"] is None
+        guard = namespace["test_protobuf_requirements_exclude_vulnerable_versions"]
+        for component in ("common", "frontend", "planner"):
+            guard(component)
+        for name in ("test_triton_protobuf_json_roundtrip", "test_request_parameters"):
+            marks = namespace[name].pytestmark
+            assert any(mark.name == "skipif" and mark.args[0] for mark in marks)
+
+    def test_unrelated_triton_runtime_error_is_not_hidden(self) -> None:
+        with pytest.raises(RuntimeError, match="unexpected initialization failure"):
+            _load_with_triton_error(RuntimeError("unexpected initialization failure"))
 
 
 class EchoTensorWorkerProcess(ManagedProcess):
@@ -44,16 +220,11 @@ class EchoTensorWorkerProcess(ManagedProcess):
         # so no namespace conflicts - use default "tensor" namespace
 
         log_dir = f"{request.node.name}_worker"
-        shutil.rmtree(log_dir, ignore_errors=True)
-
         super().__init__(
             command=command,
             env=env,
             health_check_urls=[
-                (
-                    f"http://localhost:{system_port}/health",
-                    lambda r: r.json().get("status") == "ready",
-                )
+                (f"http://localhost:{system_port}/health", check_health_ready)
             ],
             timeout=300,
             display_output=True,
@@ -106,6 +277,7 @@ def extract_params(param_map) -> dict:
     ],
     ids=["no_params", "numeric_param", "mixed_params"],
 )
+@pytest.mark.skipif(grpcclient is None, reason=TRITON_SKIP_REASON)
 def test_request_parameters(
     file_storage_backend, start_services_with_echo_tensor_worker, request_params
 ):

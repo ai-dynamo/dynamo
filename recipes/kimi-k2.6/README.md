@@ -31,7 +31,7 @@ Dynamo + vLLM deployment profiles across two GPU SKUs and two target workloads:
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/kubernetes/quickstart.mdx).
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **HuggingFace token** with access to `nvidia/Kimi-K2.6-NVFP4`, `moonshotai/Kimi-K2.6` and `lightseekorg/kimi-k2.6-eagle3-mla`:
    ```bash
    export NAMESPACE=your-namespace

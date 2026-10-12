@@ -19,3 +19,15 @@ def normalize_finish_reason(finish_reason: str) -> str:
         logging.debug(f"Normalizing finish reason: {finish_reason} to cancelled")
         return "cancelled"
     return finish_reason
+
+
+def trailing_stop_prefix_len(text: str, stop_strings: set[str]) -> int:
+    """Return the longest trailing substring that prefixes a stop string."""
+    if not text or not stop_strings:
+        return 0
+    max_len = min(len(text), max(len(stop) for stop in stop_strings))
+    for suffix_len in range(max_len, 0, -1):
+        suffix = text[-suffix_len:]
+        if any(stop.startswith(suffix) for stop in stop_strings):
+            return suffix_len
+    return 0

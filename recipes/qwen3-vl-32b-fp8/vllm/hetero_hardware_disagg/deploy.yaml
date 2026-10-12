@@ -99,7 +99,7 @@ spec:
               --model $MODEL_PATH \
               --served-model-name $SERVED_MODEL_NAME \
               --enable-multimodal \
-              --multimodal-encode-worker \
+              --disaggregation-mode encode \
               --enable-mm-embeds \
               --dtype bfloat16 \
               --enforce-eager \
@@ -109,7 +109,7 @@ spec:
           resources:
             claims:
               - name: intel-gpu-rdma-resource
-    VllmDecodeWorker:
+    decode:
       componentType: worker
       envFromSecret: hf-token-secret
       replicas: 1
@@ -174,15 +174,14 @@ spec:
               --model $MODEL_PATH \
               --served-model-name $SERVED_MODEL_NAME \
               --enable-multimodal \
-              --multimodal-worker \
+              --disaggregation-mode pd \
               --enable-mm-embeds \
               --route-to-encoder \
               --mm-prompt-template "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n" \
               --dtype bfloat16 \
               --max-num-seqs 40 \
               --kv-cache-dtype fp8 \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false}}'
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false}}'
           resources:
             claims:
               - name: gpu-rdma-resource
-

@@ -11,4 +11,34 @@
 
 --no-binary imageio-ffmpeg
 
+# The upstream vllm-openai base bundles cryptography at the prior major; floor
+# it so the --no-deps install refreshes the bundled copy to the current release
+# line.
+cryptography>=50.0.0
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
+# Refresh the upstream image's bundled mooncake wheel: older builds vendor a
+# stale Go dependency set inside libetcd_wrapper.so, and current wheels carry
+# the updated etcd client stack. vllm-openai is built with
+# INSTALL_KV_CONNECTORS=true on CUDA 13, and its Dockerfile uninstalls the
+# generic project and installs mooncake-transfer-engine-cuda13 in its place.
+# Both ship the same `mooncake` package and the generic one links
+# libcudart.so.12, so the floor has to name the CUDA 13 distribution. CUDA
+# only: stripped for the XPU and CPU images in vllm_runtime.Dockerfile.
+mooncake-transfer-engine-cuda13>=0.3.13.post1,<0.4
+# The upstream vllm-openai image bundles pillow at an older patch release;
+# floor it so the --no-deps install moves it to the current patch line.
+pillow>=12.3.0
+# NVDEC hardware decode for H.264/H.265 video input (common/multimodal/
+# nvdec_decoder). The vllm-openai base ships 2.0.4, which bundles a full FFmpeg
+# including a libavcodec the codec gate rejects, so vllm_runtime.Dockerfile
+# removes it before this installs. Requires NVIDIA_DRIVER_CAPABILITIES to include
+# "video". Pinned exactly: container/deps/README.md asks that every installed
+# version be explicitly tested, and here the wheel's bundled FFmpeg is what the
+# codec gate inspects, so a range would let an unaudited bundle land at build
+# time. Keep the specifier in step with requirements.{sglang,trtllm}.txt
+# and the runtime templates; tests/dependencies/test_pynvvideocodec_spec.py
+# enforces that.
+PyNvVideoCodec==2.2.3
+# Dynamo installs with --no-deps, so declare the shared image-cache client
+# explicitly instead of relying on LMCache's unbounded transitive dependency.
+redis>=6.2.0,<9.0.0

@@ -62,7 +62,7 @@ spec:
                               valueFrom:
                                 fieldRef:
                                     fieldPath: metadata.uid
-                          image: registry.example/dynamo-frontend:test
+                          image: registry.example/dynamo-frontend:1.4.0-test
                           livenessProbe:
                             failureThreshold: 3
                             httpGet:
@@ -113,6 +113,7 @@ spec:
                 nvidia.com/dynamo-sub-component-type: decode
                 nvidia.com/metrics-enabled: "true"
                 nvidia.com/selector: grove-manifest-decode
+                nvidia.com/dynamo-worker-hash: $var:worker-hash
               name: decode-ldr
               spec:
                 minAvailable: 1
@@ -132,6 +133,8 @@ spec:
                               value: "false"
                             - name: DYN_NAMESPACE
                               value: $pattern:clusterenv-.*-grove-manifest
+                            - name: DYN_NAMESPACE_WORKER_SUFFIX
+                              value: $var:worker-hash
                             - name: DYN_PARENT_DGD_K8S_NAME
                               value: grove-manifest
                             - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -164,7 +167,7 @@ spec:
                               valueFrom:
                                 fieldRef:
                                     fieldPath: status.podIP
-                          image: registry.example/dynamo-worker:test
+                          image: registry.example/dynamo-worker:1.4.0-test
                           livenessProbe:
                             failureThreshold: 1
                             httpGet:
@@ -223,6 +226,7 @@ spec:
                 nvidia.com/dynamo-sub-component-type: decode
                 nvidia.com/metrics-enabled: "true"
                 nvidia.com/selector: grove-manifest-decode
+                nvidia.com/dynamo-worker-hash: $var:worker-hash
               name: decode-wkr
               spec:
                 minAvailable: 1
@@ -242,6 +246,8 @@ spec:
                               value: "false"
                             - name: DYN_NAMESPACE
                               value: $pattern:clusterenv-.*-grove-manifest
+                            - name: DYN_NAMESPACE_WORKER_SUFFIX
+                              value: $var:worker-hash
                             - name: DYN_PARENT_DGD_K8S_NAME
                               value: grove-manifest
                             - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -274,7 +280,7 @@ spec:
                               valueFrom:
                                 fieldRef:
                                     fieldPath: status.podIP
-                          image: registry.example/dynamo-worker:test
+                          image: registry.example/dynamo-worker:1.4.0-test
                           name: main
                           ports:
                             - containerPort: 9090
@@ -309,4 +315,3 @@ spec:
               name: decode
               replicas: 1
         terminationDelay: 15m0s
-status: $notexists

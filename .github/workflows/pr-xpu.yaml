@@ -61,7 +61,7 @@ jobs:
           fetch-depth: 0
       - name: Check for changes
         id: changes
-        uses: ./.github/actions/changed-files
+        uses: $/.github/actions/changed-files
         with:
           gh_token: ${{ github.token }}
 
@@ -74,7 +74,7 @@ jobs:
     if: >-
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.vllm == 'true'
-    uses: ./.github/workflows/xpu-ci.yaml
+    uses: $/.github/workflows/xpu-ci.yaml
     with:
       framework: vllm
       pytest_markers: 'vllm and pre_merge and not multimodal'

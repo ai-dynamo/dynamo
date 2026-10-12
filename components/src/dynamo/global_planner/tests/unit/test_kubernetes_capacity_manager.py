@@ -13,6 +13,7 @@ import pytest
 from dynamo.global_planner.capacity_manager import PoolSpec
 from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.errors import GPUShapeUnavailableError
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -23,22 +24,36 @@ pytestmark = [
 
 
 def _component(name, replicas, gpu=1, ctype=None, node_count=None):
+    main_container = {"name": "main"}
+    if gpu is not None:
+        main_container["resources"] = {"limits": {"nvidia.com/gpu": gpu}}
     component = {
         "name": name,
         "replicas": replicas,
-        "podTemplate": {
-            "spec": {
-                "containers": [
-                    {"name": "main", "resources": {"limits": {"nvidia.com/gpu": gpu}}}
-                ]
-            }
-        },
+        "podTemplate": {"spec": {"containers": [main_container]}},
     }
     if ctype is not None:
         component["type"] = ctype
     if node_count is not None:
         component["multinode"] = {"nodeCount": node_count}
     return component
+
+
+def _with_operator_gpu_status(components):
+    statuses = {}
+    for component in components:
+        main = component["podTemplate"]["spec"]["containers"][0]
+        gpu = main.get("resources", {}).get("limits", {}).get("nvidia.com/gpu")
+        status = {}
+        if gpu is not None:
+            total_gpu = int(gpu) * component.get("multinode", {}).get("nodeCount", 1)
+            status = {"gpusPerEngine": total_gpu, "gpusPerReplica": total_gpu}
+        statuses[component["name"]] = status
+    return {
+        "metadata": {"generation": 1},
+        "spec": {"components": components},
+        "status": {"observedGeneration": 1, "components": statuses},
+    }
 
 
 def _dgd_spec(
@@ -49,27 +64,23 @@ def _dgd_spec(
     prefill_node_count=None,
 ):
     """A v1beta1 DGD spec with typed prefill and decode components."""
-    return {
-        "spec": {
-            "components": [
-                _component(
-                    "prefill-svc",
-                    prefill_replicas,
-                    gpu=prefill_gpu,
-                    ctype="prefill",
-                    node_count=prefill_node_count,
-                ),
-                _component(
-                    "decode-svc", decode_replicas, gpu=decode_gpu, ctype="decode"
-                ),
-            ]
-        }
-    }
+    return _with_operator_gpu_status(
+        [
+            _component(
+                "prefill-svc",
+                prefill_replicas,
+                gpu=prefill_gpu,
+                ctype="prefill",
+                node_count=prefill_node_count,
+            ),
+            _component("decode-svc", decode_replicas, gpu=decode_gpu, ctype="decode"),
+        ]
+    )
 
 
 def _worker_dgd_spec(replicas, gpu=1, name="worker-svc", ctype="worker"):
     """A v1beta1 DGD spec with a single generic worker component."""
-    return {"spec": {"components": [_component(name, replicas, gpu=gpu, ctype=ctype)]}}
+    return _with_operator_gpu_status([_component(name, replicas, gpu=gpu, ctype=ctype)])
 
 
 def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
@@ -253,6 +264,29 @@ def test_observe_multinode_scales_gpu_count():
     assert cm.observe()["default/my-dgd"]["prefill"].gpu_per_replica == 4
 
 
+def test_observe_dra_worker_uses_operator_resolved_gpu_count():
+    cm = KubernetesCapacityManager("default")
+    deployment = {
+        "metadata": {"generation": 2},
+        "spec": {
+            "components": [
+                _component(
+                    "decode-svc", replicas=1, gpu=None, ctype="decode", node_count=2
+                )
+            ]
+        },
+        "status": {
+            "observedGeneration": 2,
+            "components": {"decode-svc": {"gpusPerEngine": 4, "gpusPerReplica": 5}},
+        },
+    }
+    _install_connector(cm, "default/my-dgd", deployment)
+
+    pools = cm.observe(require_complete=True)["default/my-dgd"]
+
+    assert pools["decode"].gpu_per_replica == 5
+
+
 def test_observe_generic_worker_keyed_by_name_then_role_hint():
     cm = KubernetesCapacityManager("default")
     _install_connector(cm, "default/w", _worker_dgd_spec(replicas=2, gpu=2))
@@ -282,6 +316,47 @@ def test_observe_untyped_worker_with_gpu_counts_toward_budget():
     _install_connector(cm, "default/w", _worker_dgd_spec(replicas=2, gpu=2, ctype=None))
     pools = cm.observe()["default/w"]
     assert pools["worker-svc"].gpu_per_replica == 2
+
+
+def test_observe_skips_explicit_zero_gpu_dra_component():
+    cm = KubernetesCapacityManager("default")
+    component = _component("frontend", replicas=1, gpu=None, ctype=None)
+    component["podTemplate"]["spec"] = {
+        "resourceClaims": [
+            {"name": "rdma", "resourceClaimTemplateName": "frontend-rdma"}
+        ],
+        "containers": [{"name": "main", "resources": {"claims": [{"name": "rdma"}]}}],
+    }
+    deployment = {
+        "metadata": {"generation": 2},
+        "spec": {"components": [component]},
+        "status": {
+            "observedGeneration": 2,
+            "components": {"frontend": {"gpusPerEngine": 0, "gpusPerReplica": 0}},
+        },
+    }
+    _install_connector(cm, "default/frontend", deployment)
+
+    assert cm.observe(require_complete=True)["default/frontend"] == {}
+
+
+def test_observe_untyped_dra_worker_missing_shape_fails_closed():
+    cm = KubernetesCapacityManager("default")
+    component = _component("worker", replicas=1, gpu=None, ctype=None)
+    component["podTemplate"]["spec"] = {
+        "resourceClaims": [{"name": "gpu", "resourceClaimTemplateName": "worker-gpu"}],
+        "containers": [{"name": "main", "resources": {"claims": [{"name": "gpu"}]}}],
+    }
+    deployment = {
+        "metadata": {"generation": 2},
+        "spec": {"components": [component]},
+        "status": {"observedGeneration": 2, "components": {"worker": {}}},
+    }
+    _install_connector(cm, "default/worker", deployment)
+
+    with pytest.raises(RuntimeError, match="GPU shape") as exc_info:
+        cm.observe(require_complete=True)
+    assert isinstance(exc_info.value.__cause__, GPUShapeUnavailableError)
 
 
 def test_observe_tolerates_read_failure():

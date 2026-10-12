@@ -34,7 +34,7 @@ Dynamo + vLLM deployment profiles for the Mooncake agentic trace (64k/400/90%-KV
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/kubernetes/quickstart.mdx). The recipes pull
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx). The recipes pull
    `nvcr.io/nvidia/ai-dynamo/vllm-runtime` images via the `dynamo-ngc-token` image pull secret.
 2. **HuggingFace token** with access to `openai/gpt-oss-120b` and `nvidia/gpt-oss-120b-Eagle3-v3`:
    ```bash

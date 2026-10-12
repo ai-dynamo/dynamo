@@ -316,6 +316,7 @@ mod tests {
     use super::*;
 
     fn stored(worker: u64, event_id: u64, hash: u64) -> RouterEvent {
+        const EXTERNAL_MASK: u64 = 0xB3EC_4A11_7E57_F00D;
         RouterEvent::new(
             worker,
             KvCacheEvent {
@@ -324,7 +325,7 @@ mod tests {
                     parent_hash: None,
                     start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(hash),
+                        block_hash: ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK),
                         tokens_hash: LocalBlockHash(hash),
                         mm_extra_info: None,
                     }],
@@ -335,12 +336,13 @@ mod tests {
     }
 
     fn removed(worker: u64, event_id: u64, hash: u64) -> RouterEvent {
+        const EXTERNAL_MASK: u64 = 0xB3EC_4A11_7E57_F00D;
         RouterEvent::new(
             worker,
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: vec![ExternalSequenceBlockHash(hash)],
+                    block_hashes: vec![ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK)],
                 }),
                 dp_rank: 0,
             },

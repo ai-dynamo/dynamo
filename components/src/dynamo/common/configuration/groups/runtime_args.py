@@ -6,18 +6,50 @@
 import argparse
 import logging
 import os
-from typing import List, Optional
+from importlib.metadata import version as distribution_version
+from typing import List, Literal, Optional
+
+import msgspec
+from packaging.version import Version
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
-from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.configuration.utils import (
+    add_argument,
+    add_negatable_bool_argument,
+    env_or_default,
+)
 from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
 
 logger = logging.getLogger(__name__)
 _FPM_TRACE_VALUES = {"1", "0", "true", "false", "on", "off", "yes", "no"}
 _fpm_trace_invalid_warning_emitted = False
+
+
+class StructuralTagConfig(msgspec.Struct, forbid_unknown_fields=True):
+    scope: Literal["auto", "always"] = "always"
+    schema: Literal["auto", "strict"] = "auto"
+    allow_tool_calls_with_structured_output: bool = False
+    exclude_special_tokens: Optional[bool] = None
+    reasoning_boundary: Literal["auto", "structural_tag", "backend"] = "auto"
+    tool_arguments_any_order: bool = False
+
+
+_STRUCTURAL_TAG_CONFIG_DECODER = msgspec.json.Decoder(type=StructuralTagConfig)
+
+
+def _parse_structural_tag(value: str) -> StructuralTagConfig | bool:
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return StructuralTagConfig()
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    try:
+        return _STRUCTURAL_TAG_CONFIG_DECODER.decode(value)
+    except msgspec.DecodeError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 class DynamoRuntimeConfig(ConfigBase):
@@ -30,6 +62,7 @@ class DynamoRuntimeConfig(ConfigBase):
     kv_state_endpoint: Optional[str] = None
     discovery_backend: str
     request_plane: str
+    response_plane: str = "tcp"
     event_plane: Optional[str] = None
     fpm_trace: bool = False
     connector: list[str]
@@ -37,10 +70,13 @@ class DynamoRuntimeConfig(ConfigBase):
 
     dyn_tool_call_parser: Optional[str] = None
     dyn_reasoning_parser: Optional[str] = None
+    dyn_default_thinking_mode: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
-    dyn_enable_structural_tag: bool = False
-    dyn_structural_tag_scope: str = "auto"
-    dyn_structural_tag_schema: str = "auto"
+    dyn_enable_structural_tag: Optional[bool] = None
+    dyn_structural_tag_scope: Optional[Literal["auto", "always"]] = None
+    dyn_structural_tag_schema: Optional[Literal["auto", "strict"]] = None
+    dyn_structural_tag: Optional[StructuralTagConfig | bool] = None
+    structural_tag: Optional[dict[str, object]] = None
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
     dump_config_to: Optional[str] = None
@@ -57,9 +93,23 @@ class DynamoRuntimeConfig(ConfigBase):
     # default; when set, these surface env vars that the Rust runtime reads
     # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
     engine_request_limit: Optional[int] = None
+    tcp_tls_cert_path: Optional[str] = None
+    tcp_tls_key_path: Optional[str] = None
+    tcp_tls_ca_cert_path: Optional[str] = None
+    tcp_tls_insecure: bool = False
+    tcp_tls_server_name: Optional[str] = None
+    tcp_tls_handshake_timeout_secs: Optional[int] = None
+    tcp_tls_client_cert_path: Optional[str] = None
+    tcp_tls_client_key_path: Optional[str] = None
+    tcp_tls_client_ca_cert_path: Optional[str] = None
+    nats_tls_ca_cert_path: Optional[str] = None
+    nats_tls_insecure: bool = False
+    nats_tls_client_cert_path: Optional[str] = None
+    nats_tls_client_key_path: Optional[str] = None
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
+        self.structural_tag = resolve_structural_tag_config(self)
 
         # The Rust FPM sink reads this setting from the process environment.
         # Canonicalize the resolved CLI/env value before the runtime or backend
@@ -90,6 +140,53 @@ class DynamoRuntimeConfig(ConfigBase):
             raise ValueError(
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
             )
+
+        os.environ["DYN_RESPONSE_PLANE"] = self.response_plane
+
+        # Propagate TCP TLS CLI flags to env vars so the Rust runtime picks them up.
+        if self.tcp_tls_cert_path:
+            os.environ["DYN_TCP_TLS_CERT_PATH"] = self.tcp_tls_cert_path
+        if self.tcp_tls_key_path:
+            os.environ["DYN_TCP_TLS_KEY_PATH"] = self.tcp_tls_key_path
+        if self.tcp_tls_ca_cert_path:
+            os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = self.tcp_tls_ca_cert_path
+        if self.tcp_tls_insecure:
+            os.environ["DYN_TCP_TLS_INSECURE"] = "1"
+        else:
+            os.environ.pop("DYN_TCP_TLS_INSECURE", None)
+        if self.tcp_tls_server_name:
+            os.environ["DYN_TCP_TLS_SERVER_NAME"] = self.tcp_tls_server_name
+        if self.tcp_tls_handshake_timeout_secs is not None:
+            if self.tcp_tls_handshake_timeout_secs <= 0:
+                raise ValueError(
+                    f"--tcp-tls-handshake-timeout must be a positive integer, got {self.tcp_tls_handshake_timeout_secs}"
+                )
+            os.environ["DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS"] = str(
+                self.tcp_tls_handshake_timeout_secs
+            )
+        # TCP mTLS: client identity presented to the server, and the CA the
+        # server uses to verify client certificates.
+        if self.tcp_tls_client_cert_path:
+            os.environ["DYN_TCP_TLS_CLIENT_CERT_PATH"] = self.tcp_tls_client_cert_path
+        if self.tcp_tls_client_key_path:
+            os.environ["DYN_TCP_TLS_CLIENT_KEY_PATH"] = self.tcp_tls_client_key_path
+        if self.tcp_tls_client_ca_cert_path:
+            os.environ[
+                "DYN_TCP_TLS_CLIENT_CA_CERT_PATH"
+            ] = self.tcp_tls_client_ca_cert_path
+
+        # Propagate NATS TLS CLI flags.
+        if self.nats_tls_ca_cert_path:
+            os.environ["NATS_TLS_CA_CERT_PATH"] = self.nats_tls_ca_cert_path
+        if self.nats_tls_insecure:
+            os.environ["NATS_TLS_INSECURE"] = "1"
+        else:
+            os.environ.pop("NATS_TLS_INSECURE", None)
+        # NATS mTLS: client identity presented to the NATS server.
+        if self.nats_tls_client_cert_path:
+            os.environ["NATS_TLS_CLIENT_CERT_PATH"] = self.nats_tls_client_cert_path
+        if self.nats_tls_client_key_path:
+            os.environ["NATS_TLS_CLIENT_KEY_PATH"] = self.nats_tls_client_key_path
 
     def _validate_output_modalities(self) -> None:
         """Validate --output-modalities values."""
@@ -156,6 +253,14 @@ class DynamoRuntimeArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--response-plane",
+            env_var="DYN_RESPONSE_PLANE",
+            default="tcp",
+            help="Select the response transport. Frontend and workers must match.",
+            choices=["tcp", "quic"],
+        )
+        add_argument(
+            g,
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
             default=None,
@@ -196,6 +301,16 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
             choices=get_reasoning_parser_names(),
         )
+        add_argument(
+            g,
+            flag_name="--dyn-default-thinking-mode",
+            env_var="DYN_DEFAULT_THINKING_MODE",
+            default=None,
+            choices=["enabled", "disabled"],
+            help="Deployment-level default thinking mode for chat templates. "
+            "Client request thinking, reasoning_effort, chat_template_args, or "
+            "chat_template_kwargs values override this default.",
+        )
         # NOTE: This flag also exists in FrontendArgGroup (frontend_args.py).
         # Both definitions are needed: this one controls the Rust-native chat
         # template path (oai.rs), while the frontend copy controls the Python
@@ -209,35 +324,38 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Exclude tool definitions from the chat template when tool_choice='none'. "
             "Prevents models from generating raw XML tool calls in the content field.",
         )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--dyn-enable-structural-tag",
-            env_var="DYN_ENABLE_STRUCTURAL_TAG",
-            default=False,
-            help="Enable structural tag guided decoding for tool calls.",
+        g.add_argument(
+            "--dyn-enable-structural-tag",
+            action=argparse.BooleanOptionalAction,
+            default=env_or_default("DYN_ENABLE_STRUCTURAL_TAG", None, value_type=bool),
+            help=argparse.SUPPRESS,
         )
-        add_argument(
-            g,
-            flag_name="--dyn-structural-tag-scope",
-            env_var="DYN_STRUCTURAL_TAG_SCOPE",
-            default="auto",
+        g.add_argument(
+            "--dyn-structural-tag-scope",
+            default=env_or_default("DYN_STRUCTURAL_TAG_SCOPE", None, value_type=str),
             choices=["auto", "always"],
-            help="Controls when structural tags are activated. "
-            "'auto': for required/named tool_choice, and if any tool has strict=true "
-            "or parallel_tool_calls is false. "
-            "'always': also for auto without those conditions. "
-            "tool_choice none is unaffected by auto vs always.",
+            help=argparse.SUPPRESS,
+        )
+        g.add_argument(
+            "--dyn-structural-tag-schema",
+            default=env_or_default("DYN_STRUCTURAL_TAG_SCHEMA", None, value_type=str),
+            choices=["auto", "strict"],
+            help=argparse.SUPPRESS,
         )
         add_argument(
             g,
-            flag_name="--dyn-structural-tag-schema",
-            env_var="DYN_STRUCTURAL_TAG_SCHEMA",
-            default="auto",
-            choices=["auto", "strict"],
-            help="Controls parameter schema strictness inside structural tags. "
-            "'auto': real schema only for tools with strict=true; "
-            "syntactically constrained but schema-unconstrained for all other tools. "
-            "'strict': real parameter schema for all tools.",
+            flag_name="--dyn-structural-tag",
+            env_var="DYN_STRUCTURAL_TAG",
+            default=None,
+            arg_type=_parse_structural_tag,
+            nargs="?",
+            const="true",
+            help="Configure default-on structural tag guided decoding with a JSON object, "
+            "or pass false to disable optional guidance. Rust retains native tags for "
+            "Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang "
+            "respect the opt-out. Schema auto enforces strict omitted or true; schema "
+            "strict enforces every tool, overriding strict=false. Unsupported schema "
+            "constructs can cause backend grammar compilation errors.",
         )
         add_argument(
             g,
@@ -253,7 +371,10 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_ENDPOINT_TYPES",
             default="chat,completions",
             obsolete_flag="--dyn-endpoint-types",
-            help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Use 'completions' for models without chat templates.",
+            help="Comma-separated list of endpoint types to enable. Options: "
+            "'chat', 'completions', or 'none'. Use 'completions' for models "
+            "without chat templates. Use 'none' for topology-only workers "
+            "fronted by another Dynamo service.",
         )
 
         add_argument(
@@ -334,3 +455,186 @@ class DynamoRuntimeArgGroup(ArgGroup):
             "semaphore size). Enables worker-side request rejection when set. "
             "Disabled by default.",
         )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-cert-path",
+            env_var="DYN_TCP_TLS_CERT_PATH",
+            default=None,
+            help="Path to PEM certificate for the TCP server.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-key-path",
+            env_var="DYN_TCP_TLS_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP server certificate.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-ca-cert-path",
+            env_var="DYN_TCP_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate used by this node to verify the TCP peer's certificate.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--tcp-tls-insecure",
+            env_var="DYN_TCP_TLS_INSECURE",
+            default=False,
+            help="Disable TCP TLS certificate verification. For local development only.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-server-name",
+            env_var="DYN_TCP_TLS_SERVER_NAME",
+            default=None,
+            help="Override TLS SNI server name for TCP connections (useful when connecting by IP).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-handshake-timeout",
+            env_var="DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS",
+            default=None,
+            arg_type=int,
+            dest="tcp_tls_handshake_timeout_secs",
+            help="TLS handshake timeout in seconds (default: 3).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-cert-path",
+            env_var="DYN_TCP_TLS_CLIENT_CERT_PATH",
+            default=None,
+            help="Path to PEM client certificate presented to the TCP server for mTLS.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-key-path",
+            env_var="DYN_TCP_TLS_CLIENT_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP client certificate (mTLS).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-ca-cert-path",
+            env_var="DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate the TCP server uses to verify client "
+            "certificates. When set, clients must present a trusted certificate (mTLS enforced).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-ca-cert-path",
+            env_var="NATS_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate for verifying the NATS server.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--nats-tls-insecure",
+            env_var="NATS_TLS_INSECURE",
+            default=False,
+            help="Disable NATS TLS certificate verification. For local development only.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-client-cert-path",
+            env_var="NATS_TLS_CLIENT_CERT_PATH",
+            default=None,
+            help="Path to PEM client certificate presented to the NATS server for mTLS.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-client-key-path",
+            env_var="NATS_TLS_CLIENT_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the NATS client certificate (mTLS).",
+        )
+
+
+def _validate_xgrammar_any_order_support() -> None:
+    xgrammar_version = Version(distribution_version("xgrammar"))
+    if xgrammar_version < Version("0.2.3"):
+        raise ValueError(
+            "tool_arguments_any_order requires XGrammar >= 0.2.3; "
+            f"found {xgrammar_version}"
+        )
+
+
+def resolve_structural_tag_config(
+    runtime_config: DynamoRuntimeConfig,
+) -> Optional[dict[str, object]]:
+    """Normalize the public setting and hidden legacy flags."""
+
+    structural_tag_setting = runtime_config.dyn_structural_tag
+    if structural_tag_setting is True:
+        structural_tag_setting = StructuralTagConfig()
+    legacy_enable = runtime_config.dyn_enable_structural_tag
+    legacy_scope = runtime_config.dyn_structural_tag_scope
+    legacy_schema = runtime_config.dyn_structural_tag_schema
+
+    legacy_options = []
+    if legacy_enable is not None:
+        legacy_options.append(
+            "--dyn-enable-structural-tag"
+            if legacy_enable
+            else "--no-dyn-enable-structural-tag"
+        )
+    if legacy_scope is not None:
+        legacy_options.append("--dyn-structural-tag-scope")
+    if legacy_schema is not None:
+        legacy_options.append("--dyn-structural-tag-schema")
+    if legacy_options:
+        logger.warning(
+            "%s deprecated; use --dyn-structural-tag instead",
+            ", ".join(legacy_options),
+        )
+
+    if structural_tag_setting is not None:
+        enabled = structural_tag_setting is not False
+        conflicting_options = []
+        if legacy_enable is not None and legacy_enable != enabled:
+            conflicting_options.append(
+                "--dyn-enable-structural-tag"
+                if legacy_enable
+                else "--no-dyn-enable-structural-tag"
+            )
+        if legacy_scope is not None:
+            conflicting_options.append("--dyn-structural-tag-scope")
+        if legacy_schema is not None:
+            conflicting_options.append("--dyn-structural-tag-schema")
+        if conflicting_options:
+            raise ValueError(
+                "--dyn-structural-tag cannot be combined with legacy option(s): "
+                + ", ".join(conflicting_options)
+            )
+        if not enabled:
+            return None
+        if (
+            isinstance(structural_tag_setting, StructuralTagConfig)
+            and structural_tag_setting.tool_arguments_any_order
+        ):
+            _validate_xgrammar_any_order_support()
+        return msgspec.to_builtins(structural_tag_setting)
+
+    if legacy_enable is False:
+        return None
+
+    return msgspec.to_builtins(
+        StructuralTagConfig(
+            scope=legacy_scope if legacy_scope is not None else "always",
+            schema=legacy_schema if legacy_schema is not None else "auto",
+        )
+    )

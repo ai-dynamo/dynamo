@@ -6,19 +6,23 @@ The migration directory contains tests for worker fault tolerance with migration
 
 ### Test Parameterization
 
-All migration tests are parameterized with the following dimensions:
+Migration tests select a small set of meaningful cases from these dimensions;
+they do not run the full Cartesian product. Backend-specific matrices retain
+each supported policy outcome while varying lifecycle, API, response mode, and
+request-plane transport across the selected cases.
 
 | Parameter IDs | Description |
 |---------------|-------------|
 | `migration_enabled`, `migration_disabled` | Controls whether migration is allowed |
 | `worker_failure` (SIGKILL), `graceful_shutdown` (SIGTERM) | Worker termination method |
-| `chat`, `completion` (skipped) | API endpoint to test |
-| `stream`, `unary` (skipped) | Streaming vs unary responses |
+| `chat`, `completion` | API endpoint to test |
+| `stream`, `unary` | Streaming vs unary responses |
 | `nats`, `tcp` | Request plane transport |
 
 ### Test Matrix
 
-Each backend (vLLM, SGLang, TRT-LLM) has the following test types:
+Backends may implement the following test types when that migration capability
+exists:
 
 | Test | Mode | Setup |
 |------|------|-------|
@@ -27,7 +31,9 @@ Each backend (vLLM, SGLang, TRT-LLM) has the following test types:
 | `test_request_migration_{backend}_kv_transfer` | Disaggregated | 1 prefill + 2 decode |
 | `test_request_migration_{backend}_decode` | Disaggregated | 1 prefill + 2 decode |
 
-Where `{backend}` is one of: `vllm`, `sglang`, `trtllm`
+Where `{backend}` is one of: `vllm`, `sglang`, `trtllm`. Unsupported targets
+should be absent rather than permanently skipped; for example, SGLang does not
+currently expose prefill-worker migration.
 
 ### Common Test Flow
 
@@ -38,9 +44,12 @@ Where `{backend}` is one of: `vllm`, `sglang`, `trtllm`
 5. For decode tests: wait for initial responses before termination
 6. Terminate the worker processing the request (SIGKILL or SIGTERM)
 7. Validate the request outcome based on `migration_limit`:
-   - `migration_limit > 0`: Request succeeds, verify TTFT/TPOT if streaming and migration metrics
+   - `migration_limit > 0`: Request succeeds and the replacement worker proves it completed the migrated request
    - `migration_limit = 0`: Request fails with expected error
 8. Verify migration behavior in frontend logs
+
+The assertions synchronize on observable lifecycle events and counters. Timing
+measurements may be logged for diagnosis, but they are not correctness gates.
 
 **Run examples:**
 ```bash
@@ -80,7 +89,7 @@ pytest tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellatio
 
 | Test | Mode | Cancellation Phase | Request Type | Setup |
 |------|------|--------------------|--------------|-------|
-| `test_request_cancellation_trtllm_aggregated` | Aggregated | During generation | 3 scenarios: completion, chat, streaming chat | 1 worker (prefill_and_decode) |
+| `test_request_cancellation_trtllm_aggregated` | Aggregated | During generation | 3 scenarios: completion, chat, streaming chat | 1 worker (agg) |
 | `test_request_cancellation_trtllm_disagg_decode_cancel` | Disaggregated | Remote decode | Streaming chat (5 responses read) | Prefill + Decode workers |
 | `test_request_cancellation_trtllm_disagg_prefill_cancel` | Disaggregated | Remote prefill | Completion (long prompt) | Prefill + Decode workers |
 

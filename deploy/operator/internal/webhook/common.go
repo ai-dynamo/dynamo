@@ -55,14 +55,14 @@ func GetExcludedNamespaces() ExcludedNamespacesChecker {
 	return webhookExcludedNamespaces
 }
 
-// LeaseAwareValidator wraps a CustomValidator and adds lease-based namespace exclusion logic.
+// LeaseAwareValidator wraps a Validator and adds lease-based namespace exclusion logic.
 // It checks if a namespace-restricted operator is managing the namespace (via active lease)
 // before delegating validation to the underlying validator.
 //
 // This implements the Decorator pattern to transparently add coordination logic without
 // modifying the actual validation implementations.
-type LeaseAwareValidator struct {
-	validator          admission.CustomValidator
+type LeaseAwareValidator[T client.Object] struct {
+	validator          admission.Validator[T]
 	excludedNamespaces ExcludedNamespacesChecker
 }
 
@@ -87,12 +87,12 @@ func WithGate(webhook *admission.Webhook, gate features.Gate) *admission.Webhook
 
 // NewLeaseAwareValidator creates a new LeaseAwareValidator that wraps the given validator.
 // If excludedNamespaces is nil, the wrapper acts as a pass-through (no filtering).
-func NewLeaseAwareValidator(validator admission.CustomValidator, excludedNamespaces ExcludedNamespacesChecker) admission.CustomValidator {
+func NewLeaseAwareValidator[T client.Object](validator admission.Validator[T], excludedNamespaces ExcludedNamespacesChecker) admission.Validator[T] {
 	if excludedNamespaces == nil {
 		// No exclusion logic needed, return validator as-is
 		return validator
 	}
-	return &LeaseAwareValidator{
+	return &LeaseAwareValidator[T]{
 		validator:          validator,
 		excludedNamespaces: excludedNamespaces,
 	}
@@ -110,24 +110,24 @@ func NewLeaseAwareDefaulter(defaulter admission.Defaulter[runtime.Object], exclu
 	}
 }
 
-// ValidateCreate implements admission.CustomValidator
-func (v *LeaseAwareValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+// ValidateCreate implements admission.Validator.
+func (v *LeaseAwareValidator[T]) ValidateCreate(ctx context.Context, obj T) (admission.Warnings, error) {
 	if shouldSkipAdmission(obj, v.excludedNamespaces) {
 		return nil, nil
 	}
 	return v.validator.ValidateCreate(ctx, obj)
 }
 
-// ValidateUpdate implements admission.CustomValidator
-func (v *LeaseAwareValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+// ValidateUpdate implements admission.Validator.
+func (v *LeaseAwareValidator[T]) ValidateUpdate(ctx context.Context, oldObj, newObj T) (admission.Warnings, error) {
 	if shouldSkipAdmission(newObj, v.excludedNamespaces) {
 		return nil, nil
 	}
 	return v.validator.ValidateUpdate(ctx, oldObj, newObj)
 }
 
-// ValidateDelete implements admission.CustomValidator
-func (v *LeaseAwareValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+// ValidateDelete implements admission.Validator.
+func (v *LeaseAwareValidator[T]) ValidateDelete(ctx context.Context, obj T) (admission.Warnings, error) {
 	if shouldSkipAdmission(obj, v.excludedNamespaces) {
 		return nil, nil
 	}

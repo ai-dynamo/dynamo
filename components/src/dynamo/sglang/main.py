@@ -3,19 +3,30 @@
 
 import asyncio
 import logging
+import os
 import sys
 
 import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
 )
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sglang._compat import override_server_args
 from dynamo.sglang.args import parse_args
+from dynamo.sglang.gateway import (
+    build_gateway_engine,
+    effective_gateway_workers,
+    gateway_worker_count,
+    is_gateway_child,
+    reserve_system_port_for_children,
+    validate_gateway_mode,
+)
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
     init_llm_diffusion,
@@ -28,6 +39,8 @@ from dynamo.sglang.init_multimodal import (
     init_multimodal_prefill_worker,
     init_multimodal_worker,
 )
+from dynamo.sglang.init_rerank import init_rerank
+from dynamo.sglang.nixl_telemetry import install_per_rank_nixl_prometheus_ports
 from dynamo.sglang.shutdown import install_graceful_shutdown
 from dynamo.sglang.snapshot import prepare_snapshot_engine
 
@@ -41,17 +54,46 @@ async def worker(argv: list[str] | None = None):
     config = await parse_args(argv)
     dump_config(config.dynamo_args.dump_config_to, config)
 
-    if config.server_args.load_format == "gms":
+    # Must run before any sgl.Engine is constructed: it changes how the engine
+    # launches its scheduler processes, each of which needs its own exporter port.
+    install_per_rank_nixl_prometheus_ports()
+
+    if (
+        config.server_args.load_format == "gms"
+        and os.environ.get("DYN_GMS_USE_V1") != "true"
+    ):
         from gpu_memory_service.integrations.sglang import setup_gms
 
-        config.server_args.load_format = setup_gms(config.server_args)
+        override_server_args(
+            config.server_args,
+            "dynamo.gms",
+            load_format=setup_gms(config.server_args),
+        )
+
+    gateway_count = effective_gateway_workers(config.server_args, config.dynamo_args)
+    validate_gateway_mode(config.server_args, config.dynamo_args, gateway_count)
+    if gateway_count > 1 and config.server_args.tokenizer_worker_num != gateway_count:
+        # SGLang launches its MultiTokenizerRouter (the shared-memory handoff the
+        # gateway children join) with exactly tokenizer_worker_num workers.
+        override_server_args(
+            config.server_args,
+            "dynamo.gateway",
+            tokenizer_worker_num=gateway_count,
+        )
+    if gateway_worker_count(config.server_args, config.dynamo_args) > 1:
+        reserve_system_port_for_children()
 
     # Snapshot mode: engine must be created before runtime so CRIU captures no
     # NATS/etcd connections.
-    snapshot_controller = await prepare_snapshot_engine(config.server_args)
+    snapshot_controller = await prepare_snapshot_engine(config)
 
     dynamo_args = config.dynamo_args
     snapshot_engine = None
+    attached_engine = None
+    if snapshot_controller is None and is_gateway_child():
+        # Spawned by gateway.serve_via_gateway_children: share the parent's engine
+        # through a TokenizerWorker instead of launching schedulers.
+        attached_engine = build_gateway_engine()
     if snapshot_controller is not None:
         snapshot_engine = snapshot_controller.engine
         dynamo_args = await refresh_snapshot_restore_config(
@@ -65,7 +107,14 @@ async def worker(argv: list[str] | None = None):
         discovery_backend=dynamo_args.discovery_backend,
         request_plane=dynamo_args.request_plane,
         event_plane=dynamo_args.event_plane,
+        response_plane=dynamo_args.response_plane,
     )
+
+    # Keep the flock alive for process lifetime. Linux releases it on exit.
+    if snapshot_controller is not None:
+        _failover_lock = await elect_and_wake(
+            snapshot_controller.pause_controller, runtime
+        )
 
     run_deferred_handlers = install_graceful_shutdown(
         loop, runtime, shutdown_endpoints, shutdown_event
@@ -82,6 +131,10 @@ async def worker(argv: list[str] | None = None):
     elif config.dynamo_args.video_generation_worker:
         await init_video_diffusion(
             runtime, config, shutdown_endpoints, run_deferred_handlers
+        )
+    elif config.dynamo_args.rerank_worker:
+        await init_rerank(
+            runtime, config, shutdown_event, shutdown_endpoints, run_deferred_handlers
         )
     elif config.dynamo_args.embedding_worker:
         await init_embedding(
@@ -132,6 +185,7 @@ async def worker(argv: list[str] | None = None):
             shutdown_endpoints,
             run_deferred_handlers,
             snapshot_engine=snapshot_engine,
+            attached_engine=attached_engine,
         )
     else:
         await init_prefill(
@@ -141,6 +195,7 @@ async def worker(argv: list[str] | None = None):
             shutdown_endpoints,
             run_deferred_handlers,
             snapshot_engine=snapshot_engine,
+            attached_engine=attached_engine,
         )
 
 

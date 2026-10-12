@@ -27,11 +27,32 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 )
 
 const alternateAdmissionModel = "Qwen/Qwen3-8B"
 
 func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
+	const deprecatedV1beta1ComponentNames = `{
+		"apiVersion":"nvidia.com/v1beta1",
+		"kind":"DynamoGraphDeployment",
+		"spec":{"components":[
+			{"name":"VllmWorker"},
+			{"name":"TRTLLMPrefillWorker"},
+			{"name":"SGLangDecodeWorker"}
+		]}
+	}`
+	const deprecatedV1alpha1ServiceNames = `{
+		"apiVersion":"nvidia.com/v1alpha1",
+		"kind":"DynamoGraphDeployment",
+		"spec":{"services":{"VllmDecodeWorker":{},"TRTLLMDecodeWorker":{}}}
+	}`
+	const deprecatedUpdateComponentName = `{
+		"apiVersion":"nvidia.com/v1beta1",
+		"kind":"DynamoGraphDeployment",
+		"spec":{"components":[{"name":"VllmPrefillWorker"}]}
+	}`
+
 	tests := []struct {
 		name               string
 		request            runtime.Object
@@ -49,9 +70,28 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name: "valid v1beta1 request is defaulted",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Image = ""
+				request.Spec.RuntimeVersionOverride = ""
 			}),
 			gpuDiscovery: true,
-			wantImage:    "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0",
+			wantImage:    "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.6.0",
+		},
+		{
+			name: "custom image requires runtime version override",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				"spec.runtimeVersionOverride: Required value: is required when spec.image has no parseable semantic-version tag",
+			},
+		},
+		{
+			name: "runtime version override must be canonical semver core",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = "1.2"
+			}),
+			gpuDiscovery:  true,
+			wantSchemaErr: `spec.runtimeVersionOverride: Invalid value: "1.2": spec.runtimeVersionOverride in body should match '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'`,
 		},
 		{
 			name:         "valid v1alpha1 request converts through the production path",
@@ -122,6 +162,24 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "B300 hardware is admitted",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeB300SXM}
+			}),
+		},
+		{
+			name: "Vera Rubin NVL72 hardware is admitted",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeVRNVL72}
+			}),
+		},
+		{
+			name: "canonical GB200 hardware is admitted",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeGB200}
+			}),
+		},
+		{
 			name: "independent create failures aggregate in API declaration order",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Backend = nvidiacomv1beta1.BackendTypeAuto
@@ -133,7 +191,60 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 
+		// Compatibility warnings.
+		{
+			name: "deprecated GB200 SXM SKU warns",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				//nolint:staticcheck // SA1019: Exercise admission of the deprecated API value.
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeGB200SXM}
+			}),
+			gpuDiscovery: true,
+			wantWarnings: []string{
+				`spec.hardware.gpuSku: "gb200_sxm" is deprecated; use "gb200". The legacy value will be removed in a future release`,
+			},
+		},
+		{
+			name: "deprecated v1beta1 DGD override component names warn",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Overrides = &nvidiacomv1beta1.OverridesSpec{
+					DGD: &runtime.RawExtension{Raw: []byte(deprecatedV1beta1ComponentNames)},
+				}
+			}),
+			gpuDiscovery: true,
+			wantWarnings: []string{
+				`spec.overrides.dgd.spec.components[name=SGLangDecodeWorker]: override target "SGLangDecodeWorker" is deprecated; use worker (aggregate) or decode (disaggregated). Legacy-name translation will be removed in a future release`,
+				`spec.overrides.dgd.spec.components[name=TRTLLMPrefillWorker]: override target "TRTLLMPrefillWorker" is deprecated; use prefill. Legacy-name translation will be removed in a future release`,
+				`spec.overrides.dgd.spec.components[name=VllmWorker]: override target "VllmWorker" is deprecated; use worker. Legacy-name translation will be removed in a future release`,
+			},
+		},
+		{
+			name: "deprecated v1alpha1 DGD override service names warn",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Overrides = &nvidiacomv1beta1.OverridesSpec{
+					DGD: &runtime.RawExtension{Raw: []byte(deprecatedV1alpha1ServiceNames)},
+				}
+			}),
+			gpuDiscovery: true,
+			wantWarnings: []string{
+				`spec.overrides.dgd.spec.services.TRTLLMDecodeWorker: override target "TRTLLMDecodeWorker" is deprecated; use decode. Legacy-name translation will be removed in a future release`,
+				`spec.overrides.dgd.spec.services.VllmDecodeWorker: override target "VllmDecodeWorker" is deprecated; use worker (aggregate) or decode (disaggregated). Legacy-name translation will be removed in a future release`,
+			},
+		},
+
 		// Structural update rules.
+		{
+			name:       "deprecated DGD override component name warns on update",
+			oldRequest: betaDGDRForAdmission(nil),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Overrides = &nvidiacomv1beta1.OverridesSpec{
+					DGD: &runtime.RawExtension{Raw: []byte(deprecatedUpdateComponentName)},
+				}
+			}),
+			gpuDiscovery: true,
+			wantWarnings: []string{
+				`spec.overrides.dgd.spec.components[name=VllmPrefillWorker]: override target "VllmPrefillWorker" is deprecated; use prefill. Legacy-name translation will be removed in a future release`,
+			},
+		},
 		{
 			name: "unchanged spec is accepted during profiling",
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
@@ -153,6 +264,106 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			wantWebhook: []string{
 				`spec: Forbidden: updates are forbidden while the resource is in phase "Profiling"; delete and recreate the resource to change its spec`,
+			},
+		},
+		{
+			name: "auto apply can be enabled after reviewing a ready request",
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(false)
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(true)
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			}),
+			gpuDiscovery: true,
+		},
+		{
+			name:               "auto apply activation can add a missing runtime version override",
+			seedWithoutWebhook: true,
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(true)
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			}),
+			gpuDiscovery: true,
+		},
+		{
+			name:               "auto apply activation requires a missing runtime version override",
+			seedWithoutWebhook: true,
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(true)
+				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				"spec.runtimeVersionOverride: Required value: is required when spec.image has no parseable semantic-version tag",
+			},
+		},
+		{
+			name:               "runtime version override can be added while ready with auto apply disabled",
+			seedWithoutWebhook: true,
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(false)
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			}),
+			gpuDiscovery: true,
+		},
+		{
+			name: "runtime version override can change while ready with auto apply disabled",
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(false)
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.RuntimeVersionOverride = "1.2.0"
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			}),
+			gpuDiscovery: true,
+		},
+		{
+			name: "runtime version override can change while profiling with auto apply disabled",
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(false)
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.RuntimeVersionOverride = "1.2.0"
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
+			}),
+			gpuDiscovery: true,
+		},
+		{
+			name: "other spec updates remain forbidden while ready with auto apply disabled",
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(false)
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.Model = alternateAdmissionModel
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				`spec: Forbidden: updates are forbidden while the resource is in phase "Ready"; delete and recreate the resource to change its spec`,
 			},
 		},
 		{
@@ -206,6 +417,65 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 		},
 		{
+			name:               "unchanged legacy custom image without override is ratcheted on update",
+			seedWithoutWebhook: true,
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			gpuDiscovery: true,
+		},
+		{
+			name:               "adding runtime version override is rejected after deployment",
+			seedWithoutWebhook: true,
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				`spec: Forbidden: updates are forbidden while the resource is in phase "Deployed"; delete and recreate the resource to change its spec`,
+			},
+		},
+		{
+			name: "newly introduced custom image without override is rejected on update",
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Image = "test-profiler:1.1.0"
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				"spec.runtimeVersionOverride: Required value: is required when spec.image has no parseable semantic-version tag",
+			},
+		},
+		{
+			name:               "changing a legacy custom image without override is rejected on update",
+			seedWithoutWebhook: true,
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Image = "test-profiler:other-custom"
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				"spec.runtimeVersionOverride: Required value: is required when spec.image has no parseable semantic-version tag",
+			},
+		},
+		{
 			name:       "missing hardware is ratcheted when GPU discovery becomes disabled",
 			oldRequest: betaDGDRForAdmission(nil),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
@@ -244,7 +514,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				oldObject:          tt.oldRequest,
 				gates:              gates,
 				seedWithoutWebhook: tt.seedWithoutWebhook,
-				withoutTopology:    true,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
 				wantWebhookErrors:  tt.wantWebhook,
@@ -279,10 +548,11 @@ func betaDGDRForAdmission(
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-			Model:          "Qwen/Qwen3-0.6B",
-			Backend:        nvidiacomv1beta1.BackendTypeVllm,
-			Image:          "profiler:latest",
-			SearchStrategy: nvidiacomv1beta1.SearchStrategyRapid,
+			Model:                  "Qwen/Qwen3-0.6B",
+			Backend:                nvidiacomv1beta1.BackendTypeVllm,
+			Image:                  "profiler:latest",
+			RuntimeVersionOverride: "1.1.0",
+			SearchStrategy:         nvidiacomv1beta1.SearchStrategyRapid,
 		},
 	}
 	if mutate != nil {
@@ -301,8 +571,9 @@ func alphaDGDRForAdmission(
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-			Model:   "Qwen/Qwen3-0.6B",
-			Backend: "vllm",
+			Model:                  "Qwen/Qwen3-0.6B",
+			Backend:                "vllm",
+			RuntimeVersionOverride: "1.1.0",
 			ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 				ProfilerImage: "profiler:latest",
 			},

@@ -17,6 +17,7 @@ If the compiled extension hasn't been built (e.g. fresh checkout without
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,10 +27,16 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 # Import-time skip: if the extension hasn't been built, all tests below
 # are skipped rather than crashing the collection phase.
+core = pytest.importorskip(
+    "dynamo._core",
+    reason="dynamo._core not built — run `maturin develop` first",
+)
 backend = pytest.importorskip(
     "dynamo._core.backend",
     reason="dynamo._core.backend not built — run `maturin develop` first",
 )
+
+from dynamo.common.backend.engine import LlmRegistration  # noqa: E402
 
 
 def test_module_exposes_expected_classes():
@@ -63,13 +70,16 @@ def test_engine_config_required_model_only():
     cfg = backend.EngineConfig(model="m1")
     assert cfg.model == "m1"
     assert cfg.served_model_name is None
+    assert cfg.model_aliases == []
     assert cfg.llm is None
 
 
+@pytest.mark.unified
 def test_engine_config_full_kwargs_round_trip_through_getters():
     cfg = backend.EngineConfig(
         model="m2",
         served_model_name="m2-serving",
+        model_aliases=["m2-alias"],
         runtime_data={"sglang_worker_group_id": "group-a"},
         llm=backend.LlmRegistration(
             context_length=2048,
@@ -77,10 +87,13 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
             total_kv_blocks=1000,
             max_num_seqs=64,
             max_num_batched_tokens=2048,
+            enable_eagle=True,
+            max_gpu_lora_count=4,
         ),
     )
     assert cfg.model == "m2"
     assert cfg.served_model_name == "m2-serving"
+    assert cfg.model_aliases == ["m2-alias"]
     assert cfg.runtime_data == {"sglang_worker_group_id": "group-a"}
     llm = cfg.llm
     assert llm.context_length == 2048
@@ -88,6 +101,33 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     assert llm.total_kv_blocks == 1000
     assert llm.max_num_seqs == 64
     assert llm.max_num_batched_tokens == 2048
+    assert llm.enable_eagle is True
+    assert llm.max_gpu_lora_count == 4
+
+
+@pytest.mark.unified
+def test_llm_registration_preserves_legacy_positional_arguments():
+    llm = backend.LlmRegistration(2048, 16, 1000, 64, 2048, 2, 1, "host", 9000)
+    assert llm.bootstrap_host == "host"
+    assert llm.bootstrap_port == 9000
+    assert llm.enable_eagle is False
+    assert llm.max_gpu_lora_count is None
+    extended = backend.LlmRegistration(
+        2048, 16, 1000, 64, 2048, 2, 1, "host", 9000, True, 8
+    )
+    assert extended.enable_eagle is True
+    assert extended.max_gpu_lora_count == 8
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"enable_eagle": True}])
+@pytest.mark.unified
+def test_llm_registration_dataclass_matches_binding(kwargs):
+    registration = LlmRegistration(**kwargs)
+    cfg = backend.EngineConfig(
+        model="eagle-model",
+        llm=backend.LlmRegistration(**asdict(registration)),
+    )
+    assert cfg.llm.enable_eagle is kwargs.get("enable_eagle", False)
 
 
 def test_worker_config_minimum_args():
@@ -114,9 +154,71 @@ def test_worker_config_accepts_parser_runtime_settings():
         namespace="dynamo",
         tool_call_parser="kimi_k2",
         reasoning_parser="kimi_k25",
+        default_thinking_mode="disabled",
         exclude_tools_when_tool_choice_none=False,
         enable_local_indexer=False,
     )
+
+
+@pytest.mark.none
+def test_structural_tag_bindings_reject_unknown_config_fields():
+    from dynamo.llm import ModelRuntimeConfig
+
+    backend.WorkerConfig(namespace="dynamo", structural_tag={"scope": "always"})
+    runtime_config = ModelRuntimeConfig()
+    runtime_config.set_structural_tag({"scope": "always"})
+
+    with pytest.raises(ValueError, match="unknown field `scpoe`"):
+        backend.WorkerConfig(namespace="dynamo", structural_tag={"scpoe": "always"})
+
+    with pytest.raises(ValueError, match="unknown field `scpoe`"):
+        runtime_config.set_structural_tag({"scpoe": "always"})
+
+
+def test_worker_config_preserves_legacy_positional_argument_order():
+    """New optional fields must be appended after every existing argument."""
+    backend.WorkerConfig(
+        "dynamo",  # namespace
+        "backend",  # component
+        "generate",  # endpoint
+        "",  # model_name
+        None,  # served_model_name
+        core.ModelInput.Tokens,  # model_input
+        "chat,completions",  # endpoint_types
+        None,  # custom_jinja_template
+        None,  # tool_call_parser
+        None,  # reasoning_parser
+        False,  # exclude_tools_when_tool_choice_none
+        False,  # enable_local_indexer
+    )
+
+
+@pytest.mark.unified
+def test_python_worker_config_preserves_legacy_positional_argument_order():
+    from dynamo.common.backend.worker import WorkerConfig
+
+    config = WorkerConfig(
+        "dynamo",  # namespace
+        "backend",  # component
+        "generate",  # endpoint
+        "",  # model_name
+        None,  # served_model_name
+        core.ModelInput.Tokens,  # model_input
+        "chat,completions",  # endpoint_types
+        "etcd",  # discovery_backend
+        "tcp",  # request_plane
+        None,  # event_plane
+        False,  # use_kv_events
+        None,  # custom_jinja_template
+        None,  # tool_call_parser
+        None,  # reasoning_parser
+        False,  # exclude_tools_when_tool_choice_none
+        False,  # enable_local_indexer
+    )
+
+    assert config.exclude_tools_when_tool_choice_none is False
+    assert config.enable_local_indexer is False
+    assert config.default_thinking_mode is None
 
 
 def test_worker_config_accepts_media_configuration():
@@ -157,11 +259,17 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     runtime_cfg.custom_jinja_template = None
     runtime_cfg.dyn_tool_call_parser = "kimi_k2"
     runtime_cfg.dyn_reasoning_parser = "kimi_k25"
+    runtime_cfg.dyn_default_thinking_mode = "disabled"
     runtime_cfg.exclude_tools_when_tool_choice_none = False
     runtime_cfg.enable_local_indexer = False
-    runtime_cfg.dyn_enable_structural_tag = True
-    runtime_cfg.dyn_structural_tag_scope = "always"
-    runtime_cfg.dyn_structural_tag_schema = "strict"
+    runtime_cfg.structural_tag = {
+        "scope": "always",
+        "schema": "strict",
+        "allow_tool_calls_with_structured_output": True,
+        "exclude_special_tokens": False,
+        "reasoning_boundary": "structural_tag",
+        "tool_arguments_any_order": False,
+    }
     # MagicMock auto-attrs would be rejected as a foreign type by the
     # strict coercer; pin them to None.
     runtime_cfg.disaggregation_mode = None
@@ -171,11 +279,10 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
 
     assert config.tool_call_parser == "kimi_k2"
     assert config.reasoning_parser == "kimi_k25"
+    assert config.default_thinking_mode == "disabled"
     assert config.exclude_tools_when_tool_choice_none is False
     assert config.enable_local_indexer is False
-    assert config.structural_tag_mode == "on"
-    assert config.structural_tag_scope == "always"
-    assert config.structural_tag_schema == "strict"
+    assert config.structural_tag == runtime_cfg.structural_tag
 
 
 @pytest.mark.unified
@@ -195,9 +302,8 @@ def test_python_worker_config_from_runtime_config_applies_defaults_when_fields_a
     assert cfg.endpoint_types == "chat,completions"
     assert cfg.use_kv_events is False
     assert cfg.custom_jinja_template is None
-    assert cfg.structural_tag_mode == "off"
-    assert cfg.structural_tag_scope == "auto"
-    assert cfg.structural_tag_schema == "auto"
+    assert cfg.default_thinking_mode is None
+    assert cfg.structural_tag is None
 
 
 @pytest.mark.unified

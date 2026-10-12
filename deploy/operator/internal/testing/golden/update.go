@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"os"
 	"sort"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -23,6 +24,7 @@ func writeAdapted(path string, comparison comparison) error {
 	encoder := yaml.NewEncoder(&output)
 	encoder.SetIndent(2)
 	for i := range adapted {
+		restoreVariableDirectives(&adapted[i])
 		if err := encoder.Encode(&adapted[i]); err != nil {
 			return err
 		}
@@ -31,6 +33,16 @@ func writeAdapted(path string, comparison comparison) error {
 		return err
 	}
 	return os.WriteFile(path, output.Bytes(), 0o644)
+}
+
+func restoreVariableDirectives(node *yaml.Node) {
+	if strings.HasPrefix(node.Tag, variableValueTagPrefix) {
+		node.Value = "$var:" + strings.TrimPrefix(node.Tag, variableValueTagPrefix)
+		node.Tag = yamlStringTag
+	}
+	for i := range node.Content {
+		restoreVariableDirectives(node.Content[i])
+	}
 }
 
 func adaptDocuments(comparison comparison) []yaml.Node {

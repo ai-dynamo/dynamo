@@ -1,0 +1,150 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Fern Custom Components
+
+Components registered through `experimental.mdx-components: ./components` in
+[`docs.yml`](../docs.yml). This file holds their page-usage examples.
+
+## Why The Examples Live Here And Not In The Components
+
+Fern's bundler scans every component source for import specifiers and treats
+anything that is neither relative nor in its allowlist (`react`, `react-dom`,
+`@mdx-js/react`, `next`) as a third-party dependency, then shells out to
+`npx rolldown` to bundle it — a registry download on every docs build.
+
+The scan is a regular expression over raw text. It does not skip comments. A
+usage example written in a docblock is therefore indistinguishable from a real
+dependency, and three of them were enough to make docs previews fail
+intermittently with `rolldown exited with code 127` and
+`ERR_MODULE_NOT_FOUND`.
+
+The scan only looks at `.js`, `.jsx`, `.ts` and `.tsx`. Markdown is invisible to
+it, so examples here can use ordinary syntax and stay copy-pasteable.
+`../scripts/check_component_imports.py` enforces that no component source
+carries a quoted non-relative specifier, in code or in a comment.
+
+## Page Usage
+
+Import the component, then place it in the page body. Ambient use without an
+import renders `Unsupported JSX tag`. The `@/` prefix resolves to the `fern/`
+root and is rewritten to a relative path at publish time.
+
+### RecipeStyles
+
+Once per recipe/benchmark page, and on the two landing READMEs, immediately
+after the frontmatter.
+
+```mdx
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+```
+
+### ReferenceStyles
+
+Once per Reference page that uses the Reference components, immediately after
+the frontmatter.
+
+```mdx
+import { ReferenceStyles } from "@/components/ReferenceStyles";
+
+<ReferenceStyles />
+```
+
+### LandingStyles
+
+Once on `welcome.mdx` and `community/README.mdx`, immediately after the
+imports.
+
+```mdx
+import { LandingStyles } from "@/components/LandingStyles";
+
+<LandingStyles />
+```
+
+### BlogStyles
+
+Once on the digest landing page and every article page, immediately after the
+imports.
+
+```mdx
+import { BlogStyles } from "@/components/BlogStyles";
+
+<BlogStyles />
+```
+
+### TerminalDemo
+
+Props are documented in the component's own header.
+
+`src` must be a path relative to the page, because that is the only form Fern
+rewrites to the published asset URL. A site-absolute path starting from the
+docs root is rewritten by nothing and reaches the browser verbatim, where it
+404s — the same shape as the regression that blanked the Home hero mark in
+#12373. `scripts/check_asset_paths.py` rejects that form, and this file is now
+inside its scan, so the example below is enforced rather than merely stated.
+
+```mdx
+import { TerminalDemo } from "@/components/TerminalDemo";
+
+<TerminalDemo
+  src="../../assets/hero-demo-25.cast"
+  startAt={0}
+  endAt={18}
+  idleTimeLimit={2}
+  speed={1.2}
+/>
+```
+
+## Generated Modules
+
+`nightly-selector-data.generated.ts` is gitignored and rebuilt by the docs
+workflow on every publish, so neither the install selectors nor the Release
+Artifacts nightly ledger serves a pin that a human forgot to refresh.
+`install-selector-data.ts` and `NightlyBuilds.tsx` both import it, so a fresh
+clone has no module to resolve until it is generated once:
+
+```bash
+python3 docs/fern/scripts/gen_nightly_selector.py            # real data, needs network
+python3 docs/fern/scripts/gen_nightly_selector.py --offline  # empty module, no network
+```
+
+The offline form writes a valid empty module; the selectors then render their
+"not currently available" state for the nightly channel, and the ledger panel
+renders the same state. Without `--offline` the generator fails rather than
+write a module that resolved nothing — an unreachable required wheel index, no
+selector rows, or fewer than `NIGHTLY_LEDGER_BUILDS` complete ledger rows — so a
+publish cannot replace live nightly rows with nothing, blank the ledger, or
+strip every wheel command.
+
+A ledger row is written only for a night whose `ai-dynamo` and
+`ai-dynamo-runtime` wheels both published, because `ai-dynamo` pins the runtime
+wheel to the same version. `kvbm` is reported when that night published it and is
+never required: it is deprecated with removal targeted for v1.6.0. The ledger and
+the selectors' `latest` rows resolve from that same installable wheel set, so the
+ledger is never older than they are; it can be newer, because a `latest` row
+falls back to the wheel of its own container-tag night when a backend pin moved
+since.
+
+`simulate_docs_website.sh` generates its own empty copy into the scratch
+checkout via `--out`, so running the composition check leaves the module here
+alone.
+
+`events.generated.ts` and `publisher-logos.generated.ts` are committed instead,
+refreshed by their own workflows, and need no local step.
+
+## Adding A Component
+
+- No third-party dependencies. There is no `package.json` alongside `fern/`, so
+  anything outside Fern's allowlist has to be loaded at runtime instead — see
+  `TerminalDemo.tsx`, which pulls asciinema-player from a CDN for this reason.
+- Put the usage example in this file, not in the component's docblock.
+- CSS bundles that must survive the production theme go in a page-level
+  `<style>` block. Use `dangerouslySetInnerHTML` when the CSS contains `>`
+  child combinators or `&`, as `RecipeStyles`, `LandingStyles` and `BlogStyles`
+  do.
+- Keep backticks out of any string inside a CSS template literal, comments
+  included. A raw backtick closes the literal and the file stops compiling.

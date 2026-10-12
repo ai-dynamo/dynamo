@@ -20,6 +20,12 @@ pub enum EndpointType {
     Videos,
     /// Realtime API (bidirectional streaming over WebSocket)
     Realtime,
+    /// Classification API (sequence classification / cross-encoder pooling)
+    Classify,
+    /// Pooling API (raw pooler output: token embeddings, logits, rewards)
+    Pooling,
+    /// Cross-encoder reranking API
+    Rerank,
     /// Responses API
     Responses,
     /// Anthropic Messages API
@@ -40,6 +46,9 @@ impl EndpointType {
             Self::Audios => "audios",
             Self::Videos => "videos",
             Self::Realtime => "realtime",
+            Self::Classify => "classify",
+            Self::Pooling => "pooling",
+            Self::Rerank => "rerank",
             Self::Responses => "responses",
             Self::AnthropicMessages => "anthropic_messages",
             Self::Generate => "generate",
@@ -56,6 +65,9 @@ impl EndpointType {
             Self::Audios,
             Self::Videos,
             Self::Realtime,
+            Self::Classify,
+            Self::Pooling,
+            Self::Rerank,
             Self::Responses,
             Self::AnthropicMessages,
             Self::Generate,

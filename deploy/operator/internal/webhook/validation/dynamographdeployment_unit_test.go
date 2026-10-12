@@ -12,12 +12,13 @@ import (
 	"strings"
 	"testing"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -37,13 +38,27 @@ func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
 
 	validator := newDynamoGraphDeploymentTestValidator(t)
 	ctx := features.WithGate(context.Background(), features.Gates{Grove: true})
-	_, err := validator.Validate(ctx, dgd)
+	_, err := validator.Validate(ctx, dgd, runtimeVersionSourceV1Beta1)
 	if err == nil || !strings.Contains(err.Error(), "failed to reconstruct compatibility view") {
 		t.Fatalf("Validate() error = %v, want fatal conversion error", err)
 	}
 	if k8serrors.IsInvalid(err) {
 		t.Fatalf("Validate() error = %v, want fatal conversion error rather than field validation error", err)
 	}
+}
+
+// The public handler rejects changed LPX specs before reaching its independent update validator.
+func TestDynamoGraphDeploymentValidateUpdateLPXGate(t *testing.T) {
+	t.Log("Change an existing LPX component while LPX is disabled")
+	oldDGD := newBetaDGDForValidation()
+	oldDGD.Spec.Components[0].ComponentType = nvidiacomv1beta1.ComponentTypeLPX
+	newDGD := oldDGD.DeepCopy()
+	newDGD.Spec.Components[0].Replicas = k8sptr.To(int32(2))
+
+	t.Log("Invoke the stateful validator independently of the handler's new-state traversal")
+	ctx := features.WithGate(t.Context(), features.Gates{Grove: true})
+	_, err := newDynamoGraphDeploymentTestValidator(t).ValidateUpdate(ctx, oldDGD, newDGD, nil, "", runtimeVersionSourceV1Beta1)
+	assertBetaValidationErrors(t, err, []string{"spec.components[0].type: Forbidden: LPX components require lpx.enabled=true"})
 }
 
 func assertFieldPaths(t *testing.T, errs field.ErrorList, want []string) {
@@ -67,32 +82,22 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 			BackendFramework: "vllm",
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					ComponentName: "frontend",
-					ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
-					Replicas:      k8sptr.To(int32(1)),
+					ComponentName:          "frontend",
+					ComponentType:          nvidiacomv1beta1.ComponentTypeFrontend,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(1)),
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+					}},
 				},
 				{
-					ComponentName: "worker",
-					ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
-					Replicas:      k8sptr.To(int32(2)),
-				},
-			},
-		},
-	}
-}
-
-func newAlphaDGDForCompatibilityValidation() *nvidiacomv1alpha1.DynamoGraphDeployment {
-	return &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-graph",
-			Namespace: "default",
-		},
-		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-			BackendFramework: "vllm",
-			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"worker": {
-					ComponentType: consts.ComponentTypeWorker,
-					Replicas:      k8sptr.To(int32(1)),
+					ComponentName:          "worker",
+					ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(2)),
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+					}},
 				},
 			},
 		},
@@ -158,5 +163,175 @@ func assertBetaValidationErrors(t *testing.T, err error, wantErrs []string) {
 	}
 	if !slices.Equal(gotErrs, wantErrs) {
 		t.Fatalf("webhook errors = %v, want %v", gotErrs, wantErrs)
+	}
+}
+
+func elasticEPSharedSpec(command, args []string) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+	return &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    consts.MainContainerName,
+				Command: command,
+				Args:    args,
+			}},
+		}},
+	}
+}
+
+func elasticEPRoleSharedSpec(leaderCommand, leaderArgs, workerCommand, workerArgs []string) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+	roleTemplate := func(command, args []string) *corev1.PodTemplateSpec {
+		return &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    consts.MainContainerName,
+				Command: command,
+				Args:    args,
+			}},
+		}}
+	}
+	return &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+			{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate(leaderCommand, leaderArgs)},
+			{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate(workerCommand, workerArgs)},
+		},
+	}
+}
+
+func TestValidateElasticEPRequiresCommand(t *testing.T) {
+	const vllm = "vllm"
+	rayArgs := []string{"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep"}
+	fldPath := field.NewPath("spec")
+	const commandPath = "spec.podTemplate.spec.containers[0].command"
+
+	tests := []struct {
+		name    string
+		backend string
+		spec    *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+		want    []string
+	}{
+		{
+			name:    "vllm elastic-EP ray with empty command is rejected",
+			backend: vllm,
+			spec:    elasticEPSharedSpec(nil, rayArgs),
+			want:    []string{commandPath},
+		},
+		{
+			name:    "vllm elastic-EP with -dpb=ray alias and empty command is rejected",
+			backend: vllm,
+			spec:    elasticEPSharedSpec(nil, []string{"--model", "test", "-dpb=ray", "--enable-elastic-ep"}),
+			want:    []string{commandPath},
+		},
+		{
+			name:    "explicit command is accepted",
+			backend: vllm,
+			spec:    elasticEPSharedSpec([]string{"python3", "-m", "dynamo.vllm"}, rayArgs),
+			want:    nil,
+		},
+		{
+			name:    "elastic-EP flags carried in Command are accepted",
+			backend: vllm,
+			spec:    elasticEPSharedSpec([]string{"python3", "-m", "dynamo.vllm", "--data-parallel-backend", "ray", "--enable-elastic-ep"}, nil),
+			want:    nil,
+		},
+		{
+			name:    "non-vllm backend is not validated",
+			backend: sglangBackendFramework,
+			spec:    elasticEPSharedSpec(nil, rayArgs),
+			want:    nil,
+		},
+		{
+			name:    "vllm without elastic-EP is accepted",
+			backend: vllm,
+			spec:    elasticEPSharedSpec(nil, []string{"--model", "test"}),
+			want:    nil,
+		},
+		{
+			name:    "vllm elastic-EP on a non-ray backend is accepted",
+			backend: vllm,
+			spec:    elasticEPSharedSpec(nil, []string{"--model", "test", "--data-parallel-backend", "mp", "--enable-elastic-ep"}),
+			want:    nil,
+		},
+		{
+			name:    "nil pod template is ignored",
+			backend: vllm,
+			spec:    &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{},
+			want:    nil,
+		},
+		{
+			name:    "role templates own launch and do not require an operator rewrite command",
+			backend: vllm,
+			spec:    elasticEPRoleSharedSpec(nil, rayArgs, []string{"python3"}, rayArgs),
+			want:    nil,
+		},
+		{
+			name:    "role worker without command is accepted",
+			backend: vllm,
+			spec:    elasticEPRoleSharedSpec([]string{"python3"}, rayArgs, nil, rayArgs),
+			want:    nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertFieldPaths(t, validateElasticEPRequiresCommand(tt.backend, tt.spec, fldPath), tt.want)
+		})
+	}
+}
+
+func TestDynamoGraphDeploymentUpdateAllowsUnchangedRoleGMSState(t *testing.T) {
+	one := int32(1)
+	roleTemplate := func(image string) *corev1.PodTemplateSpec {
+		return &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:  consts.MainContainerName,
+			Image: image,
+			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+				corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+			}},
+		}}}}
+	}
+	oldDGD := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "roles", Namespace: "default"},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName:          "engine",
+				ComponentType:          nvidiacomv1beta1.ComponentTypeDecode,
+				RuntimeVersionOverride: "1.5.0",
+				Replicas:               &one,
+				Multinode:              &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+				Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("leader:1.5.0")},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("worker:1.5.0")},
+				},
+				Experimental: &nvidiacomv1beta1.ExperimentalSpec{
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeInterPod},
+				},
+			}},
+		},
+	}
+	validation := &dynamoGraphDeploymentValidation{sharedValidation: sharedValidation{
+		ctx:                  features.WithGate(context.Background(), features.Gates{Grove: true}),
+		runtimeVersionSource: runtimeVersionSourceV1Beta1,
+	}}
+
+	newDGD := oldDGD.DeepCopy()
+	assertFieldPaths(t, validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD), nil)
+}
+
+// TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand proves the rule is
+// wired into the DGD admission path end to end, not just callable in isolation.
+func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
+	dgd := newBetaDGDForValidation()
+	// components[1] is the worker; make it request elastic-EP Ray with no command.
+	dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = []string{
+		"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep",
+	}
+
+	validator := newDynamoGraphDeploymentTestValidator(t)
+	ctx := features.WithGate(context.Background(), features.Gates{Grove: true})
+	_, err := validator.Validate(ctx, dgd, runtimeVersionSourceV1Beta1)
+	if err == nil || !k8serrors.IsInvalid(err) {
+		t.Fatalf("Validate() error = %v, want invalid field error", err)
+	}
+	if !strings.Contains(err.Error(), "requires an explicit container command") {
+		t.Fatalf("Validate() error = %v, want elastic-EP command requirement", err)
 	}
 }

@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+from vllm.outputs import RequestOutput
 
 from dynamo.vllm.handlers import BaseWorkerHandler
 
@@ -98,6 +99,28 @@ class TestPromptEmbedsDecode:
         """Test that invalid inputs raise ValueError."""
         with pytest.raises(ValueError, match=error_match):
             mock_handler._decode_prompt_embeds(invalid_input)
+
+    def test_missing_model_config_is_server_error(self, mock_handler):
+        mock_handler.model_config = None
+
+        with pytest.raises(RuntimeError, match="ModelConfig is unavailable"):
+            mock_handler._decode_prompt_embeds("unused")
+
+    @pytest.mark.parametrize(
+        "error",
+        [MemoryError("host allocation failed"), torch.OutOfMemoryError("OOM")],
+        ids=["memory-error", "torch-oom"],
+    )
+    def test_decode_resource_errors_propagate(self, mock_handler, monkeypatch, error):
+        monkeypatch.setattr(
+            "dynamo.vllm.handlers.safe_load_prompt_embeds",
+            Mock(side_effect=error),
+        )
+
+        with pytest.raises(type(error)) as exc_info:
+            mock_handler._decode_prompt_embeds("unused")
+
+        assert exc_info.value is error
 
     def test_decode_numpy_format_rejected(self, mock_handler):
         """Test that NumPy format is rejected (PyTorch format required)."""
@@ -230,3 +253,40 @@ class TestUsageStatistics:
         assert result["prompt_tokens"] == 5
         assert result["completion_tokens"] == 2
         assert result["prompt_tokens_details"] == expected_prompt_tokens_details
+
+    @pytest.mark.core
+    def test_kv_cache_hit_engine_data_uses_stock_aggregate_counter(self):
+        request_output = RequestOutput(
+            request_id="cache-reuse",
+            prompt=None,
+            prompt_token_ids=[1, 2, 3, 4],
+            prompt_logprobs=None,
+            outputs=[],
+            finished=True,
+            num_cached_tokens=3,
+        )
+
+        assert BaseWorkerHandler._kv_cache_hit_engine_data(request_output) == {
+            "prompt_tokens": 4,
+            "reused_tokens": 3,
+        }
+
+    @pytest.mark.core
+    @pytest.mark.parametrize(
+        ("prompt_token_ids", "num_cached_tokens"),
+        [([1, 2], None), (None, 0)],
+    )
+    def test_kv_cache_hit_engine_data_omits_missing_counters(
+        self, prompt_token_ids, num_cached_tokens
+    ):
+        request_output = RequestOutput(
+            request_id="cache-reuse",
+            prompt=None,
+            prompt_token_ids=prompt_token_ids,
+            prompt_logprobs=None,
+            outputs=[],
+            finished=True,
+            num_cached_tokens=num_cached_tokens,
+        )
+
+        assert BaseWorkerHandler._kv_cache_hit_engine_data(request_output) == {}

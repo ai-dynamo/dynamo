@@ -181,6 +181,8 @@ impl DynamicSubscriber {
                             );
                         }
                     }
+                    Ok(DiscoveryEvent::ModelTaintsUpdated(_)) => {}
+                    Ok(DiscoveryEvent::Resync(_)) => {}
                     Ok(DiscoveryEvent::Removed(instance_id)) => {
                         let is_expected_topic = matches!(
                             &instance_id,

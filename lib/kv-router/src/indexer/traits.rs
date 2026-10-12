@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use super::{
-    AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, TieredMatchDetails, WorkerTask,
+    AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, LowerTierQueryOptions,
+    TieredMatchDetails, WorkerTask,
 };
 use crate::protocols::*;
 
@@ -35,6 +36,15 @@ pub trait TieredMatchProvider: Send + Sync {
         &self,
         sequence: &[LocalBlockHash],
     ) -> Result<TieredMatchDetails, KvRouterError>;
+
+    async fn find_tiered_matches_with_options(
+        &self,
+        sequence: &[LocalBlockHash],
+        options: LowerTierQueryOptions,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        let _ = options;
+        self.find_tiered_matches(sequence).await
+    }
 }
 
 /// Per-shard size snapshot returned by [`KvIndexerInterface::shard_sizes`].
@@ -256,7 +266,7 @@ pub trait SyncIndexer: Send + Sync + 'static {
 
     /// Dump events directly from the shared structure, bypassing worker channels.
     /// Returns `Some(events)` for backends whose tree state is fully shared (e.g.
-    /// ConcurrentRadixTree). Returns `None` for backends that keep per-thread
+    /// ConcurrentRadixTreeCompressed). Returns `None` for backends that keep per-thread
     /// state and must dump via the worker channel.
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
         None

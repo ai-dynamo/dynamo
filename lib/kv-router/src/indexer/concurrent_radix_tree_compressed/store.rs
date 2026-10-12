@@ -152,6 +152,7 @@ impl ConcurrentRadixTreeCompressed {
 
         let wl = lookup.get_mut(&worker).unwrap();
         wl.remove(&parent_hash);
+        self.release_hash(worker, parent_hash);
         Err(KvCacheEventError::ParentBlockNotFound)
     }
 
@@ -180,7 +181,7 @@ impl ConcurrentRadixTreeCompressed {
             StoreParentResolution::ReusedExistingEdge {
                 node,
                 coverage_changed,
-            } => Self::finish_with_lookup_update(
+            } => self.finish_with_lookup_update(
                 lookup,
                 worker,
                 &op.blocks,
@@ -192,6 +193,7 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     fn finish_with_lookup_update(
+        &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
         blocks: &[KvCacheStoredBlockData],
@@ -199,7 +201,7 @@ impl ConcurrentRadixTreeCompressed {
         duplicate_store: bool,
     ) -> StoreInsertOutcome {
         let wl = lookup.get_mut(&worker).unwrap();
-        let lookup_changed = Self::update_lookup_for_blocks(wl, blocks, node);
+        let lookup_changed = self.update_lookup_for_blocks(worker, wl, blocks, node);
 
         StoreInsertOutcome {
             duplicate_store: duplicate_store && !lookup_changed,
@@ -215,8 +217,8 @@ impl ConcurrentRadixTreeCompressed {
         self.apply_split_lookup(lookup, finish.split);
 
         let wl = lookup.get_mut(&worker).unwrap();
-        Self::update_lookup_for_blocks(wl, finish.prefix_blocks, finish.prefix_node);
-        Self::update_lookup_for_blocks(wl, finish.tail_blocks, finish.tail_node);
+        self.update_lookup_for_blocks(worker, wl, finish.prefix_blocks, finish.prefix_node);
+        self.update_lookup_for_blocks(worker, wl, finish.tail_blocks, finish.tail_node);
 
         StoreInsertOutcome {
             duplicate_store: false,
@@ -250,12 +252,6 @@ impl ConcurrentRadixTreeCompressed {
             .child_lookup_plan(cursor.last_ext_hash, first_local);
 
         let shape_version = match plan {
-            ParentChildPlan::Stale => {
-                return Ok(StoreInsertStep::RetryParent {
-                    parent: cursor.parent.clone(),
-                    parent_is_anchor: cursor.parent_is_anchor,
-                });
-            }
             ParentChildPlan::StaleParent { hash } => {
                 let Some(resolved) =
                     self.resolve_lookup(lookup, worker, hash, LookupRepairDirection::TowardTail)
@@ -297,7 +293,7 @@ impl ConcurrentRadixTreeCompressed {
                         });
                     }
                     ParentEdgeAction::ReuseExistingEdge { coverage_changed } => {
-                        return Ok(StoreInsertStep::Done(Self::finish_with_lookup_update(
+                        return Ok(StoreInsertStep::Done(self.finish_with_lookup_update(
                             lookup,
                             worker,
                             remaining,
@@ -336,7 +332,7 @@ impl ConcurrentRadixTreeCompressed {
                     });
                 }
                 Some(true) => {
-                    return Ok(StoreInsertStep::Done(Self::finish_with_lookup_update(
+                    return Ok(StoreInsertStep::Done(self.finish_with_lookup_update(
                         lookup,
                         worker,
                         remaining,
@@ -367,7 +363,7 @@ impl ConcurrentRadixTreeCompressed {
                     });
                 }
                 Some(true) => {
-                    return Ok(StoreInsertStep::Done(Self::finish_with_lookup_update(
+                    return Ok(StoreInsertStep::Done(self.finish_with_lookup_update(
                         lookup,
                         worker,
                         remaining,
@@ -389,7 +385,7 @@ impl ConcurrentRadixTreeCompressed {
             }),
             InsertChildOutcome::Existing(child) => Ok(StoreInsertStep::Descend(child)),
             InsertChildOutcome::Inserted(new_node) => Ok(StoreInsertStep::Done(
-                Self::finish_with_lookup_update(lookup, worker, remaining, &new_node, false),
+                self.finish_with_lookup_update(lookup, worker, remaining, &new_node, false),
             )),
         }
     }
@@ -423,16 +419,7 @@ impl ConcurrentRadixTreeCompressed {
                     ) else {
                         continue;
                     };
-                    if let Some((expected, actual)) = scan.block_hash_mismatch {
-                        duplicate_store = false;
-                        tracing::warn!(
-                            ?expected,
-                            ?actual,
-                            "block_hash mismatch: sequence hashes should be uniform across workers"
-                        );
-                    }
-
-                    return ChildInsertStep::Done(Self::finish_with_lookup_update(
+                    return ChildInsertStep::Done(self.finish_with_lookup_update(
                         lookup,
                         worker,
                         remaining,
@@ -454,14 +441,6 @@ impl ConcurrentRadixTreeCompressed {
                 ) else {
                     continue;
                 };
-                if let Some((expected, actual)) = scan.block_hash_mismatch {
-                    tracing::warn!(
-                        ?expected,
-                        ?actual,
-                        "block_hash mismatch: sequence hashes should be uniform across workers"
-                    );
-                }
-
                 return ChildInsertStep::Done(self.finish_after_split_lookup(
                     lookup,
                     worker,
@@ -482,21 +461,13 @@ impl ConcurrentRadixTreeCompressed {
             else {
                 continue;
             };
-            if let Some((expected, actual)) = scan.block_hash_mismatch {
-                duplicate_store = false;
-                tracing::warn!(
-                    ?expected,
-                    ?actual,
-                    "block_hash mismatch: sequence hashes should be uniform across workers"
-                );
-            }
             if promoted {
                 duplicate_store = false;
             }
 
             let wl = lookup.get_mut(&worker).unwrap();
             let lookup_changed =
-                Self::update_lookup_for_blocks(wl, &remaining[..scan.edge_len], child);
+                self.update_lookup_for_blocks(worker, wl, &remaining[..scan.edge_len], child);
             if lookup_changed {
                 duplicate_store = false;
             }

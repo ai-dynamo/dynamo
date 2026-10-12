@@ -41,9 +41,10 @@ Its main differences are:
 - **Lazy lookup repair**: worker-local reverse lookups are repaired only when a
   stale entry is observed. Cross-thread splits do not need to synchronously patch
   every other thread's lookup table.
-- **Semi-lock-free structural reads**: child maps use `DashMap`, while the edge
-  state is protected separately. Hot read paths do not take the shape gate, and
-  shape-sensitive writes use version validation to retry when a plan becomes
+- **Semi-lock-free structural reads**: child storage uses immutable compact
+  snapshots for up to four children and `DashMap` for higher fanout, while the
+  edge state is protected separately. Hot read paths do not take the shape gate,
+  and shape-sensitive writes use version validation to retry when a plan becomes
   stale.
 - **Versioned shape gates**: the node's `shape_gate` and `shape_version` combine
   a small critical section with explicit stale-plan detection. Shared operations,
@@ -124,6 +125,11 @@ reuse a matching existing suffix. If the new store diverges from that suffix, th
 node is split at the parent position. The suffix becomes a child node and keeps
 the original children, so existing descendants remain reachable after the split.
 
+The suffix retains the original child-storage representation. The prefix starts
+with compact child storage for its new suffix child, even if it previously had a
+sharded map. This avoids allocating a sharded map for a prefix with only a few
+children. The prefix remains logically internal and cannot resume leaf extension.
+
 ## Removal
 
 Removal updates worker coverage but does not structurally split edges.
@@ -176,7 +182,8 @@ shared CRTC nodes concurrently.
 Node internals use separate protection for edge state and child maps:
 
 - `NodeState` is protected by a `parking_lot::RwLock`.
-- `children` is a `DashMap`.
+- `children` publishes compact snapshots through `ArcSwap`, promoting to a
+  `DashMap` when fanout exceeds four children.
 - `shape_gate` and `shape_version` coordinate plans that depend on the relation
   between the edge and child map.
 
@@ -187,8 +194,24 @@ exclusive shape gate.
 
 `find_matches` is best-effort during concurrent shape changes. It reads node
 state and child pointers without taking `shape_gate` on the hot step, so it may
-observe adjacent tree shapes during a split and undercount. It must not panic or
-return a match past a valid reachable prefix.
+observe adjacent tree shapes during a split and undercount. It must not panic,
+and apart from the equal-size skip below it must not return a match past a
+valid reachable prefix.
+
+### Equal-size skip
+
+After the first node, the walk intersects its active workers with each node's
+full-edge coverage. When the two sets have the same size, it skips that
+intersection and treats them as equal. This is an accepted approximation.
+Removal does not cascade to children, so after a worker's head blocks are
+evicted a child can still list it, and an equal-sized coverage set can then hold
+a different worker than the walk carries. The walk credits the carried worker
+with the child's depth, past its cached prefix.
+
+The skip saves a pass over up to all workers at most hops. On the Mooncake
+replay with 128 workers it fired about 4.3M times and was wrong in 0 of them at a
+keep-up load and 2 of about 741K when overloaded, while always intersecting
+raised lookup service p50 by 34%.
 
 ## Wire Compatibility
 

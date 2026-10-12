@@ -4,7 +4,7 @@
 //! WebSocket endpoint at `/v1/realtime` for the OpenAI Realtime API.
 //!
 //! Wire shape: client sends a sequence of `Message::Text` frames each containing a
-//! JSON-encoded [`RealtimeClientEvent`]; server forwards each frame onto an
+//! JSON-encoded [`DynamoRealtimeClientEvent`]; server forwards each frame onto an
 //! engine-bound stream and forwards engine [`RealtimeServerEvent`] chunks back as
 //! `Message::Text` frames. Per the OpenAI Realtime spec, audio is base64-encoded
 //! inside the JSON envelope (`input_audio_buffer.append`); binary WebSocket frames
@@ -16,8 +16,10 @@
 //! - The handler sends a `session.created` server event before any
 //!   engine events flow.
 //! - The handler loops over inbound client frames in
-//!   [`select_engine`] until a `session.update` arrives with a usable
-//!   `session.model` and [`ModelManager::get_realtime_engine`] returns Ok.
+//!   `select_engine` until a `session.update` arrives with a usable model
+//!   (`session.model` for realtime sessions or
+//!   `session.audio.input.transcription.model` for transcription sessions)
+//!   and `ModelManager::get_realtime_engine` returns Ok.
 //! - Non-conforming frames (wrong event type, missing model, unknown / unavailable
 //!   model, malformed JSON, binary frames) emit a spec-shaped
 //!   `RealtimeServerEvent::Error` while the loop continues so a well-behaved client
@@ -63,8 +65,9 @@ use super::{RouteDoc, error::SanitizedError, service_v2};
 use crate::discovery::ModelManagerError;
 use crate::types::RealtimeBidirectionalEngine;
 use dynamo_protocols::types::realtime::{
-    EventType, RealtimeAPIError, RealtimeClientEvent, RealtimeClientEventSessionUpdate,
-    RealtimeServerEvent, RealtimeServerEventError, RealtimeServerEventSessionCreated, Session,
+    DynamoRealtimeClientEvent, EventType, RealtimeAPIError, RealtimeClientEvent,
+    RealtimeClientEventSessionUpdate, RealtimeServerEvent, RealtimeServerEventError,
+    RealtimeServerEventSessionCreated, Session,
 };
 use uuid::Uuid;
 
@@ -145,14 +148,14 @@ async fn handle_socket(
         return;
     };
 
-    let (req_tx, req_rx) = mpsc::channel::<RealtimeClientEvent>(REQUEST_CHANNEL_CAPACITY);
+    let (req_tx, req_rx) = mpsc::channel::<DynamoRealtimeClientEvent>(REQUEST_CHANNEL_CAPACITY);
 
     // Forward the session.update verbatim — it carries the engine's
     // generation config (instructions, voice, audio formats, turn-detection,
     // max_output_tokens, tools, output_modalities). The handler only used
     // it to pick the engine; the rest is the engine's to apply.
     if req_tx
-        .send(RealtimeClientEvent::SessionUpdate(session_update))
+        .send(RealtimeClientEvent::SessionUpdate(session_update).into())
         .await
         .is_err()
     {
@@ -231,7 +234,7 @@ async fn handle_socket(
         };
         match msg {
             Message::Text(text) => {
-                match serde_json::from_str::<RealtimeClientEvent>(text.as_str()) {
+                match serde_json::from_str::<DynamoRealtimeClientEvent>(text.as_str()) {
                     Ok(event) => {
                         if req_tx.send(event).await.is_err() {
                             tracing::debug!("/v1/realtime engine receiver dropped; ending inbound");
@@ -387,7 +390,7 @@ where
         };
         let event = match msg {
             Message::Text(text) => {
-                match serde_json::from_str::<RealtimeClientEvent>(text.as_str()) {
+                match serde_json::from_str::<DynamoRealtimeClientEvent>(text.as_str()) {
                     Ok(e) => e,
                     Err(err) => {
                         // Client-driven and repeatable; debug! so a misbehaving
@@ -414,7 +417,7 @@ where
             Message::Ping(_) | Message::Pong(_) => continue, // axum handles ping replies
         };
         let session_update = match event {
-            RealtimeClientEvent::SessionUpdate(req) => req,
+            DynamoRealtimeClientEvent::OpenAI(RealtimeClientEvent::SessionUpdate(req)) => req,
             other => {
                 tracing::debug!(
                     event = other.event_type(),
@@ -432,30 +435,27 @@ where
         };
 
         // Extract model name from session update.
-        let model_name = match &session_update.session {
-            Session::RealtimeSession(s) => s.model.as_deref().filter(|m| !m.is_empty()),
-            Session::RealtimeTranscriptionSession(_) => {
-                // Transcription sessions need their own engine wiring (audio →
-                // text via /audio/transcriptions) that this slice doesn't
-                // implement. Surface that directly instead of letting the
-                // empty `model` fall through to the generic "session.model
-                // required" error from the realtime path below.
-                send_error_event(
-                    ws_tx,
-                    "unsupported_session_type",
-                    "session.type 'transcription' is not yet supported (only 'realtime' is supported)",
-                    Some("session.type"),
-                )
-                .await;
-                continue;
-            }
+        let (model_name, model_param) = match &session_update.session {
+            Session::RealtimeSession(s) => (
+                s.model.as_deref().filter(|m| !m.is_empty()),
+                "session.model",
+            ),
+            Session::RealtimeTranscriptionSession(s) => (
+                s.audio
+                    .input
+                    .transcription
+                    .as_ref()
+                    .and_then(|t| t.model.as_deref())
+                    .filter(|m| !m.is_empty()),
+                "session.audio.input.transcription.model",
+            ),
         };
         let Some(model_name) = model_name else {
             send_error_event(
                 ws_tx,
                 "invalid_request",
-                "session.model required",
-                Some("session.model"),
+                &format!("{model_param} required"),
+                Some(model_param),
             )
             .await;
             continue;
@@ -467,7 +467,7 @@ where
                     ws_tx,
                     "model_not_found",
                     &format!("unknown model: {model_name}"),
-                    Some("session.model"),
+                    Some(model_param),
                 )
                 .await;
                 continue;
@@ -477,7 +477,7 @@ where
                     ws_tx,
                     "model_unavailable",
                     &format!("model unavailable: {model_name}"),
-                    Some("session.model"),
+                    Some(model_param),
                 )
                 .await;
                 continue;
@@ -488,7 +488,7 @@ where
                     ws_tx,
                     "server_error",
                     &SanitizedError::Internal.to_string(),
-                    Some("session.model"),
+                    Some(model_param),
                 )
                 .await;
                 continue;

@@ -21,6 +21,9 @@ pub struct ModuleDef {
     pub doc_comment: String,
     pub is_macro_generated: bool,
     pub macro_prefix: Option<String>,
+    /// Nested `pub mod` blocks, sorted by name so generated output is stable.
+    /// `transport::tcp` and the `frontend_service` label-value modules live here.
+    pub submodules: Vec<ModuleDef>,
 }
 
 pub struct PrometheusParser {
@@ -59,6 +62,7 @@ impl PrometheusParser {
         };
 
         let mut constants = Vec::new();
+        let mut submodules: Vec<ModuleDef> = Vec::new();
         let mut is_macro_generated = false;
         let mut macro_prefix = None;
 
@@ -76,14 +80,42 @@ impl PrometheusParser {
                         macro_prefix = Some(prefix);
                     }
                 }
-                // TODO: Handle nested `pub mod` (e.g. `transport::tcp`, `transport::nats`)
-                // by recursing into sub-modules and emitting nested Python classes.
-                // Currently these are silently skipped, producing empty Python classes.
+                Item::Mod(nested) => {
+                    // Recurse so `transport::tcp` reaches the generated Python as a
+                    // nested class. Skipping these used to emit `class transport:` with
+                    // an empty body, which parses fine and silently loses every name.
+                    if let Some(child) = Self::parse_module(nested)? {
+                        submodules.push(child);
+                    }
+                }
                 _ => {}
             }
         }
 
-        // Apply macro prefix to constants if needed
+        // Deterministic output: the caller sorts top-level modules, so sort children too.
+        submodules.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Rust keeps consts and mods in separate namespaces; Python class attributes are
+        // one namespace. `pub const status` next to `pub mod status` compiles in Rust and
+        // would emit two `status` members in the same class body, where the nested class
+        // silently wins because it is written last. Fail the build instead — a silently
+        // shadowed metric name is the exact failure mode this recursion was added to end.
+        for child in &submodules {
+            if let Some(clash) = constants.iter().find(|c| c.name == child.name) {
+                anyhow::bail!(
+                    "module `{module_name}` declares both a constant and a nested module named \
+                     `{}`; Python cannot express both as attributes of one class. Rename one of \
+                     them (the constant currently resolves to \"{}\").",
+                    child.name,
+                    clash.value
+                );
+            }
+        }
+
+        // Apply macro prefix to constants if needed. Deliberately NOT applied to
+        // submodules: the nested modules hold label *values* (`operation::TOKENIZE`,
+        // `error_type::VALIDATION`), not metric names, so prefixing them would corrupt
+        // the value a caller compares against.
         if is_macro_generated {
             if let Some(prefix) = macro_prefix.as_ref() {
                 for constant in &mut constants {
@@ -107,6 +139,7 @@ impl PrometheusParser {
             doc_comment,
             is_macro_generated,
             macro_prefix,
+            submodules,
         }))
     }
 
@@ -228,5 +261,109 @@ impl PrometheusParser {
         }
 
         doc_lines.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn child<'a>(module: &'a ModuleDef, name: &str) -> &'a ModuleDef {
+        module
+            .submodules
+            .iter()
+            .find(|m| m.name == name)
+            .unwrap_or_else(|| panic!("expected submodule `{name}`"))
+    }
+
+    /// Nested `pub mod` must survive parsing with its constants attached, sorted by name,
+    /// with private modules excluded and label values kept verbatim. Before recursion
+    /// landed, `transport` parsed with no children at all and the generator turned it into
+    /// an empty Python class, silently dropping every TCP and NATS name.
+    #[test]
+    fn nested_modules_are_parsed_sorted_and_scoped() {
+        let parser = PrometheusParser::parse_file(
+            r#"
+/// Transport-specific metrics (TCP / NATS)
+pub mod transport {
+    pub mod tcp {
+        pub const ERRORS_TOTAL: &str = "tcp_errors_total";
+    }
+    pub mod nats {
+        pub const ERRORS_TOTAL: &str = "nats_errors_total";
+    }
+    mod private_mod {
+        pub const HIDDEN: &str = "hidden_value";
+    }
+}
+
+pub mod frontend_service {
+    pub const REQUESTS_TOTAL: &str = "requests_total";
+    /// Error type label values
+    pub mod error_type {
+        pub const NONE: &str = "";
+        pub const VALIDATION: &str = "validation";
+    }
+}
+"#,
+        )
+        .expect("source should parse");
+
+        // Source order is tcp-then-nats; output must be sorted so reordering the Rust
+        // source cannot churn the generated Python diff. The private module is absent.
+        let transport = &parser.modules["transport"];
+        assert_eq!(
+            transport
+                .submodules
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["nats", "tcp"]
+        );
+        assert_eq!(
+            child(transport, "tcp").constants[0].value,
+            "tcp_errors_total"
+        );
+
+        // A parent keeps its own constants alongside its children, and nested label
+        // values stay exactly as written — `NONE` is deliberately the empty string, so
+        // any prefixing would corrupt what callers compare against.
+        let frontend = &parser.modules["frontend_service"];
+        assert_eq!(frontend.constants.len(), 1);
+        let error_type = child(frontend, "error_type");
+        assert_eq!(error_type.doc_comment, "Error type label values");
+        assert_eq!(
+            error_type
+                .constants
+                .iter()
+                .map(|c| (c.name.as_str(), c.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("NONE", ""), ("VALIDATION", "validation")]
+        );
+    }
+
+    /// Rust keeps consts and mods in separate namespaces; Python class attributes are one.
+    /// `pub const status` beside `pub mod status` compiles in Rust and would emit two
+    /// `status` members, the nested class silently overwriting the constant. Fail instead.
+    #[test]
+    fn const_and_submodule_name_collision_is_rejected() {
+        let err = PrometheusParser::parse_file(
+            r#"
+pub mod frontend_service {
+    pub const status: &str = "status_value";
+    pub mod status {
+        pub const SUCCESS: &str = "success";
+    }
+}
+"#,
+        )
+        .err()
+        .expect("a const/mod name collision must not parse silently");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("frontend_service") && msg.contains("`status`"),
+            "error must name the module and the clashing symbol, got: {msg}"
+        );
     }
 }

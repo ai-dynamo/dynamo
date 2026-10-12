@@ -13,7 +13,7 @@ This recipe deploys DeepSeek-R1 using vLLM in a disaggregated prefill/decode set
 ### 0) Prerequisites: Install the platform
 
 Follow the Kubernetes deployment guide to install the Dynamo platform and prerequisites (CRDs/operator, etc.):
-- `docs/fern/kubernetes/quickstart.mdx`
+- `docs/fern/pages/kubernetes/getting-started/quickstart.mdx`
 
 Ensure you have a GPU-enabled cluster with sufficient capacity (32x H100/H200 "Hopper" across 4 nodes), and that the NVIDIA GPU Operator is healthy.
 

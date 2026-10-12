@@ -27,22 +27,22 @@ from argparse import Namespace
 from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
+from packaging.version import Version
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.llm import (
-    AicPerfConfig,
+    AisPerfConfig,
     EngineType,
     EntrypointArgs,
     FrontendRoute,
-    KvRouterConfig,
-    RouterConfig,
-    RouterMode,
     make_engine,
     run_input,
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from .cpu_affinity import warn_if_frontend_cpu_affinity_spans_numa_nodes
 from .frontend_args import FrontendArgGroup, FrontendConfig
 
 if TYPE_CHECKING:
@@ -53,6 +53,48 @@ logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend.routes"
+
+# The frontend's TCP listener can exhaust the default soft RLIMIT_NOFILE (1024 on
+# most distros) under high concurrency (see the accept() loop in
+# lib/runtime/src/pipeline/network/tcp/server.rs), causing accept() to fail with
+# EMFILE. At startup we raise the soft limit toward FRONTEND_FD_LIMIT_TARGET,
+# overridable per-deployment via DYN_FRONTEND_FD_LIMIT_TARGET. A non-positive or
+# non-integer value disables the raise, so operators can opt out.
+FRONTEND_FD_LIMIT_ENV = "DYN_FRONTEND_FD_LIMIT_TARGET"
+FRONTEND_FD_LIMIT_TARGET = 8192
+
+
+def _raise_fd_limit(target: Optional[int] = None) -> None:
+    """Best-effort: raise the process's soft RLIMIT_NOFILE toward `target`
+    (default: the DYN_FRONTEND_FD_LIMIT_TARGET env var, else FRONTEND_FD_LIMIT_TARGET),
+    bounded by the hard limit. A target <= 0 (or a non-integer env value) disables
+    it; also a no-op if already sufficient, if the Unix-only `resource` module is
+    unavailable (e.g. Windows), or if the raise is denied."""
+    if target is None:
+        raw = os.getenv(FRONTEND_FD_LIMIT_ENV, str(FRONTEND_FD_LIMIT_TARGET))
+        try:
+            target = int(raw)
+        except ValueError:
+            target = 0
+    if target <= 0:
+        return
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft == resource.RLIM_INFINITY:
+            return  # already unlimited; a finite target would only reduce it
+        new_soft = target if hard == resource.RLIM_INFINITY else min(target, hard)
+        if new_soft > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+            logger.info(
+                f"Raised RLIMIT_NOFILE soft limit {soft} -> {new_soft} (hard={hard})"
+            )
+    except Exception:
+        # Best-effort hardening; ignore failures (Windows lacks `resource`, or
+        # setrlimit may be denied in a restricted environment).
+        # logger.debug("Could not raise RLIMIT_NOFILE; continuing")
+        pass
 
 
 def setup_engine_factory(
@@ -251,7 +293,11 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
-            from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+            if Version(importlib.metadata.version("vllm")).release >= (0, 29):
+                from vllm.entrypoints.launchers.cli_args import FrontendArgs
+            else:
+                from vllm.entrypoints.openai.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
@@ -275,6 +321,41 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
             logger.error(f"Unknown arguments specified: {unknown}")
             sys.exit(1)
     return config, vllm_flags, sglang_flags
+
+
+def _export_transport_tls_env(config: FrontendConfig) -> None:
+    """Propagate transport TLS/mTLS CLI flags to the env vars the Rust runtime
+    reads. Must run before ``DistributedRuntime`` is constructed: it connects to
+    NATS eagerly, so NATS settings applied afterwards are ignored. The TCP
+    request/response planes dial lazily, so they only need the vars set before
+    the first connection, but exporting everything up front keeps it consistent.
+    """
+    if config.tcp_tls_cert_path:
+        os.environ["DYN_TCP_TLS_CERT_PATH"] = config.tcp_tls_cert_path
+    if config.tcp_tls_key_path:
+        os.environ["DYN_TCP_TLS_KEY_PATH"] = config.tcp_tls_key_path
+    if config.tcp_tls_ca_cert_path:
+        os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = config.tcp_tls_ca_cert_path
+    if config.tcp_tls_client_cert_path:
+        os.environ["DYN_TCP_TLS_CLIENT_CERT_PATH"] = config.tcp_tls_client_cert_path
+    if config.tcp_tls_client_key_path:
+        os.environ["DYN_TCP_TLS_CLIENT_KEY_PATH"] = config.tcp_tls_client_key_path
+    if config.tcp_tls_client_ca_cert_path:
+        os.environ[
+            "DYN_TCP_TLS_CLIENT_CA_CERT_PATH"
+        ] = config.tcp_tls_client_ca_cert_path
+    if config.nats_tls_ca_cert_path:
+        os.environ["NATS_TLS_CA_CERT_PATH"] = config.nats_tls_ca_cert_path
+    if config.nats_tls_insecure:
+        os.environ["NATS_TLS_INSECURE"] = "1"
+    else:
+        # Clear any inherited NATS_TLS_INSECURE so --no-nats-tls-insecure can
+        # override it before the Rust runtime reads the env var.
+        os.environ.pop("NATS_TLS_INSECURE", None)
+    if config.nats_tls_client_cert_path:
+        os.environ["NATS_TLS_CLIENT_CERT_PATH"] = config.nats_tls_client_cert_path
+    if config.nats_tls_client_key_path:
+        os.environ["NATS_TLS_CLIENT_KEY_PATH"] = config.nats_tls_client_key_path
 
 
 async def async_main():
@@ -312,11 +393,17 @@ async def async_main():
         )
 
     loop = asyncio.get_running_loop()
+    # Export transport TLS/mTLS settings BEFORE constructing DistributedRuntime:
+    # it connects to NATS eagerly, so NATS (m)TLS env vars must already be set or
+    # the CLI flags are silently ignored (unlike the lazily-dialed TCP planes).
+    _export_transport_tls_env(config)
+    warn_if_frontend_cpu_affinity_spans_numa_nodes(logger)
     runtime = DistributedRuntime(
         loop,
         config.discovery_backend,
         config.request_plane,
         event_plane=config.event_plane,
+        response_plane=config.response_plane,
     )
 
     def signal_handler():
@@ -325,32 +412,11 @@ async def async_main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    if config.router_mode == "kv":
-        router_mode = RouterMode.KV
-        kv_router_config = KvRouterConfig(**config.kv_router_kwargs())
-    elif config.router_mode == "random":
-        router_mode = RouterMode.Random
-        kv_router_config = None
-    elif config.router_mode == "direct":
-        router_mode = RouterMode.Direct
-        kv_router_config = None
-    elif config.router_mode == "power-of-two":
-        router_mode = RouterMode.PowerOfTwoChoices
-        kv_router_config = None
-    elif config.router_mode == "least-loaded":
-        router_mode = RouterMode.LeastLoaded
-        kv_router_config = None
-    elif config.router_mode == "device-aware-weighted":
-        router_mode = RouterMode.DeviceAwareWeighted
-        kv_router_config = None
-    else:
-        router_mode = RouterMode.RoundRobin
-        kv_router_config = None
-
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
-    router_config = RouterConfig(
-        router_mode, kv_router_config, **config.router_kwargs()
-    )
+    # Shared with the backends so a worker's advertised config is built from the
+    # same flags and semantics. --router-mode always has a default here, so this
+    # never returns None.
+    router_config = build_router_config(config)
 
     metrics_prefix = (
         config.metrics_prefix
@@ -368,7 +434,9 @@ async def async_main():
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
+        "reasoning_field_name": config.reasoning_field_name,
         "tokenizer_backend": config.tokenizer_backend,
+        "tokenizer_fallback": config.tokenizer_fallback,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len
@@ -381,6 +449,8 @@ async def async_main():
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
+    if config.tls_client_ca_cert_path:
+        kwargs["tls_client_ca_cert_path"] = config.tls_client_ca_cert_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:
@@ -402,19 +472,11 @@ async def async_main():
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
 
-    if config.router_prefill_load_model == "aic":
-        kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
+    if config.router_prefill_load_model == "ais":
+        kwargs["ais_perf_config"] = AisPerfConfig(**config.ais_perf_kwargs())
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
-    # Validate mode compatibility before loading extensions, so an incompatible
-    # mode fails fast without importing/executing third-party provider code.
-    if config.frontend_route_extensions and (
-        config.interactive or config.kserve_grpc_server
-    ):
-        raise ValueError(
-            "frontend route extensions are only supported by HTTP frontend mode"
-        )
     frontend_route_extensions = load_frontend_route_extensions(
         config.frontend_route_extensions
     )
@@ -441,6 +503,7 @@ async def graceful_shutdown(runtime: DistributedRuntime) -> None:
 
 def main() -> None:
     """Entry point for the Dynamo frontend CLI."""
+    _raise_fd_limit()
     uvloop.run(async_main())
 
 

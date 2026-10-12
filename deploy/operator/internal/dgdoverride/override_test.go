@@ -6,6 +6,7 @@
 package dgdoverride
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -14,6 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
 )
+
+const alphaAPIVersion = "nvidia.com/v1alpha1"
 
 func TestApplyVersionMatrix(t *testing.T) {
 	t.Parallel()
@@ -30,7 +33,7 @@ func TestApplyVersionMatrix(t *testing.T) {
 			name:           "alpha blueprint with alpha override",
 			blueprint:      alphaBlueprintYAML,
 			override:       alphaOverrideYAML,
-			wantAPIVersion: "nvidia.com/v1alpha1",
+			wantAPIVersion: alphaAPIVersion,
 			wantArgs:       []string{"--base", "--override"},
 			wantPreservation: func(t *testing.T, result *unstructured.Unstructured) {
 				pvcs := mustNestedSlice(t, result.Object, "spec", "pvcs")
@@ -42,7 +45,7 @@ func TestApplyVersionMatrix(t *testing.T) {
 			name:           "alpha blueprint with beta override",
 			blueprint:      alphaBlueprintYAML,
 			override:       betaOverrideYAML,
-			wantAPIVersion: "nvidia.com/v1alpha1",
+			wantAPIVersion: alphaAPIVersion,
 			wantArgs:       []string{"--override"},
 			wantPreservation: func(t *testing.T, result *unstructured.Unstructured) {
 				pvcs := mustNestedSlice(t, result.Object, "spec", "pvcs")
@@ -138,6 +141,207 @@ func TestApplyUsesStructuralListSemantics(t *testing.T) {
 	assert.Equal(t, "added", findNamedObject(t, env, "ADDED")["value"])
 }
 
+func TestApplyMaterializesExplicitBetaArgsAppend(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Apply an args append directive to a main container present in the blueprint")
+	result, warnings, err := Apply(
+		mustObject(t, betaBlueprintYAML),
+		mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: Worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          $patch:
+            args: append
+          args:
+          - --router-mode
+          - kv
+`),
+	)
+	require.NoError(t, err)
+	assert.Empty(t, warnings)
+
+	t.Log("Verify the directive becomes a complete argument list in the resulting DGD")
+	worker := mustBetaWorker(t, result)
+	main := findNamedObject(
+		t,
+		mustNestedSlice(t, worker, "podTemplate", "spec", "containers"),
+		"main",
+	)
+	require.NotNil(t, main)
+	assert.Equal(t, []interface{}{"--base", "--router-mode", "kv"}, main["args"])
+	assert.NotContains(t, main, "$patch")
+	assert.NotContains(t, worker, "containerArgsPatches")
+}
+
+func TestApplyMaterializesFrontendArgsAppendAfterExplicitDefaults(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Materialize the operator-equivalent frontend CLI in the profiler blueprint")
+	blueprint := mustObject(t, betaBlueprintYAML)
+	updateBetaComponent(t, blueprint, "Frontend", func(frontend map[string]interface{}) {
+		require.NoError(t, unstructured.SetNestedSlice(
+			frontend,
+			[]interface{}{
+				map[string]interface{}{
+					"name":    "main",
+					"command": []interface{}{"python3"},
+					"args":    []interface{}{"-m", "dynamo.frontend"},
+				},
+			},
+			"podTemplate",
+			"spec",
+			"containers",
+		))
+	})
+
+	t.Log("Append KV router arguments to the explicit frontend CLI")
+	result, warnings, err := Apply(blueprint, mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          $patch:
+            args: append
+          args: [--router-mode, kv]
+`))
+	require.NoError(t, err)
+	assert.Empty(t, warnings)
+
+	t.Log("Verify the effective DGD carries the complete frontend command line")
+	components := mustNestedSlice(t, result.Object, "spec", "components")
+	frontend := findNamedObject(t, components, "Frontend")
+	require.NotNil(t, frontend)
+	main := findNamedObject(
+		t,
+		mustNestedSlice(t, frontend, "podTemplate", "spec", "containers"),
+		"main",
+	)
+	require.NotNil(t, main)
+	assert.Equal(t, []interface{}{"python3"}, main["command"])
+	assert.Equal(t, []interface{}{"-m", "dynamo.frontend", "--router-mode", "kv"}, main["args"])
+	assert.NotContains(t, main, "$patch")
+}
+
+func TestApplyMaterializesBetaArgsAppendForExistingSidecar(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Add explicit base arguments to the generated sidecar")
+	blueprint := mustObject(t, betaBlueprintYAML)
+	updateBetaComponent(t, blueprint, "Worker", func(worker map[string]interface{}) {
+		containers := mustNestedSlice(t, worker, "podTemplate", "spec", "containers")
+		sidecar := findNamedObject(t, containers, "sidecar")
+		require.NotNil(t, sidecar)
+		sidecar["args"] = []interface{}{"--serve"}
+		require.NoError(t, unstructured.SetNestedSlice(
+			worker,
+			containers,
+			"podTemplate",
+			"spec",
+			"containers",
+		))
+	})
+
+	t.Log("Apply an args append directive to a sidecar present in the generated blueprint")
+	result, warnings, err := Apply(
+		blueprint,
+		mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: Worker
+    podTemplate:
+      spec:
+        containers:
+        - name: sidecar
+          $patch:
+            args: append
+          args:
+          - --verbose
+`),
+	)
+	require.NoError(t, err)
+	assert.Empty(t, warnings)
+
+	t.Log("Verify the existing sidecar remains intact and receives the complete argument list")
+	worker := mustBetaWorker(t, result)
+	sidecar := findNamedObject(
+		t,
+		mustNestedSlice(t, worker, "podTemplate", "spec", "containers"),
+		"sidecar",
+	)
+	require.NotNil(t, sidecar)
+	assert.Equal(t, "sidecar-image", sidecar["image"])
+	assert.Equal(t, []interface{}{"--serve", "--verbose"}, sidecar["args"])
+	assert.NotContains(t, sidecar, "$patch")
+	assert.NotContains(t, worker, "containerArgsPatches")
+}
+
+func TestApplyRejectsInvalidBetaArgsAppendPatch(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Define invalid args append directives")
+	tests := []struct {
+		name          string
+		componentName string
+		containerName string
+		modifier      string
+		argsLine      string
+		wantError     string
+	}{
+		{name: "unsupported operation", containerName: "main", modifier: "replace", argsLine: "          args: [--flag]\n", wantError: "only supports args: append"},
+		{name: "missing args", containerName: "main", modifier: "append", wantError: "args must be non-empty"},
+		{name: "non-string args", containerName: "main", modifier: "append", argsLine: "          args: [--flag, 7]\n", wantError: "list of strings"},
+		{name: "empty string arg", containerName: "main", modifier: "append", argsLine: "          args: [--flag, \"\"]\n", wantError: "args[1] must be non-empty"},
+		{name: "empty container name", containerName: `""`, modifier: "append", argsLine: "          args: [--flag]\n", wantError: "name must be a non-empty string"},
+		{name: "unknown sidecar", containerName: "missing", modifier: "append", argsLine: "          args: [--flag]\n", wantError: "is not present in the generated blueprint"},
+		{name: "generated sidecar args are absent", containerName: "sidecar", modifier: "append", argsLine: "          args: [--flag]\n", wantError: "must define args explicitly"},
+		{name: "generated main is absent", componentName: "Frontend", containerName: "main", modifier: "append", argsLine: "          args: [--flag]\n", wantError: "is not present in the generated blueprint"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Apply an invalid args append directive")
+			componentName := test.componentName
+			if componentName == "" {
+				componentName = "Worker"
+			}
+			override := fmt.Sprintf(`
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: %s
+    podTemplate:
+      spec:
+        containers:
+        - name: %s
+          $patch:
+            args: %s
+%s`, componentName, test.containerName, test.modifier, test.argsLine)
+			_, _, err := Apply(mustObject(t, betaBlueprintYAML), mustObject(t, override))
+
+			t.Log("Verify the invalid directive fails before structural merge")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), test.wantError)
+		})
+	}
+}
+
 func TestApplyUsesStructuralSetSemantics(t *testing.T) {
 	t.Parallel()
 
@@ -208,19 +412,164 @@ spec:
 	assert.Nil(t, value)
 }
 
-func TestApplySanitizesMetadataAndUnknownTopology(t *testing.T) {
+func TestApplyTranslatesDeprecatedOverrideTargets(t *testing.T) {
+	t.Parallel()
+
+	const alphaAggregateBlueprint = `
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      componentType: frontend
+    worker:
+      componentType: worker
+      replicas: 1
+`
+	const betaAggregateBlueprint = `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+  - name: worker
+    type: worker
+    replicas: 1
+`
+	const alphaDisaggregatedBlueprint = `
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      componentType: frontend
+    prefill:
+      componentType: prefill
+      replicas: 1
+    decode:
+      componentType: decode
+      replicas: 1
+`
+	const betaDisaggregatedBlueprint = `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+  - name: prefill
+    type: prefill
+    replicas: 1
+  - name: decode
+    type: decode
+    replicas: 1
+`
+	const alphaLegacyOverride = `
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+spec:
+  services:
+    VllmDecodeWorker:
+      replicas: 7
+`
+	const betaLegacyOverride = `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: VllmDecodeWorker
+    replicas: 7
+`
+
+	tests := []struct {
+		name           string
+		blueprint      string
+		override       string
+		wantAPIVersion string
+		wantTarget     string
+		wantWarning    string
+	}{
+		{
+			name:           "alpha aggregate",
+			blueprint:      alphaAggregateBlueprint,
+			override:       alphaLegacyOverride,
+			wantAPIVersion: alphaAPIVersion,
+			wantTarget:     "worker",
+			wantWarning:    `spec.services.VllmDecodeWorker: deprecated override target "VllmDecodeWorker" translated to "worker"; use "worker" directly. Legacy-name translation will be removed in a future release`,
+		},
+		{
+			name:           "beta aggregate with alpha override",
+			blueprint:      betaAggregateBlueprint,
+			override:       alphaLegacyOverride,
+			wantAPIVersion: "nvidia.com/v1beta1",
+			wantTarget:     "worker",
+			wantWarning:    `spec.services.VllmDecodeWorker: deprecated override target "VllmDecodeWorker" translated to "worker"; use "worker" directly. Legacy-name translation will be removed in a future release`,
+		},
+		{
+			name:           "alpha disaggregated with beta override",
+			blueprint:      alphaDisaggregatedBlueprint,
+			override:       betaLegacyOverride,
+			wantAPIVersion: alphaAPIVersion,
+			wantTarget:     "decode",
+			wantWarning:    `spec.components[name=VllmDecodeWorker]: deprecated override target "VllmDecodeWorker" translated to "decode"; use "decode" directly. Legacy-name translation will be removed in a future release`,
+		},
+		{
+			name:           "beta disaggregated",
+			blueprint:      betaDisaggregatedBlueprint,
+			override:       betaLegacyOverride,
+			wantAPIVersion: "nvidia.com/v1beta1",
+			wantTarget:     "decode",
+			wantWarning:    `spec.components[name=VllmDecodeWorker]: deprecated override target "VllmDecodeWorker" translated to "decode"; use "decode" directly. Legacy-name translation will be removed in a future release`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Apply a legacy override against the selected generated topology")
+			blueprint := mustObject(t, test.blueprint)
+			override := mustObject(t, test.override)
+			blueprintBefore := blueprint.DeepCopy()
+			overrideBefore := override.DeepCopy()
+			result, warnings, err := Apply(blueprint, override)
+			require.NoError(t, err)
+
+			t.Log("Verify the target was translated, applied, and reported for migration")
+			require.Len(t, warnings, 1)
+			assert.Equal(t, test.wantWarning, warnings[0].String())
+			assert.Equal(t, test.wantAPIVersion, result.GetAPIVersion())
+			assert.Equal(t, int64(7), targetReplicas(t, result, test.wantTarget))
+			assert.Equal(t, blueprintBefore, blueprint, "Apply mutated the blueprint")
+			assert.Equal(t, overrideBefore, override, "Apply mutated the override")
+		})
+	}
+}
+
+func TestApplySanitizesMetadata(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name                string
-		blueprint           string
-		override            string
-		wantTopologyWarning string
+		name      string
+		blueprint string
+		override  string
 	}{
 		{
-			name:                "alpha",
-			blueprint:           alphaBlueprintYAML,
-			wantTopologyWarning: "spec.services.Missing: ignored because the generated blueprint has no such service",
+			name:      "alpha",
+			blueprint: alphaBlueprintYAML,
 			override: `
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -234,18 +583,11 @@ metadata:
   annotations:
     added: "true"
     base: "false"
-spec:
-  services:
-    Missing:
-      extraPodSpec:
-        mainContainer:
-          image: ignored
 `,
 		},
 		{
-			name:                "beta",
-			blueprint:           betaBlueprintYAML,
-			wantTopologyWarning: "spec.components[name=Missing]: ignored because the generated blueprint has no such component",
+			name:      "beta",
+			blueprint: betaBlueprintYAML,
 			override: `
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -259,14 +601,6 @@ metadata:
   annotations:
     added: "true"
     base: "false"
-spec:
-  components:
-  - name: Missing
-    podTemplate:
-      spec:
-        containers:
-        - name: main
-          image: ignored
 `,
 		},
 	}
@@ -275,17 +609,15 @@ spec:
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
+			t.Log("Apply metadata overrides that mix supported and operator-owned fields")
 			override := mustObject(t, test.override)
 			overrideBefore := override.DeepCopy()
-			result, warnings, err := Apply(
-				mustObject(t, test.blueprint),
-				override,
-			)
+			result, warnings, err := Apply(mustObject(t, test.blueprint), override)
 			require.NoError(t, err)
-			require.Len(t, warnings, 2)
-			assert.Equal(t, "metadata: ignored identity/runtime fields: finalizers, name, namespace", warnings[0].String())
-			assert.Equal(t, test.wantTopologyWarning, warnings[1].String())
 
+			t.Log("Verify identity fields were ignored while labels and annotations were merged")
+			require.Len(t, warnings, 1)
+			assert.Equal(t, "metadata: ignored identity/runtime fields: finalizers, name, namespace", warnings[0].String())
 			assert.Equal(t, "generated", result.GetName())
 			assert.Equal(t, "default", result.GetNamespace())
 			assert.Empty(t, result.GetFinalizers())
@@ -477,7 +809,7 @@ spec:
     replicas: 3
 `)
 			},
-			wantError: "duplicate",
+			wantError: `both resolve to generated component "Worker"`,
 		},
 		{
 			name:      "invalid alpha worker args",
@@ -495,6 +827,130 @@ spec:
 `)
 			},
 			wantError: "must be a list of strings",
+		},
+		{
+			name:      "unknown alpha service target",
+			blueprint: func(t *testing.T) *unstructured.Unstructured { return mustObject(t, alphaBlueprintYAML) },
+			override: func(t *testing.T) *unstructured.Unstructured {
+				return mustObject(t, `
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+spec:
+  services:
+    Missing:
+      replicas: 2
+`)
+			},
+			wantError: `spec.services.Missing: override target "Missing" is not present in the generated blueprint`,
+		},
+		{
+			name:      "unknown beta component target",
+			blueprint: func(*testing.T) *unstructured.Unstructured { return validBlueprint.DeepCopy() },
+			override: func(t *testing.T) *unstructured.Unstructured {
+				return mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: Missing
+    replicas: 2
+`)
+			},
+			wantError: `spec.components[name=Missing]: override target "Missing" is not present in the generated blueprint`,
+		},
+		{
+			name:      "deprecated target has no compatible generated target",
+			blueprint: func(*testing.T) *unstructured.Unstructured { return validBlueprint.DeepCopy() },
+			override: func(t *testing.T) *unstructured.Unstructured {
+				return mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: VllmWorker
+    replicas: 2
+`)
+			},
+			wantError: `deprecated override target "VllmWorker" cannot be translated because the generated blueprint contains none of the compatible targets: worker`,
+		},
+		{
+			name: "deprecated target does not cross backend boundaries",
+			blueprint: func(t *testing.T) *unstructured.Unstructured {
+				return mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  backendFramework: sglang
+  components:
+  - name: worker
+    type: worker
+`)
+			},
+			override: func(t *testing.T) *unstructured.Unstructured {
+				return mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: VllmWorker
+    replicas: 2
+`)
+			},
+			wantError: `deprecated override target "VllmWorker" belongs to backend "vllm" and cannot be translated for generated backend "sglang"`,
+		},
+		{
+			name: "deprecated target is ambiguous",
+			blueprint: func(t *testing.T) *unstructured.Unstructured {
+				return mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  backendFramework: vllm
+  components:
+  - name: worker
+    type: worker
+  - name: decode
+    type: decode
+`)
+			},
+			override: func(t *testing.T) *unstructured.Unstructured {
+				return mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: VllmDecodeWorker
+    replicas: 2
+`)
+			},
+			wantError: `cannot be translated unambiguously because the generated blueprint contains multiple compatible targets: worker, decode`,
+		},
+		{
+			name: "translated beta target collides with direct target",
+			blueprint: func(t *testing.T) *unstructured.Unstructured {
+				return mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  backendFramework: vllm
+  components:
+  - name: worker
+    type: worker
+`)
+			},
+			override: func(t *testing.T) *unstructured.Unstructured {
+				return mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: VllmWorker
+    replicas: 2
+  - name: worker
+    replicas: 3
+`)
+			},
+			wantError: `override targets "VllmWorker" and "worker" both resolve to generated component "worker"`,
 		},
 		{
 			name:      "unknown beta field",
@@ -560,9 +1016,14 @@ func mustNestedStringSlice(t *testing.T, object map[string]interface{}, fields .
 
 func mustBetaWorker(t *testing.T, object *unstructured.Unstructured) map[string]interface{} {
 	t.Helper()
+	return mustBetaComponent(t, object, "Worker")
+}
+
+func mustBetaComponent(t *testing.T, object *unstructured.Unstructured, name string) map[string]interface{} {
+	t.Helper()
 	components := mustNestedSlice(t, object.Object, "spec", "components")
-	component := findNamedObject(t, components, "Worker")
-	require.NotNil(t, component, "missing Worker component")
+	component := findNamedObject(t, components, name)
+	require.NotNil(t, component, "missing %s component", name)
 	return component
 }
 
@@ -592,10 +1053,36 @@ func findNamedObject(t *testing.T, values []interface{}, name string) map[string
 	return nil
 }
 
+func targetReplicas(t *testing.T, object *unstructured.Unstructured, name string) int64 {
+	t.Helper()
+
+	var value interface{}
+	if object.GetAPIVersion() == alphaAPIVersion {
+		var found bool
+		var err error
+		value, found, err = unstructured.NestedFieldNoCopy(object.Object, "spec", "services", name, "replicas")
+		require.NoError(t, err)
+		require.True(t, found, "missing replicas for service %q", name)
+	} else {
+		component := mustBetaComponent(t, object, name)
+		value = component["replicas"]
+	}
+
+	switch replicas := value.(type) {
+	case int64:
+		return replicas
+	case float64:
+		return int64(replicas)
+	default:
+		t.Fatalf("replicas for target %q has type %T", name, value)
+		return 0
+	}
+}
+
 func mainContainer(t *testing.T, object *unstructured.Unstructured) map[string]interface{} {
 	t.Helper()
 	switch object.GetAPIVersion() {
-	case "nvidia.com/v1alpha1":
+	case alphaAPIVersion:
 		container, found, err := unstructured.NestedMap(
 			object.Object,
 			"spec",
@@ -642,7 +1129,7 @@ func mainContainerArgs(t *testing.T, object *unstructured.Unstructured) []string
 func mainContainerEnv(t *testing.T, object *unstructured.Unstructured) map[string]string {
 	t.Helper()
 	result := map[string]string{}
-	if object.GetAPIVersion() == "nvidia.com/v1alpha1" {
+	if object.GetAPIVersion() == alphaAPIVersion {
 		service, found, err := unstructured.NestedMap(object.Object, "spec", "services", "Worker")
 		require.NoError(t, err)
 		require.True(t, found)

@@ -20,7 +20,7 @@ import json
 
 import pytest
 
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay import run_trace_replay
 
 pytestmark = [
@@ -34,10 +34,10 @@ pytestmark = [
 
 def _trtllm_reject_args():
     # 8 GPU blocks * block_size 64 = 512-token to-completion budget per request.
-    return MockEngineArgs.from_json(
-        json.dumps(
-            {
-                "engine_type": "trtllm",
+    return normalize_mocker_config(
+        {
+            "engine": {
+                "backend": "trtllm",
                 "block_size": 64,
                 "num_gpu_blocks": 8,
                 "max_num_seqs": 4,
@@ -46,7 +46,7 @@ def _trtllm_reject_args():
                 "enable_chunked_prefill": True,
                 "speedup_ratio": 1000.0,
             }
-        )
+        }
     )
 
 
@@ -87,6 +87,7 @@ def test_offline_replay_rejects_oversized_request_without_hanging(tmp_path):
         replay_mode="offline",
         trace_block_size=512,
     )
+    report = report.summary
 
     assert report["num_requests"] == 2, "both requests arrived"
     assert report["completed_requests"] == 1, (

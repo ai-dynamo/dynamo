@@ -8,13 +8,13 @@ _EXPORTS = {
     # Base handlers
     "BaseGenerativeHandler": ".handler_base",
     "BaseWorkerHandler": ".handler_base",
-    "RLMixin": ".handler_base",
     # LLM handlers
     "DecodeWorkerHandler": ".llm",
     "DiffusionWorkerHandler": ".llm",
     "PrefillWorkerHandler": ".llm",
     # Embedding handlers
     "EmbeddingWorkerHandler": ".embedding",
+    "RerankWorkerHandler": ".rerank",
     # Image diffusion handlers
     "ImageDiffusionWorkerHandler": ".image_diffusion",
     # Video generation handlers
@@ -37,22 +37,16 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = [
-    # Base handlers
     "BaseGenerativeHandler",
     "BaseWorkerHandler",
-    "RLMixin",
-    # LLM handlers
     "DecodeWorkerHandler",
     "DiffusionWorkerHandler",
-    "PrefillWorkerHandler",
-    # Embedding handlers
     "EmbeddingWorkerHandler",
-    # Image diffusion handlers
     "ImageDiffusionWorkerHandler",
-    # Video generation handlers
-    "VideoGenerationWorkerHandler",
-    # Multimodal handlers
     "MultimodalEncodeWorkerHandler",
     "MultimodalPrefillWorkerHandler",
     "MultimodalWorkerHandler",
+    "PrefillWorkerHandler",
+    "RerankWorkerHandler",
+    "VideoGenerationWorkerHandler",
 ]

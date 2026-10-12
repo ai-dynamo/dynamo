@@ -1,20 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end coverage for the current router-owned slot-tracker lifecycle.
+"""End-to-end coverage for the active-sequence slot-tracker lifecycle.
 
 IMPORTANT TEST CONTRACT:
-- These tests validate the current router-owned Add, MarkPrefillCompleted, and
-  Free lifecycle.
+- These tests validate Add, MarkPrefillCompleted, and Free lifecycle state.
 - Zero-buffer polling controls when the router consumes worker responses; it
-  does not pause mocker execution.
+  does not pause mocker execution or worker-origin prefill completion.
+- Add may therefore transition directly to MarkPrefillCompleted before a load
+  snapshot observes the transient prefill-active state.
 - These tests make no claim about mocker-owned load or cleanup timing.
-- If https://github.com/ai-dynamo/dynamo/issues/10511 moves prefill-complete or
-  Free ownership to engine-published acknowledgements/events, these tests will
-  likely require redesign.
-- Under engine-owned lifecycle events, response_buffer_size=0 cannot delay the
-  mocker from publishing completion or Free.
-- Do not preserve these assumptions later with sleeps or artificial mocker
+- Do not preserve transient-state assumptions with sleeps or artificial mocker
   slowdown.
 """
 
@@ -121,9 +117,13 @@ def _single_delta(current: LoadSnapshot, baseline: LoadSnapshot) -> LoadValue:
     return current_prefill - baseline_prefill, current_decode - baseline_decode
 
 
-def _matches_phase(delta: LoadValue, prefill_active: bool, decode_active: bool) -> bool:
+def _matches_phase(
+    delta: LoadValue, prefill_active: bool | None, decode_active: bool
+) -> bool:
     prefill, decode = delta
-    prefill_matches = prefill > 0 if prefill_active else prefill == 0
+    prefill_matches = prefill_active is None or (
+        prefill > 0 if prefill_active else prefill == 0
+    )
     decode_matches = decode > 0 if decode_active else decode == 0
     return prefill_matches and decode_matches
 
@@ -132,7 +132,7 @@ async def _wait_for_phase(
     router: KvRouter,
     baseline: LoadSnapshot,
     *,
-    prefill_active: bool,
+    prefill_active: bool | None,
     decode_active: bool,
     description: str,
     timeout_s: float = LOAD_TIMEOUT_S,
@@ -204,9 +204,9 @@ async def _establish_replica_readiness(
             await _wait_for_phase(
                 observer,
                 observer_baseline,
-                prefill_active=True,
+                prefill_active=None,
                 decode_active=True,
-                description="replicated sacrificial Add",
+                description="replicated sacrificial Add or worker completion",
                 timeout_s=2.0,
             )
             observed_add = True
@@ -251,9 +251,9 @@ async def _assert_replicated_lifecycle(
             await _wait_for_phase(
                 router,
                 baseline,
-                prefill_active=True,
+                prefill_active=None,
                 decode_active=True,
-                description=f"{role} Add",
+                description=f"{role} Add or worker completion",
             )
 
         await _next_nonempty_token(stream)

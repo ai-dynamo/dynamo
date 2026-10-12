@@ -1,0 +1,50 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: KV Cache Offloading
+subtitle: CPU and disk offloading integrations for vLLM in Dynamo
+---
+
+Dynamo supports multiple KV cache offloading backends for vLLM, allowing you to extend effective KV cache capacity beyond GPU memory using CPU RAM and disk storage. Each backend integrates through vLLM's connector interface and works with both aggregated and disaggregated serving.
+
+
+| Backend                 | Source                                           |
+| ----------------------- | ------------------------------------------------ |
+| **[LMCache](#lmcache)** | [GitHub](https://github.com/LMCache/LMCache)     |
+| **[FlexKV](#flexkv)**   | [GitHub](https://github.com/taco-project/FlexKV) |
+
+## LMCache
+
+[LMCache](https://github.com/LMCache/LMCache) is an open-source KV cache engine that provides prefill-once, reuse-everywhere caching with multi-level storage backends (CPU RAM, local storage, Redis, GDS, InfiniStore/Mooncake).
+
+
+| Deployment                                | Launch Script                                                                                                                       |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Aggregated (MP sidecar — recommended)     | [`agg_lmcache_mp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_mp.sh)                 |
+| Aggregated (legacy, in-process)           | [`agg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache.sh)                       |
+| Aggregated (legacy, multiprocess metrics) | [`agg_lmcache_multiproc.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_multiproc.sh)   |
+| Disaggregated                             | [`disagg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_lmcache.sh)                 |
+
+
+For local setup, see [KV Cache Offloading](../../../../../cli/kv-cache-offloading/overview.mdx).
+
+For Kubernetes deployment, see [Deploy LMCache MP](../../../../../kubernetes/kv-cache-offloading/lmcache.mdx).
+
+## FlexKV
+
+[FlexKV](https://github.com/taco-project/FlexKV) is a scalable, distributed KV cache runtime developed by Tencent Cloud's TACO team. It supports multi-level caching (GPU, CPU, SSD), distributed KV cache reuse across nodes, and high-performance I/O via io_uring and GPUDirect Storage.
+
+
+| Deployment              | Launch Script                                                                         |
+| ----------------------- | ------------------------------------------------------------------------------------- |
+| Aggregated              | [`agg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_flexkv.sh)               |
+| Aggregated + KV routing | [`agg_flexkv_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_flexkv_router.sh) |
+| Disaggregated           | [`disagg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_flexkv.sh)         |
+
+
+For local setup, see [KV Cache Offloading](../../../../../cli/kv-cache-offloading/overview.mdx).
+
+## See Also
+
+- **[Routing Concepts](../../router/routing-concepts.md)**: Routing requests based on KV cache state
+- **[Disaggregated Serving](../../../concepts/system-architecture/disaggregated-serving.md)**: Prefill/decode separation architecture

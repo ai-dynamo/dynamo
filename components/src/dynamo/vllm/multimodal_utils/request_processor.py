@@ -3,8 +3,8 @@
 
 """Shared vLLM multimodal request preparation.
 
-The legacy handler and unified backend both receive Dynamo's
-``PreprocessedRequest`` wire shape. This module owns the engine-facing
+The vLLM request handler receives Dynamo's ``PreprocessedRequest`` wire
+shape. This module owns the engine-facing
 translation: media loading, frontend-transferred ``mm_kwargs``, stable
 multimodal UUIDs, and the model-specific prefill/decode handoff.
 """
@@ -12,7 +12,6 @@ multimodal UUIDs, and the model-specific prefill/decode handoff.
 from __future__ import annotations
 
 import logging
-import pickle
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -23,16 +22,23 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.audio_loader import AudioLoader
-from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.image_loader import (
+    URL_VARIANT_KEY,
+    UUID_ONLY_VARIANT_KEY,
+    ImageLoader,
+    image_cache_scope_from_request,
+)
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlReceiver,
     MmKwargsReceiver,
     MmKwargsShmReceiver,
     MmKwargsShmTransferMetadata,
     MmKwargsTransferMetadata,
+    decode_mm_kwargs_item,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.llm.exceptions import InvalidArgument
 
 from .hash_utils import compute_mm_uuids_from_images
 from .model import ModelFamily, construct_qwen_decode_mm_data, resolve_model_family
@@ -41,23 +47,34 @@ from .models.qwen import (
     build_qwen_embedding_params,
     load_qwen_grid_params,
 )
+from .prefill_worker_utils import parse_image_item
 
 logger = logging.getLogger(__name__)
 
 IMAGE_URL_KEY = "image_url"
 VIDEO_URL_KEY = "video_url"
 AUDIO_URL_KEY = "audio_url"
-URL_VARIANT_KEY = "Url"
 
 
-def pad_mm_hashes_to_64(
+def mark_forwarded_mm_hashes_for_routing(
     mm_hashes: Sequence[str | None],
 ) -> list[str | None]:
-    """Pad frontend hashes to vLLM's 64-character UUID representation."""
-    return [
-        value.ljust(64, "0") if isinstance(value, str) and len(value) < 64 else value
-        for value in mm_hashes
-    ]
+    """Encode frontend-approved hashes as vLLM routing UUID markers."""
+    marked_hashes: list[str | None] = []
+    for value in mm_hashes:
+        if value is None:
+            marked_hashes.append(None)
+            continue
+
+        prefix = value[:16]
+        if len(prefix) != 16 or any(
+            char not in "0123456789abcdefABCDEF" for char in prefix
+        ):
+            raise ValueError(
+                "forwarded multimodal routing hashes must start with 16 hex characters"
+            )
+        marked_hashes.append(prefix + "0" * 48)
+    return marked_hashes
 
 
 def _normalize_forwarded_mm_modality(
@@ -86,7 +103,7 @@ def _build_forwarded_mm_uuids(
                 use_unified_vision_chunk,
             )
             mm_uuids.setdefault(modality_key, []).extend(
-                pad_mm_hashes_to_64(list(hashes))
+                mark_forwarded_mm_hashes_for_routing(list(hashes))
             )
         if mm_uuids:
             return mm_uuids
@@ -97,53 +114,88 @@ def _build_forwarded_mm_uuids(
             "image",
             use_unified_vision_chunk,
         )
-        padded_hashes = pad_mm_hashes_to_64(list(forwarded_hashes))
-        return {modality_key: padded_hashes}
+        marked_hashes = mark_forwarded_mm_hashes_for_routing(list(forwarded_hashes))
+        return {modality_key: marked_hashes}
 
     return None
+
+
+def _video_media_io_kwargs(request: dict) -> dict:
+    """Request-level video decode options, shape-checked the way vLLM does.
+
+    vLLM types this field as `dict[str, dict[str, Any]] | None` on its own
+    OpenAI schemas, so pydantic rejects a malformed value before any handler
+    runs. Dynamo's frontend forwards the field verbatim by design, so the
+    same check has to land here -- otherwise a non-object reaches
+    `VideoMediaIO(**kwargs)` and surfaces as a server error instead of a
+    request error.
+    """
+    media_io_kwargs = request.get("media_io_kwargs")
+    if media_io_kwargs is None:
+        return {}
+    if not isinstance(media_io_kwargs, dict):
+        raise ValueError("media_io_kwargs must be an object")
+
+    video_kwargs = media_io_kwargs.get("video")
+    if video_kwargs is None:
+        return {}
+    if not isinstance(video_kwargs, dict):
+        raise ValueError("media_io_kwargs['video'] must be an object")
+    return video_kwargs
 
 
 def _build_user_mm_uuids(
     raw_uuids: Any,
     use_unified_vision_chunk: bool,
+    use_audio_in_video: bool = False,
+    explicit_audio_count: int | None = None,
+    video_count: int | None = None,
 ) -> Optional[dict[str, list[str | None]]]:
-    """Normalize vLLM image cache identities without changing opaque values."""
+    """Map Dynamo media keys to vLLM cache identities."""
+    if use_audio_in_video and (explicit_audio_count is None or video_count is None):
+        raise ValueError(
+            "explicit_audio_count and video_count are required when "
+            "use_audio_in_video is enabled"
+        )
     if raw_uuids is None:
         return None
     if not isinstance(raw_uuids, dict):
         raise ValueError("multi_modal_uuids must be an object")
 
+    mm_uuids: dict[str, list[str | None]] = {}
     for modality, values in raw_uuids.items():
-        if modality == IMAGE_URL_KEY:
-            continue
-        has_uuid = (
-            any(value is not None for value in values)
-            if isinstance(values, list)
-            else values is not None
-        )
-        if has_uuid:
-            raise ValueError(
-                "multimodal cache UUIDs must use the 'image_url' modality key"
-            )
+        if not isinstance(values, list):
+            raise ValueError(f"multi_modal_uuids[{modality!r}] must be a list")
+        for index, value in enumerate(values):
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(
+                    f"multi_modal_uuids[{modality!r}] entries must be non-empty "
+                    f"strings or null; got invalid entry at index {index}"
+                )
 
-    if IMAGE_URL_KEY not in raw_uuids:
-        return None
-    image_uuids = raw_uuids[IMAGE_URL_KEY]
-    if not isinstance(image_uuids, list):
-        raise ValueError("multi_modal_uuids['image_url'] must be a list")
-    for index, value in enumerate(image_uuids):
-        if value is not None and (not isinstance(value, str) or not value):
-            raise ValueError(
-                "multi_modal_uuids['image_url'] entries must be non-empty "
-                f"strings or null; got invalid entry at index {index}"
-            )
-    if not any(value is not None for value in image_uuids):
-        return None
-    backend_modality = _normalize_forwarded_mm_modality(
-        "image",
-        use_unified_vision_chunk,
-    )
-    return {backend_modality: list(image_uuids)}
+        backend_modality = str(modality)
+        if backend_modality.endswith("_url"):
+            backend_modality = backend_modality.removesuffix("_url")
+        backend_modality = _normalize_forwarded_mm_modality(
+            backend_modality,
+            use_unified_vision_chunk,
+        )
+        mm_uuids.setdefault(backend_modality, []).extend(values)
+
+    if use_audio_in_video:
+        explicit_audio_count = explicit_audio_count or 0
+        video_count = video_count or 0
+        if "video" in mm_uuids or "audio" in mm_uuids:
+            video_uuids = mm_uuids.get("video", [None] * video_count)
+            audio_uuids = mm_uuids.get("audio", [None] * explicit_audio_count)
+            mm_uuids["audio"] = audio_uuids + video_uuids
+
+    mm_uuids = {
+        modality: uuids
+        for modality, uuids in mm_uuids.items()
+        if any(uuid is not None for uuid in uuids)
+    }
+    return mm_uuids or None
 
 
 def _get_modality_extra_values(
@@ -153,7 +205,7 @@ def _get_modality_extra_values(
     metadata_modality: str,
     backend_modality: str,
 ) -> Any:
-    """Read grouped transfer metadata with the legacy image-only fallback."""
+    """Read grouped transfer metadata with the image-only fallback."""
     grouped_values = extra_args.get(grouped_key)
     if isinstance(grouped_values, dict):
         for key in (metadata_modality, backend_modality):
@@ -235,16 +287,6 @@ def get_mm_processor_kwargs(request: dict[str, Any]) -> Optional[dict[str, Any]]
 
 
 @dataclass
-class PreparedMultimodalPrompt:
-    """Engine-ready prompt plus data needed for a prefill handoff."""
-
-    prompt: Any
-    request: dict[str, Any]
-    multi_modal_data: Optional[dict[str, Any]] = None
-    mm_processor_kwargs: Optional[dict[str, Any]] = None
-
-
-@dataclass
 class PreparedMultimodalInput:
     """Mode-aware request state before the engine prompt is constructed."""
 
@@ -278,6 +320,7 @@ class VllmMultimodalRequestProcessor:
         self.model = model
         self.engine_client = engine_client
         self.enable_multimodal = enable_multimodal
+        self.enable_frontend_decoding = enable_frontend_decoding
         self.trust_remote_code = trust_remote_code
         self.embedding_loader = embedding_loader
         self.image_loader = image_loader or ImageLoader(
@@ -292,6 +335,8 @@ class VllmMultimodalRequestProcessor:
         self._mm_kwargs_receiver: Optional[MmKwargsNixlReceiver] = None
         self._model_family = resolve_model_family(model)
         self._qwen_grid_params: Optional[QwenGridParams] = None
+        self._k3_expansion: Optional[tuple[int, list[int]]] = None
+        self._k3_expansion_cached = False
 
         if use_unified_vision_chunk is None:
             model_config = getattr(
@@ -306,15 +351,126 @@ class VllmMultimodalRequestProcessor:
             )
         self.use_unified_vision_chunk = use_unified_vision_chunk
 
+    def _kimi_k3_pad_expansion(self) -> Optional[tuple[int, list[int]]]:
+        """Return the structural-pad mapping for Kimi K3.
+
+        The native frontend emits one ``<|media_pad|>`` token per image.
+        vLLM's K3 processor instead matches the checkpoint's
+        ``<|kimi_image_placeholder|>`` sequence, so the adapter converts the
+        stable vocabulary token into that checkpoint-native sequence.
+
+        Successful K3 mappings and definite non-K3 model types are cached.
+        Incomplete engine metadata is not cached because it may become
+        available later during startup. Once a model identifies itself as K3,
+        malformed metadata is an error rather than a silent no-op.
+        """
+        if self._k3_expansion_cached:
+            return self._k3_expansion
+
+        model_config = getattr(
+            getattr(self.engine_client, "vllm_config", None), "model_config", None
+        )
+        hf_config = getattr(model_config, "hf_config", None)
+        if hf_config is None:
+            return None
+
+        model_type = getattr(hf_config, "model_type", None)
+        if model_type is None:
+            return None
+        if model_type != "kimi_k3":
+            self._k3_expansion_cached = True
+            return None
+
+        pad_id = getattr(hf_config, "media_placeholder_token_id", None)
+        if type(pad_id) is not int:
+            raise ValueError(
+                "Kimi-K3 requires an integer media_placeholder_token_id in "
+                "the model config"
+            )
+
+        image_placeholder = getattr(hf_config, "image_placeholder", None)
+        if not isinstance(image_placeholder, str) or not image_placeholder:
+            raise ValueError(
+                "Kimi-K3 requires a non-empty image_placeholder in the model config"
+            )
+
+        tokenizer = self.engine_client.get_tokenizer()
+        if tokenizer is None:
+            raise RuntimeError("Kimi-K3 tokenizer is unavailable")
+        native_ids = list(tokenizer.encode(image_placeholder, add_special_tokens=False))
+        if not native_ids or any(type(token_id) is not int for token_id in native_ids):
+            raise ValueError(
+                "Kimi-K3 image_placeholder must encode to a non-empty integer "
+                "token sequence"
+            )
+
+        self._k3_expansion = (pad_id, native_ids)
+        self._k3_expansion_cached = True
+        return self._k3_expansion
+
+    def _expand_kimi_k3_pads(
+        self, token_ids: list[int], multi_modal_data: Optional[dict[str, Any]]
+    ) -> list[int]:
+        """Replace each K3 structural image pad with its native token sequence."""
+        if not multi_modal_data:
+            return token_ids
+
+        image_modality = _normalize_forwarded_mm_modality(
+            "image",
+            self.use_unified_vision_chunk,
+        )
+        images = multi_modal_data.get(image_modality)
+        if images is None:
+            return token_ids
+        expected = len(images) if isinstance(images, (list, tuple)) else 1
+        if expected == 0:
+            return token_ids
+
+        expansion = self._kimi_k3_pad_expansion()
+        if expansion is None:
+            return token_ids
+        pad_id, native_ids = expansion
+
+        # Prompts here can exceed 100k tokens while pads number in the single
+        # digits. Locate the rare token in C and splice around it instead of
+        # walking every id in Python.
+        try:
+            first = token_ids.index(pad_id)
+        except ValueError:
+            return token_ids
+
+        pad_positions = [first]
+        while True:
+            try:
+                pad_positions.append(token_ids.index(pad_id, pad_positions[-1] + 1))
+            except ValueError:
+                break
+
+        if len(pad_positions) != expected:
+            raise ValueError(
+                f"Kimi-K3 prompt carries {len(pad_positions)} <|media_pad|> "
+                f"token(s) but {expected} image(s) were supplied; refusing to "
+                "expand."
+            )
+
+        expanded: list[int] = []
+        previous = 0
+        for position in pad_positions:
+            expanded.extend(token_ids[previous:position])
+            expanded.extend(native_ids)
+            previous = position + 1
+        expanded.extend(token_ids[previous:])
+        return expanded
+
     @staticmethod
-    def _multimodal_disabled_error() -> ValueError:
-        return ValueError(
+    def _multimodal_disabled_error() -> InvalidArgument:
+        return InvalidArgument(
             "Received multimodal data but multimodal processing is not enabled. "
             "Use --enable-multimodal flag to enable multimodal processing."
         )
 
     def validate_multimodal_request(self, request: dict[str, Any]) -> None:
-        """Enforce the multimodal opt-in on the unmodified inbound request."""
+        """Enforce opt-in and engine item limits before loading any media."""
         extra_args = request.get("extra_args")
         has_transfer = isinstance(extra_args, dict) and any(
             extra_args.get(key) is not None
@@ -326,6 +482,44 @@ class VllmMultimodalRequestProcessor:
             or has_transfer
         ) and not self.enable_multimodal:
             raise self._multimodal_disabled_error()
+
+        mm_map = request.get("multi_modal_data")
+        if not mm_map:
+            return
+        vllm_config = getattr(self.engine_client, "vllm_config", None)
+        if vllm_config is None:
+            return
+        mm_config = vllm_config.model_config.multimodal_config
+        if mm_config is None:
+            return
+
+        mm_processor_kwargs = get_mm_processor_kwargs(request)
+        video_audio_count = (
+            len(mm_map.get(VIDEO_URL_KEY, []))
+            if mm_processor_kwargs
+            and mm_processor_kwargs.get("use_audio_in_video", False)
+            else 0
+        )
+
+        # These are inbound media items, not decoded frames or image crops.
+        for modality, key in (
+            ("image", IMAGE_URL_KEY),
+            ("video", VIDEO_URL_KEY),
+            ("audio", AUDIO_URL_KEY),
+        ):
+            items = mm_map.get(key, [])
+            count = len(items)
+            if modality == "audio":
+                count += video_audio_count
+            limit_modality = _normalize_forwarded_mm_modality(
+                modality, self.use_unified_vision_chunk
+            )
+            limit = mm_config.get_limit_per_prompt(limit_modality)
+            if count > limit:
+                raise InvalidArgument(
+                    f"At most {limit} {modality}(s) may be provided in one prompt. "
+                    "Set `--limit-mm-per-prompt` to increase this limit."
+                )
 
     def initialize_prefill_handoff(self) -> None:
         """Load model policy needed to construct the P/D decode handoff."""
@@ -375,24 +569,30 @@ class VllmMultimodalRequestProcessor:
 
             vllm_mm_data: dict[str, Any] = {}
 
-            # A separate encoder currently supports URL-based images only. Keep
-            # processing other modalities locally so mixed image/video requests
-            # preserve all of their inputs.
+            # A separate encoder consumes URL images and, when frontend
+            # decoding is enabled, frontend-decoded pixels read via NIXL.
+            # Keep processing other modalities locally so mixed image/video
+            # requests preserve all of their inputs.
             if self.embedding_loader is not None:
-                image_urls: list[str] = []
+                image_items_for_encoder: list[Any] = []
                 supported = True
                 for item in mm_map.get(IMAGE_URL_KEY, []):
-                    if isinstance(item, dict) and URL_VARIANT_KEY in item:
-                        image_urls.append(item[URL_VARIANT_KEY])
-                    else:
+                    if isinstance(item, dict) and UUID_ONLY_VARIANT_KEY in item:
                         supported = False
+                        break
+                    _url, decoded = parse_image_item(item)
+                    if decoded is not None and not self.enable_frontend_decoding:
+                        supported = False
+                        break
+                    image_items_for_encoder.append(item)
                 if supported:
                     vllm_mm_data = (
                         await self.embedding_loader.load_multimodal_embeddings(
-                            image_urls,
+                            image_items_for_encoder,
                             request_id,
                             model=self.model,
                             context=context,
+                            cache_scope=image_cache_scope_from_request(request),
                         )
                     )
 
@@ -401,7 +601,9 @@ class VllmMultimodalRequestProcessor:
             if image_key not in vllm_mm_data and image_items:
                 with _nvtx.annotate("mm_backend:image_download", color="green"):
                     images = await self.image_loader.load_image_batch(
-                        image_items, preserve_uuid_slots=True
+                        image_items,
+                        cache_scope=image_cache_scope_from_request(request),
+                        preserve_uuid_slots=True,
                     )
                 if images:
                     if self.use_unified_vision_chunk:
@@ -429,7 +631,10 @@ class VllmMultimodalRequestProcessor:
 
             video_items = mm_map.get(VIDEO_URL_KEY, [])
             if video_items:
-                videos = await self.video_loader.load_video_batch(video_items)
+                video_io_kwargs = _video_media_io_kwargs(request)
+                videos = await self.video_loader.load_video_batch(
+                    video_items, video_io_kwargs
+                )
                 if videos:
                     vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
 
@@ -521,16 +726,14 @@ class VllmMultimodalRequestProcessor:
                 metadata.modality,
                 self.use_unified_vision_chunk,
             )
-            mm_hashes = (
-                _get_modality_extra_values(
-                    extra_args,
-                    "mm_hashes_by_modality",
-                    "mm_hashes",
-                    metadata.modality,
-                    backend_modality,
-                )
-                or metadata.mm_hashes
+            forwarded_mm_hashes = _get_modality_extra_values(
+                extra_args,
+                "mm_hashes_by_modality",
+                "mm_hashes",
+                metadata.modality,
+                backend_modality,
             )
+            mm_hashes = forwarded_mm_hashes or metadata.mm_hashes
             mm_placeholders = _get_modality_extra_values(
                 extra_args,
                 "mm_placeholders_by_modality",
@@ -553,10 +756,10 @@ class VllmMultimodalRequestProcessor:
 
             kwargs_items = []
             for payload in pickled_items:
-                # The sender is Dynamo's internal frontend transfer service,
-                # which deliberately serializes vLLM's Python-only kwargs
-                # objects. External request payloads never supply these bytes.
-                item = pickle.loads(payload)
+                # Decode with the typed msgpack decoder. It yields only
+                # MultiModalKwargsItem values and refuses the pickle extension
+                # codes, whatever VLLM_ALLOW_INSECURE_SERIALIZATION says.
+                item = decode_mm_kwargs_item(payload)
                 if not isinstance(item, MultiModalKwargsItem):
                     logger.warning(
                         "%s transfer produced %s instead of MultiModalKwargsItem",
@@ -574,11 +777,16 @@ class VllmMultimodalRequestProcessor:
                 )
                 return None
 
-            # These are vLLM's final feature hashes. When the request supplies
-            # an opaque UUID, vLLM derives this identity from the UUID together
-            # with mm_processor_kwargs. Any rewriting (including zero-padding)
-            # would create a different worker-cache key.
-            feature_hashes = list(mm_hashes)
+            # Explicitly forwarded hashes mean the frontend built exact routing.
+            # Mark those hashes so KV-event normalization is enabled. Transport
+            # metadata alone is only a vLLM cache identity and must stay native;
+            # otherwise worker-side processing could enable MM routing after the
+            # frontend fell back to text-only routing.
+            feature_hashes = (
+                mark_forwarded_mm_hashes_for_routing(list(forwarded_mm_hashes))
+                if forwarded_mm_hashes
+                else list(mm_hashes)
+            )
             mm_hashes_dict = {backend_modality: feature_hashes}
             mm_kwargs_dict = {backend_modality: kwargs_items}
             engine_input = {
@@ -618,9 +826,16 @@ class VllmMultimodalRequestProcessor:
     ) -> TokensPrompt:
         """Create a TokensPrompt with stable multimodal UUIDs."""
         extra_args = request.get("extra_args") or {}
+        raw_mm_data = request.get("multi_modal_data") or {}
         mm_uuids = _build_user_mm_uuids(
             request.get("multi_modal_uuids"),
             self.use_unified_vision_chunk,
+            use_audio_in_video=bool(
+                mm_processor_kwargs
+                and mm_processor_kwargs.get("use_audio_in_video", False)
+            ),
+            explicit_audio_count=len(raw_mm_data.get(AUDIO_URL_KEY, [])),
+            video_count=len(raw_mm_data.get(VIDEO_URL_KEY, [])),
         )
         if mm_uuids is None:
             mm_uuids = _build_forwarded_mm_uuids(
@@ -636,7 +851,10 @@ class VllmMultimodalRequestProcessor:
                 )
 
         prompt_kwargs: dict[str, Any] = {
-            "prompt_token_ids": request["token_ids"],
+            "prompt_token_ids": self._expand_kimi_k3_pads(
+                request["token_ids"],
+                multi_modal_data,
+            ),
             "multi_modal_data": multi_modal_data,
         }
         if mm_uuids is not None:
@@ -654,10 +872,9 @@ class VllmMultimodalRequestProcessor:
     ) -> PreparedMultimodalInput:
         """Apply aggregated/P/D media policy to a validated request.
 
-        Entry points must call :meth:`validate_multimodal_request` on the raw
-        request before invoking this transformation. ``prepare_prompt`` does
-        that for unified engines; the legacy handler validates at ``generate``
-        so text and token modes share the same security boundary.
+        Callers must call :meth:`validate_multimodal_request` on the raw
+        request before invoking this transformation. The handler validates at
+        ``generate`` so text and token modes share the same security boundary.
         """
         mm_processor_kwargs = get_mm_processor_kwargs(request)
         request_for_prompt = dict(request)
@@ -686,23 +903,52 @@ class VllmMultimodalRequestProcessor:
                         "embedding metadata (image_grid_thw) for Qwen-VL decode"
                     )
                     raise MissingMultimodalHandoffError(message)
-            elif embedding_params and embedding_params.get("expanded_prompt_token_ids"):
-                request_for_prompt["token_ids"] = embedding_params[
-                    "expanded_prompt_token_ids"
-                ]
-                has_mm_data = False
-
-            # Preserve the legacy fallback: video/audio media is loaded again
-            # on decode because the handoff currently carries image metadata only.
-            if multi_modal_data is None and has_mm_data:
+            # Reload media on decode. Qwen reconstructs image placeholders from
+            # the prefill handoff, so only video/audio are loaded again and
+            # merged. Non-Qwen keeps multi_modal_data and loads images (and
+            # other modalities) via ImageLoader so forwarded uuids/hashes are
+            # honored. Do not also substitute expanded_prompt_token_ids when
+            # an image is loaded: vLLM expands the placeholder again and the
+            # decode prompt grows by N-1 tokens, which trips NIXL
+            # num_decode_blocks <= len(prefill_group) (#15343).
+            if has_mm_data:
                 mm_map = request["multi_modal_data"]
-                if mm_map.get(VIDEO_URL_KEY) or mm_map.get(AUDIO_URL_KEY):
-                    multi_modal_data = await self.extract_multimodal_data(
-                        request,
+                if self._model_family is ModelFamily.QWEN_VL:
+                    local_mm_map = {
+                        key: mm_map[key]
+                        for key in (VIDEO_URL_KEY, AUDIO_URL_KEY)
+                        if mm_map.get(key)
+                    }
+                else:
+                    local_mm_map = mm_map
+                if local_mm_map:
+                    local_request = dict(request)
+                    local_request["multi_modal_data"] = local_mm_map
+                    local_mm_data = await self.extract_multimodal_data(
+                        local_request,
                         request_id,
                         context,
                         mm_processor_kwargs,
                     )
+                    if local_mm_data:
+                        if multi_modal_data is None:
+                            multi_modal_data = local_mm_data
+                        else:
+                            multi_modal_data.update(local_mm_data)
+            # Expanded prefill tokens only when decode loaded no media.
+            # With media present, the original placeholder ids are what
+            # vLLM should expand, once, matching prefill's prompt length.
+            # vision_chunk counts too, not only the image key.
+            media_loaded = bool(multi_modal_data)
+            if (
+                self._model_family is not ModelFamily.QWEN_VL
+                and not media_loaded
+                and embedding_params
+                and embedding_params.get("expanded_prompt_token_ids")
+            ):
+                request_for_prompt["token_ids"] = embedding_params[
+                    "expanded_prompt_token_ids"
+                ]
         elif mode == DisaggregationMode.AGGREGATED:
             pre_rendered = await self.try_receive_mm_kwargs(request)
             if pre_rendered is None:
@@ -730,26 +976,4 @@ class VllmMultimodalRequestProcessor:
             multi_modal_data=multi_modal_data,
             mm_processor_kwargs=mm_processor_kwargs,
             pre_rendered_prompt=pre_rendered,
-        )
-
-    async def prepare_prompt(
-        self,
-        request: dict[str, Any],
-        request_id: str,
-        context: Any,
-        mode: DisaggregationMode,
-    ) -> PreparedMultimodalPrompt:
-        """Prepare the complete engine prompt for the unified backend."""
-        self.validate_multimodal_request(request)
-        prepared = await self.prepare_input(request, request_id, context, mode)
-        prompt = prepared.pre_rendered_prompt or self.build_tokens_prompt(
-            prepared.request,
-            prepared.multi_modal_data,
-            prepared.mm_processor_kwargs,
-        )
-        return PreparedMultimodalPrompt(
-            prompt=prompt,
-            request=prepared.request,
-            multi_modal_data=prepared.multi_modal_data,
-            mm_processor_kwargs=prepared.mm_processor_kwargs,
         )

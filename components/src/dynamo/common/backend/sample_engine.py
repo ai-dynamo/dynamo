@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import itertools
 import logging
+import os
 import queue
 import threading
 import uuid
@@ -15,6 +16,7 @@ from typing import Any, Optional
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.llm import KvEventPublisher
 
 from . import telemetry
@@ -140,6 +142,11 @@ class SampleLLMEngine(LLMEngine):
         parser.add_argument("--endpoint-types", default="chat,completions")
         parser.add_argument("--discovery-backend", default="etcd")
         parser.add_argument("--request-plane", default="tcp")
+        parser.add_argument(
+            "--response-plane",
+            choices=["tcp", "quic"],
+            default=os.environ.get("DYN_RESPONSE_PLANE", "tcp"),
+        )
         parser.add_argument("--event-plane", default=None)
         parser.add_argument(
             "--disaggregation-mode",
@@ -176,6 +183,7 @@ class SampleLLMEngine(LLMEngine):
             endpoint_types=args.endpoint_types,
             discovery_backend=args.discovery_backend,
             request_plane=args.request_plane,
+            response_plane=args.response_plane,
             event_plane=args.event_plane,
             disaggregation_mode=mode,
             route_to_encoder=args.route_to_encoder,
@@ -302,6 +310,7 @@ class SampleLLMEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
+        normalize_request_token_ids(request)
         if self.disaggregation_mode == DisaggregationMode.ENCODE:
             prompt_len = len(request.get("token_ids", []))
             if context.is_stopped():

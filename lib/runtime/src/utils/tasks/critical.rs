@@ -155,7 +155,7 @@ impl CriticalTaskExecutionHandle {
         })
     }
 
-    /// Check if the task awaiting on the [Server]s background event loop has finished.
+    /// Check if the task awaiting on the `Server`'s background event loop has finished.
     pub fn is_finished(&self) -> bool {
         self.monitor_task.is_finished()
     }

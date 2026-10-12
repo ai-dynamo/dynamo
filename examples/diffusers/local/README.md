@@ -7,4 +7,4 @@ SPDX-License-Identifier: Apache-2.0
 
 Full documentation can be found:
 
-- [FastVideo - Dynamo Docs](../../../docs/fern/features/diffusion/text-to-video/README.md#local-deployment) (Recommended)
+- [FastVideo - Dynamo Docs](../../../docs/fern/pages/use-cases/diffusion/workflows/text-to-video.md#local-deployment) (Recommended)

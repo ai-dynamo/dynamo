@@ -523,7 +523,6 @@ fn tool_events_namespace(local_model: &LocalModel) -> String {
 mod tests {
     use std::{thread, time::Duration};
 
-    use crate::protocols::common::extensions::AgentContext;
     use crate::protocols::common::{
         self,
         timing::{RequestTracker, WORKER_TYPE_DECODE},
@@ -544,6 +543,7 @@ mod tests {
         record_chat_finish_reason_metadata, record_completion_finish_reason_metadata,
         request_metrics, request_metrics_from_agent_state,
     };
+    use crate::protocols::common::extensions::AgentContext;
 
     #[test]
     fn test_request_metrics_from_tracker() {
@@ -635,7 +635,8 @@ mod tests {
                 session_id: "run-finish:agent".to_string(),
                 parent_session_id: None,
                 session_final: None,
-                kv_hints: None,
+                agent_headers: Default::default(),
+                input_trigger: None,
             },
             request_model: "test-model".to_string(),
             request_tracker: None,
@@ -676,7 +677,9 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
             Annotated::from_data(NvCreateChatCompletionStreamResponse {
                 inner: CreateChatCompletionStreamResponse {
@@ -702,7 +705,9 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
         ];
         for response in &responses {
@@ -752,7 +757,8 @@ mod tests {
                 session_id: "run-completion-finish:agent".to_string(),
                 parent_session_id: None,
                 session_final: None,
-                kv_hints: None,
+                agent_headers: Default::default(),
+                input_trigger: None,
             },
             request_model: "test-model".to_string(),
             request_tracker: None,

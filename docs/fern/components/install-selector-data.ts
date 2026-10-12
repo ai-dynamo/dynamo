@@ -2,10 +2,12 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Install-selector view of the shared release data. Keep release and backend
- * versions in releases.data.ts; this module only formats install commands.
+ * Install-selector view of the release data. Stable and source-build versions
+ * come from releases.data.ts; the nightly dimension comes from the generated
+ * module. This module only formats install commands.
  */
 
+import { NIGHTLY_BACKEND_BUILDS } from "./nightly-selector-data.generated";
 import {
   CURRENT_VERSION,
   CURRENT_WHEEL,
@@ -21,6 +23,9 @@ export type InstallForm = "container" | "wheel";
 export type InstallEntry = {
   backend_version: string;
   dynamo?: string;
+  date?: string;
+  /** Immutable NGC nightly tag backing this entry, when it has one. */
+  tag?: string;
   latest?: boolean;
   source?: boolean;
   note?: string;
@@ -57,10 +62,20 @@ function dockerCommand(image: string, tag: string): string {
   return `docker run --gpus all --network host --ipc host --rm -it nvcr.io/nvidia/ai-dynamo/${image}:${tag}`;
 }
 
-function stableWheelCommand(backend: Backend, version: string): string {
-  const wheel = version === CURRENT_VERSION.slice(1) ? CURRENT_WHEEL : version;
+function stableWheelCommand(
+  backend: Backend,
+  version: string,
+  wheelOverride?: string,
+): string {
+  const wheel =
+    wheelOverride ??
+    (version === CURRENT_VERSION.slice(1) ? CURRENT_WHEEL : version);
   const prerelease = backend.id === "sglang" ? "--prerelease=allow " : "";
   return `uv pip install ${prerelease}"ai-dynamo[${backend.extra}]==${wheel}"`;
+}
+
+function nightlyWheelCommand(backend: Backend, version: string): string {
+  return `uv pip install --pre --extra-index-url https://pypi.nvidia.com/ "ai-dynamo[${backend.extra}]==${version}"`;
 }
 
 function stableEntries(backend: Backend): InstallEntry[] {
@@ -78,7 +93,7 @@ function stableEntries(backend: Backend): InstallEntry[] {
         commands: {
           container: dockerCommand(`${backend.image}-runtime`, version),
           ...(backend.extra
-            ? { wheel: stableWheelCommand(backend, version) }
+            ? { wheel: stableWheelCommand(backend, version, release.wheel) }
             : {}),
         },
       };
@@ -86,18 +101,28 @@ function stableEntries(backend: Backend): InstallEntry[] {
 }
 
 function nightlyEntries(backend: Backend): InstallEntry[] {
-  const backendVersion = pin(MAIN_TOT, backend.id);
-  if (!backendVersion) return [];
-
-  return [
-    {
-      backend_version: backendVersion,
-      latest: true,
+  return NIGHTLY_BACKEND_BUILDS.filter((build) => build.backend === backend.id).map(
+    (build) => ({
+      backend_version: build.backendVersion,
+      dynamo: build.dynamo ?? undefined,
+      date: build.date,
+      tag: build.tag,
+      latest: build.latest,
+      note: build.latest
+        ? `Tip of main, also served by the rolling ${backend.image}-runtime-nightly:latest tag.`
+        : `Newest nightly that shipped ${backend.label} ${build.backendVersion}.`,
       commands: {
-        container: dockerCommand(`${backend.image}-runtime-nightly`, "latest"),
+        // Rolling tag for the newest build, immutable date-sha tag for the rest.
+        container: dockerCommand(
+          `${backend.image}-runtime-nightly`,
+          build.latest ? "latest" : build.tag,
+        ),
+        ...(backend.extra && build.dynamo
+          ? { wheel: nightlyWheelCommand(backend, build.dynamo) }
+          : {}),
       },
-    },
-  ];
+    }),
+  );
 }
 
 function sourceEntries(backend: Backend): InstallEntry[] {

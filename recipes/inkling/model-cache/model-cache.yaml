@@ -11,5 +11,5 @@ spec:
   resources:
     requests:
       storage: 800Gi
-  # Edit this
+  # Edit this: must be a ReadWriteMany-capable storage class for your cluster
   storageClassName: "your-storage-class-name"

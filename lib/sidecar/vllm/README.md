@@ -1,76 +1,85 @@
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
+
+Note to AI agents: keep this README minimal (intro, support matrix, launch example,
+Kubernetes example, topologies). Do not edit it unless the user explicitly asks
+you to.
 -->
 
 # vLLM sidecar
 
-`dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC
-`Generate` service. It is a standalone Rust executable.
+> [!WARNING]
+> **Experimental.** The sidecars and their deployment examples are
+> experimental. Manifests, flags, and behavior may change without notice.
 
-## Supported
+`dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC server
+(`vllm-rs`). See the [sidecar overview](../README.md) for installation.
 
-- Aggregated generation
-- NIXL prefill/decode generation
-- Token and text requests through Dynamo preprocessing
-- Sampling, stop conditions, structured output, logprobs, cache options, and priority
-- Opaque `kv_transfer_params` handoff
+> [!TIP]
+> For the best and latest support, use the upstream vLLM nightly image,
+> which carries the latest gRPC server updates: [`vllm/vllm-openai:nightly`](https://hub.docker.com/r/vllm/vllm-openai/tags?name=nightly).
 
-The initial protocol does not support multimodal input, LoRA, KV-aware data
-parallel routing, encode workers, beam search, or `n > 1`.
+## Support matrix
 
-## Run
+| Feature | Supported |
+|---------|-----------|
+| Aggregated | Yes |
+| Disaggregated | Yes |
+| KV routing | Yes |
 
-Start vLLM with its released gRPC listener:
+## Run locally
 
-```bash
-vllm-rs serve Qwen/Qwen3-0.6B --grpc-port 50051
-```
-
-This listener is unauthenticated and plaintext. Keep colocated deployments on
-loopback or a private interface. Remote access requires network controls or a
-secure proxy.
-
-Start the Dynamo worker explicitly:
+See [`launch/`](launch/) for all topologies. For example, aggregated serving on
+one GPU:
 
 ```bash
-dynamo-vllm-sidecar \
-  --vllm-endpoint 127.0.0.1:50051 \
-  --model-path Qwen/Qwen3-0.6B
+export DYN_DISCOVERY_BACKEND=file   # single host: no etcd or NATS needed
+lib/sidecar/vllm/launch/agg.sh
 ```
 
-Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
-provided through the environment.
-
-The sidecar opens eight gRPC connections by default. This avoided
-connection-level throttling in high-concurrency sidecar tests. Override the
-pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
-
-Connection startup uses a 30-second timeout per attempt, a one-second retry
-interval, and a five-minute deadline for establishing the full connection
-pool. Override them with `--grpc-connect-attempt-timeout-secs`,
-`--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the
-corresponding `DYN_SIDECAR_GRPC_*` environment variables.
-
-Distribution and container packaging for the executable are intentionally
-deferred to a follow-up change.
-
-## Test without vLLM or a GPU
-
-Use the CPU-only `dynamo-vllm-mocker-server` to exercise this sidecar against
-the same `Generate` gRPC contract:
+In a second terminal:
 
 ```bash
-cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
-  --listen 127.0.0.1:50051 \
-  --model mocker-model \
-  --extra-engine-args '{"speedup_ratio":1000}'
-
-cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50051 \
-  --model-path mocker-model
+curl -s localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
 ```
 
-See [`../../mocker/servers/vllm/README.md`](../../mocker/servers/vllm/README.md)
-for aggregated and prefill/decode examples, supported Mocker configuration,
-and fidelity limits.
+## Deploy on Kubernetes
+
+Before applying, replace `<your-registry>/dynamo-sidecar` in the manifest with a
+[sidecar image](../README.md#docker).
+
+See [`deploy/`](deploy/) for all manifests. For example, aggregated serving:
+
+```bash
+kubectl apply -f lib/sidecar/vllm/deploy/agg.yaml -n <namespace>
+kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000
+```
+
+## Topologies
+
+The frontend reaches each sidecar over Dynamo's request, discovery, and event
+planes; the sidecar reaches the engine over its native gRPC API. Dashed arrows
+carry KV events.
+
+### Single-Node TP
+
+One engine on one node, with one sidecar.
+
+![On one node, a request reaches the vLLM tensor-parallel ranks through the Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar.](../../../docs/fern/assets/img/sidecar-vllm-single-node-tp.svg)
+
+### Multi-Node TP
+
+One engine spans two nodes. Only the leader node has a sidecar; the follower
+node holds the remaining TP ranks.
+
+![When one vLLM engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../docs/fern/assets/img/sidecar-vllm-multinode-tp.svg)
+
+### Multi-Node DP
+
+Hybrid DP load balancing: each node runs vLLM for its local DP ranks plus a
+sidecar that serves requests. The frontend routes to either node.
+
+![vLLM hybrid data parallelism across two nodes. The Dynamo Frontend router picks a DP rank and sends requests over the request plane to the Dynamo Sidecar on the node that owns that rank: node 0 serves DP ranks 0-1 and node 1 serves DP ranks 2-3.](../../../docs/fern/assets/img/sidecar-vllm-multinode-dp.svg)

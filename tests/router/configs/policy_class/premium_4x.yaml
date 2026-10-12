@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+default_policy_family: regular
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+# The workload uses 512-token uncached prompts. These quanta express a 4:1
+# service ratio without carrying enough credit for a multi-request burst
+# across worker-capacity wakeups.
+# The busy comparison is strict. A 1,536-token threshold lets four 512-token
+# sequences fill the Mocker; at 2,048 active tokens, later requests queue.
+policy_classes:
+  - name: premium
+    policy_family: premium
+    cache_bucket: all
+    queue_policy: fcfs
+    quantum: 512
+    prefill_busy_threshold: 1536
+    request_queue_limit_per_worker: 1024
+  - name: regular
+    policy_family: regular
+    cache_bucket: all
+    queue_policy: fcfs
+    quantum: 128
+    prefill_busy_threshold: 1536
+    request_queue_limit_per_worker: 1024

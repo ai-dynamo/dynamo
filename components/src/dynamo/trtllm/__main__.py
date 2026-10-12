@@ -9,7 +9,7 @@ if "PYTHONHASHSEED" not in os.environ:
 if __name__ == "__main__":
     from dynamo.common.snapshot.restore_context import maybe_run_restore_standby_mode
 
-    # In restore mode (DYN_SNAPSHOT_RESTORE_STANDBY=1), before importing TRT-LLM,
+    # In restore mode (SNAPSHOT_RESTORE_STANDBY=1), before importing TRT-LLM,
     # write selected restore-time env vars to snapshot-control/restore-context.json
     # and exec `sleep infinity` without initializing CUDA or backend/runtime state.
     maybe_run_restore_standby_mode()

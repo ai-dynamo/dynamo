@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import warnings
 from dataclasses import dataclass, field
@@ -41,10 +42,9 @@ def _guard_loop_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
 
     The Rust ``Worker`` owns graceful shutdown via its own OS signal handlers;
     engines must do teardown in ``cleanup()``, not a signal handler. Some
-    engines register loop handlers during ``start()`` anyway (e.g. SGLang's
-    tokenizer manager), which would reinstall the process ``sigaction`` and
-    override the Worker. Only SIGTERM/SIGINT are suppressed — other signals
-    (e.g. SGLang's SIGQUIT watchdog) pass through.
+    engines register loop handlers during ``start()`` anyway, which would
+    reinstall the process ``sigaction`` and override the Worker. Only
+    SIGTERM/SIGINT are suppressed; other signals pass through.
     """
     orig_add_signal_handler = loop.add_signal_handler
     owned = frozenset({signal.SIGINT, signal.SIGTERM})
@@ -64,7 +64,7 @@ def _guard_loop_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
 
 # Map the user-facing `dynamo.common.constants.DisaggregationMode` to the
 # Rust enum. All four modes (AGGREGATED, PREFILL, DECODE, ENCODE) are
-# supported by the unified abstraction.
+# supported by the Backend SDK.
 _DISAGG_MODE_TO_RUST = {
     DisaggregationMode.AGGREGATED: _backend.DisaggregationMode.Aggregated,
     DisaggregationMode.PREFILL: _backend.DisaggregationMode.Prefill,
@@ -78,17 +78,15 @@ def _to_rust_disaggregation_mode(mode: DisaggregationMode):
         return _DISAGG_MODE_TO_RUST[mode]
     except KeyError as e:
         raise NotImplementedError(
-            f"DisaggregationMode.{mode.name} is not supported by the unified "
-            "backend abstraction; use the legacy backend entry point for this "
-            "worker role"
+            f"DisaggregationMode.{mode.name} is not supported by the Backend SDK"
         ) from e
 
 
 def _coerce_disagg_mode(value) -> DisaggregationMode:
     """`None` → `AGGREGATED`. Native `DisaggregationMode` passes through.
-    Foreign enums (e.g. TRT-LLM's local `DisaggregationMode`) coerce by
-    `name` — same name → same mode, regardless of value-string. Anything
-    else raises so a typo-string can't be silently mapped to AGG."""
+    Foreign enums coerce by `name` — same name → same mode, regardless of
+    value-string. Anything else raises so a typo-string can't be silently
+    mapped to AGG."""
     if value is None:
         return DisaggregationMode.AGGREGATED
     if isinstance(value, DisaggregationMode):
@@ -133,9 +131,7 @@ class WorkerConfig:
     # Operator override; when set, the Rust Worker uses this instead of
     # `engine.health_check_payload()`. Populated by `from_runtime_config`.
     health_check_payload: Optional[dict] = None
-    structural_tag_mode: str = "off"
-    structural_tag_scope: str = "auto"
-    structural_tag_schema: str = "auto"
+    structural_tag: Optional[dict[str, object]] = None
     # When True, this worker declares an upstream Encode peer in its
     # topology `needs`. Meaningful only on AGGREGATED/PREFILL roles;
     # the Rust validator rejects DECODE/ENCODE + True with InvalidArgument.
@@ -146,6 +142,8 @@ class WorkerConfig:
     media_fetcher: Optional[MediaFetcher] = None
     # KV event/recovery ownership endpoint. None uses this worker's serving endpoint.
     kv_state_endpoint: Optional[str] = None
+    default_thinking_mode: Optional[str] = None
+    response_plane: str = "tcp"
 
     @classmethod
     def from_runtime_config(
@@ -156,11 +154,7 @@ class WorkerConfig:
         model_input: Optional[ModelInput] = None,
         **overrides,
     ) -> "WorkerConfig":
-        """Build from any object that carries DynamoRuntimeConfig fields.
-
-        Works with vllm.Config, trtllm.Config (inherit DynamoRuntimeConfig
-        directly) and sglang DynamoConfig (nested in config.dynamo_args).
-        """
+        """Build from any object that carries DynamoRuntimeConfig fields."""
         kwargs = {
             "namespace": runtime_cfg.namespace,
             "component": getattr(runtime_cfg, "component", None) or "backend",
@@ -173,6 +167,7 @@ class WorkerConfig:
             ),
             "discovery_backend": runtime_cfg.discovery_backend,
             "request_plane": runtime_cfg.request_plane,
+            "response_plane": getattr(runtime_cfg, "response_plane", "tcp"),
             "event_plane": runtime_cfg.event_plane,
             "use_kv_events": getattr(runtime_cfg, "use_kv_events", False),
             "custom_jinja_template": getattr(
@@ -180,30 +175,19 @@ class WorkerConfig:
             ),
             "tool_call_parser": getattr(runtime_cfg, "dyn_tool_call_parser", None),
             "reasoning_parser": getattr(runtime_cfg, "dyn_reasoning_parser", None),
+            "default_thinking_mode": getattr(
+                runtime_cfg, "dyn_default_thinking_mode", None
+            ),
             "exclude_tools_when_tool_choice_none": getattr(
                 runtime_cfg, "exclude_tools_when_tool_choice_none", True
             ),
             "enable_local_indexer": getattr(runtime_cfg, "enable_local_indexer", True),
             "enable_kv_routing": getattr(runtime_cfg, "enable_kv_routing", True),
-            "structural_tag_mode": (
-                "on"
-                if getattr(runtime_cfg, "dyn_enable_structural_tag", False)
-                else "off"
-            ),
-            "structural_tag_scope": getattr(
-                runtime_cfg, "dyn_structural_tag_scope", "auto"
-            ),
-            "structural_tag_schema": getattr(
-                runtime_cfg, "dyn_structural_tag_schema", "auto"
-            ),
-            # vLLM exposes `route_to_encoder` on its backend_args today;
-            # SGLang/TRT-LLM don't yet, so the getattr default keeps them at
-            # False until they add the field on their own runtime config.
+            "structural_tag": getattr(runtime_cfg, "structural_tag", None),
             "route_to_encoder": getattr(runtime_cfg, "route_to_encoder", False),
         }
-        # vLLM/TRT-LLM expose `disaggregation_mode`; SGLang exposes
-        # `serving_mode`. Skip the probe when an override is supplied so
-        # backends with a foreign enum (TRT-LLM) bypass the coercer.
+        # Skip the probe when an override is supplied so callers with a foreign
+        # enum can bypass coercion.
         if "disaggregation_mode" not in overrides:
             kwargs["disaggregation_mode"] = _coerce_disagg_mode(
                 getattr(
@@ -249,6 +233,10 @@ class Worker:
                 stacklevel=2,
             )
 
+        if self.config.response_plane not in {"tcp", "quic"}:
+            raise ValueError("response_plane must be 'tcp' or 'quic'")
+        os.environ["DYN_RESPONSE_PLANE"] = self.config.response_plane
+
         runtime_cfg = _backend.RuntimeConfig(
             discovery_backend=self.config.discovery_backend,
             request_plane=self.config.request_plane,
@@ -266,6 +254,7 @@ class Worker:
             custom_jinja_template=self.config.custom_jinja_template,
             tool_call_parser=self.config.tool_call_parser,
             reasoning_parser=self.config.reasoning_parser,
+            default_thinking_mode=self.config.default_thinking_mode,
             exclude_tools_when_tool_choice_none=(
                 self.config.exclude_tools_when_tool_choice_none
             ),
@@ -276,9 +265,7 @@ class Worker:
                 self.config.disaggregation_mode
             ),
             health_check_payload=self.config.health_check_payload,
-            structural_tag_mode=self.config.structural_tag_mode,
-            structural_tag_scope=self.config.structural_tag_scope,
-            structural_tag_schema=self.config.structural_tag_schema,
+            structural_tag=self.config.structural_tag,
             runtime=runtime_cfg,
             route_to_encoder=self.config.route_to_encoder,
             media_decoder=self.config.media_decoder,

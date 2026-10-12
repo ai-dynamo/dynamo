@@ -12,9 +12,10 @@
  *   This repo ships NO package.json alongside fern/, and neither existing
  *   custom component (CustomFooter, RecipeStyles) pulls an external npm dep —
  *   the build-safe pattern here is self-contained, dependency-free components.
- *   So instead of `import "asciinema-player"` (which Fern's mdx-components
- *   bundling can't resolve without a declared dep), we inject the player's JS +
- *   CSS from jsDelivr at runtime and call the global AsciinemaPlayer.create().
+ *   So instead of importing `asciinema-player` directly (which Fern's
+ *   mdx-components bundling can't resolve without a declared dep), we inject
+ *   the player's JS + CSS from jsDelivr at runtime and call the global
+ *   AsciinemaPlayer.create().
  *   The site already loads third-party JS (adobedtm) and iframes (ghbtns), so
  *   an external <script>/<link> is consistent with the page's existing origins.
  *
@@ -24,16 +25,12 @@
  *   DOM access is inside useEffect and guarded, so SSR renders an empty frame
  *   and hydration wires up the player. dispose() runs on unmount.
  *
- * USAGE (import — ambient JSX is unsupported, per the RecipeStyles note):
- *   import { TerminalDemo } from "@/components/TerminalDemo";
- *
- *   <TerminalDemo
- *     src="/dynamo/assets/dynamo-demo.cast"
- *     startAt={0}
- *     endAt={18}          // play only the first 18s of a long recording, then loop
- *     idleTimeLimit={2}   // compress dead air so pauses feel snappy
- *     speed={1.2}
- *   />
+ * USAGE:
+ *   The page-usage example lives in README.md, for the reason recorded there.
+ *   Ambient JSX is unsupported, so the component must be imported. Props:
+ *     startAt / endAt     play only a slice; endAt loops back to startAt
+ *     idleTimeLimit       cap any idle gap in seconds; kills dead air
+ *     speed               above 1 plays faster
  *
  * GETTING THE CAST (deferred — not wired to a page yet):
  *   The recording lives on asciinema.org, not in the repo. Pull it local:
@@ -67,7 +64,14 @@ const JS_ELEMENT_ID = "asciinema-player-js";
 type FitMode = "width" | "height" | "both" | false;
 
 export interface TerminalDemoProps {
-  /** Cast source: a same-origin asset path (recommended) or an https URL. */
+  /**
+   * Cast source: a path relative to the page that renders this component
+   * (recommended), or an https URL.
+   *
+   * Relative is not a style preference. Fern rewrites relative asset paths to
+   * the published URL and leaves site-absolute ones untouched, so an absolute
+   * path reaches the browser verbatim and 404s. See components/README.md.
+   */
   src: string;
   /** Start playback at this time (seconds). Default 0. */
   startAt?: number;

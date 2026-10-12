@@ -100,6 +100,9 @@ pub enum KvSourceAmbiguity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KvSourceStatus<S = KvEventSource> {
     Missing,
+    /// A recognized versioned source owns this logical rank. Legacy ingress is
+    /// disabled without interpreting the source-mode transition as rank death.
+    Suppressed,
     ActiveRecoverable(S),
     ActiveLiveOnly(S),
     Ambiguous(KvSourceAmbiguity),
@@ -109,16 +112,13 @@ impl<S> KvSourceStatus<S> {
     pub fn active_source(&self) -> Option<&S> {
         match self {
             Self::ActiveRecoverable(source) | Self::ActiveLiveOnly(source) => Some(source),
-            Self::Missing | Self::Ambiguous(_) => None,
+            Self::Missing | Self::Suppressed | Self::Ambiguous(_) => None,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Descriptive membership change only.
-///
-/// NOTE: Reset requirements are intentionally absent here. The shared coordinator derives and
-/// publishes a cumulative lifecycle generation so coalescing watch receivers cannot miss a fence.
 pub struct KvSourceTransition<S = KvEventSource> {
     pub key: KvSourceKey,
     pub previous: KvSourceStatus<S>,
@@ -144,13 +144,8 @@ pub struct KvSourceMembershipView<S = KvEventSource> {
     /// `Some(true)` and `Some(false)` are explicit declarations. `None` is a legacy or otherwise
     /// unknown declaration.
     pub kv_event_publishing_enabled: HashMap<WorkerId, Option<bool>>,
-    /// Monotonic cold-reset fence for each logical source in `sources`.
-    ///
-    /// A consumer must cold-reset a logical rank before accepting a source when this value
-    /// differs from the last value it applied. Keeping the cumulative generation in every
-    /// snapshot makes reset-relevant transitions observable even when a Tokio watch receiver
-    /// coalesces intermediate snapshots.
-    pub lifecycle_generations: HashMap<WorkerWithDpRank, u64>,
+    /// Immutable source mode selected for one worker lifecycle.
+    pub kv_event_source_mode: HashMap<WorkerId, Option<String>>,
     /// Whether the serving runtime config expects a worker-local recovery target.
     /// This is expectation/readiness metadata only and never admits a serving worker.
     pub recovery_expected: HashMap<WorkerWithDpRank, bool>,
@@ -159,10 +154,6 @@ pub struct KvSourceMembershipView<S = KvEventSource> {
 impl<S> KvSourceMembershipView<S> {
     pub fn status(&self, worker: &WorkerWithDpRank) -> Option<&KvSourceStatus<S>> {
         self.sources.get(worker)
-    }
-
-    pub fn lifecycle_generation(&self, worker: &WorkerWithDpRank) -> Option<u64> {
-        self.lifecycle_generations.get(worker).copied()
     }
 
     pub fn recovery_expected(&self, worker: &WorkerWithDpRank) -> Option<bool> {
@@ -176,11 +167,39 @@ impl<S> KvSourceMembershipView<S> {
             .flatten()
     }
 
+    pub fn kv_event_source_mode(&self, worker_id: WorkerId) -> Option<&str> {
+        self.kv_event_source_mode
+            .get(&worker_id)
+            .and_then(Option::as_deref)
+    }
+
     pub fn resolved_kv_state_endpoint(&self) -> Option<&EndpointId> {
         match &self.endpoint_resolution {
             KvStateEndpointResolution::Resolved(endpoint) => Some(endpoint),
             KvStateEndpointResolution::Ambiguous { .. } => None,
         }
+    }
+
+    /// Whether runtime fields that determine this source binding still match the view.
+    ///
+    /// Metadata-only runtime changes do not require waiting for another source-membership
+    /// publication. Endpoint mapping and the logical worker/rank set do.
+    pub(crate) fn matches_binding_inputs(
+        &self,
+        runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+    ) -> bool {
+        if self.endpoint_resolution
+            != resolve_kv_state_endpoint(&self.serving_endpoint, runtime_configs.values())
+        {
+            return false;
+        }
+
+        let mut worker_count = 0usize;
+        let workers_match = expected_workers(runtime_configs).all(|(worker, _)| {
+            worker_count = worker_count.saturating_add(1);
+            self.sources.contains_key(&worker)
+        });
+        workers_match && worker_count == self.sources.len()
     }
 }
 
@@ -212,10 +231,13 @@ pub enum KvSourceMembershipError {
 ///   never a routing identity.
 /// - Recovery targets are immutable within an incarnation. Replacing one replaces the entire
 ///   source incarnation.
+/// - The engine-side KV event publisher lifetime is coupled to the owning Dynamo
+///   `KvEventPublisher` and its `publisher_id`.
 /// - Supported multi-node restarts preserve the logical worker/rank key but create a new rank
-///   publisher and recovery target. A future backend that resurrects cache state beneath a
-///   surviving publisher must instead recreate that publisher or emit an ordered `Cleared`
-///   barrier.
+///   publisher and recovery target.
+/// - Independently replacing an engine publisher beneath a surviving Dynamo publisher is
+///   unsupported. A future backend that does so must emit an ordered rank-scoped `Cleared`
+///   barrier before later mutations or recreate the Dynamo publisher with a fresh ID.
 #[derive(Debug, Clone)]
 pub struct KvSourceMembership<S = KvEventSource> {
     advertisements: HashMap<KvSourceKey, HashMap<PublisherId, S>>,
@@ -356,28 +378,13 @@ where
     ) -> KvSourceMembershipView<S> {
         let endpoint_resolution =
             resolve_kv_state_endpoint(serving_endpoint, runtime_configs.values());
-        let workers: Vec<_> = runtime_configs
-            .iter()
-            .flat_map(|(&worker_id, config)| {
-                (0..config.data_parallel_size).filter_map(move |offset| {
-                    config
-                        .data_parallel_start_rank
-                        .checked_add(offset)
-                        .map(|dp_rank| {
-                            (
-                                WorkerWithDpRank::new(worker_id, dp_rank),
-                                config.enable_local_indexer,
-                            )
-                        })
-                })
-            })
-            .collect();
+        let workers: HashMap<_, _> = expected_workers(runtime_configs).collect();
 
         let sources: HashMap<WorkerWithDpRank, KvSourceStatus<S>> = match &endpoint_resolution {
             KvStateEndpointResolution::Resolved(kv_state_endpoint) => workers
-                .iter()
+                .keys()
                 .copied()
-                .map(|(worker, _)| {
+                .map(|worker| {
                     let key = KvSourceKey::new(kv_state_endpoint.clone(), worker);
                     (worker, self.status(&key))
                 })
@@ -387,29 +394,48 @@ where
                     endpoints: endpoints.clone(),
                 };
                 workers
-                    .iter()
+                    .keys()
                     .copied()
-                    .map(|(worker, _)| (worker, KvSourceStatus::Ambiguous(ambiguity.clone())))
+                    .map(|worker| (worker, KvSourceStatus::Ambiguous(ambiguity.clone())))
                     .collect()
             }
         };
-        let recovery_expected = workers
-            .into_iter()
-            .collect::<HashMap<WorkerWithDpRank, bool>>();
         let kv_event_publishing_enabled = runtime_configs
             .iter()
             .map(|(&worker_id, config)| (worker_id, config.kv_event_publishing_enabled))
+            .collect();
+        let kv_event_source_mode = runtime_configs
+            .iter()
+            .map(|(&worker_id, config)| (worker_id, config.kv_event_source_mode.clone()))
             .collect();
 
         KvSourceMembershipView {
             serving_endpoint: serving_endpoint.clone(),
             endpoint_resolution,
-            lifecycle_generations: sources.keys().map(|worker| (*worker, 0)).collect(),
-            recovery_expected,
+            recovery_expected: workers,
             kv_event_publishing_enabled,
+            kv_event_source_mode,
             sources,
         }
     }
+}
+
+fn expected_workers(
+    runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+) -> impl Iterator<Item = (WorkerWithDpRank, bool)> + '_ {
+    runtime_configs.iter().flat_map(|(&worker_id, config)| {
+        (0..config.data_parallel_size).filter_map(move |offset| {
+            config
+                .data_parallel_start_rank
+                .checked_add(offset)
+                .map(|dp_rank| {
+                    (
+                        WorkerWithDpRank::new(worker_id, dp_rank),
+                        config.enable_local_indexer,
+                    )
+                })
+        })
+    })
 }
 
 /// Resolve the effective KV-state endpoint advertised by active base runtime configs.
@@ -497,6 +523,7 @@ mod tests {
                 instance_id: publisher_id,
                 transport: TransportType::Tcp("tcp://127.0.0.1:1234".to_string()),
                 device_type: None,
+                request_plane_codec: None,
             }),
             ..source(endpoint, worker_id, rank, publisher_id)
         }
@@ -550,6 +577,35 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn binding_inputs_ignore_metadata_only_runtime_changes() {
+        let serving = endpoint("generate");
+        let kv_endpoint = endpoint("kv-events");
+        let original = HashMap::from([(
+            7,
+            ModelRuntimeConfig {
+                context_length: Some(4096),
+                data_parallel_start_rank: 2,
+                data_parallel_size: 2,
+                kv_state_endpoint: Some(kv_endpoint.clone()),
+                ..Default::default()
+            },
+        )]);
+        let view = KvSourceMembership::<KvEventSource>::new().view(&serving, &original);
+
+        let mut metadata_only = original.clone();
+        metadata_only.get_mut(&7).unwrap().context_length = Some(8192);
+        assert!(view.matches_binding_inputs(&metadata_only));
+
+        let mut remapped = metadata_only.clone();
+        remapped.get_mut(&7).unwrap().kv_state_endpoint = Some(endpoint("other-kv-events"));
+        assert!(!view.matches_binding_inputs(&remapped));
+
+        let mut resized = metadata_only;
+        resized.get_mut(&7).unwrap().data_parallel_size = 3;
+        assert!(!view.matches_binding_inputs(&resized));
     }
 
     #[test]

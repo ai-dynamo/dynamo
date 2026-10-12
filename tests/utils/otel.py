@@ -9,6 +9,28 @@ import threading
 import time
 
 
+def _get_attribute(attributes, key):
+    """Return an OTLP attribute value as a string, or ``None`` if absent."""
+    for attr in attributes:
+        if attr.key != key:
+            continue
+        value = attr.value
+        if value.HasField("string_value"):
+            return value.string_value
+        if value.HasField("int_value"):
+            return str(value.int_value)
+        if value.HasField("double_value"):
+            return str(value.double_value)
+        if value.HasField("bool_value"):
+            return str(value.bool_value).lower()
+    return None
+
+
+def get_span_attribute(span, key):
+    """Return a span attribute value as a string, or ``None`` if absent."""
+    return _get_attribute(span.attributes, key)
+
+
 class InProcOtlpCollector:
     """Minimal thread-safe in-process OTLP/gRPC trace collector."""
 
@@ -62,3 +84,12 @@ def wait_for_engine_generate_count(
             return count
         time.sleep(0.5)
     return len(collector.engine_generate_spans())
+
+
+def get_engine_generate_roles(collector: InProcOtlpCollector) -> set[str]:
+    """Return disaggregated roles present on collected engine spans."""
+    return {
+        role
+        for span in collector.engine_generate_spans()
+        if (role := get_span_attribute(span, "disagg_role")) is not None
+    }

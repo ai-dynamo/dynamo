@@ -1,0 +1,184 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EXPERIMENTAL: engine-primary vLLM with the Dynamo native sidecar
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-sidecar-disagg
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+  - name: prefill
+    type: prefill
+    replicas: 1
+    sharedMemorySize: 10Gi
+    podTemplate:
+      spec:
+        initContainers:
+        - name: runtime
+          image: <your-registry>/dynamo-sidecar:1.6.0
+          command:
+          - dynamo-vllm-sidecar
+          args:
+          - --grpc-endpoint
+          - 127.0.0.1:50051
+          - --disaggregation-mode
+          - prefill
+          restartPolicy: Always
+        containers:
+        - name: main
+          image: vllm/vllm-openai:v0.28.0
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+          startupProbe:
+            grpc:
+              port: 50051
+              # vLLM 0.28.0: overall health mirrors Control and Inference.
+              # Reverify this behavior when upgrading vLLM.
+              service: ""
+            periodSeconds: 5
+            timeoutSeconds: 5
+            # Allow 30 minutes for model startup; increase for larger models.
+            failureThreshold: 360
+          readinessProbe:
+            grpc:
+              port: 50051
+              service: ""
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            grpc:
+              port: 50051
+              service: ""
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          env:
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy,cuda_ipc
+          - name: UCX_NET_DEVICES
+            value: mlx5_0:1
+          - name: UCX_IB_ADDR_TYPE
+            value: eth
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_RNDV_THRESH
+            value: '0'
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+              rdma/ib: '1'
+            requests:
+              nvidia.com/gpu: '1'
+              rdma/ib: '1'
+              ephemeral-storage: 2Gi
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - |
+            VLLM_RS="$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
+            ulimit -l unlimited && exec "$VLLM_RS" serve Qwen/Qwen3-0.6B \
+              --host 0.0.0.0 --grpc-port 50051 --reasoning-parser none \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+  - name: decode
+    type: decode
+    replicas: 1
+    sharedMemorySize: 10Gi
+    podTemplate:
+      spec:
+        initContainers:
+        - name: runtime
+          image: <your-registry>/dynamo-sidecar:1.6.0
+          command:
+          - dynamo-vllm-sidecar
+          args:
+          - --grpc-endpoint
+          - 127.0.0.1:50051
+          - --disaggregation-mode
+          - decode
+          restartPolicy: Always
+        containers:
+        - name: main
+          image: vllm/vllm-openai:v0.28.0
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+          startupProbe:
+            grpc:
+              port: 50051
+              # vLLM 0.28.0: overall health mirrors Control and Inference.
+              # Reverify this behavior when upgrading vLLM.
+              service: ""
+            periodSeconds: 5
+            timeoutSeconds: 5
+            # Allow 30 minutes for model startup; increase for larger models.
+            failureThreshold: 360
+          readinessProbe:
+            grpc:
+              port: 50051
+              service: ""
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            grpc:
+              port: 50051
+              service: ""
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          env:
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy,cuda_ipc
+          - name: UCX_NET_DEVICES
+            value: mlx5_0:1
+          - name: UCX_IB_ADDR_TYPE
+            value: eth
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_RNDV_THRESH
+            value: '0'
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+              rdma/ib: '1'
+            requests:
+              nvidia.com/gpu: '1'
+              rdma/ib: '1'
+              ephemeral-storage: 2Gi
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - |
+            VLLM_RS="$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
+            ulimit -l unlimited && exec "$VLLM_RS" serve Qwen/Qwen3-0.6B \
+              --host 0.0.0.0 --grpc-port 50051 --reasoning-parser none \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+  backendFramework: vllm

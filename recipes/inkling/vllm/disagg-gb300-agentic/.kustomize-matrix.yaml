@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+source: kustomize/base
+nameTemplate: "${variant}"
+matrix:
+  variant:
+    - name: generic
+      components: []
+    - name: aws-roce
+      components:
+        - kustomize/components/aws-roce-dra
+      # Put the ResourceClaimTemplate before the DGD that claims it. The default
+      # fifo order emits the Component's claim template last, so `kubectl apply`
+      # reports a transient resource-claim-template-not-found event.
+      sortOptions:
+        order: legacy
+        legacySortOptions:
+          orderFirst: [ResourceClaimTemplate, ComputeDomain]
+          orderLast: []

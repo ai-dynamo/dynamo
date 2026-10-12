@@ -1,13 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# TODO(DIS-2240): Remove deprecated multimodal flags across engine
-
 """Dynamo SGLang wrapper configuration ArgGroup."""
 
 import argparse
-import logging
-import warnings
+import os
 from typing import List, Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -20,12 +17,27 @@ from dynamo.common.constants import EmbeddingTransferMode
 
 from . import __version__
 
-logger = logging.getLogger(__name__)
+# Env vars of the removed multimodal role flags. The flags fail at argparse,
+# but a leftover env var would otherwise be silently ignored and start the
+# worker in the wrong role — reject it with the migration path instead.
+_REMOVED_MULTIMODAL_ENV_VARS = {
+    "DYN_SGL_MULTIMODAL_ENCODE_WORKER": (
+        "--enable-multimodal --disaggregation-mode=encode"
+    ),
+    "DYN_SGL_MULTIMODAL_WORKER": (
+        "--enable-multimodal --dedicated-mm-encoder with "
+        "--disaggregation-mode=pd, prefill, or decode"
+    ),
+}
 
 
-def _warn_deprecated(message: str) -> None:
-    logger.warning(message)
-    warnings.warn(message, DeprecationWarning, stacklevel=3)
+def _reject_removed_multimodal_env_vars() -> None:
+    for env_var, replacement in _REMOVED_MULTIMODAL_ENV_VARS.items():
+        if os.environ.get(env_var, "").strip().lower() in ("true", "1", "yes", "on"):
+            raise ValueError(
+                f"{env_var} is no longer supported; use {replacement} "
+                "(env: DYN_SGL_ENABLE_MULTIMODAL, DYN_SGL_DEDICATED_MM_ENCODER)."
+            )
 
 
 class DynamoSGLangArgGroup(ArgGroup):
@@ -55,22 +67,21 @@ class DynamoSGLangArgGroup(ArgGroup):
             "the same SGLang-native pre/post processing with KV router support.",
         )
 
-        add_negatable_bool_argument(
+        add_argument(
             g,
-            flag_name="--multimodal-encode-worker",
-            env_var="DYN_SGL_MULTIMODAL_ENCODE_WORKER",
-            default=False,
-            help="DEPRECATED: use --enable-multimodal --disaggregation-mode=encode.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--multimodal-worker",
-            env_var="DYN_SGL_MULTIMODAL_WORKER",
-            default=False,
-            help=(
-                "DEPRECATED: use --enable-multimodal --dedicated-mm-encoder "
-                "with --disaggregation-mode=pd/prefill/decode."
-            ),
+            flag_name="--gateway-workers",
+            env_var="DYN_SGL_GATEWAY_WORKERS",
+            default=None,
+            arg_type=int,
+            help="Run N gateway processes in front of this engine, each a Dynamo "
+            "endpoint instance with its own SGLang request gateway (SGLang calls "
+            "that process a tokenizer worker; it also handles request intake and "
+            "output relay, which is the work being spread). Sets SGLang's "
+            "--tokenizer-worker-num to N; a --tokenizer-worker-num above 1 that "
+            "differs from N is an error, and --tokenizer-worker-num N alone runs N "
+            "gateways as well. Decode and prefill LLM workers only; not with "
+            "--enable-lora, --enable-forward-pass-metrics or snapshot mode. Child 0 "
+            "takes DYN_SYSTEM_PORT, the other children bind a random system port.",
         )
         add_negatable_bool_argument(
             g,
@@ -116,6 +127,14 @@ class DynamoSGLangArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
+            flag_name="--rerank-worker",
+            env_var="DYN_SGL_RERANK_WORKER",
+            default=False,
+            help="Run a dedicated text cross-encoder rerank worker. Requires a rerank-capable frontend; also sets SGLang's --is-embedding.",
+        )
+
+        add_negatable_bool_argument(
+            g,
             flag_name="--image-diffusion-worker",
             env_var="DYN_SGL_IMAGE_DIFFUSION_WORKER",
             default=False,
@@ -147,12 +166,38 @@ class DynamoSGLangArgGroup(ArgGroup):
             flag_name="--enable-rl",
             env_var="DYN_SGL_ENABLE_RL",
             default=False,
-            help="Enable RL training support. Registers the call_tokenizer_manager engine route for generic tokenizer_manager passthrough.",
+            help="Enable RL metadata upload support.",
+        )
+        add_argument(
+            g,
+            flag_name="--engine-route",
+            env_var="DYN_SGLANG_ENGINE_ROUTES",
+            default=[],
+            dest="engine_routes",
+            action="append",
+            help=(
+                "Expose a trusted SGLang method under /engine/<path>. Use "
+                "'<path>[=<method>][:engine|tm]'; the target defaults to Engine. "
+                "May be repeated. DYN_SGLANG_ENGINE_ROUTES accepts "
+                "whitespace-separated descriptors."
+            ),
         )
 
-        # Topology constraint: rejecting --frontend-decoding combined with the
-        # EPD multimodal flags happens in DynamoSGLangConfig.validate() below.
+        # Topology constraints for --frontend-decoding are enforced in
+        # DynamoSGLangConfig.validate() below.
         add_frontend_decoding_arg(g, env_prefix="SGL")
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--freeze-gc-after-init",
+            env_var="DYN_SGL_FREEZE_GC_AFTER_INIT",
+            default=False,
+            help=(
+                "Collect and freeze tracked objects in the decode/aggregated worker "
+                "before serving requests to reduce full-GC streaming stalls. "
+                "Opt in only after validating memory usage for the workload."
+            ),
+        )
 
         add_argument(
             g,
@@ -170,12 +215,15 @@ class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
 
     use_sglang_tokenizer: bool
-    multimodal_encode_worker: bool
-    multimodal_worker: bool
+    gateway_workers: Optional[int] = None
+    # Internal roles derived from the canonical multimodal arguments in args.py.
+    multimodal_encode_worker: bool = False
+    multimodal_worker: bool = False
     enable_multimodal: bool = False
     dedicated_mm_encoder: bool = False
     embedding_transfer_mode: EmbeddingTransferMode
     embedding_worker: bool
+    rerank_worker: bool = False
     image_diffusion_worker: bool
 
     disagg_config: Optional[str] = None
@@ -183,7 +231,9 @@ class DynamoSGLangConfig(ConfigBase):
 
     video_generation_worker: bool
     enable_rl: bool
+    engine_routes: list[str]
     frontend_decoding: bool = False
+    freeze_gc_after_init: bool = False
     sglang_trace_level: int
 
     # Extra served names beyond the primary, parsed from --served-model-name.
@@ -191,6 +241,19 @@ class DynamoSGLangConfig(ConfigBase):
     served_model_aliases: Optional[List[str]] = None
 
     def validate(self) -> None:
+        _reject_removed_multimodal_env_vars()
+        if self.rerank_worker and (
+            self.embedding_worker
+            or self.image_diffusion_worker
+            or self.video_generation_worker
+            or self.enable_multimodal
+            or self.dedicated_mm_encoder
+            or self.frontend_decoding
+        ):
+            raise ValueError(
+                "--rerank-worker cannot be combined with other worker modes"
+            )
+
         if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):
             self.embedding_transfer_mode = EmbeddingTransferMode(
                 str(self.embedding_transfer_mode)
@@ -201,23 +264,9 @@ class DynamoSGLangConfig(ConfigBase):
                 "Both 'disagg_config' and 'disagg_config_key' must be provided together."
             )
 
+        if self.gateway_workers is not None and self.gateway_workers < 1:
+            raise ValueError("--gateway-workers must be a positive integer")
         self.validate_multimodal_topology()
-
-        if self.multimodal_encode_worker:
-            _warn_deprecated(
-                "--multimodal-encode-worker is deprecated; use "
-                "--enable-multimodal --disaggregation-mode=encode. "
-                "This release will map the legacy flag to the new arguments."
-            )
-            self.enable_multimodal = True
-        if self.multimodal_worker:
-            _warn_deprecated(
-                "--multimodal-worker is deprecated; use --enable-multimodal "
-                "--dedicated-mm-encoder with --disaggregation-mode=pd, "
-                "--disaggregation-mode=prefill, or --disaggregation-mode=decode. "
-                "This release will map the legacy flag to the new arguments."
-            )
-            self.enable_multimodal = True
 
         self.validate_dedicated_mm_encoder()
 
@@ -231,15 +280,11 @@ class DynamoSGLangConfig(ConfigBase):
 
     def validate_multimodal_topology(self) -> None:
         if self.frontend_decoding and (
-            self.multimodal_encode_worker
-            or self.multimodal_worker
-            or self.dedicated_mm_encoder
+            self.multimodal_worker or self.dedicated_mm_encoder
         ):
             raise ValueError(
-                "--frontend-decoding is incompatible with the EPD multimodal topology "
-                "(--dedicated-mm-encoder / --multimodal-encode-worker / "
-                "--multimodal-worker). The encode worker needs URLs to run "
-                "MMEncoder, while --frontend-decoding ships pre-decoded pixels. "
-                "Use --frontend-decoding on a native worker that does not use "
-                "the dedicated encode-worker topology instead."
+                "--frontend-decoding is not supported on internal EPD workers "
+                "(--dedicated-mm-encoder / --multimodal-worker). In an EPD "
+                "deployment, pass the flag only to the frontend-facing worker "
+                "using --disaggregation-mode=encode."
             )

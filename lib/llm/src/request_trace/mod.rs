@@ -9,6 +9,8 @@ pub mod payload;
 pub(crate) mod payload_stream;
 mod record;
 mod replay;
+#[cfg(feature = "request-trace-s3")]
+mod s3_sink;
 pub mod sink;
 mod tool_relay;
 pub mod types;
@@ -37,6 +39,7 @@ pub(crate) use integration::{
 };
 pub(crate) use record::{publish_tool_record, validate_tool_record};
 pub(crate) use replay::replay_metrics;
+pub use sink::{ActiveInput, TraceShutdownReport, shutdown_workers};
 pub use types::{
     ChoiceFinishReasonMetadata, FinishReasonMetadata, RequestReplayMetrics,
     RequestTraceEventSource, RequestTraceEventType, RequestTraceMetrics, RequestTracePayload,

@@ -173,8 +173,8 @@ impl<T: BlockMetadata> RequestSequence<T> {
     /// Search for prefix cache hits and add matched blocks in one step.
     ///
     /// This is the standard entry point for prefix matching on a fresh
-    /// sequence. Combines [`match_prefix`](Self::match_prefix) and
-    /// [`add_matched_blocks`](Self::add_matched_blocks).
+    /// sequence. Combines `match_prefix` and
+    /// `add_matched_blocks`.
     ///
     /// # Panics
     ///

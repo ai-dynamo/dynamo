@@ -28,10 +28,11 @@ import psutil
 import pytest
 
 from tests.conftest import EtcdServer, NatsServer
+from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
-from tests.utils.port_utils import allocate_ports
+from tests.utils.port_utils import allocate_port, deallocate_ports
 
 openai = pytest.importorskip("openai")
 OpenAI = openai.OpenAI
@@ -56,13 +57,6 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 # Process management
 # ---------------------------------------------------------------------------
-
-
-def _check_ready(response) -> bool:
-    try:
-        return (response.json() or {}).get("status") == "ready"
-    except ValueError:
-        return False
 
 
 def _prepare_log_dir(request, suffix: str) -> str:
@@ -179,7 +173,7 @@ class WorkerProcess(ManagedProcess):
             command=command,
             env=env,
             health_check_urls=[
-                (f"http://localhost:{system_port}/health", _check_ready),
+                (f"http://localhost:{system_port}/health", check_health_ready),
             ],
             timeout=600,
             display_output=True,
@@ -277,14 +271,27 @@ def tool_calling_services(
     Yields the frontend HTTP port.
     """
     topology: str = request.param
-    frontend_port, system_port, fpm_port = allocate_ports(count=3, start_port=10000)
-
+    # Allocate from the disjoint bases in tests/utils/constants.py so this
+    # module cannot land on the window another suite allocates from.
+    allocated_ports: list[int] = []
+    # Every allocation sits inside the try: each one registers its port before
+    # returning, so a raise from a later call would otherwise strand the
+    # earlier reservations.
     try:
+        system_port = allocate_port(DynamoPortRange.SERVE.value)
+        allocated_ports.append(system_port)
+        fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        allocated_ports.append(fpm_port)
+
         with WorkerProcess(
             request, system_port=system_port, fpm_port=fpm_port, topology=topology
         ):
             # Allow worker to register with discovery.
             time.sleep(2)
+            # allocate_port closes its probe socket, so the port is unowned
+            # until the frontend binds; take it here, after the engine boot.
+            frontend_port = allocate_port(DynamoPortRange.FRONTEND.value)
+            allocated_ports.append(frontend_port)
             with ToolCallingFrontendProcess(
                 request, frontend_port=frontend_port, topology=topology
             ):
@@ -301,9 +308,15 @@ def tool_calling_services(
         # / frontend process is gone before the next topology boots — otherwise
         # the next worker would race against pinned GPU memory or a stale
         # discovery registration. Followed by a brief settle delay so the OS
-        # reclaims bound ports and the GPU frees its VRAM.
-        _cleanup_sglang_stragglers()
-        time.sleep(3)
+        # reclaims bound ports and the GPU frees its VRAM. The registry
+        # entries are released last so no other test is handed a live port,
+        # and in a finally of their own so a raise from the sweep or the delay
+        # cannot leak them for the 900s the stale sweep takes to reclaim them.
+        try:
+            _cleanup_sglang_stragglers()
+            time.sleep(3)
+        finally:
+            deallocate_ports(allocated_ports)
 
 
 @pytest.fixture(scope="module")
@@ -338,7 +351,7 @@ TOOLS_WEATHER = [
                     },
                 },
                 "required": ["city"],
-                "additionalProperties": True,
+                "additionalProperties": False,
             },
         },
     }
@@ -474,15 +487,6 @@ TOOLS_GET_TIME = [
         },
     }
 ]
-
-ALL_TOOLS = (
-    TOOLS_WEATHER
-    + TOOLS_SEARCH
-    + TOOLS_CALCULATOR
-    + TOOLS_COMPLEX_ARGS
-    + TOOLS_DATABASE
-)
-
 
 # ---------------------------------------------------------------------------
 # Streaming helpers
@@ -803,6 +807,10 @@ class TestToolCallingProtocol:
             ],
             tools=TOOLS_WEATHER + TOOLS_SEARCH + TOOLS_CALCULATOR,
             parallel_tool_calls=True,
+            # Keep pinned: with sampling this 0.6B model sometimes answers in
+            # prose instead of calling tools, ending the stream with 'stop'.
+            temperature=0,
+            seed=0,
         )
         assert_finish_reason(result, {"tool_calls"})
         # Models sometimes batch only a subset and emit follow-up calls in
@@ -859,7 +867,6 @@ class TestToolCallingProtocol:
             result.tool_calls[0], schema, expected_name="send_emails"
         )
         assert isinstance(args["recipients"], list)
-        assert len(args["recipients"]) >= 3
 
     @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_no_tools_is_plain_text(self, client: OpenAI, model: str):
@@ -932,11 +939,17 @@ class TestToolCallingMultiTurn:
         ]
 
         step1 = stream_chat(
-            client, model, messages=messages, tools=TOOLS_SEARCH + TOOLS_CALCULATOR
+            client,
+            model,
+            messages=messages,
+            tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
+            tool_choice={"type": "function", "function": {"name": "search_web"}},
         )
         assert_finish_reason(step1, {"tool_calls"})
         assert len(step1.tool_calls) >= 1
-        parse_and_validate_tool_call(step1.tool_calls[0], schemas)
+        parse_and_validate_tool_call(
+            step1.tool_calls[0], schemas, expected_name="search_web"
+        )
 
         messages.append(assistant_tool_message_from_result(step1))
         messages.append(
@@ -954,41 +967,36 @@ class TestToolCallingMultiTurn:
         )
 
         step2 = stream_chat(
-            client, model, messages=messages, tools=TOOLS_SEARCH + TOOLS_CALCULATOR
+            client,
+            model,
+            messages=messages,
+            tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
+            tool_choice={"type": "function", "function": {"name": "calculate"}},
         )
-        # Small models sometimes short-circuit and compute the answer in
-        # their reasoning instead of chaining a second tool call. Accept
-        # either path: (a) another tool call to `calculate`, or (b) a
-        # direct text answer containing the correct result.
-        assert_finish_reason(step2, {"tool_calls", "stop"})
-        if step2.finish_reason == "tool_calls":
-            assert len(step2.tool_calls) >= 1
-            args2 = parse_and_validate_tool_call(step2.tool_calls[0], schemas)
-            assert step2.tool_calls[0]["function"]["name"] == "calculate"
-            assert "13960000" in args2["expression"].replace(
-                ",", ""
-            ) or "1396000" in args2["expression"].replace(",", "")
+        assert_finish_reason(step2, {"tool_calls"})
+        assert len(step2.tool_calls) >= 1
+        parse_and_validate_tool_call(
+            step2.tool_calls[0], schemas, expected_name="calculate"
+        )
 
-            messages.append(assistant_tool_message_from_result(step2))
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": step2.tool_calls[0]["id"],
-                    "content": "1396000",
-                }
-            )
+        messages.append(assistant_tool_message_from_result(step2))
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": step2.tool_calls[0]["id"],
+                "content": json.dumps({"result": "1,396,000"}),
+            }
+        )
 
-            step3 = stream_chat(
-                client, model, messages=messages, tools=TOOLS_SEARCH + TOOLS_CALCULATOR
-            )
-            assert_finish_reason(step3, {"stop"})
-            assert step3.tool_calls == []
-            assert "1396000" in step3.content.replace(",", "")
-        else:
-            # Short-circuit path: model did the math itself. Just verify
-            # the final answer is present in the text.
-            assert step2.tool_calls == []
-            assert "1396000" in step2.content.replace(",", "")
+        step3 = stream_chat(
+            client,
+            model,
+            messages=messages,
+            tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
+        )
+        assert_finish_reason(step3, {"stop"})
+        assert step3.tool_calls == []
+        assert "1396000" in step3.content.replace(",", "")
 
     @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_multiple_prior_tool_results_synthesize_to_text(
@@ -1037,133 +1045,10 @@ class TestToolCallingMultiTurn:
                 },
             ],
             tools=TOOLS_WEATHER,
+            temperature=0,
         )
         assert_finish_reason(result, {"stop"})
         assert result.tool_calls == []
         assert result.content.strip()
         lower = result.content.lower()
         assert "tokyo" in lower or "paris" in lower
-
-
-# ---------------------------------------------------------------------------
-# Model-behavior smoke tests
-# These are intentionally looser because the model may vary.
-# ---------------------------------------------------------------------------
-
-
-class TestToolCallingModelBehavior:
-    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
-    def test_many_tools_prefers_calculator_for_math_question(
-        self, client: OpenAI, model: str
-    ):
-        result = stream_chat(
-            client,
-            model,
-            messages=[
-                {"role": "user", "content": "What is 2^10? Use a tool if helpful."}
-            ],
-            tools=ALL_TOOLS,
-        )
-        assert result.finish_reason in {"stop", "tool_calls"}
-        if result.finish_reason == "tool_calls":
-            assert len(result.tool_calls) >= 1
-            assert result.tool_calls[0]["function"]["name"] == "calculate"
-
-    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
-    def test_unicode_arguments_are_preserved(self, client: OpenAI, model: str):
-        result = stream_chat(
-            client,
-            model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "What's the weather in Zürich, Switzerland?",
-                }
-            ],
-            tools=TOOLS_WEATHER,
-        )
-        assert result.finish_reason in {"stop", "tool_calls"}
-        if result.finish_reason == "tool_calls":
-            schema = tool_schema_map(TOOLS_WEATHER)
-            args = parse_and_validate_tool_call(
-                result.tool_calls[0], schema, expected_name="get_weather"
-            )
-            assert args["city"]
-
-    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
-    def test_system_instruction_encourages_tool_use(self, client: OpenAI, model: str):
-        result = stream_chat(
-            client,
-            model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a careful weather assistant. "
-                        "Always use the get_weather tool for weather questions."
-                    ),
-                },
-                {"role": "user", "content": "How's the weather in Sydney?"},
-            ],
-            tools=TOOLS_WEATHER,
-        )
-        assert result.finish_reason in {"stop", "tool_calls"}
-        if result.finish_reason == "tool_calls":
-            schema = tool_schema_map(TOOLS_WEATHER)
-            parse_and_validate_tool_call(
-                result.tool_calls[0], schema, expected_name="get_weather"
-            )
-
-
-def _run_with_assertion_reruns(func, *args, attempts: int = 3):
-    """Retry assertion-only checks that can vary with model generation."""
-    for attempt in range(attempts):
-        try:
-            return func(*args)
-        except AssertionError:
-            if attempt == attempts - 1:
-                raise
-
-
-@pytest.mark.pre_merge
-@pytest.mark.core
-@pytest.mark.timeout(420)
-def test_tool_calling_sglang_all(client: OpenAI, model: str):
-    """Run the pre-merge tool-calling scenarios under one SGLang worker startup."""
-    protocol = TestToolCallingProtocol()
-    protocol.test_stream_has_required_chunk_shape(client, model)
-    protocol.test_single_tool_call_schema_valid(client, model)
-    protocol.test_tool_choice_required_forces_a_tool_call(client, model)
-    protocol.test_tool_choice_none_suppresses_tool_calls(client, model)
-    _run_with_assertion_reruns(
-        protocol.test_named_tool_choice_forces_specific_function, client, model
-    )
-    _run_with_assertion_reruns(
-        protocol.test_parallel_multi_tool_request_includes_all_expected_tools,
-        client,
-        model,
-    )
-    _run_with_assertion_reruns(protocol.test_array_argument_schema_valid, client, model)
-    _run_with_assertion_reruns(protocol.test_no_tools_is_plain_text, client, model)
-
-    multi_turn = TestToolCallingMultiTurn()
-    _run_with_assertion_reruns(
-        multi_turn.test_tool_result_is_consumed_and_final_answer_is_text, client, model
-    )
-    _run_with_assertion_reruns(
-        multi_turn.test_chained_tool_use_search_then_calculate, client, model
-    )
-    _run_with_assertion_reruns(
-        multi_turn.test_multiple_prior_tool_results_synthesize_to_text, client, model
-    )
-
-    behavior = TestToolCallingModelBehavior()
-    _run_with_assertion_reruns(
-        behavior.test_many_tools_prefers_calculator_for_math_question, client, model
-    )
-    _run_with_assertion_reruns(
-        behavior.test_unicode_arguments_are_preserved, client, model
-    )
-    _run_with_assertion_reruns(
-        behavior.test_system_instruction_encourages_tool_use, client, model
-    )

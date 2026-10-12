@@ -8,13 +8,13 @@
  * conditionally renders its children. Use it to localize a small piece of a
  * page (a card, a callout) without standing up full Fern localization.
  *
- * Usage — swap one card between Slack (default) and WeChat (Chinese browsers):
+ * Usage — swap one card between the default audience and Chinese browsers:
  *
  *     <LangGate langs="zh" invert>   // everyone EXCEPT zh
- *       {<Card title="Community Slack" ... />}
+ *       {<Card title="Community" ... />}
  *     </LangGate>
  *     <LangGate langs="zh">          // zh only
- *       {<Card title="Community WeChat" ... />}
+ *       {<Card title="Localized community" ... />}
  *     </LangGate>
  *
  * WRAP THE CARD IN `{ }`:

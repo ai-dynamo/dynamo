@@ -3,21 +3,16 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
-use std::time::Duration;
+
+use tokio::time::Instant;
 
 use ordered_float::OrderedFloat;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use tokio::time::Instant;
 
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::queue_admission::{
-    AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest, AdmissionTicket,
-    ClassAdmissionAction, PolicyClassAdmissionPolicies, PolicyClassAdmissionPolicy,
-    RequestProgress, RequestProgressUpdater, WorkerEligibility, WorkerPlacement,
-};
-use super::types::KvSchedulerError;
+use super::queue_admission::WorkerPlacement;
 use crate::protocols::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +35,14 @@ impl QueueSnapshot {
             scheduling_cost_tokens: raw_isl_tokens.saturating_sub(cached_tokens).max(1),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QueueMetadata {
+    pub(crate) class_index: usize,
+    pub(crate) snapshot: QueueSnapshot,
+    pub(crate) due_at: Option<Instant>,
+    pub(crate) arrival_offset_secs: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,9 +85,18 @@ pub struct PolicyQueueStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct QueuePriority {
     strict_priority: u32,
+    due_time_key: u64,
     policy_score: OrderedFloat<f64>,
 }
 
+const NO_DUE_TIME: u64 = u64::MAX;
+
+// Within one strict tier, deadline-bearing entries order earliest-due-first
+// ahead of every non-deadline entry, before the FCFS/LCFS/WSPT policy score
+// applies: a request that must finish by a wall-clock time cannot trade its
+// slot for cache affinity, so EDF deliberately preempts the cost-aware score
+// (DEP #13891). Entries without a deadline tie at NO_DUE_TIME and fall through
+// to the policy score unchanged.
 #[inline]
 fn cmp_queue_order(
     lhs_priority: QueuePriority,
@@ -95,15 +107,53 @@ fn cmp_queue_order(
     lhs_priority
         .strict_priority
         .cmp(&rhs_priority.strict_priority)
+        .then_with(|| rhs_priority.due_time_key.cmp(&lhs_priority.due_time_key))
         .then_with(|| lhs_priority.policy_score.cmp(&rhs_priority.policy_score))
         .then_with(|| rhs_enqueue_seq.cmp(&lhs_enqueue_seq))
+}
+
+// `uncached_tokens` is derived, so drop it from queued entries: with the
+// deadline key in `QueuePriority` the header would otherwise cross 64 bytes,
+// and the policy_queue drain benchmarks (near-empty payloads, header-bound
+// heap sifts) regress 50-150% when an entry spans two cache lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueueEntrySnapshot {
+    raw_isl_tokens: usize,
+    cached_tokens: usize,
+    scheduling_cost_tokens: usize,
+}
+
+impl From<QueueSnapshot> for QueueEntrySnapshot {
+    fn from(snapshot: QueueSnapshot) -> Self {
+        Self {
+            raw_isl_tokens: snapshot.raw_isl_tokens,
+            cached_tokens: snapshot.cached_tokens,
+            scheduling_cost_tokens: snapshot.scheduling_cost_tokens,
+        }
+    }
+}
+
+impl From<QueueEntrySnapshot> for QueueSnapshot {
+    fn from(snapshot: QueueEntrySnapshot) -> Self {
+        // `QueueSnapshot::new` clamps cached <= raw and floors the scheduling
+        // cost; both already held when the entry was built, so this round-trip
+        // only re-derives the dropped field.
+        Self {
+            raw_isl_tokens: snapshot.raw_isl_tokens,
+            cached_tokens: snapshot.cached_tokens,
+            uncached_tokens: snapshot
+                .raw_isl_tokens
+                .saturating_sub(snapshot.cached_tokens),
+            scheduling_cost_tokens: snapshot.scheduling_cost_tokens,
+        }
+    }
 }
 
 pub struct PolicyQueueEntry<T> {
     class_index: usize,
     priority: QueuePriority,
     enqueue_seq: u64,
-    snapshot: QueueSnapshot,
+    snapshot: QueueEntrySnapshot,
     payload: T,
 }
 
@@ -113,7 +163,11 @@ impl<T> PolicyQueueEntry<T> {
     }
 
     pub fn snapshot(&self) -> QueueSnapshot {
-        self.snapshot
+        self.snapshot.into()
+    }
+
+    fn due_time_key(&self) -> Option<u64> {
+        (self.priority.due_time_key != NO_DUE_TIME).then_some(self.priority.due_time_key)
     }
 
     pub fn payload(&self) -> &T {
@@ -139,11 +193,12 @@ impl<T> PartialEq for PolicyQueueEntry<T> {
 
 impl<T> Ord for PolicyQueueEntry<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.priority
-            .strict_priority
-            .cmp(&other.priority.strict_priority)
-            .then_with(|| self.priority.policy_score.cmp(&other.priority.policy_score))
-            .then_with(|| other.enqueue_seq.cmp(&self.enqueue_seq))
+        cmp_queue_order(
+            self.priority,
+            self.enqueue_seq,
+            other.priority,
+            other.enqueue_seq,
+        )
     }
 }
 
@@ -196,21 +251,13 @@ impl PartialOrd for WorkerLaneHead {
 
 struct PolicyClassQueue<T> {
     config: PolicyClassConfig,
-    admission_policy: Option<ScheduledAdmissionPolicy>,
     pending: BinaryHeap<PolicyQueueEntry<T>>,
-    deferred: FxHashMap<AdmissionId, PolicyQueueEntry<T>>,
     stats: PolicyQueueStats,
     deficit: usize,
     ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
     blocked_workers: FxHashSet<WorkerWithDpRank>,
     candidate_worker_heads: BTreeSet<WorkerLaneHead>,
     needs_blocked_worker_recheck: bool,
-}
-
-struct ScheduledAdmissionPolicy {
-    policy: Box<dyn PolicyClassAdmissionPolicy>,
-    reconcile_interval: Duration,
-    next_reconcile: Instant,
 }
 
 impl<T> PolicyClassQueue<T> {
@@ -222,7 +269,6 @@ impl<T> PolicyClassQueue<T> {
         self.pending
             .iter()
             .chain(self.ready_by_worker.values().flat_map(|ready| ready.iter()))
-            .chain(self.deferred.values())
     }
 
     fn push_ready(&mut self, placement: WorkerPlacement, entry: PolicyQueueEntry<T>) {
@@ -433,14 +479,10 @@ pub struct PolicyQueue<T> {
     round_cursor: usize,
     carry_class: Option<usize>,
     next_enqueue_seq: u64,
-    next_admission_id: u64,
     pending_count: usize,
+    due_entries: BTreeSet<(u64, u64)>,
+    deadline_origin: Instant,
     candidates: Vec<Option<DispatchCandidate>>,
-}
-
-enum QueueEntryState {
-    Ready(WorkerPlacement),
-    Deferred(AdmissionId),
 }
 
 impl<T> PolicyQueue<T> {
@@ -453,9 +495,7 @@ impl<T> PolicyQueue<T> {
                 .cloned()
                 .map(|config| PolicyClassQueue {
                     config,
-                    admission_policy: None,
                     pending: BinaryHeap::new(),
-                    deferred: FxHashMap::default(),
                     ready_by_worker: FxHashMap::default(),
                     blocked_workers: FxHashSet::default(),
                     candidate_worker_heads: BTreeSet::new(),
@@ -467,158 +507,11 @@ impl<T> PolicyQueue<T> {
             round_cursor: 0,
             carry_class: None,
             next_enqueue_seq: 0,
-            next_admission_id: 0,
             pending_count: 0,
+            due_entries: BTreeSet::new(),
+            deadline_origin: Instant::now(),
             candidates: vec![None; class_count],
         }
-    }
-
-    pub(crate) fn new_with_admission_policies(
-        profile: PolicyProfile,
-        queue_recheck_interval: Duration,
-        mut policies: PolicyClassAdmissionPolicies,
-    ) -> Result<Self, KvSchedulerError> {
-        let mut queue = Self::new(profile);
-        let now = Instant::now();
-        for class in &mut queue.classes {
-            let Some(policy) = policies.remove(&class.config.name) else {
-                if class.config.admission.is_some() {
-                    return Err(KvSchedulerError::InitFailed(format!(
-                        "no admission policy registered for configured policy class {:?}",
-                        class.config.name
-                    )));
-                }
-                continue;
-            };
-            let reconcile_interval = policy
-                .reconcile_interval()
-                .map_or(queue_recheck_interval, |requested| {
-                    requested.min(queue_recheck_interval)
-                });
-            if reconcile_interval.is_zero() {
-                return Err(KvSchedulerError::InitFailed(format!(
-                    "admission policy for policy class {:?} has a zero reconcile interval",
-                    class.config.name
-                )));
-            }
-            class.admission_policy = Some(ScheduledAdmissionPolicy {
-                policy,
-                reconcile_interval,
-                next_reconcile: now + reconcile_interval,
-            });
-        }
-        if let Some(class_name) = policies.keys().next() {
-            return Err(KvSchedulerError::InitFailed(format!(
-                "admission policy registered for unknown policy class {class_name:?}"
-            )));
-        }
-        Ok(queue)
-    }
-
-    pub(crate) fn has_admission_policy(&self, class_index: usize) -> bool {
-        self.classes[class_index].admission_policy.is_some()
-    }
-
-    pub(crate) fn admit(
-        &mut self,
-        class_index: usize,
-        session_id: Option<&str>,
-        context_tokens: usize,
-        worker_eligibility: WorkerEligibility,
-    ) -> Option<(AdmissionTicket, RequestProgressUpdater, AdmissionDecision)> {
-        let policy = &mut self.classes[class_index].admission_policy.as_mut()?.policy;
-        let id = AdmissionId::new(self.next_admission_id);
-        self.next_admission_id = self.next_admission_id.wrapping_add(1);
-        let ticket = AdmissionTicket { class_index, id };
-        let (progress, updater) = RequestProgress::new(context_tokens);
-        let decision = policy.admit(AdmissionRequest::with_progress(
-            id,
-            session_id,
-            progress,
-            worker_eligibility,
-        ));
-        Some((ticket, updater, decision))
-    }
-
-    pub(crate) fn dispatched(
-        &mut self,
-        ticket: AdmissionTicket,
-        worker: WorkerWithDpRank,
-    ) -> Vec<ClassAdmissionAction> {
-        self.admission_event(
-            ticket,
-            AdmissionEvent::Dispatched {
-                id: ticket.id,
-                worker,
-            },
-        )
-    }
-
-    pub(crate) fn completed(
-        &mut self,
-        ticket: AdmissionTicket,
-        context_tokens: usize,
-    ) -> Vec<ClassAdmissionAction> {
-        self.admission_event(
-            ticket,
-            AdmissionEvent::Completed {
-                id: ticket.id,
-                context_tokens,
-            },
-        )
-    }
-
-    pub(crate) fn aborted(&mut self, ticket: AdmissionTicket) -> Vec<ClassAdmissionAction> {
-        self.admission_event(ticket, AdmissionEvent::Aborted { id: ticket.id })
-    }
-
-    pub(crate) fn reconcile_admission(
-        &mut self,
-        now: Instant,
-        force: bool,
-    ) -> Vec<ClassAdmissionAction> {
-        let mut actions = Vec::new();
-        for (class_index, class) in self.classes.iter_mut().enumerate() {
-            let Some(scheduled) = &mut class.admission_policy else {
-                continue;
-            };
-            if !force && now < scheduled.next_reconcile {
-                continue;
-            }
-            if now >= scheduled.next_reconcile {
-                scheduled.next_reconcile = now + scheduled.reconcile_interval;
-            }
-            actions.extend(
-                scheduled
-                    .policy
-                    .on_event(AdmissionEvent::Reconcile)
-                    .into_iter()
-                    .map(|action| ClassAdmissionAction {
-                        class_index,
-                        action,
-                    }),
-            );
-        }
-        actions
-    }
-
-    fn admission_event(
-        &mut self,
-        ticket: AdmissionTicket,
-        event: AdmissionEvent,
-    ) -> Vec<ClassAdmissionAction> {
-        let Some(scheduled) = &mut self.classes[ticket.class_index].admission_policy else {
-            return Vec::new();
-        };
-        scheduled
-            .policy
-            .on_event(event)
-            .into_iter()
-            .map(|action| ClassAdmissionAction {
-                class_index: ticket.class_index,
-                action,
-            })
-            .collect()
     }
 
     pub fn pending_count(&self) -> usize {
@@ -644,6 +537,11 @@ impl<T> PolicyQueue<T> {
                         .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
                 })
         })
+    }
+
+    pub(crate) fn next_due_at(&self) -> Option<Instant> {
+        let &(due_time_key, _) = self.due_entries.first()?;
+        Some(self.deadline_origin + std::time::Duration::from_nanos(due_time_key))
     }
 
     pub fn class_count(&self) -> usize {
@@ -700,54 +598,45 @@ impl<T> PolicyQueue<T> {
         placement: WorkerPlacement,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
-        self.enqueue_with_state(
-            class_index,
+        self.enqueue_with_due_at(
+            QueueMetadata {
+                class_index,
+                snapshot,
+                due_at: None,
+                arrival_offset_secs,
+            },
             worker_count,
-            snapshot,
-            arrival_offset_secs,
             priority_jump,
             strict_priority,
-            QueueEntryState::Ready(placement),
+            placement,
             payload,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn enqueue_deferred(
+    pub(crate) fn enqueue_with_due_at(
         &mut self,
-        class_index: usize,
+        metadata: QueueMetadata,
         worker_count: usize,
-        snapshot: QueueSnapshot,
-        arrival_offset_secs: f64,
         priority_jump: f64,
         strict_priority: u32,
-        admission_id: AdmissionId,
+        placement: WorkerPlacement,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
-        self.enqueue_with_state(
+        let QueueMetadata {
             class_index,
-            worker_count,
             snapshot,
+            due_at,
             arrival_offset_secs,
-            priority_jump,
-            strict_priority,
-            QueueEntryState::Deferred(admission_id),
-            payload,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn enqueue_with_state(
-        &mut self,
-        class_index: usize,
-        worker_count: usize,
-        snapshot: QueueSnapshot,
-        arrival_offset_secs: f64,
-        priority_jump: f64,
-        strict_priority: u32,
-        state: QueueEntryState,
-        payload: T,
-    ) -> Result<(), (QueueRejection, T)> {
+        } = metadata;
+        if due_at.is_some() && self.due_entries.is_empty() {
+            self.deadline_origin = Instant::now();
+        }
+        let due_time_key = due_at.map_or(NO_DUE_TIME, |due_at| {
+            due_at
+                .saturating_duration_since(self.deadline_origin)
+                .as_nanos()
+                .min((NO_DUE_TIME - 1) as u128) as u64
+        });
         let class = &mut self.classes[class_index];
         if let Some(rejection) = queue_rejection(class, worker_count) {
             return Err((rejection, payload));
@@ -759,98 +648,20 @@ impl<T> PolicyQueue<T> {
             arrival_offset_secs,
             priority_jump,
             strict_priority,
+            due_time_key,
             class.config.queue_policy,
             self.next_enqueue_seq,
             payload,
         );
+        if due_time_key != NO_DUE_TIME {
+            self.due_entries
+                .insert((due_time_key, self.next_enqueue_seq));
+        }
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
-        match state {
-            QueueEntryState::Ready(placement) => class.push_ready(placement, entry),
-            QueueEntryState::Deferred(admission_id) => {
-                let replaced = class.deferred.insert(admission_id, entry);
-                debug_assert!(replaced.is_none(), "duplicate deferred admission ID");
-            }
-        }
+        class.push_ready(placement, entry);
         self.pending_count += 1;
         Ok(())
-    }
-
-    pub(crate) fn make_ready(
-        &mut self,
-        source_class_index: usize,
-        target_class_index: usize,
-        admission_id: AdmissionId,
-        placement: WorkerPlacement,
-        replacement_snapshot: Option<(QueueSnapshot, f64, f64)>,
-    ) -> Option<QueueSnapshot> {
-        if source_class_index == target_class_index {
-            let class = &mut self.classes[source_class_index];
-            let mut entry = class.deferred.remove(&admission_id)?;
-            let old_snapshot = entry.snapshot;
-            if let Some((snapshot, arrival_offset_secs, priority_jump)) = replacement_snapshot {
-                subtract_stats(&mut class.stats, old_snapshot);
-                add_stats(&mut class.stats, snapshot);
-                entry.priority.policy_score = OrderedFloat(queue_policy_score(
-                    class.config.queue_policy,
-                    snapshot,
-                    arrival_offset_secs,
-                    priority_jump,
-                ));
-                entry.snapshot = snapshot;
-            }
-            class.push_ready(placement, entry);
-            return Some(old_snapshot);
-        }
-
-        let source = &mut self.classes[source_class_index];
-        let mut entry = source.deferred.remove(&admission_id)?;
-        let old_snapshot = entry.snapshot;
-        subtract_stats(&mut source.stats, old_snapshot);
-        if source.ready_is_empty() {
-            source.deficit = 0;
-        }
-
-        let (snapshot, arrival_offset_secs, priority_jump) = replacement_snapshot
-            .expect("cross-class exact placement must replace the queue snapshot");
-        entry.class_index = target_class_index;
-        entry.snapshot = snapshot;
-        let target = &mut self.classes[target_class_index];
-        entry.priority.policy_score = OrderedFloat(queue_policy_score(
-            target.config.queue_policy,
-            snapshot,
-            arrival_offset_secs,
-            priority_jump,
-        ));
-        add_stats(&mut target.stats, snapshot);
-        target.push_ready(placement, entry);
-        Some(old_snapshot)
-    }
-
-    pub(crate) fn deferred_payload_mut(
-        &mut self,
-        class_index: usize,
-        admission_id: AdmissionId,
-    ) -> Option<&mut T> {
-        self.classes[class_index]
-            .deferred
-            .get_mut(&admission_id)
-            .map(PolicyQueueEntry::payload_mut)
-    }
-
-    pub(crate) fn remove_deferred(
-        &mut self,
-        class_index: usize,
-        admission_id: AdmissionId,
-    ) -> Option<PolicyQueueEntry<T>> {
-        let class = &mut self.classes[class_index];
-        let entry = class.deferred.remove(&admission_id)?;
-        subtract_stats(&mut class.stats, entry.snapshot);
-        self.pending_count -= 1;
-        if class.ready_is_empty() {
-            class.deficit = 0;
-        }
-        Some(entry)
     }
 
     pub(crate) fn take_if_in_class(
@@ -858,10 +669,53 @@ impl<T> PolicyQueue<T> {
         class_index: usize,
         mut predicate: impl FnMut(&T) -> bool,
     ) -> (Vec<PolicyQueueEntry<T>>, bool) {
+        self.take_if_entry_in_class(class_index, |entry| predicate(entry.payload()))
+    }
+
+    /// Removes and returns every entry whose deadline is at or before `now`.
+    ///
+    /// Cost: one full scan of all queued entries plus a heap rebuild of each
+    /// class that lost an entry, per timer fire. Acceptable while deadlines are
+    /// rare; once every request carries a due time (the classifier PR), this
+    /// needs a seq-to-lane index or expiry-on-pop to avoid O(N) per fire under
+    /// a standing backlog.
+    pub(crate) fn take_expired(&mut self, now: Instant) -> Vec<PolicyQueueEntry<T>> {
+        if self.due_entries.is_empty() {
+            return Vec::new();
+        }
+        let now_key = now
+            .saturating_duration_since(self.deadline_origin)
+            .as_nanos()
+            .min((NO_DUE_TIME - 1) as u128) as u64;
+        let expired_sequences: FxHashSet<u64> = self
+            .due_entries
+            .range(..=(now_key, u64::MAX))
+            .map(|(_, enqueue_seq)| *enqueue_seq)
+            .collect();
+        if expired_sequences.is_empty() {
+            return Vec::new();
+        }
+        let mut expired = Vec::new();
+        for class_index in 0..self.classes.len() {
+            expired.extend(
+                self.take_if_entry_in_class(class_index, |entry| {
+                    expired_sequences.contains(&entry.enqueue_seq)
+                })
+                .0,
+            );
+        }
+        expired
+    }
+
+    fn take_if_entry_in_class(
+        &mut self,
+        class_index: usize,
+        mut predicate: impl FnMut(&PolicyQueueEntry<T>) -> bool,
+    ) -> (Vec<PolicyQueueEntry<T>>, bool) {
         let class = &mut self.classes[class_index];
         let remove_sequences: FxHashSet<u64> = class
             .entries()
-            .filter(|entry| predicate(entry.payload()))
+            .filter(|entry| predicate(entry))
             .map(|entry| entry.enqueue_seq)
             .collect();
         if remove_sequences.is_empty() {
@@ -889,13 +743,6 @@ impl<T> PolicyQueue<T> {
         }
         class.pending = BinaryHeap::from(retained);
 
-        removed.extend(
-            class
-                .deferred
-                .extract_if(|_, entry| remove_sequences.contains(&entry.enqueue_seq))
-                .map(|(_, entry)| entry),
-        );
-
         class.ready_by_worker.retain(|_, ready| {
             let mut retained = Vec::with_capacity(ready.len());
             for entry in ready.drain() {
@@ -911,8 +758,9 @@ impl<T> PolicyQueue<T> {
         class.rebuild_worker_heads();
 
         for entry in &removed {
-            subtract_stats(&mut class.stats, entry.snapshot);
+            subtract_stats(&mut class.stats, entry.snapshot());
             self.pending_count -= 1;
+            remove_due_time(&mut self.due_entries, entry);
         }
         if class.ready_is_empty() {
             class.deficit = 0;
@@ -1026,7 +874,6 @@ impl<T> PolicyQueue<T> {
                 .pending
                 .into_iter()
                 .chain(class.ready_by_worker.into_values().flatten())
-                .chain(class.deferred.into_values())
         })
     }
 
@@ -1041,14 +888,22 @@ impl<T> PolicyQueue<T> {
         class.deficit = class
             .deficit
             .saturating_sub(entry.snapshot.scheduling_cost_tokens);
-        subtract_stats(&mut class.stats, entry.snapshot);
+        subtract_stats(&mut class.stats, entry.snapshot());
         self.pending_count -= 1;
+        remove_due_time(&mut self.due_entries, &entry);
         if class.ready_is_empty() {
             class.deficit = 0;
         } else {
             self.carry_class = (class.deficit > 0).then_some(class_index);
         }
         entry
+    }
+}
+
+fn remove_due_time<T>(due_entries: &mut BTreeSet<(u64, u64)>, entry: &PolicyQueueEntry<T>) {
+    if let Some(due_time_key) = entry.due_time_key() {
+        let removed = due_entries.remove(&(due_time_key, entry.enqueue_seq));
+        debug_assert!(removed);
     }
 }
 
@@ -1059,6 +914,7 @@ fn make_entry<T>(
     arrival_offset_secs: f64,
     priority_jump: f64,
     strict_priority: u32,
+    due_time_key: u64,
     queue_policy: RouterQueuePolicy,
     enqueue_seq: u64,
     payload: T,
@@ -1069,10 +925,11 @@ fn make_entry<T>(
         class_index,
         priority: QueuePriority {
             strict_priority,
+            due_time_key,
             policy_score: OrderedFloat(policy_score),
         },
         enqueue_seq,
-        snapshot,
+        snapshot: snapshot.into(),
         payload,
     }
 }
@@ -1140,54 +997,8 @@ fn subtract_stats(stats: &mut PolicyQueueStats, snapshot: QueueSnapshot) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-
     use super::*;
     use crate::scheduling::RouterPolicyConfig;
-    use crate::scheduling::queue_admission::{AdmissionAction, WorkerEligibilitySnapshot};
-
-    struct ReadyPolicy;
-
-    impl PolicyClassAdmissionPolicy for ReadyPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
-            AdmissionDecision::Ready(WorkerPlacement::Any)
-        }
-    }
-
-    struct ZeroIntervalPolicy;
-
-    impl PolicyClassAdmissionPolicy for ZeroIntervalPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
-            AdmissionDecision::Bypass
-        }
-
-        fn reconcile_interval(&self) -> Option<Duration> {
-            Some(Duration::ZERO)
-        }
-    }
-
-    struct CountingPolicy {
-        reconciles: Arc<AtomicUsize>,
-        interval: Duration,
-    }
-
-    impl PolicyClassAdmissionPolicy for CountingPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
-            AdmissionDecision::Bypass
-        }
-
-        fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
-            if event == AdmissionEvent::Reconcile {
-                self.reconciles.fetch_add(1, AtomicOrdering::Relaxed);
-            }
-            Vec::new()
-        }
-
-        fn reconcile_interval(&self) -> Option<Duration> {
-            Some(self.interval)
-        }
-    }
 
     fn profile(yaml: &str) -> PolicyProfile {
         RouterPolicyConfig::from_yaml(yaml)
@@ -1212,336 +1023,12 @@ policy_classes:
         )
     }
 
-    fn two_class_profile() -> PolicyProfile {
-        profile(
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: standard
-    policy_family: standard
-    cache_bucket: all
-    quantum: 1
-  - name: agents
-    quantum: 1
-"#,
-        )
-    }
-
     #[test]
-    fn rejects_zero_reconcile_interval() {
-        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
-        let mut policies = PolicyClassAdmissionPolicies::new();
-        policies.insert(
-            profile.default_class().name.clone(),
-            Box::new(ZeroIntervalPolicy),
-        );
-
-        let error = PolicyQueue::<()>::new_with_admission_policies(
-            profile,
-            Duration::from_secs(60),
-            policies,
-        )
-        .err()
-        .unwrap();
-
-        assert!(matches!(error, KvSchedulerError::InitFailed(message) if
-            message.contains("zero reconcile interval")));
-    }
-
-    #[test]
-    fn rejects_policy_for_unknown_class() {
-        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
-        let mut policies = PolicyClassAdmissionPolicies::new();
-        policies.insert("unknown".to_owned(), Box::new(ReadyPolicy));
-
-        let error = PolicyQueue::<()>::new_with_admission_policies(
-            profile,
-            Duration::from_secs(60),
-            policies,
-        )
-        .err()
-        .unwrap();
-
-        assert!(matches!(error, KvSchedulerError::InitFailed(message) if
-            message.contains("unknown policy class") && message.contains("unknown")));
-    }
-
-    #[test]
-    fn rejects_missing_configured_policy() {
-        let profile = profile(
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: standard
-    policy_family: standard
-    cache_bucket: all
-    quantum: 1
-  - name: agents
-    admission:
-      type: test
-    quantum: 1
-"#,
-        );
-
-        let error = PolicyQueue::<()>::new_with_admission_policies(
-            profile,
-            Duration::from_secs(60),
-            PolicyClassAdmissionPolicies::new(),
-        )
-        .err()
-        .unwrap();
-
-        assert!(matches!(error, KvSchedulerError::InitFailed(message) if
-            message.contains("no admission policy registered") && message.contains("agents")));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn reconciles_only_policies_whose_deadlines_are_due() {
-        let fast = Arc::new(AtomicUsize::new(0));
-        let slow = Arc::new(AtomicUsize::new(0));
-        let mut policies = PolicyClassAdmissionPolicies::new();
-        policies.insert(
-            "standard".to_owned(),
-            Box::new(CountingPolicy {
-                reconciles: Arc::clone(&fast),
-                interval: Duration::from_millis(10),
-            }),
-        );
-        policies.insert(
-            "agents".to_owned(),
-            Box::new(CountingPolicy {
-                reconciles: Arc::clone(&slow),
-                interval: Duration::from_secs(60),
-            }),
-        );
-        let mut queue = PolicyQueue::<()>::new_with_admission_policies(
-            two_class_profile(),
-            Duration::from_secs(60),
-            policies,
-        )
-        .unwrap();
-
-        tokio::time::advance(Duration::from_millis(10)).await;
-        queue.reconcile_admission(Instant::now(), false);
-        assert_eq!(fast.load(AtomicOrdering::Relaxed), 1);
-        assert_eq!(slow.load(AtomicOrdering::Relaxed), 0);
-
-        tokio::time::advance(Duration::from_millis(59_990)).await;
-        queue.reconcile_admission(Instant::now(), false);
-        assert_eq!(fast.load(AtomicOrdering::Relaxed), 2);
-        assert_eq!(slow.load(AtomicOrdering::Relaxed), 1);
-    }
-
-    #[test]
-    fn admission_ids_are_unique_across_policy_classes() {
-        let mut policies = PolicyClassAdmissionPolicies::new();
-        policies.insert("standard".to_owned(), Box::new(ReadyPolicy));
-        policies.insert("agents".to_owned(), Box::new(ReadyPolicy));
-        let mut queue = PolicyQueue::<()>::new_with_admission_policies(
-            two_class_profile(),
-            Duration::from_secs(60),
-            policies,
-        )
-        .unwrap();
-        let eligibility = || WorkerEligibility::new(|| WorkerEligibilitySnapshot::new([]));
-
-        let first = queue.admit(0, None, 1, eligibility()).unwrap().0.id;
-        let second = queue.admit(1, None, 1, eligibility()).unwrap().0.id;
-
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn deferred_entries_count_toward_limits_without_blocking_ready_work() {
-        let mut queue = PolicyQueue::new(admission_profile());
-        let deferred_id = AdmissionId::new(7);
-        queue
-            .enqueue_deferred(
-                0,
-                1,
-                QueueSnapshot::new(20, 5),
-                0.0,
-                0.0,
-                0,
-                deferred_id,
-                "deferred",
-            )
-            .unwrap();
-        assert!(!queue.has_backlog(0));
-        queue
-            .enqueue(
-                0,
-                1,
-                QueueSnapshot::new(10, 0),
-                1.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "ready",
-            )
-            .unwrap();
-        assert!(queue.has_backlog(0));
-
-        assert_eq!(queue.pending_count(), 2);
-        assert_eq!(queue.class_stats(0).requests, 2);
-        assert_eq!(
-            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-            "ready"
-        );
-        assert!(queue.pop_next(|_, _, _| true).is_none());
-
-        assert!(
-            queue
-                .make_ready(0, 0, deferred_id, WorkerPlacement::Any, None)
-                .is_some()
-        );
-        assert_eq!(
-            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-            "deferred"
-        );
-        assert_eq!(queue.pending_count(), 0);
-        assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
-    }
-
-    #[test]
-    fn exact_make_ready_rekeys_wspt_priority() {
-        let mut queue = PolicyQueue::new(profile(
-            r#"
-default_policy_family: agents
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: agents
-    policy_family: agents
-    cache_bucket: all
-    queue_policy: wspt
-    quantum: 1000
-"#,
-        ));
-        let deferred_id = AdmissionId::new(1);
-        queue
-            .enqueue_deferred(
-                0,
-                1,
-                QueueSnapshot::new(100, 99),
-                0.0,
-                0.0,
-                0,
-                deferred_id,
-                "rekeyed",
-            )
-            .unwrap();
-        queue
-            .enqueue(
-                0,
-                1,
-                QueueSnapshot::new(10, 0),
-                1.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "ready",
-            )
-            .unwrap();
-
-        queue
-            .make_ready(
-                0,
-                0,
-                deferred_id,
-                WorkerPlacement::Any,
-                Some((QueueSnapshot::new(100, 0), 0.0, 0.0)),
-            )
-            .unwrap();
-
-        assert_eq!(
-            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-            "ready"
-        );
-    }
-
-    #[test]
-    fn exact_make_ready_moves_entry_and_accounting_to_target_class() {
-        let mut queue = PolicyQueue::new(profile(
-            r#"
-default_policy_family: agents
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 32
-    bucket: uncached
-policy_classes:
-  - name: agents_cached
-    policy_family: agents
-    cache_bucket: cached
-    queue_policy: fcfs
-    quantum: 1000
-  - name: agents_uncached
-    policy_family: agents
-    cache_bucket: uncached
-    queue_policy: wspt
-    quantum: 1000
-"#,
-        ));
-        let deferred_id = AdmissionId::new(1);
-        queue
-            .enqueue_deferred(
-                0,
-                1,
-                QueueSnapshot::new(100, 99),
-                0.0,
-                0.0,
-                0,
-                deferred_id,
-                "migrated",
-            )
-            .unwrap();
-        queue
-            .enqueue(
-                1,
-                1,
-                QueueSnapshot::new(10, 0),
-                1.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "ready",
-            )
-            .unwrap();
-
-        queue
-            .make_ready(
-                0,
-                1,
-                deferred_id,
-                WorkerPlacement::Any,
-                Some((QueueSnapshot::new(100, 0), 0.0, 0.0)),
-            )
-            .unwrap();
-
-        assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
-        assert_eq!(
-            queue.class_stats(1),
-            PolicyQueueStats {
-                requests: 2,
-                raw_isl_tokens: 110,
-                cached_tokens: 0,
-            }
-        );
-        assert_eq!(
-            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-            "ready"
-        );
-        let migrated = queue.pop_next(|_, _, _| true).unwrap();
-        assert_eq!(migrated.class_index(), 1);
-        assert_eq!(migrated.into_payload(), "migrated");
+    fn queue_entry_stays_compact() {
+        // One cache line per header: the drain benchmarks are header-bound and
+        // regress heavily past 64 bytes (see QueueEntrySnapshot).
+        assert!(std::mem::size_of::<PolicyQueueEntry<()>>() <= 64);
+        assert!(std::mem::size_of::<WorkerLaneHead>() <= 48);
     }
 
     #[test]
@@ -1604,6 +1091,259 @@ policy_classes:
         assert_eq!(rejection.limit, 2);
         assert_eq!(queue.class_stats(0).raw_isl_tokens, 108);
         assert_eq!(queue.class_stats(0).cached_tokens, 104);
+    }
+
+    #[test]
+    fn earliest_due_request_precedes_fcfs_arrival_within_a_class() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let now = Instant::now();
+        queue
+            .enqueue_with_due_at(
+                QueueMetadata {
+                    class_index: 0,
+                    snapshot: QueueSnapshot::new(1, 0),
+                    due_at: Some(now + std::time::Duration::from_secs(20)),
+                    arrival_offset_secs: 0.0,
+                },
+                1,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "later-due",
+            )
+            .unwrap();
+        queue
+            .enqueue_with_due_at(
+                QueueMetadata {
+                    class_index: 0,
+                    snapshot: QueueSnapshot::new(1, 0),
+                    due_at: Some(now + std::time::Duration::from_secs(10)),
+                    arrival_offset_secs: 1.0,
+                },
+                1,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "earlier-due",
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.next_due_at(),
+            Some(now + std::time::Duration::from_secs(10))
+        );
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "earlier-due"
+        );
+        assert_eq!(queue.due_entries.len(), 1);
+        assert_eq!(
+            queue.next_due_at(),
+            Some(now + std::time::Duration::from_secs(20))
+        );
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "later-due"
+        );
+        assert!(queue.due_entries.is_empty());
+        assert_eq!(queue.next_due_at(), None);
+    }
+
+    #[test]
+    fn due_time_order_preserves_sub_millisecond_precision() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let due_at = Instant::now() + std::time::Duration::from_secs(10);
+        queue
+            .enqueue_with_due_at(
+                QueueMetadata {
+                    class_index: 0,
+                    snapshot: QueueSnapshot::new(1, 0),
+                    due_at: Some(due_at + std::time::Duration::from_nanos(1)),
+                    arrival_offset_secs: 0.0,
+                },
+                1,
+                0.0,
+                0,
+                WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
+                "later-due-better-fcfs",
+            )
+            .unwrap();
+        queue
+            .enqueue_with_due_at(
+                QueueMetadata {
+                    class_index: 0,
+                    snapshot: QueueSnapshot::new(1, 0),
+                    due_at: Some(due_at),
+                    arrival_offset_secs: 1.0,
+                },
+                1,
+                0.0,
+                0,
+                WorkerPlacement::Exact(WorkerWithDpRank::new(2, 0)),
+                "earlier-due-worse-fcfs",
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "earlier-due-worse-fcfs"
+        );
+    }
+
+    #[test]
+    fn deadline_count_restores_the_no_deadline_fast_path_after_removal() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let due_at = Instant::now() + std::time::Duration::from_secs(10);
+        queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "no-deadline",
+            )
+            .unwrap();
+        queue
+            .enqueue_with_due_at(
+                QueueMetadata {
+                    class_index: 0,
+                    snapshot: QueueSnapshot::new(1, 0),
+                    due_at: Some(due_at),
+                    arrival_offset_secs: 1.0,
+                },
+                2,
+                0.0,
+                0,
+                WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
+                "deadline",
+            )
+            .unwrap();
+
+        assert_eq!(queue.next_due_at(), Some(due_at));
+        queue.retain(|payload| *payload != "deadline");
+        assert!(queue.due_entries.is_empty());
+        assert_eq!(queue.next_due_at(), None);
+        assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[test]
+    fn deadline_timer_removes_an_expired_blocked_worker_lane() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let worker = WorkerWithDpRank::new(7, 0);
+        let due_at = Instant::now() + std::time::Duration::from_secs(1);
+        queue
+            .enqueue_with_due_at(
+                QueueMetadata {
+                    class_index: 0,
+                    snapshot: QueueSnapshot::new(1, 0),
+                    due_at: Some(due_at),
+                    arrival_offset_secs: 0.0,
+                },
+                1,
+                0.0,
+                0,
+                WorkerPlacement::Exact(worker),
+                "blocked",
+            )
+            .unwrap();
+
+        assert!(queue.pop_next(|_, _, _| false).is_none());
+        assert!(queue.classes[0].blocked_workers.contains(&worker));
+        assert_eq!(queue.next_due_at(), Some(due_at));
+
+        let expired = queue.take_expired(due_at);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(
+            expired.into_iter().next().unwrap().into_payload(),
+            "blocked"
+        );
+        assert_eq!(queue.next_due_at(), None);
+        assert!(
+            queue
+                .pop_next(|_, _, _| panic!("expired lane revisited"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn strict_priority_precedes_earlier_due_request_within_a_class() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let now = Instant::now();
+        queue
+            .enqueue_with_due_at(
+                QueueMetadata {
+                    class_index: 0,
+                    snapshot: QueueSnapshot::new(1, 0),
+                    due_at: Some(now + std::time::Duration::from_secs(20)),
+                    arrival_offset_secs: 0.0,
+                },
+                1,
+                0.0,
+                10,
+                WorkerPlacement::Any,
+                "high-priority-later-due",
+            )
+            .unwrap();
+        queue
+            .enqueue_with_due_at(
+                QueueMetadata {
+                    class_index: 0,
+                    snapshot: QueueSnapshot::new(1, 0),
+                    due_at: Some(now + std::time::Duration::from_secs(10)),
+                    arrival_offset_secs: 1.0,
+                },
+                1,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "low-priority-earlier-due",
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "high-priority-later-due"
+        );
+    }
+
+    #[test]
+    fn drr_charges_cost_when_the_queue_was_empty() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let mut snapshot = QueueSnapshot::new(100, 0);
+        snapshot.scheduling_cost_tokens = 7;
+        queue
+            .enqueue(
+                0,
+                1,
+                snapshot,
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "idle-arrival",
+            )
+            .unwrap();
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "following-arrival",
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "idle-arrival"
+        );
+        assert_eq!(queue.classes[0].deficit, 3);
     }
 
     #[test]

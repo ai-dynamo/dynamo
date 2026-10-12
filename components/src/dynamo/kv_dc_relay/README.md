@@ -1,75 +1,68 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
 # DC KV Relay
 
-The DC KV Relay aggregates exact KV-cache ownership inside one data center and publishes a compact
-Cuckoo-filter (CKF) projection for multi-DC routing. It discovers workers through the Dynamo
-runtime, consumes their ordered KV events, and supervises one actor-owned producer for each local
-routing pool.
-
-A pool is one logical indexer domain in one DC. The domain captures cache compatibility and routing
-isolation; the DC identity remains stable across Relay restarts and endpoint replacement. Runtime
-endpoints are bindings for a pool rather than part of the CKF publication identity.
-
-For each pool, the Relay:
-
-- Tracks the exact full hashes owned by every `(worker, dp_rank)` member.
-- Refcounts shared hashes so any number of owners contribute exactly one CKF entry.
-- Uses full-hash ownership to make unknown removals safe no-ops.
-- Maintains the mutable producer CKF and records buckets changed by successful mutations.
-- Publishes barrier snapshots and sequenced deltas containing absolute packed-bucket images.
-
-The full hashes and refcounts stay in the Relay because a CKF fingerprint is lossy, can collide,
-and has no owner identity. The global consumer needs only the compact projection required for
-cross-DC prefix search.
-
-## Recovery boundaries
-
-Recovery has two stages:
-
-1. **Worker to Relay:** The Relay shares the normal Dynamo indexer's worker-query recovery path.
-   Ordered KV events handle live mutations; gaps and source replacement recover exact rank state
-   before the new source generation becomes active.
-2. **Relay to global consumer:** A new or reconnected lane installs a barrier snapshot, then
-   continues with sequenced absolute bucket-image deltas. A missing delta retires that lane and
-   requires another snapshot.
-
-The current component uses the producer lifecycle and exposes local diagnostics. An in-process
-adapter exercises the complete producer/consumer protocol today. Non-local gRPC transport and
-cross-DC request forwarding are separate global-router integration work.
-
-For the complete architecture, pool model, consistency contract, and recovery flow, see
-[Multi-DC KV Routing and the DC Relay](../../../../docs/fern/components/router/multi-dc-kv-routing.md).
+**Experimental.** The DC KV Relay discovers NVIDIA Dynamo inference endpoints and publishes
+endpoint-local key-value (KV) pool facts through the universal publisher. Its optional WAN
+adapter exposes pool catalogs, Cuckoo-filter (CKF) streams, serving readiness, and load over
+Protobuf/gRPC. Relay does not merge independent pools or implement cross-data-center routing policy.
 
 ## Usage
 
-```bash
-python -m dynamo.kv_dc_relay --dc-id <stable-dc-id>
-```
-
-`--dc-id` must be stable for the logical data center across Relay process restarts. Optional
-discovery filters can limit the endpoints supervised by one Relay:
+Match the existing deployment's discovery and event-plane settings using the
+[runtime environment reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/components/kv-dc-relay-configuration.md#runtime-environment), then run:
 
 ```bash
 python -m dynamo.kv_dc_relay \
-  --dc-id us-west \
-  --namespace-filter dynamo \
-  --endpoint-prefix dynamo.backend
+  --dc-id dc-a \
+  --namespaces production-llama \
+  --bind 127.0.0.1:5561
 ```
 
-`DYN_NAMESPACE` controls the namespace used for the Relay's own runtime endpoints and defaults to
-`dynamo`.
+- Keep `--dc-id` stable across restarts.
+- `--namespaces` selects logical Dynamo namespaces. Omit the scope to watch all namespaces
+  visible to the configured discovery backend, or use `--watch-all` explicitly.
+- `--endpoint-prefix` narrows the scope; repeat it to include multiple endpoint prefixes.
+- `--bind` starts the plaintext gRPC listener. Omit it to run only the local producer.
+- `DYN_NAMESPACE` names Relay's own runtime endpoints, not the watched worker scope.
 
-## Runtime endpoints
+The Kubernetes discovery backend currently sees only the Relay pod's Kubernetes namespace;
+the logical namespace flags do not expand that watch. Transport security is external: use an
+optional TLS/mTLS sidecar across trust boundaries, and do not expose the plaintext listener.
 
-The component always exposes a health endpoint. Builds with the Rust `ckf-diagnostics` feature
-also expose Relay statistics and an endpoint-specific producer snapshot. Endpoint component names
-include a stable digest of `dc_id`, allowing several DC Relay processes to share a runtime
-namespace without colliding.
+## Documentation
 
-These diagnostic endpoints are not the WAN publication protocol, and the Relay does not proxy
-inference requests. A production global router is expected to transport published state, choose a
-DC-local serving pool, and forward requests to that pool.
+- [Architecture and concepts](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md)
+- [Kubernetes deployment](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md)
+- [CLI, environment variables, and diagnostics](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/components/kv-dc-relay-configuration.md)
+- [Rust implementation](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/docs/architecture.md)
+- [gRPC contract](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/docs/grpc-contract.md)
+- [Protocol helpers and CBI1](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/wan/grpc/protocol/README.md)
+
+## File mode and state
+
+Use `--sources-file /etc/relay/sources.json` instead of discovery filters to
+select an explicit, live-reloaded set of logical namespaces:
+
+```json
+{"version":1,"sources":[{"namespace":"production-llama"}]}
+```
+
+Without this option, discovery remains the default. An empty source list watches
+nothing. Invalid initial files fail startup; invalid updates retain the last
+working source set. Transport and credentials still come from runtime settings.
+An optional `connectionRevision` must match `DYN_RELAY_CONNECTION_REVISION`; omit both for
+standalone operation without a connection guard. Kubernetes operators supply both.
+Both modes feed a common namespace reconciler. File mode polls the file once per
+second; discovery mode follows model-registration events and periodically refreshes
+the namespace set through DRT. Explicit `--namespaces` remain a fixed selection.
+Endpoint discovery within the selected namespaces is shared by both modes.
+Source updates preserve unchanged watches and do not restart the process.
+
+When system HTTP is enabled, `GET /engine/state` reports the mode, listener readiness,
+selected namespace count (including namespaces without matching endpoints), and desired/applied revisions with the last reload error. File
+revisions are null in discovery mode. The standard runtime health endpoints and
+gRPC catalog retain their existing contracts.
