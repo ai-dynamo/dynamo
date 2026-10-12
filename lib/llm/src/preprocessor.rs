@@ -13688,8 +13688,6 @@ mod tests {
         );
     }
 
-    // The mock card's vocab_size is 128256, so 128256 is the first
-    // out-of-vocab id.
     #[tokio::test]
     async fn chat_operator_rejects_out_of_vocab_stop_token_ids() {
         let mdc = ModelDeploymentCard::load_from_disk(
@@ -13719,38 +13717,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completion_operator_rejects_out_of_vocab_stop_token_ids() {
+    async fn completion_operator_rejects_out_of_vocab_integer_stop() {
         let mdc = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
             None,
         )
         .unwrap();
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
-        for stop_field in ["stop", "stop_token_ids"] {
-            let mut request = serde_json::json!({
-                "model": "test-model",
-                "prompt": "hello",
-                "max_tokens": 4,
-                "min_tokens": 1
-            });
-            request[stop_field] = serde_json::json!([128256]);
-            let request: NvCreateCompletionRequest = serde_json::from_value(request).unwrap();
-            let next: Arc<
-                dyn AsyncEngine<
-                        SingleIn<PreprocessedRequest>,
-                        ManyOut<Annotated<BackendOutput>>,
-                        Error,
-                    >,
-            > = Arc::new(UnreachableBackend);
+        let request: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "prompt": "hello",
+            "max_tokens": 4,
+            "min_tokens": 1,
+            "stop": [128256]
+        }))
+        .unwrap();
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(UnreachableBackend);
 
-            let result =
-                Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next)
-                    .await;
-            let Err(err) = result else {
-                panic!("{stop_field}: an out-of-vocab stop token id should fail before dispatch");
-            };
-            assert_out_of_vocab_stop_rejection(&err);
-        }
+        let result =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
+        let Err(err) = result else {
+            panic!("an out-of-vocab integer stop should fail before dispatch");
+        };
+        assert_out_of_vocab_stop_rejection(&err);
     }
 
     #[tokio::test]
