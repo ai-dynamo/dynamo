@@ -1,0 +1,616 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: XPU-Base-Image-Watch
+
+# ============================================================================
+# Watches vllm/vllm-openai-xpu on Docker Hub and opens a PR adopting a new
+# release, licence baseline included.
+# ============================================================================
+# This workflow does NOT build or test anything. It opens a PR, and
+# pr-xpu-heterogeneous.yaml takes it from there: container/context.yaml is
+# listed under the `core` filter in .github/filters.yaml (line 166), and
+# build-xpu runs when `core` or `vllm` is true, so the PR builds the XPU image
+# and runs both heterogeneous tests on its own.
+#
+# Building here instead would duplicate build-xpu and occupy the single global
+# xpu-heterog-hardware slot twice to learn the same thing once.
+#
+# ---------------------------------------------------------------------------
+# WHY THE LICENCE BASELINE IS RE-CAPTURED IN THE SAME PR
+# ---------------------------------------------------------------------------
+# The licences stage subtracts a stored inventory of the base image before
+# checking licences, and the subtraction matches on (name, version). Bump the
+# tag alone and every package whose version moved between releases stops
+# subtracting, reads as net-new, and trips either the deny list or
+# `unknown = "deny"` in container/compliance/policy/licenses.toml. The gate at
+# container/templates/compliance.Dockerfile:125 then fails the build, so
+# build-xpu goes red on a paperwork error and no test ever runs.
+#
+# That is the whole reason this is a workflow and not a one-line sed. See
+# .github/XPU_VLLM_VERSION_UPDATE_README.md for the long-form explanation and
+# the by-hand equivalent of every step below.
+#
+# ---------------------------------------------------------------------------
+# THREE JOBS, AND WHY THE CREDENTIAL ONLY APPEARS IN THE LAST ONE
+# ---------------------------------------------------------------------------
+# detect (cheap) -> capture (heavy) -> commit (writes).
+#
+# detect and capture both run repository code at a ref a dispatcher can choose,
+# so neither may hold a write-capable token: persisting the PAT there would let
+# anyone able to dispatch this workflow escalate to whatever that PAT reaches.
+# They hand their results to `commit` as outputs and an artifact instead, and
+# `commit` checks out fresh with the PAT and runs no repository Python.
+# Same split, and the same reasoning, as auto-dep-upgrade-trigger.yml.
+
+on:
+  schedule:
+    # 07:41 UTC daily. Deliberately clear of the other scheduled jobs that
+    # touch this hardware or this repo: nightly-xpu-heterogeneous.yaml at 23:00,
+    # auto-dep-upgrade-trigger.yml at 10:00, sync-upstream.yaml at 06:17.
+    # Off-round minute on purpose -- GitHub delays cron that fires exactly on
+    # the hour, when everyone else's jobs are queued.
+    - cron: "41 7 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Release tag to adopt, e.g. v0.31.0. Leave empty to follow whatever
+          Docker Hub currently publishes as `latest`.
+        required: false
+        type: string
+        default: ''
+      runner:
+        description: >-
+          Runner for the syft scan. Needs docker+buildx, ~15GB free disk and
+          network to Docker Hub. The image is ~5GB, so GitHub-hosted
+          ubuntu-latest is likely too small.
+        required: false
+        type: string
+        default: 'xpu-heterogeneous-ubuntu-latest'
+      dry_run:
+        description: 'Run the scan and the edit, then stop. Pushes nothing, opens no PR.'
+        required: false
+        type: boolean
+        default: false
+      force:
+        description: 'Re-capture even when the digest already matches what is baselined.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Own group, NOT xpu-heterog-hardware. The syft scan needs disk and network but
+# no XPU device, so holding the hardware mutex would block the test pipeline for
+# a scan that cannot use the hardware anyway.
+#
+# The cost of staying out: on a self-hosted runner shared with build-xpu, a scan
+# can contend for DISK with a concurrent build, and build-xpu already documents
+# per-run disk growth on that pool. If that bites, the fix is to join
+# xpu-heterog-hardware here and accept the queueing.
+concurrency:
+  group: xpu-base-image-watch
+  cancel-in-progress: false
+
+env:
+  XPU_IMAGE: vllm/vllm-openai-xpu
+  # The XPU pipeline builds linux/amd64 only (xpu-heterogeneous-run.yml:477),
+  # and the stored inventory covers that platform alone. Both facts have to
+  # agree or baseline_stem.py fails; see its --arches note in the capture job.
+  PLATFORM: linux/amd64
+  MANIFEST: container/compliance/base_sboms/manifest.json
+
+jobs:
+
+  # ==========================================================================
+  # DETECT -- is there a newer release than the one we baselined?
+  # ==========================================================================
+  # Cheap and credential-free, so the heavy runner is never occupied when there
+  # is nothing to do.
+  detect:
+    name: detect
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      proceed:   ${{ steps.plan.outputs.proceed }}
+      version:   ${{ steps.resolve.outputs.version }}
+      digest:    ${{ steps.resolve.outputs.digest }}
+      branch:    ${{ steps.plan.outputs.branch }}
+    steps:
+      # No explicit ref: a scheduled run is always the default branch, while a
+      # dispatch runs the code from the ref you dispatched -- which is what
+      # makes a change to this workflow testable before it merges.
+      #
+      # persist-credentials: false because this job runs repository Python at a
+      # caller-chosen ref. It needs no write access: Docker Hub is public and
+      # ls-remote only reads.
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve the candidate release
+        id: resolve
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          # One page covers it -- the repo publishes ~32 tags -- but follow
+          # `next` anyway so this does not silently truncate as tags accumulate.
+          curl -sS --max-time 60 \
+            "https://hub.docker.com/v2/repositories/${XPU_IMAGE}/tags?page_size=100" \
+            > /tmp/tags.json
+          python3 -c "import json; json.load(open('/tmp/tags.json'))" \
+            || { echo "::error::Docker Hub returned something that is not JSON"; exit 1; }
+
+          # -I isolates the interpreter: this parses data fetched off the
+          # network, and -I stops a stray module in the CWD being importable.
+          read -r VERSION DIGEST <<< "$(python3 -I - "$REQUESTED" <<'PY'
+          import json, re, sys
+          requested = sys.argv[1].strip()
+          tags = json.load(open('/tmp/tags.json'))['results']
+          by_name = {t['name']: t['digest'] for t in tags}
+          RELEASE = re.compile(r'^v\d+\.\d+\.\d+(rc\d+)?$')
+
+          if requested:
+              # An explicitly dispatched version wins, but it must exist and
+              # must look like a release -- otherwise a typo would silently
+              # adopt nothing, or adopt `nightly`.
+              if requested not in by_name:
+                  sys.exit(f"requested tag {requested!r} is not published")
+              if not RELEASE.fullmatch(requested):
+                  sys.exit(f"requested tag {requested!r} is not a release tag")
+              print(requested, by_name[requested])
+              raise SystemExit(0)
+
+          # Follow `latest`, then name it. `latest` and the newest vX.Y.Z share
+          # a digest; `nightly` carries a different one, so this cannot pick up
+          # a nightly build. Release candidates are accepted if upstream ever
+          # starts publishing them -- today it publishes none.
+          if 'latest' not in by_name:
+              sys.exit("no `latest` tag published")
+          target = by_name['latest']
+          named = sorted(n for n, d in by_name.items()
+                         if d == target and RELEASE.fullmatch(n))
+          if not named:
+              sys.exit(f"`latest` ({target[:15]}...) matches no vX.Y.Z tag; "
+                       "inspect the tag list by hand rather than guessing")
+          print(named[0], target)
+          PY
+          )"
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}"   >> "$GITHUB_OUTPUT"
+          echo "Candidate: ${XPU_IMAGE}:${VERSION} (${DIGEST})"
+
+      - name: Compare against the baselined digest
+        id: plan
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          DIGEST:  ${{ steps.resolve.outputs.digest }}
+          FORCE:   ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          # Compared by DIGEST, not by version string: this asks "is the
+          # published image the one we actually scanned?", which stays correct
+          # even if a baseline is ever captured out of band.
+          BASELINED="$(python3 -I - <<'PY'
+          import json, os
+          m = json.load(open(os.environ['MANIFEST']))
+          rows = [e for e in m.get('entries', [])
+                  if e.get('from_image') == os.environ['XPU_IMAGE']
+                  and e.get('platform') == os.environ['PLATFORM']]
+          if len(rows) != 1:
+              raise SystemExit(f"expected exactly 1 manifest row, found {len(rows)}")
+          print(f"{rows[0]['from_digest']} {rows[0].get('from_tag','?')}")
+          PY
+          )"
+          BASELINED_DIGEST="${BASELINED%% *}"
+          BASELINED_TAG="${BASELINED##* }"
+
+          echo "Published : ${DIGEST} (${VERSION})"
+          echo "Baselined : ${BASELINED_DIGEST} (${BASELINED_TAG})"
+
+          BRANCH="deps/xpu-vllm-${VERSION}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### 🔎 XPU base image check"
+            echo "| | Tag | Digest |"
+            echo "|---|---|---|"
+            printf '| Published | `%s` | `%s` |\n' "${VERSION}" "${DIGEST}"
+            printf '| Baselined | `%s` | `%s` |\n' "${BASELINED_TAG}" "${BASELINED_DIGEST}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${DIGEST}" = "${BASELINED_DIGEST}" ] && [ "${FORCE}" != "true" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "=> up to date; nothing to do" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Idempotency: a branch from an earlier run means the PR already
+          # exists (or was closed deliberately). Re-pushing would either be a
+          # no-op or reopen an argument someone already settled.
+          if git ls-remote --heads \
+               "https://github.com/${GITHUB_REPOSITORY}.git" "${BRANCH}" \
+               | grep -q "${BRANCH}"; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "=> branch ${BRANCH} already exists on origin; skipping" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          echo "=> adopting ${VERSION} on ${BRANCH}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================================
+  # CAPTURE -- scan the new image and rewrite the licence inventory.
+  # ==========================================================================
+  # The slow job. Still credential-free: it runs repository Python, and hands
+  # its output to `commit` as an artifact.
+  capture:
+    name: capture baseline
+    needs: detect
+    if: needs.detect.outputs.proceed == 'true'
+    runs-on: ${{ inputs.runner || 'xpu-heterogeneous-ubuntu-latest' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      stem: ${{ steps.capture.outputs.stem }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          persist-credentials: false
+
+      - name: Install tooling
+        run: |
+          set -euo pipefail
+          docker buildx version
+          # container/compliance/overrides.py imports yaml.
+          python3 -c 'import yaml' 2>/dev/null \
+            || python3 -m pip install --quiet --user --break-system-packages pyyaml \
+            || python3 -m pip install --quiet --user pyyaml
+          mkdir -p "${RUNNER_TEMP}/bin"
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b "${RUNNER_TEMP}/bin"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+
+      - name: Report free disk before the scan
+        run: |
+          df -h . || true
+          docker system df || true
+
+      # Anonymous pulls of a ~5GB image run into Docker Hub's rate limit, which
+      # surfaces as an opaque registry error mid-scan. Best-effort: if the
+      # secrets are not configured the scan still works, just rate-limited.
+      # Guarded inside the shell, not with an `if:`. A step's `if:` cannot read
+      # that step's own `env:`, and the `secrets` context is not available in a
+      # step `if:` at all -- so either form of condition here would be dead.
+      - name: Log in to Docker Hub
+        env:
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+        run: |
+          if [ -z "${DOCKERHUB_USER:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "::notice::Docker Hub credentials not configured; scanning anonymously (rate-limited)"
+            exit 0
+          fi
+          echo "${DOCKERHUB_TOKEN}" \
+            | docker login --username "${DOCKERHUB_USER}" --password-stdin
+
+      - name: Capture the baseline SBOM
+        id: capture
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          REF="${XPU_IMAGE}:${VERSION}"
+
+          # --from and --baseline are the SAME reference on purpose: it declares
+          # the whole base image as upstream's compliance floor. Two consequences,
+          # both wanted. The script skips its second syft scan, because the
+          # difference between an image and itself is empty by construction. And
+          # the policy check it runs on that difference has nothing to examine,
+          # so this step cannot reject a new upstream release -- the licence
+          # policy is still enforced, but later, by the real build in the PR.
+          #
+          # --prune-superseded deletes the previous tag's inventory file and
+          # drops its manifest row. Without it the upsert key (which includes
+          # from_tag) never matches, so the old row is left behind.
+          python3 container/compliance/base_sboms/capture_baseline_sbom.py \
+            --from "$REF" \
+            --baseline "$REF" \
+            --platform "${PLATFORM}" \
+            --prune-superseded \
+            -v
+
+          # The stem is read back out of the manifest, not scraped from the logs.
+          #
+          # --arches amd64 is REQUIRED. The default is amd64,arm64 and the script
+          # fails if either is missing; the XPU inventory is amd64-only, so the
+          # default errors with "expected exactly 1 arm64 row ... found 0".
+          STEM="$(python3 .github/scripts/dep_upgrade/baseline_stem.py \
+                    --image "${XPU_IMAGE}" \
+                    --tag "${VERSION}" \
+                    --arches "${PLATFORM##*/}")"
+          test -n "${STEM}"
+          echo "stem=${STEM}" >> "$GITHUB_OUTPUT"
+          echo "Captured baseline stem: ${STEM}"
+
+          {
+            echo "### 📋 Licence baseline re-captured"
+            printf '| Image | `%s` |\n' "${REF}"
+            printf '| Stem | `%s` |\n' "${STEM}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report free disk after the scan
+        if: always()
+        run: df -h . || true
+
+      - name: Upload the refreshed inventory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: xpu-baseline-${{ needs.detect.outputs.version }}
+          path: |
+            container/compliance/base_sboms/manifest.json
+            container/compliance/base_sboms/*.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # ==========================================================================
+  # COMMIT -- edit the pin, push the branch, open the PR.
+  # ==========================================================================
+  # The only job holding a write credential, and it runs no repository Python.
+  #
+  # SYNC_UPSTREAM_PAT rather than GITHUB_TOKEN, and this is load-bearing: GitHub
+  # does not start workflows for events raised by GITHUB_TOKEN, so a PR opened
+  # with it would never trigger pr-xpu-heterogeneous.yaml and the whole point of
+  # this workflow would be lost. sync-upstream.yaml uses this same secret to
+  # open PRs that do start the XPU suite, which is why it is the one picked here.
+  commit:
+    name: commit + open PR
+    needs: [detect, capture]
+    if: needs.detect.outputs.proceed == 'true' && inputs.dry_run != true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_UPSTREAM_PAT }}
+
+      # Artifacts carry additions, not deletions. Without this the inventory
+      # file that --prune-superseded removed would survive into the commit.
+      - name: Clear stale inventory files
+        run: rm -f container/compliance/base_sboms/*.cdx.json
+
+      - name: Download the refreshed inventory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: xpu-baseline-${{ needs.detect.outputs.version }}
+          path: container/compliance/base_sboms
+
+      - name: Bump the pin in container/context.yaml
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+          STEM:    ${{ needs.capture.outputs.stem }}
+        run: |
+          set -euo pipefail
+          test -n "${STEM}"
+
+          # Block-anchored, NOT a search-and-replace, because the old version
+          # string legitimately appears elsewhere in this file:
+          #   * the `cpu:` block carries its own runtime_image_tag, which has
+          #     happened to hold the same version -- a global replace would
+          #     silently bump vllm/vllm-openai-cpu too;
+          #   * `vllm_omni_ref: "v0.29.0rc1"` contains the version as a
+          #     SUBSTRING, so a careless regex rewrites it into a vLLM-Omni ref
+          #     that may not exist.
+          #
+          # Line-based rather than a PyYAML round-trip on purpose: re-emitting
+          # this file would discard every explanatory comment in it.
+          python3 - <<'PY'
+          import os, re, sys
+          from pathlib import Path
+
+          path = Path("container/context.yaml")
+          # newline="" on both ends, and the original line ending is reused
+          # below. Without it Python's universal-newline handling rewrites every
+          # line ending in the file, which would turn a 3-line bump into a
+          # whole-file diff and defeat the 3-line assertion after this script.
+          with path.open("r", encoding="utf-8", newline="") as fh:
+              lines = fh.readlines()
+          version, stem = os.environ["VERSION"], os.environ["STEM"]
+          want = {
+              "base_image_tag": version,
+              "runtime_image_tag": version,
+              "baseline_sbom": stem,
+          }
+
+          def find_block(start, header, indent):
+              """Index of `header` at `indent`, searching only inside its parent."""
+              pat = re.compile(rf"^{' ' * indent}{re.escape(header)}\s*$")
+              for i in range(start, len(lines)):
+                  # Left the parent block.
+                  if indent and lines[i].strip() and not lines[i].startswith(" " * indent):
+                      break
+                  if pat.match(lines[i]):
+                      return i
+              sys.exit(f"no {header!r} block at indent {indent}")
+
+          vllm = find_block(0, "vllm:", 0)
+          xpu = find_block(vllm + 1, "xpu:", 2)
+
+          seen = {}
+          for i in range(xpu + 1, len(lines)):
+              line = lines[i]
+              # End of the xpu: block. Its keys sit at FOUR spaces, so content
+              # that is not indented four spaces is the next key at depth 2 --
+              # `cpu:` or `vllm_omni_ref:`, both of which must stay untouched.
+              if line.strip() and not line.startswith("    "):
+                  break
+              m = re.match(r"^(\s+)([A-Za-z_][A-Za-z_0-9]*):\s*(\S.*?)\s*$", line)
+              if not m:
+                  continue
+              pad, key, old = m.groups()
+              if key in want:
+                  nl = "\r\n" if line.endswith("\r\n") else "\n"
+                  lines[i] = f"{pad}{key}: {want[key]}{nl}"
+                  seen[key] = (old, want[key])
+
+          missing = set(want) - set(seen)
+          if missing:
+              sys.exit(f"keys not found in the vllm/xpu block: {sorted(missing)}")
+
+          with path.open("w", encoding="utf-8", newline="") as fh:
+              fh.writelines(lines)
+          for key, (old, new) in sorted(seen.items()):
+              print(f"{key}: {old} -> {new}")
+          PY
+
+          echo "::group::context.yaml diff"
+          git --no-pager diff -- container/context.yaml
+          echo "::endgroup::"
+
+          # The bump is exactly three lines. More means the edit strayed out of
+          # the vllm/xpu block; fewer means it silently did not apply. Either
+          # way, do not open a PR on it.
+          CHANGED="$(git diff --numstat -- container/context.yaml | awk '{print $1}')"
+          if [ "${CHANGED:-0}" != "3" ]; then
+            echo "::error::expected exactly 3 changed lines in container/context.yaml, got ${CHANGED:-0}"
+            exit 1
+          fi
+
+      - name: Commit and push the branch
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+          STEM:    ${{ needs.capture.outputs.stem }}
+          BRANCH:  ${{ needs.detect.outputs.branch }}
+          DIGEST:  ${{ needs.detect.outputs.digest }}
+        run: |
+          set -euo pipefail
+          git config user.name  "dynamo-ops"
+          git config user.email "170655669+dynamo-ops@users.noreply.github.com"
+          git switch -c "${BRANCH}"
+
+          git add container/context.yaml
+          # -A so the pruned inventory file is staged as a deletion, not left behind.
+          git add -A container/compliance/base_sboms/
+          git status --short
+
+          git commit -s -m "chore(xpu): bump vllm-openai-xpu to ${VERSION}
+
+          Re-captures the amd64 licence baseline in the same commit as the tag
+          bump. The licences stage subtracts on (name, version), so bumping the
+          tag alone leaves every moved package unsubtracted and fails the policy
+          gate in compliance.Dockerfile before any test can run.
+
+          Image digest: ${DIGEST}
+          Baseline stem: ${STEM}
+
+          Opened by .github/workflows/xpu-base-image-watch.yaml"
+
+          # Fully-qualified refspec: a bare name can resolve to the wrong ref.
+          git push origin "refs/heads/${BRANCH}"
+
+      - name: Open the PR
+        id: open
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_PAT }}
+          VERSION:  ${{ needs.detect.outputs.version }}
+          STEM:     ${{ needs.capture.outputs.stem }}
+          BRANCH:   ${{ needs.detect.outputs.branch }}
+          DIGEST:   ${{ needs.detect.outputs.digest }}
+          RUN_URL:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/pr-body.md" <<EOF
+          Adopts \`${XPU_IMAGE}:${VERSION}\` as the XPU base and runtime image.
+
+          | | |
+          |---|---|
+          | Image digest | \`${DIGEST}\` |
+          | New licence baseline | \`${STEM}\` |
+          | Platform | \`${PLATFORM}\` |
+          | Capture run | ${RUN_URL} |
+
+          ### What changed
+
+          - \`container/context.yaml\` — \`base_image_tag\`, \`runtime_image_tag\`
+            and \`baseline_sbom\` in the \`vllm: xpu:\` block. Three lines, verified
+            as exactly three before this PR was opened.
+          - \`container/compliance/base_sboms/\` — the inventory for the new image,
+            with the superseded one deleted.
+
+          ### Why the baseline moves too
+
+          The licences stage subtracts a stored inventory of the base image, and
+          the subtraction matches on (name, version). Bumping the tag alone leaves
+          every package whose version moved unsubtracted, which reads as net-new
+          and trips the policy gate at \`container/templates/compliance.Dockerfile\`
+          line 125 — so \`build-xpu\` would fail on a licence error and no test
+          would run. Re-capturing in the same commit is what keeps the gate honest.
+
+          ### What to check before merging
+
+          1. \`xpu-status-check\` is green — that is the real signal that this
+             release works on XPU.
+          2. The \`container/context.yaml\` diff touches only the \`xpu:\` block.
+          3. The baseline re-capture is a compliance statement about what we
+             treat as upstream's responsibility, so it wants a human read.
+
+          Not auto-merged on purpose. Opened by
+          \`.github/workflows/xpu-base-image-watch.yaml\`.
+          EOF
+
+          pr_url="$(gh pr create --repo "${GITHUB_REPOSITORY}" \
+            --base main \
+            --head "${BRANCH}" \
+            --title "chore(xpu): bump vllm-openai-xpu to ${VERSION}" \
+            --body-file "${RUNNER_TEMP}/pr-body.md")"
+          echo "Opened ${pr_url}"
+          echo "### 🚀 PR opened" >> "$GITHUB_STEP_SUMMARY"
+          echo "${pr_url}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================================
+  # DRY RUN -- same edit, nothing pushed.
+  # ==========================================================================
+  # A separate job rather than more `if:` on `commit`, so a rehearsal cannot
+  # reach a step that holds the PAT even by accident.
+  dry-run-report:
+    name: dry run report
+    needs: [detect, capture]
+    if: needs.detect.outputs.proceed == 'true' && inputs.dry_run == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Report what would have happened
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+          STEM:    ${{ needs.capture.outputs.stem }}
+          BRANCH:  ${{ needs.detect.outputs.branch }}
+        run: |
+          {
+            echo "### 🧪 Dry run — nothing was pushed"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            printf '| Would adopt | `%s:%s` |\n' "${XPU_IMAGE}" "${VERSION}"
+            printf '| Would set baseline_sbom to | `%s` |\n' "${STEM}"
+            printf '| Would push branch | `%s` |\n' "${BRANCH}"
+            echo ""
+            echo "The baseline SBOM was captured and uploaded as an artifact."
+            echo "Re-run without \`dry_run\` to open the PR."
+          } >> "$GITHUB_STEP_SUMMARY"
