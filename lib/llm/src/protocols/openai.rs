@@ -205,6 +205,9 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             length_penalty: None,
             guided_decoding,
             include_stop_str_in_output,
+            bad_words: self
+                .common_ext()
+                .and_then(|common| common.bad_words.clone()),
         })
     }
 }

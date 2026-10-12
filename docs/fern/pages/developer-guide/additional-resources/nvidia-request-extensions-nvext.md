@@ -239,6 +239,42 @@ worker representation. Older workers retain their existing constraint handling b
 new boolean modifier fields. New workers accept requests from older frontends that omit these
 fields. This preserves the wire representation, not a per-request modifier-enforcement guarantee.
 
+## Root-Level Word Exclusions
+
+**Experimental.** Development builds accept `bad_words` at the request root on
+`/v1/chat/completions` and `/v1/completions` for workers advertising vLLM token-input
+generation support. This is a vLLM request extension, not an `nvext` property.
+
+```json
+{
+  "model": "your-model-name",
+  "messages": [{"role": "user", "content": "Reply with exactly the word hello."}],
+  "bad_words": ["Hello", "hello"]
+}
+```
+
+The vLLM engine tokenizes each exclusion, including its space-prefixed form, and
+prevents completion of the resulting token sequence. Exclusions are case-sensitive
+and tokenizer-dependent, not a general substring filter. Blocking `Hello` and
+`hello` still permits `HELLO`. The same constraint applies to unary and streaming
+generation.
+
+- Supply an array of nonempty strings. Omission adds no request-level restriction;
+  an empty array explicitly clears word exclusions. `null`, non-string items, and
+  empty string entries reject before streaming headers. Whitespace-only entries
+  remain subject to the engine's tokenizer validation.
+- Do not combine nonempty `bad_words` with nonempty `bad_words_token_ids`. Dynamo
+  rejects the combination because engine tokenization would replace the token-ID
+  exclusions. Empty text exclusions preserve the token-ID-only extension.
+- Workers without the advertised vLLM capability reject this opt-in field rather
+  than silently dropping it. Requests omitting it keep their existing behavior.
+- Tokenization and engine validation can fail before generation. Errors after
+  streaming headers appear as error events; HTTP 200 alone does not mean success.
+
+The real-server regression covers the standard token-input vLLM path with a pinned
+small text model. It does not establish support for text-input workers, other
+backends, or every tokenizer and deployment mode.
+
 ## Agent Hints
 
 The `agent_hints` sub-object carries per-request hints that the router uses for scheduling, load balancing, and KV cache optimization.

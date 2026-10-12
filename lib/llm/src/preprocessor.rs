@@ -1985,6 +1985,48 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Validate word exclusions and require a worker that can own their semantics.
+    ///
+    /// Omitted words leave existing requests unchanged. Explicit lists require a
+    /// published vLLM token-input capability, including on mixed-version worker
+    /// sets; unknown capability fails closed for this opt-in feature.
+    /// Empty entries reject before streaming headers; whitespace-only entries
+    /// retain the engine's tokenizer-dependent validation. Nonempty
+    /// text and token-ID exclusions cannot coexist because vLLM's tokenizer
+    /// replaces its internal token-ID list. Returns an invalid-argument error
+    /// before dispatch without mutating either input.
+    fn validate_bad_words(
+        sampling: &crate::protocols::common::SamplingOptions,
+        extra_fields: Option<&HashMap<String, serde_json::Value>>,
+        runtime: &crate::local_model::runtime_config::ModelRuntimeConfig,
+    ) -> Result<()> {
+        use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+
+        let Some(words) = &sampling.bad_words else {
+            return Ok(());
+        };
+        if words.iter().any(String::is_empty) {
+            return Err(invalid_argument_error(
+                "bad_words cannot contain an empty string",
+            ));
+        }
+        if !runtime.supports_runtime_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY) {
+            return Err(invalid_argument_error(
+                "bad_words requires a worker advertising vLLM token-input generation support",
+            ));
+        }
+        let has_token_exclusions = extra_fields
+            .and_then(|fields| fields.get("bad_words_token_ids"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|ids| !ids.is_empty());
+        if !words.is_empty() && has_token_exclusions {
+            return Err(invalid_argument_error(
+                "nonempty bad_words and bad_words_token_ids cannot be combined",
+            ));
+        }
+        Ok(())
+    }
+
     fn sampling_passthrough_args<R: NvExtProvider>(
         request: &R,
     ) -> Option<serde_json::Map<String, serde_json::Value>> {
@@ -3190,7 +3232,13 @@ impl OpenAIPreprocessor {
             ));
         }
         builder.stop_conditions(stop_conditions);
-        builder.sampling_options(request.extract_sampling_options()?);
+        let sampling_options = request.extract_sampling_options()?;
+        Self::validate_bad_words(
+            &sampling_options,
+            request.unsupported_fields(),
+            &self.runtime_config,
+        )?;
+        builder.sampling_options(sampling_options);
 
         // Some parsers rely on `<|tool_call>`, `<|channel>`, etc. being
         // visible in the decoded text. The default `skip_special_tokens=true`
@@ -8635,6 +8683,50 @@ mod tests {
         FinishReason, Role,
     };
     use std::path::PathBuf;
+
+    /// Opt-in text exclusions require an identified owner and cannot overwrite
+    /// the existing token-ID extension; omitted requests retain old behavior.
+    #[test]
+    fn bad_words_requires_capable_worker_and_preserves_token_exclusions() {
+        use crate::local_model::runtime_config::{
+            ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        };
+        let mut runtime = ModelRuntimeConfig::default();
+        let absent = SamplingOptions::default();
+        assert!(OpenAIPreprocessor::validate_bad_words(&absent, None, &runtime).is_ok());
+        let mut sampling = SamplingOptions {
+            bad_words: Some(vec!["hello".into()]),
+            ..Default::default()
+        };
+        assert!(
+            OpenAIPreprocessor::validate_bad_words(&sampling, None, &runtime)
+                .unwrap_err()
+                .to_string()
+                .contains("vLLM")
+        );
+        runtime
+            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
+            .unwrap();
+        assert!(OpenAIPreprocessor::validate_bad_words(&sampling, None, &runtime).is_ok());
+        sampling.bad_words = Some(vec![String::new()]);
+        assert!(
+            OpenAIPreprocessor::validate_bad_words(&sampling, None, &runtime)
+                .unwrap_err()
+                .to_string()
+                .contains("empty string")
+        );
+        sampling.bad_words = Some(vec!["hello".into()]);
+        let extras = HashMap::from([("bad_words_token_ids".into(), serde_json::json!([[10, 11]]))]);
+        assert!(
+            OpenAIPreprocessor::validate_bad_words(&sampling, Some(&extras), &runtime)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be combined")
+        );
+        sampling.bad_words = Some(vec![]);
+        assert!(OpenAIPreprocessor::validate_bad_words(&sampling, Some(&extras), &runtime).is_ok());
+        assert!(OpenAIPreprocessor::validate_bad_words(&absent, Some(&extras), &runtime).is_ok());
+    }
 
     #[tokio::test]
     async fn eight_family_routes_and_tool_suppression() {

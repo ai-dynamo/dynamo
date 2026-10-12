@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Real HTTP regression for vLLM-style structured_outputs on both endpoints.
+"""Real HTTP regressions for vLLM output constraints on both endpoints.
 
 Run the same constraints on direct vLLM and Dynamo backed by that installed vLLM.
 The constrained answer differs from the prompt, so HTTP 200 or ordinary model
@@ -177,12 +177,14 @@ def structured_server(request, tmp_path):
         yield base, tmp_path
 
 
-def _generate(base, path, payload, evidence):
-    """Save raw HTTP evidence and return assembled content from a successful request.
+def _generate(base, path, payload, evidence, expected_status=200):
+    """Save raw HTTP evidence and return content, or None for an expected HTTP error.
 
     Streaming must end with [DONE] and a stop finish reason; malformed chunks,
     error events, truncation and non-200 statuses fail rather than being normalized
     away. Only content fragments are assembled, not IDs, timestamps or tool calls.
+    For pre-header rejection checks, pass expected_status=400: require JSON rather
+    than treating HTTP 200 with an SSE error as equivalent to an HTTP error.
     """
     evidence.mkdir()
     (evidence / "request.json").write_text(json.dumps(payload, indent=2))
@@ -194,7 +196,10 @@ def _generate(base, path, payload, evidence):
                 indent=2,
             )
         )
-        assert response.status_code == 200, response.text
+        assert response.status_code == expected_status, response.text
+        if expected_status != 200:
+            assert response.headers["Content-Type"].startswith("application/json")
+            return None
         chat = path == "/v1/chat/completions"
         if not payload["stream"]:
             choice = response.json()["choices"][0]
@@ -329,6 +334,68 @@ def test_structured_outputs_constrain_chat_and_completion(structured_server):
                         assert isinstance(json.loads(result), dict), result
                     else:
                         assert result == "violet", result
+
+
+def test_bad_words_exclude_baseline_words(structured_server):
+    """Prove word exclusions reach sampling on both endpoints and transports.
+
+    The control must emit a banned spelling before the constraint is tested;
+    otherwise ordinary model output could masquerade as enforcement. Empty lists
+    preserve the control and duplicates must not erase the exclusion. Reusing the
+    same pinned real-server fixture keeps direct vLLM and Dynamo comparable.
+    An empty entry must reject before streaming headers, not open an error stream.
+    """
+    base, evidence = structured_server
+    instruction = "Reply with exactly the word hello."
+    for chat in (True, False):
+        endpoint = "chat" if chat else "completion"
+        path = "/v1/chat/completions" if chat else "/v1/completions"
+        payload = {
+            "model": "structured-output-test",
+            "temperature": 0,
+            "seed": 0,
+            "max_tokens": 16,
+            "stream": False,
+        }
+        if chat:
+            payload.update(
+                messages=[{"role": "user", "content": instruction}],
+                chat_template_kwargs={"enable_thinking": False},
+            )
+        else:
+            payload["prompt"] = (
+                f"<|im_start|>user\n{instruction}<|im_end|>\n"
+                "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            )
+        baseline = _generate(
+            base, path, payload, evidence / f"{endpoint}-words-control"
+        )
+        excluded = ["Hello", "hello"]
+        assert any(word in baseline for word in excluded), baseline
+        for stream in (False, True):
+            for name, words in [
+                ("exclude", excluded),
+                ("duplicates", excluded + excluded),
+                ("empty", []),
+            ]:
+                result = _generate(
+                    base,
+                    path,
+                    {**payload, "stream": stream, "bad_words": words},
+                    evidence / f"{endpoint}-words-{name}-{stream}",
+                )
+                if words:
+                    assert result and result != baseline, result
+                    assert all(word not in result for word in excluded), result
+                else:
+                    assert result == baseline, result
+            _generate(
+                base,
+                path,
+                {**payload, "stream": stream, "bad_words": [""]},
+                evidence / f"{endpoint}-words-empty-entry-{stream}",
+                expected_status=400,
+            )
 
 
 def test_completion_response_format_controls_output(structured_server):

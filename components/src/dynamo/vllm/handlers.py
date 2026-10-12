@@ -817,6 +817,11 @@ def build_sampling_params(
     Structured-output constraints and modifiers are delivered through
     ``StructuredOutputsParams``. This does not compile a grammar or guarantee
     modifier enforcement: the selected vLLM backend owns those effects.
+
+    ``bad_words`` stays as text until the engine's tokenizer expands word-start
+    and space-prefixed forms. The standard Dynamo launch initializes that
+    tokenizer even for token-input requests. Setting this field proves delivery,
+    not enforcement; engine generation must consume it before claiming support.
     """
     if enable_rl and _is_token_in_request(request):
         # Use vLLM defaults without model generation_config overlays.

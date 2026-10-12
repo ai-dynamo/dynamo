@@ -63,8 +63,9 @@ pub mod postprocessor;
 pub mod preprocessor;
 pub mod timing;
 
-/// SamplingOptionsProvider is a trait that allows the caller to extract the sampling options from
-/// the object that implements it. This will mutate the object.
+/// Extract worker-bound sampling choices without consuming the request.
+/// Implementations return an error when their request-level validation fails;
+/// backend capability and engine-specific validation happen separately.
 pub trait SamplingOptionsProvider {
     fn extract_sampling_options(&self) -> Result<SamplingOptions>;
 }
@@ -460,6 +461,12 @@ pub struct SamplingOptions {
 
     /// Guided Decoding Options
     pub guided_decoding: Option<GuidedDecodingOptions>,
+
+    /// Text exclusions for a capable vLLM worker to tokenize and enforce.
+    /// Omitted on the wire when absent, preserving older/default requests.
+    /// Empty explicitly clears exclusions; this is not a token-ID constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bad_words: Option<Vec<String>>,
 }
 
 /// Guided Decoding Options
