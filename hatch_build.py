@@ -92,11 +92,11 @@ class VersionWriterHook(BuildHookInterface):
         if not git_commit:
             message = (
                 f"Could not determine the source commit: set {GIT_COMMIT_ENV} or "
-                'build from a git checkout. Writing __git_commit__ = "".'
+                "build from a git checkout."
             )
             if os.environ.get("CI", "").strip().lower() in ("1", "true", "yes"):
                 raise RuntimeError(message)
-            self.app.display_warning(message)
+            self.app.display_warning(f'{message} Writing __git_commit__ = "".')
 
         version_content = f'#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n#  SPDX-License-Identifier: Apache-2.0\n\n# This file is auto-generated at build time\n__version__ = "{full_version}"\n__git_commit__ = "{git_commit}"\n'
 
