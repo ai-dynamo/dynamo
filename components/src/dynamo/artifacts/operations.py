@@ -292,9 +292,7 @@ class ArtifactService:
     async def _deliver(self, data, target, operation_id, started):
         started.set()
         try:
-            fields = await asyncio.wait_for(
-                self._transfer_and_verify(data, target), self.timeout_seconds
-            )
+            fields = await self._bounded_transfer(data, target)
             # Keep the fenced commit owned by this task through cancellation.
             await self._finish(operation_id, "ready", **fields)
         except asyncio.CancelledError:
@@ -315,6 +313,16 @@ class ArtifactService:
             await self._finish(operation_id, "failed", error_code=code)
         finally:
             self._release_source(len(data))
+
+    async def _bounded_transfer(self, data, target):
+        child = asyncio.create_task(self._transfer_and_verify(data, target))
+        try:
+            return await asyncio.wait_for(asyncio.shield(child), self.timeout_seconds)
+        except BaseException:
+            child.cancel()
+            # Repeated caller cancellation cannot detach transfer cleanup.
+            await _settle(asyncio.gather(child, return_exceptions=True))
+            raise
 
     async def _transfer_and_verify(self, data, target):
         async with self._semaphore:
