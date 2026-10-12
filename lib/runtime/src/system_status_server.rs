@@ -490,10 +490,12 @@ fn is_resource_exhaustion_error(error: &io::Error) -> bool {
     false
 }
 
-/// Readiness handler (`/health`) with optional active health checking.
+/// Readiness handler (`/health`) with optional active health checking. A
+/// worker with validation gates is not ready until they pass.
 #[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
-    worker_health_response(&state)
+    let drt = state.drt();
+    worker_health_response(&state, drt.worker_validation().map(Arc::as_ref))
 }
 
 /// Liveness handler (`/live`). Reports the same engine health as `/health`
@@ -501,16 +503,20 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 /// `/health` without changing liveness.
 #[tracing::instrument(skip_all, level = "trace")]
 async fn live_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
-    worker_health_response(&state)
+    worker_health_response(&state, None)
 }
 
-fn worker_health_response(state: &SystemStatusState) -> (StatusCode, String) {
+fn worker_health_response(
+    state: &SystemStatusState,
+    validation: Option<&crate::validation::WorkerValidation>,
+) -> (StatusCode, String) {
     // Get basic health status
     let system_health = state.drt().system_health();
     let system_health_lock = system_health.lock();
     let (healthy, endpoints) = system_health_lock.get_health_status();
     let uptime = Some(system_health_lock.uptime());
     drop(system_health_lock);
+    let healthy = healthy && validation.is_none_or(|validation| validation.is_released());
 
     let healthy_string = if healthy { "ready" } else { "notready" };
     let status_code = if healthy {
@@ -519,11 +525,14 @@ fn worker_health_response(state: &SystemStatusState) -> (StatusCode, String) {
         StatusCode::SERVICE_UNAVAILABLE
     };
 
-    let response = json!({
+    let mut response = json!({
         "status": healthy_string,
         "uptime": uptime,
         "endpoints": endpoints,
     });
+    if let Some(validation) = validation {
+        response["validation"] = validation.status_json();
+    }
 
     tracing::trace!("Response {}", response.to_string());
 
@@ -1834,6 +1843,112 @@ mod integration_tests {
             )
             .await;
         }
+    }
+
+    /// An engine that answers nothing; only its registration matters.
+    struct StubEngine;
+
+    #[async_trait::async_trait]
+    impl
+        crate::engine::AsyncEngine<
+            crate::pipeline::SingleIn<serde_json::Value>,
+            crate::pipeline::ManyOut<crate::protocols::annotated::Annotated<serde_json::Value>>,
+            anyhow::Error,
+        > for StubEngine
+    {
+        async fn generate(
+            &self,
+            input: crate::pipeline::SingleIn<serde_json::Value>,
+        ) -> Result<
+            crate::pipeline::ManyOut<crate::protocols::annotated::Annotated<serde_json::Value>>,
+        > {
+            use crate::engine::AsyncEngineContextProvider;
+            let (_data, ctx) = input.into_parts();
+            Ok(crate::pipeline::ResponseStream::new(
+                Box::pin(futures::stream::empty()),
+                ctx.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validation_gates_hold_health_but_not_live() {
+        for (check, released) in [("exit 0", true), ("echo bad >&2; exit 1", false)] {
+            let gates =
+                format!(r#"{{"smoke": {{"exec": ["sh", "-c", "{check}"], "timeout_secs": 5}}}}"#);
+            temp_env::async_with_vars(
+                [
+                    (env_system::DYN_SYSTEM_PORT, Some("0")),
+                    (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
+                    ("DYN_WORKER_VALIDATION_GATES", Some(gates.as_str())),
+                ],
+                async {
+                    let drt = Arc::new(create_test_drt_async().await);
+                    let addr = drt.system_status_server_info().unwrap().socket_addr;
+                    let get = |path: &'static str| async move {
+                        let response = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+                        let status = response.status();
+                        (status, response.json::<serde_json::Value>().await.unwrap())
+                    };
+
+                    // Held until the gates run, which waits for a local engine.
+                    let (status, body) = get("/health").await;
+                    assert_eq!(status, 503, "{body}");
+                    assert_eq!(body["validation"]["gates"]["smoke"]["state"], "pending");
+
+                    drt.local_endpoint_registry()
+                        .register("generate".into(), Arc::new(StubEngine));
+                    let mut body = serde_json::Value::Null;
+                    for _ in 0..100 {
+                        body = get("/health").await.1;
+                        let state = &body["validation"]["gates"]["smoke"]["state"];
+                        if state == "passed" || state == "failed" {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    assert_eq!(get("/health").await.0 == 200, released, "{body}");
+                    if !released {
+                        assert!(
+                            body["validation"]["gates"]["smoke"]["reason"]
+                                .as_str()
+                                .unwrap()
+                                .contains("bad")
+                        );
+                    }
+                    let (status, body) = get("/live").await;
+                    assert_eq!(status, 200, "{body}");
+                    assert!(body.get("validation").is_none(), "{body}");
+                },
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validation_gates_require_the_system_status_server() {
+        temp_env::async_with_vars(
+            [
+                (env_system::DYN_SYSTEM_PORT, Some("-1")),
+                (
+                    "DYN_WORKER_VALIDATION_GATES",
+                    Some(r#"{"smoke": {"exec": ["true"], "timeout_secs": 5}}"#),
+                ),
+            ],
+            async {
+                let error = crate::DistributedRuntime::new(
+                    crate::Runtime::from_current().unwrap(),
+                    crate::distributed::DistributedConfig::process_local(),
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("DYN_SYSTEM_PORT"),
+                    "{error:#}"
+                );
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

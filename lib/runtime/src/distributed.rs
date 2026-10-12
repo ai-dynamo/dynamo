@@ -173,6 +173,9 @@ pub struct DistributedRuntime {
     // Local endpoint registry for in-process calls
     local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry,
 
+    // Worker validation gates; `None` unless DYN_WORKER_VALIDATION_GATES is set
+    worker_validation: Option<Arc<crate::validation::WorkerValidation>>,
+
     // This hierarchy's own metrics registry
     metrics_registry: MetricsRegistry,
 
@@ -249,6 +252,7 @@ impl DistributedRuntime {
         };
 
         let config = crate::config::RuntimeConfig::from_settings()?;
+        let worker_validation = Self::worker_validation_from_env(&config, policy)?;
         let nats_client = match nats_config {
             Some(nc) => Some(
                 nc.connect_with_cancellation(runtime.primary_token())
@@ -340,6 +344,7 @@ impl DistributedRuntime {
             request_plane,
             response_plane,
             local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
+            worker_validation,
             engine_routes: crate::engine_routes::EngineRouteRegistry::new(),
             metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry::new(),
             event_transport_kind,
@@ -405,6 +410,10 @@ impl DistributedRuntime {
             Err(error) => {
                 tracing::error!(%error, "OTLP metrics export is misconfigured; not exporting");
             }
+        }
+
+        if let Some(validation) = &distributed_runtime.worker_validation {
+            distributed_runtime.start_validation_on_first_local_engine(Arc::clone(validation));
         }
 
         // Start health check manager if enabled
@@ -477,6 +486,43 @@ impl DistributedRuntime {
         Ok(distributed_runtime)
     }
 
+    /// Parse worker validation gates, failing startup on any misconfiguration.
+    fn worker_validation_from_env(
+        config: &crate::config::RuntimeConfig,
+        policy: system_status_server::SystemProbePolicy,
+    ) -> Result<Option<Arc<crate::validation::WorkerValidation>>> {
+        let Some(validation) = crate::validation::ValidationConfig::from_env()? else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            config.system_server_enabled(),
+            "worker validation gates hold /health, so they need the system status server; \
+             set DYN_SYSTEM_PORT"
+        );
+        anyhow::ensure!(
+            policy == system_status_server::SystemProbePolicy::Worker,
+            "worker validation gates are not supported when Dynamo runs as a sidecar: \
+             the engine can restart while this process and its verdicts live on"
+        );
+        Ok(Some(crate::validation::WorkerValidation::new(validation)))
+    }
+
+    /// Start the gates once this worker's first local engine is registered,
+    /// which is when a check can reach it.
+    fn start_validation_on_first_local_engine(
+        &self,
+        validation: Arc<crate::validation::WorkerValidation>,
+    ) {
+        let mut registrations = self.local_endpoint_registry.subscribe();
+        let cancel = self.runtime.child_token();
+        tokio::spawn(async move {
+            tokio::select! {
+                Ok(_) = registrations.wait_for(|count| *count > 0) => validation.start(cancel),
+                _ = cancel.cancelled() => {}
+            }
+        });
+    }
+
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
         let config = DistributedConfig::try_from_settings()?;
         Self::new(runtime, config).await
@@ -514,6 +560,12 @@ impl DistributedRuntime {
     // TODO: Don't hand out pointers, instead provide system health related services.
     pub fn system_health(&self) -> Arc<parking_lot::Mutex<SystemHealth>> {
         self.system_health.clone()
+    }
+
+    /// Get the local endpoint registry for in-process endpoint calls
+    /// Worker validation gates, when `DYN_WORKER_VALIDATION_GATES` is set.
+    pub fn worker_validation(&self) -> Option<&Arc<crate::validation::WorkerValidation>> {
+        self.worker_validation.as_ref()
     }
 
     /// Get the local endpoint registry for in-process endpoint calls
