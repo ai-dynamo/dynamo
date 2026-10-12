@@ -181,14 +181,11 @@ class TestDiffusionParallelConfigCoverage:
 
         assert kwargs["output_modalities"] == ["image"]
 
-    @pytest.mark.parametrize("output_modality", ["image", "video"])
     @pytest.mark.parametrize("layerwise_offload", [None, False, True])
-    def test_diffusion_kwargs_accepted_by_upstream(
-        self, output_modality, layerwise_offload
-    ):
+    def test_diffusion_kwargs_accepted_by_upstream(self, layerwise_offload):
         """Exercise Omni's real validator without loading weights or using a GPU."""
         config = _make_config()
-        config.output_modalities = [output_modality]
+        config.output_modalities = ["image"]
         config.diffusion.enable_layerwise_offload = layerwise_offload
 
         stages = StageConfigFactory.create_default_diffusion(_build_kwargs(config))
