@@ -92,7 +92,7 @@ def test_runtime_wheel_has_no_bundled_libraries(wheelhouse: Path) -> None:
     smoke_install.assert_no_bundled_libraries(wheelhouse)
 
 
-def test_ai_dynamo_wheel_records_source_commit(wheelhouse: Path) -> None:
+def test_ai_dynamo_wheel_records_git_commit(wheelhouse: Path) -> None:
     # CI images set DYNAMO_COMMIT_SHA to the same build arg that the wheel build
     # receives, so this checks the published wheel against the built source.
     expected = os.environ.get(COMMIT_SHA_ENV, "").strip().lower()
