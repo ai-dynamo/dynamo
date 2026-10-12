@@ -1065,6 +1065,8 @@ class TestGenerateLocally:
         handler._initiate_shutdown.assert_not_awaited()
 
     def _set_engine_args(self, handler):
+        """Configure a decoder-only engine with a four-token prompt limit."""
+        handler.engine.llm._is_encoder_decoder_model.return_value = False
         handler.engine.llm.args = SimpleNamespace(
             backend="pytorch",
             enable_chunked_prefill=False,
@@ -1073,7 +1075,9 @@ class TestGenerateLocally:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.core
     async def test_prompt_over_max_num_tokens_raises_invalid_argument(self):
+        """Reject an oversized decoder prompt before submission or shutdown."""
         handler = self._make_handler()
         self._set_engine_args(handler)
         handler.engine.llm.generate_async = MagicMock()
@@ -1090,6 +1094,39 @@ class TestGenerateLocally:
                 pass
 
         handler.engine.llm.generate_async.assert_not_called()
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.core
+    async def test_long_encoder_prompt_reaches_engine(self):
+        """Let the engine validate decoder length after encoder preprocessing."""
+        handler = self._make_handler()
+        self._set_engine_args(handler)
+        handler.engine.llm._is_encoder_decoder_model.return_value = True
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result()
+        )
+        handler._initiate_shutdown = mock.AsyncMock()
+        request = {
+            "token_ids": [1, 2, 3, 4, 5],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks[-1]["token_ids"] == [42]
+        handler.engine.llm.generate_async.assert_called_once()
+        assert handler.engine.llm.generate_async.call_args.kwargs["inputs"] == [
+            1,
+            2,
+            3,
+            4,
+            5,
+        ]
         handler._initiate_shutdown.assert_not_awaited()
 
     @pytest.mark.asyncio

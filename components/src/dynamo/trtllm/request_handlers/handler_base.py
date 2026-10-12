@@ -1625,20 +1625,27 @@ class HandlerBase(BaseGenerativeHandler):
         which raises a plain `RequestError` that the frontend can only report
         as a 500. Raising InvalidArgument here makes the frontend answer 400.
         The conditions (backend, chunked prefill, generation-only, cp_size,
-        strict `>`) follow the engine so no request it accepts is rejected.
+        strict `>`) follow the engine. Encoder-decoder prompts are checked by
+        the engine after it constructs the decoder input.
         """
-        args = getattr(self.engine.llm, "args", None)
-        if getattr(args, "backend", None) != "pytorch":
+        args = self.engine.llm.args
+        if args.backend != "pytorch":
             return
-        if getattr(args, "enable_chunked_prefill", False):
+        if args.enable_chunked_prefill:
             return
-        max_num_tokens = getattr(args, "max_num_tokens", None)
+        max_num_tokens = args.max_num_tokens
         if not max_num_tokens:
             return
         if (
             disaggregated_params is not None
             and getattr(disaggregated_params, "request_type", None) == "generation_only"
         ):
+            return
+
+        # Text encoder-decoder inputs contain encoder tokens here. TRT-LLM
+        # constructs the decoder start token and forced prefix internally;
+        # only the engine can check that resulting prompt's length correctly.
+        if self.engine.llm._is_encoder_decoder_model():
             return
 
         if isinstance(processed_input, dict):
@@ -1652,8 +1659,7 @@ class HandlerBase(BaseGenerativeHandler):
         if prompt_token_ids is None:
             return
 
-        parallel_config = getattr(args, "parallel_config", None)
-        cp_size = getattr(parallel_config, "cp_size", 1) or 1
+        cp_size = args.parallel_config.cp_size
         limit = max_num_tokens * cp_size
         prompt_len = len(prompt_token_ids)
         if prompt_len > limit:
