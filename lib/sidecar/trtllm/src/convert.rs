@@ -813,6 +813,7 @@ fn cached_prompt_tokens(cached: Option<u32>, prompt_tokens: u32) -> Option<Promp
     cached.map(|cached_tokens| PromptTokensDetails {
         audio_tokens: None,
         cached_tokens: Some(cached_tokens.min(prompt_tokens)),
+        ..Default::default()
     })
 }
 
