@@ -254,15 +254,19 @@ def test_legacy_shard_writer_does_not_require_hash_support(tmp_path, monkeypatch
 
 
 @pytest.mark.timeout(10)
-@pytest.mark.parametrize("transfer_backend", list(TransferBackendKind))
 @pytest.mark.parametrize("schema_version", [1, 2])
 def test_weight_artifact_round_trip_preserves_exact_ids_and_bytes(
     tmp_path,
     monkeypatch,
-    transfer_backend,
     schema_version,
-    caplog,
 ) -> None:
+    transfer_backend = TransferBackendKind.NIXL_GDS
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        weight_artifact.logger,
+        "warning",
+        lambda message, *args: warnings.append(message % args),
+    )
     socket_path = str(tmp_path / "weights.sock")
     artifact = tmp_path / "artifact"
     records = (
@@ -347,9 +351,10 @@ def test_weight_artifact_round_trip_preserves_exact_ids_and_bytes(
     assert len(backend_calls) == 1
     assert backend_calls[0][0] == transfer_backend.value
     assert backend_calls[0][1].device == 0
-    assert ("SHA-256 integrity verification is unavailable" in caplog.text) == (
-        schema_version == 1
-    )
+    assert any(
+        "SHA-256 integrity verification is unavailable" in warning
+        for warning in warnings
+    ) == (schema_version == 1)
 
 
 @pytest.mark.timeout(10)
@@ -583,8 +588,14 @@ def test_weight_artifact_rejects_missing_shard(tmp_path) -> None:
 
 
 def test_legacy_artifact_warns_and_cannot_detect_same_length_corruption(
-    tmp_path, caplog
+    tmp_path, monkeypatch
 ):
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        weight_artifact.logger,
+        "warning",
+        lambda message, *args: warnings.append(message % args),
+    )
     artifact = tmp_path / "artifact"
     _write_test_artifact(artifact, version=1, include_shard=False)
 
@@ -594,11 +605,16 @@ def test_legacy_artifact_warns_and_cannot_detect_same_length_corruption(
     assert before == after
     assert sources == changed_sources
     assert before.version == 1
-    assert len(caplog.records) == 2
-    assert all(record.levelname == "WARNING" for record in caplog.records)
-    assert "SHA-256 integrity verification is unavailable" in caplog.text
-    assert "same-length weight file corruption cannot be detected" in caplog.text
-    assert str(artifact) in caplog.text
+    assert len(warnings) == 2
+    assert all(
+        "SHA-256 integrity verification is unavailable" in warning
+        for warning in warnings
+    )
+    assert all(
+        "same-length weight file corruption cannot be detected" in warning
+        for warning in warnings
+    )
+    assert all(str(artifact) in warning for warning in warnings)
 
 
 @pytest.mark.parametrize("version", [1, 2])

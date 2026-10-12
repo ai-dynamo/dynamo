@@ -18,7 +18,6 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from threading import Event
 from time import monotonic
 from types import TracebackType
 from uuid import uuid4
@@ -519,18 +518,13 @@ def _verify_shard_digests(
     *,
     max_workers: int,
 ) -> None:
-    cancelled = Event()
-
     def verify(item: tuple[Path, WeightArtifactShard]) -> None:
         path, shard = item
         digest = hashlib.sha256()
         with path.open("rb") as shard_file:
             while chunk := shard_file.read(8 * 1024**2):
-                if cancelled.is_set():
-                    return
                 digest.update(chunk)
         if digest.hexdigest() != shard.sha256:
-            cancelled.set()
             raise RuntimeError(f"GMS V1 shard SHA-256 mismatch: {path}")
 
     with ThreadPoolExecutor(max_workers=min(max_workers, len(shards))) as executor:
@@ -539,7 +533,6 @@ def _verify_shard_digests(
             for future in as_completed(futures):
                 future.result()
         except BaseException:
-            cancelled.set()
             for future in futures:
                 future.cancel()
             raise
