@@ -37,6 +37,8 @@ providers:
     name: Google
   lg:
     name: LG AI Research
+  minimax:
+    name: MiniMax
   moonshot:
     name: Moonshot AI
     chip: Moonshot

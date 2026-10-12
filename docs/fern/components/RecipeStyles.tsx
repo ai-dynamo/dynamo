@@ -210,6 +210,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-lg:checked ~ .dynamo-recipe-browser label[for="provider-lg"],
 #provider-skt:checked ~ .dynamo-recipe-browser label[for="provider-skt"],
 #provider-upstage:checked ~ .dynamo-recipe-browser label[for="provider-upstage"],
+#provider-minimax:checked ~ .dynamo-recipe-browser label[for="provider-minimax"],
 #provider-motif:checked ~ .dynamo-recipe-browser label[for="provider-motif"],
 /* provider-chip-rules:end */
 #runtime-all:checked ~ .dynamo-recipe-browser label[for="runtime-all"],
@@ -693,6 +694,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-lg:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="lg"]),
 #provider-skt:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="skt"]),
 #provider-upstage:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="upstage"]),
+#provider-minimax:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="minimax"]),
 #provider-motif:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="motif"]),
 /* provider-filter-rules:end */
 #runtime-vllm:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="vllm"]),
