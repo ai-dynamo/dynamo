@@ -21,8 +21,11 @@ PCRE2_SYS_STATIC = "1"
 # zmq-sys builds a vendored libzmq through zeromq-src, which writes an empty platform.hpp, so on
 # Linux every libzmq mailbox signaler falls back to a unix socketpair. Select the eventfd signaler
 # that libzmq's own CMake and autotools builds pick on Linux; EFD_CLOEXEC keeps the eventfds out of
-# exec'd children like the FD_CLOEXEC the socketpair path sets. cc appends these target-specific
-# flags to any CXXFLAGS already set, and other C++ builds ignore the defines.
+# exec'd children like the FD_CLOEXEC the socketpair path sets. cc combines these with a plain
+# CXXFLAGS, but Cargo [env] never overrides a variable already set in the environment, so an
+# exported CXXFLAGS_<target> (even an empty one) replaces these defines and silently brings back
+# socketpairs. Other C++ builds ignore the defines, but setting any CXXFLAGS variant also stops cc
+# from adding its default -Wall/-Wextra to them.
 CXXFLAGS_x86_64_unknown_linux_gnu = "-DZMQ_HAVE_EVENTFD -DZMQ_HAVE_EVENTFD_CLOEXEC"
 CXXFLAGS_aarch64_unknown_linux_gnu = "-DZMQ_HAVE_EVENTFD -DZMQ_HAVE_EVENTFD_CLOEXEC"
 
