@@ -132,12 +132,26 @@ The launcher passes these integration arguments:
 --rollout-function-path slime.rollout.sglang_rollout.generate_rollout
 --custom-generate-function-path dynamo_generate.generate_streaming
 --sglang-incremental-streaming-output
+--custom-megatron-init-path sglang_weight_session.install
 ```
 
 The `dynamo_generate.generate_streaming` adapter copies the Slime arguments.
 Then the adapter sets the generation address to `DYNAMO_ROLLOUT_URL`. The
 adapter calls the streaming generator from THUDM/slime#2272. Slime calls each
 fixed engine for control operations and weight updates.
+
+SGLang 0.5.21 and later accept `update_weights_from_distributed` only inside a
+weight-update session, between `begin_weight_update` and `end_weight_update`.
+Without a session, each engine rejects the update with HTTP 400. The pinned
+Slime revision does not open this session. The
+`sglang_weight_session.install` hook adds one session on every engine around
+each NCCL policy update. Disk and delta updates do not need a session. If an
+engine returns 404 for `begin_weight_update`, the hook treats it as an older
+SGLang release and skips the session for that engine.
+
+The launcher stops with an error if you pass `--custom-megatron-init-path`,
+because Slime keeps only one value. To run your own Megatron init hook, call it
+from `sglang_weight_session.install`.
 
 The `--sglang-incremental-streaming-output` flag must match the
 `--incremental-streaming-output` configuration in `dynamo.yaml`.

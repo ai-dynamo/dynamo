@@ -121,6 +121,10 @@ The launcher passes the fixed worker list to Slime. It also enables incremental 
 
 The `dynamo_generate.generate_streaming` adapter sends generation to `DYNAMO_ROLLOUT_URL`. Slime calls each fixed engine for control operations and weight updates.
 
+SGLang 0.5.21 and later accept `update_weights_from_distributed` only inside a weight-update session, between `begin_weight_update` and `end_weight_update`. Without a session, each engine rejects the update with HTTP 400. The pinned Slime revision does not open this session, so the launcher passes `--custom-megatron-init-path sglang_weight_session.install`. This hook opens one session on every engine around each NCCL policy update. Disk and delta updates do not need a session.
+
+The launcher stops with an error if you pass your own `--custom-megatron-init-path`, because Slime keeps only one value. Call your hook from `examples/rl/slime/sglang_weight_session.py` instead.
+
 ## Make Sure That the Integration Works
 
 Complete these steps before you increase the workload size:
