@@ -7,12 +7,22 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-import numpy as np
 import pytest
 
-from dynamo.artifacts.vllm import capture as generation_artifact
-from dynamo.artifacts.vllm.capture import CaptureBudget, VllmArtifactSession
-from dynamo.artifacts.vllm.format import decode_generation_artifact
+np = pytest.importorskip("numpy")
+pytest.importorskip("msgspec")
+pytest.importorskip("zstandard")
+
+from dynamo.artifacts.vllm import (  # noqa: E402 -- optional dependency guards
+    capture as generation_artifact,
+)
+from dynamo.artifacts.vllm.capture import (  # noqa: E402 -- optional dependency guards
+    CaptureBudget,
+    VllmArtifactSession,
+)
+from dynamo.artifacts.vllm.format import (  # noqa: E402 -- optional dependency guards
+    decode_generation_artifact,
+)
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
 
