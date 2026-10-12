@@ -609,11 +609,15 @@ async def parse_args(args: list[str]) -> Config:
     ):
         raise ValueError("--rerank-worker requires aggregated cross-encoder serving")
     if dynamo_config.rerank_worker:
-        # Cross-encoders attend bidirectionally, so a cached prefix is invalid,
-        # and SGLang's XLM-Roberta forward asserts when a batch has one.
+        # Cross-encoders attend bidirectionally, so the whole sequence must run
+        # in one forward: no cached prefix and no prefill chunks. SGLang's
+        # XLM-Roberta forward fails on either.
         if not parsed_args.disable_radix_cache:
             logging.info("Disabling radix cache for --rerank-worker")
         parsed_args.disable_radix_cache = True
+        if parsed_args.chunked_prefill_size != -1:
+            logging.info("Disabling chunked prefill for --rerank-worker")
+        parsed_args.chunked_prefill_size = -1
 
     # Enable encoder_only mode for multimodal encode workers to load only vision encoder
     # This significantly reduces memory usage by avoiding loading the full LLM weights
