@@ -77,11 +77,8 @@ class _MockAsyncOmni:
 
 
 async def main() -> None:
-    # event_plane="zmq" must be passed explicitly (not just via DYN_EVENT_PLANE):
-    # the runtime's NATS gating only treats the event plane as "no nats" when the
-    # event_plane argument is set, so an ambient NATS_SERVER (as in CI) would
-    # otherwise force a NATS connection that retries for up to 120s before the
-    # worker registers.
+    # Pass event_plane explicitly: DYN_EVENT_PLANE alone does not stop an ambient
+    # NATS_SERVER from forcing a NATS connection that retries for up to 120s.
     runtime = DistributedRuntime(
         asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
     )
