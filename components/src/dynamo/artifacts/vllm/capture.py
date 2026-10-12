@@ -12,12 +12,14 @@ import os
 import threading
 from copy import deepcopy
 from functools import cache
+from typing import Any, Protocol, cast
 
 import numpy as np
 
 from dynamo.artifacts.vllm.format import (
     GenerationArtifactChoice,
     GenerationArtifactView,
+    MoeRoutes,
     SelectedLogprobs,
     Tensor,
     TopKLogprobs,
@@ -29,10 +31,25 @@ from dynamo.common.metadata_upload import _backend_metadata_upload_settings
 _CONTENTS = frozenset({"moe_routes", "selected_logprobs", "topk_logprobs"})
 
 
+class _DeliveryRuntime(Protocol):
+    def validate(self, destination: dict[str, Any], mode: str) -> None:
+        ...
+
+    async def submit(
+        self,
+        data: bytes,
+        contents: list[str],
+        destination: dict[str, Any],
+        *,
+        mode: str,
+    ) -> dict[str, Any]:
+        ...
+
+
 def _validated_router_profile(profile):
     if not isinstance(profile, (tuple, list)) or len(profile) > 4092:
         raise ValueError("unsupported router profile")
-    result = []
+    result: list[tuple[int, int, int]] = []
     ids = set()
     for site in profile:
         if not isinstance(site, (tuple, list)) or len(site) != 3:
@@ -48,7 +65,7 @@ def _validated_router_profile(profile):
         ):
             raise ValueError("unsupported router geometry")
         ids.add(router_id)
-        result.append(tuple(site))
+        result.append(cast(tuple[int, int, int], tuple(site)))
     return tuple(result)
 
 
@@ -116,6 +133,25 @@ def process_capture_budget():
 
 class VllmArtifactSession:
     """Single-choice capture; all queued route buffers are already compact."""
+
+    settings: dict[str, Any]
+    contents: frozenset[str]
+    profile: tuple[tuple[int, int, int], ...]
+    token_start: int
+    max_prompt: int
+    max_completion: int
+    runtime: _DeliveryRuntime | None
+    logprob_width: int
+    prompt: tuple[int, ...] | None
+    tokens: list[int]
+    selected: list[float]
+    candidates: list[list[int]]
+    candidate_scores: list[list[float]]
+    routes: MoeRoutes | None
+    error: bool
+    _closed: bool
+    budget: CaptureBudget
+    reserved_bytes: int
 
     @classmethod
     def from_request(
@@ -289,7 +325,7 @@ class VllmArtifactSession:
     def _view(self):
         if self.error or self.prompt is None:
             raise ValueError("invalid artifact capture")
-        components = []
+        components: list[MoeRoutes | SelectedLogprobs | TopKLogprobs] = []
         if "moe_routes" in self.contents:
             if self.routes is None:
                 raise ValueError("requested routes unavailable")
@@ -342,7 +378,7 @@ class VllmArtifactSession:
                     "byte_count": encoded.byte_count,
                     "data_base64": base64.b64encode(encoded.data).decode("ascii"),
                 }
-            return await self.runtime.submit(
+            return await cast(_DeliveryRuntime, self.runtime).submit(
                 encoded.data,
                 sorted(self.contents),
                 self.settings["destination"],
