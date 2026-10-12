@@ -4,8 +4,6 @@ package gbuilddeploymentcapnpv1
 
 import (
 	capnp "capnproto.org/go/capnp/v3"
-	text "capnproto.org/go/capnp/v3/encoding/text"
-	schemas "capnproto.org/go/capnp/v3/schemas"
 	gbuildcommoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
 	strconv "strconv"
 )
@@ -33,11 +31,6 @@ func NewRootDeployment(s *capnp.Segment) (Deployment, error) {
 func ReadRootDeployment(msg *capnp.Message) (Deployment, error) {
 	root, err := msg.Root()
 	return Deployment(root.Struct()), err
-}
-
-func (s Deployment) String() string {
-	str, _ := text.Marshal(0xc30c331f5220b165, capnp.Struct(s))
-	return str
 }
 
 func (s Deployment) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
@@ -292,11 +285,6 @@ func ReadRootCheckpointReference(msg *capnp.Message) (CheckpointReference, error
 	return CheckpointReference(root.Struct()), err
 }
 
-func (s CheckpointReference) String() string {
-	str, _ := text.Marshal(0x9f7927e8c4254eb7, capnp.Struct(s))
-	return str
-}
-
 func (s CheckpointReference) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
 	return capnp.Struct(s).EncodeAsPtr(seg)
 }
@@ -439,11 +427,6 @@ func ReadRootBuildIdentity(msg *capnp.Message) (BuildIdentity, error) {
 	return BuildIdentity(root.Struct()), err
 }
 
-func (s BuildIdentity) String() string {
-	str, _ := text.Marshal(0xd0e7ed3ef51f57f9, capnp.Struct(s))
-	return str
-}
-
 func (s BuildIdentity) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
 	return capnp.Struct(s).EncodeAsPtr(seg)
 }
@@ -541,11 +524,6 @@ func NewRootPartitionDeployment(s *capnp.Segment) (PartitionDeployment, error) {
 func ReadRootPartitionDeployment(msg *capnp.Message) (PartitionDeployment, error) {
 	root, err := msg.Root()
 	return PartitionDeployment(root.Struct()), err
-}
-
-func (s PartitionDeployment) String() string {
-	str, _ := text.Marshal(0xe7a32b525b91f7a0, capnp.Struct(s))
-	return str
 }
 
 func (s PartitionDeployment) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
@@ -768,11 +746,6 @@ func ReadRootDeploymentInfo(msg *capnp.Message) (DeploymentInfo, error) {
 	return DeploymentInfo(root.Struct()), err
 }
 
-func (s DeploymentInfo) String() string {
-	str, _ := text.Marshal(0xfd3ce92fb33e4ab2, capnp.Struct(s))
-	return str
-}
-
 func (s DeploymentInfo) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
 	return capnp.Struct(s).EncodeAsPtr(seg)
 }
@@ -977,11 +950,6 @@ func ReadRootProgramConfig(msg *capnp.Message) (ProgramConfig, error) {
 	return ProgramConfig(root.Struct()), err
 }
 
-func (s ProgramConfig) String() string {
-	str, _ := text.Marshal(0xe13c796825aca58b, capnp.Struct(s))
-	return str
-}
-
 func (s ProgramConfig) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
 	return capnp.Struct(s).EncodeAsPtr(seg)
 }
@@ -1101,11 +1069,6 @@ func ReadRootPropSyncChain(msg *capnp.Message) (PropSyncChain, error) {
 	return PropSyncChain(root.Struct()), err
 }
 
-func (s PropSyncChain) String() string {
-	str, _ := text.Marshal(0x8a2b4a1188f3156d, capnp.Struct(s))
-	return str
-}
-
 func (s PropSyncChain) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
 	return capnp.Struct(s).EncodeAsPtr(seg)
 }
@@ -1187,11 +1150,6 @@ func NewRootRuntimeIoConfig(s *capnp.Segment) (RuntimeIoConfig, error) {
 func ReadRootRuntimeIoConfig(msg *capnp.Message) (RuntimeIoConfig, error) {
 	root, err := msg.Root()
 	return RuntimeIoConfig(root.Struct()), err
-}
-
-func (s RuntimeIoConfig) String() string {
-	str, _ := text.Marshal(0xd2da7d280c347740, capnp.Struct(s))
-	return str
 }
 
 func (s RuntimeIoConfig) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
@@ -1378,11 +1336,6 @@ func ReadRootRuntimeAssets(msg *capnp.Message) (RuntimeAssets, error) {
 	return RuntimeAssets(root.Struct()), err
 }
 
-func (s RuntimeAssets) String() string {
-	str, _ := text.Marshal(0xc818738947ac521b, capnp.Struct(s))
-	return str
-}
-
 func (s RuntimeAssets) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
 	return capnp.Struct(s).EncodeAsPtr(seg)
 }
@@ -1458,11 +1411,6 @@ func NewRootLpuPartitionArtifact(s *capnp.Segment) (LpuPartitionArtifact, error)
 func ReadRootLpuPartitionArtifact(msg *capnp.Message) (LpuPartitionArtifact, error) {
 	root, err := msg.Root()
 	return LpuPartitionArtifact(root.Struct()), err
-}
-
-func (s LpuPartitionArtifact) String() string {
-	str, _ := text.Marshal(0xc7a8c84cbae6ba0e, capnp.Struct(s))
-	return str
 }
 
 func (s LpuPartitionArtifact) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
@@ -1660,11 +1608,6 @@ func ReadRootCudaPartitionArtifact(msg *capnp.Message) (CudaPartitionArtifact, e
 	return CudaPartitionArtifact(root.Struct()), err
 }
 
-func (s CudaPartitionArtifact) String() string {
-	str, _ := text.Marshal(0x9a7000083c582092, capnp.Struct(s))
-	return str
-}
-
 func (s CudaPartitionArtifact) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
 	return capnp.Struct(s).EncodeAsPtr(seg)
 }
@@ -1725,11 +1668,6 @@ func ReadRootCpuPartitionArtifact(msg *capnp.Message) (CpuPartitionArtifact, err
 	return CpuPartitionArtifact(root.Struct()), err
 }
 
-func (s CpuPartitionArtifact) String() string {
-	str, _ := text.Marshal(0x96066f26b6b22046, capnp.Struct(s))
-	return str
-}
-
 func (s CpuPartitionArtifact) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
 	return capnp.Struct(s).EncodeAsPtr(seg)
 }
@@ -1788,11 +1726,6 @@ func NewRootPartSelect(s *capnp.Segment) (PartSelect, error) {
 func ReadRootPartSelect(msg *capnp.Message) (PartSelect, error) {
 	root, err := msg.Root()
 	return PartSelect(root.Struct()), err
-}
-
-func (s PartSelect) String() string {
-	str, _ := text.Marshal(0x8d60be198cd5837c, capnp.Struct(s))
-	return str
 }
 
 func (s PartSelect) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
@@ -1878,11 +1811,6 @@ func ReadRootTopologyMetadata(msg *capnp.Message) (TopologyMetadata, error) {
 	return TopologyMetadata(root.Struct()), err
 }
 
-func (s TopologyMetadata) String() string {
-	str, _ := text.Marshal(0x95b5d7af5b73d213, capnp.Struct(s))
-	return str
-}
-
 func (s TopologyMetadata) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
 	return capnp.Struct(s).EncodeAsPtr(seg)
 }
@@ -1962,165 +1890,4 @@ type TopologyMetadata_Future struct{ *capnp.Future }
 func (f TopologyMetadata_Future) Struct() (TopologyMetadata, error) {
 	p, err := f.Future.Ptr()
 	return TopologyMetadata(p.Struct()), err
-}
-
-const schema_bc98ba9c8ecc78c8 = "x\xda\x9cXo\x8c\x14g\x19\x7f\x9ey\xf7n\x8f\xe6" +
-	"`g:\xb7tO\xa1wE\x11\xbcz\x05z5*" +
-	"\xa1]`\x01=\xc2\xd1}wi\xb0\xad\x8d\x9d\x9by" +
-	"owdwf\xba3CY\x02%\xd1\x12[\x0a\xc6" +
-	"\xaa4h0B-)U\x1a\xfe(\xda\x92b\x04\x8b" +
-	"\xa5\x86\x0f\x94\x14\x8d\x04c5Q\xfeD?X\xd3\x80" +
-	"&u\xcc;373,G\xd2=\xbe0y\xde\xdf" +
-	">\xcf\xfb<\xcf\xef\xf9\xf3\xde\xfc\x97\xd3\x8bS\x0b\xa6" +
-	"^\xbb\x13\x84r\x15;:\xbdz\xf6\xdf\xcfH+\xef" +
-	"\xde\x06\xd2 z\xa77\x9c\xf9\xd6\xeec\xbb\xde\x80\x0e" +
-	"L\x03\x0c)\x99\x0b(o\xce\xa4\x01\xe4f&\x0f\xe8" +
-	"m\xfa\xc6\xf9\xed\xbd\xbfz|\xc7D\xe0W3'Q" +
-	">\xe5\x83O\xf8`z\xfa\xe5\x811\xba\xf5\xbb \x0d" +
-	"\x0a1\x18p\xe8\x03\x8e\x9c*r\xe4\x14\xf1A@O" +
-	">g?z\xf0\x0fGw\xb6\xa8\x15\xb8\xda\x99\xe2\xfb" +
-	"(\x7f\xc1\x07\x7fV|\x12\xd0[\xd1\x7f\xe4\x17\x9f2" +
-	";_\xb8\x11\x9c\xe2\xd8W\xc4\xdb\x05\xf9m1\x0d\xe4" +
-	"\xcf\xdf\xe9\xff\xf2\xa2.\xeb\x077c\xf6\x89\x1f\x13\xe4" +
-	"S\x1c\xe3\xfdr\xf5\xec7/\xcfi\xfe\x08\xe8 \xde" +
-	"dw\xafx\x9b \x9f\xf0\xed\x1e\x17\x0f\x02^\x1b\x99" +
-	"\xf3\xfb\xfe\xed\xe7\x8f\xb4:\xf3\x98t\x15\xe5\xa6\xc4q" +
-	"\xae\xc4\x9da\x87\xfbK}C\xdd\xbfi\xd5\x9a\xe6Z" +
-	"wH'Q\xde'\xf9\x06\xa4\xb7\x10\xd0\x9bv\xec\xef" +
-	"\xc7V\x9d\xde\xff\x16\x87'4w\x10\x8e\xd9)\xdf." +
-	"\xc8Ge\xfeyX^\xcb\xe1\x1f/\x1d\xf8\xe2\xb3v" +
-	"\xee\xf4D\x19\xc8f/\xa0\xbc \xcb\xaf2\x98\xe5\x19" +
-	"\xf8\xedS\xdb\xa6\xad\x7fn\xce\xef@\x1aL\xddp\xe9" +
-	"\x87\xb2\x03\x82\xecrd\xd9\xca\x12,o\xca\x0a\x08\xe0" +
-	"\xfdgm\xdf\x07\x0f\xfc\xf3\xd2\xd9\x89\x94\xd7\xb9\xf2g" +
-	"}\xe5[}\xe5\x8b\x9f\xbc\xaf{\xee\xe6\x0b\xe7Z." +
-	"\x1e\x049{\x15\xe5\x13>\xf8x\xf6\x12\xa0\xf7\xdc\xbe" +
-	"\x03\xb3\xab\xcdE\x7f\x998\xd4\xd3/\xa0||:\xff" +
-	"|}z\x1f\xf7r\xcf\xb5\xe7\x1f-\xdd\xfd\xe3K\x13" +
-	"\xc2\xaf\xdcq\x9b O\xc9q\xe5\x1d9\xce\x88\xe3B" +
-	"A\xf8\xc4\xc5\xa3\xff\xba\x89h\xc39A\x90\x99\x8fT" +
-	"r}\x80\xdeS{_\xb8t\xf2\xfa\x85\x9b\x91\x0f\xe7" +
-	"\xae\xa2\xec\xfa\xc8'r\x9f\x03\xf4\xee\xfc\x8c\xbb\xf6\xae" +
-	"\x9f\x9ez\x1f\xe8\x12L\xdc\xe7!!\x8d\x04`\xc8\xcd" +
-	"-\x15\x00\xe5\x1d\xb9\x83\x80\xde\xd9\xf9\x7f|\xfe\x8e\x17" +
-	"\x07\xaf\xdf\xa4uv\xef\x7fQ^\xd2\xcb\xb5\xde\xdf\xcb" +
-	"\xb5\x1eY\xf9\xc0\xcf\xe6]Y\xf4\xe1\x84\xc9^\xde\xfb" +
-	"W\x94\x15\x8e\x1ez\xacw-\x82\x07\x1e\\\xf7*\xa3" +
-	"\xae^\xd3\xbe\xaau2\xabf6\xeb\xccp\xe6\xad_" +
-	"0o\\\x1a\x09\xefQ\x15\xcb\xb0\x16\x16\x1b\xa6Un" +
-	"\x1aj\xa1\xaa\x10\xdd(\"\xd2\x14I\x01\xa4\x10@\x9a" +
-	"\xfa5\x00\xdaM\x90\xce\x15\xd0\xb3\x94\x86\xa3;\xba\x09" +
-	"\x19cX\xb3q\x1a`\x91 v\x81\xc0?\xdb5\xaa" +
-	"4\x9c2\xab1\xd5\x81\x16\x8b\x8fLd\x91\x18\x91=" +
-	"\xd1{\xfb\xf3\x87\xce\xdf\xff\xf0\xeeo\x02\xe0$,\xaf" +
-	"\xb0*\xca\xb09bj\xcc\xb7\xdc\x8d\x02\x804s!" +
-	"W&e\xf9\x7f\x824u!@\xde\xd6\xebV\x8d\xe5" +
-	"U\xb3n)N^\xd3G\x97\xb1\xd16M\xad1-" +
-	"\xb3fV\x9a#\xcc\xe9S4\xc5Q\xb8\xc1\xae\xc8\xd5" +
-	"Oo\x04\xa0s\x09\xd2\xfb\x04\x94\x10{\x90\x0b\x17p" +
-	"\xe1|\x82t\x95\x80\x9e\x13*\x80\xfc\x0a\xa5\xae\xd7\x9a" +
-	"\xd8\x0d\x02vC\"0y\xa3\\U,v\xabd\xa4" +
-	"?\xd2=\x0b\x96[\x0c\x15\x1aK\x1a\x8e>\xa6\xa8\xe8" +
-	"\x14\xb1m5\xae\xa6\xb4\xe8!\xead\xf4T\x99\xba\xce" +
-	"2u\xc3)\xb11\xd6`\x86\xca \xc8U\x14\xba\xe5" +
-	"+\x01\xe82\x82\xb4(\xe0x\xe4F\xee\x05\xa0_\"" +
-	"H\xd7\x08(\x09\xd8\xe3'\x96r`\x91 \xfd\x0a\xa7" +
-	"S\xc3\\\xafk\xac\x01\x00\x98\x89[\x00 f\x00\xfb" +
-	"\xea\xa6\xc6jQ\x84\x1bl\xbdn\xeb\xa6\xc1\xb1\xe3\xb2" +
-	"\xf6\xb2\xbf\xcar\x974\xd4\xaa\xee05\xe3\xb8\x0d\x96" +
-	"`\xdb\xa8\xcf\xb6\xde\x01\x9fm\xd2\x00\x80\xe7\x1a\xb6\xc5" +
-	"T}\x0c\xd2:\xd325\xeb\xde\xf9\x99\x9a54\xbf" +
-	"M\x93\xcb\"\x81\x1f\xaf\xfe(^\xefl\x03\xa0\xef\x12" +
-	"\xa4\xef\xc5\xf1\xfa\x13\x0f\xcdE\x82\xf4r\"^\x7f[" +
-	"\x08@\xdf#H\xff!\xa0D\x84\x1e\xde\xb9\xa4+\xbc" +
-	"&/\x13,\xa7P@)Ez0\x05 #6\x00" +
-	"JH\xb0\xdc\xcd\xc5\x1d\xa9\x1e\xec\xe0\xe3\x19\x1f\x01(" +
-	"wqy\x0f\x97wv\xf4`'\x80,a\x09\xa0," +
-	"r\xf9\x0c.Ow\xf6\xf0!!\xf7\xfa\xf8\x1c\x97\x7f" +
-	"\x12\x05\xf4T\xd3p\x1a\x8a\xea`)\xca\x80O\xeb." +
-	"@O\xd7\x98\xe1\xe8N\x93'E\x8cG\x0f \x8a\x80" +
-	"y\xd54\xc6\xf4\x0a\x8aq\xcb\x0c\x0en\xd1F\xa2\x06" +
-	"\x1d\xb6\x91\x86k8z\x9d-\x81>\xdbf\x8e\x8db" +
-	"<8\x13zx\xd3\x02\xa2:(\xc6\x9bMx\xcc6" +
-	"0\xd5\xe5f\xd0@\xd1\xcb\xff\xa4f\x96/\xf6\x9e\x19" +
-	"?UCV\x031\xf8\x8f\xa3E\"<n\xafDV" +
-	"\xdd\xa2bi.J\xf9\xf7\x07\x00\xe8\xf7\x08\xd2=\x89" +
-	"\xee\xf2C\x9e\xf3\xdd\x04\xe9~\x01Q\x08R\xbe\x8f\xcb" +
-	"^\"H\x0f%R\xfe*'\xcc!\x82\xf4\x0d\x9eq" +
-	"\xf43.\xbd\xce{\xd3k\x04\xe9\x9bq\xbe\xa5\x13|" +
-	"D\xfc\x9a =#`\xc6R\x9cjT.Q\xf7J" +
-	"\x94\x90\xe1\xd6\x0bU\xdd\xb2!\x91\xd5q\x1c\x8e0\xc7" +
-	"o\x93~v\xa3\x05/\x0c\x90\xc6\xd6\xeb*\xb3\x8b\x90" +
-	"g\x8d\xd5\xa6\xc6\xa2\x9f+a\x91\x81_e\x98\x19\xdf" +
-	"\xba\x82\xb2n\xb3\x82J!\x09l\x9b\x11\xc7n\x19M" +
-	"/\x02P\x91 \x9d\xe1\xb7\xe6u\xccX^\x1fE\xa6" +
-	"i\xbaQ\xb1\x8b\xe9\xa4\xeb\xedeSu\x1b\x0df8" +
-	"\x85\x90\xf9\x9c\xf8\x19\xce\xfc\"\xfa\x1d]\xea\xc2\xb6\xfd" +
-	"X\xca\xc5\xc3~\xb9\x10\xa7\xd9\xe2\xc7R\x00\xdaE\x90" +
-	"\xf6\x08\xb8e4\x00N\xb2\xc7\x85\xe1\x1a6\x0bf\x86" +
-	"\x17\x1f7$F\x86\x14\xce\xac\xc7\x09\xd2Z\x82\x82:" +
-	"\x17V\x09R'\xd1v\x9e\x18\x05\xa0\x16A\xba)\xc1" +
-	"\xc1&g\xd6\x06\x82\xf4\xe9\xa0w;\xa6j\xd6\x82\xde" +
-	"\x1d\xadOa\x92\xc7\xac\x8a\xe2\x8ft\xff4zE\x84" +
-	"\xa7\xba\xc9\x87~\xc1\x84\xb4k8\x11o\xc6\x14\xc3t" +
-	"\x9d\x15\x0adT\xc7lD\xe2\xb6\x97\xa7JC\xa9\x17" +
-	"Lc\x8c\x04\xee\xf7D\xeeo\xe6Nm\"H\x9fI" +
-	"\xb8\xbf\x95\x0b\x9f&H\xbf\x1dW\xe0\x8e\x12\x00\xddN" +
-	"\x90\xee\xe2\xde\xf7\x07\xde\xef<\x02@w\x11\xa4/\xf1" +
-	"\x0a\xbc+\xa8\xc0\xbd\xe7\x00\xe8~\x82\xf4\xe7AH\xb8" +
-	"\xed\xd5\x90V\xea,\xb1\x1a\xa8\xeb\x94\x0ak\x91\x8e*" +
-	"\x8eZ-\xeb\x1b\x01\xe3\xc2\xb1]\xcb2\x1b\x8e\x8d\x05" +
-	"\xcb]^\x1feZ\x9f\xcfdD\x10\x903\xcev\x14" +
-	"CSj\xa6`\xb05!\xdb\x03\xb2c\x8ci\x8f\xe8" +
-	"Q\xcfJ\x0c*hY\x8aJ\xf1R\xc4\xff\xc5[\xb5" +
-	"\xb4`!\x08q/\xf7\x9blr\x15\xe4#@c\x8e" +
-	"\xa2\xd7&\xbdo\x14\xc7\x17\x04\xbf`\xfc\xdct\x8c\x02" +
-	"xU\xb7R\xd1\x8d\xca\x18\xa4\x15\x95\xb5\xc9\x90\x82Y" +
-	"\xb7\xf4\x9a\xc2\xbd\xcep\x8a\xfa\xee\xfa\xaa\xa5\xa5\xfe\x1a" +
-	"0e\x16\xc0\x96\x9a\xe5>h\xd4\x9a\xe9\x9a\xb5!\xd2" +
-	"\xdf5\xd9\x98\xde\x13\x84\x81\xef\xd1\xa9\x19\x9e\x172o" +
-	"\xf9,\x00\xba8\xd8,g\xe2\xff\xbc\xb0\xf4\x86\x07\xe2" +
-	"Uj\xa6\xf0!\x17s\xfa\x8d\xcc\x8a\xb7\xa9t\xcdr" +
-	"Q\x8c\x9f\x9dA\xb03\xaa\xab)(\x8e?\x9b\x03a" +
-	"Z\xf5\xa1\xd1\x83\xbbe\xba\xb5\xd9U\x8a\x8d|P\xf5" +
-	"\x89\xa0\x0d\x04A[\x09\x90\xa9\x9a\xb6\xe3\x97~\xc9\xe4" +
-	"+\"Lz[\x1aN\x1bcf\xcb\xf8\xfcz\xa2\xfc" +
-	"\xc6\x8bw//\xde=\x04\xe9\x01\xde\xbb\xc2\xea}e" +
-	"c\\\x93H\x82\xe8\x1d\xe6-\xf6\x00A\xfaZb|" +
-	"\x1e=\x16\x8e\xcfw\xf9\xf8\x14\x82\xf1\xf9\x0e\xe7\xfbY" +
-	"\x82\xf4\xa2\xbf\xfb\x04\\A\xdd4\xfcv\x86\x99\xf8\xfd" +
-	"\x1963\xc3\xad\xaf\xb2\xdc\xd5&\xa45f'f\xa8" +
-	"\xa3\xd4V\xbbu\xc8\x97\x1d\xa5\x12\x1fl\x09\x9b\x04\x8a" +
-	"\xf1{:\xcc\x89\xed?\xbf\x98\x86\xe3\x0f\xc0|\xa1\xaa" +
-	"\xe8\xc9\x0d)\xfa;\xcf\x8d\x1b\xd20\xa0\x89b\xfc\x98" +
-	"\x0f\xf4\xfd?\x00\x00\xff\xff+\xddE\xec"
-
-func RegisterSchema(reg *schemas.Registry) {
-	reg.Register(&schemas.Schema{
-		String: schema_bc98ba9c8ecc78c8,
-		Nodes: []uint64{
-			0x8a2b4a1188f3156d,
-			0x8d60be198cd5837c,
-			0x938551662aa7c851,
-			0x95b5d7af5b73d213,
-			0x96066f26b6b22046,
-			0x9a7000083c582092,
-			0x9f7927e8c4254eb7,
-			0xb2d58c2000d6274d,
-			0xc30c331f5220b165,
-			0xc7a8c84cbae6ba0e,
-			0xc818738947ac521b,
-			0xca278b760e8a7ec6,
-			0xd0e7ed3ef51f57f9,
-			0xd2da7d280c347740,
-			0xe13c796825aca58b,
-			0xe7a32b525b91f7a0,
-			0xf1b5dc23024302bd,
-			0xf1daf8c2e796a17e,
-			0xf2c5ab2157752c1e,
-			0xf82da21791d930d0,
-			0xfd3ce92fb33e4ab2,
-		},
-		Compressed: true,
-	})
 }

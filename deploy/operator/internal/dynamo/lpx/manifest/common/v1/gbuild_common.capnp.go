@@ -4,8 +4,6 @@ package gbuildcommoncapnpv1
 
 import (
 	capnp "capnproto.org/go/capnp/v3"
-	text "capnproto.org/go/capnp/v3/encoding/text"
-	schemas "capnproto.org/go/capnp/v3/schemas"
 )
 
 type PartitionRef capnp.Struct
@@ -26,11 +24,6 @@ func NewRootPartitionRef(s *capnp.Segment) (PartitionRef, error) {
 func ReadRootPartitionRef(msg *capnp.Message) (PartitionRef, error) {
 	root, err := msg.Root()
 	return PartitionRef(root.Struct()), err
-}
-
-func (s PartitionRef) String() string {
-	str, _ := text.Marshal(0x879c593dd5b038c9, capnp.Struct(s))
-	return str
 }
 
 func (s PartitionRef) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
@@ -157,11 +150,6 @@ func ReadRootContractFile(msg *capnp.Message) (ContractFile, error) {
 	return ContractFile(root.Struct()), err
 }
 
-func (s ContractFile) String() string {
-	str, _ := text.Marshal(0xcc19dc536f6caa3f, capnp.Struct(s))
-	return str
-}
-
 func (s ContractFile) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
 	return capnp.Struct(s).EncodeAsPtr(seg)
 }
@@ -230,40 +218,4 @@ type ContractFile_Future struct{ *capnp.Future }
 func (f ContractFile_Future) Struct() (ContractFile, error) {
 	p, err := f.Future.Ptr()
 	return ContractFile(p.Struct()), err
-}
-
-const schema_945465c07f3e146d = "x\xda\x8c\xd01\x8b\x13A\x1c\x05\xf0\xf7f7n\x90" +
-	",sC\xee\x0a\x0b-\x0e\x03z\xa0\x97x*r\xa8" +
-	"'(\xa2\xd5\xdd\x984\xda\xc8fw5\x8b\x9b\xdd!" +
-	"\xee&\xc4F\xb0\xd1Z\xc4\xcaO`ei%\xb6\x01" +
-	"[\x0b\xc1/`am%#\x1b\"\x09W\x85\xe9\x1e" +
-	"\x8f\x1f\xff7\xed{\xee-\xb7\xe3\xff9\x03\xd1\x1d\xb0" +
-	"v\xc2\xce\xae}\xfa~\xe3\xe1\x87\xd7\xd0-\xd2\x0e7" +
-	"o\xbe\xfc\x1a\xf7\xde\xc1\xf5\x80\xbd@\xbees*=" +
-	"\xa0Y\xca\x09h\x0f\x9f\xcd>\xbf9\xf9\xe2=TK" +
-	",\xbb\xe0\xde\x0f\xf9\x8a\xcd\xdf\xf3\xe6/y\x08\xda\x83" +
-	"\x8fi\xde\xfdy\xea\x1bTkE\xad\x89\x8a\xfd[\xb1" +
-	"[\x1bUYmL`\xe7\xef\x8b}\xda/\x934z" +
-	"\x1c\xd6\xf2\xe10\xcfv\xc7\x9d\xdd\xff\xc9<\xb8\x18\x06" +
-	"&3\xfbG\xc1\xa8H\x8a$\xcf\x1e\xc4|rD\xea" +
-	"\xba\xe3\x02.\x01u\xfe\x11\xa0\xcf9\xd4\x97\x05\x15\xb9" +
-	"\xc9*\xec\xf4\x01\xddv\xa8\xaf\x0b\xda(\x1e'a\xdc" +
-	"\x9b\xc211\xe5r\x0eH\x09Z\xb3\xb0\xe1e\xf7#" +
-	"\xd6!X\x07\xd7\xbc\xeb\xce\x8261\xaa\xab\x1a\x14\x80" +
-	":\xbd]\xd1jk\x07\xa0P\xfe6\xe0\xa5\xa6\x94a" +
-	"\x19\x05^h\xca5\xe9\xdbyV\x8c\x82\xb0\xb8\x9b\xa4" +
-	"\x8c\x8fM\xde\x01\xf4Y\x87\xba\xbd2\xf9\xc2\xfe\xf2\x1f" +
-	"\xa4\x09\x8a\x01\x1b\x10l\x80\x07\xcf\x07\xc1\xa5+W\xe9" +
-	"C\xd0\x07\xff\x05\x00\x00\xff\xff\xfdT\x8a\x04"
-
-func RegisterSchema(reg *schemas.Registry) {
-	reg.Register(&schemas.Schema{
-		String: schema_945465c07f3e146d,
-		Nodes: []uint64{
-			0x879c593dd5b038c9,
-			0x967a0a88b8c96b4f,
-			0xcc19dc536f6caa3f,
-		},
-		Compressed: true,
-	})
 }
