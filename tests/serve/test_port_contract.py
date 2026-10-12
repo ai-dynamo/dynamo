@@ -255,3 +255,87 @@ def test_dyn_port_accepts_high_non_system_port() -> None:
 
     assert result.returncode == 0
     assert result.stdout.strip() == "40000"
+
+
+@pytest.fixture
+def mm_router_preflight(tmp_path: Path) -> Path:
+    """Run the real launcher's port checks, stopping before any services start."""
+    source = (
+        Path(__file__)
+        .parents[2]
+        .joinpath("examples/backends/sglang/launch/agg_multimodal_router.sh")
+    )
+    script = tmp_path / "examples/backends/sglang/launch/agg_multimodal_router.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text(source.read_text())
+    common = tmp_path / "examples/common"
+    common.mkdir(parents=True)
+    (common / "gpu_utils.sh").write_text("")
+    # Reaching the banner proves validation finished. Exit before GPU helpers,
+    # worker processes, readiness polling, or the process-group cleanup trap.
+    (common / "launch_utils.sh").write_text("print_launch_banner() { exit 99; }\n")
+    return script
+
+
+@pytest.mark.sglang
+@pytest.mark.multimodal
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("worker", [1, 2])
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "0", "00000", "-1", "abc", "1+2", "65536", "18446744073709551617"],
+)
+def test_mm_router_rejects_invalid_managed_nccl_port(
+    mm_router_preflight: Path, worker: int, value: str | None
+) -> None:
+    """Reject every invalid spare port before even the first worker starts."""
+    env = {
+        "DYN_MANAGED_PORTS": "1",
+        "DYN_SYSTEM_PORT3": "1",
+        "DYN_SYSTEM_PORT4": "65535",
+    }
+    variable = f"DYN_SYSTEM_PORT{2 + worker}"
+    if value is None:
+        del env[variable]
+    else:
+        env[variable] = value
+    result = subprocess.run(
+        ["bash", str(mm_router_preflight)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 1, result.stderr
+    assert variable in result.stderr
+    assert "expected" in result.stderr
+
+
+@pytest.mark.sglang
+@pytest.mark.multimodal
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("managed", [False, True])
+def test_mm_router_accepts_nccl_port_boundaries_and_standalone(
+    mm_router_preflight: Path, managed: bool
+) -> None:
+    """Accept TCP port boundaries in managed mode and no ports in standalone mode."""
+    # These values are only validated; no process binds them.
+    env = (
+        {
+            "DYN_MANAGED_PORTS": "1",
+            "DYN_SYSTEM_PORT3": "00001",
+            "DYN_SYSTEM_PORT4": "65535",
+        }
+        if managed
+        else {}
+    )
+    result = subprocess.run(
+        ["bash", str(mm_router_preflight)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 99, result.stderr

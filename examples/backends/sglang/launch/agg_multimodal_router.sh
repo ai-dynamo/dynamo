@@ -62,6 +62,23 @@ EOF
     esac
 done
 
+# Validate every managed rendezvous port before starting any worker. Falling back
+# to SGLang's free-port probe here would reintroduce the bind race.
+NCCL_PORTS=()
+if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+    for i in $(seq 1 "${NUM_WORKERS}"); do
+        NCCL_PORT_VAR="DYN_SYSTEM_PORT$((NUM_WORKERS + i))"
+        NCCL_PORT="${!NCCL_PORT_VAR:-}"
+        # Bound the digit count before arithmetic to avoid integer overflow.
+        if [[ ! "${NCCL_PORT}" =~ ^[0-9]{1,5}$ ]] \
+            || (( 10#${NCCL_PORT} < 1 || 10#${NCCL_PORT} > 65535 )); then
+            echo "Invalid managed NCCL port ${NCCL_PORT_VAR}: ${NCCL_PORT:-<unset>}; expected 1-5 decimal digits in 1..65535" >&2
+            exit 1
+        fi
+        NCCL_PORTS+=("$((10#${NCCL_PORT}))")
+    done
+fi
+
 print_launch_banner --multimodal --no-curl \
     "MM Exact Routing (SGLang)" "${MODEL}" "${HTTP_PORT}" \
     "NUM_WORKERS:  ${NUM_WORKERS}" \
@@ -113,10 +130,8 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
 
     NCCL_PORT="sglang-default"
     NCCL_PORT_ARGS=()
-    NCCL_PORT_VAR="DYN_SYSTEM_PORT$((NUM_WORKERS + i))"
-    if [[ -n "${DYN_MANAGED_PORTS:-}" && "${!NCCL_PORT_VAR:-}" =~ ^[0-9]+$ ]] \
-        && (( 10#${!NCCL_PORT_VAR} != 0 )); then
-        NCCL_PORT="${!NCCL_PORT_VAR}"
+    if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+        NCCL_PORT="${NCCL_PORTS[i-1]}"
         NCCL_PORT_ARGS=(--nccl-port "${NCCL_PORT}")
     fi
 
