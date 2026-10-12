@@ -175,6 +175,45 @@ export regression checks both request roots and the actual frontend count limit.
 Neither that regression nor these finite probes establish every tokenizer,
 backend, numeric bound, field combination or response contract.
 
+### Ignoring EOS must not discard explicit user stops
+
+`REQUEST-9f7064ff3f54` (chat) and `REQUEST-0d828214c37d` (completion) concern
+`ignore_eos`. Its schema default/null differences do not capture the independent
+runtime composition defect: Dynamo used to remove caller stops together with
+implicit model/parser EOS stops.
+
+Using the pinned tokenizer and hello prompt above, compare these requests with
+`max_tokens: 4`, `skip_special_tokens: false` and `ignore_eos: true`:
+
+| Forced generation and caller stop | Direct vLLM | Dynamo before correction |
+| --- | --- | --- |
+| Only EOS, no caller stop | Four EOS markers, length finish | Same |
+| Only `7`, no caller stop | `7777`, length finish | Same |
+| Only `7`, `stop: "7"` | Immediate stop, no visible text | `7777`, length finish |
+| Only `7`, `stop_token_ids: [22]` | Immediate stop, no visible text | `7777`, length finish |
+| Only EOS, explicitly listed in `stop_token_ids` | Immediate stop, no visible text | Four EOS markers, length finish |
+
+Both endpoints and unary/streaming requests reproduce this result. The parent is
+Dynamo `617824f63282f4abf38672def67b159eab6011f1` with the same startup prerequisite
+and unchanged vLLM reference. An explicitly listed EOS ID is a user stop even
+when the same ID is also the model's default EOS.
+
+The correction is in
+[`StopConditions::apply_ignore_eos`](../src/protocols/common.rs): retain caller
+strings and token IDs, clearing only the implicit hidden/visible model/parser
+stop-ID sets. False/omitted `ignore_eos`, token budgets, wire types and
+`no_stop_trim` are unchanged. Older frontends still have their own preprocessing
+behavior; unchanged serialization does not make this fix effective on them.
+
+The real-server regression `test_ignore_eos_preserves_explicit_user_stops` first
+checks that ignoring implicit EOS works, then requires explicit stops to win.
+Its unchanged reference passes; the parent fails with a length finish at the
+first explicit stop. The unit regression separately checks omitted/false/true
+flags and overlapping user/system/parser IDs. These tests do not resolve the
+separate EOS-output inclusion policy, parser overrides of `skip_special_tokens`,
+or early validation of impossible `min_tokens`/`max_tokens` combinations. Raw
+unary chat empty-string/null differences remain recorded, not normalized away.
+
 Other endpoints and model-specific capabilities remain outside this text-model
 execution evidence. Missing response-body contracts, unsupported schema features,
 stream ordering/termination/cancellation, and unresolved candidate groups are
