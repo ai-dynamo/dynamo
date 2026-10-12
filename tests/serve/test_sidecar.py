@@ -23,11 +23,11 @@ from tests.utils.engine_metrics import EngineMetrics, VllmMetricsChecker
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import (
+    chat_logprobs_and_structured_output_payloads,
     chat_payload_default,
     disaggregated_chat_payload,
     disaggregated_token_count_payload,
     http_cancellation_payloads,
-    sidecar_compatibility_payloads,
 )
 from tests.utils.payloads import ChatPayload, KvTransferPayload
 from tests.utils.port_utils import (
@@ -92,7 +92,7 @@ CANCELLATION_CONTEXT_LEN = 4096
 
 def _aggregated_payloads(metrics: EngineMetrics):
     return [
-        *sidecar_compatibility_payloads(),
+        *chat_logprobs_and_structured_output_payloads(),
         *http_cancellation_payloads(metrics, max_tokens=CANCELLATION_MAX_TOKENS),
     ]
 
