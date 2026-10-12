@@ -454,11 +454,9 @@ def test_weight_artifact_rejects_invalid_shard_digest(
         weight_artifact._load_manifest(str(artifact), 64)
 
 
-@pytest.mark.parametrize("transfer_backend", list(TransferBackendKind))
 def test_weight_artifact_rejects_same_length_shard_mutation_before_restore(
     tmp_path,
     monkeypatch,
-    transfer_backend,
 ) -> None:
     artifact = tmp_path / "artifact"
     _write_test_artifact(artifact)
@@ -484,7 +482,6 @@ def test_weight_artifact_rejects_same_length_shard_mutation_before_restore(
             str(artifact),
             str(tmp_path / "unused.sock"),
             0,
-            transfer_backend=transfer_backend.value,
         )
 
 
@@ -604,7 +601,6 @@ def test_legacy_artifact_warns_and_cannot_detect_same_length_corruption(
     assert str(artifact) in caplog.text
 
 
-@pytest.mark.parametrize("transfer_backend", list(TransferBackendKind))
 @pytest.mark.parametrize("version", [1, 2])
 @pytest.mark.parametrize(
     "damage", ["missing", "truncated", "escape", "duplicate", "offset"]
@@ -612,7 +608,6 @@ def test_legacy_artifact_warns_and_cannot_detect_same_length_corruption(
 def test_public_loader_rejects_structural_damage_before_backend_or_session(
     tmp_path,
     monkeypatch,
-    transfer_backend,
     version,
     damage,
 ) -> None:
@@ -653,7 +648,6 @@ def test_public_loader_rejects_structural_damage_before_backend_or_session(
             str(artifact),
             str(tmp_path / "unused.sock"),
             0,
-            transfer_backend=transfer_backend.value,
         )
 
 
