@@ -16,6 +16,10 @@
 # Qwen-Image text-to-image serving with vLLM-Omni. This is the Kubernetes
 # equivalent of launch/agg_omni_image.sh.
 # Request response_format=b64_json unless media storage is externally served.
+#
+# Usage:
+#   export NAMESPACE=<your-namespace> DYNAMO_VERSION=1.5.1
+#   envsubst '${DYNAMO_VERSION}' < agg_omni_image.yaml | kubectl apply -n ${NAMESPACE} -f -
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -31,7 +35,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_VERSION}
   - name: OmniImageWorker
     type: worker
     replicas: 1
@@ -40,7 +44,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_VERSION}
           command:
           - python3
           - -m
@@ -52,6 +56,12 @@ spec:
           - image
           - --media-output-fs-url
           - file:///tmp/dynamo_media
+          env:
+          # With Dynamo 1.5.x, the operator enables canary health checks, but the
+          # vLLM-Omni canary is a text-token request that the image handler
+          # rejects, so the worker never becomes ready. Remove once fixed upstream.
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
           envFrom:
           - secretRef:
               name: hf-token-secret

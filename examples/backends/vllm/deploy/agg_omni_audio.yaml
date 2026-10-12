@@ -16,17 +16,14 @@
 # Qwen3-TTS text-to-audio serving with vLLM-Omni. This is the Kubernetes
 # equivalent of launch/agg_omni_audio.sh.
 #
-# Experimental: validated on September 18, 2026 with the following matched images:
-# Frontend: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20260826-27f09d5
-# Worker: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260826-27f09d5
-# Both contain Dynamo 1.5.0.dev20260826; the worker contains vLLM 0.27.1 and
-# vLLM-Omni 0.27.0rc1. The Helm chart/operator remained at 1.4.2.
-# Stock Dynamo 1.4.2 serving images return only the initial silent audio chunk.
-# Replace BOTH image placeholders with the tested pair above. If using another
-# matched build, set each runtimeVersionOverride to that image's Dynamo version
-# (MAJOR.MINOR.PATCH), not the operator version. Other builds need validation.
+# Requires Dynamo 1.5.0 or later for both images. Dynamo 1.4.x images return
+# only the initial silent audio chunk.
 # For response_format=wav and data_source=b64_json, the speech endpoint returns
 # raw WAV bytes; save them with curl -o output.wav.
+#
+# Usage:
+#   export NAMESPACE=<your-namespace> DYNAMO_VERSION=1.5.1
+#   envsubst '${DYNAMO_VERSION}' < agg_omni_audio.yaml | kubectl apply -n ${NAMESPACE} -f -
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -38,22 +35,20 @@ spec:
   - name: Frontend
     type: frontend
     replicas: 1
-    runtimeVersionOverride: "1.5.0"
     podTemplate:
       spec:
         containers:
         - name: main
-          image: my-registry/dynamo-frontend:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${DYNAMO_VERSION}
   - name: OmniAudioWorker
     type: worker
     replicas: 1
-    runtimeVersionOverride: "1.5.0"
     sharedMemorySize: 16Gi
     podTemplate:
       spec:
         containers:
         - name: main
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_VERSION}
           command:
           - python3
           - -m
@@ -70,6 +65,11 @@ spec:
           env:
           - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
             value: "1"
+          # With Dynamo 1.5.x, the operator enables canary health checks, but the
+          # vLLM-Omni canary is a text-token request that the speech handler
+          # rejects, so the worker never becomes ready. Remove once fixed upstream.
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
           envFrom:
           - secretRef:
               name: hf-token-secret
