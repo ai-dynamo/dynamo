@@ -17,6 +17,7 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
+from aisimulate.runner import materialize_engine_launch_config
 from aisimulate.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     BackendDeploymentSpec,
@@ -275,6 +276,30 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
             {},
             {"ais_perf_config": {"model": " target-model "}},
             id="engine-ais-perf-config",
+        ),
+        pytest.param(
+            {},
+            {
+                "timing_model": {
+                    "type": "external",
+                    "provider": "aic",
+                    "config": {"model": " target-model "},
+                }
+            },
+            id="engine-timing-model",
+        ),
+        pytest.param(
+            {},
+            {
+                "rank": {
+                    "timing_model": {
+                        "type": "external",
+                        "provider": "aic",
+                        "config": {"model": " target-model "},
+                    }
+                }
+            },
+            id="nested-rank-timing-model",
         ),
     ],
 )
@@ -690,6 +715,121 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
     assert seen["supports_disaggregated_attention_dp"] is True
 
 
+@pytest.mark.parametrize("supported", [False, True])
+def test_agentic_capabilities_follow_engine_support_in_offline_mode(
+    monkeypatch, supported
+):
+    native = replace(
+        simulation.EngineReplayRunnerFactory().capabilities(),
+        supports_agentic_host_offload=supported,
+        supports_agentic_snapshots=supported,
+        supports_agentic_warmup=supported,
+        supports_agentic_profile=supported,
+    )
+    monkeypatch.setattr(
+        simulation.EngineReplayRunnerFactory, "capabilities", lambda self: native
+    )
+    capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
+    assert capabilities.supported_execution_modes == ("offline",)
+    assert capabilities.supports_agentic_host_offload is supported
+    assert capabilities.supports_agentic_snapshots is supported
+    assert capabilities.supports_agentic_warmup is supported
+    assert capabilities.supports_agentic_profile is supported
+    # Dynamo's composed runtime retains its pre-existing HBM speculation support.
+    assert capabilities.supports_agentic_speculative_decoding
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("alias", ["aic_nextn", "nextn", "speculation"])
+def test_agentic_speculation_capability_does_not_bypass_g2_scope(nested, alias):
+    rank = {
+        "engine_type": "vllm",
+        "native_host_offload": {"num_host_blocks": 8},
+        alias: {"nextn": 2} if alias == "speculation" else 2,
+    }
+    deployment = replace(
+        _agg_deployment(),
+        num_workers=1,
+        agg_engine_args={"rank": rank} if nested else rank,
+    )
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_format": "weka", "agentic_lanes": 1},
+        goal={"target": "throughput"},
+    )
+    capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
+    with pytest.raises(ValueError, match="requires speculative decoding disabled"):
+        capabilities.require_compatible(spec)
+    rank.pop("native_host_offload")
+    capabilities.require_compatible(spec)
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize(
+    "speculation", [{"aic_nextn": 2}, {"decode_speedup_ratio": 2.0}]
+)
+def test_hbm_agentic_speculation_runs_through_native_replay(tmp_path, speculation):
+    trace = tmp_path / "hbm-agentic.jsonl"
+    trace.write_text(
+        json.dumps(
+            {
+                "id": "hbm-play",
+                "models": ["target-model"],
+                "block_size": 4,
+                "hash_id_scope": "local",
+                "requests": [
+                    {
+                        "t": 0,
+                        "type": "s",
+                        "model": "target-model",
+                        "in": 4,
+                        "out": 7,
+                        "hash_ids": [1],
+                        "api_time": 0.1,
+                    }
+                ],
+            }
+        )
+        + "\n"
+    )
+    base_args = {
+        "engine_type": "vllm",
+        "block_size": 4,
+        "num_gpu_blocks": 8,
+        "max_num_batched_tokens": 16,
+        "max_num_seqs": 1,
+        "timing_model": {"type": "fixed", "prefill_ms": 2, "decode_ms": 8},
+    }
+    spec = ReplaySpec(
+        backend_deployment=replace(
+            _agg_deployment(), num_workers=1, agg_engine_args=base_args
+        ),
+        workload={
+            "source_type": "trace",
+            "load_type": "trace_timestamps",
+            "trace_format": "weka",
+            "trace_path": str(trace),
+            "trace_block_size": 4,
+            "agentic_lanes": 1,
+        },
+        goal={"target": "throughput"},
+    )
+    runner = simulation.DynamoReplayRunnerFactory().create(0)
+    baseline = runner.run(spec)
+    accelerated = runner.run(
+        replace(
+            spec,
+            backend_deployment=replace(
+                spec.backend_deployment, agg_engine_args={**base_args, **speculation}
+            ),
+        )
+    )
+    assert baseline.metrics["completed_requests"] == 1
+    assert accelerated.metrics["completed_requests"] == 1
+    assert accelerated.metrics["total_output_tokens"] == 7
+    assert accelerated.metrics["duration_ms"] < baseline.metrics["duration_ms"]
+
+
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:
     monkeypatch.setattr(
         simulation,
@@ -852,3 +992,141 @@ def test_compiled_custom_timing_consumes_capacity_only_fields(timing):
     assert args["engine"]["timing_model"].get("config") is None
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
     assert report.metrics["completed_requests"] == raw["traffic"]["stop"]["requests"]
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_shared_g2_launch_config_preserves_layout_and_link_controls(nested):
+    host = {
+        "scope": "cluster_shared",
+        "num_host_blocks": 12,
+        "d2h_bandwidth_gbps": 7.0,
+        "h2d_bandwidth_gbps": 5.0,
+        "latency_to_first_byte_ms": 0.3,
+        "shared_d2h_bandwidth_gbps": 9.0,
+        "shared_h2d_bandwidth_gbps": 11.0,
+    }
+    raw = {
+        "engine_type": "vllm",
+        "aic_model_path": "original-model",
+        "block_size": 4,
+        "num_gpu_blocks": 3,
+        "tensor_parallel_size": 2,
+        "kv_cache_bytes_per_token": 250_000,
+        "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
+        "native_host_offload": host,
+    }
+    materialized = materialize_engine_launch_config("vllm", "", {}, raw, "aggregated")
+    if nested:
+        raw = {
+            "dp_size": materialized["dp_size"],
+            "tensor_parallel_size": materialized["tensor_parallel_size"],
+            "rank": materialized["engine"],
+        }
+    config = _launch_config(raw)
+    engine = config["engine"]
+    assert (
+        engine["native_host_offload"] == materialized["engine"]["native_host_offload"]
+    )
+    assert engine["native_host_offload"].items() >= host.items()
+    assert config["tensor_parallel_size"] == 2
+    assert engine["kv_cache_bytes_per_token"] == 250_000
+    assert "rank" not in config
+
+
+@pytest.mark.parametrize(
+    "rank, message",
+    [
+        ({"backend": "vllm", "engine_type": "sglang"}, "unknown field `engine_type`"),
+        (
+            {"kv_transfer_bytes_per_token": 16, "kv_bytes_per_token": 32},
+            "duplicate field `kv_transfer_bytes_per_token`",
+        ),
+    ],
+)
+def test_nested_engine_arguments_reject_conflicting_aliases(rank, message):
+    with pytest.raises(ValueError, match=message):
+        _launch_config(
+            {
+                "rank": {
+                    "num_gpu_blocks": 3,
+                    "timing_model": {
+                        "type": "fixed",
+                        "prefill_ms": 1.0,
+                        "decode_ms": 1.0,
+                    },
+                    **rank,
+                }
+            }
+        )
+
+
+@pytest.mark.parametrize("configured_block_size", [None, 128])
+def test_shared_g2_layout_matches_canonical_engine_geometry(configured_block_size):
+    payload = {
+        "engine_type": "vllm",
+        "num_gpu_blocks": 3,
+        "kv_cache_bytes_per_token": 1024,
+        "kv_bytes_per_token": 4096,
+        "native_host_offload": {"scope": "cluster_shared", "num_host_blocks": 8},
+        "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
+    }
+    if configured_block_size is not None:
+        payload["block_size"] = configured_block_size
+    engine = _launch_config(payload)["engine"]
+    layout = json.loads(engine["native_host_offload"]["kv_layout_id"])
+
+    assert (
+        engine["block_size"]
+        == layout["block_size"]
+        == (64 if configured_block_size is None else configured_block_size)
+    )
+    # Physical G2 storage and P/D transfer sizes remain independent.
+    assert engine["kv_cache_bytes_per_token"] == layout["bytes_per_token"] == 1024
+    assert engine["kv_transfer_bytes_per_token"] == 4096
+
+
+@pytest.mark.parametrize(
+    "geometry, message",
+    [
+        ({}, "requires kv_cache_bytes_per_token"),
+        ({"kv_cache_bytes_per_token": None}, "requires kv_cache_bytes_per_token"),
+        ({"kv_cache_bytes_per_token": 0}, "kv_cache_bytes_per_token must be positive"),
+        ({"kv_cache_bytes_per_token": -1}, "expected usize"),
+        ({"kv_cache_bytes_per_token": True}, "expected usize"),
+    ],
+)
+def test_shared_g2_launch_requires_resolved_physical_cache_geometry(geometry, message):
+    # The CLI resolves model geometry first. Canonical replay inputs must supply
+    # physical G2 bytes explicitly, independently of optional handoff bytes.
+    with pytest.raises(ValueError, match=message):
+        _launch_config(
+            {
+                "num_gpu_blocks": 3,
+                "kv_bytes_per_token": 4096,
+                "native_host_offload": {
+                    "scope": "cluster_shared",
+                    "num_host_blocks": 8,
+                },
+                "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
+                **geometry,
+            }
+        )
+
+
+@pytest.mark.parametrize("backend", ["sglang", "trtllm"])
+def test_shared_g2_launch_rejects_unsupported_backend(backend):
+    with pytest.raises(
+        ValueError, match="native_host_offload is supported only for backend=vllm"
+    ):
+        _launch_config(
+            {
+                "engine_type": backend,
+                "num_gpu_blocks": 3,
+                "kv_cache_bytes_per_token": 1024,
+                "native_host_offload": {
+                    "scope": "cluster_shared",
+                    "num_host_blocks": 8,
+                },
+                "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
+            }
+        )
