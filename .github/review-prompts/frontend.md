@@ -7,6 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 
 Review the proposed change for frontend defects. Read the diff and surrounding code to establish what the change affects. Focus on the affected HTTP and gRPC handlers, protocol conversions, preprocessing, frontend Python processors, and their directly connected callers and backend adapters. Read enough surrounding code to establish the production path; do not scan unrelated code.
 
+For request or response field changes, apply the
+[protocol field handling contract](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md).
+Identify the field's public location, semantic owners, and internal transport. Do not infer semantic
+ownership from a typed field, map entry, or public placement.
+
 Apply the following concerns only where the change makes them relevant. They describe recurring frontend codeowner feedback, not a requirement to find an issue in every category.
 
 ## Request semantics

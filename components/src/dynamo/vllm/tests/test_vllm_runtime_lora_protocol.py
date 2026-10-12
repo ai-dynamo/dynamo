@@ -41,13 +41,17 @@ def test_explicit_requests_do_not_use_runtime_protocol(request_payload):
         "custom",
         "custom:\x00bad",
         "custom:\x7fbad",
-        "custom:\ud800",
         "custom:" + "x" * 3072,
     ],
 )
 def test_invalid_source_envelopes_are_rejected(source):
     with pytest.raises(protocol_mod.HttpError, match="invalid_lora_model_id"):
         protocol_mod._validate_source_uri(source)
+
+
+def test_source_with_unpaired_surrogate_is_rejected():
+    with pytest.raises(protocol_mod.HttpError, match="invalid_lora_model_id"):
+        protocol_mod._validate_source_uri("custom:\ud800")
 
 
 @pytest.mark.parametrize(

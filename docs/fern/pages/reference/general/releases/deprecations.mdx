@@ -17,6 +17,18 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <UpgradeSelector />
 
+<a id="v151"></a>
+
+## v1.5.1 — Oct 6, 2026
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Media fetches through an ambient HTTP proxy now require `DYN_MM_TRUST_EGRESS_PROXY=1`** ([#14474](https://github.com/ai-dynamo/dynamo/pull/14474)).
+
+  > **Migrate:** Set `DYN_MM_TRUST_EGRESS_PROXY=1` on workers that fetch request media through a proxy. Without it, a policy-checked media fetch that would route through a proxy is refused. Direct fetches, including hosts listed in `NO_PROXY`, are unaffected, and the check does not run under `DYN_MM_ALLOW_INTERNAL=1`.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **SGLang image-diffusion and video-generation workers accept local `input_reference` files only from the directory named by `DYN_MM_LOCAL_PATH`** ([#14435](https://github.com/ai-dynamo/dynamo/pull/14435)).
+
+  > **Migrate:** Set `DYN_MM_LOCAL_PATH` to the directory that holds local reference files. Previously any local path was accepted.
+
 <a id="v150"></a>
 
 ## v1.5.0 — Sep 18, 2026

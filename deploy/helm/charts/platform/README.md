@@ -106,6 +106,16 @@ to v1.6.0. Update any tooling that depends on the frontend's previous registrati
 which changes the pod template and triggers the rollout even without a manifest change.
 Components without a frontend sidecar or using pod discovery are unaffected by this change.
 
+#### New behavior
+
+##### Opt-in Grove coherent updates and native minimum availability
+
+**Change:** The component `minAvailable` field is deprecated in favor of a component provider override. New Grove-backed DGDs created by Dynamo 1.6.0 or later without any legacy minimum resolve an omitted native minimum to `1` during rendering without synthesizing an override. Coherent updates require an explicit opt-in; the default remains RollingRecreate.
+
+**Affected:** Existing Grove-backed DGDs retain their legacy defaults and rollout strategy after an operator upgrade. The upgrade does not automatically migrate availability fields or roll unchanged workloads.
+
+**Action:** Upgrade externally managed Grove controllers and matching CRDs to `v0.1.0-alpha.14` or later. When migrating availability fields, migrate all components together while preserving their existing effective minima. Review disruption requirements before opting into Coherent. See the [DGD reference for strategy configuration and minimum-availability migration](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-update-strategy). Operational rollout guidance is being restored in [the Rolling Updates guide PR](https://github.com/ai-dynamo/dynamo/pull/15730).
+
 #### Dependency compatibility
 
 **Change:** The bundled Grove version is now `v0.1.0-alpha.14`. It provides the group-wide pod

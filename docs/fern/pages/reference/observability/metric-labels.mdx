@@ -85,6 +85,12 @@ Added by an individual metric family. Each label appears only on the metrics not
   `[Shared]` On `dynamo_frontend_worker_*` — the data-parallel rank of the worker. Example: `0`.
 </ParamField>
 
+<ParamField path="request_phase" type="string">
+  `[Shared]` On `dynamo_frontend_worker_active_requests` — where a booked request is in its lifecycle: `prefill` until the worker returns the first output token, `decode` after. Unlike [`phase`](#phase-values), it does not name the serving leg; the worker role is in `worker_type`.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge></span>
+</ParamField>
+
 <ParamField path="policy_class" type="string">
   `[Shared]` On `dynamo_frontend_router_queue_*` — the resolved physical scheduler queue. With policy-family or cache-bucket configuration, this can differ from the family requested by the client.
 </ParamField>
