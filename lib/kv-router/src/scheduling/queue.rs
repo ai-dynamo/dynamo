@@ -14,6 +14,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use self::capacity::CapacityUpdates;
+#[cfg(feature = "runtime-protocols")]
+use dynamo_runtime::telemetry::{LifecycleStage, LifecycleTrace};
+
 #[cfg(test)]
 use super::config::RouterQueuePolicy;
 use super::filter::{RoutingEligibility, worker_config_for_rank};
@@ -22,7 +25,7 @@ use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
 };
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::policy_queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
+use super::policy_queue::{PolicyQueue, QueueLimitKind, QueueMetadata, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::request_classifier::{ClassificationOverrides, ClassifyRequest};
@@ -77,6 +80,20 @@ struct QueuedRequest {
     enqueue_at: Instant,
     due_at: Option<Instant>,
     block_hashes: Option<Vec<LocalBlockHash>>,
+    lifecycle_span: tracing::Span,
+}
+
+fn finish_queue_span(
+    span: tracing::Span,
+    depth: usize,
+    outcome: &'static str,
+    reason: Option<&'static str>,
+) {
+    span.record("dynamo.router.queue.depth.out", depth as u64);
+    span.record("dynamo.router.queue.outcome", outcome);
+    if let Some(reason) = reason {
+        span.record("dynamo.router.queue.reason", reason);
+    }
 }
 
 struct SelectedWorkerForRequest {
@@ -1247,7 +1264,14 @@ impl<
                 .pending_cached_tokens
                 .fetch_sub(snapshot.cached_tokens, AtomicOrdering::Relaxed);
 
-            let mut request = entry.into_payload().request;
+            let queued = entry.into_payload();
+            finish_queue_span(
+                queued.lifecycle_span,
+                self.pending_count.load(AtomicOrdering::Relaxed),
+                "failed",
+                Some("subscriber_shutdown"),
+            );
+            let mut request = queued.request;
             request.respond(Err(KvSchedulerError::SubscriberShutdown));
         }
     }
@@ -1307,6 +1331,35 @@ impl<
             }
         }
         tracing::trace!(policy_class = class.name, "ordering request");
+        #[cfg(feature = "runtime-protocols")]
+        let lifecycle_span = request
+            .mode
+            .request_id()
+            .map_or_else(tracing::Span::none, |id| {
+                LifecycleTrace::frontend_request_without_session(id)
+                    .start(LifecycleStage::RouterQueue)
+            });
+        #[cfg(not(feature = "runtime-protocols"))]
+        let lifecycle_span = tracing::Span::none();
+        let queue_depth_in = self.pending_count.load(AtomicOrdering::Relaxed);
+        lifecycle_span.record("dynamo.router.queue.class", class.name.as_str());
+        lifecycle_span.record(
+            "dynamo.router.queue.policy",
+            tracing::field::display(class.queue_policy),
+        );
+        lifecycle_span.record("dynamo.router.queue.depth.in", queue_depth_in as u64);
+        // Policy-queue membership alone does not mean capacity deferred the
+        // request: ordinary arrivals can drain in the same actor turn.
+        let backlog = self.pending.has_backlog(class_index);
+        lifecycle_span.record("dynamo.router.queue.deferred", backlog);
+        lifecycle_span.record(
+            "dynamo.router.queue.reason",
+            if backlog {
+                "class_backlog"
+            } else {
+                "policy_ordering"
+            },
+        );
         let priority_jump = request.priority_jump;
         let strict_priority = request.strict_priority;
         let placement = request
@@ -1319,6 +1372,7 @@ impl<
             enqueue_at: decay_now,
             due_at: queue_metadata.due_at,
             block_hashes,
+            lifecycle_span,
         };
         let worker_count = self.workers_with_configs.borrow().len();
         if let Err((rejection, queued)) = self.pending.enqueue_with_due_at(
@@ -1329,6 +1383,16 @@ impl<
             placement,
             queued,
         ) {
+            finish_queue_span(
+                queued.lifecycle_span,
+                queue_depth_in,
+                "rejected",
+                Some(match rejection.limit_kind {
+                    QueueLimitKind::Requests => "request_limit",
+                    QueueLimitKind::RawIslTokens => "raw_isl_token_limit",
+                    QueueLimitKind::CachedTokens => "cached_token_limit",
+                }),
+            );
             let mut request = queued.request;
             request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
             return false;
@@ -1354,8 +1418,14 @@ impl<
         for entry in self.pending.take_expired(now) {
             let class_index = entry.class_index();
             self.subtract_pending_counters(class_index, entry.snapshot());
-            let mut request = entry.into_payload().request;
-            self.reject_due_time_passed(class_index, &mut request);
+            let mut queued = entry.into_payload();
+            finish_queue_span(
+                queued.lifecycle_span,
+                self.pending_count.load(AtomicOrdering::Relaxed),
+                "timed_out",
+                Some("deadline_expired"),
+            );
+            self.reject_due_time_passed(class_index, &mut queued.request);
         }
     }
 
@@ -1452,6 +1522,10 @@ impl<
                 removed_ready_head |= class_head_removed;
                 for entry in removed {
                     self.subtract_pending_counters(class_index, entry.snapshot());
+                    let depth = self.pending_count.load(AtomicOrdering::Relaxed);
+                    let span = entry.into_payload().lifecycle_span;
+                    let reason = Some("request_lifecycle_ended_before_admission");
+                    finish_queue_span(span, depth, "cancelled", reason);
                 }
             }
         }
@@ -1573,7 +1647,7 @@ impl<
                     // TODO: This preserves head-of-line blocking within each policy
                     // class. A blocked constrained head can stall later entries in
                     // that class until a bounded non-HOL policy is introduced.
-                    !Self::all_workers_prefill_busy_with(
+                    let blocked = Self::all_workers_prefill_busy_with(
                         active_tokens,
                         &configs,
                         class,
@@ -1581,7 +1655,13 @@ impl<
                             .request
                             .eligibility()
                             .with_available_workers(available.as_deref()),
-                    )
+                    );
+                    if blocked {
+                        let span = &queued.lifecycle_span;
+                        span.record("dynamo.router.queue.deferred", true);
+                        span.record("dynamo.router.queue.reason", "prefill_capacity");
+                    }
+                    !blocked
                 })
             };
             let Some(mut popped) = popped else {
@@ -1628,8 +1708,14 @@ impl<
                 // The pop already charged this entry's scheduling cost against
                 // the class deficit; the credit is intentionally not refunded,
                 // matching every other post-pop terminal outcome.
-                let mut request = popped.into_payload().request;
-                self.reject_due_time_passed(class_index, &mut request);
+                let mut queued = popped.into_payload();
+                finish_queue_span(
+                    queued.lifecycle_span,
+                    self.pending_count.load(AtomicOrdering::Relaxed),
+                    "timed_out",
+                    Some("deadline_expired"),
+                );
+                self.reject_due_time_passed(class_index, &mut queued.request);
                 continue;
             }
             let wait_ms = queued.enqueue_at.elapsed().as_millis() as u64;
@@ -1650,6 +1736,12 @@ impl<
             let class_index = popped.class_index();
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
+            finish_queue_span(
+                queued.lifecycle_span,
+                self.pending_count.load(AtomicOrdering::Relaxed),
+                "dequeued",
+                None,
+            );
             tracing::trace!(
                 policy_class = class.name,
                 "scheduling request from pending queue"
@@ -1694,6 +1786,17 @@ impl<
             .as_ref()
             .and_then(|provider| provider(request));
 
+        #[cfg(feature = "runtime-protocols")]
+        let lifecycle_span = request
+            .mode
+            .request_id()
+            .map_or_else(tracing::Span::none, |id| {
+                LifecycleTrace::frontend_request_without_session(id)
+                    .start(LifecycleStage::RouterSelection)
+            });
+        #[cfg(not(feature = "runtime-protocols"))]
+        let lifecycle_span = tracing::Span::none();
+
         {
             let workers = self.workers_with_configs.borrow();
             let overloaded_worker_ids = self
@@ -1714,16 +1817,18 @@ impl<
             } else {
                 None
             };
-            self.selector
-                .select_worker_traced(
-                    WorkerSelectionInput::configured(
-                        &workers,
-                        request,
-                        eligibility,
-                        self.block_size,
-                    ),
-                    trace,
-                )
+            lifecycle_span
+                .in_scope(|| {
+                    self.selector.select_worker_traced(
+                        WorkerSelectionInput::configured(
+                            &workers,
+                            request,
+                            eligibility,
+                            self.block_size,
+                        ),
+                        trace,
+                    )
+                })
                 .map(|(selection, selection_trace)| {
                     let non_max_overlap_selection = if request.mode.is_tracked()
                         && self.non_max_overlap_selection_observer.get().is_some()
@@ -4046,6 +4151,95 @@ policy_classes:
                 "worker {worker:?} still has {tokens} active tokens"
             );
         }
+    }
+
+    #[cfg(feature = "runtime-protocols")]
+    #[tokio::test(start_paused = true)]
+    async fn lifecycle_concurrent_queue_outcomes() {
+        use crate::plugins::worker_selection::{
+            WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+        };
+        use crate::scheduling::selector::WorkerSelectionPolicy;
+        use crate::scheduling::test_capture::{Capture, isolated};
+        if isolated("scheduling::queue::tests::lifecycle_concurrent_queue_outcomes") {
+            return;
+        }
+        let capture = Capture::install();
+        struct FirstPicker;
+        impl WorkerPicker for FirstPicker {
+            fn pick(
+                &mut self,
+                _: &WorkerSelectionContext<'_>,
+                _: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(0)
+            }
+        }
+        let policy =
+            WorkerSelectionPolicy::new(Default::default(), "test", vec![], Box::new(FirstPicker));
+        let (queue, slots) = make_queue_with_custom_selector(2, 16, 64, Some(0.0), policy);
+        let request = |id: &str, worker| {
+            let (mut request, rx) = make_request(id, 64);
+            request.pinned_worker = Some(WorkerWithDpRank::new(worker, 0));
+            (request, rx)
+        };
+        let (active0, rx0) = request("active-0", 0);
+        let (active1, rx1) = request("active-1", 1);
+        tokio::join!(queue.enqueue(active0), queue.enqueue(active1));
+        rx0.await.unwrap().unwrap();
+        rx1.await.unwrap().unwrap();
+
+        let (admitted, admitted_rx) = request("admitted", 0);
+        let (cancelled, cancelled_rx) = request("cancelled", 1);
+        let (expired, expired_rx) = request("expired", 1);
+        let lease = queue
+            .new_request_lifecycle_lease(Some("cancelled"))
+            .unwrap();
+        let (_, lease, _) = tokio::join!(
+            queue.enqueue(admitted),
+            queue.enqueue_with_block_hashes_and_lease(cancelled, None, Some(lease)),
+            queue.enqueue_with_due_at_for_test(expired, Instant::now() + Duration::from_secs(5)),
+        );
+        assert_eq!(queue.pending_count(), 3);
+        drop(cancelled_rx);
+        drop(lease);
+        queue.update().await;
+        assert_eq!(queue.pending_count(), 2);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(matches!(
+            expired_rx.await.unwrap(),
+            Err(KvSchedulerError::DeadlineExceeded)
+        ));
+        slots.free(&"active-0".to_string(), Instant::now()).unwrap();
+        queue.update().await;
+        assert_eq!(
+            admitted_rx.await.unwrap().unwrap().best_worker,
+            WorkerWithDpRank::new(0, 0)
+        );
+        assert_eq!(queue.pending_count(), 0);
+
+        for (id, outcome) in [
+            ("admitted", "dequeued"),
+            ("cancelled", "cancelled"),
+            ("expired", "timed_out"),
+        ] {
+            let fields = capture.fields("router.queue", id);
+            assert_eq!(fields["dynamo.router.queue.outcome"], outcome);
+            assert_eq!(fields["dynamo.router.queue.deferred"], "true");
+        }
+        for (id, worker) in [("active-0", "0"), ("active-1", "1"), ("admitted", "0")] {
+            let fields = capture.fields("router.selection", id);
+            assert_eq!(fields["dynamo.router.selected.worker.id"], worker);
+            assert_eq!(fields["dynamo.router.candidate.count"], "1");
+            let detail: serde_json::Value =
+                serde_json::from_str(&fields["dynamo.router.candidates.top_k"]).unwrap();
+            assert_eq!(detail.as_array().unwrap().len(), 1);
+            assert_eq!(detail[0]["worker_id"].as_u64().unwrap().to_string(), worker);
+        }
+        for id in ["active-1", "admitted"] {
+            slots.free(&id.to_string(), Instant::now()).unwrap();
+        }
+        slots.assert_completely_drained(Instant::now());
     }
 
     #[tokio::test(flavor = "multi_thread")]
