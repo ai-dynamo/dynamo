@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import logging
 import signal
+import sys
 from collections import defaultdict
 from typing import Any, Awaitable, Callable, DefaultDict
 
@@ -47,6 +48,8 @@ def install_graceful_shutdown(
         if not shutdown_started or deferred_handlers_ran:
             return
         deferred_handlers_ran = True
+        application_error = sys.exc_info()[1]
+        shutdown_error: Exception | None = None
 
         # Join the shutdown sequence first. It is a detached task, and it sets
         # `shutdown_event` *before* awaiting the runtime teardown — so the serve
@@ -57,7 +60,8 @@ def install_graceful_shutdown(
                 await asyncio.shield(shutdown_task)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
+                shutdown_error = error
                 logging.exception("Graceful shutdown sequence failed")
 
         signums = (
@@ -73,6 +77,9 @@ def install_graceful_shutdown(
                         await res
                 except Exception:
                     logging.exception("Deferred signal callback failed: %r", cb)
+
+        if shutdown_error is not None and application_error is None:
+            raise shutdown_error
 
     async def _shutdown_sequence(signum: int, frame: Any | None) -> None:
         nonlocal shutdown_started, shutdown_signum
