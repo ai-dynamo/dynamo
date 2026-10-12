@@ -1212,6 +1212,22 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
     assert config.dynamo_args.namespace == "custom-ns"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("worker_flag", "expected"),
+    [("--rerank-worker", True), ("--embedding-worker", False)],
+)
+async def test_rerank_worker_disables_radix_cache(
+    mock_sglang_cli, worker_flag, expected
+):
+    """Rerank workers must not reuse cached prefixes; embedding workers keep the default."""
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B", worker_flag)
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.disable_radix_cache is expected
+
+
 @pytest.mark.parametrize(
     (
         "mode",
