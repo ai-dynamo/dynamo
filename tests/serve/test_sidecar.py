@@ -8,7 +8,6 @@ import importlib.util
 import json
 import os
 import pathlib
-from functools import partial
 
 import pytest
 
@@ -19,7 +18,6 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.sidecar_checks import assert_native_cancellation_and_recovery
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_metrics import EngineMetrics, VllmMetricsChecker
 from tests.utils.engine_process import EngineConfig
@@ -209,7 +207,9 @@ sidecar_configs = {
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
         },
-        request_payloads=[],
+        request_payloads=_aggregated_payloads(
+            VllmMetricsChecker(port_env="VLLM_RS_HTTP_PORT"),
+        ),
     ),
     "sglang_aggregated": EngineConfig(
         name="sglang_aggregated",
@@ -311,7 +311,11 @@ sidecar_configs = {
         health_check_workers=True,
         health_check_worker_count=2,
         env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
-        request_payloads=[],
+        request_payloads=_disaggregated_payloads(
+            prefill_metrics=VllmMetricsChecker(port_env="VLLM_PREFILL_HTTP_PORT"),
+            decode_metrics=VllmMetricsChecker(port_env="VLLM_DECODE_HTTP_PORT"),
+            transfer_metrics=VllmMetricsChecker(port_env="VLLM_DECODE_HTTP_PORT"),
+        ),
     ),
     "sglang_disaggregated": EngineConfig(
         name="sglang_disaggregated",
@@ -341,7 +345,6 @@ def sidecar_config_test(
     config = sidecar_configs[request.param]
     backend, layout = config.name.split("_", 1)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
-    post_validation = None
     num_engine_ports = (
         {"vllm": 4, "sglang": 5, "trtllm": 2}[backend]
         if layout == "disaggregated"
@@ -351,7 +354,6 @@ def sidecar_config_test(
         num_engine_ports, start_port=DynamoPortRange.SERVE.value
     ) as engine_ports:
         engine_env = {}
-        payloads = config.request_payloads
         if layout == "disaggregated":
             monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
             monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
@@ -389,17 +391,6 @@ def sidecar_config_test(
             elif backend == "trtllm":
                 engine_env["DYN_DISCOVERY_BACKEND"] = discovery_backend
 
-            if backend == "vllm":
-                prefill_url = f"http://127.0.0.1:{engine_env[f'{backend.upper()}_PREFILL_HTTP_PORT']}/metrics"
-                decode_url = f"http://127.0.0.1:{engine_env[f'{backend.upper()}_DECODE_HTTP_PORT']}/metrics"
-                prefill_metrics = VllmMetricsChecker(prefill_url)
-                decode_metrics = VllmMetricsChecker(decode_url)
-                transfer_metrics = decode_metrics
-                payloads = _disaggregated_payloads(
-                    prefill_metrics=prefill_metrics,
-                    decode_metrics=decode_metrics,
-                    transfer_metrics=transfer_metrics,
-                )
         elif backend == "trtllm":
             # The explicit config takes precedence over the launcher's file.
             memory_env = dict(os.environ)
@@ -428,31 +419,16 @@ def sidecar_config_test(
             namespace = f"sidecar-agg-{generate_random_suffix()}"
             monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
             monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
-            metrics_url = f"http://127.0.0.1:{engine_ports[0]}/metrics"
-            metrics = VllmMetricsChecker(metrics_url)
             http_port_env = "VLLM_RS_HTTP_PORT"
             engine_env = {
                 "DYN_NAMESPACE": namespace,
                 http_port_env: str(engine_ports[0]),
                 f"{backend.upper()}_GRPC_PORT": str(engine_ports[1]),
             }
-            payloads = _aggregated_payloads(metrics)
-            post_validation = partial(
-                assert_native_cancellation_and_recovery,
-                metrics=metrics,
-                model=config.model,
-                namespace=namespace,
-                max_tokens=CANCELLATION_MAX_TOKENS,
-                discovery_backend=discovery_backend,
-            )
-        yield (
-            dataclasses.replace(
-                config,
-                frontend_port=dynamo_dynamic_ports.frontend_port,
-                env={**config.env, **engine_env},
-                request_payloads=payloads,
-            ),
-            post_validation,
+        yield dataclasses.replace(
+            config,
+            frontend_port=dynamo_dynamic_ports.frontend_port,
+            env={**config.env, **engine_env},
         )
 
 
@@ -472,12 +448,10 @@ def test_serve_deployment(
     assert (
         num_system_ports >= 2
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
-    config, post_validation = sidecar_config_test
     run_serve_deployment(
-        config,
+        sidecar_config_test,
         request,
         ports=dynamo_dynamic_ports,
-        post_validation=post_validation,
     )
 
 

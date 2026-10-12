@@ -15,10 +15,19 @@ from tests.utils.prometheus import find_metric_samples
 
 @dataclass
 class EngineMetrics(ABC):
-    url: str
+    port_env: str
     settle_timeout: float = 10
+    url: str | None = field(default=None, init=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        """Resolve the engine HTTP port from this deployment's launch settings."""
+        self.url = f"http://127.0.0.1:{int(env[self.port_env])}/metrics"
 
     def scrape(self) -> str:
+        if self.url is None:
+            raise RuntimeError(
+                f"Engine metrics port has not been bound: {self.port_env}"
+            )
         with requests.get(self.url, timeout=2) as response:
             response.raise_for_status()
             return response.text
