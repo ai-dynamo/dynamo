@@ -35,6 +35,7 @@ pytestmark = [
 
 @pytest.fixture
 def session_module():
+    """Load a fresh copy of the example without importing the trainer."""
     spec = importlib.util.spec_from_file_location(
         "sglang_weight_session_under_test", MODULE_PATH
     )
@@ -48,6 +49,7 @@ class _FakeEngine:
     """Answers the SGLang 0.5.21 weight-update session contract."""
 
     def __init__(self, *, has_sessions: bool = True, fail_begin: bool = False):
+        """Start an HTTP engine with configurable session support and failures."""
         self.has_sessions = has_sessions
         self.fail_begin = fail_begin
         self.session_open = False
@@ -57,6 +59,7 @@ class _FakeEngine:
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
+                """Consume the request and return the fake engine's JSON response."""
                 length = int(self.headers.get("Content-Length") or 0)
                 self.rfile.read(length)
                 status, body = engine.handle(self.path.lstrip("/"))
@@ -68,6 +71,7 @@ class _FakeEngine:
                 self.wfile.write(payload)
 
             def log_message(self, *args):
+                """Suppress HTTP access logs during tests."""
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -76,6 +80,7 @@ class _FakeEngine:
         self.thread.start()
 
     def handle(self, route: str) -> tuple[int, dict]:
+        """Record the request and enforce the session lifecycle under a lock."""
         with self._lock:
             self.calls.append(route)
             if route in ("begin_weight_update", "end_weight_update"):
@@ -101,15 +106,18 @@ class _FakeEngine:
             return 404, {"detail": "Not Found"}
 
     def close(self):
+        """Stop the HTTP server and release its listening socket."""
         self.server.shutdown()
         self.server.server_close()
 
 
 @pytest.fixture
 def engines():
+    """Create fake engines and close every server after the test."""
     created: list[_FakeEngine] = []
 
     def make(**kwargs) -> _FakeEngine:
+        """Track a new engine so fixture cleanup closes it."""
         engine = _FakeEngine(**kwargs)
         created.append(engine)
         return engine
@@ -123,10 +131,12 @@ class _Updater:
     """Stands in for Slime's UpdateWeightFromDistributed."""
 
     def __init__(self, engine_urls, fail: bool = False):
+        """Choose the receivers and whether sending should raise an error."""
         self.engine_urls = engine_urls
         self.fail = fail
 
     def _send_weights(self, pbar):
+        """Update each receiver, then optionally simulate a failed broadcast."""
         for url in self.engine_urls:
             response = requests.post(
                 f"{url}/update_weights_from_distributed", json={}, timeout=5
@@ -147,6 +157,7 @@ def _wrap(module, urls, owner=True, owner_errors=()):
     from_owner = list(owner_errors)
 
     def share_error(error):
+        """Record this rank's error and return the simulated owner's value."""
         shared.append(error)
         if owner:
             return error
@@ -163,6 +174,7 @@ def _wrap(module, urls, owner=True, owner_errors=()):
 
 
 def test_wrapper_opens_one_session_around_all_buckets(session_module, engines):
+    """Check session ordering on two engines and allow the next policy update."""
     first, second = engines(), engines()
     urls = [first.url, second.url]
     wrapped, shared = _wrap(session_module, urls)
@@ -183,6 +195,7 @@ def test_wrapper_opens_one_session_around_all_buckets(session_module, engines):
 
 
 def test_wrapper_closes_session_after_failed_send(session_module, engines):
+    """Close the session while preserving a weight-send failure."""
     engine = engines()
     wrapped, _ = _wrap(session_module, [engine.url])
     with pytest.raises(RuntimeError, match="broadcast failed"):
@@ -192,6 +205,7 @@ def test_wrapper_closes_session_after_failed_send(session_module, engines):
 
 
 def test_non_owner_rank_makes_no_session_calls(session_module, engines):
+    """Keep peers in both error exchanges without making owner-only HTTP calls."""
     engine = engines()
     wrapped, shared = _wrap(session_module, [engine.url], owner=False)
     wrapped(_Updater([]), None)
@@ -200,6 +214,7 @@ def test_non_owner_rank_makes_no_session_calls(session_module, engines):
 
 
 def test_begin_failure_raises_on_every_rank(session_module, engines):
+    """Make the owner and peer fail before sending when a session cannot open."""
     bad = engines(fail_begin=True)
     owner, owner_shared = _wrap(session_module, [bad.url])
     with pytest.raises(RuntimeError, match="did not open"):
@@ -217,10 +232,12 @@ def test_begin_failure_raises_on_every_rank(session_module, engines):
 
 
 def test_end_failure_raises_on_every_rank(session_module, engines):
+    """Make the owner and peer receive the same session-close failure."""
     engine = engines()
     owner_shared: list[str | None] = []
 
     def close_out_of_band(self, pbar):
+        """End the session early to make the wrapper's close request fail."""
         _Updater._send_weights(self, pbar)
         # Close the session early so the wrapper's end gets HTTP 400.
         requests.post(f"{engine.url}/end_weight_update", json={}, timeout=5)
@@ -243,6 +260,7 @@ def test_end_failure_raises_on_every_rank(session_module, engines):
 
 
 def test_legacy_engine_skips_end(session_module, engines):
+    """Send to old and new engines while closing only the supported session."""
     legacy = engines(has_sessions=False)
     current = engines()
     urls = [legacy.url, current.url]
@@ -256,6 +274,7 @@ def test_legacy_engine_skips_end(session_module, engines):
 
 
 def test_begin_failure_closes_already_opened_sessions(session_module, engines):
+    """Clean up the first engine when the second engine rejects session begin."""
     good = engines()
     bad = engines(fail_begin=True)
     with pytest.raises(RuntimeError, match="begin_weight_update failed"):
@@ -273,17 +292,22 @@ def test_begin_failure_closes_already_opened_sessions(session_module, engines):
     ],
 )
 def test_engine_base_url(session_module, addr, expected):
+    """Normalize bare addresses, trailing slashes, and bracketed IPv6 hosts."""
     assert session_module.engine_base_url(addr) == expected
 
 
 def test_engine_base_url_rejects_missing_port(session_module):
+    """Reject an engine address that omits its required port."""
     with pytest.raises(ValueError):
         session_module.engine_base_url("engine-0")
 
 
 def _fake_slime(monkeypatch):
+    """Install trainer stubs that act as a non-owner distributed rank."""
+
     class UpdateWeightFromDistributed:
         def _send_weights(self, pbar):
+            """Return the progress marker without sending weights."""
             return pbar
 
     modules = {
@@ -321,6 +345,7 @@ def _fake_slime(monkeypatch):
 
 
 def _args(**overrides):
+    """Build eligible trainer arguments with per-test overrides."""
     values = {
         "rollout_external": True,
         "rollout_external_engine_addrs": ["engine-0:30000"],
@@ -333,6 +358,7 @@ def _args(**overrides):
 
 
 def test_install_wraps_nccl_updater_once(session_module, monkeypatch):
+    """Install the hook once and preserve the original return value."""
     updater_cls = _fake_slime(monkeypatch)
     original = updater_cls._send_weights
 
@@ -357,6 +383,7 @@ def test_install_wraps_nccl_updater_once(session_module, monkeypatch):
 def test_install_skips_paths_without_distributed_updates(
     session_module, monkeypatch, overrides
 ):
+    """Leave updater methods unchanged when their transport needs no session."""
     updater_cls = _fake_slime(monkeypatch)
     original = updater_cls._send_weights
     session_module.install(_args(**overrides))

@@ -118,6 +118,7 @@ def wrap_send_weights(
 
     @functools.wraps(send_weights)
     def wrapped(self, *args, **kwargs):
+        """Send all weight buckets and share session errors across ranks."""
         owner = is_session_owner()
         opened: list[str] = []
         error = None
@@ -159,6 +160,7 @@ def wrap_send_weights(
 
 def broadcast_from_rank0(value: str | None, group) -> str | None:
     """Send global rank 0's value to every rank in ``group``."""
+    # Torch is optional when importing this module for GPU-free tests.
     import torch.distributed as dist
 
     box = [value]
@@ -179,6 +181,7 @@ def install(args: Namespace) -> None:
     if getattr(args, "colocate", False):
         return
 
+    # Load trainer-only dependencies here so GPU-free tests can import the module.
     import torch.distributed as dist
     from slime.backends.megatron_utils.update_weight.update_weight_from_distributed import (
         UpdateWeightFromDistributed,
