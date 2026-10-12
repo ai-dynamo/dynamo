@@ -1746,7 +1746,6 @@ mod tests {
             assert_eq!(err.to_string(), EMPTY_TOOLS, "tool_choice={tool_choice:?}");
         }
 
-        // System-message tools make the effective tool set non-empty.
         let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
             "model": "test-model",
             "messages": [
