@@ -271,6 +271,8 @@ impl Process {
                 grace_secs.to_string(),
             )
             .env("DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", "2")
+            // Leave room for the one-second router grace and request drain.
+            .env("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", "0.5")
             .env("DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", "3")
             .env("DYN_PREFILL_DRAIN_TIMEOUT_S", "0")
             .env("HF_HUB_OFFLINE", "1")
