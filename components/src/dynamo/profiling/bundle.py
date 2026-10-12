@@ -7,14 +7,14 @@ Run outside the serving frontend:
 
     python -m dynamo.profiling.bundle <session-dir> --otel-jsonl <collector.jsonl>
 
-Lifecycle traces are selected by target identity and time overlap: a request is
-included when its worker operation ran on a captured target during that target's
-recording interval, or when the plan named its trace ID. Worker spans are
-assigned to targets through router decisions (`kv_router.route_request`
-worker_id = `handle_payload` instance_id), joined to the captured process by the
-host/PID recorded in the manifest. Native events and lifecycle spans share one
-timeline aligned to the coordinator clock; engine work inside an operation span
-is shared batch work, not attributed per kernel.
+A request is selected when its `worker.operation.<phase>` span ran on a captured
+target during that target's recording interval, or when the plan named its
+trace ID. Worker spans are assigned through router decisions
+(`kv_router.route_request` worker_id = `handle_payload` instance_id) and joined
+to captured processes by the PID in `dynamo.process.epoch`. Each request gets
+its own Perfetto timeline: its lifecycle spans plus the native events of its
+assigned workers that overlap its operation spans. Engine work inside an
+operation span is shared batch work and is not attributed per kernel.
 """
 
 import argparse
@@ -28,14 +28,16 @@ from pathlib import Path
 
 import ijson
 
-FRONTEND = "frontend"
-
 
 def attrs(span: dict) -> dict:
     return {
         a["key"]: next(iter(a["value"].values()), None)
         for a in span.get("attributes", [])
     }
+
+
+def start_end(span: dict) -> tuple[int, int]:
+    return int(span["startTimeUnixNano"]), int(span["endTimeUnixNano"])
 
 
 def load_traces(paths: list[Path]) -> dict[str, dict[str, dict]]:
@@ -53,24 +55,18 @@ def recording_intervals(manifest: dict) -> dict[str, tuple[int, int]]:
     """Observed native bounds per target; Kineto reports them per rank file."""
     intervals = {}
     for item in manifest["artifact_validation"]:
-        bounds = [item.get("recording_bounds")] + [
-            a.get("recording_bounds") for a in item.get("artifacts", [])
+        observed = [
+            b
+            for b in [item.get("recording_bounds")]
+            + [a.get("recording_bounds") for a in item.get("artifacts", [])]
+            if b and b.get("status") == "observed"
         ]
-        observed = [b for b in bounds if b and b.get("status") == "observed"]
         if observed:
             intervals[item["target_id"]] = (
                 min(b["start_unix_ns"] for b in observed),
                 max(b["end_unix_ns"] for b in observed),
             )
     return intervals
-
-
-def clock_offsets(manifest: dict) -> dict[str, int]:
-    offsets = {FRONTEND: 0}
-    for target, clock in manifest["clock"]["workers"].items():
-        if clock.get("start", {}).get("alignment") == "estimated":
-            offsets[target] = clock["start"]["offset_ns"]
-    return offsets
 
 
 def router_targets(manifest: dict, traces: dict) -> dict[str, str]:
@@ -93,19 +89,25 @@ def router_targets(manifest: dict, traces: dict) -> dict[str, str]:
         }
         for span in spans.values():
             if span.get("parentSpanId") in payloads:
-                epoch = str(attrs(span).get("dynamo.process.epoch", ""))
+                pid = str(attrs(span).get("dynamo.process.epoch", "")).split(":")[0]
                 mapping[payloads[span["parentSpanId"]]] |= targets_by_pid.get(
-                    epoch.split(":")[0], set()
+                    pid, set()
                 )
     return {worker: min(t) for worker, t in mapping.items() if len(t) == 1}
 
 
-def router_decision(span: dict | None, spans: dict) -> dict | None:
+def router_decision(span: dict | None, spans: dict) -> tuple[str | None, str | None]:
+    """(worker ID, phase) from the nearest ancestor router decision."""
     while span is not None:
         if span["name"] == "kv_router.route_request":
-            return attrs(span)
+            decision = attrs(span)
+            return decision.get("worker_id"), str(decision.get("phase", "")).lower()
         span = spans.get(span.get("parentSpanId"))
-    return None
+    return None, None
+
+
+def router_worker(span: dict | None, spans: dict) -> str | None:
+    return router_decision(span, spans)[0]
 
 
 def index_requests(manifest, traces, workers, intervals) -> list[dict]:
@@ -114,24 +116,24 @@ def index_requests(manifest, traces, workers, intervals) -> list[dict]:
     for trace_id, spans in traces.items():
         phases = []
         for span in spans.values():
-            if not span["name"].startswith("worker.operation."):
-                continue
-            decision = router_decision(spans.get(span.get("parentSpanId")), spans) or {}
-            worker_id = decision.get("worker_id")
-            target = workers.get(worker_id)
-            start, end = int(span["startTimeUnixNano"]), int(span["endTimeUnixNano"])
-            low, high = intervals.get(target, (0, 0))
-            phases.append(
-                {
-                    "phase": span["name"].rsplit(".", 1)[1],
-                    "router_worker_id": worker_id,
-                    "target_id": target,
-                    "operation_span_id": span["spanId"],
-                    "start_unix_ns": start,
-                    "end_unix_ns": end,
-                    "recording_overlap_ns": max(0, min(end, high) - max(start, low)),
-                }
-            )
+            if span["name"].startswith("worker.operation."):
+                worker_id = router_worker(span, spans)
+                target = workers.get(worker_id)
+                start, end = start_end(span)
+                low, high = intervals.get(target, (0, 0))
+                phases.append(
+                    {
+                        "phase": span["name"].rsplit(".", 1)[1],
+                        "router_worker_id": worker_id,
+                        "target_id": target,
+                        "operation_span_id": span["spanId"],
+                        "start_unix_ns": start,
+                        "end_unix_ns": end,
+                        "recording_overlap_ns": max(
+                            0, min(end, high) - max(start, low)
+                        ),
+                    }
+                )
         if trace_id in triggers or any(p["recording_overlap_ns"] for p in phases):
             request_ids = {
                 attrs(s).get("dynamo.request.id") for s in spans.values()
@@ -139,19 +141,19 @@ def index_requests(manifest, traces, workers, intervals) -> list[dict]:
             entries.append(
                 {
                     "trace_id": trace_id,
-                    "request_id": min(request_ids) if request_ids else None,
+                    "request_id": min(request_ids, default=None),
                     "trigger": trace_id in triggers,
                     "phases": sorted(phases, key=lambda p: p["start_unix_ns"]),
                 }
             )
     return sorted(
         entries,
-        key=lambda e: (e["phases"] or [{"start_unix_ns": 0}])[0]["start_unix_ns"],
+        key=lambda e: min(start_end(s)[0] for s in traces[e["trace_id"]].values()),
     )
 
 
 def kineto_events(path: Path):
-    """Yield Kineto events with raw worker-clock nanosecond timestamps."""
+    """Yield Kineto events with raw worker-clock nanosecond start/end."""
     with gzip.open(path, "rb") if path.suffix == ".gz" else path.open("rb") as stream:
         header = stream.read(1 << 20).decode(errors="replace")
         match = re.search(r'"baseTimeNanoseconds"\s*:\s*(\d+)', header)
@@ -161,7 +163,8 @@ def kineto_events(path: Path):
         stream.seek(0)
         for event in ijson.items(stream, "traceEvents.item"):
             if "ts" in event:
-                event["ts_ns"] = base + round(event["ts"] * 1000)
+                event["start_ns"] = base + round(event["ts"] * 1000)
+                event["end_ns"] = event["start_ns"] + round(event.get("dur", 0) * 1000)
             yield event
 
 
@@ -187,28 +190,24 @@ class Timeline:
         self.stream.write(
             ("" if self.first else ",\n") + json.dumps(event, default=float)
         )
-        self.first = False
-        self.count += 1
+        self.first, self.count = False, self.count + 1
 
-    def pid(self, key, name: str) -> int:
+    def pid(self, key, name: str, metadata=()) -> int:
         if key not in self.pids:
-            self.pids[key] = len(self.pids) + 1
+            self.pids[key] = pid = len(self.pids) + 1
             self.emit(
-                {
-                    "ph": "M",
-                    "name": "process_name",
-                    "pid": self.pids[key],
-                    "args": {"name": name},
-                }
+                {"ph": "M", "name": "process_name", "pid": pid, "args": {"name": name}}
             )
             self.emit(
                 {
                     "ph": "M",
                     "name": "process_sort_index",
-                    "pid": self.pids[key],
-                    "args": {"sort_index": self.pids[key]},
+                    "pid": pid,
+                    "args": {"sort_index": pid},
                 }
             )
+            for event in metadata:
+                self.emit({**event, "pid": pid})
         return self.pids[key]
 
     def tid(self, pid: int, name: str) -> int:
@@ -225,8 +224,19 @@ class Timeline:
             )
         return self.tids[pid, name]
 
-    def ts(self, unix_ns: int) -> float:
-        return (unix_ns - self.origin) / 1000
+    def interval(self, name, cat, start, end, pid, tid, args=None) -> None:
+        self.emit(
+            {
+                "ph": "X",
+                "cat": cat,
+                "name": name,
+                "pid": pid,
+                "tid": tid,
+                "ts": (start - self.origin) / 1000,
+                "dur": max(0, end - start) / 1000,
+                "args": args or {},
+            }
+        )
 
     def close(self) -> int:
         self.stream.write("]}\n")
@@ -242,25 +252,10 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
-    manifest = json.loads((session / "manifest.json").read_text())
-    if manifest["state"] not in ("completed", "failed"):
-        raise SystemExit(f"Session is still {manifest['state']}")
-    traces = load_traces(otel_paths)
-    intervals = recording_intervals(manifest)
-    offsets = clock_offsets(manifest)
-    workers = router_targets(manifest, traces)
-    index = index_requests(manifest, traces, workers, intervals)
-    selected = {entry["trace_id"] for entry in index}
-
-    output.mkdir(parents=True, exist_ok=True)
-    for folder in ("lifecycle", "control"):
-        (output / folder).mkdir(exist_ok=True)
-    shutil.copy2(session / "manifest.json", output / "manifest.json")
-    # Keep the collector's OTLP export-batch representation, filtered to the
-    # selected traces; traces are never cut at recording boundaries.
-    with (output / "lifecycle/traces.otlp.jsonl").open("w") as lifecycle:
-        for path in otel_paths:
+def write_lifecycle(paths: list[Path], selected: set[str], output: Path) -> None:
+    """Keep collector export batches, filtered to selected (uncut) traces."""
+    with output.open("w") as lifecycle:
+        for path in paths:
             for line in path.open():
                 batch = json.loads(line)
                 for resource in batch.get("resourceSpans", []):
@@ -278,6 +273,192 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
                 ]
                 if batch["resourceSpans"]:
                     lifecycle.write(json.dumps(batch, separators=(",", ":")) + "\n")
+
+
+def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
+    manifest = json.loads((session / "manifest.json").read_text())
+    if manifest["state"] not in ("completed", "failed"):
+        raise SystemExit(f"Session is still {manifest['state']}")
+    traces = load_traces(otel_paths)
+    intervals = recording_intervals(manifest)
+    offsets = {"frontend": 0} | {
+        target: clock["start"]["offset_ns"]
+        for target, clock in manifest["clock"]["workers"].items()
+        if clock.get("start", {}).get("alignment") == "estimated"
+    }
+    workers = router_targets(manifest, traces)
+    index = index_requests(manifest, traces, workers, intervals)
+    controls = sorted(
+        (
+            {"target_id": p["target_id"], "event": key[:-6], "unix_ns": p[key]}
+            for p in manifest["profiles"]
+            for key in (
+                "start_requested_at_ns",
+                "started_at_ns",
+                "stop_requested_at_ns",
+                "stopped_at_ns",
+            )
+            if key in p
+        ),
+        key=lambda event: event["unix_ns"],
+    )
+
+    for folder in ("lifecycle", "control", "timelines"):
+        (output / folder).mkdir(parents=True, exist_ok=True)
+    shutil.copy2(session / "manifest.json", output / "manifest.json")
+    write_lifecycle(
+        otel_paths,
+        {e["trace_id"] for e in index},
+        output / "lifecycle/traces.otlp.jsonl",
+    )
+    (output / "control/events.jsonl").write_text(
+        "".join(json.dumps(e) + "\n" for e in controls)
+    )
+
+    # One timeline per request, sharing one origin so files line up.
+    origin = min(
+        [
+            start_end(s)[0]
+            - offsets.get(
+                workers.get(router_worker(s, traces[e["trace_id"]])) or "frontend", 0
+            )
+            for e in index
+            for s in traces[e["trace_id"]].values()
+        ]
+        + [low - offsets.get(t, 0) for t, (low, _) in intervals.items()]
+        + [e["unix_ns"] for e in controls]
+    )
+    timelines, windows = {}, defaultdict(list)
+    for entry in index:
+        spans = traces[entry["trace_id"]]
+        name = entry["request_id"] or entry["trace_id"]
+        entry["timeline"] = f"timelines/{name}.json.gz"
+        timeline = timelines[entry["trace_id"]] = Timeline(
+            output / entry["timeline"], origin
+        )
+        # Deployment flow: frontend, then prefill, then decode workers.
+        lanes = {}
+        for span in spans.values():
+            worker_id, phase = router_decision(span, spans)
+            lanes[span["spanId"]] = (
+                ("frontend", 0)
+                if worker_id is None
+                else (
+                    workers.get(worker_id)
+                    or f"{phase} worker {worker_id} (not captured)",
+                    {"prefill": 1, "decode": 2}.get(phase, 3),
+                )
+            )
+        for lane, _ in sorted(set(lanes.values()), key=lambda lane: (lane[1], lane[0])):
+            timeline.pid(("otel", lane), f"OTel {lane}")
+        for span in sorted(spans.values(), key=lambda s: start_end(s)[0]):
+            worker_id = router_worker(span, spans)
+            lane = lanes[span["spanId"]][0]
+            start, end = start_end(span)
+            pid = timeline.pid(("otel", lane), f"OTel {lane}")
+            timeline.interval(
+                span["name"],
+                "otel",
+                start - offsets.get(lane, 0),
+                end - offsets.get(lane, 0),
+                pid,
+                timeline.tid(pid, "request"),
+                {
+                    "span_id": span["spanId"],
+                    "raw_start_unix_ns": start,
+                    "router_worker_id": worker_id,
+                },
+            )
+        roots = [s for s in spans.values() if s["name"] == "http-request"]
+        if "frontend" in intervals and roots:
+            low, high = intervals["frontend"]
+            start, end = start_end(roots[0])
+            if start < high and end > low:
+                windows["frontend"].append((max(start, low), min(end, high), timeline))
+        for phase in entry["phases"]:
+            target = phase["target_id"]
+            if phase["recording_overlap_ns"]:
+                low, high = intervals[target]
+                windows[target].append(
+                    (
+                        max(phase["start_unix_ns"], low),
+                        min(phase["end_unix_ns"], high),
+                        timeline,
+                    )
+                )
+                pid = timeline.pid(("capture", target), f"Recording {target}")
+                timeline.interval(
+                    f"{target} recording",
+                    "capture",
+                    low - offsets[target],
+                    high - offsets[target],
+                    pid,
+                    1,
+                )
+        for event in controls:
+            timeline.emit(
+                {
+                    "ph": "i",
+                    "s": "p",
+                    "cat": "control",
+                    "name": f"{event['target_id']} {event['event']}",
+                    "pid": timeline.pid(("control",), "Control"),
+                    "tid": 1,
+                    "ts": (event["unix_ns"] - origin) / 1000,
+                }
+            )
+
+    # Read each native trace once; route events to every overlapping request.
+    native = {}
+    for item in manifest["artifact_validation"]:
+        target = item["target_id"]
+        collector = next(
+            (p["collector"] for p in manifest["profiles"] if p["target_id"] == target),
+            None,
+        )
+        reader = NATIVE_READERS.get(collector)
+        if reader is None or item["status"] != "verified":
+            native[target] = {
+                "status": "pending" if reader is None else "omitted",
+                "reason": f"no timeline reader for {collector}"
+                if reader is None
+                else f"artifacts {item['status']}",
+            }
+            continue
+        shift, routed, read = offsets.get(target, 0), 0, 0
+        for artifact in item.get("artifacts", []):
+            names, threads = {}, defaultdict(list)
+            for event in reader(Path(artifact["location"])):
+                read += 1
+                key = (target, artifact.get("rank_id"), event.get("pid"))
+                if event.get("ph") == "M":
+                    if event.get("name") == "process_name":
+                        names[key] = event["args"].get("name")
+                    elif event.get("name", "").startswith("thread_"):
+                        threads[key].append(event)
+                    continue
+                if "start_ns" not in event:
+                    continue
+                start, end = event.pop("start_ns"), event.pop("end_ns")
+                for low, high, timeline in windows[target]:
+                    if start < high and max(end, start + 1) > low:
+                        label = f"{target} {artifact.get('rank_id')} · {names.get(key, 'pid')} {event.get('pid')}"
+                        timeline.emit(
+                            {
+                                **event,
+                                "pid": timeline.pid(key, label, threads[key]),
+                                "ts": (start - shift - origin) / 1000,
+                            }
+                        )
+                        routed += 1
+        native[target] = {
+            "status": "included",
+            "events_read": read,
+            "events_written": routed,
+            "clock_offset_ns": shift,
+        }
+    for entry in index:
+        entry["timeline_events"] = timelines[entry["trace_id"]].close()
     (output / "lifecycle/trace-index.json").write_text(
         json.dumps(
             {
@@ -289,171 +470,17 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
         )
         + "\n"
     )
-    controls = []
-    for profile in manifest["profiles"]:
-        for key in (
-            "start_requested_at_ns",
-            "started_at_ns",
-            "stop_requested_at_ns",
-            "stopped_at_ns",
-        ):
-            if key in profile:
-                controls.append(
-                    {
-                        "target_id": profile["target_id"],
-                        "event": key[:-6],
-                        "unix_ns": profile[key],
-                    }
-                )
-    controls.sort(key=lambda event: event["unix_ns"])
-    (output / "control/events.jsonl").write_text(
-        "".join(json.dumps(e) + "\n" for e in controls)
-    )
-
-    # Shared timeline: lifecycle spans per process lane, then native events.
-    spans_by_trace = {t: traces[t] for t in selected}
-    starts = [
-        int(s["startTimeUnixNano"])
-        for spans in spans_by_trace.values()
-        for s in spans.values()
-    ]
-    origin = min(
-        starts
-        + [low for low, _ in intervals.values()]
-        + [e["unix_ns"] for e in controls]
-    )
-    timeline = Timeline(output / "timeline.json.gz", origin)
-    for entry in index:
-        spans = spans_by_trace[entry["trace_id"]]
-        label = f"req {(entry['request_id'] or entry['trace_id'])[:8]}" + (
-            " (trigger)" if entry["trigger"] else ""
-        )
-        for span in sorted(spans.values(), key=lambda s: int(s["startTimeUnixNano"])):
-            decision = router_decision(spans.get(span.get("parentSpanId")), spans)
-            worker_id = decision.get("worker_id") if decision else None
-            lane = (
-                FRONTEND
-                if decision is None
-                else workers.get(worker_id, f"worker {worker_id}")
-            )
-            shift = offsets.get(lane, 0)
-            start, end = int(span["startTimeUnixNano"]), int(span["endTimeUnixNano"])
-            pid = timeline.pid(("otel", lane), f"OTel {lane}")
-            timeline.emit(
-                {
-                    "ph": "X",
-                    "cat": "otel",
-                    "name": span["name"],
-                    "pid": pid,
-                    "tid": timeline.tid(pid, label),
-                    "ts": timeline.ts(start - shift),
-                    "dur": max(0, end - start) / 1000,
-                    "args": {
-                        "trace_id": entry["trace_id"],
-                        "span_id": span["spanId"],
-                        "raw_start_unix_ns": start,
-                        "clock_offset_ns": shift,
-                        "router_worker_id": worker_id,
-                    },
-                }
-            )
-    for target, (low, high) in intervals.items():
-        shift = offsets.get(target, 0)
-        pid = timeline.pid(("capture", target), f"Recording {target}")
-        timeline.emit(
-            {
-                "ph": "X",
-                "cat": "capture",
-                "name": f"{target} recording",
-                "pid": pid,
-                "tid": 1,
-                "ts": timeline.ts(low - shift),
-                "dur": (high - low) / 1000,
-                "args": {"clock_offset_ns": shift},
-            }
-        )
-    for event in controls:
-        timeline.emit(
-            {
-                "ph": "i",
-                "s": "p",
-                "cat": "control",
-                "name": f"{event['target_id']} {event['event']}",
-                "pid": timeline.pid(("control",), "Control"),
-                "tid": 1,
-                "ts": timeline.ts(event["unix_ns"]),
-            }
-        )
-
-    native = {}
-    for item in manifest["artifact_validation"]:
-        target = item["target_id"]
-        collector = next(
-            (
-                p["collector"]
-                for p in manifest["profiles"]
-                if p.get("target_id") == target
-            ),
-            None,
-        )
-        reader = NATIVE_READERS.get(collector)
-        if reader is None:
-            native[target] = {
-                "status": "pending",
-                "reason": f"no timeline reader for {collector}",
-            }
-            continue
-        if item["status"] != "verified":
-            native[target] = {
-                "status": "omitted",
-                "reason": f"artifacts {item['status']}",
-            }
-            continue
-        shift, count = offsets.get(target, 0), 0
-        for artifact in item.get("artifacts", []):
-            for event in reader(Path(artifact["location"])):
-                key = (target, artifact.get("rank_id"), event.get("pid"))
-                if event.get("ph") == "M":
-                    if event.get("name") == "process_name":
-                        timeline.pid(
-                            key,
-                            f"{target} {artifact.get('rank_id')} · {event['args'].get('name')} {event.get('pid')}",
-                        )
-                    elif event.get("name", "").startswith("thread_"):
-                        event["pid"] = timeline.pid(
-                            key,
-                            f"{target} {artifact.get('rank_id')} · pid {event.get('pid')}",
-                        )
-                        timeline.emit(event)
-                    continue
-                if "ts_ns" not in event:
-                    continue
-                event["pid"] = timeline.pid(
-                    key, f"{target} {artifact.get('rank_id')} · pid {event.get('pid')}"
-                )
-                event["ts"] = timeline.ts(event.pop("ts_ns") - shift)
-                timeline.emit(event)
-                count += 1
-        native[target] = {
-            "status": "included",
-            "events": count,
-            "clock_offset_ns": shift,
-        }
-    events = timeline.close()
 
     triggers = set(manifest["plan"]["trace_ids"])
-    found_triggers = sorted(triggers & set(traces))
     summary = {
         "schema_version": 1,
         "session_id": manifest["session_id"],
         "method": __doc__.split("\n\n", 2)[2].strip(),
+        "timeline_origin_unix_ns": origin,
         "files": {
-            str(path.relative_to(output)): {
-                "bytes": path.stat().st_size,
-                "sha256": sha256(path),
-            }
-            for path in sorted(output.rglob("*"))
-            if path.is_file() and path.name != "bundle.json"
+            str(p.relative_to(output)): {"bytes": p.stat().st_size, "sha256": sha256(p)}
+            for p in sorted(output.rglob("*"))
+            if p.is_file() and p.name != "bundle.json"
         },
         "native_profiles": [
             {
@@ -470,8 +497,8 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
             "lifecycle": {
                 "status": "observed" if index else "missing",
                 "requests": len(index),
-                "trigger_traces_found": f"{len(found_triggers)}/{len(triggers)}",
-                "unmapped_router_worker_ids": sorted(
+                "trigger_traces_found": f"{len(triggers & set(traces))}/{len(triggers)}",
+                "uncaptured_router_worker_ids": sorted(
                     {p["router_worker_id"] for e in index for p in e["phases"]}
                     - set(workers)
                     - {None}
@@ -480,7 +507,6 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
             },
             "native_timeline": native,
         },
-        "timeline_events": events,
     }
     (output / "bundle.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary

@@ -1066,80 +1066,60 @@ async def test_nsys_accepts_cuda_memory_activity(tmp_path, with_kernels):
     assert result["gpu_processes"] == [0]
 
 
-def test_bundle_selects_router_assigned_requests_and_aligns_kineto(tmp_path):
+def test_bundle_writes_per_request_deployment_timelines(tmp_path):
     base = 1_700_000_000_000_000_000
     trace = tmp_path / "native" / "capture_dp0.1.pt.trace.json.gz"
     trace.parent.mkdir()
-    trace.write_bytes(
-        gzip.compress(
-            json.dumps(
-                {
-                    "baseTimeNanoseconds": base,
-                    "traceEvents": [
-                        {
-                            "ph": "M",
-                            "name": "process_name",
-                            "pid": 7,
-                            "tid": 0,
-                            "args": {"name": "EngineCore"},
-                        },
-                        {
-                            "ph": "X",
-                            "cat": "kernel",
-                            "name": "k",
-                            "pid": 7,
-                            "tid": 1,
-                            "ts": 1000.5,
-                            "dur": 2,
-                        },
-                    ],
-                }
-            ).encode()
-        )
-    )
+    kernels = [
+        {
+            "ph": "X",
+            "cat": "kernel",
+            "name": name,
+            "pid": 7,
+            "tid": 1,
+            "ts": ts,
+            "dur": 2,
+        }
+        for name, ts in (("before_operation", 1000), ("inside_operation", 2500.5))
+    ]
+    native = {"baseTimeNanoseconds": base, "traceEvents": kernels}
+    trace.write_bytes(gzip.compress(json.dumps(native).encode()))
     session = tmp_path / "session"
     session.mkdir()
-    worker_clock = {
-        "alignment": "estimated",
-        "offset_ns": 1000,
-        "hostname": "h",
-        "pid": 42,
+    bounds = {
+        "status": "observed",
+        "start_unix_ns": base + 1_000_000,
+        "end_unix_ns": base + 4_000_000,
     }
-    (session / "manifest.json").write_text(
-        json.dumps(
+    clock = {"alignment": "estimated", "offset_ns": 1000, "hostname": "h", "pid": 42}
+    manifest = {
+        "session_id": "s",
+        "state": "completed",
+        "artifact_status": "verified",
+        "plan": {"trace_ids": ["trigger"]},
+        "profiles": [
             {
-                "session_id": "s",
-                "state": "completed",
-                "artifact_status": "verified",
-                "plan": {"trace_ids": ["trigger"]},
-                "profiles": [
+                "target_id": "decode-0",
+                "collector": "torch_profiler",
+                "started_at_ns": base + 900_000,
+            }
+        ],
+        "clock": {"workers": {"decode-0": {"start": clock}}},
+        "artifact_validation": [
+            {
+                "target_id": "decode-0",
+                "status": "verified",
+                "artifacts": [
                     {
-                        "target_id": "decode-0",
-                        "collector": "torch_profiler",
-                        "started_at_ns": base + 900_000,
-                    }
-                ],
-                "clock": {"workers": {"decode-0": {"start": worker_clock}}},
-                "artifact_validation": [
-                    {
-                        "target_id": "decode-0",
-                        "status": "verified",
-                        "artifacts": [
-                            {
-                                "location": str(trace),
-                                "rank_id": "dp0",
-                                "recording_bounds": {
-                                    "status": "observed",
-                                    "start_unix_ns": base + 1_000_000,
-                                    "end_unix_ns": base + 4_000_000,
-                                },
-                            }
-                        ],
+                        "location": str(trace),
+                        "rank_id": "dp0",
+                        "recording_bounds": bounds,
                     }
                 ],
             }
-        )
-    )
+        ],
+    }
+    (session / "manifest.json").write_text(json.dumps(manifest))
 
     def span(trace_id, span_id, parent, name, start, **attributes):
         return {
@@ -1155,26 +1135,43 @@ def test_bundle_selects_router_assigned_requests_and_aligns_kineto(tmp_path):
             ],
         }
 
-    def request(trace_id, worker, pid, start):
+    def phase(trace_id, prefix, name, worker, pid, start):
         # Span host attributes are not worker host identities; only the PID joins.
-        worker_attrs = {
-            "dynamo.process.epoch": f"{pid}:x",
-            "dynamo.instance.id": "other",
-        }
+        epoch = {"dynamo.process.epoch": f"{pid}:x", "dynamo.instance.id": "other"}
         return [
-            span(trace_id, "a", "", "http-request", start),
             span(
                 trace_id,
-                "b",
+                prefix + "r",
                 "a",
                 "kv_router.route_request",
                 start,
-                phase="Decode",
+                phase=name.title(),
                 worker_id=worker,
             ),
-            span(trace_id, "c", "b", "handle_payload", start, instance_id=worker),
-            span(trace_id, "d", "c", "worker.operation.decode", start, **worker_attrs),
+            span(
+                trace_id,
+                prefix + "h",
+                prefix + "r",
+                "handle_payload",
+                start,
+                instance_id=worker,
+            ),
+            span(
+                trace_id,
+                prefix + "o",
+                prefix + "h",
+                f"worker.operation.{name}",
+                start,
+                **epoch,
+            ),
         ]
+
+    def request(trace_id, decode_worker, decode_pid, start):
+        return (
+            [span(trace_id, "a", "", "http-request", start)]
+            + phase(trace_id, "p", "prefill", "W3", 99, start)
+            + phase(trace_id, "d", "decode", decode_worker, decode_pid, start)
+        )
 
     otel = tmp_path / "otel.jsonl"
     spans = (
@@ -1189,20 +1186,28 @@ def test_bundle_selects_router_assigned_requests_and_aligns_kineto(tmp_path):
     index = json.loads((tmp_path / "out/lifecycle/trace-index.json").read_text())
     assert index["router_targets"] == {"W1": "decode-0"}
     assert [entry["trace_id"] for entry in index["requests"]] == ["captured"]
-    phase = index["requests"][0]["phases"][0]
-    assert (phase["target_id"], phase["recording_overlap_ns"]) == (
+    decode = index["requests"][0]["phases"][1]
+    assert (decode["target_id"], decode["recording_overlap_ns"]) == (
         "decode-0",
         2_000_000,
     )
     exported = (tmp_path / "out/lifecycle/traces.otlp.jsonl").read_text()
     assert "captured" in exported and "uncaptured" not in exported
     assert summary["coverage"]["lifecycle"]["trigger_traces_found"] == "0/1"
-    assert summary["coverage"]["native_timeline"]["decode-0"]["events"] == 1
-    events = json.loads(
-        gzip.decompress((tmp_path / "out/timeline.json.gz").read_bytes())
-    )
-    kernel = next(e for e in events["traceEvents"] if e.get("name") == "k")
-    # Raw base+1.0005 ms on the worker clock, minus its 1 us offset, from the
+    assert summary["coverage"]["native_timeline"]["decode-0"]["events_written"] == 1
+    timeline = tmp_path / "out" / index["requests"][0]["timeline"]
+    events = json.loads(gzip.decompress(timeline.read_bytes()))["traceEvents"]
+    processes = [e["args"]["name"] for e in events if e.get("name") == "process_name"]
+    assert processes[:3] == [
+        "OTel frontend",
+        "OTel prefill worker W3 (not captured)",
+        "OTel decode-0",
+    ]
+    assert [e["name"] for e in events if e.get("cat") == "kernel"] == [
+        "inside_operation"
+    ]
+    kernel = next(e for e in events if e.get("cat") == "kernel")
+    # Raw base+2.5005 ms on the worker clock, minus its 1 us offset, from the
     # earliest control event at base+0.9 ms.
-    assert kernel["ts"] == 99.5
-    assert all(isinstance(e.get("tid", 0), int) for e in events["traceEvents"])
+    assert kernel["ts"] == 1599.5
+    assert all(isinstance(e.get("tid", 0), int) for e in events)
