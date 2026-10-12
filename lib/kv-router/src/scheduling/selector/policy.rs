@@ -15,7 +15,7 @@ use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
-use crate::plugins::worker_selection::experimental::KvTransferPolicy;
+use crate::plugins::worker_selection::experimental::kv_hints::KvTransferPolicy;
 use crate::plugins::worker_selection::{
     CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
     WorkerCandidates, WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
@@ -576,7 +576,9 @@ mod tests {
                 costs: &mut [f64],
             ) -> Result<(), WorkerSelectionPolicyError> {
                 for (candidate, cost) in candidates.iter().zip(costs) {
-                    let metadata = context.worker(candidate.worker()).expect("known worker");
+                    let metadata = context
+                        .worker_metadata(candidate.worker())
+                        .expect("known worker");
                     *cost = if metadata.total_kv_blocks().is_some() {
                         0.0
                     } else {
@@ -597,7 +599,7 @@ mod tests {
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 assert!(
                     context
-                        .worker(WorkerWithDpRank::from_worker_id(9))
+                        .worker_metadata(WorkerWithDpRank::from_worker_id(9))
                         .is_none()
                 );
                 Ok(input
@@ -656,7 +658,7 @@ mod tests {
             ..MaterializedSelectionInput::new(&request, 16).context
         };
         let advertised = context
-            .worker(WorkerWithDpRank::from_worker_id(1))
+            .worker_metadata(WorkerWithDpRank::from_worker_id(1))
             .expect("known worker");
         assert_eq!(advertised.total_kv_blocks(), Some(4096));
         assert_eq!(advertised.max_num_batched_tokens(), Some(8192));
@@ -670,13 +672,13 @@ mod tests {
         );
         assert_eq!(advertised.kv_transfer_domain(), Some("nvl72-a"));
         let unadvertised = context
-            .worker(WorkerWithDpRank::from_worker_id(0))
+            .worker_metadata(WorkerWithDpRank::from_worker_id(0))
             .expect("known worker");
         assert_eq!(unadvertised.total_kv_blocks(), None);
         assert_eq!(unadvertised.max_num_batched_tokens(), None);
         assert!(
             context
-                .worker(WorkerWithDpRank::from_worker_id(9))
+                .worker_metadata(WorkerWithDpRank::from_worker_id(9))
                 .is_none()
         );
     }

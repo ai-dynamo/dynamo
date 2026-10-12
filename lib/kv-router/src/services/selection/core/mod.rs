@@ -83,7 +83,6 @@ use super::types::{
 };
 use crate::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
-use crate::plugins::worker_selection::experimental::KvTransferPolicy;
 use crate::services::common::replica_sync::AffinityBindingEvent;
 
 pub type SelectionScheduler = LocalScheduler<
@@ -131,7 +130,7 @@ struct SelectionEntry {
     affinity: OnceCell<SessionAffinity>,
     replica_config: Option<ReplicaSyncConfig>,
     /// Experimental fetch-hint policy from this partition's worker-selection plugin.
-    kv_transfer_policy: Option<parking_lot::Mutex<Box<dyn KvTransferPolicy>>>,
+    kv_transfer_policy: Option<hint::PartitionKvTransferPolicy>,
 }
 
 impl SelectionEntry {

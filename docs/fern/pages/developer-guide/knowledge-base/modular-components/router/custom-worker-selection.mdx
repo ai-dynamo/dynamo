@@ -51,6 +51,7 @@ Use `dynamo_kv_router::plugins` for plugin registration and these modules for pl
 |---|---|
 | `plugins::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, request context, worker signal accessors, configuration, and factories |
 | `plugins` | `RouterPluginRegistry` and the resolved `RouterPlugins` bundle |
+| `plugins::worker_selection::experimental` | Unstable extensions, such as the [KV fetch-hint policy](#experimental-kv-fetch-hint-policy). No compatibility guarantee |
 
 Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchronization, and the default selector implementation. Low-level host interfaces such as `WorkerSelector` are used to connect Dynamo components; external plugins use `WorkerSelectionPolicy`.
 
@@ -384,11 +385,17 @@ Routing cache resources start only if a component requests `CACHE`. `serve_index
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
 | `router_temperature_override()` | Optional per-request router temperature override |
-| `worker(worker)` | Optional facts the worker advertised at registration, described below. `None` for a worker the host does not know |
+| `worker_metadata(worker)` | Facts a worker advertised at registration, described below. Pass a `WorkerWithDpRank`, such as `candidate.worker()`. `None` for a worker the host does not know |
 
 ### Worker Metadata
 
-`worker(worker)` reads the host's worker table on each call; nothing is copied per request, so policies that never call it pay nothing. The values change only when the worker re-registers.
+`worker_metadata(worker)` reads the host's worker table on each call; nothing is copied per request, so policies that never call it pay nothing. The values change only when the worker re-registers.
+
+```rust
+let capacity = context
+    .worker_metadata(candidate.worker())
+    .and_then(|metadata| metadata.total_kv_blocks());
+```
 
 | Accessor | Meaning |
 |---|---|
@@ -557,6 +564,45 @@ Standalone EPP supplies `WorkerType::Aggregated` because it selects from one ful
 
 </Tab>
 </Tabs>
+
+## Experimental KV Fetch-Hint Policy
+
+When workers consume KV hints, Dynamo attaches a `kv.fetch` hint to a booked selection if another worker holds a longer cached prefix than the selected worker. The selected worker fetches that prefix before prefill. By default, Dynamo fetches from the source with the longest prefix. A `KvTransferPolicy` from `plugins::worker_selection::experimental::kv_hints` can keep, redirect, or drop that fetch for each request. The API has no compatibility guarantee.
+
+Attach the policy in the factory with `with_kv_transfer_policy`:
+
+```rust
+use dynamo_kv_router::plugins::worker_selection::experimental::kv_hints::{
+    KvTransferAction, KvTransferInput, KvTransferPolicy, with_kv_transfer_policy,
+};
+
+/// Fetch only when the default source adds at least `min_blocks` blocks.
+struct MinFetch {
+    min_blocks: u32,
+}
+
+impl KvTransferPolicy for MinFetch {
+    fn decide(&mut self, input: KvTransferInput<'_>) -> KvTransferAction {
+        if input.additional_blocks() >= self.min_blocks {
+            KvTransferAction::Default
+        } else {
+            KvTransferAction::Skip
+        }
+    }
+}
+
+// In the policy factory:
+let policy = WorkerSelectionPolicy::new(config.clone(), worker_type.as_str(), scorers, picker);
+with_kv_transfer_policy(policy, Box::new(MinFetch { min_blocks: 64 }))
+```
+
+For each booked selection:
+
+1. Filters, scorers, and the picker select a worker. The fetch policy cannot change that choice.
+2. If at least one eligible source holds a longer prefix than the selected worker, Dynamo calls `decide` with every eligible source, longest prefix first. Otherwise, it does not call the policy.
+3. Dynamo builds the hint from the returned action. `Default` keeps the longest-prefix source, `FetchFrom(index)` fetches from `sources()[index]`, and `Skip` attaches no hint. An out-of-range index attaches no hint.
+
+`KvTransferInput` provides `target()`, `local_prefix_blocks()`, `sources()`, `additional_blocks()`, and `worker_metadata(worker)`. Each `KvTransferSource` provides `worker()`, `is_cache_owner()`, and `prefix_blocks()`. Each partition owns one policy instance and calls it one selection at a time, so keep `decide` cheap.
 
 ## Policy Contract
 

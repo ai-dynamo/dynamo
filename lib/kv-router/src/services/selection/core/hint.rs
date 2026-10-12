@@ -4,10 +4,14 @@
 //! The KV transfer hint attached to a booked selection.
 
 use super::*;
-use crate::plugins::worker_selection::experimental::{
+use crate::plugins::worker_selection::experimental::kv_hints::{
     KvTransferAction, KvTransferInput, KvTransferPolicy, KvTransferSource,
 };
 use parking_lot::Mutex;
+
+/// A partition's experimental fetch-hint policy, moved out of its worker-selection policy when the
+/// partition is created. Kept here so the rest of the core does not depend on the experimental API.
+pub(super) type PartitionKvTransferPolicy = Mutex<Box<dyn KvTransferPolicy>>;
 
 /// Pick the best router-hint source for `target`: a same-role worker (or
 /// cache owner) holding a longer root-aligned prefix than the target's own
@@ -28,7 +32,7 @@ pub(super) fn transfer_hint_for_selection(
     target: WorkerWithDpRank,
     target_cached_prefix_blocks: u32,
     candidates: Option<&KvTransferCandidates>,
-    transfer_policy: Option<&Mutex<Box<dyn KvTransferPolicy>>>,
+    transfer_policy: Option<&PartitionKvTransferPolicy>,
 ) -> Option<KvSourceLocationsPayload> {
     let candidates = candidates?;
     let target_config = configs.get(&target.worker_id)?;
@@ -104,7 +108,7 @@ pub(super) fn transfer_hint_for_selection(
 /// longest prefix first, with the same tie-break as [`KvTransferCandidates::best_source`], so
 /// index 0 is the router's default choice.
 fn policy_source(
-    transfer_policy: &Mutex<Box<dyn KvTransferPolicy>>,
+    transfer_policy: &PartitionKvTransferPolicy,
     configs: &HashMap<WorkerId, SelectionWorkerConfig>,
     target: WorkerWithDpRank,
     local_prefix_blocks: u32,

@@ -8,7 +8,7 @@ use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
-use crate::plugins::worker_selection::experimental::{
+use crate::plugins::worker_selection::experimental::kv_hints::{
     KvTransferAction, KvTransferInput, KvTransferPolicy, with_kv_transfer_policy,
 };
 use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};

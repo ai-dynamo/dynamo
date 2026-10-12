@@ -20,10 +20,11 @@ pub struct WorkerSelectionContext<'a> {
 }
 
 impl<'a> WorkerSelectionContext<'a> {
-    /// Facts this worker advertised at registration, or None for a worker the host does not know.
-    /// Each call is one lookup in the host's worker table, so policies that never call it pay
-    /// nothing.
-    pub fn worker(&self, worker: WorkerWithDpRank) -> Option<WorkerMetadata<'a>> {
+    /// Facts `worker` advertised at registration, such as its KV capacity or topology. Pass a
+    /// candidate's [`WorkerCandidate::worker`](super::WorkerCandidate::worker). None for a worker
+    /// the host does not know. Each call is one lookup in the host's worker table, so policies that
+    /// never call it pay nothing.
+    pub fn worker_metadata(&self, worker: WorkerWithDpRank) -> Option<WorkerMetadata<'a>> {
         self.workers?
             .get(worker.worker_id)
             .map(|config| WorkerMetadata { config })
