@@ -120,6 +120,7 @@ from .multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
     URL_VARIANT_KEY,
     MissingMultimodalHandoffError,
+    MultimodalTransferError,
     VllmMultimodalRequestProcessor,
 )
 from .state_agent import state_agent_settings
@@ -3957,7 +3958,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     context,
                     mode,
                 )
-            except MissingMultimodalHandoffError as exc:
+            except (MissingMultimodalHandoffError, MultimodalTransferError) as exc:
                 logger.error("Request %s: %s", request_id, exc)
                 yield {
                     "finish_reason": f"error: {exc}",
