@@ -7,6 +7,7 @@ intent: >-
   OpenAI-compatible smoke request. Benchmarking and optimization are owned by other agents.
 skills:
   - deploy-dynamo-recipe
+  - report-skillpack-issue
 "Required Readings: Docs":
   - agent-docs/guides/deployment/kubernetes-recipe-workflow.md
   - agent-docs/references/definitions.md

@@ -60,6 +60,10 @@ fn insert_metadata_entry(
     raw_key: &str,
     raw_value: &str,
 ) -> Result<(), MetadataHeaderError> {
+    // Lifecycle capture is selected by the frontend, never by caller metadata.
+    if raw_key.eq_ignore_ascii_case(dynamo_runtime::telemetry::LIFECYCLE_ROOT_METADATA_KEY) {
+        return Ok(());
+    }
     if out.contains_key(raw_key) {
         return Ok(());
     }
@@ -191,6 +195,23 @@ mod tests {
     use super::*;
     use axum::http::HeaderName;
     use tonic::metadata::{MetadataKey, MetadataValue};
+
+    #[test]
+    fn callers_cannot_enable_lifecycle_capture_through_metadata() {
+        let key = dynamo_runtime::telemetry::LIFECYCLE_ROOT_METADATA_KEY;
+        for prefix in ["x-dynamo-meta-", "custom-meta-"] {
+            let metadata = extract_metadata_from_pairs(
+                [
+                    (format!("{prefix}{key}"), "v1"),
+                    (format!("{prefix}tenant"), "test"),
+                ],
+                prefix,
+            )
+            .unwrap();
+            assert!(!metadata.contains_key(key));
+            assert_eq!(metadata.get("tenant").map(String::as_str), Some("test"));
+        }
+    }
 
     fn header_name(name: String) -> HeaderName {
         name.parse::<HeaderName>().unwrap()

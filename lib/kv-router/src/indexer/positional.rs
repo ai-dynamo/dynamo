@@ -164,9 +164,20 @@ pub struct PositionalIndexer {
     jump_size: usize,
 
     search_mode: SearchMode,
+    lifecycle: super::HashLifecycle,
 }
 
 impl PositionalIndexer {
+    pub fn new_with_delegate(
+        jump_size: usize,
+        search_mode: SearchMode,
+        delegate: Arc<dyn super::KvIndexerDelegate>,
+    ) -> Self {
+        let mut backend = Self::new_with_mode(jump_size, search_mode);
+        backend.lifecycle = super::HashLifecycle::new(delegate);
+        backend
+    }
+
     /// Create a new PositionalIndexer.
     ///
     /// The search mode defaults to whatever [`DYN_ROUTER_POSITIONAL_SEARCH_MODE`] selects
@@ -192,6 +203,7 @@ impl PositionalIndexer {
             index: DashMap::with_hasher(FxBuildHasher),
             jump_size,
             search_mode,
+            lifecycle: super::HashLifecycle::default(),
         }
     }
 
@@ -299,6 +311,16 @@ impl SyncIndexer for PositionalIndexer {
                             .map(|(worker, worker_map)| (*worker, worker_map.len())),
                     );
                     let _ = sender.send(stats);
+                }
+                WorkerTask::ContainsWorkerBlock {
+                    worker,
+                    block_hash,
+                    resp,
+                } => {
+                    let resident = worker_blocks
+                        .get(&worker)
+                        .is_some_and(|worker_blocks| worker_blocks.contains_key(&block_hash));
+                    let _ = resp.send(resident);
                 }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
@@ -417,6 +439,7 @@ impl PositionalIndexer {
                 }
             }
 
+            self.lifecycle.insert(worker, seq_hash);
             // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
             match worker_blocks_entry.insert(seq_hash, (position, local_hash)) {
                 Some(existing) if existing == (position, local_hash) => {}
@@ -468,6 +491,7 @@ impl PositionalIndexer {
             if let Some(mut entry) = self.index.get_mut(&(position, local_hash)) {
                 let _ = entry.remove(*seq_hash, worker);
             }
+            self.lifecycle.remove(worker, *seq_hash);
         }
 
         Ok(())
@@ -485,6 +509,7 @@ impl PositionalIndexer {
                 if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
                     let _ = entry.remove(*seq_hash, key);
                 }
+                self.lifecycle.remove(key, *seq_hash);
             }
         }
     }
@@ -506,6 +531,7 @@ impl PositionalIndexer {
                     if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
                         let _ = entry.remove(*seq_hash, worker);
                     }
+                    self.lifecycle.remove(worker, *seq_hash);
                 }
             }
         }
@@ -530,6 +556,7 @@ impl PositionalIndexer {
                 events.push(RouterEvent {
                     worker_id: worker.worker_id,
                     state_source: None,
+                    session_id: None,
                     storage_tier: crate::protocols::StorageTier::Device,
                     residency_domain: crate::protocols::WireResidencyDomain::explicit(
                         crate::protocols::ResidencyDomain::Worker,

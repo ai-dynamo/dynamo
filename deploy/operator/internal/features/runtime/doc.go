@@ -4,7 +4,7 @@
  */
 
 // Package runtime defines explicit feature gates controlled by the Dynamo
-// runtime compatibility version.
+// runtime version.
 //
 // Runtime gates make rendered defaults stable across operator upgrades. A
 // runtime version change is the trigger for adopting new defaults, while

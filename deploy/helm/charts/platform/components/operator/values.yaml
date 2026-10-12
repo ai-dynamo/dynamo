@@ -22,6 +22,14 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
+# The LPX scheduler and its CRDs must be installed separately.
+lpx:
+  # -- EXPERIMENTAL: Enable the Dynamo operator's LPX integration. Startup requires the
+  # externally installed scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API.
+  enabled: false
+  # -- Configure the LPU model registry used by the LPX integration.
+  modelRegistryURL: ""
+
 # Environment variables to pass to operator Deployment.
 env: []
 
@@ -90,22 +98,17 @@ controllerManager:
       requests:
         cpu: 512m
         memory: 1Gi
+    volumeMounts: []
+    volumes: []
   replicas: 1
   serviceAccount:
     annotations: {}
 
 planner:
   powerAwareness:
-    # -- Grant the Planner's ServiceAccount pods/list in the DGD namespace.
-    # Required for power-annotation settlement checks during startup when
-    # enable_power_awareness=true. Leaving this false avoids granting an
-    # unnecessary namespace-level permission to power-disabled Planners.
-    # Note: this is an installation-wide capability flag; per-instance
-    # power awareness is still controlled by enable_power_awareness in the
-    # Planner config. In clusters where multiple Planner instances share
-    # the standard ServiceAccount, enabling this flag grants pods/list to
-    # all of them. A separate ServiceAccount per Planner is needed for
-    # truly per-instance least privilege.
+    # -- Deprecated compatibility value. Planner pods/list is now always granted
+    # in the DGD namespace for startup/drain detection. Per-instance power
+    # awareness remains controlled by enable_power_awareness in Planner config.
     enabled: false
 
 dynamo:

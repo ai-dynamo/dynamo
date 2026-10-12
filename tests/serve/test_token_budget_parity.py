@@ -204,7 +204,8 @@ def _native_command(spec: BackendParitySpec, port: int, tmp_path: Path) -> list[
             "2",
             "--skip-server-warmup",
             "--disable-cuda-graph",
-            "--disable-piecewise-cuda-graph",
+            "--cuda-graph-backend-prefill",
+            "disabled",
             "--trust-remote-code",
         ]
         if spec.mode == "auto-truncate":

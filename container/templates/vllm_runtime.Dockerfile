@@ -20,6 +20,7 @@ ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
 ARG TRANSFORMERS_VERSION
+ARG TOKENIZERS_VERSION
 ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
@@ -176,22 +177,18 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
 {% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
-{# cuda installs into the system interpreter (/usr/local/bin); xpu and cpu run out
-   of ${VIRTUAL_ENV} and prepend ${VIRTUAL_ENV}/bin to PATH. #}
-{% set vllm_rs_link = "/usr/local/bin/vllm-rs" if device == "cuda" else "${VIRTUAL_ENV}/bin/vllm-rs" %}
-{# Inline expression, not a block tag: render.py leaves trim_blocks off, so a tag
-   on its own line inside the RUN breaks the backslash continuation. #}
-{% set vllm_rs_required = "1" if device == "cuda" else "0" %}
+{% if device != "cuda" %}
+{% set vllm_rs_link = "${VIRTUAL_ENV}/bin/vllm-rs" %}
+{# vLLM <0.31 rejects the extra output fields added by Omni. #}
+{% set vllm_rs_allowlist = "1" if target not in ("dev", "local-dev") else "0" %}
+{% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
+{% endif %}
 
-# The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
-# requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
-# Omni is layered against the installed Transformers version, so install the
-# compatible release first and its dependency solve sees the final Transformers
-# invariant instead of resolving against 5.15.1.
+# Align Transformers and tokenizers before freezing Omni's protected dependencies.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps \
-        "transformers==${TRANSFORMERS_VERSION}"
+        "transformers==${TRANSFORMERS_VERSION}" "tokenizers==${TOKENIZERS_VERSION}"
 
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
@@ -365,7 +362,6 @@ RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.
 # IMAGEIO_FFMPEG_EXE. This remains ungated by enable_media_ffmpeg so the
 # media-enabled runtime wheel and the omni video-export path always have their
 # required shared libraries and CLI available.
-{% if device == "cuda" or device == "xpu" %}
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
@@ -390,6 +386,47 @@ RUN set -eu; \
         echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
         exit 1; \
     fi
+
+{% if device == "cuda" %}
+# Delete the base image's PyNvVideoCodec before the install below replaces it.
+# The vllm-openai base ships 2.0.4, which bundles a complete FFmpeg including a
+# libavcodec the codec gate denies on presence.
+#
+# Uninstall first, then rm. The wheel's RECORD is the only complete list of what
+# it wrote -- it reaches top-level `samples/` and `benchmarks/` trees and an
+# FFmpeg source tarball outside site-packages -- so deleting the dist-info first
+# would orphan those. The rm covers what does not depend on the installer
+# honouring its own metadata; `pynvvideocodec*` takes the dist-info and the stray
+# `pynvvideocodec.` directory beside it.
+#
+# find_spec, not an import: PyNvVideoCodec's __init__ dlopens libnvidia-encode,
+# which no builder has, so an import raises whether or not the wheel is there.
+#
+# Fails if the base stops shipping it, rather than quietly removing nothing.
+RUN set -eu; \
+    purelib="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    data="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["data"])')"; \
+    before="$(python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))' 2>/dev/null || echo none)"; \
+    echo "PyNvVideoCodec in base image: ${before}"; \
+    if [ "${before}" = "none" ]; then \
+        echo "ERROR: the vllm-openai base no longer ships PyNvVideoCodec, so this" >&2; \
+        echo "       removal has nothing to act on -- delete this RUN and keep the" >&2; \
+        echo "       requirements install below, which is then the only copy." >&2; \
+        exit 1; \
+    fi; \
+    python3 -m pip uninstall --yes pynvvideocodec; \
+    rm -rf "${purelib}/PyNvVideoCodec" "${purelib}"/pynvvideocodec* "${data}/external/ffmpeg"; \
+    if python3 -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("PyNvVideoCodec") else 1)'; then \
+        echo "ERROR: PyNvVideoCodec is still importable after the removal above; the" >&2; \
+        echo "       base ships it somewhere these paths do not reach." >&2; \
+        exit 1; \
+    fi; \
+    leftover="$(find "${data}/external" -name 'ffmpeg-*.tar.*' 2>/dev/null || true)"; \
+    if [ -n "${leftover}" ]; then \
+        echo "ERROR: a bundled FFmpeg source tarball survived the removal:" >&2; \
+        echo "${leftover}" >&2; \
+        exit 1; \
+    fi
 {% endif %}
 
 # Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships a
@@ -400,7 +437,7 @@ RUN set -eu; \
 # The vllm-openai base sets UV_CACHE_DIR=/opt/uv/cache and used to bake a uv
 # cache there (v0.27.1 carried archived wheel copies, including mooncake, that
 # duplicated installed packages and kept stale versions on disk after floors
-# refreshed them). The pinned v0.28.0 base mounts a cache over that path in
+# refreshed them). Recent upstream bases mount a cache over that path in
 # every uv RUN and ships only the empty directory, so the rm below is a no-op
 # today. It stays as a guard against a base that bakes the cache again: the
 # cache would sit in an inherited layer, so removing it here does not shrink
@@ -415,6 +452,11 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
         --reinstall-package imageio-ffmpeg --reinstall-package PyNvVideoCodec \
         --no-deps --requirement /tmp/requirements.vllm.txt && \
     rm -rf /opt/uv/cache
+
+# Assert what the removal and install left. The pin is repeated from the
+# requirements file on purpose; a test asserts the two agree.
+RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
+    PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.3
 {% else %}
 # PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
 # non-NVIDIA device. Drop it from the shared requirements rather than ship an
@@ -465,13 +507,19 @@ RUN rm -rf /workspace/vllm
 # Remove the codec-bearing video-DECODE wheels inherited from the vllm-openai
 # base. Each bundles its own full ffmpeg carrying software H.264/H.265/AAC;
 # PyAV and decord additionally ship GPL libx264/libx265. Dynamo's vLLM component
-# imports none of the removed wheels, so they are unused decode-side dead weight.
+# keeps OpenCV for mistral_common's cv2.resize, rebuilt at the base image's
+# version with video backends disabled. Other codec-bearing wheels are removed.
 # (PyNvVideoCodec is KEPT for NVDEC hardware decode -- see the note below.) The in-tree
 # LGPL ffmpeg + imageio-ffmpeg installed above are intentionally KEPT for the
 # omni video-encode path, which uses the royalty-free VP9 (libvpx_vp9) encoder —
 # no H.264 is built. Direct rm makes the removal robust regardless of how the
 # base image's pip is configured; the guards fail the build if any of them survive.
 RUN set -eux; \
+    OPENCV_VERSION="$(python3 -m pip show opencv-python-headless 2>/dev/null | awk '/^Version:/{print $2}')"; \
+    if [ -z "${OPENCV_VERSION}" ]; then \
+        OPENCV_VERSION="$(python3 -m pip show opencv-python 2>/dev/null | awk '/^Version:/{print $2}')"; \
+    fi; \
+    test -n "${OPENCV_VERSION}" || { echo "ERROR: base image must provide version metadata for opencv-python-headless or opencv-python" >&2; exit 1; }; \
     python3 -m pip uninstall --yes \
         av decord decord2 opencv-python opencv-python-headless torchcodec \
         || true; \
@@ -489,16 +537,40 @@ RUN set -eux; \
     ! python3 -c "import cv2" 2>/dev/null; \
     ! python3 -c "import av" 2>/dev/null; \
     ! python3 -c "import decord" 2>/dev/null; \
-    ! python3 -c "import torchcodec" 2>/dev/null
+    ! python3 -c "import torchcodec" 2>/dev/null; \
+    ENABLE_HEADLESS=1 ENABLE_CONTRIB=0 MAKEFLAGS="-j$(nproc)" \
+    CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DVIDEOIO_ENABLE_PLUGINS=OFF -DWITH_1394=OFF -DWITH_V4L=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DENABLE_CCACHE=OFF" \
+    python3 -m pip install --no-binary opencv-python-headless "opencv-python-headless==${OPENCV_VERSION}"; \
+    rm -rf /root/.cache/pip; \
+    python3 -c "import cv2; cv2.resize"; \
+    ! ls -d "${SITE_PACKAGES}"/opencv_python*.libs 2>/dev/null; \
+    python3 -c "import cv2,re,sys; enabled=[name for name,value in re.findall(r'^\s*(FFMPEG|GSTREAMER):\s*(\S+)', cv2.getBuildInformation(), re.M|re.I) if value.upper()=='YES']; sys.exit('ERROR: cv2 was built with video backends: '+', '.join(enabled) if enabled else 0)"
 
-# PyNvVideoCodec is KEPT (removed from the purge above) but UPGRADED to >=2.2.0 by
-# the requirements install: the base image's 2.0.4 bundles a full FFmpeg (incl.
-# libavcodec) that the codec gate rejects, while 2.2.0 bundles only libavutil +
-# libavformat (container demux, no software codec). It provides the built-in
-# H.264/H.265 video-input path (NVDEC hardware decode via libnvcuvid;
+# PyNvVideoCodec is KEPT (removed from the purge above) but REPLACED with 2.2.3 by
+# the removal and requirements install above: the base image's 2.0.4 bundles a
+# full FFmpeg 8.1.1 (incl. libavcodec) that the codec gate rejects, while 2.2.3
+# bundles only libavutil.so.61 + libavformat.so.63 (FFmpeg 9.0.1, container
+# demux, no software codec). It provides the built-in H.264/H.265 video-input
+# path (NVDEC hardware decode via libnvcuvid;
 # common/multimodal/nvdec_decoder.py) and requires the driver "video" capability
 # at runtime or it cannot import; set it in the image and ensure the K8s
 # pod/runtimeClass does not drop it.
+#
+# This deliberately overrides a dependency of vLLM's: `importlib.metadata.requires
+# ("vllm")` lists `PyNvVideoCodec==2.0.4`, an exact pin, and the image ships 2.2.3
+# against it. Unlike the equivalent override in trtllm_runtime.Dockerfile, do not
+# expect a resolver complaint in the build log to confirm it -- that stage runs
+# real `pip`, which prints one; this one runs `uv pip install --no-deps`, which
+# does not. `uv pip check` on the finished image is what surfaces it.
+#
+# The override is deliberate: 2.0.4 is the version whose bundled libavcodec the
+# codec gate rejects, so the override is the point. vLLM's own consumer is
+# vllm/multimodal/video_decoders/pynvvideocodec.py
+# (PyNvVideoCodecVideoBackendMixin), and everything it touches -- SimpleDecoder,
+# OutputColorType, get_batch_frames_by_index, get_stream_metadata,
+# reconfigure_decoder -- still exists in 2.2.3. The one API 2.2.3 drops is
+# SimpleDecoder.stop(), which neither vLLM nor Dynamo calls. Re-check that list
+# when the base image moves.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 {% endif %}
 
@@ -515,35 +587,44 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 [ep.load()() for ep in eps]"
 {% endif %}
 
-# vLLM-Omni is installed with the current Transformers version in its protected
-# constraints file, so an incompatible Omni requirement fails during dependency
-# resolution. Check the completed image as well so a later package layer cannot
-# silently replace the vLLM-Omni-compatible Transformers release. A global
-# `uv pip check` is not appropriate here: the upstream runtime and Dynamo's
-# deliberate --no-deps layers contain unrelated package-metadata conflicts.
-RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" <<'PY'
+# Check that later package layers preserve the Omni-compatible versions.
+RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" "${TOKENIZERS_VERSION}" <<'PY'
 import importlib.metadata as md
 import sys
 
-actual = md.version("transformers")
-expected = sys.argv[1]
-if actual != expected:
-    raise RuntimeError(f"expected transformers {expected}, found {actual}")
+for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
+    actual = md.version(package)
+    if actual != expected:
+        raise RuntimeError(f"expected {package} {expected}, found {actual}")
 PY
 
-# `vllm-rs` ships inside the installed `vllm` package, not as a console script;
-# linking it keeps the binary at that package's vLLM revision. Fatal on cuda only.
+{% if device == "cuda" %}
+# Omni's soxr dependency is only needed for unsupported Breeze voice cloning.
+RUN python3 -m pip uninstall --yes soxr
+
+RUN vllm-rs --help >/dev/null
+{% else %}
+# Use the packaged binary to match the installed vLLM version.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
-        ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
+        if [ "{{ vllm_rs_allowlist }}" = "1" ]; then \
+            printf '%s\n' \
+                '#!/bin/sh' \
+                '# Keep Omni from changing the EngineCore output schema.' \
+                'VLLM_PLUGINS="${VLLM_PLUGINS-{{ vllm_rs_plugins }}}"' \
+                'export VLLM_PLUGINS' \
+                "exec \"${pkg}/vllm-rs\" \"\$@\"" \
+                > {{ vllm_rs_link }}; \
+            chmod 755 {{ vllm_rs_link }}; \
+        else \
+            ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
+        fi; \
         vllm-rs --help >/dev/null; \
-    elif [ "{{ vllm_rs_required }}" = "1" ]; then \
-        echo "ERROR: installed vllm package (${pkg}) ships no executable vllm-rs" >&2; \
-        exit 1; \
     else \
-        echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not linking it onto PATH" >&2; \
+        echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not putting it onto PATH" >&2; \
     fi
+{% endif %}
 
 USER dynamo
 

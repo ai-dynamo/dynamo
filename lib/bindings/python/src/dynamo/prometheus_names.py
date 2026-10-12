@@ -97,6 +97,8 @@ class frontend_service:
     REQUESTS_TOTAL = "requests_total"
     # Total number of LLM requests accepted by the frontend handler
     REQUESTS_STARTED_TOTAL = "requests_started_total"
+    # Total number of terminal semantic request failures.
+    FAILURES_TOTAL = "failures_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
     QUEUED_REQUESTS = "queued_requests"
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
@@ -115,6 +117,14 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "kv_hit_rate"
+    # Raw cached prefix tokens on the best eligible worker at selection (per routing attempt)
+    KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL = (
+        "kv_best_eligible_cached_prefix_tokens_total"
+    )
+    # Raw cached prefix tokens on the selected worker and DP rank at selection
+    KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL = "kv_selected_cached_prefix_tokens_total"
+    # Backend-reported cache-hit tokens
+    KV_WORKER_REUSED_TOKENS_TOTAL = "kv_worker_reused_tokens_total"
     # Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     KV_TRANSFER_ESTIMATED_LATENCY_SECONDS = "kv_transfer_estimated_latency_seconds"
     # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
@@ -181,6 +191,9 @@ class frontend_service:
     # Active prefill tokens per worker
     # Gauge metric tracking current queued prefill tokens for each worker
     WORKER_ACTIVE_PREFILL_TOKENS = "worker_active_prefill_tokens"
+    # Active requests booked per worker, labeled by request phase
+    # Gauge metric split into `prefill` (not yet marked prefill-complete) and `decode`
+    WORKER_ACTIVE_REQUESTS = "worker_active_requests"
     # Last observed time to first token per worker (in seconds)
     # Gauge metric tracking the most recent TTFT for each worker
     WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS = "worker_last_time_to_first_token_seconds"
@@ -386,6 +399,10 @@ class labels:
     MODEL_NAME = "model_name"
     # Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     WORKER_TYPE = "worker_type"
+    # Label for where a booked request is in its lifecycle: "prefill" until it is
+    # marked prefill-complete, "decode" after. Distinct from `phase`, which names
+    # the serving leg ("aggregated", "prefill", "decode").
+    REQUEST_PHASE = "request_phase"
     # Label for router instance (discovery.instance_id() of the frontend)
     ROUTER_ID = "router_id"
 
@@ -463,6 +480,16 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Raw cached prefix tokens on the best eligible worker (counter, per routing attempt)
+    KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL = (
+        "router_kv_best_eligible_cached_prefix_tokens_total"
+    )
+    # Raw cached prefix tokens on the selected worker and DP rank (counter)
+    KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL = (
+        "router_kv_selected_cached_prefix_tokens_total"
+    )
+    # Backend-reported cache-hit tokens (counter)
+    KV_WORKER_REUSED_TOKENS_TOTAL = "router_kv_worker_reused_tokens_total"
     # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
     SHARED_CACHE_HIT_RATE = "router_shared_cache_hit_rate"
     # Shared cache blocks beyond device overlap for the selected worker

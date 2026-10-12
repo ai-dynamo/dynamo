@@ -145,6 +145,14 @@ When a remove event arrives for worker `w` at edge position `i`:
 - Otherwise the worker moves to `worker_cutoffs[w] = new_cutoff`.
 - Worker lookup entries for the newly uncovered suffix are scrubbed eagerly.
 
+A remove event is applied in runs. A run starts at the node its first hash's
+lookup entry names, or the node [lookup repair](#lookup-repair) resolves that
+hash to, and takes the following hashes whose entries name that node. A hash
+whose entry names another node starts its own run, because that node may hold
+the worker's coverage of it: once cleanup unlinks a subtree the worker's lookup
+still names, a partial restore can store some of its hashes on a new live node,
+and consuming them on the unlinked node would leave the live coverage behind.
+
 After the coverage update, removal may clear children only when no full-edge
 workers remain. Because `internal` is sticky, clearing those children does not
 make the node eligible for future leaf extension.
@@ -159,7 +167,7 @@ suffix child. `resolve_lookup` handles this lazily:
 worker lookup says hash -> old node
 old node no longer contains hash
 scan descendants for a node containing hash
-rewrite the useful covered range in the resolved node
+repoint entries in the useful covered range that still name the old node
 ```
 
 Store repair rewrites from the requested parent hash toward the worker's covered
@@ -168,6 +176,11 @@ suffix that removal is about to scrub. This matters for tail-to-head removes:
 once one hash in a moved compressed edge repairs the useful head range, later
 hashes in that same edge should hit the resolved node directly instead of paying
 another subtree scan.
+
+Repair and split lookup updates move only entries that still name the old node,
+and never insert missing ones. An entry naming any other node either holds that
+worker's coverage there or is stale from an older split; the latter is repaired
+on its own next access.
 
 If the scan fails in a store path, the store is rejected with
 `ParentBlockNotFound` and logged as a warning. If it fails in a remove path, the
@@ -194,8 +207,24 @@ exclusive shape gate.
 
 `find_matches` is best-effort during concurrent shape changes. It reads node
 state and child pointers without taking `shape_gate` on the hot step, so it may
-observe adjacent tree shapes during a split and undercount. It must not panic or
-return a match past a valid reachable prefix.
+observe adjacent tree shapes during a split and undercount. It must not panic,
+and apart from the equal-size skip below it must not return a match past a
+valid reachable prefix.
+
+### Equal-size skip
+
+After the first node, the walk intersects its active workers with each node's
+full-edge coverage. When the two sets have the same size, it skips that
+intersection and treats them as equal. This is an accepted approximation.
+Removal does not cascade to children, so after a worker's head blocks are
+evicted a child can still list it, and an equal-sized coverage set can then hold
+a different worker than the walk carries. The walk credits the carried worker
+with the child's depth, past its cached prefix.
+
+The skip saves a pass over up to all workers at most hops. On the Mooncake
+replay with 128 workers it fired about 4.3M times and was wrong in 0 of them at a
+keep-up load and 2 of about 741K when overloaded, while always intersecting
+raised lookup service p50 by 34%.
 
 ## Wire Compatibility
 

@@ -662,21 +662,6 @@ class TestEmbeddingWorkerProcesses:
         config.embedding_worker_processes = 3
         config._validate_embedding_worker_processes()
 
-    def test_enabled_nixl_prometheus_collision_is_rejected(self, monkeypatch):
-        monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
-        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
-        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
-        monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "19090")
-        config = create_config()
-        config.embedding_worker = True
-        config.embedding_worker_processes = 3
-
-        with pytest.raises(
-            ValueError,
-            match="NIXL_TELEMETRY_PROMETHEUS_PORT reserves 19090",
-        ):
-            config._validate_embedding_worker_processes()
-
     def test_disabled_nixl_prometheus_port_is_not_reserved(self, monkeypatch):
         monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
         monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "n")
@@ -703,6 +688,39 @@ class TestEmbeddingWorkerProcesses:
                 "NIXL_TELEMETRY_PROMETHEUS_PORT reserves 19090"
             ),
         ):
+            config._validate_embedding_worker_processes()
+
+    @pytest.mark.parametrize(
+        ("system_port", "nixl_port", "reserved_port"),
+        [("19089", "19090", "19090"), ("9090", None, "9090")],
+    )
+    def test_nixl_port_collision_is_rejected(
+        self, monkeypatch, system_port, nixl_port, reserved_port
+    ):
+        monkeypatch.setenv("DYN_SYSTEM_PORT", system_port)
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
+        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+        if nixl_port is not None:
+            monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", nixl_port)
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+
+        with pytest.raises(
+            ValueError,
+            match=f"NIXL_TELEMETRY_PROMETHEUS_PORT reserves {reserved_port}",
+        ):
+            config._validate_embedding_worker_processes()
+
+    def test_invalid_nixl_configuration_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
+        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+        monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "not-a-port")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+
+        with pytest.raises(ValueError, match="NIXL_TELEMETRY_PROMETHEUS_PORT"):
             config._validate_embedding_worker_processes()
 
     def test_fixed_tcp_rpc_port_is_rejected(self, monkeypatch):

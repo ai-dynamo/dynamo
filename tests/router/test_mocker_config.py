@@ -18,7 +18,7 @@ def test_mocker_config_renders_scalar_and_boolean_flags() -> None:
         speedup_ratio=10.0,
         block_size=16,
         enable_prefix_caching=False,
-        aic_perf_model=True,
+        ais_perf_model=True,
     )
 
     assert config.to_cli_args() == [
@@ -27,7 +27,7 @@ def test_mocker_config_renders_scalar_and_boolean_flags() -> None:
         "--block-size",
         "16",
         "--no-enable-prefix-caching",
-        "--aic-perf-model",
+        "--ais-perf-model",
     ]
 
 

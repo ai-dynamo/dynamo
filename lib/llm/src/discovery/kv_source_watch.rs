@@ -299,7 +299,8 @@ fn reconcile_discovery_event(
         }
         Ok(DiscoveryEvent::Added(_))
         | Ok(DiscoveryEvent::ModelTaintsUpdated(_))
-        | Ok(DiscoveryEvent::Removed(_)) => {}
+        | Ok(DiscoveryEvent::Removed(_))
+        | Ok(DiscoveryEvent::Resync(_)) => {}
         Err(error) => {
             tracing::error!(%error, "KV event-source discovery stream failed; rebinding");
             *membership = KvSourceMembership::new();

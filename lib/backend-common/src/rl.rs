@@ -90,13 +90,7 @@ pub(crate) async fn serve_endpoint(
 
 fn self_host_base_url(drt: &dynamo_runtime::DistributedRuntime) -> Option<String> {
     let info = drt.system_status_server_info()?;
-    let socket_addr = info.socket_addr;
-    if socket_addr.ip().is_unspecified() {
-        let host = dynamo_runtime::utils::local_ip_for_advertise();
-        Some(format!("http://{host}:{}", socket_addr.port()))
-    } else {
-        Some(format!("http://{socket_addr}"))
-    }
+    Some(format!("http://{}", info.advertised_socket_addr()))
 }
 
 fn resolve_endpoint_name(primary_name: &str) -> anyhow::Result<String> {

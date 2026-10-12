@@ -172,18 +172,20 @@ where
 
 pub fn error_type_from_chain(err: &(dyn StdError + 'static)) -> ErrorType {
     let mut current = Some(err);
-    let mut first = None;
+    let mut fallback = None;
     while let Some(error) = current {
         if let Some(dynamo_error) = error.downcast_ref::<DynamoError>() {
             let error_type = dynamo_error.error_type();
-            first.get_or_insert(error_type);
-            if error_type != ErrorType::Unknown {
+            fallback.get_or_insert(error_type);
+            if error_type != ErrorType::Unknown
+                && dynamo_error.reason().as_str() != "runtime.unclassified"
+            {
                 return error_type;
             }
         }
         current = error.source();
     }
-    first.unwrap_or(ErrorType::Unknown)
+    fallback.unwrap_or(ErrorType::Unknown)
 }
 
 pub fn error_type_name(error_type: ErrorType) -> &'static str {
@@ -208,6 +210,19 @@ pub fn error_type_name(error_type: ErrorType) -> &'static str {
         ErrorType::Backend(BackendError::Cancelled) => "backend_cancelled",
         ErrorType::Backend(BackendError::EngineShutdown) => "engine_shutdown",
         ErrorType::Backend(BackendError::StreamIncomplete) => "stream_incomplete",
+        ErrorType::InvalidRequest => "invalid_request",
+        ErrorType::Unauthenticated => "unauthenticated",
+        ErrorType::PermissionDenied => "permission_denied",
+        ErrorType::NotFound => "not_found",
+        ErrorType::Conflict => "conflict",
+        ErrorType::PayloadTooLarge => "payload_too_large",
+        ErrorType::UnsupportedMedia => "unsupported_media",
+        ErrorType::RateLimited => "rate_limited",
+        ErrorType::CapacityExhausted => "capacity_exhausted",
+        ErrorType::BackendProtocol => "backend_protocol",
+        ErrorType::DeadlineExceeded => "deadline_exceeded",
+        ErrorType::NotImplemented => "not_implemented",
+        ErrorType::Internal => "internal",
     }
 }
 
@@ -236,8 +251,22 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
         }
         ErrorType::ResourceExhausted | ErrorType::WorkerOverloaded => "rejected",
         ErrorType::Unavailable | ErrorType::WorkerUnavailable => "unavailable",
-        ErrorType::Cancelled | ErrorType::Backend(BackendError::Cancelled) => "cancelled",
+        // Deadline expiry matches the HTTP metric classification, which labels
+        // deadline-exceeded 429 responses as `cancelled`.
+        ErrorType::DeadlineExceeded
+        | ErrorType::Cancelled
+        | ErrorType::Backend(BackendError::Cancelled) => "cancelled",
         ErrorType::Unknown | ErrorType::Backend(BackendError::Unknown) => "error",
+        ErrorType::InvalidRequest
+        | ErrorType::Unauthenticated
+        | ErrorType::PermissionDenied
+        | ErrorType::NotFound
+        | ErrorType::Conflict
+        | ErrorType::PayloadTooLarge
+        | ErrorType::UnsupportedMedia
+        | ErrorType::RateLimited
+        | ErrorType::CapacityExhausted => "rejected",
+        ErrorType::BackendProtocol | ErrorType::NotImplemented | ErrorType::Internal => "error",
     }
 }
 
@@ -382,7 +411,6 @@ mod tests {
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::{Context as TraceContext, SubscriberExt};
     use tracing_subscriber::registry::LookupSpan;
-    use tracing_subscriber::util::SubscriberInitExt;
 
     use super::*;
 
@@ -512,12 +540,22 @@ mod tests {
         captured.fields.lock().unwrap().get(name).cloned()
     }
 
+    #[test]
+    fn deadline_exceeded_is_a_cancelled_route_outcome() {
+        assert_eq!(
+            error_type_name(ErrorType::DeadlineExceeded),
+            "deadline_exceeded"
+        );
+        assert_eq!(error_outcome(ErrorType::DeadlineExceeded), "cancelled");
+    }
+
     #[tokio::test]
     async fn route_span_covers_attempt_lifecycle_and_retry_metadata() {
         let captured = Arc::new(Captured::default());
-        let _subscriber = tracing_subscriber::registry()
-            .with(CaptureLayer(captured.clone()))
-            .set_default();
+        // Do not install a global LogTracer: other tests initialize logging.
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(CaptureLayer(captured.clone())),
+        );
 
         let mut request = Context::new(());
         let trace_context = attach_route_trace_context(

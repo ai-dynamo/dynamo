@@ -9,10 +9,9 @@ use rustc_hash::FxHashMap;
 
 /// Update an `Arc` lookup map for keys that should point at `node`.
 ///
-/// Duplicate store/repair paths often revisit keys that already resolve to the
-/// same node. Skipping those replacements avoids unnecessary hash table writes
-/// and `Arc` refcount churn while still repairing stale entries. Returns the
-/// number of entries that were inserted or changed.
+/// Duplicate store paths often revisit keys that already resolve to the same
+/// node. Skipping those replacements avoids unnecessary hash table writes and
+/// `Arc` refcount churn. Returns the number of entries inserted or changed.
 pub(crate) fn update_arc_lookup_for_keys<K, T>(
     lookup: &mut FxHashMap<K, Arc<T>>,
     keys: impl IntoIterator<Item = K>,
@@ -34,6 +33,42 @@ where
                 entry.insert(Arc::clone(node));
                 changed += 1;
             }
+        }
+    }
+
+    changed
+}
+
+/// Repoint existing `Arc` lookup entries for `keys` that still name `from` at `to`.
+///
+/// Unlike [`update_arc_lookup_for_keys`], this neither inserts missing keys nor
+/// touches entries naming any other node. Absence is meaningful: a remove can
+/// scrub an entry before another worker on the same event thread repairs a
+/// stale lookup. An entry naming another node either holds that worker's
+/// coverage of the key there, for example after the worker stored the key again
+/// on a live node while an unlinked node still contains it, or is stale and
+/// left to its own lazy repair. Returns the number of entries changed.
+pub(crate) fn redirect_arc_lookup_for_keys<K, T>(
+    lookup: &mut FxHashMap<K, Arc<T>>,
+    keys: impl IntoIterator<Item = K>,
+    from: &Arc<T>,
+    to: &Arc<T>,
+) -> usize
+where
+    K: Eq + Hash,
+{
+    debug_assert!(
+        !Arc::ptr_eq(from, to),
+        "redirect source and target must differ"
+    );
+    let mut changed = 0;
+
+    for key in keys {
+        if let Some(entry) = lookup.get_mut(&key)
+            && Arc::ptr_eq(entry, from)
+        {
+            *entry = Arc::clone(to);
+            changed += 1;
         }
     }
 

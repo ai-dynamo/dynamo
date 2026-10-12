@@ -139,6 +139,11 @@ pub mod labels {
     /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
 
+    /// Label for where a booked request is in its lifecycle: "prefill" until it is
+    /// marked prefill-complete, "decode" after. Distinct from `phase`, which names
+    /// the serving leg ("aggregated", "prefill", "decode").
+    pub const REQUEST_PHASE: &str = "request_phase";
+
     /// Label for router instance (discovery.instance_id() of the frontend)
     pub const ROUTER_ID: &str = "router_id";
 }
@@ -176,6 +181,9 @@ pub mod frontend_service {
     /// Total number of LLM requests accepted by the frontend handler
     pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
 
+    /// Total number of terminal semantic request failures.
+    pub const FAILURES_TOTAL: &str = "failures_total";
+
     /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
     pub const QUEUED_REQUESTS: &str = "queued_requests";
 
@@ -201,6 +209,17 @@ pub mod frontend_service {
 
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
+
+    /// Raw cached prefix tokens on the best eligible worker at selection (per routing attempt)
+    pub const KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "kv_best_eligible_cached_prefix_tokens_total";
+
+    /// Raw cached prefix tokens on the selected worker and DP rank at selection
+    pub const KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "kv_selected_cached_prefix_tokens_total";
+
+    /// Backend-reported cache-hit tokens
+    pub const KV_WORKER_REUSED_TOKENS_TOTAL: &str = "kv_worker_reused_tokens_total";
 
     /// Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     pub const KV_TRANSFER_ESTIMATED_LATENCY_SECONDS: &str = "kv_transfer_estimated_latency_seconds";
@@ -295,6 +314,10 @@ pub mod frontend_service {
     /// Active prefill tokens per worker
     /// Gauge metric tracking current queued prefill tokens for each worker
     pub const WORKER_ACTIVE_PREFILL_TOKENS: &str = "worker_active_prefill_tokens";
+
+    /// Active requests booked per worker, labeled by request phase
+    /// Gauge metric split into `prefill` (not yet marked prefill-complete) and `decode`
+    pub const WORKER_ACTIVE_REQUESTS: &str = "worker_active_requests";
 
     /// Last observed time to first token per worker (in seconds)
     /// Gauge metric tracking the most recent TTFT for each worker
@@ -657,6 +680,17 @@ pub mod router {
 
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "router_kv_hit_rate";
+
+    /// Raw cached prefix tokens on the best eligible worker (counter, per routing attempt)
+    pub const KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "router_kv_best_eligible_cached_prefix_tokens_total";
+
+    /// Raw cached prefix tokens on the selected worker and DP rank (counter)
+    pub const KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "router_kv_selected_cached_prefix_tokens_total";
+
+    /// Backend-reported cache-hit tokens (counter)
+    pub const KV_WORKER_REUSED_TOKENS_TOTAL: &str = "router_kv_worker_reused_tokens_total";
 
     /// Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
     pub const SHARED_CACHE_HIT_RATE: &str = "router_shared_cache_hit_rate";
