@@ -21,7 +21,7 @@ from tests.serve.common import (
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_metrics import EngineMetrics, VllmMetricsChecker
 from tests.utils.engine_process import EngineConfig
-from tests.utils.gpu_args import build_trtllm_override_args, map_cuda_visible_devices
+from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import (
     chat_payload_default,
     disaggregated_chat_payload,
@@ -339,9 +339,7 @@ sidecar_configs = {
 
 
 @pytest.fixture(params=params_with_model_mark(sidecar_configs))
-def sidecar_config_test(
-    request, dynamo_dynamic_ports, monkeypatch, discovery_backend, tmp_path
-):
+def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_backend):
     config = sidecar_configs[request.param]
     backend, layout = config.name.split("_", 1)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
@@ -391,30 +389,6 @@ def sidecar_config_test(
             elif backend == "trtllm":
                 engine_env["DYN_DISCOVERY_BACKEND"] = discovery_backend
 
-        elif backend == "trtllm":
-            # The explicit config takes precedence over the launcher's file.
-            memory_env = dict(os.environ)
-            memory_env.setdefault(
-                "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS",
-                str(
-                    request.node.get_closest_marker("requested_trtllm_kv_tokens").args[
-                        0
-                    ]
-                ),
-            )
-            memory_args = build_trtllm_override_args(memory_env)
-            engine_config = tmp_path / "engine.json"
-            engine_config.write_text(
-                json.dumps(
-                    {
-                        "guided_decoding_backend": "xgrammar",
-                        **json.loads(memory_args[1]),
-                    }
-                )
-            )
-            config = dataclasses.replace(
-                config, script_args=["--extra_llm_api_options", str(engine_config)]
-            )
         elif backend == "vllm":
             namespace = f"sidecar-agg-{generate_random_suffix()}"
             monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
@@ -425,6 +399,15 @@ def sidecar_config_test(
                 http_port_env: str(engine_ports[0]),
                 f"{backend.upper()}_GRPC_PORT": str(engine_ports[1]),
             }
+        if backend == "trtllm":
+            engine_env["_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS"] = os.environ.get(
+                "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS",
+                str(
+                    request.node.get_closest_marker("requested_trtllm_kv_tokens").args[
+                        0
+                    ]
+                ),
+            )
         yield dataclasses.replace(
             config,
             frontend_port=dynamo_dynamic_ports.frontend_port,
