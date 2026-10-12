@@ -2186,7 +2186,8 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
     async def abort_monitor(*args, **kwargs):
         yield
 
-    handler = SimpleNamespace(
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.__dict__.update(
         input_param_manager=InputParams(),
         default_sampling_params={},
         config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
@@ -2266,7 +2267,8 @@ async def test_generate_text_mode_notifies_for_empty_decoded_token():
     async def abort_monitor(*args, **kwargs):
         yield
 
-    handler = SimpleNamespace(
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.__dict__.update(
         input_param_manager=InputParams(),
         default_sampling_params={},
         config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),

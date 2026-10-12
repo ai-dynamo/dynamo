@@ -42,7 +42,7 @@ class BackendParitySpec:
 class RequestCase:
     name: str
     prompt: str
-    max_tokens: int
+    max_tokens: int | None
     stream: bool
 
 
@@ -53,6 +53,7 @@ class RequestOutcome:
     stream_finished: bool
     usage: TokenUsage | None
     stream_error: dict | None
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -230,7 +231,9 @@ def _native_command(spec: BackendParitySpec, port: int, tmp_path: Path) -> list[
 def _dynamo_config(
     spec: BackendParitySpec, tmp_path: Path, output_limit: int | None = None
 ) -> EngineConfig:
-    backend_dir = os.path.join(WORKSPACE_DIR, "examples", "backends", spec.framework)
+    backend_dir = os.path.join(
+        WORKSPACE_DIR, "examples", "backends", spec.framework, "launch"
+    )
     script_args: list[str] = []
     env: dict[str, str] = {}
     delayed_start = 0
@@ -295,10 +298,11 @@ def _send_case(port: int, case: RequestCase) -> RequestOutcome:
     payload = {
         "model": MODEL,
         "prompt": case.prompt,
-        "max_tokens": case.max_tokens,
         "temperature": 0.0,
         "stream": case.stream,
     }
+    if case.max_tokens is not None:
+        payload["max_tokens"] = case.max_tokens
     if case.stream:
         payload["stream_options"] = {"include_usage": True}
     if case.name == "output-overflow":
@@ -326,12 +330,14 @@ def _send_case(port: int, case: RequestCase) -> RequestOutcome:
                 False,
                 _parse_usage(body),
                 None,
+                (body.get("choices") or [{}])[0].get("finish_reason") if body else None,
             )
 
         stream_finished = False
         saw_data = False
         usage = None
         stream_error = None
+        finish_reason = None
         for line in response.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data:"):
                 continue
@@ -345,6 +351,8 @@ def _send_case(port: int, case: RequestCase) -> RequestOutcome:
                 stream_error = event["error"]
                 continue
             usage = _parse_usage(event) or usage
+            for choice in event.get("choices", []):
+                finish_reason = choice.get("finish_reason") or finish_reason
 
         assert saw_data, "Successful streaming response did not contain SSE data"
         return RequestOutcome(
@@ -353,6 +361,7 @@ def _send_case(port: int, case: RequestCase) -> RequestOutcome:
             stream_finished,
             usage,
             stream_error,
+            finish_reason,
         )
     finally:
         response.close()
@@ -534,7 +543,7 @@ def test_worker_output_ceiling(
     config = _dynamo_config(spec, tmp_path, output_limit=32)
     with managed_serve_deployment(config, request, ports=dynamo_dynamic_ports):
         for stream in (False, True):
-            for requested in (8, 32, 64):
+            for requested in (None, 8, 32, 64):
                 outcome = _send_case(
                     dynamo_dynamic_ports.frontend_port,
                     RequestCase("output-overflow", "Hello", requested, stream),
@@ -542,7 +551,8 @@ def test_worker_output_ceiling(
                 assert outcome.status_code == 200
                 assert outcome.stream_error is None
                 assert outcome.usage is not None
-                assert outcome.usage.completion_tokens == min(requested, 32)
+                assert outcome.usage.completion_tokens == min(requested or 32, 32)
+                assert outcome.finish_reason == "length"
                 if stream:
                     assert outcome.stream_finished
         response = requests.post(
