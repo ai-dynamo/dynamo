@@ -393,7 +393,8 @@ pub fn validate_min_p(min_p: Option<f32>) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Validates logit bias map
+/// Validates logit bias map: each key must be a token id (the string form of a
+/// `u32`) and each value a number within the allowed bias range.
 pub fn validate_logit_bias(
     logit_bias: &Option<std::collections::HashMap<String, serde_json::Value>>,
 ) -> Result<(), anyhow::Error> {
@@ -403,6 +404,13 @@ pub fn validate_logit_bias(
     };
 
     for (token, bias_value) in logit_bias {
+        token.parse::<u32>().map_err(|_| {
+            anyhow::anyhow!(
+                "Logit bias key '{}' must be a token id (integer string)",
+                token
+            )
+        })?;
+
         let bias = bias_value.as_f64().ok_or_else(|| {
             anyhow::anyhow!(
                 "Logit bias value for token '{}' must be a number, got {:?}",
@@ -1082,6 +1090,19 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn test_validate_logit_bias_keys() {
+        let bias = |key: &str| Some(HashMap::from([(key.to_string(), json!(1.0))]));
+
+        let err = validate_logit_bias(&bias("not-a-token")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("'not-a-token'"), "unexpected error: {msg}");
+        assert!(msg.contains("token id"), "unexpected error: {msg}");
+
+        assert!(validate_logit_bias(&bias("-1")).is_err());
+        assert!(validate_logit_bias(&bias("50256")).is_ok());
+    }
 
     fn unknown_fields() -> HashMap<String, serde_json::Value> {
         HashMap::from([("experimental_field".to_string(), json!("value"))])
