@@ -19,6 +19,8 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.pre_merge,
+    # Each test runs git subprocesses (well under a second locally).
+    pytest.mark.timeout(10),
     pytest.mark.unit,
 ]
 
@@ -207,3 +209,17 @@ def test_conflicting_existing_commits_raise(
 
     with pytest.raises(ValueError, match="record different commits"):
         hook.initialize("standard", {})
+
+
+def test_unreadable_existing_version_file_raises(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = _load_hook(tree, monkeypatch, _FakeApp())
+    # A directory in place of _version.py: opening it fails with an error
+    # other than "file not found".
+    (tree / "components" / "src" / "dynamo" / COMPONENTS[0] / "_version.py").mkdir()
+    read_existing = type(hook).initialize.__globals__["read_existing_git_commit"]
+    components = [str(tree / "components" / "src" / "dynamo" / c) for c in COMPONENTS]
+
+    with pytest.raises(IsADirectoryError):
+        read_existing(components)

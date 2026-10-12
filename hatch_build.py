@@ -77,7 +77,7 @@ def read_existing_git_commit(components):
         try:
             with open(path) as f:
                 match = _EXISTING_COMMIT.search(f.read())
-        except OSError:
+        except FileNotFoundError:
             continue
         if match:
             found[path] = match.group(1)
