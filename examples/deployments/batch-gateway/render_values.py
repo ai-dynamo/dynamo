@@ -38,7 +38,10 @@ def load_values(name: str) -> dict:
 
 def render_values(profile: dict) -> dict[str, dict]:
     for values, allowed in (
-        (profile, {"targetDGD", "model", "asyncConcurrency", "storage"}),
+        (
+            profile,
+            {"targetDGD", "model", "readinessModel", "asyncConcurrency", "storage"},
+        ),
         (profile["targetDGD"], {"name", "namespace"}),
         (
             profile["storage"],
@@ -63,6 +66,11 @@ def render_values(profile: dict) -> dict[str, dict]:
                 f"targetDGD.{field} must be a DNS label of at most 63 characters"
             )
     model = required_text(profile, "model")
+    readiness_model = (
+        required_text(profile, "readinessModel")
+        if "readinessModel" in profile
+        else model
+    )
     if len(f"{name}-frontend") > 63:
         raise ValueError(
             "targetDGD.name makes the frontend Service name exceed 63 characters"
@@ -129,7 +137,7 @@ def render_values(profile: dict) -> dict[str, dict]:
     queue["queue_name"] = request_queue
     queue["igw_base_url"] = frontend
     queue["gate_params"]["url"] = f"{frontend}/metrics"
-    queue["gate_params"]["labels"]["model"] = model
+    queue["gate_params"]["labels"]["model"] = readiness_model
 
     # Helm does not transform parent values into independent dependency values.
     # Derive the shared contract here, while reusing the published workload charts.

@@ -99,6 +99,101 @@ fn client() -> reqwest::Client {
         .unwrap()
 }
 
+#[tokio::test]
+async fn upload_limit_does_not_raise_control_request_limit() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let upstream = Server::start(Router::new().fallback(|request: Request| async move {
+            axum::body::to_bytes(request.into_body(), 1024)
+                .await
+                .unwrap()
+        }))
+        .await;
+        let (_, proxy) =
+            router(&upstream.origin, None, None, 4, 8, CancellationToken::new()).unwrap();
+        let proxy = Server::start(proxy).await;
+        for (path, body, status) in [
+            ("/v1/files", "12345678", StatusCode::OK),
+            ("/v1/files", "123456789", StatusCode::PAYLOAD_TOO_LARGE),
+            ("/v1/batches", "12345", StatusCode::PAYLOAD_TOO_LARGE),
+        ] {
+            let response = client()
+                .post(format!("{}{path}", proxy.origin))
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            let _ = response.bytes().await.unwrap();
+        }
+        proxy.stop().await;
+        upstream.stop().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn file_transfer_permit_lives_until_response_eof_or_drop() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let upstream = Server::start(Router::new().fallback(|| async { "output" })).await;
+        let permits = Arc::new(Semaphore::new(1));
+        let state = ProxyState {
+            client: client(),
+            gateway: Url::parse(&upstream.origin).unwrap(),
+            files_path: "/v1/files".to_string(),
+            batches_path: "/v1/batches".to_string(),
+            max_body: 1024,
+            max_upload_body: 1024,
+            file_transfers: permits.clone(),
+            file_transfer_timeout: Duration::from_secs(600),
+            cancel: CancellationToken::new(),
+        };
+        let request = || {
+            Request::builder()
+                .uri("/v1/files/file-1/content")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let response = forward(State(state.clone()), request()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        // No body poll: returning headers must not release admission.
+        assert_eq!(permits.available_permits(), 0);
+        assert_eq!(
+            forward(State(state.clone()), request()).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        // Control-plane operations do not wait behind file transfers.
+        let control = Request::builder()
+            .uri("/v1/batches")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            forward(State(state.clone()), control).await.status(),
+            StatusCode::OK
+        );
+        drop(response);
+        assert_eq!(permits.available_permits(), 1);
+        let response = forward(State(state.clone()), request()).await;
+        assert_eq!(permits.available_permits(), 0);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap(),
+            "output"
+        );
+        assert_eq!(permits.available_permits(), 1);
+        state.cancel.cancel();
+        assert_eq!(
+            forward(State(state), request()).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(permits.available_permits(), 1);
+        upstream.stop().await;
+    })
+    .await
+    .unwrap();
+}
+
 #[derive(Clone, Default)]
 struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -125,6 +220,9 @@ async fn failed_requests_log_bounded_classification_without_client_values() {
             files_path: "/v1/files".to_string(),
             batches_path: "/v1/batches".to_string(),
             max_body: 1024,
+            max_upload_body: 1024,
+            file_transfers: Arc::new(Semaphore::new(4)),
+            file_transfer_timeout: Duration::from_secs(600),
             cancel: CancellationToken::new(),
         };
         let logs = CapturedLogs::default();
@@ -180,7 +278,7 @@ async fn keeps_client_controlled_uris_and_headers_on_the_configured_origin() {
         let (sender, mut captured) = mpsc::channel(1);
         let upstream = Server::start(Router::new().fallback(echo_request).with_state(sender)).await;
         let (_, proxy) =
-            router(&upstream.origin, None, None, 1024, CancellationToken::new()).unwrap();
+            router(&upstream.origin, None, None, 1024, 1024, CancellationToken::new()).unwrap();
         let proxy = Server::start(proxy).await;
         let canary_url = Url::parse(&canary.origin).unwrap();
         let upstream_url = Url::parse(&upstream.origin).unwrap();
@@ -257,6 +355,7 @@ async fn proxies_full_batch_api_and_nested_mounts_without_changing_requests() {
             Some("/api".to_string()),
             Some("/api/batches".to_string()),
             1024,
+            1024,
             CancellationToken::new(),
         )
         .unwrap();
@@ -322,7 +421,7 @@ async fn rejects_invalid_configuration_and_oversize_uploads() {
             "http://example.test/?query=x",
             "http://example.test/#fragment",
         ] {
-            assert!(router(origin, None, None, 8, CancellationToken::new()).is_err());
+            assert!(router(origin, None, None, 8, 8, CancellationToken::new()).is_err());
         }
         for path in ["/", "/files/", "files", "/files/{id}"] {
             assert!(
@@ -330,6 +429,7 @@ async fn rejects_invalid_configuration_and_oversize_uploads() {
                     "http://example.test",
                     Some(path.to_string()),
                     None,
+                    8,
                     8,
                     CancellationToken::new()
                 )
@@ -342,13 +442,15 @@ async fn rejects_invalid_configuration_and_oversize_uploads() {
                 Some("/same".to_string()),
                 Some("/same".to_string()),
                 8,
+                8,
                 CancellationToken::new()
             )
             .is_err()
         );
         let (sender, mut captured) = mpsc::channel(1);
         let upstream = Server::start(Router::new().fallback(echo_request).with_state(sender)).await;
-        let (_, proxy) = router(&upstream.origin, None, None, 8, CancellationToken::new()).unwrap();
+        let (_, proxy) =
+            router(&upstream.origin, None, None, 8, 8, CancellationToken::new()).unwrap();
         let proxy = Server::start(proxy).await;
         let client = client();
         let response = client
@@ -395,7 +497,7 @@ async fn streams_output_and_preserves_redirects_failures_and_cancellation() {
         }))
         .await;
         let cancel = CancellationToken::new();
-        let (_, proxy) = router(&upstream.origin, None, None, 1024, cancel.clone()).unwrap();
+        let (_, proxy) = router(&upstream.origin, None, None, 1024, 1024, cancel.clone()).unwrap();
         let proxy = Server::start(proxy).await;
         let client = client();
         let mut response = client
@@ -441,8 +543,15 @@ async fn streams_output_and_preserves_redirects_failures_and_cancellation() {
                 .into_response()
         }))
         .await;
-        let (_, proxy) =
-            router(&upstream.origin, None, None, 1024, CancellationToken::new()).unwrap();
+        let (_, proxy) = router(
+            &upstream.origin,
+            None,
+            None,
+            1024,
+            1024,
+            CancellationToken::new(),
+        )
+        .unwrap();
         let proxy = Server::start(proxy).await;
         let response = client
             .get(format!("{}/v1/batches", proxy.origin))
@@ -472,7 +581,15 @@ async fn streams_output_and_preserves_redirects_failures_and_cancellation() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let unavailable = format!("http://{}", listener.local_addr().unwrap());
         drop(listener);
-        let (_, proxy) = router(&unavailable, None, None, 1024, CancellationToken::new()).unwrap();
+        let (_, proxy) = router(
+            &unavailable,
+            None,
+            None,
+            1024,
+            1024,
+            CancellationToken::new(),
+        )
+        .unwrap();
         let proxy = Server::start(proxy).await;
         let response = client
             .post(format!("{}/v1/batches", proxy.origin))
@@ -508,8 +625,15 @@ async fn does_not_follow_gateway_redirects_to_another_origin() {
             }
         }))
         .await;
-        let (_, proxy) =
-            router(&upstream.origin, None, None, 1024, CancellationToken::new()).unwrap();
+        let (_, proxy) = router(
+            &upstream.origin,
+            None,
+            None,
+            1024,
+            1024,
+            CancellationToken::new(),
+        )
+        .unwrap();
         let proxy = Server::start(proxy).await;
         let response = client()
             .get(format!("{}/v1/batches", proxy.origin))

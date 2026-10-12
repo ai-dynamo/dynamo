@@ -103,6 +103,27 @@ def test_dgds_do_not_share_queue_or_file_names(profile):
     assert first_files["prefix"] != second_files["prefix"]
 
 
+@pytest.mark.parametrize("readiness_model", [None, "primary"])
+def test_request_alias_and_readiness_model(profile, readiness_model):
+    profile["model"] = "public-model"
+    if readiness_model is not None:
+        profile["readinessModel"] = readiness_model
+    values = RENDERER.render_values(profile)["dynamo-batch-values.yaml"]
+    models = values["batch-gateway"]["processor"]["config"]["asyncDispatch"]["models"]
+    assert set(models) == {"public-model"}
+    queue = values["async"]["ap"]["transportConfig"]["queues"][0]
+    assert queue["gate_params"]["labels"] == {
+        "model": readiness_model or "public-model"
+    }
+
+
+@pytest.mark.parametrize("readiness_model", ["", "   ", "REPLACE_ME", None, 1])
+def test_invalid_readiness_model(profile, readiness_model):
+    profile["readinessModel"] = readiness_model
+    with pytest.raises(ValueError, match="readinessModel"):
+        RENDERER.render_values(profile)
+
+
 def test_storage_is_referenced_not_provisioned(profile):
     parent = RENDERER.render_values(profile)["dynamo-batch-values.yaml"]
     assert "developmentStorage" not in parent

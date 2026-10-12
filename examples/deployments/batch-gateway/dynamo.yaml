@@ -40,7 +40,7 @@ spec:
                 - http://qwen3-0-6b-batch-batch-api:8000
               env:
                 # Batch Gateway accepts a 200 MiB file; allow multipart framing.
-                - name: DYN_HTTP_BODY_LIMIT_MB
+                - name: DYN_BATCH_UPLOAD_BODY_LIMIT_MB
                   value: "202"
               workingDir: /workspace
               resources:

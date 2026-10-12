@@ -10,11 +10,14 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use futures::StreamExt;
 use http_body_util::{BodyExt, Limited};
 use reqwest::Url;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
+use super::write_timeout::ConnectionDeadline;
 use super::{RouteDoc, validate_extension_route_path};
 
 #[derive(Clone)]
@@ -24,7 +27,37 @@ struct ProxyState {
     files_path: String,
     batches_path: String,
     max_body: usize,
+    max_upload_body: usize,
+    file_transfers: Arc<Semaphore>,
+    file_transfer_timeout: Duration,
     cancel: CancellationToken,
+}
+
+pub(super) fn upload_body_limit() -> usize {
+    std::env::var(env_llm::DYN_BATCH_UPLOAD_BODY_LIMIT_MB)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .and_then(|value| value.checked_mul(1024 * 1024))
+        .unwrap_or(202 * 1024 * 1024)
+}
+
+fn max_file_transfers() -> usize {
+    std::env::var(env_llm::DYN_BATCH_MAX_FILE_TRANSFERS)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| (1..=Semaphore::MAX_PERMITS).contains(value))
+        .unwrap_or(4)
+}
+
+fn file_transfer_timeout() -> Duration {
+    std::env::var(env_llm::DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .filter(|duration| tokio::time::Instant::now().checked_add(*duration).is_some())
+        .unwrap_or(Duration::from_secs(600))
 }
 
 pub(super) fn router(
@@ -32,6 +65,7 @@ pub(super) fn router(
     files_path: Option<String>,
     batches_path: Option<String>,
     max_body: usize,
+    max_upload_body: usize,
     cancel: CancellationToken,
 ) -> anyhow::Result<(Vec<RouteDoc>, Router)> {
     let gateway = Url::parse(gateway)?;
@@ -114,6 +148,9 @@ pub(super) fn router(
             files_path,
             batches_path,
             max_body,
+            max_upload_body,
+            file_transfers: Arc::new(Semaphore::new(max_file_transfers())),
+            file_transfer_timeout: file_transfer_timeout(),
             cancel,
         }),
     ))
@@ -159,12 +196,18 @@ fn proxy_error(status: StatusCode, message: &'static str) -> Response {
 
 async fn forward(State(state): State<ProxyState>, request: Request) -> Response {
     let (mut parts, body) = request.into_parts();
+    let upload = parts.method == axum::http::Method::POST && parts.uri.path() == state.files_path;
+    let max_body = if upload {
+        state.max_upload_body
+    } else {
+        state.max_body
+    };
     if parts
         .headers
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|length| length > state.max_body as u64)
+        .is_some_and(|length| length > max_body as u64)
     {
         return proxy_error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -186,6 +229,33 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
     .map(|(_, path)| path);
     let Some(upstream_path) = upstream_path else {
         return proxy_error(StatusCode::NOT_FOUND, "Unknown Batch API path");
+    };
+    let file_transfer = upload
+        || (parts.method == axum::http::Method::GET
+            && upstream_path.starts_with("/v1/files/")
+            && upstream_path.ends_with("/content"));
+    let permit = if file_transfer {
+        match state.file_transfers.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return proxy_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Batch file transfer capacity exhausted; retry later",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    // The connection owner enforces this even when HTTP/2 flow control stops
+    // polling the response body. It closes the connection when a transfer expires.
+    let deadline = if file_transfer {
+        parts
+            .extensions
+            .get::<ConnectionDeadline>()
+            .map(|connection| connection.start(state.file_transfer_timeout))
+    } else {
+        None
     };
     // Only trusted configuration constructs the outbound destination. Client input
     // can update path/query components, never the scheme, authority or port.
@@ -210,7 +280,7 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
 
     let upload_failure = Arc::new(AtomicU8::new(0));
     let failure = upload_failure.clone();
-    let upload = Limited::new(body, state.max_body)
+    let upload = Limited::new(body, max_body)
         .into_data_stream()
         .map(move |item| {
             if let Err(error) = &item {
@@ -271,6 +341,10 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
     remove_hop_headers(&mut headers);
     let mut chunks = upstream.bytes_stream();
     let output = async_stream::stream! {
+        // Captured even before the stream's first poll. Dropping an unread body
+        // releases admission; returning headers alone must not release it.
+        let _permit = permit;
+        let _deadline = deadline;
         loop {
             let chunk = tokio::select! {
                 biased;

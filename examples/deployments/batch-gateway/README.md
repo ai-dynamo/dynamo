@@ -7,6 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 
 Submit files and batch jobs to the same Dynamo frontend used for inference. One `dynamo-batch` Helm release deploys the batch services for your DGD, using pinned Batch Gateway and Async components internally. Provision metadata, queue, and object storage separately; this chart only connects to them.
 
+Use dedicated offline inference capacity for this profile. Requests use the standard inference API, but model readiness is not a measure of spare capacity and does not reserve GPU capacity for online traffic. Sharing the worker pool requires a separately configured and validated admission policy; this example does not promise online latency isolation.
+
+> [!WARNING]
+> For untrusted clients, require an authenticating ingress that strips client-supplied `X-MaaS-Username` headers and injects a tenant identity from validated credentials. Reject unauthenticated requests before they reach the frontend. Restrict direct access to the frontend and internal Batch API with network policies or gateway-to-frontend mTLS so callers cannot bypass that ingress. Neither the proxy nor the pinned Batch Gateway validates bearer tokens; forwarding `Authorization` is not authentication. Follow the [Dynamo secure deployment guidelines](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/security/secure-deployment-guidelines.md).
+
 ![Batch request path: the client calls the DGD frontend on the left; batch operations are proxied to internal services on the right, and Async submits inference through the same frontend.](batch-architecture.svg)
 
 ## Set Up
@@ -76,11 +81,17 @@ Your own client uses the same frontend base URL:
 3. `GET /v1/batches/<batch id>` until the job reaches a terminal state.
 4. Download `GET /v1/files/<output_file_id>/content`, and the error file if `error_file_id` is present.
 
-Use a consistent `X-MaaS-Username` tenant header for all calls. Pass your deployment's authorization credentials when required. The example client uses a development tenant and placeholder bearer token. Input files are limited to 200 MiB in this profile; for larger workloads, split the JSONL into multiple input files and submit a job for each. The Batch API has a disk-backed, 1 GiB temporary volume at `/tmp` for multipart uploads above 32 MiB, while its root filesystem stays read-only. Concurrent uploads share this temporary storage budget. Increasing the limit also requires sizing the frontend request-body limit, API temporary volume, Processor work directory, and storage capacity.
+The localhost example uses a development tenant and placeholder bearer token; use it only within a trusted development environment. For production, send real credentials to your authenticating ingress and let that ingress supply the tenant header. Before exposing the service, verify that absent or invalid credentials and forged tenant headers cannot list, retrieve, or delete another tenant's files or jobs, and verify that direct frontend/Batch API access is blocked.
+
+Input files are limited to 200 MiB in this profile; for larger workloads, split the JSONL into multiple input files and submit a job for each. `DYN_BATCH_UPLOAD_BODY_LIMIT_MB` defaults to 202 MiB, including multipart framing, without changing the online JSON limit (`DYN_HTTP_BODY_LIMIT_MB`, default 45 MiB). `DYN_BATCH_MAX_FILE_TRANSFERS` defaults to four concurrent uploads/downloads per frontend replica; excess transfers receive 503 and should retry with backoff. Permits remain held through the response body lifetime. Configure bandwidth and tenant quotas at your ingress. The Batch API has a disk-backed, 1 GiB temporary volume at `/tmp` for multipart uploads above 32 MiB. Size this budget for the combined permitted upload concurrency across frontend replicas. Increasing the file limit also requires sizing the batch upload limit, API temporary volume, Processor work directory, and storage capacity.
+
+File transfers also have a 600-second maximum lifetime (`DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS`). The frontend closes the connection when a transfer expires, even if the client stops consuming an HTTP/2 response. This also interrupts other HTTP/2 streams sharing that connection. Reconnect before retrying reads; for interrupted uploads or job creation, check whether the operation succeeded before resubmitting. Size the limit for your file sizes and network speed. Stalled socket writes have a separate 120-second limit (`DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS`).
 
 ## Use an Existing DGD
 
 Set `targetDGD.name`, `targetDGD.namespace`, and `model` in the profile to match your deployment. Add `--batch-gateway-url http://<dgd>-batch-api.<namespace>.svc:8000` to every frontend replica, using a runtime image containing the proxy. The integration calls the standard `<dgd>-frontend` Service on port 8000. Regenerate the values into a new output directory, then install the chart in that namespace.
+
+If `model` is a served alias, also set `readinessModel` to the primary served name (the first `--served-model-name` value). Dynamo exports readiness only under that primary name. Batch requests retain the `model` alias; `readinessModel` selects the readiness metric and defaults to `model` when omitted.
 
 For error and cancellation examples, run `run_example.py` without `--success-only`. Cancelling a job does not interrupt inference requests already accepted by Dynamo.
 

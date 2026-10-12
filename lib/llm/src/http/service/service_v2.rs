@@ -907,7 +907,7 @@ impl HttpService {
         &self,
         cancel_token: CancellationToken,
         listener: Option<tokio::net::TcpListener>,
-        tls_handle: Option<axum_server::Handle>,
+        server_handle: Option<axum_server::Handle>,
     ) -> Result<()> {
         if self.tls_client_ca_cert_path.is_some() && !self.enable_tls {
             anyhow::bail!("TLS must be enabled when a client CA certificate is configured");
@@ -948,7 +948,7 @@ impl HttpService {
             server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let config = RustlsConfig::from_config(Arc::new(server_config));
 
-            let handle = tls_handle.unwrap_or_default();
+            let handle = server_handle.unwrap_or_default();
             let std_listener = bind_listener(addr)
                 .and_then(|l| l.into_std())
                 .map_err(|e| {
@@ -961,6 +961,9 @@ impl HttpService {
                     anyhow::anyhow!("Failed to start {} server on {}: {}", protocol, address, e)
                 })?;
             let server = axum_server::from_tcp_rustls(std_listener, config)
+                .map(|acceptor| {
+                    super::write_timeout::WriteTimeoutAcceptor::new(acceptor, write_idle_timeout())
+                })
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
@@ -982,8 +985,9 @@ impl HttpService {
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
+            tokio::pin!(server);
             tokio::select! {
-                result = server => {
+                result = &mut server => {
                     let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
                     state.start_stopping();
                     cancel_token.cancel();
@@ -995,7 +999,11 @@ impl HttpService {
                     let shutdown_timeout =
                         Duration::from_secs(get_graceful_shutdown_timeout() as u64);
                     handle.graceful_shutdown(Some(shutdown_timeout));
-                    if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
+                    let (result, drained) = tokio::join!(
+                        &mut server,
+                        state.wait_inflight_zero_or_timeout(shutdown_timeout),
+                    );
+                    if !drained {
                         tracing::warn!(
                             inflight_requests = state.inflight_count(),
                             "Timed out waiting for inflight inference requests to drain"
@@ -1003,6 +1011,7 @@ impl HttpService {
                     }
                     state.start_stopping();
                     state_cancel.cancel();
+                    result.context("HTTPS server shutdown")?;
                 }
             }
         } else {
@@ -1034,20 +1043,37 @@ impl HttpService {
                 }
             };
 
+            let std_listener = listener.into_std()?;
             self.spawn_rl_listener_if_configured(&cancel_token).await?;
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
-            let state = self.state.clone();
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    observer.cancelled_owned().await;
+            let handle = server_handle.unwrap_or_default();
+            let server = axum_server::from_tcp(std_listener)
+                .map(|acceptor| {
+                    super::write_timeout::WriteTimeoutAcceptor::new(acceptor, write_idle_timeout())
+                })
+                .handle(handle.clone())
+                .serve(router.into_make_service());
+            tokio::pin!(server);
+            tokio::select! {
+                result = &mut server => {
+                    state.start_stopping();
+                    cancel_token.cancel();
+                    result?;
+                },
+                _ = observer.cancelled() => {
                     state.start_draining();
                     tracing::info!("HTTP server shutdown requested");
                     let shutdown_timeout =
                         Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-                    if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
+                    handle.graceful_shutdown(Some(shutdown_timeout));
+                    let (result, drained) = tokio::join!(
+                        &mut server,
+                        state.wait_inflight_zero_or_timeout(shutdown_timeout),
+                    );
+                    if !drained {
                         tracing::warn!(
                             inflight_requests = state.inflight_count(),
                             "Timed out waiting for inflight inference requests to drain"
@@ -1055,12 +1081,9 @@ impl HttpService {
                     }
                     state.start_stopping();
                     state_cancel.cancel();
-                })
-                .await
-                .inspect_err(|_| {
-                    self.state.start_stopping();
-                    cancel_token.cancel()
-                })?;
+                    result.context("HTTP server shutdown")?;
+                }
+            }
             self.state.start_stopping();
             cancel_token.cancel();
         }
@@ -1138,6 +1161,16 @@ fn get_graceful_shutdown_timeout() -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(5)
+}
+
+fn write_idle_timeout() -> Duration {
+    std::env::var(env_llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_secs)
+        .filter(|duration| tokio::time::Instant::now().checked_add(*duration).is_some())
+        .unwrap_or(Duration::from_secs(120))
 }
 
 const DEFAULT_LISTEN_BACKLOG: u32 = 4096;
@@ -1444,6 +1477,7 @@ impl HttpServiceConfigBuilder {
                 var(HTTP_SVC_FILES_PATH_ENV).ok(),
                 var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
                 super::openai::get_body_limit(),
+                super::batch_proxy::upload_body_limit(),
                 state.cancel_token().clone(),
             )?);
         }
@@ -2165,6 +2199,198 @@ mod tests {
         list.assert_async().await;
         handle.abort();
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_batch_upload_limit_preserves_online_json_limit() {
+        temp_env::async_with_vars(
+            [
+                (env_llm::DYN_HTTP_BODY_LIMIT_MB, Some("1")),
+                (env_llm::DYN_BATCH_UPLOAD_BODY_LIMIT_MB, Some("3")),
+            ],
+            async {
+                let mut gateway = mockito::Server::new_async().await;
+                let upload = gateway
+                    .mock("POST", "/v1/files")
+                    .with_status(200)
+                    .with_body(r#"{"id":"file-1"}"#)
+                    .create_async()
+                    .await;
+                let (port, _, task) =
+                    spawn_service(|builder| builder.batch_gateway_url(Some(gateway.url()))).await;
+                let task = tokio_util::task::AbortOnDropHandle::new(task);
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap();
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "model": "model", "input": "x".repeat(2 * 1024 * 1024),
+                }))
+                .unwrap();
+                let response = client
+                    .post(format!("http://127.0.0.1:{port}/v1/files"))
+                    .body(body.clone())
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let _ = response.bytes().await.unwrap();
+                let response = client
+                    .post(format!("http://127.0.0.1:{port}/v1/responses"))
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+                assert_eq!(
+                    response.json::<serde_json::Value>().await.unwrap()["code"],
+                    413
+                );
+                upload.assert_async().await;
+                task.abort();
+                let _ = task.await;
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_shutdown_closes_stalled_batch_downloads() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        trait Connection: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+        impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Connection for T {}
+
+        temp_env::async_with_vars(
+            [
+                (env_llm::DYN_BATCH_MAX_FILE_TRANSFERS, Some("1")),
+                (env_llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS, Some("120")),
+                (env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1")),
+            ],
+            tokio::time::timeout(Duration::from_secs(20), async {
+                for is_tls in [false, true] {
+                    let released = CancellationToken::new();
+                    let body_released = released.clone();
+                    let upstream_router = axum::Router::new().route(
+                        "/v1/files/file-1/content",
+                        axum::routing::get(move || {
+                            let guard = body_released.clone().drop_guard();
+                            async move {
+                                let chunk = axum::body::Bytes::from(vec![b'x'; 65536]);
+                                axum::body::Body::from_stream(async_stream::stream! {
+                                    let _guard = guard;
+                                    loop { yield Ok::<_, std::io::Error>(chunk.clone()); }
+                                })
+                            }
+                        }),
+                    );
+                    let upstream_listener =
+                        tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let upstream_addr = upstream_listener.local_addr().unwrap();
+                    let upstream_cancel = CancellationToken::new();
+                    let _upstream_guard = upstream_cancel.clone().drop_guard();
+                    let upstream_task =
+                        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                            axum::serve(upstream_listener, upstream_router)
+                                .with_graceful_shutdown(upstream_cancel.cancelled_owned())
+                                .await
+                                .unwrap();
+                        }));
+
+                    let certificates = make_mtls_test_certificates();
+                    let service = HttpService::builder()
+                        .host("127.0.0.1")
+                        .port(0)
+                        .batch_gateway_url(Some(format!("http://{upstream_addr}")))
+                        .enable_tls(is_tls)
+                        .tls_cert_path(
+                            is_tls.then(|| certificates.server_cert.path().to_path_buf()),
+                        )
+                        .tls_key_path(is_tls.then(|| certificates.server_key.path().to_path_buf()))
+                        .build()
+                        .unwrap();
+                    let state = service.state_clone();
+                    let cancel = CancellationToken::new();
+                    let _guard = cancel.clone().drop_guard();
+                    let server_cancel = cancel.clone();
+                    let handle = axum_server::Handle::new();
+                    let server_handle = handle.clone();
+                    let listener = if is_tls {
+                        None
+                    } else {
+                        Some(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap())
+                    };
+                    let mut task =
+                        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                            service
+                                .run_inner(server_cancel, listener, Some(server_handle))
+                                .await
+                        }));
+                    let addr = tokio::time::timeout(Duration::from_secs(2), handle.listening())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+                    let mut client: Box<dyn Connection> = if is_tls {
+                        let config = dynamo_runtime::tls_utils::client_tls_config(
+                            Some(certificates.ca.path()),
+                            false,
+                            None,
+                            None,
+                        )
+                        .unwrap();
+                        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+                        Box::new(
+                            connector
+                                .connect(
+                                    rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap(),
+                                    stream,
+                                )
+                                .await
+                                .unwrap(),
+                        )
+                    } else {
+                        Box::new(stream)
+                    };
+                    client
+                        .write_all(
+                            b"GET /v1/files/file-1/content HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    client.flush().await.unwrap();
+                    let mut headers = Vec::new();
+                    while !headers.ends_with(b"\r\n\r\n") {
+                        assert!(headers.len() < 8192);
+                        headers.push(client.read_u8().await.unwrap());
+                    }
+                    assert!(headers.starts_with(b"HTTP/1.1 200"));
+                    assert_eq!(state.inflight_count(), 0);
+                    assert!(!released.is_cancelled());
+                    // The 120-second idle deadline cannot make the 1-second drain pass.
+                    cancel.cancel();
+                    tokio::time::timeout(Duration::from_secs(3), &mut task)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(state.service_stage(), ServiceStage::Stopping);
+                    tokio::time::timeout(Duration::from_secs(1), released.cancelled())
+                        .await
+                        .expect("frontend retained upstream response");
+                    handle.shutdown();
+                    drop(client);
+                    upstream_task.abort();
+                    let _ = upstream_task.await;
+                }
+            }),
+        )
+        .await
+        .unwrap();
     }
 
     /// Verifies that an unsupported content type returns the standard JSON error

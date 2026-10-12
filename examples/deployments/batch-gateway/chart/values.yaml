@@ -56,6 +56,8 @@ batch-gateway:
       enabled: false
     config:
       inputHeaders:
+        # Trusted ingress strips caller input and injects verified tenant identity.
+        # This header is not authentication; prevent direct API/frontend bypass.
         tenant: X-MaaS-Username
       batchAPI:
         passThroughHeaders:
@@ -117,6 +119,8 @@ async:
           request_path_url: /v1/chat/completions
           igw_base_url: "http://qwen3-0-6b-batch-frontend:8000"
           gate_type: endpoint-scrape
+          # Dedicated offline capacity only: readiness is not spare capacity.
+          # Shared online/offline pools need a validated load/priority policy.
           gate_params:
             url: "http://qwen3-0-6b-batch-frontend:8000/metrics"
             metric: dynamo_frontend_model_ready
