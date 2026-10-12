@@ -76,6 +76,14 @@ inputs:
     description: 'Check the GPU through torch before running GPU tests. Set false for images without torch (Triton), leaving the suite to check the GPU it needs.'
     required: false
     default: 'true'
+  gpu_shard_count:
+    description: 'Number of duration-balanced GPU shards; 1 disables sharding'
+    required: false
+    default: '1'
+  gpu_shard_index:
+    description: 'Zero-based GPU shard index'
+    required: false
+    default: '0'
   dd_flaky_retry_enabled:
     description: 'Override Datadog automatic test retries for this pytest invocation; empty inherits the job environment'
     required: false
@@ -116,6 +124,8 @@ runs:
         TRITON_ARTIFACTORY_USER: ${{ inputs.triton_artifactory_user }}
         TRITON_ARTIFACTORY_TOKEN: ${{ inputs.triton_artifactory_token }}
         VERIFY_GPU: ${{ inputs.verify_gpu }}
+        DYNAMO_GPU_SHARD_COUNT: ${{ inputs.gpu_shard_count }}
+        DYNAMO_GPU_SHARD_INDEX: ${{ inputs.gpu_shard_index }}
       run: |
         # Sanitize test_type for the JUnit and coverage filenames this step
         # writes: remove commas and spaces.
@@ -231,10 +241,18 @@ runs:
         fi
         echo "📦 Running pytest from container workspace: ${CONTAINER_WORKSPACE}"
 
+        SHARD_OPTS=""
+        if [[ "${GPU_TESTS}" == "true" && "${DYNAMO_GPU_SHARD_COUNT}" != "1" ]]; then
+          export PYTHONPATH="${GITHUB_WORKSPACE}/.github/scripts${PYTHONPATH:+:${PYTHONPATH}}"
+          export DYNAMO_GPU_SHARD_POOL="${TEST_SUITE_NAME}/${TEST_TYPE}/${PLATFORM_ARCH}"
+          export DYNAMO_GPU_SHARD_DURATIONS="${GITHUB_WORKSPACE}/.github/ci/pre-merge-test-durations.json"
+          SHARD_OPTS="-p test_sharding"
+        fi
+
         # Determine pytest command based on dry_run mode
         if [[ "${DRY_RUN}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
-          PYTEST_CMD="python -m pytest -v --collect-only -m \"${PYTEST_MARKS}\""
+          PYTEST_CMD="python -m pytest ${SHARD_OPTS} -v --collect-only -m \"${PYTEST_MARKS}\""
         else
           echo "🚀 Running pytest in normal mode"
           # Determine parallelization based on parallel_mode input
@@ -280,7 +298,7 @@ runs:
             export PYTHONPATH="${CONTAINER_WORKSPACE}/components/src:${CONTAINER_WORKSPACE}/lib/bindings/python/src${PYTHONPATH:+:${PYTHONPATH}}"
           fi
 
-          PYTEST_CMD="python -m pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WORK_DIR}/pytest_temp -o cache_dir=${WORK_DIR}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${PYTEST_MARKS}\""
+          PYTEST_CMD="python -m pytest ${SHARD_OPTS} ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WORK_DIR}/pytest_temp -o cache_dir=${WORK_DIR}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${PYTEST_MARKS}\""
         fi
 
         echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
