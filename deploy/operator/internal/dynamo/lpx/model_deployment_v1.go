@@ -6,11 +6,9 @@
 package lpx
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"math"
 	"slices"
-	"strings"
 
 	"capnproto.org/go/capnp/v3"
 	commoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
@@ -72,44 +70,8 @@ func decodeGbuildDeploymentV1(data []byte) (deploymentcapnpv1.Deployment, error)
 	return deployment, nil
 }
 
-// validateExecutionReference checks association metadata without reading runtime bytes.
-func validateExecutionReference(deployment deploymentcapnpv1.Deployment, inventory []string) error {
-	if !deployment.HasExecution() {
-		return fmt.Errorf("%s is missing execution", gbuildDeploymentV1CapnpFile)
-	}
-	execution, err := deployment.Execution()
-	if err != nil {
-		return fmt.Errorf("reading execution: %w", err)
-	}
-	rawPath, err := execution.Path()
-	if err != nil {
-		return fmt.Errorf("reading execution.path: %w", err)
-	}
-	path, err := cleanManifestRelativeBuildPath("execution.path", rawPath)
-	if err != nil {
-		return err
-	}
-	if path != rawPath || strings.Contains(rawPath, "\\") || strings.Contains(rawPath, ":") {
-		return fmt.Errorf("execution.path %q must be a canonical bundle-relative path", rawPath)
-	}
-	if path == gbuildDeploymentV1CapnpFile || path == gbuildManifestV2CapnpFile || path == "build-report.v1.capnp.bin" {
-		return fmt.Errorf("execution.path %q must name the execution contract", path)
-	}
-	digest, err := execution.Sha256()
-	if err != nil {
-		return fmt.Errorf("reading execution.sha256: %w", err)
-	}
-	if len(digest) != sha256.Size {
-		return fmt.Errorf("execution.sha256 must contain %d bytes, got %d", sha256.Size, len(digest))
-	}
-	if !slices.Contains(inventory, path) {
-		return fmt.Errorf("execution.path %q is missing from build inventory", path)
-	}
-	return nil
-}
-
 // buildFromGbuildDeploymentV1 validates compiler input using the acquired canonical build reference.
-func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Deployment, inventory []string) (*Build, error) {
+func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Deployment) (*Build, error) {
 	if manifest.ContractRevision() != deploymentcapnpv1.CurrentContractRevision {
 		return nil, fmt.Errorf(
 			"%s contractRevision = %d, want %d",
@@ -117,18 +79,6 @@ func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Dep
 			manifest.ContractRevision(),
 			deploymentcapnpv1.CurrentContractRevision,
 		)
-	}
-	// A split deployment must identify its build before scheduling.
-	identity, err := manifest.Identity()
-	if err != nil {
-		return nil, fmt.Errorf("reading %s identity: %w", gbuildDeploymentV1CapnpFile, err)
-	}
-	buildID, err := identity.BuildId()
-	if err != nil {
-		return nil, fmt.Errorf("reading %s identity.buildId: %w", gbuildDeploymentV1CapnpFile, err)
-	}
-	if strings.TrimSpace(buildID) == "" {
-		return nil, fmt.Errorf("%s identity.buildId is required", gbuildDeploymentV1CapnpFile)
 	}
 	if !manifest.HasConfig() {
 		return nil, fmt.Errorf("%s is missing config", gbuildDeploymentV1CapnpFile)
@@ -166,21 +116,6 @@ func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Dep
 	if err := validateManifestBatchSize(gbuildDeploymentV1CapnpFile, batchSize, ioFPGACount, ioFanoutFactor); err != nil {
 		return nil, err
 	}
-	if err := validateExecutionReference(manifest, inventory); err != nil {
-		return nil, err
-	}
-	runtimeTokenEmbeddingsPath, err := runtimeTokenEmbeddingsPathFromDeploymentV1(manifest)
-	if err != nil {
-		return nil, err
-	}
-	// Validate runtime embedding assets before projecting scheduler-facing artifacts.
-	if runtimeTokenEmbeddingsPath != "" && !program.SupportsCpuEmbeddings() {
-		return nil, fmt.Errorf("%s runtimeAssets.tokenEmbeddingsPath requires supportsCpuEmbeddings=true", gbuildDeploymentV1CapnpFile)
-	}
-	if program.SupportsCpuEmbeddings() && program.StandaloneTokenEmbeddings() && runtimeTokenEmbeddingsPath == "" {
-		return nil, fmt.Errorf("%s runtimeAssets.tokenEmbeddingsPath is required when standaloneTokenEmbeddings=true", gbuildDeploymentV1CapnpFile)
-	}
-
 	build := &Build{
 		Path:                      buildRef,
 		CompilationMode:           compilationMode,
@@ -224,9 +159,6 @@ func runtimeIOFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo) (int
 	case deploymentcapnpv1.RuntimeIoProtocol_fpgaRoce:
 	default:
 		return 0, 0, fmt.Errorf("%s config.runtimeIo.protocol %d is not supported", gbuildDeploymentV1CapnpFile, runtimeIO.Protocol())
-	}
-	if mode := runtimeIO.FpgaMode(); mode > deploymentcapnpv1.FpgaIoMode_dibDeb {
-		return 0, 0, fmt.Errorf("%s config.runtimeIo.fpgaMode %d is not supported", gbuildDeploymentV1CapnpFile, mode)
 	}
 	return int32(count), int32(fanoutFactor), nil
 }
@@ -323,17 +255,8 @@ func buildPartitionFromDeploymentV1(raw deploymentcapnpv1.PartitionDeployment) (
 	if err != nil {
 		return BuildPartition{}, false, fmt.Errorf("reading %s artifact partition ref: %w", gbuildDeploymentV1CapnpFile, err)
 	}
-	// Require the device kind and payload discriminator to agree even for non-LPU partitions.
 	switch ref.DeviceType() {
-	case commoncapnpv1.DeviceType_cuda:
-		if raw.Detail().Which() != deploymentcapnpv1.PartitionDeployment_detail_Which_cuda || !raw.Detail().HasCuda() {
-			return BuildPartition{}, false, fmt.Errorf("CUDA partition %d has mismatched detail", ref.PartitionId())
-		}
-		return BuildPartition{}, false, nil
-	case commoncapnpv1.DeviceType_cpu:
-		if raw.Detail().Which() != deploymentcapnpv1.PartitionDeployment_detail_Which_cpu || !raw.Detail().HasCpu() {
-			return BuildPartition{}, false, fmt.Errorf("CPU partition %d has mismatched detail", ref.PartitionId())
-		}
+	case commoncapnpv1.DeviceType_cuda, commoncapnpv1.DeviceType_cpu:
 		return BuildPartition{}, false, nil
 	case commoncapnpv1.DeviceType_lpu:
 		if raw.Detail().Which() != deploymentcapnpv1.PartitionDeployment_detail_Which_lpu || !raw.Detail().HasLpu() {
@@ -380,25 +303,4 @@ func validateDeploymentV1PartSelect(artifacts deploymentcapnpv1.Deployment, part
 		selectedIDs = append(selectedIDs, int(ref.PartitionId()))
 	}
 	return validateSelectedLPUPartitions(gbuildDeploymentV1CapnpFile, "partSelect", selectedIDs, partitions)
-}
-
-func runtimeTokenEmbeddingsPathFromDeploymentV1(artifacts deploymentcapnpv1.Deployment) (string, error) {
-	if !artifacts.HasRuntimeAssets() {
-		return "", nil
-	}
-	runtimeAssets, err := artifacts.RuntimeAssets()
-	if err != nil {
-		return "", fmt.Errorf("reading %s runtimeAssets: %w", gbuildDeploymentV1CapnpFile, err)
-	}
-	if !runtimeAssets.HasTokenEmbeddingsPath() {
-		return "", nil
-	}
-	rawPath, err := runtimeAssets.TokenEmbeddingsPath()
-	if err != nil {
-		return "", fmt.Errorf("reading %s runtimeAssets.tokenEmbeddingsPath: %w", gbuildDeploymentV1CapnpFile, err)
-	}
-	return cleanManifestRelativeBuildPath(
-		fmt.Sprintf("%s runtimeAssets.tokenEmbeddingsPath", gbuildDeploymentV1CapnpFile),
-		rawPath,
-	)
 }

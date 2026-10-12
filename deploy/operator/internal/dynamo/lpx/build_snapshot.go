@@ -219,7 +219,7 @@ func normalizeBuildSnapshot(snapshot *BuildSnapshot) (NormalizedBuildSnapshot, e
 		if decodeErr != nil {
 			return NormalizedBuildSnapshot{}, decodeErr
 		}
-		build, err = buildFromGbuildDeploymentV1(snapshot.ref, deployment, snapshot.inventory)
+		build, err = buildFromGbuildDeploymentV1(snapshot.ref, deployment)
 	default:
 		return NormalizedBuildSnapshot{}, fmt.Errorf("unsupported build contract format %d", snapshot.format)
 	}

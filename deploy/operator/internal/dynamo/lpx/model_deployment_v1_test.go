@@ -99,24 +99,21 @@ func TestDeploymentContractPreservesNormalizedBuild(t *testing.T) {
 	t.Log("Decode the deployment without importing execution or report types")
 	decoded, err := decodeGbuildDeploymentV1(data)
 	require.NoError(t, err)
-	build, err := buildFromGbuildDeploymentV1("gs://models/build", decoded, []string{gbuildDeploymentV1CapnpFile, "execution.v1.capnp.bin"})
+	build, err := buildFromGbuildDeploymentV1("gs://models/build", decoded)
 	require.NoError(t, err)
 	require.Equal(t, legacy, build)
 }
 
 func TestDeploymentContractRejectsInvalidFacts(t *testing.T) {
-	for _, name := range []string{"revision", "future revision", "build ID", "I/O protocol", "FPGA mode", "zero endpoints", "zero fanout", "host endpoints", "batch splitting", "execution path", "execution self-reference", "execution digest", "execution inventory", "unknown device", "mismatched detail", "embedding support", "missing embeddings", "missing architecture", "unknown architecture"} {
+	for _, name := range []string{"revision", "future revision", "I/O protocol", "zero endpoints", "zero fanout", "host endpoints", "batch splitting", "unknown device", "missing architecture", "unknown architecture"} {
 		t.Run(name, func(t *testing.T) {
 			t.Log("Alter one typed deployment fact and retain the other valid fields")
 			deployment := newDeploymentV1ContractFixture(t)
-			inventory := []string{gbuildDeploymentV1CapnpFile, "execution.v1.capnp.bin"}
 			config, err := deployment.Config()
 			require.NoError(t, err)
 			runtimeIO, err := config.RuntimeIo()
 			require.NoError(t, err)
-			execution, err := deployment.Execution()
-			require.NoError(t, err)
-			wantErr := "execution"
+			var wantErr string
 			switch name {
 			case "missing architecture", "unknown architecture":
 				partitions, err := deployment.Partitions()
@@ -135,11 +132,6 @@ func TestDeploymentContractRejectsInvalidFacts(t *testing.T) {
 			case "future revision":
 				deployment.SetContractRevision(99)
 				wantErr = "contractRevision"
-			case "build ID":
-				identity, err := deployment.Identity()
-				require.NoError(t, err)
-				require.NoError(t, identity.SetBuildId(""))
-				wantErr = "identity.buildId"
 			case "zero endpoints":
 				runtimeIO.SetIoFpgaCount(0)
 				wantErr = "ioFpgaCount"
@@ -149,52 +141,25 @@ func TestDeploymentContractRejectsInvalidFacts(t *testing.T) {
 			case "host endpoints":
 				runtimeIO.SetProtocol(deploymentcapnpv1.RuntimeIoProtocol_host)
 				wantErr = "host runtime I/O"
-			case "execution self-reference":
-				require.NoError(t, execution.SetPath(gbuildDeploymentV1CapnpFile))
-			case "unknown device", "mismatched detail":
+			case "unknown device":
 				partitions, err := deployment.Partitions()
 				require.NoError(t, err)
 				ref, err := partitions.At(0).Partition()
 				require.NoError(t, err)
-				if name == "unknown device" {
-					ref.SetDeviceType(commoncapnpv1.DeviceType(99))
-					wantErr = "deviceType"
-				} else {
-					ref.SetDeviceType(commoncapnpv1.DeviceType_cuda)
-					wantErr = "mismatched detail"
-				}
-			case "embedding support":
-				assets, err := deployment.NewRuntimeAssets()
-				require.NoError(t, err)
-				require.NoError(t, assets.SetTokenEmbeddingsPath("runtime/embeddings.npz"))
-				wantErr = "requires supportsCpuEmbeddings"
-			case "missing embeddings":
-				program, err := config.Program()
-				require.NoError(t, err)
-				program.SetSupportsCpuEmbeddings(true)
-				program.SetStandaloneTokenEmbeddings(true)
-				wantErr = "tokenEmbeddingsPath is required"
+				ref.SetDeviceType(commoncapnpv1.DeviceType(99))
+				wantErr = "deviceType"
 			case "I/O protocol":
 				runtimeIO.SetProtocol(deploymentcapnpv1.RuntimeIoProtocol(99))
 				wantErr = "protocol"
-			case "FPGA mode":
-				runtimeIO.SetFpgaMode(deploymentcapnpv1.FpgaIoMode(99))
-				wantErr = "fpgaMode"
 			case "batch splitting":
 				program, err := config.Program()
 				require.NoError(t, err)
 				program.SetBatchSize(7)
 				wantErr = "divisible"
-			case "execution path":
-				require.NoError(t, execution.SetPath("../execution.v1.capnp.bin"))
-			case "execution digest":
-				require.NoError(t, execution.SetSha256([]byte("short")))
-			case "execution inventory":
-				inventory = []string{gbuildDeploymentV1CapnpFile}
 			}
 
 			t.Log("Reject the malformed scheduler input before producing a build")
-			_, err = buildFromGbuildDeploymentV1("gs://models/build", deployment, inventory)
+			_, err = buildFromGbuildDeploymentV1("gs://models/build", deployment)
 			require.ErrorContains(t, err, wantErr)
 		})
 	}
@@ -413,7 +378,7 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 			}
 
 			t.Log("Preserve scheduler geometry while excluding non-LPU execution details")
-			build, err := buildFromGbuildDeploymentV1("gs://models/build", deployment, []string{gbuildDeploymentV1CapnpFile, "execution.v1.capnp.bin"})
+			build, err := buildFromGbuildDeploymentV1("gs://models/build", deployment)
 			require.NoError(t, err)
 			require.Equal(t, wantFamily, build.Family)
 			require.Equal(t, wantIO, build.IOFPGACount)
