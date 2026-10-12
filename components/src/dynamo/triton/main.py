@@ -250,7 +250,7 @@ def _build_handler(
             classify_input_name=config.classify_input_name,
             classify_output_name=config.classify_output_name,
         )
-    if config.task == "embed":
+    elif config.task == "embed":
         return EmbeddingWorkerHandler(
             server,
             model,
@@ -258,7 +258,8 @@ def _build_handler(
             embed_input_name=config.embed_input_name,
             embed_output_name=config.embed_output_name,
         )
-    return RequestHandler(server, model, parsed_config)
+    else:
+        return RequestHandler(server, model, parsed_config)
 
 
 @dataclass

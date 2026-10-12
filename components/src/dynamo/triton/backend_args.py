@@ -445,14 +445,24 @@ class DynamoTritonArgGroup(DynamoArgGroup):
             flag_name="--embed-input-name",
             env_var="DYN_TRITON_EMBED_INPUT_NAME",
             default=None,
-            help="Input tensor name for --task embed; auto-detect when omitted.",
+            help=(
+                "Explicit input tensor name for --task embed. Omit to "
+                "auto-detect the sole TYPE_STRING input in the model's "
+                "config.pbtxt; required when the model declares more than "
+                "one BYTES input."
+            ),
         )
         add_argument(
             endpoint_group,
             flag_name="--embed-output-name",
             env_var="DYN_TRITON_EMBED_OUTPUT_NAME",
             default=None,
-            help="Output tensor name for --task embed; auto-detect when omitted.",
+            help=(
+                "Explicit output tensor name for --task embed. Omit to "
+                "auto-detect the sole TYPE_FP32 output in the model's "
+                "config.pbtxt; required when the model declares more than "
+                "one FP32 output."
+            ),
         )
 
 
