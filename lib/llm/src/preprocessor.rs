@@ -120,6 +120,16 @@ pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 
+/// Takes the encoder's token buffer rather than copying it. The tokenizer cache and fastokens
+/// return `Encoding::Sp` with an exactly sized buffer, so a copy only adds a prompt-sized
+/// allocation per request; the Hugging Face encoding still needs one.
+fn into_token_ids(encoding: Encoding) -> Vec<TokenIdType> {
+    match encoding {
+        Encoding::Sp(token_ids) => token_ids,
+        encoding => encoding.token_ids().to_vec(),
+    }
+}
+
 fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, Option<i32>) {
     let priority_jump = hints.and_then(|h| {
         h.priority
@@ -358,6 +368,36 @@ pub(crate) fn decode_base64_to_floats(encoded: &str) -> Result<Vec<f32>, String>
         .chunks_exact(std::mem::size_of::<f32>())
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect())
+}
+
+#[cfg(test)]
+mod into_token_ids_tests {
+    use super::{Encoding, into_token_ids};
+
+    #[test]
+    fn takes_the_encoder_buffer_without_copying() {
+        let token_ids = vec![1, 2, 3];
+        let buffer = token_ids.as_ptr();
+        let taken = into_token_ids(Encoding::Sp(token_ids));
+        assert_eq!(taken, vec![1, 2, 3]);
+        assert_eq!(taken.as_ptr(), buffer);
+    }
+
+    #[test]
+    fn copies_hugging_face_ids() {
+        let encoding = Encoding::Hf(Box::new(tokenizers::tokenizer::Encoding::new(
+            vec![7, 8],
+            vec![0, 0],
+            vec!["a".to_string(), "b".to_string()],
+            vec![None, None],
+            vec![(0, 1), (1, 2)],
+            vec![0, 0],
+            vec![1, 1],
+            vec![],
+            Default::default(),
+        )));
+        assert_eq!(into_token_ids(encoding), vec![7, 8]);
+    }
 }
 
 #[cfg(test)]
@@ -4747,7 +4787,7 @@ impl OpenAIPreprocessor {
                                         tracker,
                                     )
                                     .await?;
-                                (encoding.token_ids().to_vec(), false)
+                                (into_token_ids(encoding), false)
                             } else {
                                 let encoding = self
                                     .encode_prompt_with_timing(
@@ -4756,7 +4796,7 @@ impl OpenAIPreprocessor {
                                         tracker,
                                     )
                                     .await?;
-                                (encoding.token_ids().to_vec(), false)
+                                (into_token_ids(encoding), false)
                             };
 
                             if request.has_annotation(ANNOTATION_TOKEN_IDS)
@@ -4773,8 +4813,7 @@ impl OpenAIPreprocessor {
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
                                 let encoding = self.encode_with_timing(&texts[0], tracker).await?;
-                                let tokens = encoding.token_ids().to_vec();
-                                tokens_out = tokens;
+                                tokens_out = into_token_ids(encoding);
                             } else {
                                 bail!(
                                     "Batch text input not supported for more than one text in requests (got {})",
