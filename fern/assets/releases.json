@@ -2234,23 +2234,24 @@
       "dateIso": "2026-10-10"
     },
     {
-      "version": "1.6.0.dev20261009",
-      "date": "Oct 9, 2026",
-      "packages": [
-        "ai-dynamo",
-        "ai-dynamo-runtime"
-      ],
-      "dateIso": "2026-10-09"
-    },
-    {
-      "version": "1.6.0.dev20261008",
-      "date": "Oct 8, 2026",
+      "version": "1.6.0.dev20260930",
+      "date": "Sep 30, 2026",
       "packages": [
         "ai-dynamo",
         "ai-dynamo-runtime",
         "kvbm"
       ],
-      "dateIso": "2026-10-08"
+      "dateIso": "2026-09-30"
+    },
+    {
+      "version": "1.6.0.dev20260929",
+      "date": "Sep 29, 2026",
+      "packages": [
+        "ai-dynamo",
+        "ai-dynamo-runtime",
+        "kvbm"
+      ],
+      "dateIso": "2026-09-29"
     }
   ]
 }
