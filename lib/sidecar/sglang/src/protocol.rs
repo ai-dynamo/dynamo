@@ -210,7 +210,14 @@ fn media_data(request: &PreprocessedRequest) -> Result<[Vec<String>; 3], DynamoE
             data.push(media_source(item)?);
         }
     }
-    Ok([image_data, video_data, audio_data])
+    let media = [image_data, video_data, audio_data];
+    // Text requests ignore these options, but SGLang would decode media with its own defaults.
+    if request.media_io_kwargs.is_some() && media.iter().any(|data| !data.is_empty()) {
+        return Err(client::invalid_request(
+            "media_io_kwargs are not supported by SGLang's native Generate RPC",
+        ));
+    }
+    Ok(media)
 }
 
 /// SGLang reads `file://` URLs and bare paths from the disk of the SGLang server.
@@ -241,8 +248,9 @@ fn media_source(item: &MultimodalData) -> Result<String, DynamoError> {
     }
 }
 
-/// SGLang servers without the `multimodal_inputs` gRPC feature drop the media
-/// fields silently, so the model would answer without seeing the media.
+/// SGLang lists the `multimodal_inputs` gRPC feature only when it can consume
+/// media. Older servers and text-only models drop the media fields silently, so
+/// the model would answer without seeing the media.
 pub(crate) fn require_media_support(
     request: &pb::GenerateRequest,
     supports_multimodal_inputs: bool,
@@ -252,7 +260,7 @@ pub(crate) fn require_media_support(
         || !request.audio_data.is_empty();
     if has_media && !supports_multimodal_inputs {
         return Err(client::invalid_request(
-            "this SGLang server does not accept image, video, or audio inputs over gRPC; upgrade SGLang",
+            "this SGLang server does not accept image, video, or audio inputs over gRPC; serve a multimodal model with an SGLang version that supports gRPC media",
         ));
     }
     Ok(())
@@ -310,11 +318,6 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     if request.mm_processor_kwargs.is_some() {
         return Err(client::invalid_request(
             "mm_processor_kwargs are not supported by SGLang's native Generate RPC",
-        ));
-    }
-    if request.media_io_kwargs.is_some() {
-        return Err(client::invalid_request(
-            "media_io_kwargs are not supported by SGLang's native Generate RPC",
         ));
     }
     if request

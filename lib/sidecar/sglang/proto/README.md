@@ -29,4 +29,5 @@ adds the three media fields, and a follow-up change adds `mm_hashes` and the
 these changes merge, the local descriptor does not match the commit above. When
 they merge, copy the file again from the SGLang merge commit and update the
 commit and the SHA-256. The sidecar sends media only to servers that list
-`multimodal_inputs`, because older servers drop unknown fields silently.
+`multimodal_inputs`, because older servers drop unknown fields and text-only
+models ignore media, both silently.
