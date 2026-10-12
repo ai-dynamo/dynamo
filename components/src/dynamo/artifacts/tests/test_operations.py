@@ -8,10 +8,17 @@ import sqlite3
 import threading
 
 import pytest
-from cryptography.fernet import Fernet
 
-from dynamo.artifacts.operations import ArtifactOperationStore, ArtifactService
-from dynamo.artifacts.storage import ArtifactStorageError
+fernet = pytest.importorskip("cryptography.fernet")
+pytest.importorskip("opendal")
+
+from dynamo.artifacts.operations import (  # noqa: E402
+    ArtifactOperationStore,
+    ArtifactService,
+)
+from dynamo.artifacts.storage import ArtifactStorageError  # noqa: E402
+
+Fernet = fernet.Fernet
 
 pytestmark = [
     pytest.mark.pre_merge,
