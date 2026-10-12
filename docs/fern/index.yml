@@ -791,11 +791,13 @@ navigation:
           - page: Speech Recognition (ASR)
             slug: speech-recognition
             path: pages/use-cases/speech/speech-recognition.md
-          - page: Text-to-Speech
+          - page: Text to Speech (TTS)
+            slug: text-to-speech
             path: pages/use-cases/speech/text-to-speech.md
           - page: Audio Understanding
             path: pages/use-cases/speech/audio-understanding.md
-          - page: Speech-to-Speech
+          - page: Speech to Speech
+            slug: speech-to-speech
             path: pages/use-cases/speech/speech-to-speech.md
 
       # ==================== Multimodal Performance ====================
