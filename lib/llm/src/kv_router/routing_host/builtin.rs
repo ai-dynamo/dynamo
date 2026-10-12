@@ -368,15 +368,8 @@ impl RoutingHost {
         );
         let tracker = request.tracker.clone();
         let request_context = request.context().clone();
-        let context_id = request.context().id().to_string();
-        let lifecycle = request
-            .get_optional::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
-            .ok()
-            .flatten()
-            .map(|trace| trace.as_ref().clone())
-            .unwrap_or_else(|| LifecycleTrace::frontend_request_without_session(context_id));
         let request_dispatch = DispatchSpan {
-            span: lifecycle.start(LifecycleStage::RequestDispatch),
+            span: start_request_dispatch(&request, request.phase()),
             target: Default::default(),
         };
         request_dispatch.span.record(

@@ -66,6 +66,26 @@ const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 /// Bounds the wait for a worker's trailing typed error after a terminal frame.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The request's lifecycle trace, absent when no lifecycle root was opened for it.
+fn request_lifecycle(request: &SingleIn<PreprocessedRequest>) -> Option<Arc<LifecycleTrace>> {
+    request
+        .get_optional::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
+        .ok()
+        .flatten()
+}
+
+/// Start `request.dispatch` for one phase leg; never invent a rootless identity.
+fn start_request_dispatch(
+    request: &SingleIn<PreprocessedRequest>,
+    phase: RequestPhase,
+) -> tracing::Span {
+    let span = request_lifecycle(request).map_or_else(tracing::Span::none, |trace| {
+        trace.start(LifecycleStage::RequestDispatch)
+    });
+    span.record("dynamo.dispatch.phase", phase.as_str());
+    span
+}
+
 pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
 }

@@ -80,7 +80,40 @@ struct QueuedRequest {
     enqueue_at: Instant,
     due_at: Option<Instant>,
     block_hashes: Option<Vec<LocalBlockHash>>,
+    lifecycle: RouterLifecycle,
     lifecycle_span: tracing::Span,
+}
+
+/// The request's lifecycle trace and current span, captured on the request task
+/// before the actor hop so router spans join the request's trace. Empty unless
+/// the routing host scoped an enabled trace, so no router span lacks a root.
+#[derive(Default)]
+struct RouterLifecycle {
+    #[cfg(feature = "runtime-protocols")]
+    parent: Option<(Arc<LifecycleTrace>, tracing::Span)>,
+}
+
+impl RouterLifecycle {
+    fn capture() -> Self {
+        Self {
+            #[cfg(feature = "runtime-protocols")]
+            parent: LifecycleTrace::scoped().map(|trace| (trace, tracing::Span::current())),
+        }
+    }
+
+    /// Run actor work under the captured span and trace.
+    fn in_scope<R>(&self, f: impl FnOnce() -> R) -> R {
+        #[cfg(feature = "runtime-protocols")]
+        if let Some((trace, parent)) = &self.parent {
+            return parent.in_scope(|| LifecycleTrace::scope_sync(Some(Arc::clone(trace)), f));
+        }
+        f()
+    }
+}
+
+#[cfg(feature = "runtime-protocols")]
+fn router_span(stage: LifecycleStage) -> tracing::Span {
+    LifecycleTrace::scoped().map_or_else(tracing::Span::none, |trace| trace.start(stage))
 }
 
 fn finish_queue_span(
@@ -172,10 +205,12 @@ enum AdmissionCommand {
         block_hashes: Option<Vec<LocalBlockHash>>,
         queue_metadata: QueueMetadata,
         lease: Option<Box<RequestLifecycleLease>>,
+        lifecycle: RouterLifecycle,
         ack_tx: oneshot::Sender<Option<Box<RequestLifecycleLease>>>,
     },
     SelectWithoutAdmission {
         request: SchedulingRequest,
+        lifecycle: RouterLifecycle,
         resp_tx: oneshot::Sender<Result<AdvisorySchedulingResponse, KvSchedulerError>>,
     },
     Update {
@@ -863,6 +898,7 @@ impl<
             block_hashes: self.prepare_block_hashes_for_refresh(block_hashes),
             queue_metadata,
             lease,
+            lifecycle: RouterLifecycle::capture(),
             ack_tx,
         };
 
@@ -932,6 +968,7 @@ impl<
             block_hashes: None,
             queue_metadata,
             lease: None,
+            lifecycle: RouterLifecycle::capture(),
             ack_tx,
         };
         self.admission_tx
@@ -1068,7 +1105,11 @@ impl<
         request.eligibility().validate_pinned_worker_allowed()?;
 
         let (resp_tx, resp_rx) = oneshot::channel();
-        let command = AdmissionCommand::SelectWithoutAdmission { request, resp_tx };
+        let command = AdmissionCommand::SelectWithoutAdmission {
+            request,
+            lifecycle: RouterLifecycle::capture(),
+            resp_tx,
+        };
         if self.admission_tx.send(command).await.is_err() {
             return Err(KvSchedulerError::SubscriberShutdown);
         }
@@ -1210,18 +1251,21 @@ impl<
                     block_hashes,
                     queue_metadata,
                     lease,
+                    lifecycle,
                     ack_tx,
                 } => {
                     let lifecycle_transfer = lease
                         .as_ref()
                         .and_then(|lease| lease.transfer.as_ref().map(Arc::clone));
-                    let enqueue_ready = self.handle_enqueue(
-                        request,
-                        attempt_tx,
-                        lifecycle_transfer,
-                        block_hashes,
-                        queue_metadata,
-                    );
+                    let enqueue_ready = lifecycle.in_scope(|| {
+                        self.handle_enqueue(
+                            request,
+                            attempt_tx,
+                            lifecycle_transfer,
+                            block_hashes,
+                            queue_metadata,
+                        )
+                    });
                     let cleanup_ready = drain_cleanup && self.drain_cleanup();
                     if cleanup_ready {
                         self.handle_update().await;
@@ -1230,8 +1274,13 @@ impl<
                     }
                     let _ = ack_tx.send(lease);
                 }
-                AdmissionCommand::SelectWithoutAdmission { request, resp_tx } => {
-                    let result = self.select_without_admission_inner(request, Instant::now());
+                AdmissionCommand::SelectWithoutAdmission {
+                    request,
+                    lifecycle,
+                    resp_tx,
+                } => {
+                    let result = lifecycle
+                        .in_scope(|| self.select_without_admission_inner(request, Instant::now()));
                     if drain_cleanup && self.drain_cleanup() {
                         self.handle_update().await;
                     }
@@ -1350,13 +1399,7 @@ impl<
         }
         tracing::trace!(policy_class = class.name, "ordering request");
         #[cfg(feature = "runtime-protocols")]
-        let lifecycle_span = request
-            .mode
-            .request_id()
-            .map_or_else(tracing::Span::none, |id| {
-                LifecycleTrace::frontend_request_without_session(id)
-                    .start(LifecycleStage::RouterQueue)
-            });
+        let lifecycle_span = router_span(LifecycleStage::RouterQueue);
         #[cfg(not(feature = "runtime-protocols"))]
         let lifecycle_span = tracing::Span::none();
         let queue_depth_in = self.pending_count.load(AtomicOrdering::Relaxed);
@@ -1390,6 +1433,8 @@ impl<
             enqueue_at: decay_now,
             due_at: queue_metadata.due_at,
             block_hashes,
+            // Runs under the caller scope entered by the actor; keep it for admission.
+            lifecycle: RouterLifecycle::capture(),
             lifecycle_span,
         };
         let worker_count = self.workers_with_configs.borrow().len();
@@ -1764,12 +1809,14 @@ impl<
                 policy_class = class.name,
                 "scheduling request from pending queue"
             );
-            self.admit_one(
-                queued.request,
-                queued.attempt_tx,
-                queued.lifecycle_transfer,
-                admit_now,
-            );
+            queued.lifecycle.in_scope(|| {
+                self.admit_one(
+                    queued.request,
+                    queued.attempt_tx,
+                    queued.lifecycle_transfer,
+                    admit_now,
+                )
+            });
         }
     }
 
@@ -1805,13 +1852,7 @@ impl<
             .and_then(|provider| provider(request));
 
         #[cfg(feature = "runtime-protocols")]
-        let lifecycle_span = request
-            .mode
-            .request_id()
-            .map_or_else(tracing::Span::none, |id| {
-                LifecycleTrace::frontend_request_without_session(id)
-                    .start(LifecycleStage::RouterSelection)
-            });
+        let lifecycle_span = router_span(LifecycleStage::RouterSelection);
         #[cfg(not(feature = "runtime-protocols"))]
         let lifecycle_span = tracing::Span::none();
 
@@ -3216,6 +3257,7 @@ policy_classes:
                 block_hashes: Some(vec![LocalBlockHash(42)]),
                 queue_metadata,
                 lease: None,
+                lifecycle: RouterLifecycle::default(),
                 ack_tx,
             })
             .await
@@ -3690,7 +3732,11 @@ policy_classes:
             permits
                 .next()
                 .unwrap()
-                .send(AdmissionCommand::SelectWithoutAdmission { request, resp_tx });
+                .send(AdmissionCommand::SelectWithoutAdmission {
+                    request,
+                    lifecycle: RouterLifecycle::default(),
+                    resp_tx,
+                });
             responses.push(resp_rx);
             queue.capacity_changed(Some(booking.worker));
         }
@@ -4182,10 +4228,23 @@ policy_classes:
         };
         use crate::scheduling::selector::WorkerSelectionPolicy;
         use crate::scheduling::test_capture::{Capture, isolated};
+        use dynamo_runtime::telemetry::LifecycleTrace;
+        use tracing::Instrument;
         if isolated("scheduling::queue::tests::lifecycle_concurrent_queue_outcomes") {
             return;
         }
         let capture = Capture::install();
+        // As the routing host does: scope the request's trace around a caller span.
+        fn traced<F: std::future::Future>(
+            id: &str,
+            future: F,
+        ) -> impl std::future::Future<Output = F::Output> {
+            let trace = Arc::new(LifecycleTrace::frontend_request_without_session(id));
+            LifecycleTrace::scope(
+                Some(trace),
+                future.instrument(tracing::info_span!("caller")),
+            )
+        }
         struct FirstPicker;
         impl WorkerPicker for FirstPicker {
             fn pick(
@@ -4206,7 +4265,10 @@ policy_classes:
         };
         let (active0, rx0) = request("active-0", 0);
         let (active1, rx1) = request("active-1", 1);
-        tokio::join!(queue.enqueue(active0), queue.enqueue(active1));
+        tokio::join!(
+            traced("active-0", queue.enqueue(active0)),
+            traced("active-1", queue.enqueue(active1)),
+        );
         rx0.await.unwrap().unwrap();
         rx1.await.unwrap().unwrap();
 
@@ -4217,9 +4279,16 @@ policy_classes:
             .new_request_lifecycle_lease(Some("cancelled"))
             .unwrap();
         let (_, lease, _) = tokio::join!(
-            queue.enqueue(admitted),
-            queue.enqueue_with_block_hashes_and_lease(cancelled, None, Some(lease)),
-            queue.enqueue_with_due_at_for_test(expired, Instant::now() + Duration::from_secs(5)),
+            traced("admitted", queue.enqueue(admitted)),
+            traced(
+                "cancelled",
+                queue.enqueue_with_block_hashes_and_lease(cancelled, None, Some(lease)),
+            ),
+            traced(
+                "expired",
+                queue
+                    .enqueue_with_due_at_for_test(expired, Instant::now() + Duration::from_secs(5)),
+            ),
         );
         assert_eq!(queue.pending_count(), 3);
         drop(cancelled_rx);
@@ -4247,9 +4316,12 @@ policy_classes:
             let fields = capture.fields("router.queue", id);
             assert_eq!(fields["dynamo.router.queue.outcome"], outcome);
             assert_eq!(fields["dynamo.router.queue.deferred"], "true");
+            assert_eq!(fields["parent"], "caller");
         }
         for (id, worker) in [("active-0", "0"), ("active-1", "1"), ("admitted", "0")] {
             let fields = capture.fields("router.selection", id);
+            // The queued request is selected in a later actor turn, still under its caller.
+            assert_eq!(fields["parent"], "caller");
             assert_eq!(fields["dynamo.router.selected.worker.id"], worker);
             assert_eq!(fields["dynamo.router.candidate.count"], "1");
             let detail: serde_json::Value =
@@ -4257,7 +4329,15 @@ policy_classes:
             assert_eq!(detail.as_array().unwrap().len(), 1);
             assert_eq!(detail[0]["worker_id"].as_u64().unwrap().to_string(), worker);
         }
-        for id in ["active-1", "admitted"] {
+        // Without a scoped trace there is no request root, so no router span is emitted.
+        let (untraced, untraced_rx) = request("untraced", 0);
+        slots.free(&"admitted".to_string(), Instant::now()).unwrap();
+        queue.enqueue(untraced).await;
+        untraced_rx.await.unwrap().unwrap();
+        for name in ["router.queue", "router.selection"] {
+            assert!(capture.matching(name, "untraced").is_empty(), "{name}");
+        }
+        for id in ["active-1", "untraced"] {
             slots.free(&id.to_string(), Instant::now()).unwrap();
         }
         slots.assert_completely_drained(Instant::now());

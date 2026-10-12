@@ -274,11 +274,23 @@ impl RouterSelectionTelemetry {
         );
         self.span
             .record("dynamo.router.selected.score", selected.cost);
-        if let Some(best) = candidates.iter().min_by(|left, right| {
-            left.cost
-                .total_cmp(&right.cost)
-                .then_with(|| left.worker.cmp(&right.worker))
-        }) {
+        // Among equal scores, report the selected worker as best: the policy may
+        // break ties differently, and a zero margin must not read as a skip.
+        if let Some(best) = candidates
+            .iter()
+            .min_by(|left, right| {
+                left.cost
+                    .total_cmp(&right.cost)
+                    .then_with(|| left.worker.cmp(&right.worker))
+            })
+            .map(|best| {
+                if selected.cost.total_cmp(&best.cost).is_eq() {
+                    &selected
+                } else {
+                    best
+                }
+            })
+        {
             self.span
                 .record("dynamo.router.best.worker.id", best.worker.worker_id);
             self.span
@@ -372,25 +384,17 @@ fn current_router_selection_telemetry<C: WorkerConfigLike>(
 ) -> Option<RouterSelectionTelemetry> {
     #[cfg(feature = "runtime-protocols")]
     {
-        use dynamo_runtime::config::{
-            env_is_truthy,
-            environment_names::lifecycle_tracing::{
-                DYN_LIFECYCLE_TRACE_ENABLED, DYN_LIFECYCLE_TRACE_MODE,
-            },
-        };
+        use dynamo_runtime::telemetry::{LIFECYCLE_TARGET, lifecycle_mode};
 
+        // Only the queue opens `router.selection`, and only for enabled traces.
         let span = tracing::Span::current();
         let is_router_selection = span.metadata().is_some_and(|metadata| {
-            metadata.target() == dynamo_runtime::telemetry::LIFECYCLE_TARGET
-                && metadata.name() == "router.selection"
+            metadata.name() == "router.selection" && metadata.target() == LIFECYCLE_TARGET
         });
-        (env_is_truthy(DYN_LIFECYCLE_TRACE_ENABLED) && is_router_selection).then(|| {
-            RouterSelectionTelemetry {
-                span,
-                filters: CandidateFilterSummary::from_eligibility(workers, eligibility),
-                include_candidate_details: std::env::var(DYN_LIFECYCLE_TRACE_MODE)
-                    .is_ok_and(|mode| mode.trim().eq_ignore_ascii_case("investigation")),
-            }
+        is_router_selection.then(|| RouterSelectionTelemetry {
+            span,
+            filters: CandidateFilterSummary::from_eligibility(workers, eligibility),
+            include_candidate_details: lifecycle_mode() == "investigation",
         })
     }
     #[cfg(not(feature = "runtime-protocols"))]
