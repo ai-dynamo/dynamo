@@ -7,7 +7,8 @@ name: XPU-Heterogeneous-Run
 # REUSABLE XPU heterogeneous P/D pipeline.
 # ============================================================================
 # guard -> changed-files -> build-xpu / build-nvidia -> resolve-images ->
-# heterog-test-px-dn -> heterog-test-pn-dx -> xpu-status-check.
+# heterog-test-px-dn -> heterog-test-pn-dx -> cleanup-images ->
+# xpu-status-check.
 #
 # Called by exactly three thin trigger workflows, one per merge phase:
 #
@@ -97,6 +98,14 @@ on:
         required: false
         type: string
         default: '1'
+      node_cleanup_image:
+        description: >-
+          Small image with /bin/sh and chroot, run once per worker node by
+          cleanup-images to remove this run's images from the node's container
+          runtime. Override with a mirror if the nodes cannot reach Docker Hub.
+        required: false
+        type: string
+        default: 'docker.io/library/busybox:1.36'
 
 permissions:
   contents: read
@@ -934,6 +943,342 @@ jobs:
       nvidia_node: "nvidia_node"
       model: ${{ inputs.model }}
       tensor_parallel: ${{ inputs.tensor_parallel }}
+
+  # ============================================================================
+  # IMAGE CLEANUP – worker nodes and registry
+  # ============================================================================
+  # The build jobs already drop their tags from the runner's own docker daemon
+  # right after the push. Two more copies outlive the run, and every run adds a
+  # new pair because the tags embed github.run_id:
+  #
+  #   1. The worker nodes. Each test pod pulls its image into the node's
+  #      container runtime, and deleting the pod (the template's Cleanup step)
+  #      leaves the image there. Removed by one short privileged pod per node
+  #      that runs the node's own crictl through a hostPath mount of /.
+  #   2. The registry. Removed through the Harbor API.
+  #
+  # Only images THIS run built are touched. The pinned nvcr.io GPU image is
+  # shared by every run that does not build its own; deleting it would only
+  # force a multi-GB re-pull on the next run.
+  #
+  # Runs after both tests whatever their result, so a failed run cleans up too.
+  # The cost: "Re-run failed jobs" re-runs the tests against an image that no
+  # longer exists and they fail to pull it. Use "Re-run all jobs" instead,
+  # which rebuilds and re-pushes under the same tag.
+  #
+  # Every failure here is a ::warning::, never a red job: a leaked image costs
+  # disk, a red cleanup would fail xpu-status-check on a run whose tests passed.
+  # Same posture as the build jobs' local cleanup.
+
+  cleanup-images:
+    name: Clean up test images
+    needs: [build-xpu, build-nvidia, heterog-test-px-dn, heterog-test-pn-dx]
+    if: >-
+      always() &&
+      (needs.build-xpu.outputs.image != '' ||
+      needs.build-nvidia.outputs.image != '')
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    env:
+      NS: dynamo-system
+      XPU_IMAGE: ${{ needs.build-xpu.outputs.image }}
+      NVIDIA_IMAGE: ${{ needs.build-nvidia.outputs.image }}
+      # Must match the xpu_node / nvidia_node values passed to both heterog
+      # tests above: the test manifests pin the XPU image to the first and the
+      # GPU image to the second via dynamo.intel.com/node.
+      XPU_NODE_LABEL: xpu_node
+      NVIDIA_NODE_LABEL: nvidia_node
+      KUEUE_QUEUE: dynamo-queue
+    steps:
+      - name: Remove images from worker nodes
+        shell: bash
+        env:
+          CLEANUP_IMAGE: ${{ inputs.node_cleanup_image }}
+        run: |
+          set -uo pipefail
+
+          POD_LABEL="app.kubernetes.io/name=xpu-heterog-image-cleanup"
+
+          # Runs inside the per-node pod. crictl is the NODE's binary, reached
+          # through chroot, so it talks to the runtime the kubelet uses with the
+          # node's own /etc/crictl.yaml. A missing crictl or an unreachable
+          # runtime exits 2 rather than reporting "absent": an empty image list
+          # from a broken crictl would otherwise read as nothing to clean.
+          # rmi is retried because a container the kubelet has not yet garbage
+          # collected still holds the image for a few seconds after its pod is
+          # deleted.
+          # `|| true`: read -d '' always returns 1 at end of input, and
+          # `shell: bash` runs with -e.
+          read -r -d '' NODE_SCRIPT <<'EOF' || true
+          set -u
+          if ! chroot /host /bin/sh -c 'command -v crictl' >/dev/null 2>&1; then
+            echo "crictl not found on the node"
+            exit 2
+          fi
+          i=0
+          while :; do
+            ids=$(chroot /host crictl images --quiet "$IMAGE") || { echo "crictl images failed"; exit 2; }
+            if [ -z "$ids" ]; then
+              echo "absent: $IMAGE"
+              exit 0
+            fi
+            if chroot /host crictl rmi "$IMAGE"; then
+              echo "removed: $IMAGE"
+              exit 0
+            fi
+            i=$((i + 1))
+            if [ "$i" -ge 6 ]; then
+              echo "still in use after $i attempts: $IMAGE"
+              exit 1
+            fi
+            sleep 10
+          done
+          EOF
+
+          # Pods left behind by an earlier run that died mid-cleanup. Safe to
+          # remove unconditionally: the xpu-heterog-hardware concurrency group
+          # guarantees no other run is cleaning up right now.
+          kubectl delete pods -n "${NS}" -l "${POD_LABEL}" --ignore-not-found=true --wait=false || true
+
+          PAIRS=()
+          [[ -n "${XPU_IMAGE}" ]]    && PAIRS+=("${XPU_NODE_LABEL}|${XPU_IMAGE}")
+          [[ -n "${NVIDIA_IMAGE}" ]] && PAIRS+=("${NVIDIA_NODE_LABEL}|${NVIDIA_IMAGE}")
+
+          ROWS=()
+          idx=0
+          for pair in ${PAIRS+"${PAIRS[@]}"}; do
+            label="${pair%%|*}"
+            image="${pair#*|}"
+
+            nodes=$(kubectl get nodes -l "dynamo.intel.com/node=${label}" -o jsonpath='{.items[*].metadata.name}' 2>&1) || {
+              echo "::warning::Could not list nodes labelled dynamo.intel.com/node=${label}: ${nodes}"
+              ROWS+=("| \`${label}\` | - | \`${image}\` | ⚠️ could not list nodes |")
+              continue
+            }
+            if [[ -z "${nodes}" ]]; then
+              echo "::warning::No node carries dynamo.intel.com/node=${label}; ${image} was not removed from any node"
+              ROWS+=("| \`${label}\` | - | \`${image}\` | ⚠️ no node with this label |")
+              continue
+            fi
+
+            for node in ${nodes}; do
+              idx=$((idx + 1))
+              pod="image-cleanup-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${idx}"
+
+              # Built with jq rather than a heredoc so the image ref, node name
+              # and script reach the manifest as JSON strings, never as YAML
+              # spliced together from shell text.
+              # tolerations: operator Exists -- GPU nodes are commonly tainted,
+              # and this pod must land on exactly the node it names.
+              #
+              # kueue.x-k8s.io/queue-name is mandatory: the cluster's
+              # enforce-kueue-labels ValidatingAdmissionPolicy rejects any pod
+              # without it. Same queue as the test pods in
+              # .ci/test/dynamo-heterog/k8s/tests/*.yaml.
+              #
+              # Pinned with a hostname nodeSelector, NOT nodeName: Kueue gates a
+              # labelled pod with a scheduling gate until it is admitted, and the
+              # API server rejects a pod that sets both nodeName and
+              # schedulingGates.
+              jq -n \
+                --arg pod "${pod}" --arg node "${node}" --arg image "${image}" \
+                --arg helper "${CLEANUP_IMAGE}" --arg script "${NODE_SCRIPT}" \
+                --arg run "${GITHUB_RUN_ID}" --arg queue "${KUEUE_QUEUE}" \
+                '{
+                  apiVersion: "v1", kind: "Pod",
+                  metadata: {
+                    name: $pod,
+                    labels: {
+                      "app.kubernetes.io/name": "xpu-heterog-image-cleanup",
+                      "github-run-id": $run,
+                      "kueue.x-k8s.io/queue-name": $queue
+                    }
+                  },
+                  spec: {
+                    nodeSelector: {"kubernetes.io/hostname": $node},
+                    restartPolicy: "Never",
+                    tolerations: [{operator: "Exists"}],
+                    containers: [{
+                      name: "rmi",
+                      image: $helper,
+                      command: ["/bin/sh", "-c", $script],
+                      env: [
+                        {name: "IMAGE", value: $image},
+                        {name: "PATH", value: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+                      ],
+                      securityContext: {privileged: true},
+                      resources: {requests: {cpu: "10m", memory: "16Mi"}},
+                      volumeMounts: [{name: "host", mountPath: "/host"}]
+                    }],
+                    volumes: [{name: "host", hostPath: {path: "/", type: "Directory"}}]
+                  }
+                }' | kubectl apply -n "${NS}" -f - || {
+                echo "::warning::Could not create cleanup pod on ${node}; ${image} left on that node"
+                ROWS+=("| \`${label}\` | \`${node}\` | \`${image}\` | ⚠️ pod not created |")
+                continue
+              }
+
+              # 5 minutes covers Kueue admission, pulling the helper image and
+              # all six rmi attempts inside the pod.
+              phase=""
+              for _ in $(seq 1 60); do
+                phase=$(kubectl get pod "${pod}" -n "${NS}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+                [[ "${phase}" == "Succeeded" || "${phase}" == "Failed" ]] && break
+                sleep 5
+              done
+
+              echo "::group::${node}: ${image} (${phase:-unknown})"
+              log=$(kubectl logs -n "${NS}" "${pod}" 2>&1 || true)
+              echo "${log}"
+              if [[ "${phase}" != "Succeeded" ]]; then
+                kubectl describe pod -n "${NS}" "${pod}" || true
+              fi
+              echo "::endgroup::"
+
+              if [[ "${phase}" == "Succeeded" ]]; then
+                ROWS+=("| \`${label}\` | \`${node}\` | \`${image}\` | ✅ $(tail -n1 <<< "${log}" | cut -d: -f1) |")
+              else
+                echo "::warning::Could not remove ${image} from node ${node} (pod phase: ${phase:-unknown}); see the group above"
+                ROWS+=("| \`${label}\` | \`${node}\` | \`${image}\` | ⚠️ ${phase:-timed out} |")
+              fi
+
+              kubectl delete pod "${pod}" -n "${NS}" --ignore-not-found=true --wait=false || true
+            done
+          done
+
+          {
+            echo "### 🧹 Worker-node image cleanup"
+            echo "| Node label | Node | Image | Result |"
+            echo "|------------|------|-------|--------|"
+            for row in ${ROWS+"${ROWS[@]}"}; do
+              echo "${row}"
+            done
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Harbor keeps the blobs until its own garbage collection runs, so this
+      # frees the space at the next GC, not immediately.
+      #
+      # Credential: HARBOR_USERNAME / HARBOR_PASSWORD secrets if both are set,
+      # otherwise the login the runner's docker client already pushes with. The
+      # account needs delete permission on the project; a push-only robot
+      # account gets a 403, reported as a warning.
+      #
+      # A tag is deleted, not blindly the artifact behind it: two runs on the
+      # same commit with a warm build cache can produce the same digest under
+      # two tags. The artifact itself goes only when this run's tag is its last.
+      - name: Remove images from the registry
+        if: always()
+        shell: bash
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -uo pipefail
+
+          basic_auth() {
+            local host="$1" config="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+            if [[ -n "${HARBOR_USERNAME}" && -n "${HARBOR_PASSWORD}" ]]; then
+              printf '%s:%s' "${HARBOR_USERNAME}" "${HARBOR_PASSWORD}" | base64 -w0
+            elif [[ -f "${config}" ]]; then
+              jq -r --arg h "${host}" '(.auths[$h].auth // .auths["https://" + $h].auth) // empty' "${config}"
+            fi
+          }
+
+          # api METHOD URL OUTFILE -> prints the HTTP status, 000 if unreachable.
+          # The Authorization header goes in through a file descriptor so the
+          # credential never appears in the runner's process list.
+          #
+          # -r, not -f: the docker daemon reads certs.d as root, so the file can
+          # exist yet be unreadable by the runner user, and curl then fails with
+          # error 77 before sending anything. Fall back to the system store.
+          api() {
+            local cacert=() ca="/etc/docker/certs.d/${host}/ca.crt"
+            [[ -r "${ca}" ]] && cacert=(--cacert "${ca}")
+            curl -sS --max-time 60 -o "$3" -w '%{http_code}' -X "$1" \
+              ${cacert+"${cacert[@]}"} \
+              -H @<(printf 'Authorization: Basic %s\n' "${auth}") \
+              "$2" || true
+          }
+
+          REFS=()
+          [[ -n "${XPU_IMAGE}" ]]    && REFS+=("${XPU_IMAGE}")
+          [[ -n "${NVIDIA_IMAGE}" ]] && REFS+=("${NVIDIA_IMAGE}")
+
+          ROWS=()
+          body=$(mktemp)
+          for ref in ${REFS+"${REFS[@]}"}; do
+            # sc09super01-srv.intel.com/dynamo/dynamo-vllm-runtime-xpu:<run_id>-<sha>
+            host="${ref%%/*}"
+            rest="${ref#*/}"
+            project="${rest%%/*}"
+            repo_tag="${rest#*/}"
+            repo="${repo_tag%:*}"
+            tag="${repo_tag##*:}"
+
+            auth="$(basic_auth "${host}" || true)"
+            if [[ -z "${auth}" ]]; then
+              echo "::warning::No registry credential for ${host} (no HARBOR_USERNAME/HARBOR_PASSWORD secrets, no docker login entry); ${ref} left in the registry"
+              ROWS+=("| \`${ref}\` | ⚠️ no credential |")
+              continue
+            fi
+            echo "::add-mask::${auth}"
+
+            # Harbor wants a nested repository name with its slashes encoded
+            # twice; a flat one like dynamo-vllm-runtime-xpu is unchanged.
+            base="https://${host}/api/v2.0/projects/${project}/repositories/${repo//\//%252F}/artifacts"
+
+            code=$(api GET "${base}/${tag}?with_tag=true" "${body}")
+            case "${code}" in
+              200) ;;
+              404)
+                echo "Already gone from the registry: ${ref}"
+                ROWS+=("| \`${ref}\` | ✅ already absent |")
+                continue
+                ;;
+              *)
+                echo "::warning::Could not look up ${ref} in the registry (HTTP ${code:-000}): $(head -c 500 "${body}" 2>/dev/null)"
+                ROWS+=("| \`${ref}\` | ⚠️ lookup HTTP ${code:-000} |")
+                continue
+                ;;
+            esac
+
+            digest=$(jq -r '.digest // empty' "${body}" || true)
+            others=$(jq -r --arg t "${tag}" '[.tags[]?.name | select(. != $t)] | length' "${body}" || true)
+            if [[ -z "${digest}" ]]; then
+              echo "::warning::Registry returned no digest for ${ref}; left in place"
+              ROWS+=("| \`${ref}\` | ⚠️ no digest in response |")
+              continue
+            fi
+
+            if [[ "${others}" == "0" ]]; then
+              url="${base}/${digest}"
+              what="artifact ${digest}"
+            else
+              url="${base}/${digest}/tags/${tag}"
+              what="tag only; ${others} other tag(s) still reference ${digest}"
+            fi
+
+            code=$(api DELETE "${url}" "${body}")
+            if [[ "${code}" == "200" ]]; then
+              echo "Deleted ${ref} (${what})"
+              ROWS+=("| \`${ref}\` | ✅ deleted (${what}) |")
+            else
+              echo "::warning::Could not delete ${ref} (HTTP ${code:-000}): $(head -c 500 "${body}" 2>/dev/null)"
+              ROWS+=("| \`${ref}\` | ⚠️ delete HTTP ${code:-000} |")
+            fi
+          done
+          rm -f "${body}"
+
+          {
+            echo "### 🧹 Registry image cleanup"
+            echo "| Image | Result |"
+            echo "|-------|--------|"
+            for row in ${ROWS+"${ROWS[@]}"}; do
+              echo "${row}"
+            done
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # STATUS CHECK — deliberately NOT in this file.
