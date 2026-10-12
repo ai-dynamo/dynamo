@@ -200,6 +200,87 @@ async fn disallowed_streamed_function_call_kills_backend_context() {
     .await;
 }
 
+/// Exercise the production handler's shared name map, including historical
+/// identities that are absent from the current tool definitions.
+#[tokio::test]
+#[serial]
+async fn colliding_namespace_tools_round_trip_through_http() {
+    use dynamo_llm::protocols::openai::{
+        chat_completions::NvCreateChatCompletionRequest, responses::NvCreateResponse,
+    };
+
+    temp_env::async_with_vars(ENV, async {
+        for stream in [false, true] {
+            for namespace in ["crm", "billing"] {
+                let body = json!({
+                    "model": MODEL,
+                    "input": [
+                        {"type": "function_call", "namespace": "archived", "name": "lookup",
+                         "call_id": "previous", "arguments": "{}"},
+                        {"type": "function_call_output", "call_id": "previous", "output": "ok"},
+                        {"role": "user", "content": "Look up /tmp"}
+                    ],
+                    "stream": stream,
+                    "tools": [
+                        {"type": "namespace", "name": "crm", "description": "CRM", "tools": [tool("lookup")]},
+                        {"type": "namespace", "name": "billing", "description": "Billing", "tools": [tool("lookup")]}
+                    ],
+                    "tool_choice": {"type": "allowed_tools", "mode": "required", "tools": [
+                        {"type": "function", "namespace": namespace, "name": "lookup"}
+                    ]}
+                });
+                let request: NvCreateResponse = serde_json::from_value(body.clone()).unwrap();
+                let converted = NvCreateChatCompletionRequest::try_from(request).unwrap();
+                let backend_name = &converted.inner.tools.as_ref().unwrap()[0].function.name;
+                assert_ne!(backend_name, "lookup");
+                let mut script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
+                for chunk in &mut script {
+                    if let Some(data) = &mut chunk.data {
+                        for choice in &mut data.inner.choices {
+                            for call in choice.delta.tool_calls.iter_mut().flatten() {
+                                if let Some(function) = &mut call.function
+                                    && function.name.is_some()
+                                {
+                                    function.name = Some(backend_name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                let svc = HarnessService::start([script]).await;
+                let response = post_responses(&svc, &body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let response_body = if stream {
+                    let events = parse_json_sse(&response.text().await.unwrap()).await.unwrap();
+                    for kind in ["response.output_item.added", "response.output_item.done"] {
+                        let call = events.iter().find(|event| event.event == kind
+                            && event.data["item"]["type"] == "function_call").unwrap();
+                        assert_eq!(call.data["item"]["name"], "lookup");
+                        assert_eq!(call.data["item"]["namespace"], namespace);
+                    }
+                    events.iter().find(|event| event.event == "response.completed")
+                        .unwrap().data["response"].clone()
+                } else {
+                    response.json::<Value>().await.unwrap()
+                };
+                let call = response_body["output"].as_array().unwrap().iter()
+                    .find(|item| item["type"] == "function_call").unwrap();
+                assert_eq!(call["name"], "lookup");
+                assert_eq!(call["namespace"], namespace);
+                assert!(!call["call_id"].as_str().unwrap().is_empty());
+                let observed = svc.engine.take_requests().await;
+                assert_eq!(observed.len(), 1);
+                assert_eq!(&observed[0].inner.tools.as_ref().unwrap()[0].function.name, backend_name);
+                let ChatCompletionRequestMessage::Assistant(history) = &observed[0].inner.messages[0] else {
+                    panic!("expected historical function call");
+                };
+                assert_ne!(&history.tool_calls.as_ref().unwrap()[0].function.name, backend_name);
+                svc.shutdown().await;
+            }
+        }
+    }).await;
+}
+
 async fn post_responses(svc: &HarnessService, body: &Value) -> reqwest::Response {
     svc.client
         .post(format!("{}/v1/responses", svc.base_url))

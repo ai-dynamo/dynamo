@@ -48,9 +48,10 @@ type groveWorkloadRenderer struct {
 // grovePodCliqueSetRender couples the desired PCS to the exact observation used
 // to decide compatibility and the worker hash suffix.
 type grovePodCliqueSetRender struct {
-	existing  *grovev1alpha1.PodCliqueSet
-	desired   *grovev1alpha1.PodCliqueSet
-	gpuShapes map[string]dynamo.GPUShape
+	existing        *grovev1alpha1.PodCliqueSet
+	desired         *grovev1alpha1.PodCliqueSet
+	gpuShapes       map[string]dynamo.GPUShape
+	runtimeStatuses map[string]dynamo.ComponentRuntimeStatus
 }
 
 func newGroveWorkloadRenderer(
@@ -115,9 +116,10 @@ func (r *groveWorkloadRenderer) Render(
 		return nil, err
 	}
 	return &grovePodCliqueSetRender{
-		existing:  existingPodCliqueSet,
-		desired:   desired,
-		gpuShapes: gpuShapes,
+		existing:        existingPodCliqueSet,
+		desired:         desired,
+		gpuShapes:       gpuShapes,
+		runtimeStatuses: dynamo.ResolveGroveComponentRuntimeStatuses(req.DGD, desired),
 	}, nil
 }
 

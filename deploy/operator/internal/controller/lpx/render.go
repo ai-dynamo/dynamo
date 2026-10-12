@@ -5,7 +5,6 @@ package lpx
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -72,7 +71,8 @@ func (r *graphReconciler) resolveWorkloads(
 
 // renderPodCliqueSet composes resolved workloads into one Grove envelope with
 // runtime ConfigMaps and, for Kubernetes discovery, serving Services.
-// Inputs must be non-nil and workloads must contain every component group.
+// Inputs must be non-nil except existingPCS, which is nil during creation.
+// Workloads must contain every component group.
 // Plans must have finalized names and use the same keys as workloads.
 // Inputs remain read-only.
 func (r *graphReconciler) renderPodCliqueSet(
@@ -81,17 +81,15 @@ func (r *graphReconciler) renderPodCliqueSet(
 	dgd *v1beta1.DynamoGraphDeployment,
 	workloads map[string]*lpx.Workload,
 	plans map[string]*lpx.MaterializationPlan,
+	existingPCS *grovev1alpha1.PodCliqueSet,
 ) (*grovev1alpha1.PodCliqueSet, []client.Object, error) {
 	// Shared defaults and queue resolution belong to the single PCS envelope.
-	pcs, err := dynamo.RenderLPXPodCliqueSet(ctx, dgd, r.config, r.runtimeConfig, dynamo.PCSNameForLPX(deployment))
+	pcs, err := dynamo.RenderLPXPodCliqueSet(ctx, dgd, r.config, r.runtimeConfig, dynamo.PCSNameForLPX(deployment), existingPCS)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	var (
-		resources []client.Object
-		digest    = sha256.New()
-	)
+	var resources []client.Object
 
 	for _, groupName := range slices.Sorted(maps.Keys(plans)) {
 		workload, plan := workloads[groupName], plans[groupName]
@@ -121,7 +119,7 @@ func (r *graphReconciler) renderPodCliqueSet(
 			}
 		}
 
-		// Component order fixes both rendering and the graph's immutable workload digest.
+		// Keep workload templates in canonical component order.
 		pcs.Spec.Template.Cliques = append(pcs.Spec.Template.Cliques, rendered.Cliques...)
 		pcs.Spec.Template.PodCliqueScalingGroupConfigs = append(pcs.Spec.Template.PodCliqueScalingGroupConfigs, rendered.ScalingGroup)
 		resources = append(resources, rendered.Resources...)
@@ -144,10 +142,8 @@ func (r *graphReconciler) renderPodCliqueSet(
 			resources = append(resources, service)
 		}
 
-		writeIdentityHashField(digest, groupName, workload.Digest().String())
 	}
 
-	pcs.Annotations[lpx.WorkloadDigestAnnotation] = fmt.Sprintf("sha256:%x", digest.Sum(nil))
 	stampDeploymentIdentity(deployment, pcs, resources)
 
 	// Enforce the aggregate size budget after identity and discovery metadata are final.

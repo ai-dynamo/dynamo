@@ -64,11 +64,17 @@ def project_standalone_dcd_schema(markdown: str) -> str:
             columns[0] = re.sub(
                 r"_\[ComponentRoleSpec\]\(#[^)]+\) array_", "_object array_", columns[0]
             )
-            if "Standalone DCD roles accept only" not in columns[1]:
-                columns[1] += (
-                    " Standalone DCD roles accept only `name` and `replicas`; "
-                    "`providerOverride` is a DGD-only provider context."
-                )
+            old_note = (
+                "Standalone DCD roles accept only `name` and `replicas`; "
+                "`providerOverride` is a DGD-only provider context."
+            )
+            role_note = (
+                "Standalone DCD roles support `name`, `replicas`, and `podTemplate`; "
+                "`providerOverride` is a DGD-only provider context."
+            )
+            columns[1] = columns[1].replace(old_note, role_note)
+            if role_note not in columns[1]:
+                columns[1] += f" {role_note}"
             line = " | ".join(columns) + "\n"
 
         if current_type in DGD_ONLY_DCD_REFERENCES and DCD_REFERENCE_RE.match(line):

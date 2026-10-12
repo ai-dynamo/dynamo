@@ -70,6 +70,7 @@ func (p *componentProgram) Reconcile(
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
 	clearComponentGPUShapes(programResult.Status.Components)
+	clearComponentRuntimeStatuses(programResult.Status.Components)
 
 	// Admission prevents this combination; guard previously stored or admission-bypassed objects.
 	for i := range req.DGD.Spec.Components {
@@ -157,7 +158,6 @@ func (p *componentProgram) Reconcile(
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
 	}
-
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil
 }

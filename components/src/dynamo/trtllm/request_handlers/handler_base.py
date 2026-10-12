@@ -1199,7 +1199,9 @@ class HandlerBase(BaseGenerativeHandler):
             or self.disaggregation_mode == DisaggregationMode.PREFILL
         ):
             apply_stop_conditions_to_sampling_params(
-                sampling_params, request["stop_conditions"]
+                sampling_params,
+                request["stop_conditions"],
+                no_stop_trim=(output_options or {}).get("no_stop_trim", False),
             )
 
         # TODO: Instead of True, we should use streaming from the request.

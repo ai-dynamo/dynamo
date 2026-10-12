@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -26,16 +28,17 @@ import (
 
 // RenderLPXPodCliqueSet constructs the shared LPX Grove envelope without workload
 // templates. Its labels include the resolved scheduler queue.
-// Pointer inputs must be non-nil and are not mutated.
+// existingPCS may be nil on creation; other pointer inputs must be non-nil and are not mutated.
 func RenderLPXPodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
 	pcsName string,
+	existingPCS *grovev1alpha1.PodCliqueSet,
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	// Reuse the ordinary Grove defaults once for the complete LPX graph.
-	pcs, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig)
+	pcs, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig, existingPCS)
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +133,7 @@ type lpxInputRevisionPayload struct {
 	PriorityClass         string
 	TopologyConstraint    *v1beta1.SpecTopologyConstraint
 	RestartToken          string `json:"Restart"`
+	ServingHash           string
 	ProviderOverride      *v1beta1.ProviderOverride
 	SchedulingLabels      map[string]string            `json:",omitempty"`
 	EPPEnabled            bool                         `json:",omitempty"`
@@ -138,16 +142,16 @@ type lpxInputRevisionPayload struct {
 	AlphaSubComponentType map[string]string            `json:",omitempty"`
 }
 
-// LPXInputRevision hashes all LPX components and their shared render inputs.
-// Source identity is checked separately by ValidateLPXSource. Ordinary component payloads,
-// DGD bookkeeping and raw restart requests are excluded: restart is the effective
-// token selected by persisted DGD restart state. Operator configuration is not a
-// source revision; rejected topology inputs remain included because they change
-// preflight results.
+// LPXInputRevision hashes LPX intent, shared render inputs, and cooperating workers.
+// restart is the effective token selected by persisted DGD restart state.
 func LPXInputRevision(dgd *v1beta1.DynamoGraphDeployment, restart string) (string, error) {
 	components := dynamolpx.Components(dgd)
 	if len(components) == 0 {
 		return "", fmt.Errorf("LPX component is required")
+	}
+	servingHash, err := ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return "", err
 	}
 
 	// Canonicalize authored lists on shallow copies; nested templates remain read-only.
@@ -164,7 +168,7 @@ func LPXInputRevision(dgd *v1beta1.DynamoGraphDeployment, restart string) (strin
 	})
 
 	annotations := lpxSchedulingMetadata(dgd.Annotations)
-	for _, key := range append(slices.Clone(dgdPropagatedAnnotationKeys), commonconsts.KubeAnnotationWorkloadProvider,
+	for _, key := range append(slices.Clone(dgdPropagatedAnnotationKeys), commonconsts.KubeAnnotationDynamoOperatorOriginVersion, commonconsts.KubeAnnotationWorkloadProvider,
 		commonconsts.KubeAnnotationGroveUpdateStrategy, commonconsts.KubeAnnotationKaiSchedulerQueue, commonconsts.KubeAnnotationVolcanoQueue) {
 		if value, exists := dgd.Annotations[key]; exists {
 			annotations[key] = value
@@ -179,6 +183,7 @@ func LPXInputRevision(dgd *v1beta1.DynamoGraphDeployment, restart string) (strin
 		PriorityClass:         dgd.Spec.PriorityClassName,
 		TopologyConstraint:    dgd.Spec.TopologyConstraint,
 		RestartToken:          restart,
+		ServingHash:           servingHash,
 		ProviderOverride:      dgd.Spec.ProviderOverride,
 		SchedulingLabels:      lpxSchedulingMetadata(dgd.Labels),
 		EPPEnabled:            dgd.HasEPPComponent(),
@@ -246,9 +251,14 @@ func PCSNameForLPX(deployment *v1alpha1.LPXGraphDeployment) string {
 // LPX component's roles are returned to the same PCS renderer.
 // Preflight supplies the non-nil validated workload and materialization plan.
 func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dynamolpx.MaterializationPlan) (*dynamolpx.RenderInput, error) {
+	// Cooperating workers use one serving revision; discovery labels keep the base namespace.
+	servingHash, err := ComputeDGDWorkersSpecHash(p.dynamoDeployment)
+	if err != nil {
+		return nil, err
+	}
 	// Pass runtime inputs; deployment identity is stamped only on final resources.
 	input := &dynamolpx.RenderInput{
-		MinAvailable: p.component.MinAvailable,
+		MinAvailable: ptr.To(provideroverride.EffectiveGroveMinAvailable(p.component)),
 		Stages:       make(map[string]corev1.PodTemplateSpec),
 	}
 
@@ -264,7 +274,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		alphaComponent := alphaComponents[component.ComponentName]
 		agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent)
 		lpuRole := lpxRoleComponent(component, agent.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
-		lpuDefaults := &podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}}
+		lpuDefaults := &podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: servingHash}
 		lpuTemplate, err := renderSelectedLPXRole(lpuRole, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 			p.discoveryContext, lpuDefaults)
 		if err != nil {
@@ -295,7 +305,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		template, replicas := conductor.PodTemplate, ptr.Deref(conductor.Replicas, minimumReplicas)
 		role := lpxRoleComponent(component, template, p.dynamoDeployment, p.discoveryBackend)
 		role.ComponentType = v1beta1.ComponentTypeDecode
-		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()}
+		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults(), servingHash: servingHash}
 		gpu := p
 		gpu.component = role
 		gpu.r = ServiceRole{Name: plan.CyborgTemplate, Role: RoleMain, Replicas: replicas}
@@ -338,9 +348,12 @@ func lpxRoleComponent(source *v1beta1.DynamoComponentDeploymentSharedSpec, templ
 // while retaining shared infrastructure bindings.
 type podTemplateRuntimeDefaults struct {
 	ComponentDefaults
+	servingHash string
 }
 
 func (d *podTemplateRuntimeDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
+	context.DynamoNamespace += "-" + d.servingHash
+	context.WorkerHashSuffix = ""
 	container, err := d.ComponentDefaults.GetBaseContainer(context)
 	if err != nil {
 		return corev1.Container{}, err
@@ -352,6 +365,7 @@ func (d *podTemplateRuntimeDefaults) GetBaseContainer(context ComponentContext) 
 	container.LivenessProbe = nil
 	container.ReadinessProbe = nil
 
+	container.Env = append(container.Env, corev1.EnvVar{Name: commonconsts.DynamoNamespaceWorkerSuffixEnvVar, Value: ""})
 	// Bind the pod address for LPX runtimes before authored environment overrides.
 	container.Env = append(container.Env, corev1.EnvVar{
 		Name: commonconsts.PodIPEnvVar,
@@ -372,11 +386,12 @@ func renderSelectedLPXRole(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	secretsRetriever SecretsRetriever,
 	discoveryContext DiscoveryContext,
-	defaults ComponentDefaults,
+	defaults *podTemplateRuntimeDefaults,
 ) (*corev1.PodTemplateSpec, error) {
 	componentName := component.ComponentName
 	// Capture authored precedence before PodSpec defaults fill the role's metadata.
 	metadata := generatePodMetadata(component, dgd, alphaComponent, componentName, discoveryContext)
+	metadata.Labels[commonconsts.KubeLabelDynamoWorkerHash] = defaults.servingHash
 	applyDGDTemplateDefaults(component, dgd, nil)
 	basePodSpec, err := generateBasePodSpecWithDefaults(
 		component,

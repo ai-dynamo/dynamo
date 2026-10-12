@@ -15,15 +15,15 @@ data:
     part-0
     part-1
   topologies: |-
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
+    test-topology
+    test-topology
 immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpu-cyborg-specdec-5f16-draft-lpu-6bcf1f4cf22aaf55
+  name: lpu-cyborg-specdec-5f16-draft-lpu-bc28ad8b58b97be6
   namespace: test
 ---
 data:
@@ -44,20 +44,19 @@ data:
   partition_models: default
   partition_node_offsets: "0"
   partition_paths: part-0
-  topologies: URSA_V2__Q8__32C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
+  topologies: test-topology
 immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpu-cyborg-specdec-5f16-target-lpu-355e8ac6768c54e3
+  name: lpu-cyborg-specdec-5f16-target-lpu-40c1426237894337
   namespace: test
 ---
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:99c53c044b25d089c4cc6839b4b6cd8ecf0089e50a14b0158144c6b93c95ba28
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: lpu-cyborg-specdec
@@ -70,9 +69,9 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        nvidia.com/extra-resources-hash: 6bcf1f4cf22aaf552736014dfc177eec81d993bf14b94b3328a39dd1b7d38e5d
-        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:0d06b39bcb17ce3d6ed500ab51251a7bd13b5bd99b68e261743aa68c66242ca2
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15c36b313ead3714748f06279e21588b5fbb83cad6d114dd1cc2849394c15859
+        nvidia.com/extra-resources-hash: bc28ad8b58b97be60c2d1c08e866c24118f26ae618eb0ac449c8b13614ff54e7
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:886fe4bd8b53d2f8b1e5e251389d1aa03932410d2e622c23a0b5add02bc8a9a2
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:62f97fac431d09ef5dc7903e63394738955cbfed8086027893d62d3c324a298d
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2LpuOnly
@@ -147,14 +146,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: lpu-cyborg-specdec-5f16-draft-lpu-6bcf1f4cf22aaf55
+              name: lpu-cyborg-specdec-5f16-draft-lpu-bc28ad8b58b97be6
             name: config
         replicas: 4
         roleName: draft-agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        nvidia.com/extra-resources-hash: 6bcf1f4cf22aaf552736014dfc177eec81d993bf14b94b3328a39dd1b7d38e5d
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15c36b313ead3714748f06279e21588b5fbb83cad6d114dd1cc2849394c15859
+        nvidia.com/extra-resources-hash: bc28ad8b58b97be60c2d1c08e866c24118f26ae618eb0ac449c8b13614ff54e7
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:62f97fac431d09ef5dc7903e63394738955cbfed8086027893d62d3c324a298d
         scheduling.lpu.nvidia.com/role: conductor
       labels:
         lpx.nvidia.com/serving: "true"
@@ -228,7 +227,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: lpu-cyborg-specdec-5f16-draft-lpu-6bcf1f4cf22aaf55
+              name: lpu-cyborg-specdec-5f16-draft-lpu-bc28ad8b58b97be6
             name: config
         replicas: 1
         roleName: draft-cond
@@ -236,9 +235,9 @@ spec:
         - draft-agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        nvidia.com/extra-resources-hash: 355e8ac6768c54e3ee778e2044a7498390f64c82034bbc4cc3dafa0ef4031877
-        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:989dd3b851c8165b24124bd9864a75f5080f42ea1a3429340fa49fbce5f967ac
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:81331790aee117ec75745e2bc3fea28539bbf4b897e80d37702ffc7b0dc8c9a9
+        nvidia.com/extra-resources-hash: 40c1426237894337d864193c2ce98c857c622144d2c66ee912eefd3871f520f4
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:5cad661716edebcf65e421a2ef66164e24970b24ff42d7c0c5aaca9b30744194
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:5d1acbf961a05af53edbbd71c05f2053eee85a5f05eac089ed6ee022db45d317
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2StrictHybrid
@@ -315,14 +314,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: lpu-cyborg-specdec-5f16-target-lpu-355e8ac6768c54e3
+              name: lpu-cyborg-specdec-5f16-target-lpu-40c1426237894337
             name: config
         replicas: 4
         roleName: target-agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
         nvidia.com/extra-resources-hash: 32805b2198371ed2ff837e4776e3e59448937c6274efe6602681e42f78f14d41
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:81331790aee117ec75745e2bc3fea28539bbf4b897e80d37702ffc7b0dc8c9a9
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:5d1acbf961a05af53edbbd71c05f2053eee85a5f05eac089ed6ee022db45d317
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
@@ -339,7 +338,7 @@ spec:
           containers:
           - args:
             - --draft-endpoint
-            - test-lpu-cyborg-specdec/backend/generate
+            - $(DYN_NAMESPACE)/backend/generate
             command:
             - python
             - -m
@@ -436,7 +435,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15c36b313ead3714748f06279e21588b5fbb83cad6d114dd1cc2849394c15859
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:62f97fac431d09ef5dc7903e63394738955cbfed8086027893d62d3c324a298d
       cliqueNames:
       - draft-cond
       - draft-agt
@@ -445,7 +444,7 @@ spec:
       replicas: 1
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:81331790aee117ec75745e2bc3fea28539bbf4b897e80d37702ffc7b0dc8c9a9
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:5d1acbf961a05af53edbbd71c05f2053eee85a5f05eac089ed6ee022db45d317
       cliqueNames:
       - target-agt
       - target-cond
