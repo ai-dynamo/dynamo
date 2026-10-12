@@ -64,9 +64,9 @@ metadata:
 
 Starting with Dynamo 1.6.0, new Grove-backed DGDs that omit all deprecated component minima default provider-native `minAvailable` to `1`. Existing DGDs retain their persisted legacy fields. This availability defaulting is independent of the rollout strategy: both forms use RollingRecreate without an annotation. Mixing the old and native minimum forms anywhere in the DGD is rejected; migrate all components in one update. An explicit strategy annotation applies to both PodCliqueSets in a hybrid graph.
 
-Grove v0.1.0-alpha.14 or later and its matching CRDs are required for Coherent updates. Upgrade externally managed Grove controllers and CRDs together. The operator writes the requested strategy and reports API validation or admission rejections through its normal failure condition and reconciliation retry path; it does not substitute a different strategy.
+Use Grove v0.1.0-alpha.15 or later and its matching CRDs for Coherent updates. Upgrade externally managed Grove controllers and CRDs together. The operator writes the requested strategy and reports API validation or admission rejections through its normal failure condition and reconciliation retry path; it does not substitute a different strategy.
 
-Grove alpha.14 can stall a corrective Coherent update when old replicas are already unavailable. [Grove issue #873](https://github.com/ai-dynamo/grove/issues/873) is fixed in Grove main; use a release containing that fix. For older Grove installations, review the recovery limitation before opting in. Changing or removing the strategy annotation cannot unblock a stalled active update. See [Recover from a stalled Coherent update](../../kubernetes/model-deployment/deploy-with-dgd.md#recover-from-a-stalled-coherent-update) for the DGD recreation procedure and the limitations of pod deletion workarounds.
+Grove v0.1.0-alpha.15 fixes [corrective Coherent updates that stall when old replicas are unavailable (#873)](https://github.com/ai-dynamo/grove/issues/873). For older Grove installations, review the recovery limitation before opting in. Changing or removing the strategy annotation cannot unblock a stalled active update. See [Recover from a stalled Coherent update](../../kubernetes/model-deployment/deploy-with-dgd.md#recover-from-a-stalled-coherent-update) for the DGD recreation procedure and the limitations of pod deletion workarounds.
 
 Coherent coordinates compatible replacement capacity within one PodCliqueSet (PCS). Grove selects components whose rendered pod templates change and gang-schedules a minimum viable unit of their replacements. Separate PCSes, including the ordinary and LPX PCSes in a hybrid graph, roll independently.
 
@@ -89,7 +89,7 @@ For a component with eight replicas:
 | `4` | `4` (default) | A coordinated unit can remove four replicas before replacements become available, temporarily losing half the component's capacity. |
 | `4` | `6` | The minimum unit still contains four replicas; the larger budget permits up to six unavailable replicas. |
 
-Grove can roll replicas beyond the minimum unit through additional tail steps. Progress depends on scheduling and remaining availability budget; it does not always wait for every replica in the previous batch to become Ready. Coherent does not guarantee an exact P/D ratio at every instant or zero downtime. For the detailed step plan, see [Grove's coherent update design](https://github.com/ai-dynamo/grove/blob/v0.1.0-alpha.14/docs/proposals/393-coherent-rolling-updates/README.md).
+Grove can roll replicas beyond the minimum unit through additional tail steps. Progress depends on scheduling and remaining availability budget; it does not always wait for every replica in the previous batch to become Ready. Coherent does not guarantee an exact P/D ratio at every instant or zero downtime. For the detailed step plan, see [Grove's coherent update design](https://github.com/ai-dynamo/grove/blob/v0.1.0-alpha.15/docs/proposals/393-coherent-rolling-updates/README.md).
 
 <Warning>
   If `minAvailable == replicas`, the minimum unit can take the entire component offline. This also applies to a single-replica worker or frontend whose template changes. Unchanged frontends are not co-rolled solely because workers change. Replica counts alone do not establish whether the remaining workers can meet your latency and throughput service-level objectives (SLOs).
@@ -101,7 +101,7 @@ Grove rejects replica changes throughout an active Coherent rollout. Before chan
 
 For LPX workloads with explicit replica counts, scheduling deadline cleanup also waits until capacity can be reduced before deleting expired pipeline requests. Workloads with omitted replica counts retain external capacity ownership, and their expired requests can still be cleaned up during a rollout.
 
-For RollingRecreate, `maxUnavailable` defaults to `1`; rolling update configuration is rejected with OnDelete. See [Grove's defaulting implementation](https://github.com/ai-dynamo/grove/blob/v0.1.0-alpha.14/operator/internal/webhook/admission/pcs/defaulting/podcliqueset.go).
+For RollingRecreate, `maxUnavailable` defaults to `1`; rolling update configuration is rejected with OnDelete. See [Grove's defaulting implementation](https://github.com/ai-dynamo/grove/blob/v0.1.0-alpha.15/operator/internal/webhook/admission/pcs/defaulting/podcliqueset.go).
 
 Set `maxUnavailable` through a component-level provider override; see [Grove rollout budget overrides](#grove-rollout-budget-overrides). Without an override, Dynamo leaves it unset and Grove supplies the defaults above.
 
@@ -361,7 +361,7 @@ A sparse provider-native fragment, supported only for Grove-backed DGD resources
 
 ### Grove rollout budget overrides
 
-Requires a Grove release containing the fixes for [#873](https://github.com/ai-dynamo/grove/issues/873) and [#876](https://github.com/ai-dynamo/grove/issues/876). Grove alpha.14 does not contain these fixes. Upgrade the Grove controller and matching CRDs together, including installations managed separately from the Dynamo platform chart. Set `spec.components[*].providerOverride.value.rollingUpdate.maxUnavailable` to bound unavailable instances during a Grove rollout. Omit `target`; admission resolves it from the component shape, and Dynamo applies the fragment to the generated standalone clique or owning scaling group. You do not specify generated PCS names, list indices, or member clique names.
+Requires Grove v0.1.0-alpha.15 or later, which fixes [corrective Coherent update recovery (#873)](https://github.com/ai-dynamo/grove/issues/873) and [budgets constrained by stale template replicas (#876)](https://github.com/ai-dynamo/grove/issues/876). Upgrade the Grove controller and matching CRDs together, including installations managed separately from the Dynamo platform chart. Set `spec.components[*].providerOverride.value.rollingUpdate.maxUnavailable` to bound unavailable instances during a Grove rollout. Omit `target`; admission resolves it from the component shape, and Dynamo applies the fragment to the generated standalone clique or owning scaling group. You do not specify generated PCS names, list indices, or member clique names.
 
 The budget counts pods for standalone cliques and complete scaling-group replicas for PCSGs. One multinode scaling-group replica includes all ranks of a distributed worker. Set the budget on the component, never on its member roles or the graph root. A budget-only override can coexist with typed topology constraints; an override that also writes `topologyConstraint` retains the existing restriction against mixing native and typed topology.
 

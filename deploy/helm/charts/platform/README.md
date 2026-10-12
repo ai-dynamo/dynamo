@@ -114,29 +114,31 @@ Components without a frontend sidecar or using pod discovery are unaffected by t
 
 **Affected:** Existing Grove-backed DGDs retain their legacy defaults and rollout strategy after an operator upgrade. The upgrade does not automatically migrate availability fields or roll unchanged workloads.
 
-**Action:** Upgrade externally managed Grove controllers and matching CRDs to `v0.1.0-alpha.14` or later. When migrating availability fields, migrate all components together while preserving their existing effective minima. Review disruption requirements before opting into Coherent. See the [DGD reference for strategy configuration and minimum-availability migration](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-update-strategy). Operational rollout guidance is being restored in [the Rolling Updates guide PR](https://github.com/ai-dynamo/dynamo/pull/15730).
+**Action:** Upgrade externally managed Grove controllers and matching CRDs to `v0.1.0-alpha.15` or later. When migrating availability fields, migrate all components together while preserving their existing effective minima. Review disruption requirements before opting into Coherent. See the [DGD reference for strategy configuration and minimum-availability migration](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-update-strategy). Operational rollout guidance is being restored in [the Rolling Updates guide PR](https://github.com/ai-dynamo/dynamo/pull/15730).
 
 ##### Per-component Grove rollout budgets
 
-**Change:** Component-level `providerOverride.value` now accepts `rollingUpdate.maxUnavailable`, alone or alongside native `minAvailable` and `topologyConstraint`. Admission infers an omitted target, and Dynamo applies the budget to the generated standalone clique or owning scaling group. Graph-root and multinode role overrides remain topology-only. Requires a Grove release containing the fixes for [#873](https://github.com/ai-dynamo/grove/issues/873) and [#876](https://github.com/ai-dynamo/grove/issues/876); alpha.14 does not contain these fixes.
+**Change:** Component-level `providerOverride.value` now accepts `rollingUpdate.maxUnavailable`, alone or alongside native `minAvailable` and `topologyConstraint`. Admission infers an omitted target, and Dynamo applies the budget to the generated standalone clique or owning scaling group. Graph-root and multinode role overrides remain topology-only. Requires Grove `v0.1.0-alpha.15` or later, which fixes [corrective Coherent update recovery (#873)](https://github.com/ai-dynamo/grove/issues/873) and [budgets constrained by stale template replicas (#876)](https://github.com/ai-dynamo/grove/issues/876).
 
 **Warning:** Admission warns when an explicit RollingRecreate or Coherent budget could take a complete component offline. Coherent also warns about this risk with its default budget, including single-replica frontends. RollingRecreate keeps its established warning behavior when no budget is configured. Warnings appear on creation and relevant rollout edits; unchanged metadata edits do not repeat them. No warning is emitted for externally scaled LPX capacity that is unknown to admission.
 
 **Affected:** Grove-backed DGDs that explicitly opt into a rollout budget. Existing workloads keep Grove's defaults when the override is absent: `minAvailable` for Coherent and `1` for RollingRecreate. Removing a budget restores the selected strategy's default. Budget-only edits preserve worker hashes and pod templates and do not initiate a workload rollout. LPX reconciles the changed policy while retaining PCS identity and existing pipeline requests.
 
-**Action:** Upgrade Grove and its matching CRDs before configuring rollout budgets, including separately managed installations. Set a positive integer, and at least the effective `minAvailable` under Coherent. The budget may exceed the component's desired replicas or its PCS template seed, including for LPX. Keep the budget when scaling below it or to zero; Grove limits disruption to the replicas that remain. Remove the rollout fragment before selecting OnDelete. See the [DGD reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-rollout-budget-overrides) for a complete P/D example and scope rules.
+**Action:** Upgrade Grove and its matching CRDs to `v0.1.0-alpha.15` or later before configuring rollout budgets, including separately managed installations. Set a positive integer, and at least the effective `minAvailable` under Coherent. The budget may exceed the component's desired replicas or its PCS template seed, including for LPX. Keep the budget when scaling below it or to zero; Grove limits disruption to the replicas that remain. Remove the rollout fragment before selecting OnDelete. See the [DGD reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-rollout-budget-overrides) for a complete P/D example and scope rules.
 
 #### Dependency compatibility
 
-**Change:** The bundled Grove version is now `v0.1.0-alpha.14`. It provides the group-wide pod
-index and environment-variable ordering used by Dynamo's backend-independent `DYNAMO_RANK` and
-`DYNAMO_LEADER_ADDRESS` aliases.
+**Change:** The bundled Grove version is now `v0.1.0-alpha.15`. It fixes corrective Coherent
+update recovery and permits rollout budgets above the creation-time replica seed. It also provides
+the group-wide pod index and environment-variable ordering used by Dynamo's backend-independent
+`DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` aliases.
 
-**Affected:** New multinode DGDs created by Dynamo 1.6.0 when Grove is managed outside the platform
-chart.
+**Affected:** Grove-backed DGDs using rollout budgets or Coherent updates, and new multinode DGDs
+created by Dynamo 1.6.0 when Grove is managed outside the platform chart.
 
-**Action:** Upgrade externally managed Grove and its CRDs to `v0.1.0-alpha.14` or later before
-creating new multinode DGDs.
+**Action:** Upgrade externally managed Grove and its CRDs to `v0.1.0-alpha.15` or later before
+using rollout budgets or Coherent updates, or creating new multinode DGDs. Updating Dynamo's
+dependency or platform chart does not upgrade separately managed Grove installations.
 
 **Existing deployments:** The operator origin version gates alias injection. An operator-only
 upgrade leaves existing multinode workload pod templates unchanged and does not roll them solely to
@@ -335,7 +337,7 @@ Kubernetes: `>=1.30.0-0`
 | file://components/operator | dynamo-operator | 1.6.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.14 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.15 |
 | oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0-rc.1 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
@@ -488,7 +490,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
 | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
-| 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
+| 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
 
 Upgrade Grove in lockstep with Dynamo while Grove APIs are not stable. See the
 [v1.4.0 upgrade notes](#v140) for the topology API transition and the

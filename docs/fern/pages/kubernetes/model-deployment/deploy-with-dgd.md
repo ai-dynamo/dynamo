@@ -723,7 +723,7 @@ This runs eight TP-2 workers (16 GPUs). To turn it into one of the variations ab
 
 Grove uses RollingRecreate by default for every DGD. To opt into Coherent, set `metadata.annotations["nvidia.com/grove-update-strategy"]: Coherent`. New Grove DGDs created by operator 1.6.0 or later default provider-native `minAvailable` to `1` unless the manifest uses a deprecated component minimum. Existing DGDs retain their persisted legacy minima. Moving those minima to provider overrides preserves their effective values and does not select Coherent.
 
-For deployments that explicitly select Coherent, use a Grove release containing the [corrective-update recovery fix](https://github.com/ai-dynamo/grove/issues/873) and complete these checks before changing worker images or pod templates:
+For deployments that explicitly select Coherent, use Grove v0.1.0-alpha.15 or later with its matching CRDs, which includes the [corrective-update recovery fix](https://github.com/ai-dynamo/grove/issues/873), and complete these checks before changing worker images or pod templates:
 
 1. Review each component's effective `minAvailable` and whether it uses the deprecated field or a provider override. It defines the minimum viable replacement unit under Coherent. For new deployments, start at `1` unless the application requires a larger unit; the field is immutable after creation.
 2. Review any `providerOverride.value.rollingUpdate.maxUnavailable`. It is a ceiling on unavailable replicas, defaults to the effective minimum under Coherent, and must be at least that minimum.
@@ -735,7 +735,7 @@ See [Coherent capacity and disruption](../../reference/kubernetes-api/dynamo-gra
 
 ### Recover from a stalled Coherent update
 
-On Grove alpha.14, a corrective update can stall because old replicas are already unavailable. [Grove issue #873](https://github.com/ai-dynamo/grove/issues/873) fixes this in Grove main; upgrade to a release containing that fix. For an older installation with a stalled update, changing or removing the strategy annotation cannot unblock it: Dynamo waits for the active Grove update to finish before applying a strategy change.
+On Grove alpha.14, a corrective update can stall because old replicas are already unavailable. [Grove issue #873](https://github.com/ai-dynamo/grove/issues/873) is fixed in v0.1.0-alpha.15; upgrade Grove and its matching CRDs together. For an older installation with a stalled update, changing or removing the strategy annotation cannot unblock it: Dynamo waits for the active Grove update to finish before applying a strategy change.
 
 > [!WARNING]
 > Recreating the DGD stops its workloads and interrupts serving. Plan downtime or move traffic to another deployment before using this reset path.
