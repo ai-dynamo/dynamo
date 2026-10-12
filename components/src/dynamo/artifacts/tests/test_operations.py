@@ -338,6 +338,43 @@ async def test_repeated_delivery_cancellation_settles_failed_writer(
 
 
 @pytest.mark.asyncio
+async def test_repeated_cancellation_drains_transfer_cleanup_before_release(tmp_path):
+    entered = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+
+    async def transfer(data, target):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_entered.set()
+            await release_cleanup.wait()
+
+    service = ArtifactService(store, transfer, None)
+    pending = await service.submit(b"owned", "owner", [], {})
+    await entered.wait()
+    delivery = next(iter(service._tasks))
+    delivery.cancel()
+    await cleanup_entered.wait()
+    delivery.cancel()
+    draining = asyncio.create_task(service.drain())
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(delivery), timeout=0.05)
+        assert not draining.done()
+        assert service.source_bytes == len(b"owned")
+        assert store.get(pending["operation_id"], "owner")["state"] == "pending"
+    finally:
+        release_cleanup.set()
+        await draining
+    assert store.get(pending["operation_id"], "owner")["state"] == "failed"
+    assert store.grant(pending["operation_id"]) is None
+    assert service.source_bytes == 0
+
+
+@pytest.mark.asyncio
 async def test_background_writer_exception_is_observed_without_secret_logs(
     tmp_path, monkeypatch, caplog
 ):
