@@ -218,7 +218,14 @@ def patch_static_state_for_gms() -> None:
             from sglang.srt.managers.scheduler_components import (
                 weight_updater as _mixin,
             )
-        except ImportError:
+        except ModuleNotFoundError as exc:
+            # Only a missing new module means an older SGLang layout. Report
+            # other import failures below with their real cause.
+            if exc.name not in (
+                "sglang.srt.managers.scheduler_components",
+                "sglang.srt.managers.scheduler_components.weight_updater",
+            ):
+                raise
             # Older SGLang ships scheduler_update_weights_mixin; remove once
             # no supported image pins such a release.
             from sglang.srt.managers import scheduler_update_weights_mixin as _mixin

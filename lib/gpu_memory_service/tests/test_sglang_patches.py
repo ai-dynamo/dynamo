@@ -101,7 +101,7 @@ def test_patch_static_state_for_gms_patches_weight_updater(monkeypatch):
     assert weight_updater._export_static_state(model) == {"buffers": []}
 
 
-def test_patch_static_state_for_gms_falls_back_to_legacy_mixin(monkeypatch):
+def _install_fake_sglang(monkeypatch):
     def original_export(model):
         return {"buffers": ["original"]}
 
@@ -122,9 +122,14 @@ def test_patch_static_state_for_gms_falls_back_to_legacy_mixin(monkeypatch):
     ):
         module.__path__ = getattr(module, "__path__", [])
         monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(patches, "_static_state_patched", False)
+    return mixin, original_export
+
+
+def test_patch_static_state_for_gms_falls_back_to_legacy_mixin(monkeypatch):
+    mixin, original_export = _install_fake_sglang(monkeypatch)
     # A None entry makes the newer weight_updater import raise ImportError.
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler_components", None)
-    monkeypatch.setattr(patches, "_static_state_patched", False)
 
     patches.patch_static_state_for_gms()
 
@@ -132,3 +137,20 @@ def test_patch_static_state_for_gms_falls_back_to_legacy_mixin(monkeypatch):
     assert mixin._export_static_state is not original_export
     assert mixin._export_static_state(object()) == {"buffers": []}
     assert mixin._import_static_state(object(), {"buffers": []}) is None
+
+
+def test_patch_static_state_for_gms_keeps_weight_updater_dependency_errors(
+    monkeypatch, tmp_path, caplog
+):
+    mixin, original_export = _install_fake_sglang(monkeypatch)
+    (tmp_path / "weight_updater.py").write_text("import gms_test_missing_dependency\n")
+    components = ModuleType("sglang.srt.managers.scheduler_components")
+    components.__path__ = [str(tmp_path)]
+    monkeypatch.setitem(sys.modules, components.__name__, components)
+    monkeypatch.delitem(sys.modules, f"{components.__name__}.weight_updater", False)
+
+    patches.patch_static_state_for_gms()
+
+    assert not patches._static_state_patched
+    assert mixin._export_static_state is original_export
+    assert "gms_test_missing_dependency" in caplog.text
