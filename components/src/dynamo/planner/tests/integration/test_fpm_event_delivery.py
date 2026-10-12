@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import faulthandler
 import os
 import subprocess
 import sys
@@ -40,6 +41,15 @@ pytestmark = [
 ]
 
 
+# Interpreter start-up and the planner imports (scikit-learn, SciPy, kubernetes) dominate the
+# child's run time. They take about 2 s on an idle host but more than 25 s when the CPU is
+# heavily contended, while the scenario itself takes about 1-2 s. The child bounds the scenario
+# and teardown with its own watchdog, armed after imports, so a real hang still fails at the
+# old 30 s budget with every thread's stack. The parent budget only has to cover slow start-up.
+_SCENARIO_TIMEOUT_S = 30
+_CHILD_TIMEOUT_S = 120
+
+
 class _PlannerSources:
     def __init__(self, namespace: str, state: DeploymentState) -> None:
         self._namespace = namespace
@@ -72,7 +82,7 @@ def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path):
         [sys.executable, __file__],
         check=True,
         env={**os.environ, "DYN_FILE_KV": str(tmp_path)},
-        timeout=30,
+        timeout=_CHILD_TIMEOUT_S,
     )
 
 
@@ -228,4 +238,7 @@ async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
 
 
 if __name__ == "__main__":
+    # Dumps every thread's stack to the inherited stderr, which pytest captures, then exits
+    # non-zero.
+    faulthandler.dump_traceback_later(_SCENARIO_TIMEOUT_S, exit=True)
     asyncio.run(_endpoint_fpm_reaches_planner_and_drives_scale_up())
