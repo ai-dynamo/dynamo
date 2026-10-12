@@ -83,10 +83,57 @@ function PublicationCard({ publication }: { publication: Publication }) {
   );
 }
 
+function siteOf(url: string) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+// Title split inline, not in a helper, for the Fern transform reason noted on
+// PublicationCard.
+function FeaturedCard({ publication }: { publication: Publication }) {
+  const { title, url, partner, date, summary } = publication;
+  const words = title.trim().split(/\s+/);
+  const lastWord = words.pop() ?? "";
+  const leadingWords = words.join(" ");
+  return (
+    <a
+      className="dynamo-pubs-featured__card"
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      <span className="dynamo-pubs-featured__top">
+        <PublisherMark partner={partner} />
+        <span className="dynamo-pubs-featured__byline">
+          <span className="dynamo-pubs__partner">{partner}</span>
+          <span className="dynamo-pubs__date">{date}</span>
+        </span>
+      </span>
+      <span className="dynamo-pubs-featured__title">
+        {leadingWords ? `${leadingWords} ` : ""}
+        <span className="dynamo-pubs__title-end">{lastWord}</span>
+      </span>
+      {summary ? (
+        <span className="dynamo-pubs-featured__summary">{summary}</span>
+      ) : null}
+      <span className="dynamo-pubs-featured__cta">
+        Read on {siteOf(url)}
+        <ExternalMark />
+      </span>
+    </a>
+  );
+}
+
 // Newest first, from `iso`, so ordering does not depend on how the array is
-// maintained by hand.
-const sortedPublications = [...PUBLICATIONS].sort((a, b) =>
-  (b.iso ?? "").localeCompare(a.iso ?? ""),
+// maintained by hand. Pinned entries sit in the featured row instead.
+const pinnedPublications = PUBLICATIONS.filter((p) => p.pinned != null).sort(
+  (a, b) => (a.pinned ?? 0) - (b.pinned ?? 0),
+);
+const sortedPublications = PUBLICATIONS.filter((p) => p.pinned == null).sort(
+  (a, b) => (b.iso ?? "").localeCompare(a.iso ?? ""),
 );
 
 export function EcosystemPublications() {
@@ -109,6 +156,20 @@ export function EcosystemPublications() {
             </p>
           </div>
         </div>
+
+        {/* A wrapper rather than a fragment: fragments do not survive Fern's
+            component transform. */}
+        {pinnedPublications.length > 0 ? (
+          <div className="dynamo-pubs-featured-block">
+            <h3 className="dynamo-pubs__group-label">Featured</h3>
+            <div className="dynamo-pubs-featured">
+              {pinnedPublications.map((publication) => (
+                <FeaturedCard key={publication.url} publication={publication} />
+              ))}
+            </div>
+            <h3 className="dynamo-pubs__group-label">All publications</h3>
+          </div>
+        ) : null}
 
         <div className="dynamo-pubs">
           {sortedPublications.map((publication) => (

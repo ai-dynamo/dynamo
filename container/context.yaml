@@ -25,7 +25,7 @@ dynamo:
     # The frontend installs NIXL from PyPI (the tag minus its leading "v")
     # rather than building it in wheel_builder, so it moves independently of
     # the framework-level ref the runtime target's nixl-sys links against.
-    nixl_ref: v1.3.2
+    nixl_ref: v1.5.0
   # Dynamo's native Rust EPP (deploy/inference-gateway/ext-proc). This is the
   # default value of the frontend's EPP_IMAGE build arg; the frontend copies
   # /epp out of it. CI overrides EPP_IMAGE with the per-commit image it just
@@ -40,10 +40,10 @@ dynamo:
   planner_build_image: python
   planner_build_image_tag: 3.13-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.13-v4.1.4
+  planner_runtime_image_tag: 3.13-v4.1.6
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@eb5be985
+  planner_baseline_sbom: python@5be5c1f0
   # Planner-scoped interpreter. The planner uses a separate, newer CPython line
   # from the global python_version below because it is the only stage whose
   # interpreter is decoupled from the framework/runtime bases: the build stage
@@ -69,7 +69,10 @@ dynamo:
   nixl_ucx_ref: v1.21.0
   nixl_gdrcopy_ref: v2.5.2
   nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
-  nixl_libfabric_ref: v2.4.0
+  # >= v2.5 for NIXL 1.5.0 (fi_mr_attr.device.rocr). <= the libfabric of
+  # efa_version (2.6.0): the TRT-LLM EFA image runs NIXL against that copy,
+  # which lacks the FABRIC_1.10 symbols that v2.7.0 links to.
+  nixl_libfabric_ref: v2.6.0
   # Keep in sync with upstream NIXL's contrib/Dockerfile.manylinux.
   hwloc_version: 2.12.2
   enable_kvbm: "true"
@@ -161,7 +164,7 @@ sglang:
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
   # build doesn't leak into the runtime image.
-  nixl_ref: v1.4.0
+  nixl_ref: v1.5.0
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"

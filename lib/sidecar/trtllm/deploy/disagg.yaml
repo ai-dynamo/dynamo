@@ -33,8 +33,8 @@
 #     manifest asks for. On a real RDMA fabric, add `rdma/ib: "1"` to each
 #     engine's resource limits and requests. Configure memory-lock limits and
 #     any additional capabilities only as required by that deployment.
-#   - No published sidecar image yet — build from lib/sidecar/Dockerfile and set
-#     <your-registry>.
+#   - Set the sidecar image to nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>,
+#     or build lib/sidecar/Dockerfile.
 
 apiVersion: v1
 kind: ConfigMap
@@ -99,11 +99,7 @@ spec:
         # starts before `main`, stops after.
         initContainers:
         - name: trtllm-engine
-          # Layer the OpenEngine Python bindings onto this release and push the
-          # result: the release ships the servicer, but both it and the probes
-          # below import `openengine.v1`, which it does not install. See the
-          # README's Run section for the pinned versions.
-          image: <your-registry>/tensorrt-llm-openengine:1.3.0rc27.dev202609170000
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc0.dev202610090112
           restartPolicy: Always
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state rather than just a connectable socket.
@@ -194,8 +190,8 @@ spec:
           - --extra_llm_api_options
           - /config/config.yaml
         containers:
-        # Sidecar worker. No published image yet — build from
-        # lib/sidecar/Dockerfile, set <your-registry> (see README), add
+        # Sidecar worker. Use nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>
+        # or build from lib/sidecar/Dockerfile; add
         # imagePullSecrets if private. Must be named "main" (operator injects
         # discovery env + probes by name).
         - name: main
@@ -231,7 +227,7 @@ spec:
             sizeLimit: 10Gi
         initContainers:
         - name: trtllm-engine
-          image: <your-registry>/tensorrt-llm-openengine:1.3.0rc27.dev202609170000
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc0.dev202610090112
           restartPolicy: Always
           startupProbe:
             exec:

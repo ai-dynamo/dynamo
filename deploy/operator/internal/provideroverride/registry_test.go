@@ -171,6 +171,12 @@ func TestValidateValue(t *testing.T) {
 			value:   `{"topologyConstraint":{"pack":"rack"}}`,
 			wantErr: []string{"does not match the registered PodCliqueTemplateSpec schema"},
 		},
+		{name: "standalone native minimum", target: TargetPodCliqueTemplateSpec, value: `{"spec":{"minAvailable":2}}`},
+		{name: "scaling-group native minimum", target: TargetPodCliqueScalingGroupConfig, value: `{"minAvailable":2}`},
+		{name: "standalone minimum cannot rewrite podSpec", target: TargetPodCliqueTemplateSpec, value: `{"spec":{"minAvailable":1,"podSpec":{}}}`, wantErr: []string{"spec.podSpec"}, ownershipViolation: true},
+		{name: "null minimum", target: TargetPodCliqueScalingGroupConfig, value: `{"minAvailable":null}`, wantErr: []string{"minAvailable"}},
+		{name: "zero minimum", target: TargetPodCliqueTemplateSpec, value: `{"spec":{"minAvailable":0}}`, wantErr: []string{"spec.minAvailable"}},
+		{name: "fractional minimum", target: TargetPodCliqueScalingGroupConfig, value: `{"minAvailable":1.5}`, wantErr: []string{"does not match the registered"}},
 	}
 
 	for _, tt := range tests {
