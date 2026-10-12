@@ -1236,3 +1236,166 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
     # earliest control event at base+0.9 ms.
     assert kernel["ts"] == 1599.5
     assert all(isinstance(e.get("tid", 0), int) for e in events)
+
+
+def test_bundle_reads_nsight_frontend_and_worker_exports(tmp_path):
+    base, clock = 1_700_000_000_000_000_000, 5_000_000_000
+    # Nsight event timestamps are relative to the session start (utcEpochNs).
+
+    def export(name, rows):
+        path = tmp_path / f"{name}.sqlite"
+        with sqlite3.connect(path) as db:
+            db.execute(
+                "CREATE TABLE TARGET_INFO_SESSION_START_TIME (utcEpochNs, systemClockNs)"
+            )
+            db.execute(
+                "INSERT INTO TARGET_INFO_SESSION_START_TIME VALUES (?, ?)",
+                (base, clock),
+            )
+            db.execute("CREATE TABLE StringIds (id, value)")
+            db.executemany(
+                "INSERT INTO StringIds VALUES (?, ?)", [(1, "epoll_wait"), (2, "gemm")]
+            )
+            db.execute("CREATE TABLE PROCESSES (globalPid, pid, name)")
+            db.execute("INSERT INTO PROCESSES VALUES (0, 42, 'VLLM::EngineCore')")
+            for table, columns, values in rows:
+                db.execute(f"CREATE TABLE {table} ({columns})")
+                db.executemany(
+                    f"INSERT INTO {table} VALUES ({','.join('?' * len(values[0]))})",
+                    values,
+                )
+        (tmp_path / f"{name}.nsys-rep").write_bytes(b"report")
+        return path
+
+    tid = (42 << 24) | 7
+    frontend = export(
+        "frontend",
+        [
+            (
+                "OSRT_API",
+                "start, end, nameId, globalTid",
+                [(2_500_000, 2_600_000, 1, tid)],
+            )
+        ],
+    )
+    worker = export(
+        "worker",
+        [
+            (
+                "NVTX_EVENTS",
+                "start, end, eventType, text, textId, globalTid, domainId",
+                [
+                    (2_400_000, 2_700_000, 59, "forward", None, tid, 1),
+                    (0, None, 75, "PyTorch", None, 0, 1),
+                ],
+            ),
+            (
+                "CUPTI_ACTIVITY_KIND_KERNEL",
+                "start, end, demangledName, deviceId, streamId",
+                [
+                    (1_000_000, 1_100_000, 2, 0, 7),
+                    (2_500_000, 2_600_000, 2, 0, 7),
+                ],
+            ),
+        ],
+    )
+    bounds = {
+        "status": "observed",
+        "start_unix_ns": base + 1_000_000,
+        "end_unix_ns": base + 4_000_000,
+    }
+    session = tmp_path / "session"
+    session.mkdir()
+    (session / "manifest.json").write_text(
+        json.dumps(
+            {
+                "session_id": "s",
+                "state": "completed",
+                "artifact_status": "verified",
+                "plan": {"trace_ids": []},
+                "profiles": [
+                    {"target_id": t, "collector": "nsys"}
+                    for t in ("frontend", "decode-0")
+                ],
+                "clock": {
+                    "workers": {
+                        "decode-0": {
+                            "start": {
+                                "alignment": "estimated",
+                                "offset_ns": 0,
+                                "pid": 42,
+                            }
+                        }
+                    }
+                },
+                "artifact_validation": [
+                    {
+                        "target_id": t,
+                        "status": "verified",
+                        "recording_bounds": bounds,
+                        "artifacts": [
+                            {"location": str(path.with_suffix(".nsys-rep"))},
+                            {"location": str(path)},
+                        ],
+                    }
+                    for t, path in (("frontend", frontend), ("decode-0", worker))
+                ],
+            }
+        )
+    )
+
+    def span(span_id, parent, name, **attributes):
+        return {
+            "traceId": "t",
+            "spanId": span_id,
+            "parentSpanId": parent,
+            "name": name,
+            "startTimeUnixNano": str(base + 2_000_000),
+            "endTimeUnixNano": str(base + 3_000_000),
+            "attributes": [
+                {"key": k, "value": {"stringValue": str(v)}}
+                for k, v in attributes.items()
+            ],
+        }
+
+    spans = [
+        span("a", "", "http-request"),
+        span("r", "a", "kv_router.route_request", phase="Decode", worker_id="W"),
+        span("h", "r", "handle_payload", instance_id="W"),
+        span("o", "h", "worker.operation.decode", **{"dynamo.process.epoch": "42:x"}),
+    ]
+    otel = tmp_path / "otel.jsonl"
+    otel.write_text(
+        json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}) + "\n"
+    )
+    bundle.build(session, [otel], tmp_path / "out")
+    index = json.loads((tmp_path / "out/lifecycle/trace-index.json").read_text())
+    path = tmp_path / "out" / index["requests"][0]["timeline"]
+    events = json.loads(gzip.decompress(path.read_bytes()))["traceEvents"]
+    order = {
+        e["pid"]: e["args"]["sort_index"]
+        for e in events
+        if e.get("name") == "process_sort_index"
+    }
+    names = {
+        e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"
+    }
+    assert [names[pid] for pid in sorted(order, key=order.get)][:5] == [
+        "frontend · OTel spans",
+        "frontend · VLLM::EngineCore (CPU)",
+        "decode-0 · OTel spans",
+        "decode-0 · VLLM::EngineCore (CPU)",
+        "decode-0 · CUDA device 0 (GPU 0)",
+    ]
+    native = sorted(
+        (e["cat"], e["name"])
+        for e in events
+        if e.get("cat") in ("osrt", "pytorch", "kernel")
+    )
+    # The kernel before the decode operation is excluded; the frontend
+    # OS-runtime call is included within the request's lifetime.
+    assert native == [
+        ("kernel", "gemm"),
+        ("osrt", "epoll_wait"),
+        ("pytorch", "forward"),
+    ]

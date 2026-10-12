@@ -23,7 +23,9 @@ import hashlib
 import json
 import re
 import shutil
+import sqlite3
 from collections import defaultdict
+from contextlib import closing
 from pathlib import Path
 
 import ijson
@@ -168,8 +170,105 @@ def kineto_events(path: Path):
             yield event
 
 
-# Native readers by collector; Nsight SQLite conversion is a later addition.
-NATIVE_READERS = {"torch_profiler": kineto_events}
+def nsys_events(path: Path):
+    """Yield Nsight SQLite export events as Chrome events with raw host-clock ns.
+
+    The native `.nsys-rep` is kept as is; its automatic SQLite export is read.
+    Python function ranges arrive as NVTX ranges in the PyTorch domain.
+    """
+    if path.suffix != ".sqlite":
+        return
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master")}
+        # Event timestamps are relative to the session start anchored here.
+        (epoch,) = db.execute(
+            "SELECT utcEpochNs FROM TARGET_INFO_SESSION_START_TIME"
+        ).fetchone()
+        strings = dict(db.execute("SELECT id, value FROM StringIds"))
+        domains = (
+            dict(
+                db.execute(
+                    "SELECT domainId, text FROM NVTX_EVENTS WHERE eventType = 75"
+                )
+            )
+            if "NVTX_EVENTS" in tables
+            else {}
+        )
+        for pid, name in db.execute("SELECT pid, name FROM PROCESSES"):
+            yield {
+                "ph": "M",
+                "name": "process_name",
+                "pid": pid,
+                "args": {"name": name},
+            }
+            yield {
+                "ph": "M",
+                "name": "process_labels",
+                "pid": pid,
+                "args": {"labels": "CPU"},
+            }
+        if "ThreadNames" in tables:
+            for name_id, tid in db.execute("SELECT nameId, globalTid FROM ThreadNames"):
+                yield {
+                    "ph": "M",
+                    "name": "thread_name",
+                    "pid": (tid >> 24) & 0xFFFFFF,
+                    "tid": tid & 0xFFFFFF,
+                    "args": {"name": strings.get(name_id, "")},
+                }
+        devices = set()
+        queries = {
+            "nvtx": "SELECT start, end, COALESCE(text, textId), globalTid, domainId FROM NVTX_EVENTS "
+            "WHERE eventType IN (59, 60) AND end IS NOT NULL",
+            "osrt": "SELECT start, end, nameId, globalTid, NULL FROM OSRT_API",
+            "cuda_runtime": "SELECT start, end, nameId, globalTid, NULL FROM CUPTI_ACTIVITY_KIND_RUNTIME",
+            "cuda_driver": "SELECT start, end, nameId, globalTid, NULL FROM CUPTI_ACTIVITY_KIND_DRIVER",
+            "kernel": "SELECT start, end, demangledName, deviceId, streamId FROM CUPTI_ACTIVITY_KIND_KERNEL",
+            "gpu_memcpy": "SELECT start, end, NULL, deviceId, streamId FROM CUPTI_ACTIVITY_KIND_MEMCPY",
+            "gpu_memset": "SELECT start, end, NULL, deviceId, streamId FROM CUPTI_ACTIVITY_KIND_MEMSET",
+        }
+        for cat, query in queries.items():
+            if query.split(" FROM ")[1].split()[0] not in tables:
+                continue
+            gpu = cat in ("kernel", "gpu_memcpy", "gpu_memset")
+            for start, end, name, lane, extra in db.execute(query):
+                if gpu:
+                    pid, tid = f"GPU {lane}", extra
+                    if lane not in devices:
+                        devices.add(lane)
+                        yield {
+                            "ph": "M",
+                            "name": "process_name",
+                            "pid": pid,
+                            "args": {"name": f"CUDA device {lane}"},
+                        }
+                        yield {
+                            "ph": "M",
+                            "name": "process_labels",
+                            "pid": pid,
+                            "args": {"labels": pid},
+                        }
+                else:
+                    pid, tid = (lane >> 24) & 0xFFFFFF, lane & 0xFFFFFF
+                kind = (
+                    {"PyTorch": "pytorch", "vLLM": "vllm"}.get(domains.get(extra), cat)
+                    if cat == "nvtx"
+                    else cat
+                )
+                yield {
+                    "ph": "X",
+                    "cat": kind,
+                    "name": strings.get(name, name) if name is not None else cat,
+                    "pid": pid,
+                    "tid": tid,
+                    "dur": (end - start) / 1000,
+                    "start_ns": epoch + start,
+                    "end_ns": epoch + end,
+                }
+
+
+# Native readers by collector.
+NATIVE_READERS = {"torch_profiler": kineto_events, "nsys": nsys_events}
 
 
 class Timeline:
@@ -383,6 +482,15 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
             start, end = start_end(roots[0])
             if start < high and end > low:
                 windows["frontend"].append((max(start, low), min(end, high), timeline))
+                pid = timeline.pid(("otel", "frontend"), "frontend · OTel spans")
+                timeline.interval(
+                    "frontend recording",
+                    "capture",
+                    low,
+                    high,
+                    pid,
+                    timeline.tid(pid, "native recording"),
+                )
         for phase in entry["phases"]:
             target = phase["target_id"]
             if phase["recording_overlap_ns"]:
@@ -450,6 +558,17 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
                 if "start_ns" not in event:
                     continue
                 start, end = event.pop("start_ns"), event.pop("end_ns")
+                # Native data exists only inside recording; clip events that
+                # began before or ended after it and keep their original bounds.
+                recorded_low, recorded_high = intervals[target]
+                if start < recorded_low or end > recorded_high:
+                    event["args"] = {
+                        **event.get("args", {}),
+                        "original_start_unix_ns": start,
+                        "original_end_unix_ns": end,
+                    }
+                    start, end = max(start, recorded_low), min(end, recorded_high)
+                    event["dur"] = max(0, end - start) / 1000
                 for low, high, timeline in windows[target]:
                     if start < high and max(end, start + 1) > low:
                         # Kineto keeps profiler bookkeeping in unnamed pseudo-processes.
