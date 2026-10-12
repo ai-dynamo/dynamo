@@ -11,7 +11,7 @@ next to its text. Dynamo decodes the clip, samples frames, and the worker runs
 the model's vision encoder on them.
 
 This page gets one video request working on each backend. To generate video
-instead, see [Text-to-Video](text-to-video.md). To route repeated clips to the
+instead, see [Text to Video (T2V)](text-to-video.md). To route repeated clips to the
 worker that already holds their KV cache, see
 [Exact Video KV Routing](exact-video-kv-routing.md).
 

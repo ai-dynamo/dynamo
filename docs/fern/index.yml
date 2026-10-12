@@ -764,16 +764,15 @@ navigation:
         contents:
           - page: Video Understanding
             path: pages/use-cases/video/video-understanding.md
-          - page: Text-to-Video
+          - page: Text to Video (T2V)
+            slug: text-to-video
             path: pages/use-cases/video/text-to-video.md
-          - page: Image-to-Video
+          - page: Image to Video (I2V)
+            slug: image-to-video
             path: pages/use-cases/video/image-to-video.md
           - page: FastVideo
             slug: fastvideo
             path: pages/use-cases/video/fastvideo.md
-          - page: MiniMax-H3
-            slug: minimax-h3
-            path: pages/use-cases/video/minimax-h3.md
           - page: Exact Video KV Routing
             path: pages/use-cases/video/exact-video-kv-routing.md
           - page: Video Decoding and GPU Requirements

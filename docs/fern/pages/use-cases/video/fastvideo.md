@@ -8,7 +8,7 @@ subtitle: Deploy FastVideo text-to-video generation on Dynamo with a custom work
 This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo) text-to-video generation on Dynamo using a custom worker (`worker.py`) exposed through the `/v1/videos` endpoint.
 
 > [!NOTE]
-> FastVideo is a custom example worker with its own runtime image, not one of Dynamo's built-in backends. Its image encodes H.264 (`libx264`), unlike the standard Dynamo images, which encode VP9. For the built-in backends (vLLM-Omni, SGLang, TensorRT-LLM), see [Text-to-Video](text-to-video.md).
+> FastVideo is a custom example worker with its own runtime image, not one of Dynamo's built-in backends. Its image encodes H.264 (`libx264`), unlike the standard Dynamo images, which encode VP9. For the built-in backends (vLLM-Omni, SGLang, TensorRT-LLM), see [Text to Video (T2V)](text-to-video.md).
 
 ## Overview
 
@@ -458,5 +458,5 @@ The example source lives at [`examples/diffusers/`](https://github.com/ai-dynamo
 - [Text-to-Video with vLLM-Omni](text-to-video.md#vllm-omni) — vLLM-Omni video generation via `/v1/videos`
 - [Text-to-Video with SGLang](text-to-video.md#sglang) — SGLang video generation worker
 - [Text-to-Video with TensorRT-LLM](text-to-video.md#tensorrt-llm) — TensorRT-LLM diffusion quick start
-- [Text-to-Video](text-to-video.md) — built-in text-to-video backends
+- [Text to Video (T2V)](text-to-video.md) — built-in text-to-video backends
 

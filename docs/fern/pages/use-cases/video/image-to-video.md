@@ -1,17 +1,17 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Image-to-Video
+title: Image to Video (I2V)
 subtitle: Animate source images with vLLM-Omni or SGLang
 ---
 
 Image-to-video (I2V) animates a source image from a text prompt through the
-same `/v1/videos` endpoint as [Text-to-Video](text-to-video.md), with an extra
+same `/v1/videos` endpoint as [Text to Video (T2V)](text-to-video.md), with an extra
 `input_reference` field that points at the source image.
 
 > [!NOTE]
 > Before you begin, set up vLLM-Omni or SGLang as described in
-> [Text-to-Video › Set up the backend](text-to-video.md#set-up-the-backend).
+> [Text to Video (T2V) › Set up the backend](text-to-video.md#set-up-the-backend).
 > TensorRT-LLM does not support image-to-video.
 
 ## Generate Videos from Images
