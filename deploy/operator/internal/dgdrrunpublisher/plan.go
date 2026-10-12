@@ -144,6 +144,17 @@ func progressTime(snap *Snapshot) time.Time {
 	return parsed.UTC().Truncate(time.Second)
 }
 
+// WithPreservedProgress returns the status to write. When the snapshot carries no usable
+// timestamp, the progress time already known (observed or written earlier) is kept:
+// omitting a field from a server-side-apply payload removes it once this manager owns
+// it, so "leave it alone" has to be spelled out as "write the same value again".
+func (desired RunStatus) WithPreservedProgress(known time.Time) RunStatus {
+	if desired.LastProgress.IsZero() {
+		desired.LastProgress = known
+	}
+	return desired
+}
+
 // NeedsUpdate reports whether the observed run status differs from the desired one, so
 // the status is only written when something changed. A zero desired LastProgress means
 // "leave the observed value alone".

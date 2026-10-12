@@ -19,10 +19,8 @@ package dgdrrunpublisher
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -31,14 +29,13 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher/placeholderapi"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 const (
@@ -68,13 +65,28 @@ const (
 // Reconciler reconciles the one DynamoGraphDeploymentRun this publisher serves.
 //
 // Client is the manager's client: reads come from the scoped informer cache (this Run,
-// its candidates, this Pod), writes go to the API server. It needs RBAC (namespaced Role
-// bound to the run's ServiceAccount): runs get/list/watch and runs/status patch (server-
-// side apply); candidates get/list/watch/create/patch/delete and candidates/status patch;
-// pods get/list/watch (own pod, for Sweeper crash detection; resourceNames cannot be used
-// with list/watch of generated Job pod names, so the cache narrows with a field selector).
+// its candidates, this Pod). Writes go through Writer to the API server. It needs RBAC
+// (namespaced Role bound to the run's ServiceAccount): runs get/list/watch and
+// runs/status patch (server-side apply); candidates get/list/watch/create/patch/delete
+// and candidates/status patch; pods get/list/watch (own pod, for Sweeper crash
+// detection; the cache narrows list/watch to it with a field selector because generated
+// Job pod names cannot be listed in resourceNames).
+//
+// Write echoes and cache lag: the publisher's own writes come back as watch events, and
+// the cache can trail them. The reconciler therefore remembers what it has written (the
+// candidates it created and populated, the last run status it applied, the latest
+// progress time) and does not redo that work while the cache catches up. A retry after a
+// partial success repeats only the unfinished writes, and an event that merely echoes a
+// write finds nothing to do and produces no further write, so it cannot start a loop.
+//
+// Stale reads: every status write is constrained to the resourceVersion the decision was
+// based on (the cached run, the cached candidate, or the version read back from the API
+// server for a candidate created a moment ago). A decision made from an older cache
+// observation fails with a conflict instead of overwriting newer state, and is retried
+// once the informer has delivered the newer version.
 type Reconciler struct {
 	Client           client.Client
+	Writer           writer
 	Namespace        string
 	RunName          string
 	RunUID           string
@@ -85,9 +97,17 @@ type Reconciler struct {
 	Store      *InputStore
 	Completion *Completion
 
-	// finalFailures counts failed reconciles after the Sweeper exited. The controller
-	// runs one worker, so it needs no locking.
+	// The fields below are touched only by Reconcile; the controller runs one worker, so
+	// they need no locking.
+
+	// finalFailures counts failed reconciles after the Sweeper exited.
 	finalFailures int
+	// written holds the candidates this process has created and populated.
+	written map[string]struct{}
+	// applied is the last run status written successfully.
+	applied *RunStatus
+	// lastProgress is the latest progress time written.
+	lastProgress time.Time
 }
 
 func (r *Reconciler) key() types.NamespacedName {
@@ -119,7 +139,7 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	// exit, so an exit observed here means that write is visible to the check below.
 	state, stateErr := r.sweeperState(ctx)
 	if stateErr != nil {
-		log.Printf("reading sweeper container state: %v", stateErr)
+		ctrl.LoggerFrom(ctx).Error(stateErr, "reading sweeper container state")
 	}
 	exited := stateErr == nil && state.Exited
 	if exited {
@@ -162,6 +182,11 @@ func (r *Reconciler) retryOrFail(exited bool, err error) error {
 		r.Completion.Finish(err) // retrying cannot fix it
 		return nil
 	}
+	if apierrors.IsConflict(err) {
+		// A write was based on a stale cached read. The informer delivers the newer
+		// version and the retry decides again, so this is not a failed attempt.
+		return err
+	}
 	if exited {
 		r.finalFailures++
 		if r.finalFailures >= finalReconcileAttempts {
@@ -182,6 +207,7 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 	}
 	current := make([]dgdcreconcile.CurrentDGDC, 0, len(list.Items))
 	uids := make(map[string]types.UID, len(list.Items))
+	versions := make(map[string]string, len(list.Items)) // cached resourceVersion per candidate
 	for i := range list.Items {
 		item := &list.Items[i]
 		current = append(current, dgdcreconcile.CurrentDGDC{
@@ -190,130 +216,78 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 			Incomplete: !meta.IsStatusConditionTrue(item.Status.Conditions, evaluatedCondition),
 		})
 		uids[item.Name] = item.UID
+		versions[item.Name] = item.ResourceVersion
 	}
 	actions, err := dgdcreconcile.ComputeActions(desired.Candidates, current)
 	if err != nil {
 		return err
 	}
+	if r.written == nil {
+		r.written = map[string]struct{}{}
+	}
 
 	for _, candidate := range actions.Creates {
-		if err := r.createCandidate(ctx, run, desired.Names[candidate.ID], candidate); err != nil {
+		name := desired.Names[candidate.ID]
+		if _, done := r.written[name]; done {
+			continue // created and populated by this process; the cache has not caught up yet
+		}
+		version, err := r.Writer.CreateCandidate(ctx, run, name, candidate)
+		if err != nil {
 			return fmt.Errorf("creating candidate %s: %w", candidate.ID, err)
 		}
+		versions[name] = version // a new candidate is not in the cache; use the version the API server returned
 	}
 	unpopulated := make([]dgdcreconcile.DesiredCandidate, 0, len(actions.Creates)+len(actions.Incomplete))
 	unpopulated = append(unpopulated, actions.Creates...)
 	unpopulated = append(unpopulated, actions.Incomplete...)
 	for _, candidate := range unpopulated {
-		if err := r.populateStatus(ctx, desired.Names[candidate.ID], candidate); err != nil {
+		name := desired.Names[candidate.ID]
+		if _, done := r.written[name]; done {
+			continue
+		}
+		if err := r.Writer.PopulateStatus(ctx, name, versions[name], candidate); err != nil {
 			return fmt.Errorf("populating status of candidate %s: %w", candidate.ID, err)
 		}
+		r.written[name] = struct{}{}
 	}
 
-	if desired.Status.NeedsUpdate(observedStatus(run)) {
-		if err := r.updateRunStatus(ctx, desired.Status); err != nil {
-			return fmt.Errorf("updating run status: %w", err)
-		}
+	if err := r.updateRunStatus(ctx, run, desired.Status); err != nil {
+		return err
 	}
 
 	for _, name := range actions.Deletes {
-		uid := uids[name]
-		object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{Namespace: r.Namespace, Name: name}}
-		if err := client.IgnoreNotFound(r.Client.Delete(ctx, object, client.Preconditions{UID: &uid})); err != nil {
+		if err := r.Writer.DeleteCandidate(ctx, name, uids[name]); err != nil {
 			return fmt.Errorf("deleting candidate %s: %w", name, err)
 		}
 	}
 	return nil
 }
 
-// createCandidate creates the candidate with server-side apply. It is only called for a
-// candidate that is missing from the cache, and re-applying the same content after a
-// stale cache read is a no-op, so no spec comparison is needed.
-func (r *Reconciler) createCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) error {
-	spec, companions, err := decodeManifest(candidate)
-	if err != nil {
-		return err
+// updateRunStatus writes the run status when it differs from what the cache shows and
+// from what this process already wrote. A snapshot without a usable timestamp keeps the
+// latest progress time known, because a server-side-apply payload that omits the field
+// would remove it.
+func (r *Reconciler) updateRunStatus(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, desired RunStatus) error {
+	observed := observedStatus(run)
+	if !desired.NeedsUpdate(observed) {
+		return nil
 	}
-	parameters, err := normalizeJSON(candidate.Parameters)
-	if err != nil {
-		return err
+	known := observed.LastProgress
+	if r.lastProgress.After(known) {
+		known = r.lastProgress
 	}
-	object := &v1beta2.DynamoGraphDeploymentCandidate{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: r.Namespace,
-			Name:      name,
-			Labels:    map[string]string{LabelRunUID: r.RunUID, LabelCandidateID: candidate.ID},
-		},
-		Spec: v1beta2.DynamoGraphDeploymentCandidateSpec{DynamoGraphDeploymentSpec: *spec},
+	write := desired.WithPreservedProgress(known)
+	if r.applied != nil && !write.NeedsUpdate(*r.applied) {
+		return nil // already written; the cache has not caught up yet
 	}
-	if companions != "" {
-		object.Annotations = map[string]string{AnnotationAdditionalResources: companions}
+	if err := r.Writer.UpdateRunStatus(ctx, run.ResourceVersion, write); err != nil {
+		return fmt.Errorf("updating run status: %w", err)
 	}
-	if err := controllerutil.SetControllerReference(run, object, r.Client.Scheme()); err != nil {
-		return err
+	r.applied = &write
+	if write.LastProgress.After(r.lastProgress) {
+		r.lastProgress = write.LastProgress
 	}
-	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(object)
-	if err != nil {
-		return err
-	}
-	// The status is written separately, through the status subresource.
-	delete(content, "status")
-	unstructured.RemoveNestedField(content, "metadata", "creationTimestamp")
-	if err := unstructured.SetNestedField(content, parameters, "spec", "parameters"); err != nil {
-		return err
-	}
-	apply := &unstructured.Unstructured{Object: content}
-	apply.SetGroupVersionKind(v1beta2.GroupVersion.WithKind("DynamoGraphDeploymentCandidate"))
-	return r.Client.Apply(ctx, client.ApplyConfigurationFromUnstructured(apply), client.FieldOwner(fieldOwner), client.ForceOwnership)
-}
-
-// populateStatus records the evaluation facts once. The candidate is referenced from the
-// run only after this, and its status is immutable afterwards.
-func (r *Reconciler) populateStatus(ctx context.Context, name string, candidate dgdcreconcile.DesiredCandidate) error {
-	metrics, err := normalizeJSON(candidate.Metrics)
-	if err != nil {
-		return err
-	}
-	apply := &unstructured.Unstructured{Object: map[string]any{
-		"metadata": map[string]any{"namespace": r.Namespace, "name": name},
-		"status": map[string]any{
-			"metrics": metrics,
-			"conditions": []any{map[string]any{
-				"type":               evaluatedCondition,
-				"status":             string(metav1.ConditionTrue),
-				"reason":             evaluatedCondition,
-				"message":            "evaluated by the Sweeper",
-				"lastTransitionTime": time.Now().UTC().Format(time.RFC3339),
-			}},
-		},
-	}}
-	apply.SetGroupVersionKind(v1beta2.GroupVersion.WithKind("DynamoGraphDeploymentCandidate"))
-	return r.Client.Status().Apply(ctx, client.ApplyConfigurationFromUnstructured(apply), client.FieldOwner(fieldOwner), client.ForceOwnership)
-}
-
-// updateRunStatus writes the publisher-owned run status fields with server-side apply, so
-// the run controller's own status fields (conditions) are left alone.
-func (r *Reconciler) updateRunStatus(ctx context.Context, status RunStatus) error {
-	refs := make([]any, 0, len(status.CandidateNames))
-	for _, name := range status.CandidateNames {
-		refs = append(refs, map[string]any{"name": name})
-	}
-	fields := map[string]any{
-		"message":       status.Message,
-		"candidateRefs": refs,
-	}
-	if status.HasProgress {
-		fields["progress"] = map[string]any{"round": int64(status.Round), "evaluated": int64(status.Evaluated)}
-	}
-	if !status.LastProgress.IsZero() {
-		fields["lastProgressTime"] = status.LastProgress.UTC().Format(time.RFC3339)
-	}
-	apply := &unstructured.Unstructured{Object: map[string]any{
-		"metadata": map[string]any{"namespace": r.Namespace, "name": r.RunName},
-		"status":   fields,
-	}}
-	apply.SetGroupVersionKind(v1beta2.GroupVersion.WithKind("DynamoGraphDeploymentRun"))
-	return r.Client.Status().Apply(ctx, client.ApplyConfigurationFromUnstructured(apply), client.FieldOwner(fieldOwner), client.ForceOwnership)
+	return nil
 }
 
 // observedStatus is the publisher-owned part of the run's current (cached) status.
@@ -353,23 +327,6 @@ func sweeperStateOf(pod *corev1.Pod, container string) SweeperState {
 		return SweeperState{}
 	}
 	return SweeperState{}
-}
-
-// normalizeJSON round-trips a value through JSON so it only holds the types unstructured
-// objects allow (int64, float64, string, bool, maps, slices).
-func normalizeJSON(value map[string]any) (map[string]any, error) {
-	out := map[string]any{}
-	if value == nil {
-		return out, nil
-	}
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // decodeManifest extracts the DGD spec and the companion resources from a rendered

@@ -121,3 +121,19 @@ func TestNeedsUpdateOnlyWhenSomethingDiffers(t *testing.T) {
 		}
 	}
 }
+
+func TestWithPreservedProgressKeepsTheKnownTimeOnlyWhenTheSnapshotHasNone(t *testing.T) {
+	known := time.Date(2026, 10, 5, 21, 35, 12, 0, time.UTC)
+	without := desire(t, withTimestamp(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}), "")).Status
+	if got := without.WithPreservedProgress(known).LastProgress; !got.Equal(known) {
+		t.Fatalf("a snapshot without a timestamp must keep the known time, got %v", got)
+	}
+	newer := time.Date(2026, 10, 5, 21, 40, 0, 0, time.UTC)
+	with := desire(t, withTimestamp(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}), "2026-10-05T21:40:00Z")).Status
+	if got := with.WithPreservedProgress(known).LastProgress; !got.Equal(newer) {
+		t.Fatalf("a snapshot with a timestamp must win, got %v", got)
+	}
+	if got := without.WithPreservedProgress(time.Time{}).LastProgress; !got.IsZero() {
+		t.Fatalf("nothing known, nothing to preserve, got %v", got)
+	}
+}
