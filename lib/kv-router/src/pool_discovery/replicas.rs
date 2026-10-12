@@ -4,9 +4,14 @@
 //! Router replicas a pool must connect to. Every replica needs every pool's
 //! state, so a Relay opens one connection per replica.
 //!
-//! Replicas register themselves, so a `ReplicaDirectory` can be backed by
-//! `dynamo_runtime::discovery::Discovery`. A replica must be listed before it
-//! is ready, or pools can never reach it.
+//! The operator deploys the Global Router, so each replica registers itself
+//! with the hub's Dynamo runtime discovery, like a worker, and the router
+//! reads that list back. It needs the list only for the `RegisterPool` reply.
+//!
+//! Runtime discovery lists only Ready pods, and Relays dial only listed
+//! replicas. So a replica's readiness must not wait for its pools, or no
+//! pool can ever reach it. Pool completeness is a separate signal
+//! ([`super::Completeness`]).
 //!
 //! The Relay reads a `ReplicaDirectory` in every mode. In gRPC and Hybrid
 //! modes it is filled from the `RegisterPool` and `Heartbeat` replies
