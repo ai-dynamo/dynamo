@@ -20,7 +20,6 @@ package dgdrrunpublisher
 import (
 	"context"
 	"errors"
-	"log"
 	"os"
 	"reflect"
 	"sync"
@@ -105,6 +104,9 @@ func checkProgress(previous, next *Snapshot) error {
 type Observer struct {
 	Store *InputStore
 	Path  string
+	// OnError reports a problem reading the snapshot, once per distinct message. It is
+	// optional; the manager wires it to the controller-runtime logger.
+	OnError func(err error)
 	// Enqueue asks the controller to reconcile the run. It must not block.
 	Enqueue func()
 	// MinInterval is the check interval after a change; it doubles while the input is
@@ -157,7 +159,9 @@ func (o *Observer) noteError(err error) {
 		return
 	}
 	o.lastErr = err.Error()
-	log.Printf("reading snapshot: %v", err)
+	if o.OnError != nil {
+		o.OnError(err)
+	}
 }
 
 // NextInterval is the delay before the next check: it resets to min after a change and

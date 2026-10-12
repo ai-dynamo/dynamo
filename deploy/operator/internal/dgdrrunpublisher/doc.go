@@ -34,6 +34,10 @@
 //     where they differ, and finally deletes obsolete candidates. Failed writes are
 //     retried by the workqueue with backoff.
 //
+// The publisher's own writes come back as watch events and the cache can trail them, so
+// the Reconciler remembers what it has written and ignores candidate update events; see
+// Reconciler.
+//
 // The manager's cache covers only this Run, its candidates (by the run-UID label) and the
 // publisher's own Pod, so there is no API-server polling and no spec comparison:
 // candidate specs are immutable once created.

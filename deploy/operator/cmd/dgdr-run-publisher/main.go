@@ -25,7 +25,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -33,6 +32,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 func main() {
@@ -41,6 +41,8 @@ func main() {
 
 func run() int {
 	var cfg dgdrrunpublisher.Config
+	logOptions := zap.Options{}
+	logOptions.BindFlags(flag.CommandLine)
 	flag.StringVar(&cfg.SnapshotDir, "snapshot-dir", "", "directory shared with the Sweeper container")
 	flag.StringVar(&cfg.RunName, "run-name", "", "name of the DynamoGraphDeploymentRun")
 	flag.StringVar(&cfg.RunUID, "run-uid", "", "UID of the DynamoGraphDeploymentRun this pod serves")
@@ -48,6 +50,7 @@ func run() int {
 	flag.DurationVar(&cfg.MinPollInterval, "poll-interval", time.Second, "snapshot check interval after a change")
 	flag.DurationVar(&cfg.MaxPollInterval, "max-poll-interval", 5*time.Second, "longest snapshot check interval while the snapshot is unchanged")
 	flag.Parse()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&logOptions)))
 
 	cfg.Namespace, cfg.PodName = os.Getenv("POD_NAMESPACE"), os.Getenv("POD_NAME")
 	if cfg.SnapshotDir == "" || cfg.RunName == "" || cfg.RunUID == "" || cfg.Namespace == "" || cfg.PodName == "" {
@@ -60,7 +63,7 @@ func run() int {
 
 	err := dgdrrunpublisher.Run(ctx, ctrl.GetConfigOrDie(), cfg)
 	if err != nil {
-		log.Printf("publisher: %v", err)
+		ctrl.Log.WithName("dgdr-run-publisher").Error(err, "publisher stopped")
 	}
 	return dgdrrunpublisher.ExitCode(err)
 }

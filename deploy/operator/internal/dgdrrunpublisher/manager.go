@@ -34,6 +34,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -41,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
@@ -102,6 +104,15 @@ func cacheOptions(c Config) cache.Options {
 	}
 }
 
+// ignoreCandidateUpdates drops candidate update events. The publisher is the only writer
+// of a candidate: its spec is immutable and its status is written once, so an update is
+// the echo of our own write and carries nothing to act on. Creates (including the
+// initial list) and deletes still enqueue the run key, so a deleted candidate is
+// repaired.
+var ignoreCandidateUpdates = predicate.Funcs{
+	UpdateFunc: func(event.UpdateEvent) bool { return false },
+}
+
 // Run starts the controller manager and returns the publisher's outcome (see the package
 // comment for its meaning and ExitCode for the exit code), or ctx's error if the process
 // is told to stop first.
@@ -133,6 +144,9 @@ func Run(ctx context.Context, restConfig *rest.Config, cfg Config) error {
 		Path:        SnapshotPath(cfg.SnapshotDir),
 		MinInterval: cfg.MinPollInterval,
 		MaxInterval: cfg.MaxPollInterval,
+		OnError: func(err error) {
+			ctrl.Log.WithName("input-observer").Error(err, "reading snapshot")
+		},
 		Enqueue: func() {
 			// One pending event is enough: the workqueue deduplicates by key anyway.
 			select {
@@ -143,7 +157,14 @@ func Run(ctx context.Context, restConfig *rest.Config, cfg Config) error {
 	}
 	completion := NewCompletion()
 	reconciler := &Reconciler{
-		Client:           mgr.GetClient(),
+		Client: mgr.GetClient(),
+		Writer: &clientWriter{
+			Client:    mgr.GetClient(),
+			Reader:    mgr.GetAPIReader(),
+			Namespace: cfg.Namespace,
+			RunName:   cfg.RunName,
+			RunUID:    cfg.RunUID,
+		},
 		Namespace:        cfg.Namespace,
 		RunName:          cfg.RunName,
 		RunUID:           cfg.RunUID,
@@ -160,7 +181,7 @@ func Run(ctx context.Context, restConfig *rest.Config, cfg Config) error {
 	if err := ctrl.NewControllerManagedBy(mgr).
 		Named("dgdr-run-publisher").
 		For(&v1beta2.DynamoGraphDeploymentRun{}).
-		Owns(&v1beta2.DynamoGraphDeploymentCandidate{}).
+		Owns(&v1beta2.DynamoGraphDeploymentCandidate{}, builder.WithPredicates(ignoreCandidateUpdates)).
 		Watches(&corev1.Pod{}, podToRun).
 		WatchesRawSource(source.Channel(events, &handler.EnqueueRequestForObject{})).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
