@@ -414,6 +414,8 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
 
 # Expected values follow SGLang MooncakeStore's `config_prefix`: backend tag (when
 # not None) then served model name with "/" -> "-", joined with "_".
+# Keep registration imports inside these tests so containers without SGLang can
+# still collect the capacity tests in this module.
 @pytest.mark.parametrize(
     "extra_config, served_model_name, expected",
     [
@@ -450,19 +452,26 @@ def test_mooncake_runtime_data_publishes_sglang_key_prefix(
 @pytest.mark.parametrize(
     "filename, content",
     [
-        ("extra.json", '{"extra_backend_tag": "t"}'),
-        ("extra.toml", 'extra_backend_tag = "t"\n'),
-        ("extra.yaml", "extra_backend_tag: t\n"),
-        ("extra.yml", "extra_backend_tag: t\n"),
+        ("extra.json", '{"extra_backend_tag": "équipe"}'),
+        ("extra.toml", 'extra_backend_tag = "équipe"\n'),
+        ("extra.yaml", "extra_backend_tag: équipe\n"),
+        ("extra.yml", "extra_backend_tag: équipe\n"),
     ],
 )
 def test_mooncake_key_prefix_reads_at_file_extra_config(
     monkeypatch, tmp_path, filename, content
 ):
+    """Preserve UTF-8 cache tags even when text reads default to ASCII."""
     from dynamo.sglang import register
 
+    def open_with_ascii_default(path, mode="r", **kwargs):
+        if "b" not in mode:
+            kwargs.setdefault("encoding", "ascii")
+        return open(path, mode, **kwargs)
+
     config_path = tmp_path / filename
-    config_path.write_text(content)
+    config_path.write_bytes(content.encode("utf-8"))
+    monkeypatch.setattr(register, "open", open_with_ascii_default, raising=False)
     monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
     server_args = SimpleNamespace(
         hicache_storage_backend="mooncake",
@@ -476,8 +485,8 @@ def test_mooncake_key_prefix_reads_at_file_extra_config(
 
     runtime_data = register._get_mooncake_runtime_data(server_args)
 
-    assert runtime_data["extra_backend_tag"] == "t"
-    assert runtime_data["key_prefix"] == "t_Qwen-Qwen3-0.6B"
+    assert runtime_data["extra_backend_tag"] == "équipe"
+    assert runtime_data["key_prefix"] == "équipe_Qwen-Qwen3-0.6B"
 
 
 @pytest.mark.parametrize("filename", ["missing.json", "extra.ini"])

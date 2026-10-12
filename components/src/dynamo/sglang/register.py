@@ -312,13 +312,13 @@ def _load_hicache_storage_extra_config_file(path: str) -> Any:
     """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".json":
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     if ext == ".toml":
         with open(path, "rb") as f:
             return tomllib.load(f)
     if ext in (".yaml", ".yml"):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return yaml.safe_load(f)
     raise ValueError(f"unsupported config file {path!r} (format {ext!r})")
 
