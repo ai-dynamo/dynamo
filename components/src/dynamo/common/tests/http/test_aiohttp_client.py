@@ -16,6 +16,10 @@ policy=...)`` path so we don't reach into the
 from __future__ import annotations
 
 import asyncio
+import http.server
+import threading
+import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import aiohttp
@@ -443,3 +447,136 @@ async def test_the_proxy_gate_is_awaitable() -> None:
     import inspect
 
     assert inspect.iscoroutinefunction(AiohttpClient._require_trusted_egress_proxy)
+
+
+# --- Read timeout: a stalled server fails early, a slow one still finishes ---
+
+
+@pytest.mark.parametrize("policy", [None, _PERMISSIVE], ids=["simple", "policy"])
+@pytest.mark.parametrize(
+    ("override", "kwargs", "expected"),
+    [
+        # No read timeout: what every caller that passes none gets, unchanged.
+        (None, {}, {"total": 30.0}),
+        (None, {"read_timeout": 2.0}, {"total": 30.0, "sock_read": 2.0}),
+        # DYN_HTTP_TIMEOUT replaces the total budget only.
+        ("7", {"read_timeout": 2.0}, {"total": 7.0, "sock_read": 2.0}),
+    ],
+    ids=["default", "read-timeout", "override"],
+)
+async def test_the_request_timeout_carries_the_read_timeout(
+    monkeypatch, policy, override, kwargs, expected
+) -> None:
+    if override is None:
+        monkeypatch.delenv("DYN_HTTP_TIMEOUT", raising=False)
+    else:
+        monkeypatch.setenv("DYN_HTTP_TIMEOUT", override)
+    seen = []
+    respond = _cm_returning(_FakeResponse(status=200, body=b"ok"))
+
+    def _get(url, **get_kwargs):
+        seen.append(get_kwargs["timeout"])
+        return respond(url)
+
+    session = MagicMock(spec=aiohttp.ClientSession)
+    session.closed = False
+    session.get = _get
+    client = _make_client_with_session(session)
+
+    body = await client.fetch_bytes("https://h/x.png", 30.0, policy=policy, **kwargs)
+
+    assert body == b"ok"
+    connect = client._config.connect_timeout
+    assert seen == [aiohttp.ClientTimeout(sock_connect=connect, **expected)]
+
+
+@pytest.fixture
+def paced_server():
+    """Serve ``state.body`` on loopback.
+
+    ``chunks`` and ``gap`` send the body in pieces, ``gap`` seconds apart.
+    ``stall`` sends one byte and then nothing more.
+    """
+    state = SimpleNamespace(body=bytes(range(256)) * 4, chunks=1, gap=0.0, stall=False)
+    done = threading.Event()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server API
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(state.body)))
+            self.end_headers()
+            try:
+                if state.stall:
+                    self.wfile.write(state.body[:1])
+                    done.wait(10)
+                    return
+                size = -(-len(state.body) // state.chunks)
+                for start in range(0, len(state.body), size):
+                    time.sleep(state.gap)
+                    self.wfile.write(state.body[start : start + size])
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the client gave up
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+    ).start()
+    state.url = f"http://127.0.0.1:{server.server_address[1]}/x.bin"
+    try:
+        yield state
+    finally:
+        done.set()
+        server.shutdown()
+        server.server_close()
+
+
+# The timeouts below stay under 5 s, the value from which aiohttp rounds a
+# timeout up to a whole second.
+
+
+@_allows_cleanup_closed_notice
+@pytest.mark.parametrize("policy", [None, _PERMISSIVE], ids=["simple", "policy"])
+async def test_a_stalled_server_fails_at_the_read_timeout(
+    monkeypatch, paced_server, policy
+) -> None:
+    """A server that stops sending fails at ``read_timeout``, long before the
+    whole-request ``timeout``."""
+    monkeypatch.delenv("DYN_HTTP_TIMEOUT", raising=False)
+    paced_server.stall = True
+    client = AiohttpClient()
+    try:
+        start = time.monotonic()
+        with pytest.raises(mm_http.HttpTimeoutError):
+            await client.fetch_bytes(
+                paced_server.url, 4.0, policy=policy, read_timeout=1.0
+            )
+        elapsed = time.monotonic() - start
+    finally:
+        await client.close()
+
+    assert elapsed < 2.5, f"waited {elapsed:.2f} s, the whole 4 s budget"
+
+
+@_allows_cleanup_closed_notice
+async def test_a_slow_steady_server_completes_within_the_total_budget(
+    monkeypatch, paced_server
+) -> None:
+    """``read_timeout`` bounds each wait for bytes, not the whole download."""
+    monkeypatch.delenv("DYN_HTTP_TIMEOUT", raising=False)
+    paced_server.chunks, paced_server.gap = 15, 0.1
+    client = AiohttpClient()
+    try:
+        start = time.monotonic()
+        body = await client.fetch_bytes(
+            paced_server.url, 4.0, policy=_PERMISSIVE, read_timeout=1.0
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        await client.close()
+
+    assert body == paced_server.body
+    # Longer than the 1 s read timeout, and within the 4 s budget.
+    assert elapsed > 1.0

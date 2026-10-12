@@ -62,8 +62,12 @@ type ModelProjection struct {
 	allocationMetadata     json.RawMessage
 	// partitions describes the partitions requested from LPX. Packing can combine
 	// several configuredBuild.Partitions into one LPX partition.
-	partitions    []BuildPartition
-	connectors    []lpxv1alpha1.PropSyncConnectorRequest
+	partitions []BuildPartition
+	connectors []lpxv1alpha1.PropSyncConnectorRequest
+	// propSyncEdges lists each position in partitions whose successor continues
+	// a selected prop-sync chain. Only unpacked HX projections set it; XT
+	// collapses selected chains in configuredBuild instead.
+	propSyncEdges []int
 	agentReplicas int
 	// localPartitionIDs lists the runtime partitions that run on the Cyborg GPU, in build order.
 	localPartitionIDs []int

@@ -57,6 +57,10 @@ issues:
       # EPPConfig symbol itself rather than also silencing a future
       # LegacyEPPConfig / EPPConfigRef.
       text: 'SA1019:.*\bEPPConfig is deprecated'
+    # Legacy minima remain part of conversion, compatibility defaulting, and migration validation.
+    - linters:
+        - staticcheck
+      text: 'SA1019:.*\bMinAvailable is deprecated: use providerOverride'
 linters:
   disable-all: true
   enable:
