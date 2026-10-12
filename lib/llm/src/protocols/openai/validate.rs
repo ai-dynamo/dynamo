@@ -591,6 +591,12 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
 pub(crate) fn validated_effective_tools(
     request: &CreateChatCompletionRequest,
 ) -> Result<Cow<'_, [ChatCompletionTool]>, anyhow::Error> {
+    // Check the request field, not the merged slice below: an omitted `tools`
+    // field also produces an empty slice and must stay valid.
+    if request.tools.as_ref().is_some_and(|tools| tools.is_empty()) {
+        anyhow::bail!("tools array cannot be empty; omit the field entirely to disable tool use");
+    }
+
     let dynamic_tools = request
         .dynamic_system_tools()
         .enumerate()

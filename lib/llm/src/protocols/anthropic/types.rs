@@ -112,10 +112,12 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             }
         }
 
-        // Convert tools
+        // Convert tools. Chat validation rejects an empty `tools` array, so map it
+        // to `None` to keep `/v1/messages` accepting `tools: []`.
         let tools = req
             .tools
             .as_deref()
+            .filter(|tools| !tools.is_empty())
             .map(convert_anthropic_tools)
             .transpose()?;
 
@@ -1230,6 +1232,13 @@ mod tests {
             container: None,
             output_config: None,
         };
+
+        let mut empty_req = req.clone();
+        empty_req.tools = Some(vec![]);
+        empty_req.tool_choice = None;
+        let empty_chat_req: NvCreateChatCompletionRequest = empty_req.try_into().unwrap();
+        assert!(empty_chat_req.inner.tools.is_none());
+        crate::engines::ValidateRequest::validate(&empty_chat_req).unwrap();
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert!(chat_req.inner.tools.is_some());
