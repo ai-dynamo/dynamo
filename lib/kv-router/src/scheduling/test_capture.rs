@@ -32,19 +32,25 @@ impl Capture {
     }
 
     pub fn fields(&self, name: &str, request: &str) -> HashMap<String, String> {
+        let matches = self.matching(name, request);
+        assert_eq!(matches.len(), 1, "{name} spans for {request}");
+        matches.into_iter().next().unwrap()
+    }
+
+    /// Closed spans named `name` for `request`; `parent` holds the parent span's name.
+    pub fn matching(&self, name: &str, request: &str) -> Vec<HashMap<String, String>> {
         let spans = self.0.lock().unwrap();
-        let mut matches = spans.iter().filter(|(n, fields)| {
-            *n == name
-                && fields
-                    .0
-                    .get("dynamo.request.id")
-                    .is_some_and(|id| id == request)
-        });
-        let (_, fields) = matches
-            .next()
-            .unwrap_or_else(|| panic!("no {name} for {request}"));
-        assert!(matches.next().is_none(), "multiple {name} for {request}");
-        fields.0.clone()
+        spans
+            .iter()
+            .filter(|(n, fields)| {
+                *n == name
+                    && fields
+                        .0
+                        .get("dynamo.request.id")
+                        .is_some_and(|id| id == request)
+            })
+            .map(|(_, fields)| fields.0.clone())
+            .collect()
     }
 }
 
@@ -57,7 +63,11 @@ impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Capture {
     ) {
         let mut fields = Fields::default();
         attrs.record(&mut fields);
-        ctx.span(id).unwrap().extensions_mut().insert(fields);
+        let span = ctx.span(id).unwrap();
+        if let Some(parent) = span.parent() {
+            fields.0.insert("parent".into(), parent.name().into());
+        }
+        span.extensions_mut().insert(fields);
     }
 
     fn on_record(&self, id: &tracing::Id, values: &tracing::span::Record<'_>, ctx: Context<'_, S>) {

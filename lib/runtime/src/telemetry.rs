@@ -261,6 +261,7 @@ impl LifecycleStage {
                 "dynamo.lifecycle.detail_schema" = "dispatch.v1",
                 "dynamo.dispatch.destination.worker.id" = tracing::field::Empty,
                 "dynamo.dispatch.destination.dp.rank" = tracing::field::Empty,
+                "dynamo.dispatch.phase" = tracing::field::Empty,
                 "dynamo.dispatch.route" = tracing::field::Empty,
                 "dynamo.dispatch.result" = tracing::field::Empty,
             ),
@@ -408,6 +409,30 @@ impl LifecycleTrace {
         let role = self.identity.as_ref().map(|identity| identity.role);
         self.start(worker_operation_stage(role))
     }
+
+    /// Make an enabled trace visible to router stages polled within `future`,
+    /// such as embedded KV-router admission, without widening router request
+    /// types. A missing or disabled trace leaves nothing in scope.
+    pub fn scope<F: std::future::Future>(
+        trace: Option<Arc<Self>>,
+        future: F,
+    ) -> impl std::future::Future<Output = F::Output> {
+        SCOPED_TRACE.scope(trace.filter(|trace| trace.enabled), future)
+    }
+
+    /// Synchronous form of [`LifecycleTrace::scope`].
+    pub fn scope_sync<R>(trace: Option<Arc<Self>>, f: impl FnOnce() -> R) -> R {
+        SCOPED_TRACE.sync_scope(trace.filter(|trace| trace.enabled), f)
+    }
+
+    /// The trace scoped by [`LifecycleTrace::scope`] around the current poll, if any.
+    pub fn scoped() -> Option<Arc<Self>> {
+        SCOPED_TRACE.try_with(Clone::clone).ok().flatten()
+    }
+}
+
+tokio::task_local! {
+    static SCOPED_TRACE: Option<Arc<LifecycleTrace>>;
 }
 
 /// Bounded frontend stage state, written once on drop. `abandoned` means dropped
@@ -540,7 +565,8 @@ impl Drop for TerminalState {
     }
 }
 
-fn lifecycle_mode() -> &'static str {
+/// Process-wide lifecycle mode (`core` or `investigation`), read once.
+pub fn lifecycle_mode() -> &'static str {
     LIFECYCLE_MODE.get_or_init(|| match std::env::var(DYN_LIFECYCLE_TRACE_MODE) {
         Ok(mode) if mode.trim().eq_ignore_ascii_case("investigation") => "investigation",
         _ => DEFAULT_MODE,
@@ -749,6 +775,22 @@ mod tests {
         let _span = trace.start(LifecycleStage::RequestPreprocessing);
 
         assert!(captured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_scope_exposes_only_enabled_traces() {
+        assert!(LifecycleTrace::scoped().is_none());
+        let enabled = Arc::new(LifecycleTrace::new(true));
+        let seen = LifecycleTrace::scope(Some(enabled.clone()), async {
+            tokio::task::yield_now().await;
+            LifecycleTrace::scoped()
+        })
+        .await;
+        assert!(seen.is_some_and(|trace| Arc::ptr_eq(&trace, &enabled)));
+        let disabled = Some(Arc::new(LifecycleTrace::new(false)));
+        let seen = LifecycleTrace::scope(disabled, async { LifecycleTrace::scoped() }).await;
+        assert!(seen.is_none());
+        assert!(LifecycleTrace::scoped().is_none());
     }
 
     #[test]

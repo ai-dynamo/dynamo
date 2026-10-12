@@ -28,8 +28,11 @@ impl RoutingHost {
             .map(to_worker_selection_session_context);
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
-        let selection_future = self
-            .select_worker_outcome(
+        // Router queue and selection spans run on the router actor; the scoped
+        // trace lets them join this request's trace under the selection span.
+        let selection_future = LifecycleTrace::scope(
+            request_lifecycle(request),
+            self.select_worker_outcome(
                 &context_id,
                 request,
                 routing_parts,
@@ -50,7 +53,8 @@ impl RoutingHost {
                     admission,
                 },
             )
-            .instrument(tracing::info_span!("kv_router.select_worker"));
+            .instrument(tracing::info_span!("kv_router.select_worker")),
+        );
 
         await_with_cleanup_policy(
             request_context.as_ref(),
@@ -548,15 +552,7 @@ impl RoutingHost {
         guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
-        let lifecycle = request
-            .get_optional::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
-            .ok()
-            .flatten()
-            .map(|trace| trace.as_ref().clone())
-            .unwrap_or_else(|| {
-                LifecycleTrace::frontend_request_without_session(context_id.clone())
-            });
-        let request_dispatch = lifecycle.start(LifecycleStage::RequestDispatch);
+        let request_dispatch = start_request_dispatch(&request, phase);
         request_dispatch.record(
             "dynamo.dispatch.destination.worker.id",
             selection.worker.worker_id,
