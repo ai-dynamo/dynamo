@@ -15,6 +15,15 @@ from dynamo.sglang.capacity import (
     kv_event_block_size,
 )
 
+# SGLang is optional in containers that only collect the capacity tests.
+# Propagate missing dependencies within an installed SGLang instead of hiding them.
+try:
+    from dynamo.sglang import register as _register
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang":
+        raise
+    _register = None
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
@@ -22,6 +31,14 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.fixture
+def register():
+    """Provide registration code only to tests that require SGLang."""
+    if _register is None:
+        pytest.skip("SGLang is not installed")
+    return _register
 
 
 @pytest.mark.parametrize(
@@ -37,6 +54,7 @@ pytestmark = [
     ],
 )
 def test_structural_tag_reasoning_policy_advertises_only_an_available_gate(
+    register,
     parser,
     skip_tokenizer_init,
     has_engine,
@@ -45,8 +63,6 @@ def test_structural_tag_reasoning_policy_advertises_only_an_available_gate(
     think_end_ids,
     expected,
 ):
-    from dynamo.sglang import register
-
     async def async_generate(*, require_reasoning=False):
         pass
 
@@ -204,6 +220,7 @@ def test_token_budget_matches_sglang_policy(
     ],
 )
 def test_runtime_config_publishes_supported_disagg_capabilities(
+    register,
     monkeypatch,
     caplog,
     disaggregation_mode,
@@ -211,8 +228,6 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     enable_multimodal,
     capability_expected,
 ):
-    from dynamo.sglang import register
-
     server_args = SimpleNamespace(
         allow_auto_truncate=False,
         context_length=4096,
@@ -346,9 +361,9 @@ def test_hicache_write_through_ignores_fully_overlapped_host_pool():
 
 
 @pytest.mark.asyncio
-async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, caplog):
-    from dynamo.sglang import register
-
+async def test_hicache_publish_failure_preserves_core_capacity(
+    register, monkeypatch, caplog
+):
     server_args = SimpleNamespace(
         allow_auto_truncate=False,
         context_length=4096,
@@ -414,8 +429,6 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
 
 # Expected values follow SGLang MooncakeStore's `config_prefix`: backend tag (when
 # not None) then served model name with "/" -> "-", joined with "_".
-# Keep registration imports inside these tests so containers without SGLang can
-# still collect the capacity tests in this module.
 @pytest.mark.parametrize(
     "extra_config, served_model_name, expected",
     [
@@ -429,10 +442,8 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     ],
 )
 def test_mooncake_runtime_data_publishes_sglang_key_prefix(
-    monkeypatch, extra_config, served_model_name, expected
+    register, monkeypatch, extra_config, served_model_name, expected
 ):
-    from dynamo.sglang import register
-
     monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
     server_args = SimpleNamespace(
         hicache_storage_backend="mooncake",
@@ -459,10 +470,9 @@ def test_mooncake_runtime_data_publishes_sglang_key_prefix(
     ],
 )
 def test_mooncake_key_prefix_reads_at_file_extra_config(
-    monkeypatch, tmp_path, filename, content
+    register, monkeypatch, tmp_path, filename, content
 ):
     """Preserve UTF-8 cache tags even when text reads default to ASCII."""
-    from dynamo.sglang import register
 
     def open_with_ascii_default(path, mode="r", **kwargs):
         if "b" not in mode:
@@ -490,9 +500,7 @@ def test_mooncake_key_prefix_reads_at_file_extra_config(
 
 
 @pytest.mark.parametrize("filename", ["missing.json", "extra.ini"])
-def test_unreadable_at_file_extra_config_is_ignored(tmp_path, filename):
-    from dynamo.sglang import register
-
+def test_unreadable_at_file_extra_config_is_ignored(register, tmp_path, filename):
     path = tmp_path / filename
     if filename.endswith(".ini"):
         path.write_text("extra_backend_tag = t\n")
