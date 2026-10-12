@@ -1666,7 +1666,6 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
         top_logprobs=None,
         cache_salt=None,
         mm_processor_kwargs=None,
-        logprobs=None,
         **{"temperature": None, "top_k": None, "min_p": None, **requested},
     )
     monkeypatch.setattr(

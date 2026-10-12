@@ -998,17 +998,18 @@ impl HttpService {
                     tracing::info!("HTTPS server shutdown requested");
                     let shutdown_timeout =
                         Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-                    handle.graceful_shutdown(Some(shutdown_timeout));
-                    let (result, drained) = tokio::join!(
-                        &mut server,
-                        state.wait_inflight_zero_or_timeout(shutdown_timeout),
-                    );
-                    if !drained {
-                        tracing::warn!(
-                            inflight_requests = state.inflight_count(),
-                            "Timed out waiting for inflight inference requests to drain"
-                        );
-                    }
+                    let drain_started = tokio::time::Instant::now();
+                    let (result, ()) = tokio::join!(&mut server, async {
+                        if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
+                            tracing::warn!(
+                                inflight_requests = state.inflight_count(),
+                                "Timed out waiting for inflight inference requests to drain"
+                            );
+                        }
+                        handle.graceful_shutdown(Some(
+                            shutdown_timeout.saturating_sub(drain_started.elapsed()),
+                        ));
+                    });
                     state.start_stopping();
                     state_cancel.cancel();
                     result.context("HTTPS server shutdown")?;
@@ -1068,17 +1069,18 @@ impl HttpService {
                     tracing::info!("HTTP server shutdown requested");
                     let shutdown_timeout =
                         Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-                    handle.graceful_shutdown(Some(shutdown_timeout));
-                    let (result, drained) = tokio::join!(
-                        &mut server,
-                        state.wait_inflight_zero_or_timeout(shutdown_timeout),
-                    );
-                    if !drained {
-                        tracing::warn!(
-                            inflight_requests = state.inflight_count(),
-                            "Timed out waiting for inflight inference requests to drain"
-                        );
-                    }
+                    let drain_started = tokio::time::Instant::now();
+                    let (result, ()) = tokio::join!(&mut server, async {
+                        if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
+                            tracing::warn!(
+                                inflight_requests = state.inflight_count(),
+                                "Timed out waiting for inflight inference requests to drain"
+                            );
+                        }
+                        handle.graceful_shutdown(Some(
+                            shutdown_timeout.saturating_sub(drain_started.elapsed()),
+                        ));
+                    });
                     state.start_stopping();
                     state_cancel.cancel();
                     result.context("HTTP server shutdown")?;
