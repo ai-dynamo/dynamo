@@ -150,12 +150,26 @@ impl TopologyPublisher {
         if state.membership == membership {
             return;
         }
+        // A logical reassignment starts a new public serving lifetime even when the
+        // physical endpoint survives. Never publish it with its predecessor's readiness.
+        let retained = membership
+            .endpoints
+            .iter()
+            .filter_map(|(endpoint, next)| {
+                state
+                    .membership
+                    .endpoints
+                    .get(endpoint)
+                    .is_some_and(|previous| previous.namespace == next.namespace)
+                    .then_some(endpoint.clone())
+            })
+            .collect::<HashSet<_>>();
         state
             .availability
-            .retain(|endpoint, _| membership.endpoints.contains_key(endpoint));
+            .retain(|endpoint, _| retained.contains(endpoint));
         state
             .availability_owners
-            .retain(|endpoint, _| membership.endpoints.contains_key(endpoint));
+            .retain(|endpoint, _| retained.contains(endpoint));
         state.membership = membership;
         publish_if_changed(&mut state, &self.sender);
     }
@@ -307,7 +321,7 @@ fn derive_topology(
                 .or_default();
             group.observe_authority(endpoint_availability.is_some());
             group.members.push(TopologyMember {
-                endpoint: endpoint.clone(),
+                endpoint: endpoint_membership.public_endpoint(),
                 roles: endpoint_membership.roles.clone(),
                 pool_id: compatible_pool_id(endpoint_membership, &base_model, pools),
             });
@@ -370,7 +384,7 @@ fn compatible_pool_id(
         return None;
     }
     let domain = membership.domain.as_ref()?;
-    let link = pools.get(&(membership.endpoint.clone(), base_model.clone()))?;
+    let link = pools.get(&(membership.public_endpoint(), base_model.clone()))?;
     let roles = membership.roles.iter().copied().collect::<BTreeSet<_>>();
     let registrations = membership
         .registrations
@@ -609,7 +623,7 @@ mod tests {
                 let pool_id = PoolId::new(domain.id, DcId::new(3));
                 DcPoolDescriptor::new(
                     ProducerIdentity::new(pool_id, 11, layout_generation, format),
-                    membership.endpoint.clone(),
+                    membership.public_endpoint(),
                     Arc::from(membership.registrations.clone()),
                     domain.query_semantics,
                     Arc::from(membership.roles.clone()),
@@ -625,6 +639,72 @@ mod tests {
             publisher.claim_availability(endpoint.clone(), membership.generation);
         }
         publisher
+    }
+
+    #[test]
+    fn logical_namespace_topology_links_physical_pool_and_availability() {
+        let mut member = endpoint(
+            "physical.backend.generate",
+            "llama",
+            1,
+            Some(WorkerType::Aggregated),
+            Vec::new(),
+        );
+        let physical = member.endpoint.clone();
+        let domain = member.domain.as_ref().unwrap().id;
+        member.namespace = "logical".into();
+        let view = view(vec![member]);
+        let publisher = publisher(&view);
+        publisher.replace_availability(physical, 1, Some(HashSet::from([1])));
+        let snapshot = publisher.snapshot();
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].namespace, "logical");
+        assert_eq!(
+            snapshot.entries[0].members[0].endpoint,
+            EndpointId::from("logical.backend.generate")
+        );
+        assert_eq!(
+            snapshot.entries[0].members[0].pool_id,
+            Some(PoolId::new(domain, DcId::new(3)))
+        );
+        assert_eq!(snapshot.entries[0].state, TopologyReadinessState::Ready);
+    }
+
+    #[test]
+    fn logical_reassignment_withdraws_readiness_before_a_new_slot_claim() {
+        let mut member = endpoint(
+            "physical.backend.generate",
+            "llama",
+            1,
+            Some(WorkerType::Aggregated),
+            Vec::new(),
+        );
+        let physical = member.endpoint.clone();
+        member.namespace = "logical-a".into();
+        let before = view(vec![member.clone()]);
+        let publisher = publisher(&before);
+        publisher.replace_availability(physical.clone(), 1, Some(HashSet::from([1])));
+        assert_eq!(
+            publisher.snapshot().entries[0].state,
+            TopologyReadinessState::Ready
+        );
+        member.namespace = "logical-b".into();
+        publisher.replace_membership(view(vec![member]));
+        assert_eq!(
+            publisher.snapshot().entries[0].state,
+            TopologyReadinessState::Unknown
+        );
+        publisher.replace_availability(physical.clone(), 1, Some(HashSet::from([1])));
+        assert_eq!(
+            publisher.snapshot().entries[0].state,
+            TopologyReadinessState::Unknown
+        );
+        publisher.claim_availability(physical.clone(), 2);
+        publisher.replace_availability(physical, 2, Some(HashSet::from([1])));
+        assert_eq!(
+            publisher.snapshot().entries[0].state,
+            TopologyReadinessState::Ready
+        );
     }
 
     #[test]

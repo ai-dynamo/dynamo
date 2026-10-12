@@ -187,6 +187,8 @@ async fn attach_pool(registry: &PoolRegistry, pool_id: PoolId) -> PoolAttachment
     registry
         .attach(PoolAttachRequest {
             pool_id,
+            public_endpoint: EndpointId::from("backend.generate"),
+            owner_cancel: CancellationToken::new(),
             endpoint: EndpointId::from("backend.generate"),
             registrations: vec![CanonicalModelRegistration::new(
                 CanonicalModelId::new("llama").unwrap(),
