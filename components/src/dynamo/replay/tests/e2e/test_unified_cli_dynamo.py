@@ -46,10 +46,13 @@ _RECOMMEND_CASES = tuple(
 
 
 def _report_child_output_on_timeout(run):
+    """Decorate a CLI runner to include captured output in timeout failures."""
+
     # subprocess.run discards the child's output on TimeoutExpired unless the
     # caller reads it from the exception; keep it so a CI timeout is diagnosable.
     @functools.wraps(run)
     def wrapper(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        """Run the command and report partial output if its timeout expires."""
         try:
             return run(*args, **kwargs)
         except subprocess.TimeoutExpired as exc:
@@ -67,6 +70,7 @@ def _report_child_output_on_timeout(run):
 
 @_report_child_output_on_timeout
 def _run_cli(*args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
+    """Run the AISimulate CLI and require a successful exit within the timeout."""
     result = subprocess.run(
         [sys.executable, "-m", "aisimulate", *args],
         cwd=_REPO_ROOT,
