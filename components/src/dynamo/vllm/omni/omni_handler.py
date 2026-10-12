@@ -506,6 +506,8 @@ class OmniHandler(BaseOmniHandler):
             except EngineShutdown:
                 logger.info(f"Request {request_id} aborted due to shutdown")
                 raise
+            except InvalidArgument:
+                raise
             except Exception as e:
                 logger.error(
                     "Error during generation for request %s: %s", request_id, e
@@ -580,7 +582,7 @@ class OmniHandler(BaseOmniHandler):
                     "rejecting the request",
                     lora_request.lora_name,
                 )
-                raise ValueError(
+                raise InvalidArgument(
                     f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
                 )
 

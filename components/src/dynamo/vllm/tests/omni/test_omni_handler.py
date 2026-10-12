@@ -1343,7 +1343,7 @@ class TestLoraEnablement:
             "dynamo.vllm.omni.omni_handler.get_lora_manager",
             return_value=MagicMock(),
         ):
-            with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+            with pytest.raises(InvalidArgument, match="unknown model or LoRA adapter"):
                 handler._resolve_lora_request("ghost-adapter")
 
     def test_resolve_lora_request_unknown_adapter_is_none_when_manager_missing(self):
