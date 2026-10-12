@@ -30,6 +30,7 @@ pub mod rerank;
 pub mod responses;
 pub mod stream_aggregator;
 mod strict_schema;
+pub mod structured_outputs;
 pub mod tools;
 pub mod validate;
 pub mod videos;
@@ -187,21 +188,8 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             }
         }
 
-        let guided_decoding_backend = self.get_guided_decoding_backend();
-        let guided_json = self.get_guided_json();
-        let guided_regex = self.get_guided_regex();
-        let guided_grammar = self.get_guided_grammar();
-        let guided_choice = self.get_guided_choice();
-        let guided_whitespace_pattern = self.get_guided_whitespace_pattern();
-        let guided_decoding = common::GuidedDecodingOptions::from_optional(
-            guided_json,
-            guided_regex,
-            guided_choice,
-            guided_grammar,
-            guided_decoding_backend,
-            guided_whitespace_pattern,
-            None,
-        )?;
+        // Admission and dispatch must resolve the same constraint and precedence.
+        let guided_decoding = common_ext::extract_guided_decoding_options(self)?;
         Ok(common::SamplingOptions {
             n,
             best_of,

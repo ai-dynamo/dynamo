@@ -31,6 +31,7 @@ from dynamo.vllm.args import (
     update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.handlers import build_sampling_params
 from dynamo.vllm.headless import build_headless_namespace
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
@@ -1517,6 +1518,46 @@ def test_build_sampling_params_maps_guided_decoding(constraint_name, constraint_
     for field in ("json", "regex", "grammar", "choice"):
         expected = constraint_value if field == constraint_name else None
         assert getattr(sp.structured_outputs, field) == expected
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_build_sampling_params_preserves_structured_output_modifiers(enabled):
+    """Prove worker delivery of explicit booleans and an empty whitespace pattern.
+
+    This calls the real mapper and vLLM parameter type, not inference. It must
+    not be interpreted as proof that xgrammar applies the per-request modifiers.
+    """
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {
+            "guided_decoding": {
+                "json": {"type": "object"},
+                "disable_any_whitespace": enabled,
+                "disable_additional_properties": enabled,
+                "whitespace_pattern": "",
+            }
+        },
+        "stop_conditions": {},
+        "output_options": {},
+    }
+    structured = build_sampling_params(request, {}).structured_outputs
+    assert structured.disable_any_whitespace is enabled
+    assert structured.disable_additional_properties is enabled
+    assert structured.whitespace_pattern == ""
+
+
+def test_build_sampling_params_accepts_legacy_constraint_without_modifiers():
+    """Older frontends omit the new wire keys; the worker keeps vLLM defaults."""
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {"guided_decoding": {"regex": "violet"}},
+        "stop_conditions": {},
+        "output_options": {},
+    }
+    structured = build_sampling_params(request, {}).structured_outputs
+    assert structured.regex == "violet"
+    assert structured.disable_any_whitespace is False
+    assert structured.disable_additional_properties is False
 
 
 @pytest.mark.parametrize(

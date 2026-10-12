@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::Validate;
 
+use super::structured_outputs::StructuredOutputs;
 use crate::protocols::common::GuidedDecodingOptions;
 
 /// Common extensions for OpenAI API requests that are not part of the standard OpenAI spec
@@ -76,6 +77,13 @@ pub struct CommonExt {
     #[builder(default, setter(strip_option))]
     pub guided_whitespace_pattern: Option<String>,
 
+    /// vLLM-style structured output constraint and backend modifiers.
+    /// Omission/null requests no new constraint. Cannot be combined with legacy
+    /// guided_* options; chat response_format follows the nested type's precedence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub structured_outputs: Option<StructuredOutputs>,
+
     /// Whether to skip special tokens in the decoded output.
     /// When true, special tokens (like EOS, BOS, PAD) are removed from the output text.
     /// When false, special tokens are included in the output text.
@@ -127,9 +135,33 @@ pub(crate) struct ChatCommonExt {
     continue_final_message: Option<bool>,
 }
 
+/// Resolve one canonical constraint for both request validation and dispatch.
+///
+/// Nested structured_outputs uses response_format overrides and rejects legacy
+/// guided_* mixtures. The legacy-only path retains its existing defaults. Returns
+/// None when neither path requests a constraint; invalid combinations return an
+/// invalid-argument error before inference.
 pub(crate) fn extract_guided_decoding_options(
     request: &impl CommonExtProvider,
 ) -> anyhow::Result<Option<GuidedDecodingOptions>> {
+    if let Some(common) = request.common_ext()
+        && let Some(structured) = &common.structured_outputs
+    {
+        if common.guided_json.is_some()
+            || common.guided_regex.is_some()
+            || common.guided_choice.is_some()
+            || common.guided_grammar.is_some()
+            || common.guided_decoding_backend.is_some()
+            || common.guided_whitespace_pattern.is_some()
+        {
+            return Err(super::structured_outputs::invalid(
+                "structured_outputs cannot be combined with legacy guided_* fields",
+            ));
+        }
+        return structured
+            .to_guided(request.structured_response_format())
+            .map(Some);
+    }
     let guided_whitespace_pattern = request.get_guided_whitespace_pattern();
     GuidedDecodingOptions::from_optional(
         request.get_guided_json(),
@@ -152,6 +184,11 @@ impl CommonExt {
 pub trait CommonExtProvider {
     /// Get a reference to the CommonExt struct if available
     fn common_ext(&self) -> Option<&CommonExt>;
+
+    /// Return a typed response_format override, or None for endpoints without one.
+    fn structured_response_format(&self) -> Option<&dynamo_protocols::types::ResponseFormat> {
+        None
+    }
 
     /// Guided Decoding Options
     fn get_guided_json(&self) -> Option<serde_json::Value>;
@@ -205,6 +242,7 @@ mod tests {
             guided_choice: None,
             guided_decoding_backend: None,
             guided_whitespace_pattern: None,
+            structured_outputs: None,
             skip_special_tokens: None,
             prompt_logprobs: None,
             add_generation_prompt: None,

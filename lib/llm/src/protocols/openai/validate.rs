@@ -1024,18 +1024,12 @@ pub fn validate_chat_template_args(
     Ok(())
 }
 
-/// Rejects a request with conflicting guided-decoding options.
+/// Check caller-supplied constraints before preprocessing or generation.
 ///
-/// The conflict rule itself lives in [`crate::protocols::common::GuidedDecodingOptions::validate`],
-/// reached here through `from_optional`, so this function adds no second copy of it. What it adds is
-/// the call at the request-validation boundary: every other field is checked here, where
-/// a failure becomes a 400 naming the problem, while guided decoding was checked only
-/// later inside `extract_sampling_options`. By that point the error is an untyped
-/// `anyhow` with nothing for the HTTP layer to branch on, so a malformed request was
-/// reported to the caller as `500 Internal Server Error`.
-///
-/// `structural_tag` has no `CommonExtProvider` getter, matching `extract_sampling_options`,
-/// which also passes `None` for it.
+/// Uses the same resolver as sampling extraction for nested structured_outputs,
+/// legacy guided_* values, response_format precedence and conflicts. Returns Ok
+/// for valid or absent constraints; errors reach the HTTP request-validation
+/// boundary as client errors. Does not mutate the request or compile backend grammars.
 pub fn validate_guided_decoding(request: &impl CommonExtProvider) -> Result<(), anyhow::Error> {
     extract_guided_decoding_options(request)?;
     Ok(())

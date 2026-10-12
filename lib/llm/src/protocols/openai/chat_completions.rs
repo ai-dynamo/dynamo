@@ -461,6 +461,11 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
         Some(&self.common)
     }
 
+    /// Expose chat's response_format to the shared structured-output resolver.
+    fn structured_response_format(&self) -> Option<&dynamo_protocols::types::ResponseFormat> {
+        self.inner.response_format.as_ref()
+    }
+
     /// Guided Decoding Options
     fn get_guided_json(&self) -> Option<serde_json::Value> {
         if let Some(value) = self.common.guided_json.clone() {

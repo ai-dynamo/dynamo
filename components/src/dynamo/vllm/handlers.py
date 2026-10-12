@@ -795,14 +795,28 @@ def build_sampling_params(
             ``generation_config.json`` (vLLM ``ModelConfig.get_diff_sampling_param``).
             Used for non-RL/chat clients that want the model's recommended
             sampling defaults applied transparently.
+        model_max_len: When set and max_tokens is omitted, cap the default output
+            budget using this context length minus the supplied token_ids length.
+        enable_rl: Use vLLM defaults for RL token-in requests instead of model
+            generation-config sampling defaults; stop-token defaults still apply.
 
     Returns:
-        SamplingParams configured from the request
+        New SamplingParams for internal token-delta output, with
+        detokenization disabled. The input dictionaries are not updated.
+
+    Raises:
+        ValueError: Invalid sampling values detected by vLLM's parameter checks.
+        HttpError: Unsupported non-progressing guided JSON reference cycles (400).
+        AttributeError: The installed vLLM lacks the required bad-word token-ID field.
 
     RL token-in requests use vLLM's default sampling values instead of model
     `generation_config.json` sampling overrides. Ordinary token-data requests
     keep generation_config defaults for Gateway/backward-compatible traffic.
     Stop-token defaults from the model config are still applied later.
+
+    Structured-output constraints and modifiers are delivered through
+    ``StructuredOutputsParams``. This does not compile a grammar or guarantee
+    modifier enforcement: the selected vLLM backend owns those effects.
     """
     if enable_rl and _is_token_in_request(request):
         # Use vLLM defaults without model generation_config overlays.
@@ -830,6 +844,10 @@ def build_sampling_params(
             whitespace_pattern=guided_decoding.get("whitespace_pattern"),
             structural_tag=serialize_structural_tag(
                 guided_decoding.get("structural_tag")
+            ),
+            disable_any_whitespace=guided_decoding.get("disable_any_whitespace", False),
+            disable_additional_properties=guided_decoding.get(
+                "disable_additional_properties", False
             ),
         )
 
