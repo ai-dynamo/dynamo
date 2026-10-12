@@ -17,11 +17,11 @@
 //! This is a native, partially resolved document: `x-dynamo-schema-import` marks
 //! dependency schema slots that require version-pinned offline composition. Those
 //! slots do not establish the imported fields' validation constraints.
-//! On a `text/event-stream` media type, `x-dynamo-sse-data-schema: true` means its
-//! `schema` describes each successful JSON data payload, not the entire SSE body,
-//! error/annotation events, or the literal `[DONE]` terminator. Consumers must
-//! explicitly support this convention; ordinary JSON Schema validation does not
-//! validate framing, event ordering, or termination.
+//! OpenAPI 3.2 `text/event-stream.itemSchema` describes parsed SSE data events:
+//! chunks, errors, `[DONE]`, and optional named chat dispatch events. JSON payloads
+//! use string `data` with `contentSchema`, which consumers must explicitly validate.
+//! Comments/keep-alives are ignored by SSE parsing; event ordering, termination,
+//! and disconnect behavior require separate lifecycle checks.
 
 use std::fs;
 use std::path::PathBuf;
