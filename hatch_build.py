@@ -63,6 +63,25 @@ def resolve_git_commit(root):
         return ""
 
 
+_EXISTING_COMMIT = re.compile(r'^__git_commit__ = "([0-9a-f]{40})"$', re.MULTILINE)
+
+
+def read_existing_git_commit(components):
+    """
+    Return the full commit SHA an earlier build wrote into a component's
+    _version.py, or "" if none holds one.
+    """
+    for component in components:
+        try:
+            with open(os.path.join(component, "_version.py")) as f:
+                match = _EXISTING_COMMIT.search(f.read())
+        except OSError:
+            continue
+        if match:
+            return match.group(1)
+    return ""
+
+
 class VersionWriterHook(BuildHookInterface):
     """
     A Hatch build hook to write the project version to a file.
@@ -88,19 +107,24 @@ class VersionWriterHook(BuildHookInterface):
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
 
-        git_commit = resolve_git_commit(self.root)
+        components = get_components()
+        # A wheel built from an unpacked sdist has no .git; keep the commit the
+        # sdist build already wrote into _version.py.
+        git_commit = resolve_git_commit(self.root) or read_existing_git_commit(
+            components
+        )
         if not git_commit:
-            message = (
+            # Warn rather than fail: `uv build` / `python -m build` build the wheel
+            # from the unpacked sdist, so a CI-only failure here would break them.
+            # The wheel-smoke test fails CI when a published wheel has no commit.
+            self.app.display_warning(
                 f"Could not determine the source commit: set {GIT_COMMIT_ENV} or "
-                "build from a git checkout."
+                'build from a git checkout. Writing __git_commit__ = "".'
             )
-            if os.environ.get("CI", "").strip().lower() in ("1", "true", "yes"):
-                raise RuntimeError(message)
-            self.app.display_warning(f'{message} Writing __git_commit__ = "".')
 
         version_content = f'#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n#  SPDX-License-Identifier: Apache-2.0\n\n# This file is auto-generated at build time\n__version__ = "{full_version}"\n__git_commit__ = "{git_commit}"\n'
 
-        for component in get_components():
+        for component in components:
             version_file_path = os.path.join(component, "_version.py")
             with open(version_file_path, "w") as f:
                 f.write(version_content)

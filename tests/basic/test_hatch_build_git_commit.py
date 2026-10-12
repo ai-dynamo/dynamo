@@ -167,8 +167,29 @@ def test_malformed_explicit_commit_raises(
         hook.initialize("standard", {})
 
 
-def test_no_commit_in_ci_raises(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_commit_in_ci_warns(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CI", "true")
+    app = _FakeApp()
+    _load_hook(tree, monkeypatch, app).initialize("standard", {})
+
+    assert _read_versions(tree) == {c: (METADATA_VERSION, "") for c in COMPONENTS}
+    assert len(app.warnings) == 1
+
+
+def test_keeps_commit_from_existing_version_file(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Models a wheel built from an unpacked sdist: no .git, no env var, but the
+    # sdist build already wrote the commit into _version.py.
     hook = _load_hook(tree, monkeypatch, _FakeApp())
-    with pytest.raises(RuntimeError, match="DYNAMO_GIT_COMMIT"):
-        hook.initialize("standard", {})
+    (tree / "components" / "src" / "dynamo" / COMPONENTS[1] / "_version.py").write_text(
+        f'__version__ = "{METADATA_VERSION}"\n__git_commit__ = "{VALID_SHA}"\n'
+    )
+    app = _FakeApp()
+    hook.app = app
+    hook.initialize("standard", {})
+
+    assert _read_versions(tree) == {
+        c: (METADATA_VERSION, VALID_SHA) for c in COMPONENTS
+    }
+    assert app.warnings == []
