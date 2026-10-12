@@ -316,7 +316,9 @@ RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm_patc
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch; \
         PATCH_INSTALLED=1; \
     fi; \
-    for p in $(ls /tmp/vllm_patches/*.patch | sort); do \
+    set -- /tmp/vllm_patches/*.patch; \
+    [ -e "$1" ] || { echo "ERROR: no vLLM patches found in container/deps/vllm/patches" >&2; exit 1; }; \
+    for p in "$@"; do \
         patch --forward --fuzz=0 --batch -p1 -d "${VLLM_SITE}" < "${p}"; \
     done; \
     if [ "${PATCH_INSTALLED}" = "1" ]; then \
