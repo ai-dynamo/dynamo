@@ -241,6 +241,6 @@ def patch_static_state_for_gms() -> None:
         )
     except Exception:
         logger.warning(
-            "[GMS] Could not patch scheduler_update_weights_mixin: ",
+            "[GMS] Could not patch SGLang weight_updater _export/_import_static_state: ",
             exc_info=True,
         )
