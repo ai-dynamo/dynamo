@@ -531,8 +531,10 @@ def test_native_and_dynamo_token_budget_parity(
 @pytest.mark.model(MODEL)
 @pytest.mark.timeout(900)
 @pytest.mark.parametrize("spec", PARITY_SPECS)
+@pytest.mark.parametrize("ceiling_source", ["worker", "generation-config"])
 def test_worker_output_ceiling(
     spec,
+    ceiling_source,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
@@ -540,7 +542,15 @@ def test_worker_output_ceiling(
     tmp_path,
 ):
     """Prove termination at a small configured ceiling, with EOS disabled."""
-    config = _dynamo_config(spec, tmp_path, output_limit=32)
+    if ceiling_source == "generation-config" and spec.framework != "vllm":
+        pytest.skip("Explicit generation-config ceiling is a vLLM server control")
+    config = _dynamo_config(
+        spec, tmp_path, output_limit=32 if ceiling_source == "worker" else None
+    )
+    if ceiling_source == "generation-config":
+        config.script_args.extend(
+            ["--override-generation-config", '{"max_new_tokens":32}']
+        )
     with managed_serve_deployment(config, request, ports=dynamo_dynamic_ports):
         for stream in (False, True):
             for requested in (None, 8, 32, 64):
