@@ -7,12 +7,13 @@ import hashlib
 import struct
 from dataclasses import replace
 
-import msgspec
-import numpy as np
 import pytest
-import zstandard as zstd
 
-from dynamo.artifacts.vllm.format import (
+msgspec = pytest.importorskip("msgspec")
+np = pytest.importorskip("numpy")
+zstd = pytest.importorskip("zstandard")
+
+from dynamo.artifacts.vllm.format import (  # noqa: E402
     CODEC_NONE,
     CODEC_ZSTD,
     GenerationArtifactChoice,
