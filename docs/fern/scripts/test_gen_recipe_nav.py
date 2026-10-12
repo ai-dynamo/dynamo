@@ -246,6 +246,28 @@ def test_render_index_reorders_only_the_active_list():
     assert out == "schema_version: 1\nrecipes:\n- z\n- q\ndeferred_recipes:\n- d\n"
 
 
+@pytest.mark.parametrize(
+    "items",
+    [
+        ["- q", "# newest first", "- z"],
+        ["- q", "", "- z"],
+        ["  - q", "  - z"],
+    ],
+)
+def test_render_index_rejects_a_split_or_indented_list(items):
+    # Rewriting only the first run of items would leave the rest behind, so
+    # every run would duplicate them.
+    text = "\n".join(["recipes:", *items, "deferred_recipes:", "- d", ""])
+    with pytest.raises(gen.CatalogError, match="contiguous"):
+        gen.render_index(text, groups_for("z", "q"))
+
+
+def test_render_index_keeps_comments_after_the_list():
+    text = "recipes:\n- q\n- z\n\n# held back\ndeferred_recipes:\n- d\n"
+    out = gen.render_index(text, groups_for("z", "q"))
+    assert out == "recipes:\n- z\n- q\n\n# held back\ndeferred_recipes:\n- d\n"
+
+
 def test_splice_replaces_between_markers_and_keeps_indent():
     text = "a\n    # nav:begin\n    stale\n    # nav:end\nb"
     out = gen.splice(text, "nav", lambda ind: [f"{ind}fresh"], gen.NAV_YML)

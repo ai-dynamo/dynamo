@@ -330,6 +330,19 @@ def render_index(text: str, groups: list[Group]) -> str:
     end = start
     while end < len(lines) and lines[end].startswith("- "):
         end += 1
+    # Only a contiguous, unindented list is rewritten; an item left past a
+    # comment, blank line, or indent would be duplicated on every run.
+    rest = end
+    while rest < len(lines) and (
+        not lines[rest].strip() or lines[rest].lstrip().startswith("#")
+    ):
+        rest += 1
+    if rest < len(lines) and lines[rest].lstrip().startswith("- "):
+        raise CatalogError(
+            f"index.yaml: line {rest + 1} continues the recipes: list after a "
+            "comment, blank line, or indent; keep the list as contiguous "
+            "'- <id>' lines with no indent"
+        )
     ordered = [f"- {r.id}" for g in groups for r in g.recipes]
     return "\n".join(lines[:start] + ordered + lines[end:])
 
