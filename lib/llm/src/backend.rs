@@ -106,17 +106,19 @@ fn decode_token_text(tokenizer: &Tokenizer, token_id: TokenIdType) -> Option<Str
 
 /// Fills missing candidate metadata only from complete, lossless single-ID decodes, with
 /// special tokens kept as for the sampled token (see [`decode_token_text`]). Engine-provided
-/// values are left unchanged.
+/// values are left unchanged, except that an empty engine string counts as missing: an
+/// engine that decodes candidates with `skip_special_tokens` sends one for every special
+/// token.
 fn fill_missing_top_logprob_text(tokenizer: &Tokenizer, top_logprobs: &mut TopLogprobs) {
     for position in top_logprobs.iter_mut() {
         for entry in position.iter_mut() {
-            if entry.token.is_none()
+            if entry.token.as_deref().is_none_or(str::is_empty)
                 && let Ok(decoded) = tokenizer.decode(&[entry.token_id], false)
                 && decoded.is_complete()
                 && !decoded.as_str().contains('\u{fffd}')
             {
                 let token: String = decoded.into();
-                if entry.bytes.is_none() && !token.is_empty() {
+                if entry.bytes.as_ref().is_none_or(Vec::is_empty) && !token.is_empty() {
                     entry.bytes = Some(token.as_bytes().to_vec());
                 }
                 entry.token = Some(token);
@@ -443,6 +445,15 @@ impl
                             {
                                 data.jailed_text = decoder.checkpoint();
                             }
+                        }
+                        // The engine's per-token strings are reported as sent, except that
+                        // its top-logprob string for the sampled ID wins, as on the
+                        // decoder path below.
+                        if let Some(data) = &mut output.data
+                            && let (Some(tokens), Some(top_logprobs)) =
+                                (data.tokens.as_mut(), data.top_logprobs.as_ref())
+                        {
+                            prefer_engine_token_text(tokens, &data.token_ids, top_logprobs);
                         }
                         return Some((output, state));
                     }
@@ -1888,6 +1899,53 @@ mod tests {
         );
         assert_eq!(content[0].token, "Okay!");
         assert_eq!(content[0].bytes, Some(b"Okay!".to_vec()));
+        // The empty candidate string is decoded like a missing one.
+        assert_eq!(content[1].top_logprobs[0].token, "<|user|>");
+        assert_eq!(content[1].top_logprobs[0].bytes, Some(b"<|user|>".to_vec()));
+    }
+
+    /// An engine that decodes its own text bypasses the decoder; its top-logprob string
+    /// for the sampled ID still wins over the per-token string it sent.
+    #[tokio::test]
+    async fn test_engine_decoded_chunk_prefers_the_engine_logprob_string() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: Some(1),
+                ..Default::default()
+            })
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine {
+                outputs: Some(vec![LLMEngineOutput {
+                    token_ids: vec![101],
+                    tokens: Some(vec![Some("Okay".to_string())]),
+                    text: Some("Okay".to_string()),
+                    log_probs: Some(vec![-0.1]),
+                    top_logprobs: Some(vec![vec![top_logprob(101, Some("Okay!"))]]),
+                    index: Some(0),
+                    ..Default::default()
+                }]),
+            });
+
+        let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let output = stream
+            .next()
+            .await
+            .expect("backend emits a response")
+            .data
+            .expect("response contains backend output");
+
+        assert_eq!(output.text.as_deref(), Some("Okay"));
+        assert_eq!(output.tokens, vec![Some("Okay!".to_string())]);
     }
 
     #[test]
