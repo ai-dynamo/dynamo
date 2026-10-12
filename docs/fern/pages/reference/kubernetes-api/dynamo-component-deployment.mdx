@@ -377,11 +377,13 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 </Indent>
 
 <ParamField path="checkpoint" type="ComponentCheckpointConfig">
-  Configures container-image snapshotting and restore for the component. Set `checkpoint.enabled: true` to opt in; omit `checkpointRef` for a DGD-managed automatic checkpoint, or set it to restore a `PodSnapshot` in the same namespace.
+  Experimental process checkpoint/restore through standalone Snapshot. The API retains the name `checkpoint`; configure it under `spec.components[*].experimental` in a DGD. Enable checkpoint support in the Dynamo operator and install Snapshot before using this field.
+
+  Set `enabled: true` without `checkpointRef` for DGD-managed capture through a `SnapshotJob`. Set `checkpointRef` to restore an existing compatible `PodSnapshot` in the same namespace. Omit the deprecated `mode` and `identity` fields.
 </ParamField>
 
 <Warning>
-This release is a hard compatibility boundary for checkpoint resources. Dynamo creates automatic captures through the standalone Snapshot operator's `SnapshotJob` API, and `checkpointRef` names a standalone `PodSnapshot`. Legacy `DynamoCheckpoint` objects and their artifacts cannot be restored.
+Dynamo v1.5.0 is a hard compatibility boundary for checkpoint resources. Dynamo creates automatic captures through the standalone Snapshot operator's `SnapshotJob` API, and `checkpointRef` names a standalone `PodSnapshot`. Legacy `DynamoCheckpoint` objects and their artifacts cannot be restored.
 
 The upgrade does not delete the legacy `DynamoCheckpoint` CRD, instances, `PodSnapshot` objects, `PodSnapshotContent` objects, PVC data, or stored artifacts. Before upgrading, list retained `DynamoCheckpoint` objects and legacy `PodSnapshot` objects labeled `nvidia.com/snapshot-owner`, recreate any required snapshots through the standalone Snapshot APIs, and delete unneeded legacy checkpoints while the old controller can still run their finalizers. After upgrading, review and remove unsupported resources manually. Do not delete the shared `PodSnapshot` or `PodSnapshotContent` CRDs because the standalone Snapshot operator uses them.
 </Warning>
@@ -391,17 +393,19 @@ The upgrade does not delete the legacy `DynamoCheckpoint` CRD, instances, `PodSn
     Whether checkpointing is enabled for this component. When `true`, omit `checkpointRef` for a DGD-managed automatic checkpoint, or set `checkpointRef` to restore a `PodSnapshot` in the same namespace. Omit the `checkpoint` block, or set `enabled: false`, to disable checkpointing.
   </ParamField>
   <ParamField path="startupPolicy" type="CheckpointStartupPolicy" default="Immediate">
-    When normal worker replicas are started relative to automatic checkpoint readiness. `Immediate` starts workers cold immediately, and later pods restore from the checkpoint once it is Ready. `WaitForCheckpoint` keeps worker replicas at zero until the checkpoint is Ready, then starts them from it.
+    When serving workers start relative to automatic capture. `Immediate` starts them cold while the `SnapshotJob` runs; only Pods created after capture completes restore. Snapshot readiness does not restart existing workers. `WaitForCheckpoint` keeps serving replicas at zero until capture completes and the `PodSnapshot` is Ready, then starts them from it. Capture completion includes any helper containers that persist state.
 
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Immediate</Badge> <Badge intent="note" minimal>WaitForCheckpoint</Badge></span>
   </ParamField>
   <ParamField path="deletionPolicy" type="CheckpointDeletionPolicy" default="Delete">
-    Whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit `checkpointRef` PodSnapshots are never owned or deleted by the DGD, and retained automatic checkpoints are not valid `checkpointRef` targets.
+    Whether DGD-managed capture resources and snapshot artifacts are deleted or retained when the owning DGD is deleted. Explicit `checkpointRef` PodSnapshots are never owned or deleted by the DGD, and retained automatic checkpoints are not valid `checkpointRef` targets.
 
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Delete</Badge> <Badge intent="note" minimal>Retain</Badge></span>
   </ParamField>
   <ParamField path="checkpointRef" type="string">
-    References an existing `PodSnapshot` in the same namespace by `metadata.name`. When set, this component's `identity` is ignored and the referenced PodSnapshot is used directly. Standalone worker-class (`worker`, `prefill`, or `decode`) `DynamoComponentDeployment` resources cannot set this field; configure `checkpointRef` on the component in the owning `DynamoGraphDeployment`.
+    Names an existing `PodSnapshot` in the same namespace. Before workers can restore, the snapshot must be Ready and carry matching Dynamo compatibility metadata for the target worker configuration. If the named snapshot does not exist, its capture has failed, or its compatibility metadata does not match, the operator reports an error and does not restore workers from it. Both startup policies perform these checks.
+
+    Standalone worker-class (`worker`, `prefill`, or `decode`) `DynamoComponentDeployment` resources cannot set this field; configure it on the component in the owning DGD. Do not set `job` with `checkpointRef`.
   </ParamField>
   <ParamField path="targetContainerName" type="string" default="main">
     The workload container to snapshot and restore. Must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
@@ -454,7 +458,7 @@ The upgrade does not delete the legacy `DynamoCheckpoint` CRD, instances, `PodSn
       Maximum sequence length. Minimum `1`.
     </ParamField>
     <ParamField path="extraParameters" type="map[string]string" deprecated={true}>
-      Additional parameters that affect the checkpoint hash.
+      Legacy identity parameters. Ignored for DGD-managed automatic capture.
     </ParamField>
   </Indent>
 </Indent>

@@ -323,7 +323,13 @@ These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mo
 </ParamField>
 
 <ParamField path="DYN_BENCH_GIANT_KV_REPEATS" type="integer" default="3">
-  Steady-step repeat count for real-KV points and for fake-injected points above the threshold; the recorded latency is the median. The warm-up chains reserve this many steady writes per request.
+  Steady-step repeat count for real-KV points and for fake-injected points above the threshold; the recorded latency is the median. The warm-up chains reserve this many steady writes per request. These adjacent steps share one preparation and are not independent benchmark repetitions. The artifact retains their individual timings in `benchmark_measurement.raw_fpms`.
+</ParamField>
+
+<ParamField path="DYN_BENCH_CONTENT_SEED" type="string" default="0">
+  Seed for benchmark prompt construction. The seed is combined with the point's coordinates, data-parallel rank, and request slot, independently of grid membership, benchmark point id, or earlier requests. Keep it fixed when comparing full-grid and subset runs; set the same value on every rank. Changing it creates a different content sample and is recorded in `measurement_protocol.content_seed`.
+
+  Matching this seed does not establish identical inputs by itself. Compare the recorded per-rank prompt hashes and preparation metadata, and keep the model, tokenizer, dataset, content mode, and pool tag fixed. Prompt hashes do not cover sampled continuation tokens, KV-cache or recurrent-state tensors, or prior execution history.
 </ParamField>
 
 <ParamField path="DYN_BENCH_PREFILL_CONTENT" type="string">
@@ -339,6 +345,8 @@ These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mo
 </ParamField>
 
 Every result and skipped-point entry in the artifact carries a `kv_seed_regime` field plus `kvwarm` and `synthetic_prompts` metadata blocks, so downstream consumers can filter by seeding provenance. Decode rows carry `real_kv`, `fake_fallback`, `legacy` (warm-up switched off), `skip:<reason>` (gate rejected the configuration), or `unstamped` (decode point that never reached injection). Prefill rows that read past KV carry `real_prefix` (real-KV seeding on) or `fake_prefix` (synthetic prefix blocks); other prefill rows are `not_applicable`.
+
+See [Measurement Protocol in the Self-Benchmark Artifact](forward-pass-metrics-traces.mdx#measurement-protocol-in-the-self-benchmark-artifact) for input hashes, warmup completion records, per-sample timing intervals, and observed CUDA graph dispatch. See [Engine Provenance in the Self-Benchmark Artifact](forward-pass-metrics-traces.mdx#engine-provenance-in-the-self-benchmark-artifact) for the optional `engine` block and the worker probe sidecar that records resolved worker configurations and probe coverage.
 
 ## Request tracing
 
