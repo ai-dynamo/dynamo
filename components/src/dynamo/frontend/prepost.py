@@ -275,8 +275,15 @@ def build_tool_call_guided_decoding(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    starts_in_reasoning: bool = False,
 ) -> dict[str, Any] | None:
-    """Build tool-call guidance through vLLM's configured tool parser."""
+    """Build tool-call guidance through vLLM's configured tool parser.
+
+    ``starts_in_reasoning`` is true when generation begins inside a reasoning
+    block the prompt opened and the engine does not hold the grammar back until
+    that block ends. The structural tag must then accept the reasoning text and
+    its end marker before the tool-call section.
+    """
     if not _should_build_tool_call_guidance(
         request,
         structural_tag_mode=structural_tag_mode,
@@ -303,11 +310,15 @@ def build_tool_call_guided_decoding(
                     model=structural_tag_model,
                     tools=request_for_tag.tools,
                     tool_choice=request_for_tag.tool_choice,
-                    reasoning=False,
+                    reasoning=starts_in_reasoning,
                     **structural_tag_kwargs,
                 )
                 if structural_tag_model is not None
                 and get_model_structural_tag is not None
+                # Older parser hooks may not take ``reasoning``; keep their
+                # call unchanged unless the reasoning prefix is needed.
+                else tool_parser.get_structural_tag(request_for_tag, reasoning=True)
+                if starts_in_reasoning
                 else tool_parser.get_structural_tag(request_for_tag)
             )
         except (
@@ -519,6 +530,44 @@ def _reasoning_parser_enabled(
     )
 
 
+# Enough trailing prompt tokens to contain any reasoning opener.
+_REASONING_START_TAIL_TOKENS = 16
+
+
+def _prompt_leaves_reasoning_open(
+    prompt_token_ids: Sequence[int],
+    *,
+    tokenizer: TokenizerLike,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    chat_template_kwargs: dict[str, Any],
+    model_config: ModelConfig | None,
+) -> bool:
+    """Whether the rendered prompt ends with an opened reasoning block.
+
+    Mirrors ``prompt_injected_reasoning_start`` in the Rust preprocessor: the
+    prompt (trailing whitespace ignored) must end with the reasoning parser's
+    opening marker. A prompt without that marker, e.g. for models that emit
+    their own opener, does not start in reasoning.
+    """
+    if not prompt_token_ids or not _reasoning_parser_enabled(
+        reasoning_parser_class, chat_template_kwargs
+    ):
+        return False
+    parser = reasoning_parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    start = getattr(parser, "reasoning_start_str", None)
+    if not isinstance(start, str) or not start:
+        return False
+    tail = tokenizer.decode(
+        list(prompt_token_ids[-_REASONING_START_TAIL_TOKENS:]),
+        skip_special_tokens=False,
+    )
+    return tail.rstrip().endswith(start)
+
+
 def _prepare_request(
     request: dict[str, Any] | ChatCompletionRequest,
     *,
@@ -697,6 +746,7 @@ async def preprocess_chat_request(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    structural_tag_excludes_reasoning: bool = False,
 ) -> PreprocessResult:
     validated_request = _validate_chat_completion_request(request)
     assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
@@ -750,6 +800,21 @@ async def preprocess_chat_request(
         and adjusted_structured_guidance != client_structured_guidance
         else None
     )
+    # Render first: whether generation starts inside a reasoning block depends
+    # on the rendered prompt (e.g. a template that ends the generation prompt
+    # with an open think tag), and the tool-call grammar must match it.
+    _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
+
+    if "prompt_token_ids" in engine_prompt:
+        tokens = list(engine_prompt["prompt_token_ids"])
+    else:
+        async_tokenizer = _get_async_tokenizer(tokenizer)
+        encoded = await async_tokenizer(
+            engine_prompt["prompt"],
+            add_special_tokens=request_for_sampling.add_special_tokens,
+        )
+        tokens = list(encoded.input_ids)
+
     tool_guided_decoding = build_tool_call_guided_decoding(
         request_for_sampling,
         tool_parser,
@@ -757,6 +822,19 @@ async def preprocess_chat_request(
         structural_tag_mode=structural_tag_mode,
         structural_tag_scope=structural_tag_scope,
         structural_tag_schema=structural_tag_schema,
+        starts_in_reasoning=(
+            structural_tag_mode == "on"
+            and tool_parser is not None
+            and bool(request_for_sampling.tools)
+            and not structural_tag_excludes_reasoning
+            and _prompt_leaves_reasoning_open(
+                tokens,
+                tokenizer=tokenizer,
+                reasoning_parser_class=reasoning_parser_class,
+                chat_template_kwargs=chat_template_kwargs,
+                model_config=model_config,
+            )
+        ),
     )
     # A forced tool choice already claims the decoder's single grammar slot, so a
     # caller-set guided_*/structured_outputs constraint over the same token stream
@@ -827,18 +905,6 @@ async def preprocess_chat_request(
         and isinstance(tool_guided_decoding, dict)
         and ("json" in tool_guided_decoding or "regex" in tool_guided_decoding)
     )
-
-    _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
-
-    if "prompt_token_ids" in engine_prompt:
-        tokens = list(engine_prompt["prompt_token_ids"])
-    else:
-        async_tokenizer = _get_async_tokenizer(tokenizer)
-        encoded = await async_tokenizer(
-            engine_prompt["prompt"],
-            add_special_tokens=request_for_sampling.add_special_tokens,
-        )
-        tokens = list(encoded.input_ids)
 
     return PreprocessResult(
         request_for_sampling=request_for_sampling,

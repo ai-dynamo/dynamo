@@ -21,7 +21,8 @@ use dynamo_protocols::types::{
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
     ChatCompletionToolChoiceOption, ChatCompletionToolType, CompletionUsage, FunctionName,
-    FunctionObject, FunctionType, ImageUrl, ReasoningContent,
+    FunctionObject, FunctionType, ImageUrl, ReasoningContent, ResponseFormat,
+    ResponseFormatJsonSchema,
 };
 use uuid::Uuid;
 
@@ -59,7 +60,7 @@ fn system_message_content(content: &AnthropicMessageContent) -> String {
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
-    fn try_from(req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
+    fn try_from(mut req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
         let mut messages = Vec::new();
 
         // Prepend system message if present
@@ -136,6 +137,33 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .filter(|sequences| !sequences.is_empty())
             .map(dynamo_protocols::types::Stop::StringArray);
 
+        let response_format = req
+            .output_config
+            .as_mut()
+            .and_then(|config| config.get_mut("format"))
+            .filter(|format| !format.is_null())
+            .map(|format| {
+                anyhow::ensure!(
+                    format.get("type").and_then(|value| value.as_str()) == Some("json_schema"),
+                    "output_config.format.type must be json_schema"
+                );
+                let schema = format
+                    .get_mut("schema")
+                    .filter(|schema| schema.is_object())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("output_config.format.schema must be an object")
+                    })?;
+                Ok::<_, anyhow::Error>(ResponseFormat::JsonSchema {
+                    json_schema: ResponseFormatJsonSchema {
+                        name: "response".into(),
+                        description: None,
+                        schema: schema.take(),
+                        strict: Some(true),
+                    },
+                })
+            })
+            .transpose()?;
+
         Ok(NvCreateChatCompletionRequest {
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
@@ -147,6 +175,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 tools,
                 tool_choice,
                 parallel_tool_calls,
+                response_format,
                 stream: Some(true), // Always stream internally
                 // Request cumulative usage on every chunk (not just the final
                 // one) so the Anthropic stream converter can stamp an
@@ -862,6 +891,74 @@ pub fn chat_completion_to_anthropic_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_output_config_format_conversion() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "$defs": {"value": {"type": "string", "enum": ["OK"]}},
+            "properties": {"value": {"$ref": "#/$defs/value"}},
+            "required": ["value"],
+            "additionalProperties": false
+        });
+        let req: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model", "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Return a value."}],
+            "output_config": {"format": {"type": "json_schema", "schema": schema}}
+        }))
+        .unwrap();
+        let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+        assert_eq!(
+            serde_json::to_value(chat.inner.response_format).unwrap(),
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": schema, "strict": true}
+            })
+        );
+    }
+
+    #[test]
+    fn test_output_config_format_absent_or_invalid() {
+        for (config, valid) in [
+            (serde_json::json!(null), true),
+            (serde_json::json!({}), true),
+            (serde_json::json!({"effort": "high"}), true),
+            (serde_json::json!({"format": null}), true),
+            (serde_json::json!({"format": "json_schema"}), false),
+            (serde_json::json!({"format": {"type": "text"}}), false),
+            (serde_json::json!({"format": {"schema": {}}}), false),
+            (
+                serde_json::json!({"format": {"type": "json_schema"}}),
+                false,
+            ),
+            (
+                serde_json::json!({"format": {"type": "json_schema", "schema": null}}),
+                false,
+            ),
+            (
+                serde_json::json!({"format": {"type": "json_schema", "schema": []}}),
+                false,
+            ),
+        ] {
+            let req: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+                "model": "test-model", "max_tokens": 100,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "output_config": config
+            }))
+            .unwrap();
+            let result = NvCreateChatCompletionRequest::try_from(req);
+            if valid {
+                assert!(result.unwrap().inner.response_format.is_none());
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .starts_with("output_config.format")
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_simple_user_message_conversion() {
