@@ -42,11 +42,21 @@ _PREDICT_CASES = tuple(
 _RECOMMEND_CASES = tuple(
     sorted((_REPO_ROOT / _CONFIG_ROOT / "recommend/dynamo").glob("*.yaml"))
 )
+# AISimulate's supervisor exits 124 when its child is not ready within 60 s or
+# has not exited 5 s after finishing its output. Those wall-clock defaults suit
+# interactive use; on a loaded CI runner a correct run can miss them. Keep
+# initialization + shutdown + the run itself under the subprocess timeout.
+_SUPERVISOR_BUDGETS = (
+    "--set",
+    "execution.resources.initialization_timeout_seconds=120",
+    "--set",
+    "execution.resources.shutdown_timeout_seconds=30",
+)
 
 
 def _run_cli(*args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
-        [sys.executable, "-m", "aisimulate", *args],
+        [sys.executable, "-m", "aisimulate", *args, *_SUPERVISOR_BUDGETS],
         cwd=_REPO_ROOT,
         text=True,
         capture_output=True,
