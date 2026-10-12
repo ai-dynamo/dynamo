@@ -649,7 +649,7 @@ async def test_audio_in_video_rejects_unusable_audio(video_item, audio_error, me
     if audio_error is not None:
         processor.audio_loader.load_audio.side_effect = audio_error
 
-    with pytest.raises((ValueError, RuntimeError), match=message):
+    with pytest.raises((mod.InvalidArgument, RuntimeError), match=message):
         await processor.extract_multimodal_data(
             {"multi_modal_data": {"video_url": [video_item]}},
             "request-audio-error",
@@ -818,7 +818,7 @@ def test_build_tokens_prompt_rejects_malformed_user_uuids(
 ) -> None:
     processor = _processor()
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(mod.InvalidArgument, match=message):
         processor.build_tokens_prompt(
             {
                 "token_ids": [1, 2, 3],
@@ -841,7 +841,7 @@ def test_build_tokens_prompt_reports_uuid_only_cache_miss(
 ) -> None:
     processor = _processor(unified_vision_chunk="vision_chunk" in multi_modal_data)
 
-    with pytest.raises(ValueError, match="require aligned multi_modal_uuids"):
+    with pytest.raises(mod.InvalidArgument, match="require aligned multi_modal_uuids"):
         processor.build_tokens_prompt(
             {"token_ids": [1, 2, 3]},
             multi_modal_data,
@@ -967,7 +967,7 @@ def test_mark_forwarded_mm_hashes_for_routing(hashes, expected):
 
 
 def test_mark_forwarded_mm_hashes_rejects_noncanonical_hash():
-    with pytest.raises(ValueError, match="must start with 16 hex characters"):
+    with pytest.raises(mod.InvalidArgument, match="must start with 16 hex characters"):
         mod.mark_forwarded_mm_hashes_for_routing(["opaque-key"])
 
 
@@ -1945,7 +1945,7 @@ def test_k3_pad_expands_for_unified_vision_chunk():
 def test_k3_mismatched_pad_count_is_rejected():
     processor, _ = _k3_processor()
 
-    with pytest.raises(ValueError, match="refusing to expand"):
+    with pytest.raises(mod.InvalidArgument, match="refusing to expand"):
         processor._expand_kimi_k3_pads(
             [_K3_PAD_ID],
             {"image": [object(), object()]},

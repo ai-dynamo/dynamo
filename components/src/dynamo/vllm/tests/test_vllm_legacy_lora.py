@@ -652,7 +652,9 @@ async def test_legacy_prefill_request_rejects_adapter_unloaded_before_admission(
         raise AssertionError("stale request must not reach vLLM")
         yield  # pragma: no cover - marks this as an async generator
 
-    with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+    with pytest.raises(
+        handlers_mod.InvalidArgument, match="unknown model or LoRA adapter"
+    ):
         await anext(
             handler._generate_with_lora_admission_lock(
                 stale_request,
