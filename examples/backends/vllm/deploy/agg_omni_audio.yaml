@@ -16,8 +16,6 @@
 # Qwen3-TTS text-to-audio serving with vLLM-Omni. This is the Kubernetes
 # equivalent of launch/agg_omni_audio.sh.
 #
-# Requires Dynamo 1.5.0 or later for both images. Dynamo 1.4.x images return
-# only the initial silent audio chunk.
 # For response_format=wav and data_source=b64_json, the speech endpoint returns
 # raw WAV bytes; save them with curl -o output.wav.
 #

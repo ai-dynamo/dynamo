@@ -42,10 +42,6 @@ spec:
     sharedMemorySize: 16Gi
     podTemplate:
       spec:
-        # SGLang 0.5.16 in Dynamo 1.4.2 mistakes parent PID 1 for a dead parent.
-        # Share PIDs within this worker pod so the Dynamo process is not PID 1.
-        # Remove when the minimum runtime includes sgl-project/sglang#31361.
-        shareProcessNamespace: true
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:${DYNAMO_VERSION}
