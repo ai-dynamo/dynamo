@@ -27,6 +27,7 @@ and HPC-X v2.50 do not have it.
 """
 
 import os
+import zlib
 
 _MAX_SAFE_HOSTNAME = 30
 
@@ -39,8 +40,6 @@ def short_pmix_hostname(hostname: str, *, launched: bool, preset: bool) -> str |
     """
     if launched or preset or len(hostname) <= _MAX_SAFE_HOSTNAME:
         return None
-    import zlib
-
     return f"pmix-{zlib.crc32(hostname.encode()):08x}"
 
 
