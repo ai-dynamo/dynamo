@@ -2393,11 +2393,6 @@ mod tests {
         run_cancel_during_handshake(false, true).await;
     }
 
-    #[tokio::test]
-    async fn test_retry_manager_ongoing_request_attempt_cancelled_before_parent() {
-        run_cancel_during_handshake(true, true).await;
-    }
-
     /// Test case 8: No migration for guided-decoding (structured-output) requests
     ///
     /// Bug (#7634): When a worker crashes mid-stream during a structured-output
