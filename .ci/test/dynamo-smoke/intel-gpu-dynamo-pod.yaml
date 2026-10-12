@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ POD_NAME }}
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    gpu.type: intel-xpu
+  imagePullSecrets:
+    - name: {{ IMAGE_PULL_SECRET }}
+  containers:
+  - name: with-resource
+    image: {{ inputs.DOCKER_IMAGE }}
+    command:
+      - /bin/bash
+      - -c
+      - |
+        set -Eeuo pipefail
+
+        cleanup() {
+          for pid in "${frontend_pid:-}" "${backend_pid:-}" "${etcd_pid:-}" "${nats_pid:-}"; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              kill "$pid" 2>/dev/null || true
+            fi
+          done
+        }
+
+        check_process() {
+          local name="$1"
+          local pid="$2"
+          local exit_code=0
+
+          if ! kill -0 "$pid" 2>/dev/null; then
+            if ! wait "$pid"; then
+              exit_code=$?
+            fi
+            if [ "$exit_code" -eq 0 ]; then
+              exit_code=1
+            fi
+            echo "ERROR: ${name} exited unexpectedly with code ${exit_code}."
+            exit "$exit_code"
+          fi
+        }
+
+        trap cleanup EXIT INT TERM
+
+        # Print xpu-smi discovery output for debugging
+        xpu-smi discovery || true
+
+        # Launch NATS server
+        echo "Starting NATS server..."
+        { nats-server -js 2>&1 | tee /tmp/nats.log; } &
+        nats_pid=$!
+
+        # Launch etcd
+        echo "Starting etcd..."
+        export LIP=$(hostname -I | awk '{ print $1 }')
+        { etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://${LIP}:2379 --data-dir /tmp/etcd 2>&1 | tee /tmp/etcd.log; } &
+        etcd_pid=$!
+
+        # Wait for etcd to be ready
+        sleep 5
+
+        # Launch dynamo backend worker
+        echo "Starting Dynamo backend worker..."
+        { python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --dtype float16 --block-size 64 --max-model-len 4096 --gpu-memory-utilization 0.7 --num-gpu-blocks-override 512 2>&1 | tee /tmp/backend.log; } &
+        backend_pid=$!
+
+        # Wait for backend to initialize
+        sleep 10
+
+        # Launch dynamo frontend
+        echo "Starting Dynamo frontend..."
+        { python -m dynamo.frontend --http-port=8000 2>&1 | tee /tmp/frontend.log; } &
+        frontend_pid=$!
+
+        # Wait for frontend to start
+        sleep 5
+
+        echo "All services started. Logs available at:"
+        echo "  NATS:     /tmp/nats.log"
+        echo "  etcd:     /tmp/etcd.log"
+        echo "  Backend:  /tmp/backend.log"
+        echo "  Frontend: /tmp/frontend.log"
+
+        # Keep the container alive only while all critical services are alive.
+        while true; do
+          check_process "NATS server" "$nats_pid"
+          check_process "etcd" "$etcd_pid"
+          check_process "Dynamo backend worker" "$backend_pid"
+          check_process "Dynamo frontend" "$frontend_pid"
+          sleep 5
+        done
+    securityContext:
+      runAsUser: 0
+      runAsGroup: 0
+      capabilities:
+        add: ["IPC_LOCK","SYS_PTRACE","SYS_ADMIN","SYS_RAWIO"]
+    env:
+      - name: ZE_AFFINITY_MASK
+        value: "{{ ZE_AFFINITY_MASK }}"
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: hf-token
+            key: token
+            optional: true
+      - name: HF_HOME
+        value: /models/huggingface
+      - name: TRANSFORMERS_CACHE
+        value: /models/huggingface/hub
+      - name: VLLM_USE_V1
+        value: "1"
+      - name: TORCH_LLM_ALLREDUCE
+        value: "1"
+      - name: VLLM_WORKER_MULTIPROC_METHOD
+        value: "spawn"
+    resources:
+      claims:
+      - name: {{ CLAIM_TEMPLATE_NAME }}
+    volumeMounts:
+      - name: pytorch-models
+        mountPath: /models
+  volumes:
+      - name: pytorch-models
+        hostPath:
+          path: /software/data/pytorch
+          type: Directory
+  resourceClaims:
+  - name: {{ CLAIM_TEMPLATE_NAME }}
+    resourceClaimTemplateName: {{ RESOURCE_TEMPLATE }}

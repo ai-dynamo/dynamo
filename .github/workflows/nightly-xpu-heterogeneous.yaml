@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Nightly-XPU-Heterogeneous
+
+# ============================================================================
+# NIGHTLY caller for the shared XPU heterogeneous P/D pipeline.
+# ============================================================================
+# This is the 23:00 UTC cron that used to be the `schedule:` trigger inside
+# pr-xpu-heterogeneous.yaml. It is MOVED, not new -- behaviour is preserved
+# exactly:
+#
+#   old (pr-xpu-heterogeneous.yaml)          new (this file)
+#   ---------------------------------------  --------------------------------
+#   schedule: cron '0 23 * * *'              same cron
+#   guard: has_xpu_label=true, no label read phase: nightly does the same
+#   guard: checkout_ref=$GITHUB_SHA          same
+#   guard: build_nvidia_image=false          build_nvidia_image: 'false'
+#   changed-files: core/vllm forced true     force_all_tests: true
+#   GPU_TAG="latest"                         gpu_tag default 'latest'
+#
+# It lived in a file named "pr-" only by accident of history: `schedule` fires
+# solely on the default branch, so that cron never had anything to do with a PR.
+#
+# Sibling callers:
+#   pr-xpu-heterogeneous.yaml         push pull-request/N, /run_xpu_heterogeneous
+#   post-merge-xpu-heterogeneous.yaml push main
+
+on:
+  schedule:
+    # 23:00 UTC daily. Unchanged from the cron this replaces. GitHub runs
+    # `schedule` against the DEFAULT BRANCH only, so editing this on a feature
+    # branch has no effect until it merges -- which is why the manual trigger
+    # below exists.
+    - cron: '0 23 * * *'
+  # Not part of the original cron. Added because a schedule-only workflow cannot
+  # be exercised at all before it is on the default branch, which would leave
+  # this file unverifiable until after it merged. Inputs let an on-demand run
+  # pin a GPU tag or widen the model without editing the file.
+  #
+  # This is NOT a replacement for xpu-heterogeneous-dispatch.yaml, which is the
+  # richer manual entry point (image overrides, BUILD sentinels, test selection).
+  # Use that one for image-level experiments; use this to rehearse the nightly.
+  workflow_dispatch:
+    inputs:
+      gpu_tag:
+        description: 'nvcr.io vllm-runtime-nightly tag to test (latest, or a dated tag like 20260727-769ee07)'
+        required: false
+        type: string
+        default: 'latest'
+      build_nvidia_image:
+        description: "Build a fresh cuda image instead of using the pinned nvcr.io one"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  # No `issues: write`: the eyes-reaction step is pre-merge-only and lives in
+  # pr-xpu-heterogeneous.yaml.
+
+# SHARED CONSTANT group -- the `concurrency:` mapping below must stay
+# byte-identical across ALL FOUR workflows that touch this hardware:
+#   pr-xpu-heterogeneous.yaml
+#   post-merge-xpu-heterogeneous.yaml
+#   nightly-xpu-heterogeneous.yaml     (this file)
+#   xpu-heterogeneous-dispatch.yaml
+# Do NOT add github.workflow or github.ref to this string: the cluster, the
+# dynamo-system namespace and the onexpu-/onenvidia-rdma-kueue
+# ResourceClaimTemplates are ONE global resource, so every run must serialize on
+# one key regardless of workflow or branch. Splitting the three merge phases
+# into three files does NOT give them three slots, and must not.
+#
+# Consequence worth knowing for a cron specifically: if the hardware is busy at
+# 23:00 the nightly does not skip, it QUEUES (queue: max never cancels), so it
+# starts whenever the slot frees and its run timestamp will not match its cron
+# time. That is the intended trade -- a nightly that silently skipped would be
+# worse than one that runs late.
+#
+# Workflow level, not job level: this holds the slot for the ENTIRE run --
+# including every job contributed by xpu-heterogeneous-run.yml, so a waiting run
+# starts no jobs at all, build-xpu included. The reusable workflow therefore
+# carries no concurrency block of its own; one there would deadlock against the
+# slot this run already holds.
+#
+# cancel-in-progress: false + queue: max => up to 100 runs wait in FIFO order
+# and nothing is ever cancelled. queue: max is invalid with cancel-in-progress:
+# true. actionlint <=1.7.12 wrongly flags "queue" as an unknown key.
+concurrency:
+  group: xpu-heterog-hardware
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+
+  run:
+    name: XPU Heterogeneous
+    uses: ./.github/workflows/xpu-heterogeneous-run.yml
+    secrets: inherit
+    with:
+      phase: nightly
+      # A nightly must run on a quiet day too, so it never diff-gates. Same
+      # value the old cron got from the
+      # `event_name == 'schedule' || event_name == 'issue_comment'` expression.
+      force_all_tests: true
+      # Defaults reproduce the old cron exactly: pinned nvcr.io image, :latest.
+      # On a workflow_dispatch the boolean input is rendered to the 'true' /
+      # 'false' strings the reusable workflow validates; on a cron run
+      # inputs.build_nvidia_image is empty, so `|| 'false'` supplies the default.
+      build_nvidia_image: ${{ inputs.build_nvidia_image && 'true' || 'false' }}
+      gpu_tag: ${{ inputs.gpu_tag || 'latest' }}
+
+  # Aggregate status, kept as a TOP-LEVEL job so its Checks API context is
+  # `xpu-status-check` rather than `run / xpu-status-check`, identical to the
+  # other two callers.
+  xpu-status-check:
+    runs-on: xpu-heterogeneous-ubuntu-latest
+    needs: [run]
+    if: always()
+    steps:
+      - name: Check the XPU heterogeneous pipeline result
+        env:
+          RESULT: ${{ needs.run.result }}
+        run: |
+          echo "xpu-heterogeneous-run result: ${RESULT}"
+          case "${RESULT}" in
+            success) echo "OK: nightly XPU heterogeneous pipeline succeeded" ;;
+            skipped) echo "SKIPPED: pipeline reported skipped" ;;
+            *)
+              echo "::error::Nightly XPU heterogeneous pipeline ${RESULT} on ${GITHUB_SHA}"
+              exit 1
+              ;;
+          esac

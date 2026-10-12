@@ -1,0 +1,247 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: PR-XPU-Heterogeneous
+
+# ============================================================================
+# PRE-MERGE caller for the shared XPU heterogeneous P/D pipeline.
+# ============================================================================
+# The pipeline itself -- guard, changed-files, build-xpu, build-nvidia,
+# resolve-images and the two heterog tests -- moved to
+# xpu-heterogeneous-run.yml so post-merge and nightly run the byte-same thing
+# instead of a drifting copy. What is left here is the pre-merge TRIGGER plus
+# the slash-command authorization gate.
+#
+# Sibling callers:
+#   post-merge-xpu-heterogeneous.yaml   push to main
+#   nightly-xpu-heterogeneous.yaml      cron 0 23 * * *  (was the `schedule`
+#                                       trigger in THIS file)
+#
+# TWO LOAD-BEARING NAMES -- do not rename either:
+#   `name: PR-XPU-Heterogeneous`  the workflow name in the Actions UI and in any
+#                                 `gh run list --workflow` automation.
+#   job `xpu-status-check`        the Checks API context branch protection is
+#                                 expected to require. It stays a TOP-LEVEL job
+#                                 here rather than moving into the reusable
+#                                 workflow, because a job contributed by a
+#                                 reusable workflow reports as
+#                                 "run / xpu-status-check" -- a rule requiring
+#                                 `xpu-status-check` would then block every PR
+#                                 forever, waiting on a context that no longer
+#                                 reports.
+
+on:
+  issue_comment:
+    types: [created]
+  # The 23:00 cron that used to sit here now lives in
+  # nightly-xpu-heterogeneous.yaml. It was never a pre-merge trigger in the
+  # first place: `schedule` fires only on the default branch, so this file was
+  # testing main under a "pr-" name.
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+  # Fires on every PR into main so `xpu-status-check` REPORTS on every PR: a
+  # required context that never reports blocks its PR forever.
+  #
+  # Every such PR also EXECUTES the pipeline. It did not always: the `run` job
+  # below used to narrow execution to sync/upstream-* branches, and
+  # xpu-status-check counted the resulting `skipped` as a pass -- so an ordinary
+  # PR got a green context without any XPU hardware being touched. A gate that
+  # passes without testing is not a gate, so both halves of that are gone. The
+  # only PRs that still skip are the ones whose head branch lives in a fork, and
+  # for those a skip now reports FAILURE rather than success.
+  #
+  # This is the only trigger here whose check attaches to the PR's OWN head
+  # commit. An issue_comment run executes in the default-branch context, so its
+  # result is filed against main's tip and can never satisfy a rule on the PR,
+  # however the job is named.
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  # Needed only by the `react` job below, to put an eyes reaction on the
+  # slash-command comment. post-merge and nightly do not grant this.
+  issues: write
+  pull-requests: read
+
+# SHARED CONSTANT group -- the `concurrency:` mapping below must stay
+# byte-identical across ALL FOUR workflows that touch this hardware:
+#   pr-xpu-heterogeneous.yaml          (this file)
+#   post-merge-xpu-heterogeneous.yaml
+#   nightly-xpu-heterogeneous.yaml
+#   xpu-heterogeneous-dispatch.yaml
+# Do NOT add github.workflow or github.ref to this string: the cluster, the
+# dynamo-system namespace and the onexpu-/onenvidia-rdma-kueue
+# ResourceClaimTemplates are ONE global resource, so every run must serialize on
+# one key regardless of workflow or branch. Keying on github.workflow is what
+# previously let a manual dispatch run alongside a PR run and interleave on the
+# same self-hosted runners. Splitting the three merge phases into three files
+# does NOT give them three slots, and must not.
+#
+# Workflow level, not job level: this holds the slot for the ENTIRE run --
+# including every job contributed by xpu-heterogeneous-run.yml, so a waiting run
+# starts no jobs at all, build-xpu included. The reusable workflow therefore
+# carries no concurrency block of its own; one there would deadlock against the
+# slot this run already holds. See .github/CONCURRENCY.md.
+#
+# cancel-in-progress: false + queue: max => up to 100 runs wait in FIFO order
+# and nothing is ever cancelled. queue: max is invalid with cancel-in-progress:
+# true. actionlint <=1.7.12 wrongly flags "queue" as an unknown key.
+concurrency:
+  group: xpu-heterog-hardware
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+
+  # ==========================================================================
+  # Acknowledge the slash command.
+  # ==========================================================================
+  # Its own job rather than a step inside the pipeline: `run` below is a `uses:`
+  # caller and cannot carry steps. Deliberately NOT a dependency of `run`, so a
+  # GitHub API hiccup on the reaction can neither delay nor fail the tests.
+  react:
+    name: React to slash command
+    if: github.event_name == 'issue_comment'
+    runs-on: xpu-heterogeneous-ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.reactions.createForIssueComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: context.payload.comment.id,
+                content: 'eyes'
+              });
+            } catch (error) {
+              core.warning(`Could not add reaction to slash command: ${error.status || 'unknown'} ${error.message}`);
+            }
+
+  # ==========================================================================
+  # AUTHORIZATION GATE + pipeline.
+  # ==========================================================================
+  # The gate stays here, on the calling job, because this is the only one of the
+  # three callers that can receive an issue_comment event. It is unchanged from
+  # the `guard` job it used to sit on.
+  #
+  # The push path needs no gate: only copy-pr-bot writes pull-request/N.
+  #
+  # The pull_request path runs for EVERY PR whose head branch is in THIS
+  # repository -- a developer's feature branch and a sync branch alike. It was
+  # previously restricted to sync-upstream.yaml's branches (its
+  # SYNC_BRANCH_PREFIX is `sync/upstream-`), which left every ordinary PR skipped
+  # and, because a skip counted as a pass, mergeable without the heterogeneous
+  # tests ever running.
+  #
+  # One clause remains, and it is load-bearing:
+  #   head.repo.full_name == github.repository -- github.head_ref is the branch
+  #     name in the HEAD repo, so without this a PR opened from a fork would aim
+  #     this self-hosted hardware, this internal registry and this cluster at
+  #     code nobody reviewed.
+  #
+  # A fork PR is tested through the push path instead: copy-pr-bot copies its
+  # commits to pull-request/N in this repo, and because those are the same commit
+  # objects, the check from that run lands on the fork PR's own head SHA. Until
+  # that happens the fork PR has no passing check and cannot merge -- see
+  # xpu-status-check below.
+  #
+  # Spelled out per event rather than the previous
+  # `github.event_name != 'issue_comment'`: that negation admitted any trigger
+  # added to `on:` later by default, which is how an unreviewed event reaches the
+  # cluster without anyone editing this condition.
+  run:
+    name: XPU Heterogeneous
+    if: >-
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository) ||
+      github.event_name == 'push' ||
+      (github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      (startsWith(github.event.comment.body, '/run_xpu_heterogeneous') ||
+      startsWith(github.event.comment.body, '/run_xpu_heterog')) &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    uses: ./.github/workflows/xpu-heterogeneous-run.yml
+    secrets: inherit
+    with:
+      phase: pre-merge
+      # Reproduces the old
+      #   github.event_name == 'schedule' || github.event_name == 'issue_comment'
+      # expression for this file's remaining triggers: a slash command runs
+      # everything, a copy-pr-bot push stays diff-gated by changed-files.
+      #
+      # An ordinary PR is diff-gated as well: it reaches `run` now, but
+      # changed-files still decides whether the heterogeneous tests apply to what
+      # it touched. A PR that edits only documentation therefore gets a green
+      # xpu-status-check without occupying the hardware. If that is too lax,
+      # the change is here -- force_all_tests: true for every PR -- and the cost
+      # is that every PR queues for the single hardware slot.
+      #
+      # A sync PR forces everything on for the same reason sync-upstream.yaml
+      # originally reached for a slash command: upstream commits that touch
+      # neither the core nor the vllm paths would otherwise skip the
+      # heterogeneous tests and report a green run that tested nothing. A sync
+      # PR carries whatever upstream changed, so no paths filter can decide on
+      # its behalf that it does not need testing.
+      force_all_tests: ${{ github.event_name == 'issue_comment' || startsWith(github.head_ref, 'sync/upstream-') }}
+      # Opt-in per PR via the build_nvidia_image label; absent => the pinned
+      # nvcr.io image. Only pre-merge may pass 'pr-label' -- there is no PR to
+      # read on the other two callers, and the reusable workflow rejects it.
+      build_nvidia_image: 'pr-label'
+
+  # ==========================================================================
+  # STATUS CHECK -- the branch-protection context. Keep this job id.
+  # ==========================================================================
+  # A called workflow's conclusion is already the conjunction of its jobs, so
+  # asserting on needs.run.result covers the whole pipeline.
+  #
+  # `skipped` used to pass unconditionally. It no longer does, because with the
+  # sync-only restriction removed a skip no longer means "not applicable" -- it
+  # means nothing tested this commit. The verdict is now per event:
+  #
+  #   pull_request  -- FAIL. The only way `run` skips here is a head branch in a
+  #     fork, so this run tested nothing and a green check would let unreviewed
+  #     code merge. The real verdict arrives from the push run on pull-request/N,
+  #     which reports against the same head SHA and supersedes this failure. If
+  #     copy-pr-bot never copies the PR, the failure stands and the PR stays
+  #     blocked -- the intended fail-safe direction.
+  #   issue_comment -- PASS. Every comment anywhere in the repo starts a run of
+  #     this workflow, and an issue_comment run's check is filed against main's
+  #     tip rather than any PR (see the trigger comments at the top). Failing
+  #     those would paint main red for ordinary conversation while blocking
+  #     nothing.
+  #   push          -- cannot skip; its clause in `run` is unconditional.
+  #
+  # A non-success, non-skipped result always fails, as before.
+  xpu-status-check:
+    runs-on: xpu-heterogeneous-ubuntu-latest
+    needs: [run]
+    if: always()
+    steps:
+      - name: Check the XPU heterogeneous pipeline result
+        env:
+          RESULT: ${{ needs.run.result }}
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          echo "event: ${EVENT}"
+          echo "xpu-heterogeneous-run result: ${RESULT}"
+          case "${RESULT}" in
+            success)
+              echo "OK: XPU heterogeneous pipeline succeeded"
+              ;;
+            skipped)
+              if [[ "${EVENT}" == "pull_request" ]]; then
+                echo "::error::The XPU heterogeneous pipeline did not run for this PR, so nothing has tested this commit. Head branch is in ${HEAD_REPO:-an unknown repository}, not ${GITHUB_REPOSITORY}, so the pipeline is not allowed to run it directly. It must be copied to a pull-request/N branch in ${GITHUB_REPOSITORY} first; that run reports against this same commit and will replace this failure."
+                exit 1
+              fi
+              echo "NOT APPLICABLE: ${EVENT} run with no pipeline to report on (no slash command, or the comment author is not an owner, member or collaborator). This result is filed against the default branch, not against any PR."
+              ;;
+            *)
+              echo "::error::XPU heterogeneous pipeline ${RESULT}"
+              exit 1
+              ;;
+          esac

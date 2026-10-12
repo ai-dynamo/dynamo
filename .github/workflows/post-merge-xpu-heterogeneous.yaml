@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Post-Merge-XPU-Heterogeneous
+
+# ============================================================================
+# POST-MERGE caller for the shared XPU heterogeneous P/D pipeline.
+# ============================================================================
+# Runs the identical pipeline as the pre-merge and nightly callers -- same
+# reusable workflow, same two heterog tests, same cluster -- against main after
+# a merge lands. This is the only one of the three phases that did not exist
+# before the refactor.
+#
+# Sibling callers:
+#   pr-xpu-heterogeneous.yaml       push pull-request/N, /run_xpu_heterogeneous
+#   nightly-xpu-heterogeneous.yaml  cron 0 23 * * *
+#
+# ---------------------------------------------------------------------------
+# WHY NO DIFF GATING (force_all_tests: true)
+# ---------------------------------------------------------------------------
+# The pre-merge path gates on .github/actions/changed-files, which needs a PR
+# base to diff against. A push to main has no PR, so the gate has nothing
+# meaningful to compare and would either no-op or compare against whatever the
+# action falls back to. Post-merge validation also exists precisely to catch
+# what per-PR gating missed -- a merge whose own diff touches neither core nor
+# vllm can still break them via a semantic conflict with another PR that landed
+# in between. So this caller always builds and always tests.
+#
+# ---------------------------------------------------------------------------
+# CAPACITY -- READ THIS BEFORE ASSUMING THIS IS FREE
+# ---------------------------------------------------------------------------
+# Every push to main now queues a full build + both heterog tests (~9 min per
+# test cycle) on the SAME single-slot xpu-heterog-hardware mutex that pre-merge
+# runs, the nightly and xpu-heterogeneous-dispatch.yaml all share. With
+# queue: max nothing is ever cancelled, so N merges in quick succession queue N
+# full cycles behind each other AND in front of any waiting PR run.
+#
+# Two levers if the backlog bites, in order of preference:
+#   1. Add a `paths:` filter to the push trigger below, so doc-only and
+#      unrelated merges do not claim the hardware. This is the narrowest fix.
+#   2. Drop to `queue: single` on THIS workflow only, letting superseded
+#      post-merge runs be replaced so only the newest main commit is tested.
+#      Note this breaks the byte-identical rule in .github/CONCURRENCY.md, so
+#      document it there if you do it.
+
+on:
+  push:
+    branches:
+      - main
+    # No `paths:` filter by design -- see CAPACITY above. Add one here rather
+    # than adding conditions inside the reusable workflow, so the hardware slot
+    # is never claimed in the first place.
+
+permissions:
+  contents: read
+  pull-requests: read
+  # No `issues: write`: the eyes-reaction step is pre-merge-only and lives in
+  # pr-xpu-heterogeneous.yaml. Granting it here would widen the token for no
+  # reason.
+
+# SHARED CONSTANT group -- the `concurrency:` mapping below must stay
+# byte-identical across ALL FOUR workflows that touch this hardware:
+#   pr-xpu-heterogeneous.yaml
+#   post-merge-xpu-heterogeneous.yaml  (this file)
+#   nightly-xpu-heterogeneous.yaml
+#   xpu-heterogeneous-dispatch.yaml
+# Do NOT add github.workflow or github.ref to this string: the cluster, the
+# dynamo-system namespace and the onexpu-/onenvidia-rdma-kueue
+# ResourceClaimTemplates are ONE global resource, so every run must serialize on
+# one key regardless of workflow or branch. Splitting the three merge phases
+# into three files does NOT give them three slots, and must not -- a post-merge
+# run interleaving with a PR run on the same ResourceClaimTemplates is exactly
+# the bug .github/CONCURRENCY.md documents.
+#
+# Workflow level, not job level: this holds the slot for the ENTIRE run --
+# including every job contributed by xpu-heterogeneous-run.yml, so a waiting run
+# starts no jobs at all, build-xpu included. The reusable workflow therefore
+# carries no concurrency block of its own; one there would deadlock against the
+# slot this run already holds.
+#
+# cancel-in-progress: false + queue: max => up to 100 runs wait in FIFO order
+# and nothing is ever cancelled. queue: max is invalid with cancel-in-progress:
+# true. actionlint <=1.7.12 wrongly flags "queue" as an unknown key.
+concurrency:
+  group: xpu-heterog-hardware
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+
+  run:
+    name: XPU Heterogeneous
+    uses: ./.github/workflows/xpu-heterogeneous-run.yml
+    secrets: inherit
+    with:
+      phase: post-merge
+      # See WHY NO DIFF GATING above.
+      force_all_tests: true
+      # 'false' => test the pinned nvcr.io nightly resolved in changed-files,
+      # matching what the cron path did before this refactor. 'pr-label' is
+      # rejected for this phase (no PR to read). Flip to 'true' to have every
+      # merge to main also build a fresh cuda image -- that roughly doubles the
+      # per-run build time and is the only job subject to Docker Hub anonymous
+      # pull limits, so it is off by default.
+      build_nvidia_image: 'false'
+
+  # Aggregate status, kept as a TOP-LEVEL job so its Checks API context is
+  # `xpu-status-check` rather than `run / xpu-status-check`. Post-merge does not
+  # gate a merge, but keeping the name identical across all three callers means
+  # notifications and `gh` queries can key on one context.
+  xpu-status-check:
+    runs-on: xpu-heterogeneous-ubuntu-latest
+    needs: [run]
+    if: always()
+    steps:
+      - name: Check the XPU heterogeneous pipeline result
+        env:
+          RESULT: ${{ needs.run.result }}
+        run: |
+          echo "xpu-heterogeneous-run result: ${RESULT}"
+          case "${RESULT}" in
+            success) echo "OK: post-merge XPU heterogeneous pipeline succeeded" ;;
+            skipped) echo "SKIPPED: pipeline reported skipped" ;;
+            *)
+              echo "::error::Post-merge XPU heterogeneous pipeline ${RESULT} on ${GITHUB_SHA}"
+              exit 1
+              ;;
+          esac

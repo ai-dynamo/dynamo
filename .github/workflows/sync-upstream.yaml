@@ -1,0 +1,224 @@
+# Keeps this fork's main up to date with the upstream project by opening a PR.
+#
+# Nothing is ever pushed to upstream, and main is never written to directly.
+# The job only points a branch at upstream's tip and opens a PR against main,
+# so conflicts surface as ordinary PR conflicts and can be resolved in the UI.
+#
+# Requires the SYNC_UPSTREAM_PAT repository secret: a PAT carrying
+# Contents: read/write, Workflows: read/write and Pull requests: read/write.
+# The Workflows permission is mandatory, not optional - upstream regularly
+# changes files under .github/workflows/, and the default GITHUB_TOKEN is
+# forbidden from pushing commits that touch them.
+name: Sync fork with upstream
+
+on:
+  schedule:
+    # 06:17 UTC daily. Off-round minute on purpose: GitHub delays cron that
+    # fires exactly on the hour, when everyone else's jobs are queued.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: ai-dynamo/dynamo
+  UPSTREAM_BRANCH: main
+  TARGET_BRANCH: main
+  SYNC_BRANCH_PREFIX: sync/upstream-
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          # Full history: merge-base and rev-list below need it.
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_UPSTREAM_PAT }}
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          # Fully-qualified refspec on both sides: an abbreviated one can
+          # resolve to the wrong ref, or delete the destination.
+          git fetch --no-tags upstream \
+            "refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
+          git rev-parse --verify "refs/remotes/upstream/${UPSTREAM_BRANCH}"
+
+      - name: Check whether upstream has new commits
+        id: check
+        run: |
+          upstream_sha="$(git rev-parse "refs/remotes/upstream/${UPSTREAM_BRANCH}")"
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor \
+               "${upstream_sha}" "refs/remotes/origin/${TARGET_BRANCH}"; then
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+            echo "${TARGET_BRANCH} already contains ${upstream_sha}. Nothing to sync." \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            behind="$(git rev-list --count \
+              "refs/remotes/origin/${TARGET_BRANCH}..${upstream_sha}")"
+            echo "needs_sync=true" >> "$GITHUB_OUTPUT"
+            echo "behind=${behind}" >> "$GITHUB_OUTPUT"
+            echo "${TARGET_BRANCH} is missing ${behind} upstream commit(s)." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Decide the sync branch name and whether it already exists
+        # The name encodes upstream's tip and nothing else, giving a stable
+        # identity for "the sync of this upstream state". A repeated run computes
+        # the same name, so if the branch already exists the work is done and
+        # everything below skips.
+        #
+        # No date component, deliberately: a date would make the same upstream
+        # tip produce a second branch and a duplicate PR the following day.
+        #
+        # This checks the BRANCH, not any PR's head commit. The branch created
+        # below is a merge commit rather than upstream's tip, so comparing head
+        # commits against upstream would never match and the run would keep
+        # trying to recreate a branch that already exists.
+        if: steps.check.outputs.needs_sync == 'true'
+        id: plan
+        env:
+          UPSTREAM_SHA: ${{ steps.check.outputs.upstream_sha }}
+        run: |
+          branch="${SYNC_BRANCH_PREFIX}${UPSTREAM_SHA:0:12}"
+          echo "branch=${branch}" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Branch ${branch} already exists; upstream ${UPSTREAM_SHA} has already been proposed." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Will create ${branch} at ${UPSTREAM_SHA}"
+          fi
+
+      - name: Create the sync branch, already updated against the base
+        # One NEW branch per sync. Never reuses or force-updates an existing one.
+        #
+        # An earlier version reused the open sync PR's branch and fast-forwarded
+        # it to each newer upstream tip. That breaks permanently the first time
+        # anyone clicks "Update branch" to satisfy the up-to-date rule: the merge
+        # commit it adds makes the branch un-fast-forwardable, so every later run
+        # failed with "non-fast-forward". Force-pushing would have discarded that
+        # merge commit, so failing loudly was right - the design was wrong.
+        #
+        # The base branch is merged in HERE rather than left to someone clicking
+        # "Update branch" afterwards. Two reasons:
+        #   1. Checks attach to a commit. Requesting the test suite before the
+        #      branch is updated tests a commit that the update then replaces, so
+        #      the commit actually merged would carry no test result at all.
+        #   2. It removes a manual step from every sync PR, which the up-to-date
+        #      rule would otherwise demand forever - a sync branch is behind the
+        #      base by construction, since it holds none of this fork's commits.
+        #
+        # Merging the base in keeps upstream's tip an ANCESTOR of the branch, so
+        # the ancestry test in "Check whether upstream has new commits" still
+        # resolves correctly once this PR merges. Rebasing would not.
+        if: steps.check.outputs.needs_sync == 'true' && steps.plan.outputs.exists == 'false'
+        id: push
+        env:
+          UPSTREAM_SHA: ${{ steps.check.outputs.upstream_sha }}
+          BRANCH: ${{ steps.plan.outputs.branch }}
+        run: |
+          # A merge commit needs an author, and the runner has no git identity.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git switch --no-track -c "${BRANCH}" "${UPSTREAM_SHA}"
+
+          if git merge --no-edit "refs/remotes/origin/${TARGET_BRANCH}"; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            echo "Merged ${TARGET_BRANCH} into ${BRANCH}; the PR will open already up to date."
+          else
+            # Leave the branch at upstream's tip so the conflict surfaces as an
+            # ordinary PR conflict, resolvable in the UI, rather than the sync
+            # failing and silently producing nothing.
+            git merge --abort
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::${TARGET_BRANCH} does not merge cleanly into upstream ${UPSTREAM_SHA}; opening the PR un-updated so the conflict is visible."
+          fi
+
+          git push origin "refs/heads/${BRANCH}"
+
+      - name: Open the sync PR
+        if: steps.check.outputs.needs_sync == 'true' && steps.plan.outputs.exists == 'false'
+        id: open
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_PAT }}
+          SYNC_BRANCH: ${{ steps.plan.outputs.branch }}
+          UPSTREAM_SHA: ${{ steps.check.outputs.upstream_sha }}
+          BEHIND: ${{ steps.check.outputs.behind }}
+          MERGED: ${{ steps.push.outputs.merged }}
+        run: |
+          if [ "${MERGED}" = "true" ]; then
+            state_note="${TARGET_BRANCH} was merged into this branch by CI, so it opens already up to date and needs no Update branch click. The head commit is that merge, which is also what the test suite runs against."
+          else
+            state_note="CONFLICT: ${TARGET_BRANCH} does not merge cleanly into upstream's tip, so the branch was left at ${UPSTREAM_SHA} un-updated. Resolve the conflict here; that pushes a new head commit, which starts the test suite automatically. No slash command is needed."
+          fi
+          cat > "${RUNNER_TEMP}/pr-body.md" <<EOF
+          Automated fork sync from ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}.
+
+          Upstream tip: ${UPSTREAM_SHA}
+          Upstream commits missing from ${TARGET_BRANCH} when this PR opened: ${BEHIND}
+
+          ${state_note}
+
+          Opened by .github/workflows/sync-upstream.yaml
+          EOF
+          pr_url="$(gh pr create --repo "$GITHUB_REPOSITORY" \
+            --base "$TARGET_BRANCH" \
+            --head "$SYNC_BRANCH" \
+            --title "Sync ${TARGET_BRANCH} with ${UPSTREAM_REPO} ($(date -u +%Y-%m-%d))" \
+            --body-file "${RUNNER_TEMP}/pr-body.md")"
+          echo "Opened ${pr_url}"
+          # gh prints the PR URL; the number is its last path segment.
+          echo "pr_number=${pr_url##*/}" >> "$GITHUB_OUTPUT"
+
+      # NO STEP REQUESTS THE XPU HETEROGENEOUS SUITE ANY MORE.
+      #
+      # pr-xpu-heterogeneous.yaml now carries a pull_request trigger scoped to
+      # sync/upstream-* head refs, so opening this PR starts the suite by itself.
+      # The step that used to post /run_xpu_heterogeneous was removed rather than
+      # kept as a second request, because an issue_comment run executes in the
+      # DEFAULT-BRANCH context: its check run is filed against main's tip, not
+      # against this PR's head commit, so it could never satisfy a required status
+      # check on this PR however the job was named. Now that the pull_request path
+      # files a verdict on the right commit, a comment would only queue a SECOND
+      # full pipeline on the single global xpu-heterog-hardware slot to re-derive
+      # a result already in hand.
+      #
+      # Both properties that made a slash command the right choice before are
+      # preserved deliberately:
+      #   - the full suite still always runs. pr-xpu-heterogeneous.yaml passes
+      #     force_all_tests: true for a sync/upstream-* head ref, so no paths
+      #     filter can decide an upstream commit needs no testing.
+      #   - the tested commit is still the commit that merges. The guard job in
+      #     xpu-heterogeneous-run.yml checks out the PR head, and the create step
+      #     above has already merged the base into it.
+      #
+      # The `xpu` label went with that step. It gated only the issue_comment path,
+      # and the pull_request path deliberately ignores it: a required check must
+      # not report a pass because a label was missing. Re-add the label here if it
+      # is wanted for filtering, but nothing reads it on this path.
+      #
+      # The conflict case needs no special handling now. Such a PR opens without a
+      # suite result and cannot merge anyway; resolving the conflict pushes a new
+      # head commit, which fires `synchronize` and runs the suite automatically.
+
+      - name: Report open sync PRs
+        if: steps.check.outputs.needs_sync == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_PAT }}
+        run: |
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --base "$TARGET_BRANCH" --json number,headRefName,url \
+            --jq '.[] | "PR #\(.number)  \(.headRefName)  \(.url)"' \
+            >> "$GITHUB_STEP_SUMMARY"

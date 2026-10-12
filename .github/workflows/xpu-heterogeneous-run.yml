@@ -1,0 +1,952 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: XPU-Heterogeneous-Run
+
+# ============================================================================
+# REUSABLE XPU heterogeneous P/D pipeline.
+# ============================================================================
+# guard -> changed-files -> build-xpu / build-nvidia -> resolve-images ->
+# heterog-test-px-dn -> heterog-test-pn-dx -> xpu-status-check.
+#
+# Called by exactly three thin trigger workflows, one per merge phase:
+#
+#   Caller                              Trigger                        phase
+#   ----------------------------------  -----------------------------  ----------
+#   pr-xpu-heterogeneous.yaml           push pull-request/N,           pre-merge
+#                                       /run_xpu_heterogeneous comment
+#   post-merge-xpu-heterogeneous.yaml   push main                      post-merge
+#   nightly-xpu-heterogeneous.yaml      cron 0 23 * * *                nightly
+#
+# Behaviour is driven by the `phase` input rather than by github.event_name. A
+# reusable workflow sees the CALLER's event, so event sniffing still works, but
+# it cannot distinguish post-merge from nightly-dispatch and it hides the
+# phase from the run page. One explicit input is both readable and testable.
+#
+# ---------------------------------------------------------------------------
+# DELIBERATELY NO `concurrency` BLOCK IN THIS FILE.
+# ---------------------------------------------------------------------------
+# The xpu-heterog-hardware mutex lives at WORKFLOW level on each of the three
+# callers (see .github/CONCURRENCY.md). It cannot move in here:
+#
+#   1. DEADLOCK. A called workflow requesting the same group its caller's run
+#      already holds waits forever on a slot it is itself holding. This is the
+#      same trap documented for job-level blocks in CONCURRENCY.md:129.
+#   2. IT IS ALREADY COVERED. Workflow-level concurrency on the caller holds the
+#      slot for the ENTIRE run, including every job contributed by this file, so
+#      a waiting run starts no jobs at all — including build-xpu, which occupies
+#      the same runner label as the tests.
+#
+# Keep the block byte-identical in all three callers; never add one here.
+#
+# ---------------------------------------------------------------------------
+# NESTING DEPTH
+# ---------------------------------------------------------------------------
+# caller -> this file -> epd-test-template.yml is 3 levels. GitHub allows 4, so
+# there is exactly one level of headroom: do not introduce another `uses:` hop
+# between a caller and epd-test-template.yml.
+
+on:
+  workflow_call:
+    inputs:
+      phase:
+        description: "Merge phase: pre-merge | post-merge | nightly. Validated in guard."
+        required: true
+        type: string
+      force_all_tests:
+        description: >-
+          Skip diff-based gating and treat core+vllm as changed. Post-merge and
+          nightly pass true (there is no PR base to diff against, and a nightly
+          must run even on a quiet day). Pre-merge passes true only for the
+          slash-command path, matching the previous
+          `event_name == schedule || event_name == issue_comment` expression.
+        required: false
+        type: boolean
+        default: false
+      build_nvidia_image:
+        description: >-
+          'pr-label' = build only when the PR carries the build_nvidia_image
+          label (pre-merge only); 'true' = always build; 'false' = always use
+          the pinned nvcr.io image. Default 'false' preserves the behaviour the
+          cron path had when it lived in pr-xpu-heterogeneous.yaml.
+        required: false
+        type: string
+        default: 'false'
+      gpu_tag:
+        description: >-
+          Tag on nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly to test when no
+          NVIDIA image is built. 'latest' follows the newest nightly and is
+          resolved to its immutable YYYYMMDD-sha tag for provenance. Pass a
+          dated tag (e.g. 20260727-769ee07) to pin one caller without pinning
+          the others.
+        required: false
+        type: string
+        default: 'latest'
+      runner:
+        description: 'Runner label for every job in this pipeline and both tests.'
+        required: false
+        type: string
+        default: 'xpu-heterogeneous-ubuntu-latest'
+      model:
+        description: 'Model passed to both heterogeneous tests.'
+        required: false
+        type: string
+        default: 'Qwen/Qwen3-0.6B'
+      tensor_parallel:
+        description: 'Tensor parallel size passed to both heterogeneous tests.'
+        required: false
+        type: string
+        default: '1'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+
+  # ============================================================================
+  # GATE – resolve the checkout ref, the xpu label and the NVIDIA build choice.
+  # ============================================================================
+  # The "xpu" label gate applies to the pre-merge slash-command path only.
+  #
+  # No `if:` here any more. The slash-command authorization gate (comment body
+  # prefix + OWNER/MEMBER/COLLABORATOR) belongs to the trigger that can actually
+  # receive an issue_comment event, so it now sits on the calling job in
+  # pr-xpu-heterogeneous.yaml. Gating a reusable workflow from inside itself is
+  # not expressible: there is no workflow-level `if`, and replicating the gate on
+  # every job here would report each one as skipped instead of never starting.
+  #
+  # The 👀 reaction step moved to that caller for the same reason plus one more:
+  # it needs `issues: write`, which post-merge and nightly have no business
+  # holding.
+
+  guard:
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      has_xpu_label: ${{ steps.pr-info.outputs.has_xpu_label }}
+      checkout_ref: ${{ steps.pr-info.outputs.checkout_ref }}
+      # "true" only when this run should build a fresh NVIDIA image — either
+      # because build_nvidia_image=='true', or because the mode is 'pr-label'
+      # and the PR carries the label. Otherwise the pinned nvcr.io gpu_tag is
+      # used, exactly as before.
+      build_nvidia_image: ${{ steps.pr-info.outputs.build_nvidia_image }}
+    steps:
+      - name: Get PR info and check labels
+        id: pr-info
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
+          # The pull_request payload carries neither .issue.number nor
+          # .issue.pull_request, so the slash-command branch below cannot resolve
+          # a PR number from it. Both of these are empty for every other event.
+          PR_NUMBER_EVENT: ${{ github.event.pull_request.number || '' }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          PHASE: ${{ inputs.phase }}
+          BUILD_NVIDIA_MODE: ${{ inputs.build_nvidia_image }}
+        run: |
+          # Reads the build_nvidia_image label off a PR. Best-effort by design:
+          # an API failure prints a warning and yields "false", so a registry or
+          # token hiccup falls back to the pinned GPU image instead of failing
+          # the run. Same posture as the digest resolution in changed-files.
+          check_build_nvidia_label() {
+            local pr_number="$1" pr_json
+            if pr_json=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" 2>/dev/null); then
+              jq -r '[.labels[].name] | any(. == "build_nvidia_image")' <<< "${pr_json}"
+            else
+              echo "::warning::Could not read labels for PR #${pr_number}; using the pinned NVIDIA image" >&2
+              echo "false"
+            fi
+          }
+
+          # Fail fast on a typo'd input rather than silently taking a default
+          # path: a caller that passes phase: premerge would otherwise fall
+          # through to the issue_comment branch and die on a missing PR number
+          # several lines later, with a far less obvious message.
+          case "${PHASE}" in
+            pre-merge|post-merge|nightly) ;;
+            *)
+              echo "::error::Unknown phase '${PHASE}' (expected pre-merge, post-merge or nightly)"
+              exit 1
+              ;;
+          esac
+
+          case "${BUILD_NVIDIA_MODE}" in
+            'true'|'false'|pr-label) ;;
+            *)
+              echo "::error::Unknown build_nvidia_image '${BUILD_NVIDIA_MODE}' (expected 'true', 'false' or 'pr-label')"
+              exit 1
+              ;;
+          esac
+
+          # 'pr-label' outside pre-merge is a caller bug, not a fallback: a push
+          # to main and a cron run have no PR, so the mode could only ever
+          # resolve to false, quietly disabling a build the caller asked for.
+          if [[ "${BUILD_NVIDIA_MODE}" == "pr-label" && "${PHASE}" != "pre-merge" ]]; then
+            echo "::error::build_nvidia_image='pr-label' is only valid for phase=pre-merge; ${PHASE} has no PR to read a label from. Pass 'true' or 'false'."
+            exit 1
+          fi
+
+          # Resolves the mode when no PR JSON is in hand. 'pr-label' needs a PR
+          # number; an empty one warns and falls back to the pinned image rather
+          # than failing, matching check_build_nvidia_label's posture.
+          resolve_nvidia() {
+            case "${BUILD_NVIDIA_MODE}" in
+              'true')  echo "true" ;;
+              'false') echo "false" ;;
+              pr-label)
+                if [[ -n "$1" ]]; then
+                  check_build_nvidia_label "$1"
+                else
+                  echo "::warning::build_nvidia_image='pr-label' but no PR number was resolvable; using the pinned NVIDIA image" >&2
+                  echo "false"
+                fi
+                ;;
+            esac
+          }
+
+          # Same decision against a PR payload already fetched, so the
+          # issue_comment path below does not re-query the API.
+          nvidia_from_json() {
+            case "${BUILD_NVIDIA_MODE}" in
+              'true')  echo "true" ;;
+              'false') echo "false" ;;
+              pr-label) jq -r '[.labels[].name] | any(. == "build_nvidia_image")' <<< "$1" ;;
+            esac
+          }
+
+          # ---- post-merge and nightly: no PR exists, so no label gate --------
+          # Both test the pushed/scheduled commit as-is. Formerly the
+          # GITHUB_EVENT_NAME == "schedule" branch; post-merge is new and shares
+          # it because "test this commit, no diff gating" is the same contract.
+          if [[ "${PHASE}" != "pre-merge" ]]; then
+            echo "has_xpu_label=true" >> "$GITHUB_OUTPUT"
+            echo "checkout_ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+            BUILD_NVIDIA="$(resolve_nvidia "")"
+            echo "build_nvidia_image=${BUILD_NVIDIA}" >> "$GITHUB_OUTPUT"
+            if [[ "${PHASE}" == "nightly" ]]; then
+              echo "🌙 Nightly XPU CI run – skipping PR label gate"
+            else
+              echo "🔀 Post-merge XPU CI run on ${GITHUB_REF_NAME} – skipping PR label gate"
+            fi
+            echo "checkout_ref=${GITHUB_SHA}"
+            echo "build_nvidia_image=${BUILD_NVIDIA}"
+            exit 0
+          fi
+
+          # ---- pre-merge, copy-pr-bot push to pull-request/N ----------------
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            echo "has_xpu_label=true" >> "$GITHUB_OUTPUT"
+            echo "checkout_ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+            # The push path deliberately skips the xpu label gate, but the
+            # NVIDIA build is opt-in, so its label still has to be looked up.
+            # Recover the PR number from the pull-request/N branch name.
+            PR_FROM_BRANCH=""
+            if [[ "${GITHUB_REF_NAME}" =~ ^pull-request/([0-9]+)$ ]]; then
+              PR_FROM_BRANCH="${BASH_REMATCH[1]}"
+            fi
+            BUILD_NVIDIA="$(resolve_nvidia "${PR_FROM_BRANCH}")"
+            echo "build_nvidia_image=${BUILD_NVIDIA}" >> "$GITHUB_OUTPUT"
+            echo "Push to ${GITHUB_REF_NAME}; running XPU CI at ${GITHUB_SHA}"
+            echo "build_nvidia_image=${BUILD_NVIDIA}"
+            exit 0
+          fi
+
+          # ---- pre-merge, pull_request (the sync PR) -------------------------
+          # Must precede the slash-command branch below, which is the fallthrough
+          # and assumes an issue_comment payload: a pull_request event carries no
+          # .issue.number, so without this branch every PR run would die on
+          # "Could not resolve pull request number" and report red forever.
+          #
+          # No xpu label gate here, matching the push branch above. This path
+          # backs a REQUIRED status check, so it must reach a verdict on its own;
+          # a label a human forgot to apply would otherwise read as a pass. The
+          # label keeps its meaning on the slash-command path below.
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            echo "has_xpu_label=true" >> "$GITHUB_OUTPUT"
+            # The PR head, NOT GITHUB_SHA. On a pull_request event GITHUB_SHA is
+            # GitHub's own refs/pull/N/merge commit, which exists only inside the
+            # run and is never what lands. sync-upstream.yaml already merges the
+            # base into the branch when it creates it (see its "Create the sync
+            # branch" step), so the head commit here IS the commit that merges --
+            # which is the whole point of testing it.
+            echo "checkout_ref=${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+            BUILD_NVIDIA="$(resolve_nvidia "${PR_NUMBER_EVENT}")"
+            echo "build_nvidia_image=${BUILD_NVIDIA}" >> "$GITHUB_OUTPUT"
+            echo "PR #${PR_NUMBER_EVENT}; running XPU CI at ${PR_HEAD_SHA}"
+            echo "build_nvidia_image=${BUILD_NVIDIA}"
+            exit 0
+          fi
+
+          # ---- pre-merge, /run_xpu_heterogeneous slash command --------------
+
+          echo "ISSUE_NUMBER=${ISSUE_NUMBER}"
+          echo "$GITHUB_EVENT_PATH"
+          cat "$GITHUB_EVENT_PATH"
+
+          PR_NUMBER="${ISSUE_NUMBER}"
+          if [[ -z "${PR_NUMBER}" ]]; then
+            PR_NUMBER="$(jq -r '.issue.number // empty' "$GITHUB_EVENT_PATH")"
+            echo "PR_NUMBER=${PR_NUMBER}"
+          fi
+
+          if [[ -z "${PR_NUMBER}" ]]; then
+            echo "Could not resolve pull request number for ${GITHUB_EVENT_NAME}"
+            exit 1
+          fi
+
+          PR_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
+
+          # Check for xpu label
+          HAS_XPU=$(jq -r '[.labels[].name] | any(. == "xpu")' <<< "${PR_JSON}")
+          echo "has_xpu_label=${HAS_XPU}" >> "$GITHUB_OUTPUT"
+          # Reuse the PR_JSON already fetched above rather than re-querying.
+          BUILD_NVIDIA=$(nvidia_from_json "${PR_JSON}")
+          echo "build_nvidia_image=${BUILD_NVIDIA}" >> "$GITHUB_OUTPUT"
+          echo "build_nvidia_image=${BUILD_NVIDIA}"
+          CHECKOUT_REF="refs/pull/${PR_NUMBER}/head"
+          CHECKOUT_SHA=$(jq -r '.head.sha' <<< "${PR_JSON}")
+          echo "checkout_ref=${CHECKOUT_REF}" >> "$GITHUB_OUTPUT"
+          if [[ "${HAS_XPU}" == "true" ]]; then
+            echo "✅ PR #${PR_NUMBER} has 'xpu' label – running XPU CI at ${CHECKOUT_REF} (${CHECKOUT_SHA})"
+          else
+            echo "⏭️ PR #${PR_NUMBER} does not have 'xpu' label – skipping XPU CI"
+          fi
+
+  # ============================================================================
+  # CHANGE DETECTION
+  # ============================================================================
+
+  changed-files:
+    needs: [guard]
+    if: needs.guard.outputs.has_xpu_label == 'true'
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      # force_all_tests replaces the former
+      #   github.event_name == 'schedule' || github.event_name == 'issue_comment'
+      # expression. Same truth table for the two pre-existing phases — the
+      # pre-merge caller passes `github.event_name == 'issue_comment'`, and the
+      # nightly caller passes true — but now post-merge can opt in too, and the
+      # condition is visible at the call site instead of buried here.
+      core: ${{ inputs.force_all_tests && 'true' || steps.changes.outputs.core }}
+      vllm: ${{ inputs.force_all_tests && 'true' || steps.changes.outputs.vllm }}
+      sglang: ${{ steps.changes.outputs.sglang }}
+      docker_image_gpu: ${{ steps.shared-images.outputs.docker_image_gpu }}
+      # Immutable form of docker_image_gpu (repo:YYYYMMDD-sha) plus its digest,
+      # recorded for provenance. Empty if :latest could not be resolved.
+      docker_image_gpu_resolved: ${{ steps.shared-images.outputs.docker_image_gpu_resolved }}
+      docker_image_gpu_digest: ${{ steps.shared-images.outputs.docker_image_gpu_digest }}
+      checkout_ref: ${{ needs.guard.outputs.checkout_ref }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ needs.guard.outputs.checkout_ref }}
+          fetch-depth: 0
+      - name: Check for changes
+        # Skipped whenever the caller forces everything on, so the diff action
+        # never runs on a push to main or a cron tick where there is no PR base
+        # to diff against.
+        if: ${{ !inputs.force_all_tests }}
+        id: changes
+        uses: ./.github/actions/changed-files
+        with:
+          gh_token: ${{ github.token }}
+      - name: Set shared images
+        id: shared-images
+        shell: bash
+        env:
+          # Via env rather than inline ${{ }} so the value reaches bash as data,
+          # not as text spliced into the script before it runs.
+          GPU_TAG_INPUT: ${{ inputs.gpu_tag }}
+        run: |
+          set -uo pipefail
+
+          GPU_REPO="nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly"
+          GPU_PATH="nvidia/ai-dynamo/vllm-runtime-nightly"
+
+          # ---- Override point -------------------------------------------------
+          # Now the gpu_tag input instead of a literal, so one caller can be
+          # pinned without pinning the others -- e.g. hold the nightly on a known
+          # -good dated tag while PR runs keep following :latest.
+          #
+          # "latest" follows whatever the newest nightly is, which is what the
+          # 23:00 cron and the PR runs want. To pin a caller to one specific
+          # nightly instead, pass that build's immutable dated tag, e.g.
+          #     gpu_tag: '20260727-769ee07'
+          # Tag only -- GPU_PATH must keep matching GPU_REPO for the registry API
+          # calls below, so do not fold a full image reference in here. An empty
+          # value falls back to "latest" rather than requesting ":".
+          GPU_TAG="${GPU_TAG_INPUT:-latest}"
+          # ---------------------------------------------------------------------
+
+          GPU_IMAGE="${GPU_REPO}:${GPU_TAG}"
+
+          # A moving pointer like ":latest" means a run's logs alone never say
+          # which nightly was actually tested. Resolve it to the immutable
+          # YYYYMMDD-sha tag (e.g. 20260715-b0b7786) and record that in the job
+          # summary, so a failure can be reproduced against the exact image months
+          # later.
+          #
+          # Done by digest comparison rather than by reading image labels: the
+          # labels on these nightlies are inherited from the upstream vLLM base
+          # image (org.opencontainers.image.version=vllm/vllm-openai:...), so they
+          # identify the vLLM release, not the dynamo nightly build.
+          #
+          # An explicitly pinned dated tag is already immutable, so it is its own
+          # provenance record: skip the reverse lookup and just record the digest.
+          case "$GPU_TAG" in
+            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-*) pinned=true ;;
+            *)                                          pinned=false ;;
+          esac
+
+          resolved_tag=""
+          digest=""
+          accept='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json'
+
+          token=$(curl -sS --max-time 30 "https://nvcr.io/proxy_auth?scope=repository:${GPU_PATH}:pull" 2>/dev/null | jq -r '.token // empty' || true)
+
+          manifest_digest() {
+            curl -sS --max-time 30 -o /dev/null -D - \
+              -H "Authorization: Bearer $token" -H "Accept: $accept" \
+              "https://nvcr.io/v2/${GPU_PATH}/manifests/$1" 2>/dev/null \
+              | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}'
+          }
+
+          if [ "$pinned" = true ]; then
+            resolved_tag="$GPU_TAG"
+          fi
+
+          if [ -n "$token" ]; then
+            digest=$(manifest_digest "$GPU_TAG")
+            if [ "$pinned" != true ] && [ -n "$digest" ]; then
+              # Newest date tags first so the freshest match wins if a digest is
+              # carried by more than one tag.
+              for tag in $(curl -sS --max-time 30 -H "Authorization: Bearer $token" \
+                             "https://nvcr.io/v2/${GPU_PATH}/tags/list" 2>/dev/null \
+                             | jq -r '.tags[]? // empty' | grep -E '^[0-9]{8}-' | sort -r); do
+                if [ "$(manifest_digest "$tag")" = "$digest" ]; then
+                  resolved_tag="$tag"
+                  break
+                fi
+              done
+            fi
+          fi
+
+          echo "docker_image_gpu=${GPU_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "docker_image_gpu_digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "docker_image_gpu_resolved=${resolved_tag:+${GPU_REPO}:${resolved_tag}}" >> "$GITHUB_OUTPUT"
+
+          # Resolution is best-effort: it is a provenance record, not a gate, so a
+          # registry hiccup must not fail the build. Say so plainly in the summary
+          # instead of silently reporting nothing.
+          echo "### 📦 Shared GPU Image" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Requested | \`${GPU_IMAGE}\` |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$pinned" = true ]; then
+            echo "| Resolved | \`${GPU_IMAGE}\` (pinned in workflow) |" >> "$GITHUB_STEP_SUMMARY"
+            echo "📌 Pinned to ${GPU_IMAGE} (dated tag, no :latest resolution needed)"
+          elif [ -n "$resolved_tag" ]; then
+            echo "| Resolved | \`${GPU_REPO}:${resolved_tag}\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ Resolved ${GPU_IMAGE} -> ${GPU_REPO}:${resolved_tag}"
+          else
+            echo "| Resolved | ⚠️ could not resolve \`${GPU_TAG}\` to a dated tag |" >> "$GITHUB_STEP_SUMMARY"
+            echo "⚠️ Could not resolve ${GPU_IMAGE} to a dated tag (registry unreachable or no matching tag)"
+          fi
+          if [ -n "$digest" ]; then
+            echo "| Digest | \`${digest}\` |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ============================================================================
+  # BUILD XPU IMAGE
+  # ============================================================================
+
+  build-xpu:
+    needs: [changed-files]
+    if: >-
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.vllm == 'true'
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      image: ${{ steps.push.outputs.registry_image_tag }}
+      short_sha: ${{ steps.build.outputs.short_sha }}
+    env:
+      FRAMEWORK: vllm
+      TARGET: runtime
+      DEVICE: xpu
+      PLATFORM: linux/amd64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ needs.changed-files.outputs.checkout_ref }}
+
+      - name: Generate Dockerfile
+        id: render
+        shell: bash
+        run: |
+          echo "::group::Generating XPU Dockerfile"
+          # --output-short-filename is deliberately NOT passed: it would write
+          # container/rendered.Dockerfile, the same path the cuda render in
+          # build-nvidia uses. Keeping the long per-device name means both
+          # rendered Dockerfiles survive side by side for review, and neither
+          # job can overwrite the other's when they share a runner workspace.
+          # render.py clears cuda_version for non-cuda devices, so the name has
+          # no version segment here: vllm-runtime-xpu-amd64-rendered.Dockerfile
+          python3 ./container/render.py \
+              --target=${{ env.TARGET }} \
+              --framework=${{ env.FRAMEWORK }} \
+              --device=${{ env.DEVICE }} \
+              --platform=${{ env.PLATFORM }} \
+              --show-result
+          echo "::endgroup::"
+
+          # render.py names the file <framework>-<target>-<device><cuda_version>-<arch>-rendered.Dockerfile
+          # with the arch normalized from --platform (linux/amd64 -> amd64) and
+          # cuda_version cleared for non-cuda devices, so xpu has no version segment.
+          ARCH="${PLATFORM##*/}"
+          RENDERED="container/${FRAMEWORK}-${TARGET}-${DEVICE}-${ARCH}-rendered.Dockerfile"
+          if [[ ! -f "${RENDERED}" ]]; then
+            echo "::error::Expected rendered Dockerfile not found at ${RENDERED}"
+            ls -la container/*rendered.Dockerfile || true
+            exit 1
+          fi
+          echo "rendered=${RENDERED}" >> "$GITHUB_OUTPUT"
+          echo "Rendered: ${RENDERED}"
+
+      - name: Build XPU image
+        id: build
+        shell: bash
+        run: |
+          set -x
+
+          IMAGE_NAME="dynamo-${{ env.FRAMEWORK }}-${{ env.TARGET }}-${{ env.DEVICE }}"
+          SHORT_SHA="$(git rev-parse HEAD | cut -c1-7)"
+          IMAGE_TAG="${IMAGE_NAME}:${{ github.run_id }}-${SHORT_SHA}"
+
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+          docker build \
+            --progress=plain \
+            --tag "${IMAGE_TAG}" \
+            -f "${{ steps.render.outputs.rendered }}" \
+            . 2>&1 | tee build-xpu.log
+
+          echo "### 🐳 XPU Image Built" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image Tag | \`${IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Framework | ${{ env.FRAMEWORK }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Device | ${{ env.DEVICE }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build XPU test image
+        shell: bash
+        run: |
+          set -x
+
+          TEST_IMAGE_TAG="${{ steps.build.outputs.image_tag }}-test"
+
+          docker build \
+            --progress=plain \
+            --tag "${TEST_IMAGE_TAG}" \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.build.outputs.image_tag }} \
+            . 2>&1 | tee build-xpu-test.log
+
+      - name: Push XPU image to registry
+        id: push
+        shell: bash
+        run: |
+          set -x
+
+          REGISTRY="sc09super01-srv.intel.com/dynamo"
+          IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+          REGISTRY_IMAGE_TAG="${REGISTRY}/${IMAGE_TAG}"
+
+          docker tag "${IMAGE_TAG}" "${REGISTRY_IMAGE_TAG}"
+          docker push "${REGISTRY_IMAGE_TAG}"
+
+          echo "registry_image_tag=${REGISTRY_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          echo "### 🚀 XPU Image Pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Registry Image | \`${REGISTRY_IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      # Remove THIS run's image tags from the self-hosted runner's daemon. The
+      # tags embed github.run_id, so every run creates new names and nothing is
+      # ever reclaimed by being overwritten -- without this the daemon grows by
+      # a full framework image per run until the disk fills.
+      #
+      # Scoped to this run's own tags on purpose. `docker system prune` would
+      # also discard the shared build cache that makes subsequent runs fast, and
+      # on a runner shared with other jobs it can pull layers out from under a
+      # concurrent build. `docker rmi` on a pushed tag only drops the local
+      # reference: the registry copy the tests pull is unaffected.
+      #
+      # always() so a failed build still cleans up its partial tags, and every
+      # command is `|| true` -- a cleanup failure must not fail a green build.
+      - name: Clean up local images
+        if: always()
+        shell: bash
+        run: |
+          IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+          REGISTRY_IMAGE_TAG="${{ steps.push.outputs.registry_image_tag }}"
+
+          echo "Disk usage before cleanup:"
+          docker system df || true
+
+          # Built from IMAGE_TAG, so only meaningful when that is set. Guarding
+          # on IMAGE_TAG rather than on the composed ref: if the build step
+          # failed before writing its outputs, IMAGE_TAG is empty and a bare
+          # "-test" would reach docker rmi as a flag.
+          REFS=()
+          if [[ -n "${IMAGE_TAG}" ]]; then
+            # The -test image is built but never pushed, so this is the only
+            # thing that ever removes it.
+            REFS+=("${IMAGE_TAG}" "${IMAGE_TAG}-test")
+          fi
+          if [[ -n "${REGISTRY_IMAGE_TAG}" ]]; then
+            REFS+=("${REGISTRY_IMAGE_TAG}")
+          fi
+
+          for ref in ${REFS+"${REFS[@]}"}; do
+            echo "Removing ${ref}"
+            docker rmi "${ref}" || true
+          done
+
+          # Dangling layers orphaned by the rmi calls above. Untagged only --
+          # this does not touch the tagged build cache other runs reuse.
+          docker image prune --force || true
+
+          echo "Disk usage after cleanup:"
+          docker system df || true
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xpu-build-log
+          path: |
+            build-xpu.log
+            build-xpu-test.log
+            container/*rendered.Dockerfile
+          retention-days: 7
+
+  # ============================================================================
+  # BUILD NVIDIA IMAGE (opt-in)
+  # ============================================================================
+  # Mirrors build-xpu with DEVICE=cuda. Opt-in via the build_nvidia_image PR
+  # label: without it this job skips and the tests use the pinned nvcr.io image
+  # resolved in changed-files, which is the default behaviour.
+  #
+  # Three deliberate differences from build-xpu:
+  #   1. --cuda-version is required for the cuda device (render.py accepts only
+  #      13.0 for vllm); the xpu render omits it entirely.
+  #   2. No test image is built. Dockerfile.test is only ever consumed by the
+  #      xpu smoke path -- the heterog manifests reference the runtime image
+  #      alone, so building it here would be dead weight.
+  #   3. Base images come from Docker Hub (vllm/vllm-openai) and nvcr.io
+  #      (cuda-dl-base) rather than public.ecr.aws, so this is the only job in
+  #      this workflow subject to Docker Hub anonymous pull limits.
+
+  build-nvidia:
+    needs: [guard, changed-files]
+    if: >-
+      needs.guard.outputs.build_nvidia_image == 'true' &&
+      (needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.vllm == 'true')
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      image: ${{ steps.push.outputs.registry_image_tag }}
+      short_sha: ${{ steps.build.outputs.short_sha }}
+    env:
+      FRAMEWORK: vllm
+      TARGET: runtime
+      DEVICE: cuda
+      CUDA_VERSION: "13.0"
+      PLATFORM: linux/amd64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ needs.changed-files.outputs.checkout_ref }}
+
+      - name: Generate Dockerfile
+        id: render
+        shell: bash
+        run: |
+          echo "::group::Generating NVIDIA (cuda) Dockerfile"
+          # See the note in build-xpu: --output-short-filename is omitted so the
+          # xpu and cuda renders land on distinct paths and both are retained.
+          python3 ./container/render.py \
+              --target=${{ env.TARGET }} \
+              --framework=${{ env.FRAMEWORK }} \
+              --device=${{ env.DEVICE }} \
+              --cuda-version=${{ env.CUDA_VERSION }} \
+              --platform=${{ env.PLATFORM }} \
+              --show-result
+          echo "::endgroup::"
+
+          # cuda keeps its version in the filename (unlike xpu, where render.py
+          # clears it): vllm-runtime-cuda13.0-amd64-rendered.Dockerfile
+          ARCH="${PLATFORM##*/}"
+          RENDERED="container/${FRAMEWORK}-${TARGET}-${DEVICE}${CUDA_VERSION}-${ARCH}-rendered.Dockerfile"
+          if [[ ! -f "${RENDERED}" ]]; then
+            echo "::error::Expected rendered Dockerfile not found at ${RENDERED}"
+            ls -la container/*rendered.Dockerfile || true
+            exit 1
+          fi
+          echo "rendered=${RENDERED}" >> "$GITHUB_OUTPUT"
+          echo "Rendered: ${RENDERED}"
+
+      - name: Build NVIDIA image
+        id: build
+        shell: bash
+        run: |
+          set -x
+
+          IMAGE_NAME="dynamo-${{ env.FRAMEWORK }}-${{ env.TARGET }}-${{ env.DEVICE }}"
+          SHORT_SHA="$(git rev-parse HEAD | cut -c1-7)"
+          IMAGE_TAG="${IMAGE_NAME}:${{ github.run_id }}-${SHORT_SHA}"
+
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+          docker build \
+            --progress=plain \
+            --tag "${IMAGE_TAG}" \
+            -f "${{ steps.render.outputs.rendered }}" \
+            . 2>&1 | tee build-nvidia.log
+
+          echo "### 🐳 NVIDIA Image Built" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image Tag | \`${IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Framework | ${{ env.FRAMEWORK }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Device | ${{ env.DEVICE }} ${{ env.CUDA_VERSION }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push NVIDIA image to registry
+        id: push
+        shell: bash
+        run: |
+          set -x
+
+          REGISTRY="sc09super01-srv.intel.com/dynamo"
+          IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+          REGISTRY_IMAGE_TAG="${REGISTRY}/${IMAGE_TAG}"
+
+          docker tag "${IMAGE_TAG}" "${REGISTRY_IMAGE_TAG}"
+          docker push "${REGISTRY_IMAGE_TAG}"
+
+          echo "registry_image_tag=${REGISTRY_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          echo "### 🚀 NVIDIA Image Pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Registry Image | \`${REGISTRY_IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      # See the matching step in build-xpu for why this is scoped to this run's
+      # own tags rather than a broad prune. No -test ref here: this job builds
+      # no test image. The cuda layers share nothing with the xpu ones, so
+      # skipping this would double the per-run disk growth on the runner.
+      - name: Clean up local images
+        if: always()
+        shell: bash
+        run: |
+          IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+          REGISTRY_IMAGE_TAG="${{ steps.push.outputs.registry_image_tag }}"
+
+          echo "Disk usage before cleanup:"
+          docker system df || true
+
+          REFS=()
+          [[ -n "${IMAGE_TAG}" ]]          && REFS+=("${IMAGE_TAG}")
+          [[ -n "${REGISTRY_IMAGE_TAG}" ]] && REFS+=("${REGISTRY_IMAGE_TAG}")
+
+          for ref in ${REFS+"${REFS[@]}"}; do
+            echo "Removing ${ref}"
+            docker rmi "${ref}" || true
+          done
+
+          # Untagged layers only; leaves the tagged cache other runs reuse.
+          docker image prune --force || true
+
+          echo "Disk usage after cleanup:"
+          docker system df || true
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvidia-build-log
+          path: |
+            build-nvidia.log
+            container/*rendered.Dockerfile
+          retention-days: 7
+
+  # ============================================================================
+  # RESOLVE GPU IMAGE
+  # ============================================================================
+  # Picks the built image over the pinned one and records what was actually used.
+  #
+  # always() is required, not decorative: build-nvidia is skipped whenever the
+  # label is absent, and without a status function the implicit success() over
+  # the whole ancestor closure would skip this job -- and every test behind it --
+  # on the default path. Gating is done by the explicit changed-files check.
+  # Same reasoning as the heterog-test-* jobs in xpu-heterogeneous-dispatch.yaml.
+
+  resolve-images:
+    needs: [guard, changed-files, build-nvidia]
+    if: always() && needs.changed-files.result == 'success'
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      docker_image_gpu: ${{ steps.resolve.outputs.docker_image_gpu }}
+    steps:
+      - name: Resolve GPU image
+        id: resolve
+        shell: bash
+        env:
+          BUILD_NVIDIA_LABEL: ${{ needs.guard.outputs.build_nvidia_image }}
+          BUILD_NVIDIA_RESULT: ${{ needs.build-nvidia.result }}
+          BUILT_IMAGE: ${{ needs.build-nvidia.outputs.image }}
+          PINNED_IMAGE: ${{ needs.changed-files.outputs.docker_image_gpu }}
+          PINNED_RESOLVED: ${{ needs.changed-files.outputs.docker_image_gpu_resolved }}
+        run: |
+          set -euo pipefail
+
+          case "${BUILD_NVIDIA_RESULT}" in
+            success)
+              # A green build that produced no image ref means the push step was
+              # bypassed; falling back silently here would test the pinned image
+              # while the summary claimed otherwise, so fail loudly instead.
+              if [[ -z "${BUILT_IMAGE}" ]]; then
+                echo "::error::build-nvidia succeeded but produced no image output"
+                exit 1
+              fi
+              docker_image_gpu="${BUILT_IMAGE}"
+              origin="built by this run's build-nvidia job"
+              ;;
+            skipped)
+              # No label, or a diff that touched neither core nor vllm. Either
+              # way the pinned image is the intended default.
+              docker_image_gpu="${PINNED_IMAGE}"
+              if [[ "${BUILD_NVIDIA_LABEL}" == "true" ]]; then
+                origin="pinned (build-nvidia skipped: no core/vllm changes)"
+              else
+                origin="pinned (no build_nvidia_image label)"
+              fi
+              ;;
+            *)
+              # failure / cancelled. The label asked for a fresh GPU image, so
+              # quietly testing a stale pinned one would hide the breakage.
+              echo "::error::build-nvidia did not succeed (result: ${BUILD_NVIDIA_RESULT})"
+              exit 1
+              ;;
+          esac
+
+          if [[ -z "${docker_image_gpu}" ]]; then
+            echo "::error::Could not resolve a GPU image"
+            exit 1
+          fi
+
+          echo "docker_image_gpu=${docker_image_gpu}" >> "$GITHUB_OUTPUT"
+
+          # What the tests actually ran with, after the built-vs-pinned choice.
+          # The Shared GPU Image table above shows what changed-files resolved;
+          # this one shows what was used, which is what a failure months from now
+          # has to be reproduced against.
+          {
+            echo "### 🧩 Resolved GPU Image"
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            printf '| GPU image | `%s` |\n' "${docker_image_gpu}"
+            printf '| Origin | %s |\n' "${origin}"
+            if [[ "${BUILD_NVIDIA_RESULT}" == "skipped" && -n "${PINNED_RESOLVED}" ]]; then
+              printf '| Pinned tag resolved to | `%s` |\n' "${PINNED_RESOLVED}"
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Resolved GPU image: ${docker_image_gpu} (${origin})"
+
+  # ============================================================================
+  # HETEROGENEOUS P/D TESTS
+  # ============================================================================
+
+  heterog-test-px-dn:
+    name: "Heterog: XPU Prefill + NVIDIA Decode"
+    needs: [changed-files, build-xpu, resolve-images]
+    # always() is required, not decorative: build-nvidia is in this job's
+    # ancestor closure via resolve-images, and it is skipped whenever the
+    # build_nvidia_image label is absent. Without a status function the implicit
+    # success() evaluates over that whole closure, so the skipped build-nvidia
+    # would skip this test on the DEFAULT path. Gating is done by the explicit
+    # result checks below. Matches heterog-test-pn-dx and the same pattern in
+    # xpu-heterogeneous-dispatch.yaml.
+    if: >-
+      always() &&
+      needs.build-xpu.result == 'success' &&
+      needs.resolve-images.result == 'success' &&
+      (needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.vllm == 'true')
+    uses: ./.github/workflows/epd-test-template.yml
+    secrets: inherit
+    with:
+      test_name: "px-dn"
+      test_yaml_path: ".ci/test/dynamo-heterog/k8s/tests/px-dn.yaml"
+      runner: ${{ inputs.runner }}
+      CHECKOUT_COMMIT: ${{ needs.changed-files.outputs.checkout_ref }}
+      docker_image_xpu: ${{ needs.build-xpu.outputs.image }}
+      docker_image_gpu: "${{ needs.resolve-images.outputs.docker_image_gpu }}"
+      xpu_resource_template: "onexpu-rdma-kueue"
+      nvidia_resource_template: "onenvidia-rdma-kueue"
+      xpu_node: "xpu_node"
+      nvidia_node: "nvidia_node"
+      model: ${{ inputs.model }}
+      tensor_parallel: ${{ inputs.tensor_parallel }}
+
+  heterog-test-pn-dx:
+    name: "Heterog: NVIDIA Prefill + XPU Decode"
+    needs: [changed-files, build-xpu, resolve-images, heterog-test-px-dn]
+    if: >-
+      always() &&
+      needs.build-xpu.result == 'success' &&
+      needs.resolve-images.result == 'success' &&
+      needs.heterog-test-px-dn.result != 'cancelled' &&
+      (needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.vllm == 'true')
+    uses: ./.github/workflows/epd-test-template.yml
+    secrets: inherit
+    with:
+      test_name: "pn-dx"
+      test_yaml_path: ".ci/test/dynamo-heterog/k8s/tests/pn-dx.yaml"
+      runner: ${{ inputs.runner }}
+      CHECKOUT_COMMIT: ${{ needs.changed-files.outputs.checkout_ref }}
+      docker_image_xpu: ${{ needs.build-xpu.outputs.image }}
+      docker_image_gpu: "${{ needs.resolve-images.outputs.docker_image_gpu }}"
+      xpu_resource_template: "onexpu-rdma-kueue"
+      nvidia_resource_template: "onenvidia-rdma-kueue"
+      xpu_node: "xpu_node"
+      nvidia_node: "nvidia_node"
+      model: ${{ inputs.model }}
+      tensor_parallel: ${{ inputs.tensor_parallel }}
+
+  # ============================================================================
+  # STATUS CHECK — deliberately NOT in this file.
+  # ============================================================================
+  # The aggregate `xpu-status-check` job lives in each of the three callers, not
+  # here, purely to keep its check NAME stable.
+  #
+  # A job contributed by a reusable workflow is reported to the Checks API as
+  # "<caller job name> / <job name>", so hosting it here would rename the check
+  # from `xpu-status-check` to `run / xpu-status-check`. Any branch protection
+  # rule requiring `xpu-status-check` would then wait forever on a context that
+  # no longer reports — PRs blocked, with nothing red to explain why.
+  #
+  # Nothing is lost by moving it out: a called workflow's own conclusion is
+  # already the conjunction of its jobs, so the caller's one-line assertion over
+  # `needs.run.result` covers every job below.

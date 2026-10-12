@@ -1,0 +1,39 @@
+# Deliberately does no work. Read this before wondering what it tests: nothing.
+#
+# The sync_pre_merge ruleset on main wants "require branches to be up to date
+# before merging". GitHub only honours that setting when at least one status
+# check is required, because the setting exists to keep a required check's
+# result honest - a check that passed against a stale base proves nothing. With
+# an empty check list the setting is accepted by the UI and then silently
+# ignored, which is the bug this file works around.
+#
+# So this workflow exists to publish one check name, "pr-gate", for the ruleset
+# to attach that setting to. Its green tick carries no information: it means a
+# container started and echoed a line. Do not read it as a signal about the PR.
+#
+# Intended to be temporary. Once the XPU heterogeneous tests run on sync PRs,
+# require their status check instead and delete this file - that yields the same
+# up-to-date enforcement backed by something that actually tests the code.
+#
+# Must stay on a GitHub-hosted runner. A required check that queues behind the
+# xpu-heterog-hardware concurrency slot would turn a busy cluster into a merge
+# freeze for every PR in the repo.
+name: PR Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+# Needs no access to anything. Least privilege, so a required check that runs on
+# every PR can never become an attack path.
+permissions: {}
+
+jobs:
+  gate:
+    # This job name IS the required status check context in the ruleset.
+    # Renaming it breaks the rule: every PR would block forever waiting on a
+    # context that nothing emits. Change both together or neither.
+    name: pr-gate
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "pr-gate is an intentional no-op. See the comment at the top of this file."

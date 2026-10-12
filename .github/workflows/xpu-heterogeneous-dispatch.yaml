@@ -1,0 +1,730 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: XPU-Heterogeneous-Dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_selection:
+        description: 'Heterogeneous P/D test(s) to run'
+        required: true
+        type: choice
+        options:
+          - both
+          - px-dn
+          - pn-dx
+        default: both
+      CHECKOUT_COMMIT:
+        description: 'Commit SHA for the heterog test checkout (optional, defaults to workflow trigger commit)'
+        required: false
+        type: string
+        default: ''
+      xpu_build_checkout_commit:
+        description: 'Commit SHA to build the XPU image from (optional, defaults to CHECKOUT_COMMIT or workflow trigger commit)'
+        required: false
+        type: string
+        default: ''
+      # The literal word BUILD (any case) => this run builds the image; anything
+      # else is treated as an image ref and tested as-is. Both default to a
+      # known-good ref, so an all-defaults dispatch tests those two and builds
+      # nothing.
+      #
+      # A SENTINEL, NOT AN EMPTY FIELD. Emptiness cannot work here: GitHub
+      # substitutes an input's default whenever a dispatch field is submitted
+      # blank, so `inputs.docker_image_xpu == ''` is unreachable for any input
+      # carrying a non-empty default -- clearing the box yields the default ref,
+      # the build job never triggers, and the run silently tests the pinned image
+      # instead. A non-empty sentinel survives that substitution.
+      #
+      # There is also deliberately no separate "source" switch: a build/provided
+      # choice alongside a ref makes two states expressible that cannot be
+      # honoured -- "provided" with no ref (nothing to test) and "build" with a
+      # ref (a value that must be silently ignored).
+      docker_image_xpu:
+        description: 'XPU image to test, or BUILD to build one from xpu_build_checkout_commit'
+        required: false
+        type: string
+        default: 'sc09super01-srv.intel.com/dynamo/dynamo-vllm-runtime-xpu:30415619006-9764ba0'
+      docker_image_gpu:
+        description: 'NVIDIA GPU image to test, or BUILD to build one from CHECKOUT_COMMIT'
+        required: false
+        type: string
+        default: 'nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260727-769ee07'
+      xpu_resource_template:
+        description: 'XPU ResourceClaimTemplate name'
+        required: false
+        type: string
+        default: 'onexpu-rdma-kueue'
+      nvidia_resource_template:
+        description: 'NVIDIA ResourceClaimTemplate name'
+        required: false
+        type: string
+        default: 'onenvidia-rdma-kueue'
+      # One field, "repo:tag", replacing the former xpu_base_image +
+      # xpu_base_image_tag pair. Split on the LAST colon in build-xpu, because a
+      # registry host may itself carry a port (host:5000/img:tag).
+      #
+      # DEFAULT => pass no --build-arg at all, so the build falls back to the
+      # values baked into the rendered Dockerfile by container/render.py from
+      # container/context.yaml (vllm: xpu: => vllm/vllm-openai-xpu:v0.26.0). That
+      # is the repo default, and pinning it here would silently go stale the next
+      # time context.yaml moves.
+      xpu_base_image:
+        description: 'XPU base/runtime image as repo:tag when building, or DEFAULT to use container/context.yaml'
+        required: false
+        type: string
+        default: 'DEFAULT'
+
+# SHARED CONSTANT group — must stay byte-identical to the block in
+# pr-xpu-heterogeneous.yaml. Do NOT add github.workflow or github.ref to this
+# string: the cluster, the dynamo-system namespace and the onexpu-/
+# onenvidia-rdma-kueue ResourceClaimTemplates are ONE global resource, so every
+# run must serialize on one key regardless of workflow or branch. Keying on
+# github.workflow is what previously let this manual dispatch run alongside a PR
+# run and interleave on the same self-hosted runners.
+#
+# Workflow level, not job level: this holds the slot for the ENTIRE run, so a
+# waiting run starts no jobs at all — including build-xpu, which occupies the
+# same runner label as the tests.
+#
+# cancel-in-progress: false + queue: max => up to 100 runs wait in FIFO order
+# and nothing is ever cancelled. queue: max is invalid with cancel-in-progress:
+# true. actionlint <=1.7.12 wrongly flags "queue" as an unknown key.
+concurrency:
+  group: xpu-heterog-hardware
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  print-inputs:
+    runs-on: xpu-heterogeneous-ubuntu-latest
+    steps:
+      - name: Print workflow inputs
+        shell: bash
+        run: |
+          echo "test_selection=${{ inputs.test_selection }}"
+          echo "CHECKOUT_COMMIT=${{ inputs.CHECKOUT_COMMIT }}"
+          echo "xpu_build_checkout_commit=${{ inputs.xpu_build_checkout_commit }}"
+          echo "docker_image_xpu=${{ inputs.docker_image_xpu }}"
+          echo "docker_image_gpu=${{ inputs.docker_image_gpu }}"
+          echo "xpu_resource_template=${{ inputs.xpu_resource_template }}"
+          echo "nvidia_resource_template=${{ inputs.nvidia_resource_template }}"
+          echo "xpu_base_image=${{ inputs.xpu_base_image }}"
+
+      - name: Summarize dispatch inputs
+        # workflow_dispatch inputs are not recorded anywhere a reader can see
+        # after the fact: the run page shows only the workflow name, and the step
+        # above is a click deep in a log that scrolls away. Put them in the job
+        # summary so "what was this run actually given?" is answerable from the
+        # run page itself. Runs unconditionally -- unlike the build-xpu summaries
+        # below, which vanish entirely unless the XPU input was set to BUILD.
+        shell: bash
+        env:
+          TEST_SELECTION: ${{ inputs.test_selection }}
+          INPUT_CHECKOUT_COMMIT: ${{ inputs.CHECKOUT_COMMIT }}
+          XPU_BUILD_CHECKOUT_COMMIT: ${{ inputs.xpu_build_checkout_commit }}
+          INPUT_DOCKER_IMAGE_XPU: ${{ inputs.docker_image_xpu }}
+          INPUT_DOCKER_IMAGE_GPU: ${{ inputs.docker_image_gpu }}
+          XPU_RESOURCE_TEMPLATE: ${{ inputs.xpu_resource_template }}
+          NVIDIA_RESOURCE_TEMPLATE: ${{ inputs.nvidia_resource_template }}
+          XPU_BASE_IMAGE: ${{ inputs.xpu_base_image }}
+        run: |
+          set -uo pipefail
+
+          # Values are free-form user input, so pass them as arguments rather
+          # than interpolating them into the script body.
+          # row LABEL VALUE            -> plain value, "-" when empty
+          # code_row LABEL VALUE NOTE  -> `value` plus an optional unformatted
+          #                               note, so "(defaulted)" stays outside
+          #                               the code span rather than reading as
+          #                               part of the image ref / SHA.
+          row() { printf '| %s | %s |\n' "$1" "${2:--}" >> "$GITHUB_STEP_SUMMARY"; }
+          code_row() {
+            if [ -n "${2:-}" ]; then
+              printf '| %s | `%s`%s |\n' "$1" "$2" "${3:+ $3}" >> "$GITHUB_STEP_SUMMARY"
+            else
+              row "$1" "${3:-}"
+            fi
+          }
+
+          {
+            echo "### ⚙️ Dispatch Inputs"
+            echo "| Input | Value |"
+            echo "|-------|-------|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          row      "Test selection"   "$TEST_SELECTION"
+          if [ -n "$INPUT_CHECKOUT_COMMIT" ]; then
+            code_row "Test checkout commit" "$INPUT_CHECKOUT_COMMIT"
+          else
+            code_row "Test checkout commit" "$GITHUB_SHA" "(workflow trigger commit)"
+          fi
+          # image_row LABEL REF BUILD_JOB -> the ref when one was given, else a
+          # note naming the job that builds it. Not code_row's third argument:
+          # that appends to a NON-empty value, and the BUILD sentinel is itself
+          # non-empty, so it would render as `BUILD` plus a note rather than as a
+          # plain "building via ..." line.
+          image_row() {
+            if [ "$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')" = "BUILD" ]; then
+              row "$1" "building via \`$3\`"
+            else
+              code_row "$1" "$2"
+            fi
+          }
+
+          image_row "XPU image"    "$INPUT_DOCKER_IMAGE_XPU" "build-xpu"
+          image_row "NVIDIA image" "$INPUT_DOCKER_IMAGE_GPU" "build-nvidia"
+          code_row "XPU ResourceClaimTemplate"    "$XPU_RESOURCE_TEMPLATE"
+          code_row "NVIDIA ResourceClaimTemplate" "$NVIDIA_RESOURCE_TEMPLATE"
+
+          # The build-only inputs are noise when no build happens -- the XPU
+          # image came from the 'XPU image' row above instead.
+          if [ "$(printf '%s' "$INPUT_DOCKER_IMAGE_XPU" | tr '[:lower:]' '[:upper:]')" = "BUILD" ]; then
+            if [ -n "$XPU_BUILD_CHECKOUT_COMMIT" ]; then
+              code_row "XPU build checkout commit" "$XPU_BUILD_CHECKOUT_COMMIT"
+            else
+              code_row "XPU build checkout commit" \
+                "${INPUT_CHECKOUT_COMMIT:-$GITHUB_SHA}" "(inherited)"
+            fi
+            # DEFAULT is not an image ref, so show what it MEANS rather than
+            # printing the sentinel back at the reader.
+            if [ "$(printf '%s' "$XPU_BASE_IMAGE" | tr '[:lower:]' '[:upper:]')" = "DEFAULT" ]; then
+              row "XPU base image" "repo default from \`container/context.yaml\`"
+            else
+              code_row "XPU base image" "$XPU_BASE_IMAGE"
+            fi
+          fi
+
+          # Blank line terminates the table, so anything appended after this
+          # step is not swallowed as a malformed extra row.
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # OPTIONAL XPU IMAGE BUILD
+  # ============================================================================
+  build-xpu:
+    needs: [print-inputs]
+    # BUILD sentinel => build; any other value is an image ref to test as-is. See
+    # the input comments above for why this is not an emptiness check.
+    # GitHub expression string comparison is case-insensitive, so this also
+    # matches "build" and "Build"; the shell side upper-cases to match.
+    if: inputs.docker_image_xpu == 'BUILD'
+    runs-on: xpu-heterogeneous-ubuntu-latest
+    outputs:
+      image: ${{ steps.push.outputs.registry_image_tag }}
+    env:
+      FRAMEWORK: vllm
+      TARGET: runtime
+      DEVICE: xpu
+      PLATFORM: linux/amd64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ inputs.xpu_build_checkout_commit || inputs.CHECKOUT_COMMIT || github.sha }}
+
+      - name: Generate Dockerfile
+        shell: bash
+        run: |
+          echo "::group::Generating XPU Dockerfile"
+          python3 ./container/render.py \
+              --target=${{ env.TARGET }} \
+              --framework=${{ env.FRAMEWORK }} \
+              --device=${{ env.DEVICE }} \
+              --platform=${{ env.PLATFORM }} \
+              --show-result \
+              --output-short-filename
+          echo "::endgroup::"
+
+      - name: Build XPU image
+        id: build
+        shell: bash
+        env:
+          XPU_BASE_IMAGE: ${{ inputs.xpu_base_image }}
+        run: |
+          set -x
+
+          IMAGE_NAME="dynamo-${{ env.FRAMEWORK }}-${{ env.TARGET }}-${{ env.DEVICE }}"
+          SHORT_SHA="$(git rev-parse HEAD | cut -c1-7)"
+          IMAGE_TAG="${IMAGE_NAME}:${{ github.run_id }}-${SHORT_SHA}"
+
+          # DEFAULT => pass nothing, so the ARG defaults render.py baked into the
+          # Dockerfile from container/context.yaml apply (vllm: xpu: =>
+          # vllm/vllm-openai-xpu:v0.26.0). Anything else is a "repo:tag" override
+          # fanned out to the same five build args this step has always set.
+          BUILD_ARGS=()
+          if [[ "${XPU_BASE_IMAGE^^}" != "DEFAULT" ]]; then
+            # Split on the LAST colon: a registry host can carry its own port, so
+            # "host:5000/img:tag" must divide into "host:5000/img" + "tag".
+            # ${var%:*} / ${var##*:} rather than a bare ${var%%:*}, which would
+            # cut at the port instead.
+            XPU_BASE_IMAGE_REPO="${XPU_BASE_IMAGE%:*}"
+            XPU_BASE_IMAGE_TAG="${XPU_BASE_IMAGE##*:}"
+
+            # No colon at all, or an empty half: refuse rather than build the
+            # wrong thing. A tagless ref would silently become ":latest", and a
+            # ref like "img:" would produce an unusable empty tag.
+            if [[ "$XPU_BASE_IMAGE" != *:* || -z "$XPU_BASE_IMAGE_REPO" || -z "$XPU_BASE_IMAGE_TAG" ]]; then
+              echo "::error::xpu_base_image must be 'repo:tag' or DEFAULT; got '${XPU_BASE_IMAGE}'"
+              exit 1
+            fi
+
+            BUILD_ARGS+=(--build-arg "BASE_IMAGE=${XPU_BASE_IMAGE_REPO}")
+            BUILD_ARGS+=(--build-arg "BASE_IMAGE_TAG=${XPU_BASE_IMAGE_TAG}")
+            BUILD_ARGS+=(--build-arg "RUNTIME_IMAGE=${XPU_BASE_IMAGE_REPO}")
+            BUILD_ARGS+=(--build-arg "RUNTIME_IMAGE_TAG=${XPU_BASE_IMAGE_TAG}")
+            BUILD_ARGS+=(--build-arg "WHEEL_BUILDER_IMAGE=${XPU_BASE_IMAGE_REPO}:${XPU_BASE_IMAGE_TAG}")
+          fi
+
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          docker build \
+            --progress=plain \
+            --tag "${IMAGE_TAG}" \
+            "${BUILD_ARGS[@]}" \
+            -f ./container/rendered.Dockerfile \
+            . 2>&1 | tee build-xpu.log
+
+          echo "### XPU Image Built" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image Tag | \`${IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Framework | ${{ env.FRAMEWORK }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Device | ${{ env.DEVICE }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build XPU test image
+        shell: bash
+        run: |
+          set -x
+
+          TEST_IMAGE_TAG="${{ steps.build.outputs.image_tag }}-test"
+
+          docker build \
+            --progress=plain \
+            --tag "${TEST_IMAGE_TAG}" \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.build.outputs.image_tag }} \
+            . 2>&1 | tee build-xpu-test.log
+
+      - name: Push XPU image to registry
+        id: push
+        shell: bash
+        run: |
+          set -x
+
+          REGISTRY="sc09super01-srv.intel.com/dynamo"
+          IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+          REGISTRY_IMAGE_TAG="${REGISTRY}/${IMAGE_TAG}"
+
+          docker tag "${IMAGE_TAG}" "${REGISTRY_IMAGE_TAG}"
+          docker push "${REGISTRY_IMAGE_TAG}"
+
+          echo "registry_image_tag=${REGISTRY_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          echo "### XPU Image Pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Registry Image | \`${REGISTRY_IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      # Remove THIS run's image tags from the self-hosted runner's daemon. The
+      # tags embed github.run_id, so every run creates new names and nothing is
+      # ever reclaimed by being overwritten -- without this the daemon grows by
+      # a full framework image per run until the disk fills.
+      #
+      # Scoped to this run's own tags on purpose. `docker system prune` would
+      # also discard the shared build cache that makes subsequent runs fast, and
+      # on a runner shared with other jobs it can pull layers out from under a
+      # concurrent build. `docker rmi` on a pushed tag only drops the local
+      # reference: the registry copy the tests pull is unaffected.
+      #
+      # always() so a failed build still cleans up its partial tags, and every
+      # command is `|| true` -- a cleanup failure must not fail a green build.
+      - name: Clean up local images
+        if: always()
+        shell: bash
+        run: |
+          IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+          REGISTRY_IMAGE_TAG="${{ steps.push.outputs.registry_image_tag }}"
+
+          echo "Disk usage before cleanup:"
+          docker system df || true
+
+          # Built from IMAGE_TAG, so only meaningful when that is set. Guarding
+          # on IMAGE_TAG rather than on the composed ref: if the build step
+          # failed before writing its outputs, IMAGE_TAG is empty and a bare
+          # "-test" would reach docker rmi as a flag.
+          REFS=()
+          if [[ -n "${IMAGE_TAG}" ]]; then
+            # The -test image is built but never pushed, so this is the only
+            # thing that ever removes it.
+            REFS+=("${IMAGE_TAG}" "${IMAGE_TAG}-test")
+          fi
+          if [[ -n "${REGISTRY_IMAGE_TAG}" ]]; then
+            REFS+=("${REGISTRY_IMAGE_TAG}")
+          fi
+
+          for ref in ${REFS+"${REFS[@]}"}; do
+            echo "Removing ${ref}"
+            docker rmi "${ref}" || true
+          done
+
+          # Dangling layers orphaned by the rmi calls above. Untagged only --
+          # this does not touch the tagged build cache other runs reuse.
+          docker image prune --force || true
+
+          echo "Disk usage after cleanup:"
+          docker system df || true
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xpu-build-log
+          path: |
+            build-xpu.log
+            build-xpu-test.log
+          retention-days: 7
+
+  # ============================================================================
+  # OPTIONAL NVIDIA IMAGE BUILD
+  # ============================================================================
+  # Mirrors build-nvidia in pr-xpu-heterogeneous.yaml, with the opt-in switched
+  # from the build_nvidia_image PR label to an empty docker_image_gpu, since a
+  # workflow_dispatch run has no PR and therefore no labels to read. Given a ref,
+  # this job skips and the tests use that image as-is.
+  #
+  # Differences from build-xpu above, all inherited from the PR workflow:
+  #   1. --cuda-version is required for the cuda device (render.py accepts only
+  #      13.0 for vllm); the xpu render omits it entirely.
+  #   2. --output-short-filename is deliberately NOT passed. build-xpu above does
+  #      pass it, so it writes container/rendered.Dockerfile; taking the long
+  #      per-device name here keeps the two renders on distinct paths so neither
+  #      job can overwrite the other's when they share a runner workspace.
+  #   3. No test image is built. Dockerfile.test is only ever consumed by the xpu
+  #      smoke path -- the heterog manifests reference the runtime image alone.
+  #   4. No base-image build args. The xpu_base_image/_tag inputs are xpu-only;
+  #      the cuda render pins its own bases (vllm/vllm-openai on Docker Hub and
+  #      cuda-dl-base on nvcr.io), so this is the only job in this workflow
+  #      subject to Docker Hub anonymous pull limits.
+  build-nvidia:
+    needs: [print-inputs]
+    # BUILD sentinel => build; any other value is an image ref to test as-is.
+    # Case-insensitive, as in build-xpu above.
+    if: inputs.docker_image_gpu == 'BUILD'
+    runs-on: xpu-heterogeneous-ubuntu-latest
+    outputs:
+      image: ${{ steps.push.outputs.registry_image_tag }}
+    env:
+      FRAMEWORK: vllm
+      TARGET: runtime
+      DEVICE: cuda
+      CUDA_VERSION: "13.0"
+      PLATFORM: linux/amd64
+    steps:
+      # No nvidia-specific build ref input: this follows CHECKOUT_COMMIT, so the
+      # GPU image is built from the same commit the tests run against.
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ inputs.CHECKOUT_COMMIT || github.sha }}
+
+      - name: Generate Dockerfile
+        id: render
+        shell: bash
+        run: |
+          echo "::group::Generating NVIDIA (cuda) Dockerfile"
+          python3 ./container/render.py \
+              --target=${{ env.TARGET }} \
+              --framework=${{ env.FRAMEWORK }} \
+              --device=${{ env.DEVICE }} \
+              --cuda-version=${{ env.CUDA_VERSION }} \
+              --platform=${{ env.PLATFORM }} \
+              --show-result
+          echo "::endgroup::"
+
+          # render.py names the file
+          # <framework>-<target>-<device><cuda_version>-<arch>-rendered.Dockerfile
+          # with the arch normalized from --platform (linux/amd64 -> amd64). cuda
+          # keeps its version segment, unlike xpu where render.py clears it:
+          # vllm-runtime-cuda13.0-amd64-rendered.Dockerfile
+          ARCH="${PLATFORM##*/}"
+          RENDERED="container/${FRAMEWORK}-${TARGET}-${DEVICE}${CUDA_VERSION}-${ARCH}-rendered.Dockerfile"
+          if [[ ! -f "${RENDERED}" ]]; then
+            echo "::error::Expected rendered Dockerfile not found at ${RENDERED}"
+            ls -la container/*rendered.Dockerfile || true
+            exit 1
+          fi
+          echo "rendered=${RENDERED}" >> "$GITHUB_OUTPUT"
+          echo "Rendered: ${RENDERED}"
+
+      - name: Build NVIDIA image
+        id: build
+        shell: bash
+        run: |
+          set -x
+
+          IMAGE_NAME="dynamo-${{ env.FRAMEWORK }}-${{ env.TARGET }}-${{ env.DEVICE }}"
+          SHORT_SHA="$(git rev-parse HEAD | cut -c1-7)"
+          IMAGE_TAG="${IMAGE_NAME}:${{ github.run_id }}-${SHORT_SHA}"
+
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+          docker build \
+            --progress=plain \
+            --tag "${IMAGE_TAG}" \
+            -f "${{ steps.render.outputs.rendered }}" \
+            . 2>&1 | tee build-nvidia.log
+
+          echo "### 🐳 NVIDIA Image Built" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image Tag | \`${IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Framework | ${{ env.FRAMEWORK }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Device | ${{ env.DEVICE }} ${{ env.CUDA_VERSION }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push NVIDIA image to registry
+        id: push
+        shell: bash
+        run: |
+          set -x
+
+          REGISTRY="sc09super01-srv.intel.com/dynamo"
+          IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+          REGISTRY_IMAGE_TAG="${REGISTRY}/${IMAGE_TAG}"
+
+          docker tag "${IMAGE_TAG}" "${REGISTRY_IMAGE_TAG}"
+          docker push "${REGISTRY_IMAGE_TAG}"
+
+          echo "registry_image_tag=${REGISTRY_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          echo "### 🚀 NVIDIA Image Pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Registry Image | \`${REGISTRY_IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      # Remove THIS run's image tags from the self-hosted runner's daemon. The
+      # tags embed github.run_id, so every run creates new names and nothing is
+      # ever reclaimed by being overwritten -- without this the daemon grows by a
+      # full cuda image per run until the disk fills.
+      #
+      # Scoped to this run's own tags on purpose. `docker system prune` would
+      # also discard the shared build cache that makes subsequent runs fast, and
+      # on a runner shared with other jobs it can pull layers out from under a
+      # concurrent build. `docker rmi` on a pushed tag only drops the local
+      # reference: the registry copy the tests pull is unaffected. No -test ref
+      # here -- this job builds no test image.
+      #
+      # always() so a failed build still cleans up its partial tags, and every
+      # command is `|| true` -- a cleanup failure must not fail a green build.
+      - name: Clean up local images
+        if: always()
+        shell: bash
+        run: |
+          IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+          REGISTRY_IMAGE_TAG="${{ steps.push.outputs.registry_image_tag }}"
+
+          echo "Disk usage before cleanup:"
+          docker system df || true
+
+          REFS=()
+          [[ -n "${IMAGE_TAG}" ]]          && REFS+=("${IMAGE_TAG}")
+          [[ -n "${REGISTRY_IMAGE_TAG}" ]] && REFS+=("${REGISTRY_IMAGE_TAG}")
+
+          for ref in ${REFS+"${REFS[@]}"}; do
+            echo "Removing ${ref}"
+            docker rmi "${ref}" || true
+          done
+
+          # Untagged layers only; leaves the tagged cache other runs reuse.
+          docker image prune --force || true
+
+          echo "Disk usage after cleanup:"
+          docker system df || true
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvidia-build-log
+          path: |
+            build-nvidia.log
+            container/*rendered.Dockerfile
+          retention-days: 7
+
+  resolve-inputs:
+    runs-on: xpu-heterogeneous-ubuntu-latest
+    needs: [build-xpu, build-nvidia]
+    if: always()
+    outputs:
+      checkout_commit: ${{ steps.resolve.outputs.checkout_commit }}
+      docker_image_xpu: ${{ steps.resolve.outputs.docker_image_xpu }}
+      docker_image_gpu: ${{ steps.resolve.outputs.docker_image_gpu }}
+      xpu_resource_template: ${{ steps.resolve.outputs.xpu_resource_template }}
+      nvidia_resource_template: ${{ steps.resolve.outputs.nvidia_resource_template }}
+    steps:
+      - name: Resolve workflow inputs
+        id: resolve
+        shell: bash
+        env:
+          INPUT_DOCKER_IMAGE_XPU: ${{ inputs.docker_image_xpu }}
+          INPUT_DOCKER_IMAGE_GPU: ${{ inputs.docker_image_gpu }}
+          BUILT_DOCKER_IMAGE_XPU: ${{ needs.build-xpu.outputs.image }}
+          BUILD_XPU_RESULT: ${{ needs.build-xpu.result }}
+          BUILT_DOCKER_IMAGE_GPU: ${{ needs.build-nvidia.outputs.image }}
+          BUILD_NVIDIA_RESULT: ${{ needs.build-nvidia.result }}
+          INPUT_CHECKOUT_COMMIT: ${{ inputs.CHECKOUT_COMMIT }}
+          DEFAULT_CHECKOUT_COMMIT: ${{ github.sha }}
+          XPU_RESOURCE_TEMPLATE: ${{ inputs.xpu_resource_template }}
+          NVIDIA_RESOURCE_TEMPLATE: ${{ inputs.nvidia_resource_template }}
+        run: |
+          set -euo pipefail
+
+          checkout_commit="${INPUT_CHECKOUT_COMMIT:-$DEFAULT_CHECKOUT_COMMIT}"
+
+          # The BUILD sentinel means the matching build job ran, so take its
+          # output; any other value is an image ref and is tested as-is. The build
+          # result still has to be checked: the job can fail, and testing nothing
+          # at all is worse than failing here.
+          #
+          # Upper-cased before comparing because bash [[ == ]] is case-SENSITIVE,
+          # unlike the GitHub expressions in the two job `if:` gates. Without this
+          # a dispatch of "build" would trigger the build job but then be read as
+          # an image ref here, and the tests would try to pull "build".
+          #
+          # Both devices resolve identically, so one helper covers them instead of
+          # two near-identical blocks that can drift apart.
+          resolve_image() { # DEVICE INPUT_REF BUILD_JOB BUILD_RESULT BUILT_REF
+            if [[ "${2^^}" != "BUILD" ]]; then
+              # Unreachable from the dispatch form -- a cleared field takes the
+              # default -- but a caller with an explicitly empty value would
+              # otherwise resolve to "", and an empty image ref fails much later
+              # inside the test template with a far less obvious message.
+              if [[ -z "$2" ]]; then
+                echo "$1 image is empty; give an image ref or BUILD" >&2
+                return 1
+              fi
+              printf '%s' "$2"
+              return
+            fi
+            if [[ "$4" != "success" ]]; then
+              echo "$1 image was set to BUILD, but $3 did not succeed (result: '$4')" >&2
+              return 1
+            fi
+            if [[ -z "$5" ]]; then
+              echo "$1 image was set to BUILD, but $3 produced no image output" >&2
+              return 1
+            fi
+            printf '%s' "$5"
+          }
+
+          docker_image_xpu="$(resolve_image XPU "$INPUT_DOCKER_IMAGE_XPU" \
+            build-xpu "$BUILD_XPU_RESULT" "$BUILT_DOCKER_IMAGE_XPU")"
+          docker_image_gpu="$(resolve_image NVIDIA "$INPUT_DOCKER_IMAGE_GPU" \
+            build-nvidia "$BUILD_NVIDIA_RESULT" "$BUILT_DOCKER_IMAGE_GPU")"
+
+          echo "checkout_commit=${checkout_commit}" >> "$GITHUB_OUTPUT"
+          echo "docker_image_xpu=${docker_image_xpu}" >> "$GITHUB_OUTPUT"
+          echo "docker_image_gpu=${docker_image_gpu}" >> "$GITHUB_OUTPUT"
+          echo "xpu_resource_template=${XPU_RESOURCE_TEMPLATE}" >> "$GITHUB_OUTPUT"
+          echo "nvidia_resource_template=${NVIDIA_RESOURCE_TEMPLATE}" >> "$GITHUB_OUTPUT"
+
+          # These are the values the tests actually ran with, after defaulting
+          # and after the provided-vs-built choice was made. The Dispatch Inputs
+          # table above shows what was requested; this one shows what was used,
+          # which is what a failure has to be reproduced against months later.
+          {
+            echo "### 🧩 Resolved Test Configuration"
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            printf '| XPU image | `%s` |\n'    "$docker_image_xpu"
+            printf '| NVIDIA image | `%s` |\n' "$docker_image_gpu"
+            printf '| Test checkout commit | `%s` |\n' "$checkout_commit"
+            printf '| XPU ResourceClaimTemplate | `%s` |\n'    "$XPU_RESOURCE_TEMPLATE"
+            printf '| NVIDIA ResourceClaimTemplate | `%s` |\n' "$NVIDIA_RESOURCE_TEMPLATE"
+            if [[ "${INPUT_DOCKER_IMAGE_XPU^^}" == "BUILD" ]]; then
+              echo "| XPU image origin | built by this run's \`build-xpu\` job |"
+            else
+              echo "| XPU image origin | provided as a workflow input |"
+            fi
+            if [[ "${INPUT_DOCKER_IMAGE_GPU^^}" == "BUILD" ]]; then
+              echo "| NVIDIA image origin | built by this run's \`build-nvidia\` job |"
+            else
+              echo "| NVIDIA image origin | provided as a workflow input |"
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+
+  # ============================================================================
+  # HETEROGENEOUS P/D TESTS
+  # ============================================================================
+
+  heterog-test-px-dn:
+    name: "Heterog: XPU Prefill + NVIDIA Decode"
+    needs: [resolve-inputs]
+    # always() is required, not decorative: without a status function the
+    # implicit success() evaluates over the whole ancestor closure, so a skipped
+    # build-xpu or build-nvidia (an image ref was supplied, which is the default)
+    # skips this job even though resolve-inputs succeeded. Gating is still done by
+    # the explicit resolve-inputs check below. Matches heterog-test-pn-dx.
+    if: >-
+      always() &&
+      needs.resolve-inputs.result == 'success' &&
+      (inputs.test_selection == 'both' ||
+      inputs.test_selection == 'px-dn')
+    uses: ./.github/workflows/epd-test-template.yml
+    secrets: inherit
+    with:
+      test_name: "px-dn"
+      test_yaml_path: ".ci/test/dynamo-heterog/k8s/tests/px-dn.yaml"
+      runner: "xpu-heterogeneous-ubuntu-latest"
+      CHECKOUT_COMMIT: ${{ needs.resolve-inputs.outputs.checkout_commit }}
+      docker_image_xpu: ${{ needs.resolve-inputs.outputs.docker_image_xpu }}
+      docker_image_gpu: ${{ needs.resolve-inputs.outputs.docker_image_gpu }}
+      xpu_resource_template: ${{ needs.resolve-inputs.outputs.xpu_resource_template }}
+      nvidia_resource_template: ${{ needs.resolve-inputs.outputs.nvidia_resource_template }}
+      xpu_node: "xpu_node"
+      nvidia_node: "nvidia_node"
+      model: 'Qwen/Qwen3-0.6B'
+      tensor_parallel: '1'
+
+  heterog-test-pn-dx:
+    name: "Heterog: NVIDIA Prefill + XPU Decode"
+    needs: [resolve-inputs, heterog-test-px-dn]
+    if: >-
+      always() &&
+      needs.resolve-inputs.result == 'success' &&
+      (inputs.test_selection == 'both' ||
+      inputs.test_selection == 'pn-dx')
+    uses: ./.github/workflows/epd-test-template.yml
+    secrets: inherit
+    with:
+      test_name: "pn-dx"
+      test_yaml_path: ".ci/test/dynamo-heterog/k8s/tests/pn-dx.yaml"
+      runner: "xpu-heterogeneous-ubuntu-latest"
+      CHECKOUT_COMMIT: ${{ needs.resolve-inputs.outputs.checkout_commit }}
+      docker_image_xpu: ${{ needs.resolve-inputs.outputs.docker_image_xpu }}
+      docker_image_gpu: ${{ needs.resolve-inputs.outputs.docker_image_gpu }}
+      xpu_resource_template: ${{ needs.resolve-inputs.outputs.xpu_resource_template }}
+      nvidia_resource_template: ${{ needs.resolve-inputs.outputs.nvidia_resource_template }}
+      xpu_node: "xpu_node"
+      nvidia_node: "nvidia_node"
+      model: 'Qwen/Qwen3-0.6B'
+      tensor_parallel: '1'
+
+  # ============================================================================
+  # STATUS CHECK
+  # ============================================================================
+
+  xpu-status-check:
+    runs-on: xpu-heterogeneous-ubuntu-latest
+    needs: [build-xpu, build-nvidia, resolve-inputs, heterog-test-px-dn, heterog-test-pn-dx]
+    if: always()
+    steps:
+      - name: Check all XPU jobs
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
