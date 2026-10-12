@@ -74,12 +74,19 @@ impl EngineRouteRegistry {
             let registry = registry.clone();
             let callback = callback.clone();
             Box::pin(async move {
-                let _guard = registry.active.read().await;
+                let guard = registry.active.clone().read_owned().await;
                 anyhow::ensure!(
                     !registry.is_closed(),
                     "worker engine routes are shutting down"
                 );
-                callback(body).await
+                // The HTTP waiter may disappear while a Python callback keeps
+                // running. Own both the callback and its admission guard in a
+                // separate task so shutdown still joins the actual operation.
+                tokio::spawn(async move {
+                    let _guard = guard;
+                    callback(body).await
+                })
+                .await?
             })
         }))
     }
@@ -119,16 +126,18 @@ mod tests {
         let cached = registry.get("control").unwrap();
         let active = tokio::spawn(cached(serde_json::Value::Null));
         entered.notified().await;
+        // Disconnecting the waiter must not release the shutdown barrier while
+        // its admitted engine operation is still running.
+        active.abort();
+        assert!(active.await.unwrap_err().is_cancelled());
         registry.close();
-        let idle = tokio::spawn({
-            let registry = registry.clone();
-            async move { registry.wait_for_idle().await }
-        });
-        tokio::task::yield_now().await;
-        assert!(!idle.is_finished());
+        let idle = registry.wait_for_idle();
+        tokio::pin!(idle);
+        assert!(futures::poll!(&mut idle).is_pending());
         release.notify_one();
-        active.await.unwrap().unwrap();
-        idle.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), idle)
+            .await
+            .unwrap();
         assert!(cached(serde_json::Value::Null).await.is_err());
     }
 

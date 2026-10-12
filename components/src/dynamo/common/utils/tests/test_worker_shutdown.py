@@ -102,6 +102,35 @@ def test_shutdown_drains_admitted_stream_before_engine_and_runtime(shutdown_env)
     asyncio.run(run())
 
 
+def test_snapshot_shutdown_before_restore_cleans_engine(shutdown_env):
+    # Regression: a missing pre-restore control barrier prevents engine cleanup
+    # and leaves the native watchdog armed even though no runtime exists yet.
+    from dynamo.trtllm.snapshot import _SnapshotRuntimeProxy
+
+    async def run():
+        runtime = _SnapshotRuntimeProxy(object())
+        shutdown = ws.WorkerShutdown(runtime, [], asyncio.Event())
+        started = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        async def worker():
+            try:
+                started.set()
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        owner = asyncio.create_task(shutdown.run(worker(), install_signals=False))
+        await started.wait()
+        shutdown.request_shutdown()
+        await owner
+        assert cleaned.is_set()
+        assert runtime._runtime is None
+        shutdown_env.finish.assert_called_once()
+
+    asyncio.run(run())
+
+
 def test_prefill_reserves_cleanup_inside_total(shutdown_env, monkeypatch):
     # Regression: KV fallback must not consume the cleanup reserve or extend
     # the SIGTERM deadline. A reserve equal to total leaves no drain allowance.
