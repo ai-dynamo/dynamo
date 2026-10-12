@@ -609,9 +609,8 @@ async def parse_args(args: list[str]) -> Config:
     ):
         raise ValueError("--rerank-worker requires aggregated cross-encoder serving")
     if dynamo_config.rerank_worker:
-        # Cross-encoders attend bidirectionally, so the whole sequence must run
-        # in one forward: no cached prefix and no prefill chunks. SGLang's
-        # XLM-Roberta forward fails on either.
+        # Cross-encoders attend bidirectionally: SGLang's XLM-Roberta forward fails
+        # with a cached prefix or chunked prefill, so run each sequence in one pass.
         if not parsed_args.disable_radix_cache:
             logging.info("Disabling radix cache for --rerank-worker")
         parsed_args.disable_radix_cache = True
