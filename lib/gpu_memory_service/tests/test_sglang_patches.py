@@ -140,7 +140,7 @@ def _install_fake_sglang(monkeypatch):
         ("sglang.srt.managers", managers),
         (mixin_name, mixin),
     ):
-        module.__path__ = getattr(module, "__path__", [])
+        module.__path__ = []
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(patches, "_static_state_patched", False)
     return mixin, original_export
