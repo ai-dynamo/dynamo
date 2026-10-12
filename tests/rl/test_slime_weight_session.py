@@ -137,24 +137,39 @@ class _Updater:
         return pbar
 
 
-def _wrap(module, urls, owner=True):
-    barriers: list[bool] = []
+def _wrap(module, urls, owner=True, owner_errors=()):
+    """Wrap ``_Updater._send_weights`` for one rank.
+
+    ``shared`` records what this rank passes to ``share_error``. A non-owner
+    rank receives ``owner_errors`` in order, standing in for rank 0's values.
+    """
+    shared: list[str | None] = []
+    from_owner = list(owner_errors)
+
+    def share_error(error):
+        shared.append(error)
+        if owner:
+            return error
+        return from_owner.pop(0) if from_owner else None
+
     wrapped = module.wrap_send_weights(
         _Updater._send_weights,
         urls,
         is_session_owner=lambda: owner,
-        barrier=lambda: barriers.append(True),
+        share_error=share_error,
+        timeout=5,
     )
-    return wrapped, barriers
+    return wrapped, shared
 
 
 def test_wrapper_opens_one_session_around_all_buckets(session_module, engines):
     first, second = engines(), engines()
     urls = [first.url, second.url]
-    wrapped, barriers = _wrap(session_module, urls)
+    wrapped, shared = _wrap(session_module, urls)
 
     assert wrapped(_Updater(urls), "pbar") == "pbar"
-    assert barriers == [True]
+    # One exchange after begin and one after end.
+    assert shared == [None, None]
     for engine in (first, second):
         assert engine.calls == [
             "begin_weight_update",
@@ -176,12 +191,55 @@ def test_wrapper_closes_session_after_failed_send(session_module, engines):
     assert not engine.session_open
 
 
-def test_non_owner_rank_only_waits_on_barrier(session_module, engines):
+def test_non_owner_rank_makes_no_session_calls(session_module, engines):
     engine = engines()
-    wrapped, barriers = _wrap(session_module, [engine.url], owner=False)
+    wrapped, shared = _wrap(session_module, [engine.url], owner=False)
     wrapped(_Updater([]), None)
-    assert barriers == [True]
+    assert shared == [None, None]
     assert engine.calls == []
+
+
+def test_begin_failure_raises_on_every_rank(session_module, engines):
+    bad = engines(fail_begin=True)
+    owner, owner_shared = _wrap(session_module, [bad.url])
+    with pytest.raises(RuntimeError, match="did not open"):
+        owner(_Updater([bad.url]), None)
+    # The owner still takes part in the exchange, so peers are not left waiting.
+    assert len(owner_shared) == 1 and "begin_weight_update failed" in owner_shared[0]
+
+    peer, peer_shared = _wrap(
+        session_module, [bad.url], owner=False, owner_errors=owner_shared
+    )
+    with pytest.raises(RuntimeError, match="did not open"):
+        peer(_Updater([bad.url]), None)
+    assert peer_shared == [None]
+    assert "update_weights_from_distributed" not in bad.calls
+
+
+def test_end_failure_raises_on_every_rank(session_module, engines):
+    engine = engines()
+    owner_shared: list[str | None] = []
+
+    def close_out_of_band(self, pbar):
+        _Updater._send_weights(self, pbar)
+        # Close the session early so the wrapper's end gets HTTP 400.
+        requests.post(f"{engine.url}/end_weight_update", json={}, timeout=5)
+
+    owner = session_module.wrap_send_weights(
+        close_out_of_band,
+        [engine.url],
+        is_session_owner=lambda: True,
+        share_error=lambda error: owner_shared.append(error) or error,
+        timeout=5,
+    )
+    with pytest.raises(RuntimeError, match="did not close"):
+        owner(_Updater([engine.url]), None)
+    assert owner_shared[0] is None
+    assert "end_weight_update failed" in owner_shared[1]
+
+    peer, _ = _wrap(session_module, [], owner=False, owner_errors=owner_shared)
+    with pytest.raises(RuntimeError, match="did not close"):
+        peer(_Updater([]), None)
 
 
 def test_legacy_engine_skips_end(session_module, engines):
@@ -254,7 +312,7 @@ def _fake_slime(monkeypatch):
 
     fake_dist = types.ModuleType("torch.distributed")
     fake_dist.get_rank = lambda: 1
-    fake_dist.barrier = lambda group=None: None
+    fake_dist.broadcast_object_list = lambda objects, src=0, group=None: None
     fake_torch = types.ModuleType("torch")
     fake_torch.distributed = fake_dist
     monkeypatch.setitem(sys.modules, "torch", fake_torch)

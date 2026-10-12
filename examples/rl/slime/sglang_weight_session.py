@@ -24,6 +24,9 @@ import requests
 logger = logging.getLogger(__name__)
 
 _WRAPPED_ATTR = "_dynamo_weight_session_wrapped"
+# Seconds to wait for one engine to answer begin_weight_update or
+# end_weight_update. Both run while the engines are paused.
+SESSION_TIMEOUT_S = 120.0
 
 
 def engine_base_url(addr: str) -> str:
@@ -41,7 +44,9 @@ def engine_base_url(addr: str) -> str:
     return addr
 
 
-def end_weight_update(engine_urls: Sequence[str], timeout: float | None = None) -> None:
+def end_weight_update(
+    engine_urls: Sequence[str], timeout: float = SESSION_TIMEOUT_S
+) -> None:
     """Close the session on every engine; raise after trying all of them."""
     errors = []
     for url in engine_urls:
@@ -59,7 +64,7 @@ def end_weight_update(engine_urls: Sequence[str], timeout: float | None = None) 
 
 
 def begin_weight_update(
-    engine_urls: Sequence[str], timeout: float | None = None
+    engine_urls: Sequence[str], timeout: float = SESSION_TIMEOUT_S
 ) -> list[str]:
     """Open a session on every engine and return the engines that opened one.
 
@@ -96,30 +101,69 @@ def wrap_send_weights(
     engine_urls: Sequence[str],
     *,
     is_session_owner: Callable[[], bool],
-    barrier: Callable[[], None],
+    share_error: Callable[[str | None], str | None],
+    timeout: float = SESSION_TIMEOUT_S,
 ) -> Callable:
     """Wrap ``UpdateWeightFromDistributed._send_weights`` in one session.
 
     The owner rank opens the session before any rank sends a bucket and closes
     it after its own send returns. ``_send_weights`` ends with a barrier, so the
     other ranks have finished sending by then.
+
+    ``share_error`` is a collective that every rank calls with its own error
+    text (``None`` on success) and that returns the owner's. All ranks call it
+    after begin and again after end, so an owner failure makes every rank
+    raise instead of leaving the others waiting in the next collective.
     """
 
     @functools.wraps(send_weights)
     def wrapped(self, *args, **kwargs):
         owner = is_session_owner()
         opened: list[str] = []
+        error = None
         if owner:
-            opened = begin_weight_update(engine_urls)
-        barrier()
+            try:
+                opened = begin_weight_update(engine_urls, timeout=timeout)
+            except Exception as exc:
+                error = str(exc)
+        error = share_error(error)
+        if error is not None:
+            raise RuntimeError(f"Weight-update session did not open: {error}")
+
         try:
-            return send_weights(self, *args, **kwargs)
-        finally:
+            result = send_weights(self, *args, **kwargs)
+        except Exception:
+            # Ranks are already out of step here, as in Slime when a send
+            # fails, so close the session without another collective.
             if owner and opened:
-                end_weight_update(opened)
+                try:
+                    end_weight_update(opened, timeout=timeout)
+                except RuntimeError:
+                    logger.exception("Could not close weight-update sessions")
+            raise
+
+        error = None
+        if owner and opened:
+            try:
+                end_weight_update(opened, timeout=timeout)
+            except Exception as exc:
+                error = str(exc)
+        error = share_error(error)
+        if error is not None:
+            raise RuntimeError(f"Weight-update session did not close: {error}")
+        return result
 
     setattr(wrapped, _WRAPPED_ATTR, True)
     return wrapped
+
+
+def broadcast_from_rank0(value: str | None, group) -> str | None:
+    """Send global rank 0's value to every rank in ``group``."""
+    import torch.distributed as dist
+
+    box = [value]
+    dist.broadcast_object_list(box, src=0, group=group)
+    return box[0]
 
 
 def install(args: Namespace) -> None:
@@ -151,5 +195,5 @@ def install(args: Namespace) -> None:
         UpdateWeightFromDistributed._send_weights,
         engine_urls,
         is_session_owner=lambda: dist.get_rank() == 0,
-        barrier=lambda: dist.barrier(group=get_gloo_group()),
+        share_error=lambda error: broadcast_from_rank0(error, get_gloo_group()),
     )
