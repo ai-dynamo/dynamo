@@ -600,6 +600,8 @@ fn consume_redundant_nvext(
                             | "completion_token_ids"
                             | "prompt_token_ids"
                             | "prompt_logprobs"
+                            | "detailed_finish_reason"
+                            | "stop_reason"
                     )
                 )
             });

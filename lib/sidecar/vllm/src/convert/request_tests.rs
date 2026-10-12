@@ -1325,7 +1325,9 @@ fn frontend_router_metadata_does_not_require_engine_support() {
                 "timing",
                 "completion_token_ids",
                 "prompt_token_ids",
-                "prompt_logprobs"
+                "prompt_logprobs",
+                "detailed_finish_reason",
+                "stop_reason"
             ]),
             true,
         ),
