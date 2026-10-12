@@ -283,6 +283,10 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
     # Set up signal handler for graceful shutdown
     def signal_handler():
         nonlocal shutdown_requested
+        # Every worker already stopped on its own: the cleanup below shuts the
+        # runtimes down and exits 1, so this signal is not a shutdown request.
+        if all(future.done() for future in futures):
+            return
         shutdown_requested = True
         asyncio.create_task(graceful_shutdown(runtimes))
 
