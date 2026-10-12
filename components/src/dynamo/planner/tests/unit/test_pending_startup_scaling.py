@@ -183,11 +183,21 @@ def test_startup_gpu_bounds(floor, ceiling, target, allowed):
 
 def _deployment():
     return {
-        "metadata": {"name": "qwen", "generation": 2},
+        "metadata": {"name": "qwen", "uid": "qwen-uid", "generation": 2},
         "spec": {
             "components": [
-                {"name": "p", "type": "prefill", "replicas": 1},
-                {"name": "d", "type": "decode", "replicas": 2},
+                {
+                    "name": "p",
+                    "type": "prefill",
+                    "replicas": 1,
+                    "scalingAdapter": {},
+                },
+                {
+                    "name": "d",
+                    "type": "decode",
+                    "replicas": 2,
+                    "scalingAdapter": {},
+                },
             ]
         },
         "status": {
@@ -219,6 +229,7 @@ def _pods():
 
 def _connector(deployment, pods):
     api = KubernetesAPI.__new__(KubernetesAPI)
+    api.current_namespace = "default"
     api.get_graph_deployment = Mock(side_effect=lambda _: deepcopy(deployment))
     api.list_pods_for_graph = Mock(return_value=pods)
     # DGDSA writes precede DGD reconciliation; neither depends on Planner's latch.
@@ -226,11 +237,53 @@ def _connector(deployment, pods):
         component["name"]: component.get("replicas", 1)
         for component in deployment["spec"]["components"]
     }
-    api.update_graph_replicas = Mock(
-        side_effect=lambda _, name, target: scale_targets.__setitem__(name, target)
+    legacy_write = Mock()
+    api.update_graph_replicas = legacy_write
+
+    def adapter(name):
+        return {
+            "apiVersion": "nvidia.com/v1beta1",
+            "kind": "DynamoGraphDeploymentScalingAdapter",
+            "metadata": {
+                "name": f"qwen-{name}",
+                "uid": f"adapter-{name}-uid",
+                "resourceVersion": "101",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "nvidia.com/v1beta1",
+                        "kind": "DynamoGraphDeployment",
+                        "name": "qwen",
+                        "uid": "qwen-uid",
+                        "controller": True,
+                    }
+                ],
+            },
+            "spec": {
+                "dgdRef": {"name": "qwen", "componentName": name},
+                "replicas": scale_targets[name],
+            },
+        }
+
+    api.get_service_scaling_adapter = Mock(side_effect=lambda _, name: adapter(name))
+
+    def update_adapter(graph_name, name, target, **_kwargs):
+        scale_targets[name] = target
+        legacy_write(graph_name, name, target)
+
+    api.update_scaling_adapter_replicas = Mock(side_effect=update_adapter)
+    api.update_dgd_replicas_directly = Mock(
+        side_effect=lambda graph_name, name, target: legacy_write(
+            graph_name, name, target
+        )
     )
     api.get_service_replica_target = Mock(
         side_effect=lambda _, name: scale_targets[name]
+    )
+    api._test_scale_targets = scale_targets
+    api.fetch_authoritative_replica_targets = Mock(
+        side_effect=lambda snapshot: KubernetesAPI.fetch_authoritative_replica_targets(
+            api, snapshot
+        )
     )
     connector = KubernetesConnector.__new__(KubernetesConnector)
     connector.graph_deployment_name = "qwen"
@@ -239,6 +292,7 @@ def _connector(deployment, pods):
     connector._startup_scale_down_lock = Lock()
     connector._startup_scale_down_targets = {}
     connector._startup_read_warnings = set()
+    connector._batch_writer_id = None
     return connector
 
 
@@ -387,8 +441,8 @@ def test_sla_one_ready_worker_can_cancel_startup_without_division_by_zero(role):
     regression.query_groups.return_value = [
         ("worker", list((obs.prefill if role == "prefill" else obs.decode).values()))
     ]
-    regression.estimate_queued_prefill_time.side_effect = (
-        lambda *args, **kwargs: 0.005 if kwargs.get("queue_scale") == 0 else 0.01
+    regression.estimate_queued_prefill_time.side_effect = lambda *args, **kwargs: (
+        0.005 if kwargs.get("queue_scale") == 0 else 0.01
     )
     regression.estimate_scheduled_decode_itl.return_value = 0.001
     if role == "prefill":

@@ -119,8 +119,10 @@ Each worker type registers a health check with the Dynamo runtime:
 
 The runtime runs these checks when enabled, and its HTTP health endpoints expose the resulting
 status to Kubernetes probes. Override the payload with `DYN_HEALTH_CHECK_PAYLOAD`. For aggregated
-Omni workers, use a request valid for the model's output modality and allow enough time for inference
-with `DYN_HEALTH_CHECK_REQUEST_TIMEOUT`. See the
+Omni workers, use a request verified with the exact model and allow enough time for queueing and
+inference with `DYN_HEALTH_CHECK_REQUEST_TIMEOUT`. Native-only checks do not prove inference
+completion. Custom checks require a completed protocol result and reject empty media output;
+malformed overrides fail initialization instead of falling back to native-only checks. See the
 [Health Check Reference](../../../../../reference/observability/health-checks.mdx#active-canary-configuration)
 for configuration and [Observability Architecture](../../../concepts/observability-architecture.md#active-worker-health-checks)
 for the active health-check design.

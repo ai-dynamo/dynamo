@@ -10,7 +10,6 @@ import os
 import uvloop
 
 from dynamo import prometheus_names
-from dynamo.common.backend.health_check import build_raw_health_check_payload
 from dynamo.common.config_dump import dump_config
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response
@@ -23,6 +22,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.main import setup_metrics_collection
+from dynamo.vllm.omni.health_check import build_omni_health_check_payload
 from dynamo.vllm.omni.realtime_utils import init_omni_realtime
 from dynamo.vllm.omni.stage_router import init_omni_stage_router
 from dynamo.vllm.omni.stage_worker import init_omni_stage
@@ -72,6 +72,9 @@ async def init_omni(
     """Initialize Omni worker for multi-stage pipeline generation."""
     # Intentional function-local import to avoid omni package import cycles.
     from dynamo.vllm.omni import OmniHandler
+
+    # Validate configuration before loading the model or advertising the endpoint.
+    health_check_payload = build_omni_health_check_payload(config.output_modalities)
 
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -156,9 +159,14 @@ async def init_omni(
 
         logger.info("Starting to serve Omni worker endpoint...")
 
-        # The default probe checks AsyncOmni's orchestrator and stage replicas.
-        # DYN_HEALTH_CHECK_PAYLOAD can opt into a model-specific generation probe.
-        health_check_payload = build_raw_health_check_payload({})
+        if len(health_check_payload) == 1:
+            logger.info(
+                "Omni canary checks native stage health only; inference completion "
+                "is not verified. Set DYN_HEALTH_CHECK_PAYLOAD to a request verified "
+                "with this model to enable an inference canary."
+            )
+        else:
+            logger.info("Omni canary requires a completed inference response")
 
         model_metrics_labels = [
             (

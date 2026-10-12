@@ -157,7 +157,7 @@ PORT="1234"
 # Highest buildkit pod ordinal to probe, exclusive. Must be >= the KEDA
 # maxReplicaCount for the buildkit StatefulSet, or pods above this ordinal are
 # never discovered and sit idle while builds queue on the pods below it.
-MAX_POD_CHECK=${MAX_POD_CHECK:-16}
+MAX_POD_CHECK=${MAX_POD_CHECK:-25}
 # ---------------------
 
 if ! command -v nslookup &> /dev/null; then
