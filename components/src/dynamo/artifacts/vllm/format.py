@@ -27,7 +27,7 @@ _MAX_ROUTERS = 4096
 _MAX_DIMENSION = 1 << 20
 _MAX_TOPK = 1024
 _MAX_TENSORS = 4096
-_DTYPES = {
+_DTYPES: dict[str, np.dtype[Any]] = {
     "u8": np.dtype("u1"),
     "u16": np.dtype("<u2"),
     "i32": np.dtype("<i4"),
@@ -96,7 +96,8 @@ class Tensor:
                 ),
                 None,
             )
-        _require(dtype is not None and dtype != "bf16", "use raw Tensor bytes for bf16")
+        if dtype is None or dtype == "bf16":
+            raise GenerationArtifactFormatError("use raw Tensor bytes for bf16")
         _tensor_size(dtype, tuple(value.shape))
         target = _DTYPES[dtype]
         if dtype in _INTEGER_DTYPES:
@@ -114,7 +115,10 @@ class Tensor:
             )
             finite = value[np.isfinite(value)]
             _require(
-                not finite.size or float(np.abs(finite).max()) <= np.finfo(target).max,
+                bool(
+                    not finite.size
+                    or float(np.abs(finite).max()) <= np.finfo(target).max
+                ),
                 "floating conversion out of range",
             )
         return cls(
