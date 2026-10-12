@@ -230,6 +230,11 @@ jobs:
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           lfs: true
+      # source_ref may be a branch or tag; the wheel build needs the full SHA.
+      - name: Resolve checked-out commit
+        id: source-commit
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Docker Login
         uses: $/.github/actions/docker-login
         with:
@@ -497,7 +502,7 @@ jobs:
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
           extra_build_args: |
-            DYNAMO_COMMIT_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+            DYNAMO_COMMIT_SHA=${{ steps.source-commit.outputs.sha }}
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
             ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }}
             ${{ inputs.extra_build_args }}
@@ -590,7 +595,7 @@ jobs:
           cuda_version: ${{ matrix.cuda_version }}
           builder_name: ${{ inputs.builder_name }}
           artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
-          git_sha: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          git_sha: ${{ steps.source-commit.outputs.sha }}
           # Freshly-built ECR EPP image (frontend only) — must match the build's
           # EPP_IMAGE so the epp stage cache-hits instead of resolving the
           # rendered default upstream staging tag, which gets garbage-collected.

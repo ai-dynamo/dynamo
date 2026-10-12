@@ -68,18 +68,27 @@ _EXISTING_COMMIT = re.compile(r'^__git_commit__ = "([0-9a-f]{40})"$', re.MULTILI
 
 def read_existing_git_commit(components):
     """
-    Return the full commit SHA an earlier build wrote into a component's
-    _version.py, or "" if none holds one.
+    Return the full commit SHA an earlier build wrote into the components'
+    _version.py files, or "" if none holds one. Raise if they disagree.
     """
+    found = {}
     for component in components:
+        path = os.path.join(component, "_version.py")
         try:
-            with open(os.path.join(component, "_version.py")) as f:
+            with open(path) as f:
                 match = _EXISTING_COMMIT.search(f.read())
         except OSError:
             continue
         if match:
-            return match.group(1)
-    return ""
+            found[path] = match.group(1)
+    commits = set(found.values())
+    if len(commits) > 1:
+        details = ", ".join(f"{path}={sha}" for path, sha in sorted(found.items()))
+        raise ValueError(
+            f"Existing _version.py files record different commits ({details}); "
+            f"set {GIT_COMMIT_ENV} or build from a git checkout."
+        )
+    return commits.pop() if commits else ""
 
 
 class VersionWriterHook(BuildHookInterface):

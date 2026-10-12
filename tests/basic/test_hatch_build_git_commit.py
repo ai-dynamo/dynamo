@@ -193,3 +193,17 @@ def test_keeps_commit_from_existing_version_file(
         c: (METADATA_VERSION, VALID_SHA) for c in COMPONENTS
     }
     assert app.warnings == []
+
+
+def test_conflicting_existing_commits_raise(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = _load_hook(tree, monkeypatch, _FakeApp())
+    other_sha = "f" * 40
+    for component, sha in zip(COMPONENTS, (VALID_SHA, other_sha)):
+        (tree / "components" / "src" / "dynamo" / component / "_version.py").write_text(
+            f'__version__ = "{METADATA_VERSION}"\n__git_commit__ = "{sha}"\n'
+        )
+
+    with pytest.raises(ValueError, match="record different commits"):
+        hook.initialize("standard", {})
