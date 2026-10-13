@@ -4,7 +4,7 @@
 //! Helper binary to generate the Dynamo HTTP frontend OpenAPI specification.
 //!
 //! This allows CI and documentation tooling to obtain the exact same
-//! OpenAPI document that is served at `/openapi.json` by the frontend
+//! OpenAPI representation that is served at `/openapi.json` by the frontend
 //! without having to start the HTTP service and scrape the endpoint.
 //!
 //! Usage (from the repository root):
@@ -22,6 +22,8 @@
 //! use string `data` with `contentSchema`, which consumers must explicitly validate.
 //! Comments/keep-alives are ignored by SSE parsing; event ordering, termination,
 //! and disconnect behavior require separate lifecycle checks.
+//! Unlike a configured service, this full-surface export includes both optional
+//! named dispatch event variants; HTTP only advertises enabled dispatches.
 
 use std::fs;
 use std::path::PathBuf;
@@ -59,12 +61,9 @@ fn main() -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Propagates service-construction, serialization, and I/O errors. A failed write may
+/// Propagates service-construction, schema-invariant, serialization, and I/O errors. A failed write may
 /// leave a truncated file; created directories are not removed on failure.
 ///
-/// # Panics
-///
-/// Panics if compiled schema invariants are violated during document generation.
 fn generate_openapi() -> anyhow::Result<()> {
     // Build an HttpService instance with all standard OpenAI-compatible
     // frontend endpoints enabled so that the generated OpenAPI document
@@ -83,7 +82,16 @@ fn generate_openapi() -> anyhow::Result<()> {
         .context("failed to build HttpService for OpenAPI generation")?;
 
     let route_docs = http_service.route_docs().to_vec();
-    let openapi = openapi_docs::generate_openapi_spec(&route_docs);
+    let openapi = openapi_docs::generate_openapi_spec_with_options(
+        &route_docs,
+        openapi_docs::OpenApiOptions {
+            streaming_tool_dispatch: true,
+            streaming_reasoning_dispatch: true,
+            ..Default::default()
+        },
+    )
+    .map_err(anyhow::Error::msg)
+    .context("failed to generate OpenAPI document")?;
 
     // Write the spec to a stable location relative to the repository root.
     let out_dir = PathBuf::from("docs/frontends");
