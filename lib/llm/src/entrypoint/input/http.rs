@@ -36,10 +36,17 @@ use dynamo_runtime::metrics::MetricsHierarchy;
 #[derive(Default)]
 pub struct HttpFrontend {
     frontend_route_extensions: Vec<FrontendRouteExtension>,
+    health_check_requires_model: bool,
     plugins: RouterPlugins,
 }
 
 impl HttpFrontend {
+    /// Require a serving model before HTTP health probes report readiness.
+    pub fn health_check_requires_model(mut self, required: bool) -> Self {
+        self.health_check_requires_model = required;
+        self
+    }
+
     /// Install a resolved plugin bundle for all routers created by this frontend.
     ///
     /// This replaces all previously configured plugins. Call this before
@@ -126,6 +133,7 @@ impl HttpFrontend {
             distributed_runtime,
             engine_config,
             self.frontend_route_extensions,
+            self.health_check_requires_model,
             plugins,
         )
         .await;
@@ -162,6 +170,7 @@ async fn run_with_router_plugins(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
+    health_check_requires_model: bool,
     plugins: RouterPluginBuilder,
 ) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
@@ -211,6 +220,7 @@ async fn run_with_router_plugins(
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
     http_service_builder = http_service_builder
+        .health_check_requires_model(health_check_requires_model)
         .metrics_config(local_model.metrics_config().clone())
         .frontend_api_config(local_model.frontend_api_config().clone());
     // Inject the DRT's metrics registry so that component-scoped metrics

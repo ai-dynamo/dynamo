@@ -831,13 +831,14 @@ async fn select_engine(
 }
 
 #[pyfunction]
-#[pyo3(signature = (distributed_runtime, input, engine_config, frontend_route_extensions=None))]
+#[pyo3(signature = (distributed_runtime, input, engine_config, frontend_route_extensions=None, *, health_check_requires_model=false))]
 pub fn run_input<'p>(
     py: Python<'p>,
     distributed_runtime: super::DistributedRuntime,
     input: &str,
     engine_config: EngineConfig,
     frontend_route_extensions: Option<PyObject>,
+    health_check_requires_model: bool,
 ) -> PyResult<Bound<'p, PyAny>> {
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     let frontend_route_extensions =
@@ -864,6 +865,7 @@ pub fn run_input<'p>(
     crate::future_into_py(py, async move {
         if matches!(&input_enum, Input::Http) {
             HttpFrontend::default()
+                .health_check_requires_model(health_check_requires_model)
                 .frontend_route_extensions(frontend_route_extensions)
                 .plugins(plugins)
                 .run(distributed_runtime.inner.clone(), engine_config.inner)

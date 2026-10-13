@@ -487,7 +487,13 @@ async def async_main():
         elif config.kserve_grpc_server:
             await run_input(runtime, "grpc", engine)
         else:
-            await run_input(runtime, "http", engine, frontend_route_extensions)
+            await run_input(
+                runtime,
+                "http",
+                engine,
+                frontend_route_extensions,
+                health_check_requires_model=config.health_check_requires_model,
+            )
     except asyncio.exceptions.CancelledError:
         pass
 

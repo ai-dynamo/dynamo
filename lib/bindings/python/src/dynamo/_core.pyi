@@ -2197,11 +2197,14 @@ def run_input(
     input: str,
     engine_config: EngineConfig,
     frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None,
+    *,
+    health_check_requires_model: bool = False,
 ) -> asyncio.Future[None]:
     """Start an engine, connect it to an input, and run until stopped.
 
     ``frontend_route_extensions`` supplies additional HTTP routes to the
     frontend (HTTP input only); see ``FrontendRoute``.
+    ``health_check_requires_model`` makes HTTP health checks require a serving model.
     """
     ...
 

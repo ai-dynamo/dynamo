@@ -143,6 +143,7 @@ pub struct State {
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
+    health_check_requires_model: bool,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -155,6 +156,7 @@ struct StateConfig {
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
+    health_check_requires_model: bool,
 }
 
 fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
@@ -555,6 +557,7 @@ impl State {
             frontend_api_config: config.frontend_api_config,
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
+            health_check_requires_model: config.health_check_requires_model,
         }
     }
 
@@ -585,6 +588,11 @@ impl State {
 
     pub fn is_ready(&self) -> bool {
         self.service_observer.is_ready()
+    }
+
+    /// Readiness for health probes, optionally requiring a routable model.
+    pub fn is_health_ready(&self) -> bool {
+        self.is_ready() && (!self.health_check_requires_model || self.manager.has_any_ready_model())
     }
 
     pub fn start_draining(&self) {
@@ -714,6 +722,10 @@ pub struct HttpService {
 #[derive(Clone, Builder)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct HttpServiceConfig {
+    /// Require a serving model before health probes report readiness.
+    #[builder(default = "false")]
+    health_check_requires_model: bool,
+
     #[builder(default = "8787")]
     port: u16,
 
@@ -1309,6 +1321,7 @@ impl HttpServiceConfigBuilder {
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
                 streaming_backend_error_check: config.streaming_backend_error_check,
+                health_check_requires_model: config.health_check_requires_model,
             },
         ));
         state
@@ -2458,6 +2471,75 @@ mod tests {
             Ok(_) => panic!("service build unexpectedly succeeded"),
             Err(err) => err.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_health_default_does_not_require_model() {
+        let (port, handle) = spawn_default_service().await;
+        assert_eq!(get_status(port, "/health").await, reqwest::StatusCode::OK);
+        assert_eq!(get_status(port, "/live").await, reqwest::StatusCode::OK);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_health_requires_serving_model() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .health_check_requires_model(true)
+            .build()
+            .unwrap();
+        let running_service = service.clone();
+        let handle = tokio::spawn(async move {
+            running_service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+
+        assert_eq!(
+            get_status(port, "/health").await,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(get_status(port, "/live").await, reqwest::StatusCode::OK);
+
+        let mut card = crate::model_card::ModelDeploymentCard::default();
+        card.display_name = "pending-llama".to_string();
+        service
+            .model_manager()
+            .save_model_card("pending", card)
+            .unwrap();
+        assert_eq!(
+            get_status(port, "/health").await,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        service
+            .model_manager()
+            .add_chat_completions_model("ready-llama", "abc", make_chat_engine())
+            .unwrap();
+        assert_eq!(get_status(port, "/health").await, reqwest::StatusCode::OK);
+        service
+            .model_manager()
+            .remove_chat_completions_model("ready-llama")
+            .unwrap();
+        assert_eq!(
+            get_status(port, "/health").await,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(get_status(port, "/live").await, reqwest::StatusCode::OK);
+        service
+            .model_manager()
+            .add_chat_completions_model("ready-llama", "abc", make_chat_engine())
+            .unwrap();
+        service.state().start_draining();
+        assert_eq!(
+            get_status(port, "/health").await,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(get_status(port, "/live").await, reqwest::StatusCode::OK);
+        handle.abort();
     }
 
     #[tokio::test]

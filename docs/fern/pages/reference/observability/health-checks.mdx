@@ -62,6 +62,10 @@ returns `503 Service Unavailable` with status `not_ready` and a `stage` value th
 current lifecycle stage. This removes the Frontend from readiness routing before admitted responses
 finish.
 
+To require a servable model before reporting readiness, pass `--health-check-requires-model` to `python -m dynamo.frontend`, or set `DYN_HEALTH_CHECK_REQUIRES_MODEL=true`. This option defaults to `false`. With it enabled, `/health` returns `503 Service Unavailable` with status `not_ready` until at least one model is ready to serve. Registering a model card alone is insufficient; its required workers must be available. If the last servable model disappears, `/health` returns `503` again.
+
+The flag applies to the HTTP frontend and also covers custom health paths. It does not change `/live` or inference request admission. Use `/health` for readiness and `/live` for liveness so that waiting for workers does not restart the frontend. Pass `--no-health-check-requires-model` to override an enabled environment default. For readiness of a specific model, use `/v1/models/{model}/ready`.
+
 ## System-Status Responses
 
 Workers and standalone routers expose health endpoints only when `DYN_SYSTEM_PORT` is zero or a

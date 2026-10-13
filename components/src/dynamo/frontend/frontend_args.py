@@ -176,6 +176,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     kv_cache_block_size: Optional[int]
     http_host: str
     http_port: int
+    health_check_requires_model: bool
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
     tls_client_ca_cert_path: Optional[pathlib.Path]
@@ -403,6 +404,13 @@ class FrontendArgGroup(ArgGroup):
             default=8000,
             help="HTTP port for the engine (u16).",
             arg_type=int,
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--health-check-requires-model",
+            env_var="DYN_HEALTH_CHECK_REQUIRES_MODEL",
+            default=False,
+            help="Return HTTP 503 from /health until at least one model is ready to serve.",
         )
         add_negatable_bool_argument(
             g,
