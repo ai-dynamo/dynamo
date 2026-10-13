@@ -1394,7 +1394,7 @@ mod tests {
         // A point read must neither decode nor depend on an unrelated discovery record.
         bucket
             .insert(
-                &kv::Key::new("other/worker/query/1"),
+                &kv::Key::new("other/worker/query/1".to_string()),
                 bytes::Bytes::from_static(b"invalid json"),
                 0,
             )
