@@ -71,3 +71,24 @@ def test_runtime_structural_tag_options_read_model_card_policy():
             "structural_tag_schema": "strict",
         }
     ) == ("on", "always", "strict")
+
+
+@pytest.mark.parametrize(
+    "config, expected",
+    [
+        (
+            {"structural_tag": {"scope": "always", "schema": "strict"}},
+            ("on", "always", "strict"),
+        ),
+        (
+            {"structural_tag": None, "structural_tag_mode": "on"},
+            ("off", "auto", "auto"),
+        ),
+        (
+            {"structural_tag": {"scope": "always"}, "structural_tag_mode": "off"},
+            ("on", "always", "auto"),
+        ),
+    ],
+)
+def test_canonical_structural_tag_policy_takes_precedence(config, expected):
+    assert runtime_structural_tag_options(config) == expected
