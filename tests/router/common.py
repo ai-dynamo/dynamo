@@ -1055,6 +1055,27 @@ def _test_remote_indexer_decisions(
             5: {(worker_a_id, dp_a): 2, (worker_b_id, dp_b): 3},
         }
 
+        async def wait_for_serving_indexers(i: int, token_ids: list[int]) -> None:
+            # The consumer's remote queries round-robin across the serving routers, so
+            # every replica must have ingested the pinned requests' KV events, not just
+            # the one a single consumer-side check happens to reach.
+            deadline = time.monotonic() + 10
+            for idx, serving_router in enumerate(serving_routers):
+                while True:
+                    try:
+                        await _assert_overlap_scores(
+                            serving_router,
+                            token_ids,
+                            block_size,
+                            expected_overlap_by_request[i],
+                            f"request {i} on serving router {idx}",
+                        )
+                        break
+                    except AssertionError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        await asyncio.sleep(0.1)
+
         responses: list[dict[str, Optional[int]]] = []
         for i, (
             kv_router,
@@ -1078,6 +1099,8 @@ def _test_remote_indexer_decisions(
                 ),
             )
             if i in expected_overlap_by_request:
+                if use_kv_events:
+                    await wait_for_serving_indexers(i, token_ids)
                 await _assert_overlap_scores(
                     kv_router,
                     token_ids,
