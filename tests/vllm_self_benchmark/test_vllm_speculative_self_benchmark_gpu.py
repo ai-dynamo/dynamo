@@ -10,6 +10,7 @@ import pytest
 import requests
 
 from dynamo.vllm.benchmark_points import BenchmarkPoints
+from dynamo.vllm.worker_factory import _merge_benchmark_rank_results
 from tests.utils.constants import DynamoPortRange
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_port, deallocate_ports
@@ -124,11 +125,18 @@ def test_eagle3_self_benchmark_native_verification(
     ):
         data = json.loads(output.read_text())
         assert data["valid"], data.get("error")
+        assert data["schema_version"] == 3
+        assert (
+            data["measurement_policy"]["decode"]
+            == "first_native_verification_after_prefill"
+        )
         assert len(data["results"]) == 3
         spec = data["speculative_benchmark"]
         assert spec["verify_tokens_per_request"] == 4
         assert spec["kv_capacity"]["usable_blocks"] > 0
         assert spec["kv_capacity"]["context_capacity_tokens"] > 0
+        assert spec["kv_capacity"]["allocated_kv_tensor_bytes"] > 0
+        assert all(group["specs_by_layer"] for group in spec["kv_capacity"]["groups"])
         assert (
             spec["free_blocks_after_benchmark"]
             == spec["kv_capacity"]["free_blocks_before_benchmark"]
@@ -167,6 +175,12 @@ def test_eagle3_self_benchmark_native_verification(
             )
             assert set(actual_outputs) <= expected_outputs
             assert fpm["wall_time"] > 0
+        merged = _merge_benchmark_rank_results(
+            [(0, output, data)], tmp_path / "merged.json"
+        )
+        assert merged["schema_version"] == 3
+        assert merged["speculative_benchmark"] == spec
+        assert merged["measurement_policy"] == data["measurement_policy"]
         response = requests.post(
             f"http://127.0.0.1:{api_port}/v1/completions",
             json={"model": "Qwen/Qwen3-0.6B", "prompt": "The sky is", "max_tokens": 16},

@@ -3196,6 +3196,9 @@ class InstrumentedScheduler(AsyncScheduler):
                 "capacity_basis_max_model_len": self.max_model_len,
                 "max_concurrency_at_max_model_len": concurrency,
                 "lookahead_tokens_per_request": self.num_lookahead_tokens,
+                "allocated_kv_tensor_bytes": sum(
+                    tensor.size for tensor in cache.kv_cache_tensors
+                ),
                 "definition": "vLLM max-concurrency capacity using the observed free block pool; includes target/draft groups; per-request lookahead consumes this budget",
                 "groups": [
                     {
@@ -3203,6 +3206,19 @@ class InstrumentedScheduler(AsyncScheduler):
                         "layer_names": list(group.layer_names),
                         "spec": _bench_engine_kv_cache_spec(group.kv_cache_spec),
                         "page_size_bytes": group.kv_cache_spec.page_size_bytes,
+                        "specs_by_layer": {
+                            name: {
+                                **_bench_engine_kv_cache_spec(spec),
+                                "page_size_bytes": spec.page_size_bytes,
+                            }
+                            for name, spec in (
+                                getattr(group.kv_cache_spec, "kv_cache_specs", None)
+                                or {
+                                    name: group.kv_cache_spec
+                                    for name in group.layer_names
+                                }
+                            ).items()
+                        },
                     }
                     for index, group in enumerate(cache.kv_cache_groups)
                 ],
@@ -7264,9 +7280,9 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_current_fpms = []
             self._bench_expected_fpms = 1
             self._bench_sd_measuring = False
-            self._bench_point_deadline = (
-                time.monotonic() + self._bench_point_result_timeout_seconds
-            )
+            # Real long-context prefill can outlast the short AR result/barrier
+            # budget. It is bounded by the campaign deadline instead.
+            self._bench_point_deadline = self._bench_deadline_monotonic
             contexts = self._bench_decode_context_lengths(
                 point.total_kv_read_tokens, point.batch_size
             )
@@ -7726,7 +7742,9 @@ class InstrumentedScheduler(AsyncScheduler):
             and timing_valid
         )
         output = {
-            "schema_version": 2,
+            # SD changes decode query width and preparation/timing semantics.
+            # Do not present it to version-2-only consumers as ordinary AR data.
+            "schema_version": 3 if self._bench_speculative_tokens else 2,
             **(
                 {"kvwarm": self._kvwarm_meta}
                 if getattr(self, "_kvwarm_meta", None) is not None
@@ -7798,7 +7816,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 ],
             },
             "measurement_policy": {
-                "decode": "steady_state_second_step",
+                "decode": (
+                    "first_native_verification_after_prefill"
+                    if self._bench_speculative_tokens
+                    else "steady_state_second_step"
+                ),
                 "prefill": "single_step",
             },
             # Provenance for the synthetic prompt content: a vocab-size

@@ -2640,6 +2640,50 @@ def test_eagle_prefill_balances_final_chunks_and_restores_serving_policy(
     assert stub._bench_sd_inflight
 
 
+def test_eagle_long_prefill_uses_campaign_budget(eagle_benchmark, monkeypatch):
+    stub = eagle_benchmark
+    clock = [10.0]
+    monkeypatch.setattr(
+        instrumented_scheduler_module.time, "monotonic", lambda: clock[0]
+    )
+    stub._bench_deadline_monotonic = 100.0
+    stub._bench_point_result_timeout_seconds = 8.0
+    stub._bench_frees_pending = lambda: False
+    stub._bench_stop_at_timeout_boundary = lambda phase: False
+    stub._bench_grid.append(
+        BenchmarkPoint("decode", batch_size=1, total_kv_read_tokens=1024)
+    )
+    request = SimpleNamespace(
+        request_id="r",
+        num_computed_tokens=0,
+        num_prompt_tokens=1024,
+        num_output_tokens=0,
+        is_finished=lambda: False,
+    )
+
+    def inject(*args, **kwargs):
+        stub.requests = {"r": request}
+        stub.running = [request]
+        stub._bench_active_req_ids = {"r"}
+        return 1
+
+    monkeypatch.setattr(stub, "_bench_inject_prefill", inject)
+    output = SimpleNamespace(total_num_scheduled_tokens=128)
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler, "schedule", lambda *_: output
+    )
+    assert stub._bench_step_speculative_decode() is output
+    assert stub._bench_point_deadline == 100.0
+    clock[0] = 30.0
+    request.num_computed_tokens = 128
+    stub._bench_sd_inflight = False
+    assert stub._bench_step_speculative_decode() is output
+    clock[0] = 101.0
+    stub._bench_sd_inflight = False
+    with pytest.raises(TimeoutError, match="preparation timed out"):
+        stub._bench_step_speculative_decode()
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

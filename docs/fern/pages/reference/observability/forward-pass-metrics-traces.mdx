@@ -155,7 +155,7 @@ Each data-parallel rank binds `DYN_FORWARDPASS_METRIC_PORT + dp_rank`, defaultin
 
 ## Measurement Protocol in the Self-Benchmark Artifact
 
-Self-benchmark artifacts (`--benchmark-mode`) record a top-level `measurement_protocol` block and a `benchmark_measurement` block inside each retained FPM. The artifact's `schema_version` remains `2`; both blocks have their own `schema_version: 1`. These fields describe benchmark input construction, timing reduction, and observed execution evidence. They do not appear in live-serving traces.
+Self-benchmark artifacts (`--benchmark-mode`) record a top-level `measurement_protocol` block and a `benchmark_measurement` block inside each retained FPM. The artifact's `schema_version` is `2` for ordinary decoding and `3` for speculative decoding; both blocks have their own `schema_version: 1`. These fields describe benchmark input construction, timing reduction, and observed execution evidence. They do not appear in live-serving traces.
 
 Prompt construction combines `DYN_BENCH_CONTENT_SEED` (default `"0"`) with the point's coordinates, data-parallel rank, and request slot. Selecting a smaller grid or changing benchmark point order does not change that content identity. A decode point recorded with `giant_fake_off_by_batch` in its `sample_reasons` keeps the prompts built for its declared coordinate, whose `total_kv_read_tokens` exceeds the recorded value by `batch_size`; its `benchmark_measurement.point_key` names the recorded coordinate. Different data-parallel ranks intentionally use different content. Compare the same rank's prompt hashes across runs rather than requiring every rank to have the same hash. Pin the model, tokenizer, dataset, content mode, and pool tag when comparing measurements; see [FPM self-benchmark collection](environment-variables.mdx#fpm-self-benchmark-collection).
 
@@ -264,7 +264,10 @@ The raw sample's `benchmark_sample.speculation` records actual scheduled-token,
 draft-token and output-token counts. Acceptance changes output progress, not the
 meaning of the measured iteration latency.
 
-The rank artifact also contains `speculative_benchmark`:
+SD artifacts use `schema_version: 3` so version-2-only consumers can reject the
+changed decode semantics. `measurement_policy.decode` is
+`first_native_verification_after_prefill`, not the ordinary decode policy.
+The rank and merged artifacts also contain `speculative_benchmark`:
 
 | Field | Meaning |
 |---|---|
@@ -274,7 +277,8 @@ The rank artifact also contains `speculative_benchmark`:
 | `kv_capacity.usable_blocks` | Observed free KV blocks before warmup, minus the watermark; permanent reservations are already excluded. |
 | `kv_capacity.context_capacity_tokens` | vLLM's maximum-concurrency capacity calculation applied to that usable pool at `capacity_basis_max_model_len`. Includes target and draft cache groups. |
 | `kv_capacity.lookahead_tokens_per_request` | Speculative lookahead that consumes the same pool in addition to committed context. |
-| `kv_capacity.groups` | Runtime cache group layout, layer ownership, block size, dtype and page bytes. |
+| `kv_capacity.allocated_kv_tensor_bytes` | Sum of the runtime KV tensor allocations for the recorded rank layout. |
+| `kv_capacity.groups` | Runtime cache group layout and page bytes; `specs_by_layer` retains each layer's dtype and geometry, including heterogeneous groups. |
 
 Use the capacity only with the recorded model, draft, topology, context limit,
 graph policy and memory budget. It is not a universal sum of committed tokens
@@ -285,7 +289,7 @@ import or agentic replay in AISimulate.
 
 ## Engine Provenance in the Self-Benchmark Artifact
 
-A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-parallel rank plus one merged artifact, both separate from the `dynamo.fpm.trace.v1` records above. Each carries an optional top-level `engine` block, captured when the instrumented scheduler starts. Dynamo does not rewrite these artifacts after the benchmark: the post-run worker probe records the resolved worker configuration in a separate [sidecar file](#worker-probe-sidecar), and per-forward dispatch belongs to the raw samples described above. The artifact's `schema_version` stays `2`. Artifacts whose capture never ran, including older artifacts, omit `engine`.
+A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-parallel rank plus one merged artifact, both separate from the `dynamo.fpm.trace.v1` records above. Each carries an optional top-level `engine` block, captured when the instrumented scheduler starts. Dynamo does not rewrite these artifacts after the benchmark: the post-run worker probe records the resolved worker configuration in a separate [sidecar file](#worker-probe-sidecar), and per-forward dispatch belongs to the raw samples described above. The artifact's `schema_version` is `2` for ordinary decoding and `3` for speculative decoding. Artifacts whose capture never ran, including older artifacts, omit `engine`.
 
 The following example shows selected fields from a rank artifact. The `null` and `"pending_worker_probe"` values are placeholders that stay in the artifact; the worker probe's results are in the sidecar.
 
