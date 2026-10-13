@@ -4294,8 +4294,57 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             async for chunk in _translate_vllm_client_errors(generator):
                 yield chunk
 
+    def _prefill_kv_protocol(
+        self, is_local_probe: bool, sampling_params
+    ) -> "KvConnectorProtocol | None":
+        """The KV connector for this request, or None for a local health probe.
+
+        A probe runs on this worker and no decode worker consumes it, so it must
+        not ask for a handoff. Any caller-supplied transfer parameters are
+        dropped as well.
+        """
+        if is_local_probe:
+            if sampling_params.extra_args is not None:
+                sampling_params.extra_args = dict(sampling_params.extra_args)
+                sampling_params.extra_args.pop(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY, None)
+            return None
+
+        # One protocol instance per request; carries per-request state
+        # (e.g. Mooncake's transfer_id) into the response loop.
+        kv_protocol = make_kv_connector_protocol(self.engine_client.vllm_config)
+        _update_kv_transfer_params(
+            sampling_params,
+            kv_protocol.prefill_request_kv_transfer_params(),
+        )
+        return kv_protocol
+
+    def _prefill_disaggregated_params(
+        self,
+        kv_protocol: "KvConnectorProtocol | None",
+        res,
+        multi_modal_data,
+        mm_processor_kwargs,
+    ) -> "Dict[str, Any] | None":
+        """The handoff field for the response, or None when there is no handoff.
+
+        Only one result is generated per prefill request, so the embedding
+        params are built here without further conditionals.
+        """
+        if kv_protocol is None:
+            return None
+        embedding_params = self._multimodal_request_processor.build_prefill_handoff(
+            multi_modal_data=multi_modal_data,
+            prompt_token_ids=list(res.prompt_token_ids or []),
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+        return self._build_disaggregated_params(
+            kv_protocol.decode_request_kv_transfer_params(res),
+            embedding_params,
+        )
+
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
+        # Read the marker first: input preparation below can replace the request.
         is_local_probe = is_probe(request)
         prepared_input = await self._multimodal_request_processor.prepare_input(
             request,
@@ -4332,21 +4381,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             enable_rl=self.config.enable_rl,
         )
 
-        kv_protocol: KvConnectorProtocol | None = None
-        if is_local_probe:
-            # A health probe has no decode worker, so it must not ask for a
-            # KV handoff. Drop a client-supplied value too.
-            if sampling_params.extra_args is not None:
-                sampling_params.extra_args = dict(sampling_params.extra_args)
-                sampling_params.extra_args.pop(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY, None)
-        else:
-            # One protocol instance per request; carries per-request state
-            # (e.g. Mooncake's transfer_id) into the response loop below.
-            kv_protocol = make_kv_connector_protocol(self.engine_client.vllm_config)
-            _update_kv_transfer_params(
-                sampling_params,
-                kv_protocol.prefill_request_kv_transfer_params(),
-            )
+        kv_protocol = self._prefill_kv_protocol(is_local_probe, sampling_params)
 
         # Extract LoRA request if present
         model_name = request.get("model")
@@ -4402,23 +4437,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
 
-                disaggregated_params = None
-                if kv_protocol is not None:
-                    embedding_params = (
-                        self._multimodal_request_processor.build_prefill_handoff(
-                            multi_modal_data=multi_modal_data,
-                            prompt_token_ids=list(res.prompt_token_ids or []),
-                            mm_processor_kwargs=mm_processor_kwargs,
-                        )
-                    )
-                    disaggregated_params = self._build_disaggregated_params(
-                        kv_protocol.decode_request_kv_transfer_params(res),
-                        embedding_params,
-                    )
-
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
-                    "disaggregated_params": disaggregated_params,
+                    "disaggregated_params": self._prefill_disaggregated_params(
+                        kv_protocol,
+                        res,
+                        multi_modal_data,
+                        mm_processor_kwargs,
+                    ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
                     ),
