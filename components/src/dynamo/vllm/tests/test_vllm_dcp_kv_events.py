@@ -53,6 +53,7 @@ async def runtime(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
 async def test_dcp_events_match_configured_block_size(monkeypatch, runtime):
+    """Check DCP events use effective block sizes without changing the cache config."""
     if Version(version("vllm")).release < (0, 31):
         pytest.skip("Native effective cache-group metadata requires vLLM 0.31+")
 
