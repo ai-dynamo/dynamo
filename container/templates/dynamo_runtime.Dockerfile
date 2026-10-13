@@ -121,6 +121,7 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+    /opt/dynamo/wheelhouse/aisimulate*.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
