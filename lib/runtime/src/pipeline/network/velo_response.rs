@@ -517,6 +517,14 @@ impl VeloResponseService {
 
     async fn prepare_peer(&self, peer: PeerInfo) -> Result<()> {
         let peer_id = peer.instance_id();
+        // Steady state: the peer is already prepared, so skip the shard write lock.
+        if self
+            .prepared_peers
+            .get(&peer_id)
+            .is_some_and(|ready| ready.initialized())
+        {
+            return Ok(());
+        }
         let ready = self
             .prepared_peers
             .entry(peer_id)
