@@ -400,6 +400,30 @@ def _preprocess_worker(
     )
 
 
+def _chat_logprobs_count(logprobs: Any, top_logprobs: Any) -> int | None:
+    """Map OpenAI chat logprob fields onto ``output_options.logprobs``.
+
+    The result is the number of alternatives per token. ``logprobs: true``
+    without ``top_logprobs`` is ``0``: the sampled token only. A positive
+    ``top_logprobs`` requires ``logprobs: true``, as in OpenAI.
+    """
+    if top_logprobs is not None and (
+        not isinstance(top_logprobs, int)
+        or isinstance(top_logprobs, bool)
+        or top_logprobs < 0
+    ):
+        raise PreprocessError("`top_logprobs` must be an integer >= 0.")
+    if logprobs is True:
+        return top_logprobs if top_logprobs is not None else 0
+    if isinstance(logprobs, int) and not isinstance(logprobs, bool):
+        return logprobs
+    if top_logprobs:
+        raise PreprocessError(
+            "When using `top_logprobs`, `logprobs` must be set to true."
+        )
+    return None
+
+
 def _build_dynamo_preproc(
     request: dict[str, Any],
     prompt_token_ids: list[int],
@@ -429,16 +453,9 @@ def _build_dynamo_preproc(
     elif stop is None:
         stop = []
 
-    # Handle logprobs
-    logprobs_val = None
-    logprobs = request.get("logprobs")
-    top_logprobs = request.get("top_logprobs")
-    if logprobs is True:
-        logprobs_val = top_logprobs if top_logprobs is not None else 1
-    elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
-        logprobs_val = logprobs
-    elif top_logprobs not in (None, 0):
-        logprobs_val = top_logprobs
+    logprobs_val = _chat_logprobs_count(
+        request.get("logprobs"), request.get("top_logprobs")
+    )
 
     nvext = request.get("nvext") or {}
     routing = request.get("routing")
