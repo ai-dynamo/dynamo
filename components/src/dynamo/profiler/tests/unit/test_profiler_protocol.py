@@ -579,7 +579,9 @@ def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
     assert cuda_graph_bs_args == ["--cuda-graph-bs-decode=1"]
 
 
-@pytest.mark.parametrize("mode, role", [("agg", "worker"), ("disagg", "decode")])
+@pytest.mark.parametrize(
+    "mode, role", [("agg", "worker"), ("disagg", "decode"), ("disagg", "prefill")]
+)
 def test_build_dgd_config_sglang_renames_removed_cuda_graph_args(
     mode: str, role: str
 ) -> None:
@@ -596,7 +598,8 @@ def test_build_dgd_config_sglang_renames_removed_cuda_graph_args(
         model_name="Qwen/Qwen3-0.6B",
         image="example/sglang:test",
         agg_cli_args=list(worker_args),
-        prefill_cli_args=list(worker_args),
+        # MRR 1 makes prefill run its CUDA graph safety check after the rename.
+        prefill_cli_args=["--max-running-requests", "1", *worker_args[2:]],
         decode_cli_args=list(worker_args),
     )
 
