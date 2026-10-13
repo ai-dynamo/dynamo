@@ -108,6 +108,8 @@ The Rust HTTP server also reads these environment variables, which are not expos
 <ParamField path="DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS" type="integer" default="5">
   Maximum time the Frontend waits for admitted HTTP response bodies and `/v1/realtime` WebSocket
   tasks to finish after shutdown begins. New inference requests are rejected while draining.
+  HTTP connections still open at that deadline are closed, so a client that has stopped reading
+  cannot hold up shutdown.
 </ParamField>
 
 <ParamField path="DYN_HTTP_OVERLOAD_STATUS_CODE" type="integer" default="529">

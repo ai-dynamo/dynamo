@@ -17,6 +17,7 @@ use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
+use super::closing::ClosingListener;
 use super::forward::ForwardRoutes;
 use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
@@ -1076,6 +1077,12 @@ impl HttpService {
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
             let state = self.state.clone();
+            // Graceful shutdown waits for every connection to close. Like the
+            // TLS server, close those still open at the deadline: one whose
+            // client stopped reading leaves its response body unpolled, so
+            // nothing else would ever end it.
+            let close_connections = CancellationToken::new();
+            let listener = ClosingListener::new(listener, close_connections.clone());
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
                     observer.cancelled_owned().await;
@@ -1083,6 +1090,10 @@ impl HttpService {
                     tracing::info!("HTTP server shutdown requested");
                     let shutdown_timeout =
                         Duration::from_secs(get_graceful_shutdown_timeout() as u64);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(shutdown_timeout).await;
+                        close_connections.cancel();
+                    });
                     if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
                         tracing::warn!(
                             inflight_requests = state.inflight_count(),
@@ -2248,6 +2259,117 @@ mod tests {
                     "the stream must be held through the drain window, ended after {held:?}"
                 );
                 handle.await.unwrap().unwrap();
+            },
+        )
+        .await;
+    }
+
+    /// A client that stops reading fills every buffer back to the upstream,
+    /// so Hyper stops polling the forwarded body and the body never sees the
+    /// stopping token. The connection must still close at the shutdown
+    /// deadline, dropping the upstream response and the inflight permit.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_shutdown_closes_connection_whose_client_stopped_reading() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tokio::io::AsyncWriteExt;
+
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
+            async move {
+                // Streams as fast as it is read, and fires `dropped` once its
+                // stream is dropped: when the frontend drops its upstream
+                // response.
+                struct OnDrop(CancellationToken);
+                impl Drop for OnDrop {
+                    fn drop(&mut self) {
+                        self.0.cancel();
+                    }
+                }
+                let produced = Arc::new(AtomicU64::new(0));
+                let dropped = CancellationToken::new();
+                let upstream = axum::Router::new().route(
+                    "/v1/custom/flood",
+                    axum::routing::get({
+                        let (produced, dropped) = (produced.clone(), dropped.clone());
+                        move || async move {
+                            let chunk = bytes::Bytes::from(vec![b'x'; 64 * 1024]);
+                            Body::from_stream(futures::stream::unfold(
+                                OnDrop(dropped),
+                                move |on_drop| {
+                                    produced.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                                    let chunk = chunk.clone();
+                                    async move { Some((Ok::<_, std::io::Error>(chunk), on_drop)) }
+                                },
+                            ))
+                        }
+                    }),
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let upstream_addr = listener.local_addr().unwrap();
+                tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+                let runtime = CancellationToken::new();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let service = HttpService::builder()
+                    .port(addr.port())
+                    .cancel_token(Some(runtime.clone()))
+                    .forward_routes(Some(vec![format!("/v1/custom=http://{upstream_addr}")]))
+                    .build()
+                    .unwrap();
+                let state = service.state_clone();
+                let server = tokio::spawn({
+                    let runtime = runtime.clone();
+                    async move { service.run_with_listener(runtime, listener).await }
+                });
+
+                // Ask for the stream, then never read it.
+                let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+                client
+                    .write_all(b"GET /v1/custom/flood HTTP/1.1\r\nhost: localhost\r\n\r\n")
+                    .await
+                    .unwrap();
+                // Once every buffer on the way is full, the upstream stalls.
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    let (mut seen, mut unchanged) = (0, 0);
+                    while unchanged < 3 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let now = produced.load(Ordering::Relaxed);
+                        unchanged = if now > 0 && now == seen {
+                            unchanged + 1
+                        } else {
+                            0
+                        };
+                        seen = now;
+                    }
+                })
+                .await
+                .expect("the upstream stalls once the client stops reading");
+                assert_eq!(state.inflight_count(), 1);
+
+                let started = std::time::Instant::now();
+                runtime.cancel();
+                tokio::time::timeout(Duration::from_secs(5), server)
+                    .await
+                    .expect("the server stops at the shutdown deadline")
+                    .unwrap()
+                    .unwrap();
+                let held = started.elapsed();
+                assert!(
+                    held >= Duration::from_millis(900),
+                    "the connection must be held through the drain window, closed after {held:?}"
+                );
+                assert!(
+                    state
+                        .wait_inflight_zero_or_timeout(Duration::from_secs(5))
+                        .await,
+                    "closing releases the permit"
+                );
+                tokio::time::timeout(Duration::from_secs(5), dropped.cancelled())
+                    .await
+                    .expect("closing drops the upstream response");
+                drop(client);
             },
         )
         .await;

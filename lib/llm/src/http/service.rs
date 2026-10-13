@@ -23,6 +23,7 @@ pub mod metadata;
 mod openai;
 
 pub mod busy_threshold;
+mod closing;
 pub mod disconnect;
 pub mod error;
 mod forward;
