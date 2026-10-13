@@ -10,6 +10,69 @@
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use utoipa::ToSchema;
 
+/// Find a root field through the export's known acyclic allOf/local-ref chain.
+/// Returns None for absence; never matches the same name in nested request values.
+fn root_property<'a>(
+    spec: &'a serde_json::Value,
+    node: &'a serde_json::Value,
+    name: &str,
+) -> Option<&'a serde_json::Value> {
+    if let Some(field) = node.get("properties").and_then(|fields| fields.get(name)) {
+        return Some(field);
+    }
+    if let Some(reference) = node.get("$ref").and_then(|value| value.as_str()) {
+        return root_property(spec, spec.pointer(reference.strip_prefix('#')?)?, name);
+    }
+    node.get("allOf")?
+        .as_array()?
+        .iter()
+        .find_map(|part| root_property(spec, part, name))
+}
+
+/// Extra-map token controls must be declared without changing their runtime owner.
+/// Preserve null/omission, integer items and the actual admission count limit;
+/// inference and vocabulary/error semantics are checked separately by real servers.
+#[test]
+fn passthrough_token_controls_match_admission_shape() {
+    use dynamo_llm::http::service::{RouteDoc, openapi_docs::generate_openapi_spec};
+    use dynamo_llm::protocols::openai::{completions::NvCreateCompletionRequest, validate};
+    let spec = generate_openapi_spec(&[
+        RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions"),
+        RouteDoc::new(axum::http::Method::POST, "/v1/completions"),
+    ]);
+    let controls = &spec["components"]["schemas"]["PassthroughTokenControls"];
+    for name in ["allowed_token_ids", "stop_token_ids"] {
+        let field = &controls["properties"][name];
+        assert_eq!(field["type"], serde_json::json!(["array", "null"]));
+        assert_eq!(field["items"]["type"], "integer");
+        assert!(
+            !controls["required"]
+                .as_array()
+                .is_some_and(|fields| fields.iter().any(|field| field == name))
+        );
+        for root in ["NvCreateChatCompletionRequest", "NvCreateCompletionRequest"] {
+            assert_eq!(
+                root_property(&spec, &spec["components"]["schemas"][root], name),
+                Some(field)
+            );
+        }
+    }
+    assert_eq!(
+        controls["properties"]["stop_token_ids"]["maxItems"],
+        validate::MAX_STOP_SEQUENCES
+    );
+    let request: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "test", "prompt": "hello", "allowed_token_ids": [22], "stop_token_ids": null
+    }))
+    .unwrap();
+    assert_eq!(
+        request.unsupported_fields["allowed_token_ids"],
+        serde_json::json!([22])
+    );
+    assert!(!request.unsupported_fields.contains_key("stop_token_ids"));
+    validate::validate_no_unsupported_fields(&request.unsupported_fields).unwrap();
+}
+
 #[test]
 fn http_export_describes_request_aliases() {
     use dynamo_llm::http::service::{RouteDoc, openapi_docs::generate_openapi_spec};

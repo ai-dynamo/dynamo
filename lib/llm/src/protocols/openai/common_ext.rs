@@ -112,6 +112,19 @@ pub struct CommonExt {
     pub continue_final_message: Option<bool>,
 }
 
+/// Schema-only generation extensions, including fields captured outside CommonExt.
+///
+/// Runtime parsing and transport stay unchanged. The extra-field map is skipped
+/// during serialization, so its admitted token controls need an explicit input view.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub(crate) struct GenerationCommonExt {
+    #[serde(flatten)]
+    common: CommonExt,
+    #[serde(flatten)]
+    token_controls: super::validate::PassthroughTokenControls,
+}
+
 /// Schema-only view of common extensions for the chat endpoint.
 ///
 /// The runtime type remains `CommonExt`. Its shared schema omits these two
@@ -120,7 +133,7 @@ pub struct CommonExt {
 #[allow(dead_code)]
 pub(crate) struct ChatCommonExt {
     #[serde(flatten)]
-    common: CommonExt,
+    common: GenerationCommonExt,
     /// Append the assistant generation prompt after the last message.
     add_generation_prompt: Option<bool>,
     /// Continue the final message rather than starting a new assistant turn.
