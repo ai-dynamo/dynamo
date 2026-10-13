@@ -245,6 +245,7 @@ def test_request_reraises_unexpected_port_forward_stop_error(tmp_path) -> None:
 
 @pytest.mark.parametrize("main_started", [True, False])
 async def test_pod_status_includes_native_sidecar(tmp_path, main_started) -> None:
+    """Report sidecar failures even before regular containers have started."""
     deployment = managed_deployment(tmp_path)
     runtime = SimpleNamespace(
         name="runtime",
