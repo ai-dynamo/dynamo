@@ -11,11 +11,10 @@ Compare Dynamo and framework OpenAPI 3.1/3.2 request and response contracts for
 for scope, provenance, normalization, aliases, and interpretation. Schema agreement
 does not establish actual acceptance or behavioral compatibility.
 
-This package composes explicit dependency imports from the native export, then
-compares requests and responses independently. Composition is a temporary offline
-step; the guide explains the
+The `assess` command fills dependency placeholders in Dynamo's native export, then
+compares requests and responses separately. The guide explains the temporary
 [async-openai annotation gap and removal condition](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#schema-inputs-and-provenance).
-It does not modify the running frontend's `/openapi.json` or `/docs`.
+Composition does not modify the running frontend's `/openapi.json` or `/docs`.
 
 ## Installation
 
@@ -31,41 +30,48 @@ python -m scripts.protocol_compatibility assess --help
 
 ## CLI Examples
 
-Run from the selected Dynamo checkout. Generate the default Dynamo input without a
-GPU or listener:
+Run these commands from the selected Dynamo checkout. Use new output directories for
+`acquire` and `assess`.
 
-```bash
-cargo run --locked -p dynamo-llm --no-default-features --bin generate-frontend-openapi
-```
+1. Generate Dynamo's default schema. This command needs no GPU and starts no HTTP listener.
 
-Download the composition input pinned by the default manifest:
+   ```bash
+   cargo run --locked -p dynamo-llm --no-default-features --bin generate-frontend-openapi
+   ```
 
-```bash
-curl --fail --location \
-  https://raw.githubusercontent.com/64bit/async-openai/d453592328fdbb3f59c1ea74f8e6cdf7f9140efb/openapi.yaml \
-  --output openai-d4535923.yaml
-```
+2. Download the OpenAI schema pinned by the composition manifest.
 
-Set `FRAMEWORK_NAME` to a lowercase identity such as `example-engine` and
-`FRAMEWORK_SPEC_URL` to its direct published or live OpenAPI URL. Capture and compare:
+   ```bash
+   curl --fail --location \
+     https://raw.githubusercontent.com/64bit/async-openai/d453592328fdbb3f59c1ea74f8e6cdf7f9140efb/openapi.yaml \
+     --output openai-d4535923.yaml
+   ```
 
-```bash
-python -m scripts.protocol_compatibility acquire \
-  --server "$FRAMEWORK_NAME" --url "$FRAMEWORK_SPEC_URL" \
-  --output-dir captures/framework
+3. Set `FRAMEWORK_NAME` to a lowercase identifier such as `example-engine`.
+4. Set `FRAMEWORK_SPEC_URL` to the direct URL of the framework's published or served OpenAPI schema.
+5. Capture the framework schema.
 
-python -m scripts.protocol_compatibility assess \
-  --dynamo docs/frontends/openapi.json --framework captures/framework \
-  --framework-name "$FRAMEWORK_NAME" \
-  --openai openai-d4535923.yaml --oasdiff /absolute/path/to/oasdiff \
-  --output-dir assessment
-```
+   ```bash
+   python -m scripts.protocol_compatibility acquire \
+     --server "$FRAMEWORK_NAME" --url "$FRAMEWORK_SPEC_URL" \
+     --output-dir captures/framework
+   ```
+
+6. Compare the schemas. Replace `/absolute/path/to/oasdiff` with the installed executable's path.
+
+   ```bash
+   python -m scripts.protocol_compatibility assess \
+     --dynamo docs/frontends/openapi.json --framework captures/framework \
+     --framework-name "$FRAMEWORK_NAME" \
+     --openai openai-d4535923.yaml --oasdiff /absolute/path/to/oasdiff \
+     --output-dir assessment
+   ```
 
 Alternatively, pass JSON/YAML files directly as `--dynamo` and `--framework`.
 To package a local file with acquisition metadata, use `acquire --file framework.yaml`
 instead of `--url`. For optional Dynamo HTTP capture, use
 `acquire --server dynamo --url http://127.0.0.1:8000/openapi.json` with a fresh
-`--output-dir`. The generated Dynamo file still needs composition, performed by `assess`.
+`--output-dir`. The `assess` command composes the Dynamo schema before comparison.
 
 ### Arguments
 
@@ -81,19 +87,18 @@ instead of `--url`. For optional Dynamo HTTP capture, use
 | `assess` | `--oasdiff` | Required path to the pinned oasdiff 1.33.0 executable |
 | Both | `--output-dir` | Required output directory that must not already exist |
 
-The framework identity does not select an adapter or schema exceptions. URLs must
-be direct HTTP(S), with no credentials, query strings, fragments, or redirects.
-Downloads are bounded to 32 MiB and 30 seconds; proxies are disabled. Review paths,
-URLs, and annotations for secrets before publishing artifacts.
+The `acquire` command requires HTTP(S) URLs that return HTTP 200 without redirects.
+It rejects credentials, query strings, and fragments in URLs. It limits captures to
+32 MiB, uses a 30-second socket timeout, and disables proxies. Review paths, URLs,
+and annotations for secrets before publishing artifacts.
 
 ## Composition
 
-The shared request/response
-[manifest](composition/async-openai-0.42.1.yaml) records the expected
+The shared [manifest](composition/async-openai-0.42.1.yaml) records the expected
 `dynamo-protocols` and `async-openai` versions, OpenAI source revision and checksum,
-import mappings, and corrections reviewed against Rust serialization. A dependency
-upgrade requires reviewing these inputs and revalidating schema/Serde agreement
-and runtime consumers. Never change a checksum to bypass a failed correction guard.
+import mappings, and corrections reviewed against Rust serialization. When upgrading
+a dependency, review these inputs and retest schema/Serde agreement and runtime
+consumers. Never change a checksum to bypass a failed correction guard.
 
 To compose without running the comparator, use the native export and pinned OpenAI
 file from the CLI examples:
@@ -105,31 +110,34 @@ python -m scripts.protocol_compatibility.composition.responses \
   --output-dir composed
 ```
 
-Despite the module name, this uses the same engine and manifest for both request
-and response imports. It requires a new output directory and writes
+The `composition.responses` command handles both request and response imports.
+It requires a new output directory and writes
 `openapi.composed.json` and `composition.yaml`. Keep the raw capture and acquisition
 metadata separately. This command does not require the `oasdiff` executable.
 
 ### Composition Invariants
 
-- Preserve raw inputs, Dynamo endpoints, owned fields, and SSE envelopes in a
-  separate composed document. Never fill gaps from a framework's schema.
-- Resolve explicit import slots and their reachable components only. Namespace
-  imported components; reject collisions, unmapped slots, external references,
-  and unsupported reference constructs.
-- Guard each JSON Patch correction with a preceding `test` of the affected value
-  (or parent for additions) and record its Rust-code rationale.
-- Redirect references to corrected definitions so nested uses receive the same
-  corrections. Preserve recursion as references and walk schema positions only;
-  literal examples and defaults remain data.
+The composer:
 
-A passing checksum or patch guard verifies input assumptions, not runtime fidelity.
-An explicit `serde_json::Value` is intentionally untyped; an unresolved import is
-a coverage gap. Record Dynamo-specific `nvext` exclusions without claiming parity.
+- Creates a separate document. It preserves raw inputs, Dynamo endpoints, owned fields,
+  and SSE envelopes. It never fills gaps from a framework's schema.
+- Imports only definitions selected by placeholders and the components they reference.
+  It gives imported components distinct names and rejects collisions, unmapped placeholders,
+  external references, and unsupported reference constructs.
+- Requires a `test` operation immediately before each JSON Patch correction.
+  The test must check the affected value, or its parent for additions.
+  Each correction must include a rationale based on Rust code.
+- Redirects references to corrected definitions so nested uses receive the corrections.
+  It preserves recursive references and traverses only schema locations.
+  Literal examples and defaults remain data.
+
+Checksums and patch guards verify input assumptions, not runtime behavior.
+An explicit `serde_json::Value` is intentionally untyped. Record excluded Dynamo-specific
+`nvext` fields without claiming compatibility.
 
 ## Outputs and Exit Codes
 
-Acquisition writes exact JSON/YAML bytes to `openapi.raw` and observations to
+The `acquire` command writes exact JSON/YAML bytes to `openapi.raw` and observations to
 `acquisition.json`. Legacy v1 capture directories with `openapi.raw.json` remain
 readable; their deployment metadata is not reverified.
 
@@ -146,8 +154,11 @@ Start with `assessment/report.md`. Retain the entire assessment directory:
 | `response-oasdiff.json`, `response-normalization.json` | Response deltas and equivalent-representation audit |
 | `alias-matches.json` | Alias-name matches, parent constraints, and value-schema comparison results |
 
-The directory also retains input and composition/coverage evidence. Invalid capture
-checksums, pinned OpenAI checksum mismatches, and unresolved imports fail visibly.
+The `assess` command also saves inputs, the composition manifest, and the coverage catalog.
+Checksum mismatches and unresolved Dynamo imports stop the command with an error.
+A later failure can leave partial output; use a new output directory for a retry.
+
+The `assess` command returns these exit codes:
 
 | Exit | Meaning |
 | --- | --- |
@@ -155,48 +166,46 @@ checksums, pinned OpenAI checksum mismatches, and unresolved imports fail visibl
 | `1` | Differences or coverage gaps require review |
 | `2` | Invalid inputs or tooling failure |
 
-None of these statuses proves runtime parity. The current coverage catalog prevents
-a complete-coverage result until its known limitations are resolved.
+No exit code proves runtime compatibility. The current coverage catalog contains
+known gaps, so a completed assessment returns `1` even if the comparator finds no differences.
 
 ## Response comparison boundaries
 
-The report lists request candidates first and response candidates separately.
-Both compare the framework export to Dynamo; a structural delta is a candidate,
-not a compatibility decision. To establish that a framework client can use Dynamo,
-verify request acceptance and semantics and whether Dynamo responses meet that
-client's expectations. Reverse-direction and additive differences need separate
-interpretation, not automatic fixes.
+The report lists request differences first, then response differences, in the direction
+framework → Dynamo. To assess compatibility, verify request acceptance, request semantics,
+and whether Dynamo responses meet the client's expectations. Evaluate reverse-direction
+comparisons and Dynamo-only additions separately before changing either contract.
 
 Response comparison keeps status codes, media types and JSON body schemas. For
-SSE it requires OpenAPI 3.2 `text/event-stream.itemSchema`: a parsed event object
-with string `data`. A JSON data branch uses `contentMediaType: application/json`
+server-sent events (SSE), it requires OpenAPI 3.2 `text/event-stream.itemSchema`:
+a parsed event object with string `data`. JSON data uses `contentMediaType: application/json`
 and `contentSchema`; a literal marker uses `const: "[DONE]"`.
 
-The pinned comparison engine does not consume these new media keywords directly.
-The tooling therefore creates an explicitly comparison-only OpenAPI 3.1 copy:
+The pinned `oasdiff` version does not compare these media keywords directly.
+The tool therefore creates an OpenAPI 3.1 copy for comparison:
 `itemSchema` becomes an event `schema`, and data becomes an object tagged with
 `encoding: json` plus its decoded `value`, or `encoding: literal` plus the marker.
 This makes the embedded payload constraints visible to the comparator without
 confusing the literal `[DONE]` marker with JSON containing the string `"[DONE]"`.
-Raw server exports remain unchanged. Real-binary tests check that changes inside
-`contentSchema` and to the marker produce deltas, while equivalent inline/local
-event references do not.
+Raw server exports remain unchanged. Tests with the `oasdiff` executable verify that
+changes inside `contentSchema` and to the marker produce differences. Equivalent inline
+schemas and local references produce no differences.
 
-Only these explicit data encodings are supported. Encoded-string constraints,
-unsupported keywords or media types, unresolved references/imports, and missing
-body schemas are reported as coverage gaps. A description-only error response is
+The tool supports only these encodings. It reports encoded-string constraints,
+unsupported keywords or media types, unresolved response references/imports, and missing
+body schemas as coverage gaps. An error response with only a description is
 not proof that the body is empty. Response headers, other endpoints, event ordering,
 termination timing and cancellation are outside this comparison's coverage.
-Generic JSON Schema validation does not assert JSON inside a `contentSchema`:
-real-server tests must parse SSE, decode and validate JSON data explicitly, and
-check stream lifecycle separately. Neither the comparison projection nor the
-success-payload fixtures replace that E2E evidence.
+Generic JSON Schema validation does not validate the JSON encoded inside a string
+against `contentSchema`. Tests against a running server must parse SSE, decode and validate
+JSON data, and check the stream lifecycle. Schema comparison and payload fixtures alone
+do not establish that behavior.
 
 After parsing a data-bearing SSE event, call
 `assessment.responses.validate_sse_event(document, item_schema, event)` to check
 its envelope and encoded content. Supply a composed document with local payload
-references and the endpoint's `itemSchema`; `event["data"]` must still be a string.
-The helper returns `None` on success and raises on invalid or unsupported input.
+references and the endpoint's `itemSchema`. Keep `event["data"]` as a string.
+The helper returns `None` on success or raises an exception for invalid or unsupported input.
 It does not parse raw frames, count events, or establish a valid stream lifecycle.
 
 ## Validation
@@ -216,7 +225,9 @@ python -m scripts.protocol_compatibility.tests.composition.response_fidelity \
   --spec assessment/dynamo.composed.json
 ```
 
-Real-comparator tests explicitly skip without `OASDIFF_BIN`; that skip is not
-validation evidence. CI supplies the verified binary. See the
+Tests that execute `oasdiff` skip when `OASDIFF_BIN` is unset. A skipped test does not
+validate the comparator. CI supplies the verified binary for fixture tests and separately
+generates the native schema artifact. CI does not compose that artifact or run `assess`
+against a pinned framework schema. See the
 [guide's validation boundaries](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#maintenance-and-validation)
 for what these checks establish.
