@@ -647,6 +647,7 @@ mod tests {
     use super::*;
     use crate::discovery::CommittedWorkerSetTarget;
     use crate::entrypoint::RouterConfig;
+    use crate::kv_router::prefill_router::PrefillRouterLifecycle;
     use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_kv_router::protocols::RoutingConstraints;
     use dynamo_runtime::{
@@ -660,6 +661,7 @@ mod tests {
         storage::kv,
     };
     use futures::StreamExt;
+    use std::collections::HashSet;
 
     fn card(router_config: Option<RouterConfig>) -> ModelDeploymentCard {
         let mut card = ModelDeploymentCard::with_name_only("test-model");
@@ -871,6 +873,7 @@ mod tests {
             router_track_active_blocks: false,
             ..Default::default()
         };
+        let group_id = endpoint.id().to_string();
         let target = |generation, block_size, admitted_ids| {
             let mut selected = card(Some(RouterConfig::new(RouterMode::KV, kv_config.clone())));
             selected.kv_cache_block_size = block_size;
@@ -912,6 +915,15 @@ mod tests {
         })
         .await
         .expect("committed prefill target must activate");
+        assert_eq!(
+            router.available_worker_ids_for(&group_id, &endpoint.id()),
+            Some(HashSet::from([ids[0]]))
+        );
+        assert!(
+            router
+                .available_worker_ids_for("other-group", &endpoint.id())
+                .is_none()
+        );
         let retired = router.binding.load_full().unwrap();
         let chooser = retired
             .router
@@ -993,8 +1005,22 @@ mod tests {
         admissions.send_replace(Vec::new());
         drop(admissions);
         router.set_target(None);
+        assert!(
+            router
+                .available_worker_ids_for(&group_id, &endpoint.id())
+                .is_none()
+        );
         let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
         router.set_target(Some(target(2, 32, successor_ids)));
+        assert_eq!(
+            router.available_worker_ids_for(&group_id, &endpoint.id()),
+            Some(HashSet::new())
+        );
+        assert!(
+            router
+                .available_worker_ids_for("other-group", &endpoint.id())
+                .is_none()
+        );
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let worker = prefilled_worker(&router).await;
@@ -1007,6 +1033,10 @@ mod tests {
         })
         .await
         .expect("same-endpoint successor must activate");
+        assert_eq!(
+            router.available_worker_ids_for(&group_id, &endpoint.id()),
+            Some(HashSet::from([ids[2]]))
+        );
         assert_eq!(
             router
                 .binding
