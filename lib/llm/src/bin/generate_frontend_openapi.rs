@@ -148,7 +148,8 @@ fn generate_openapi(listen: Option<SocketAddr>) -> anyhow::Result<()> {
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create OpenAPI output directory: {out_dir:?}"))?;
 
-    let json = serde_json::to_string_pretty(&openapi).context("failed to serialize OpenAPI spec")?;
+    let json =
+        serde_json::to_string_pretty(&openapi).context("failed to serialize OpenAPI spec")?;
 
     fs::write(&out_path, json)
         .with_context(|| format!("failed to write OpenAPI spec to: {out_path:?}"))?;
