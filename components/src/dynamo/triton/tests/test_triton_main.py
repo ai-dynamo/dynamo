@@ -10,7 +10,7 @@ import types
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import tritonclient.grpc.model_config_pb2 as model_config_pb
+import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
 
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.triton import main
@@ -30,7 +30,7 @@ def patched_worker(monkeypatch):
     # Stub text_format but keep Parse() -> a real ModelConfig so downstream
     # SerializeToString() yields bytes that _build_handler can parse.
     text_format_mock = MagicMock(name="text_format")
-    text_format_mock.Parse.return_value = model_config_pb.ModelConfig()
+    text_format_mock.Parse.return_value = TritonModelConfigPb.ModelConfig()
     monkeypatch.setattr(main, "text_format", text_format_mock)
     monkeypatch.setattr(main, "register_model", register_model)
     return types.SimpleNamespace(register_model=register_model)

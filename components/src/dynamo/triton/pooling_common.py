@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, ClassVar, Final, Optional
 
 import numpy as np
-import tritonclient.grpc.model_config_pb2 as model_config_pb
+import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
 from tritonserver import MemoryType as TritonMemoryType
 from tritonserver import Model as TritonModel
 from tritonserver import Server as TritonServer
@@ -28,8 +28,8 @@ from dynamo.common.backend.health_check import is_probe
 
 logger = logging.getLogger(__name__)
 
-TYPE_STRING: Final[int] = model_config_pb.DataType.TYPE_STRING
-TYPE_FP32: Final[int] = model_config_pb.DataType.TYPE_FP32
+TYPE_STRING: Final[int] = TritonModelConfigPb.DataType.TYPE_STRING
+TYPE_FP32: Final[int] = TritonModelConfigPb.DataType.TYPE_FP32
 
 
 # Client-input errors are raised as plain ``ValueError``; the PyO3 binding
@@ -40,7 +40,7 @@ TYPE_FP32: Final[int] = model_config_pb.DataType.TYPE_FP32
 
 
 def resolve_string_input_name(
-    config: model_config_pb.ModelConfig,
+    config: TritonModelConfigPb.ModelConfig,
     model_name: str,
     override: Optional[str],
     task_label: str,
@@ -65,7 +65,7 @@ def resolve_string_input_name(
 
 
 def validate_string_input_dims(
-    config: model_config_pb.ModelConfig,
+    config: TritonModelConfigPb.ModelConfig,
     name: str,
     model_name: str,
     task_label: str,
@@ -91,7 +91,7 @@ def validate_string_input_dims(
 
 
 def resolve_fp32_output_name(
-    config: model_config_pb.ModelConfig,
+    config: TritonModelConfigPb.ModelConfig,
     model_name: str,
     override: Optional[str],
     task_label: str,
@@ -243,7 +243,7 @@ class PoolingWorkerHandlerBase(ABC):
     # Per-instance state (assigned in ``__init__`` below).
     _server: TritonServer
     _model: TritonModel
-    _config: model_config_pb.ModelConfig
+    _config: TritonModelConfigPb.ModelConfig
     _input_name: str
     _output_name: str
     _batched: bool
@@ -252,7 +252,7 @@ class PoolingWorkerHandlerBase(ABC):
         self,
         server: TritonServer,
         model: TritonModel,
-        triton_model_config: model_config_pb.ModelConfig,
+        triton_model_config: TritonModelConfigPb.ModelConfig,
         input_name: Optional[str] = None,
         output_name: Optional[str] = None,
     ) -> None:

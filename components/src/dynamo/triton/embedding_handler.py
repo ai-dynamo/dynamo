@@ -13,7 +13,7 @@ import base64
 from typing import Any, Final, Optional
 
 import numpy as np
-import tritonclient.grpc.model_config_pb2 as model_config_pb
+import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
 from tritonserver import Model as TritonModel
 from tritonserver import Server as TritonServer
 
@@ -44,7 +44,7 @@ class EmbeddingWorkerHandler(PoolingWorkerHandlerBase):
         self,
         server: TritonServer,
         model: TritonModel,
-        triton_model_config: model_config_pb.ModelConfig,
+        triton_model_config: TritonModelConfigPb.ModelConfig,
         embeddings_input_name: Optional[str] = None,
         embeddings_output_name: Optional[str] = None,
     ) -> None:

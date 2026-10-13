@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import tritonclient.grpc.model_config_pb2 as model_config_pb
+import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
 import uvloop
 from google.protobuf import json_format, text_format
 from tritonserver import Model as TritonModel
@@ -63,7 +63,9 @@ def _read_model_config(
         # Read Triton model config from config.pbtxt
         config_path = f"{repository_path}/{model_name}/config.pbtxt"
         with open(config_path, "r") as f:
-            model_config = text_format.Parse(f.read(), model_config_pb.ModelConfig())
+            model_config = text_format.Parse(
+                f.read(), TritonModelConfigPb.ModelConfig()
+            )
             serialized_config = model_config.SerializeToString()
             logger.info(f"Loaded model config from {config_path}")
             logger.debug(serialized_config)
@@ -71,7 +73,9 @@ def _read_model_config(
     else:
         # model.config() returns dict[str, Any]; parse it back into the ModelConfig
         # protobuf and serialize to bytes, matching the config.pbtxt branch above.
-        parsed_pb = json_format.ParseDict(model_config, model_config_pb.ModelConfig())
+        parsed_pb = json_format.ParseDict(
+            model_config, TritonModelConfigPb.ModelConfig()
+        )
         serialized_config = parsed_pb.SerializeToString()
         logger.info("Read model config from Triton.")
         logger.debug(serialized_config)
@@ -122,7 +126,7 @@ def _collect_ensemble_dependency_models(
         if not raw_config:
             continue
         try:
-            cfg = json_format.ParseDict(raw_config, model_config_pb.ModelConfig())
+            cfg = json_format.ParseDict(raw_config, TritonModelConfigPb.ModelConfig())
         except json_format.ParseError as exc:
             logger.warning(
                 "Could not parse runtime config for '%s' while scanning "
@@ -146,7 +150,7 @@ def _collect_ensemble_dependency_models(
     for pbtxt in pbtxts:
         try:
             with pbtxt.open() as f:
-                cfg = text_format.Parse(f.read(), model_config_pb.ModelConfig())
+                cfg = text_format.Parse(f.read(), TritonModelConfigPb.ModelConfig())
         except (OSError, text_format.ParseError) as exc:
             logger.warning(
                 "Could not read %s while scanning for ensemble dependencies: %s",
@@ -242,7 +246,9 @@ def _build_handler(
     model: TritonModel,
     triton_model_config_bytes: bytes,
 ):
-    parsed_config = model_config_pb.ModelConfig.FromString(triton_model_config_bytes)
+    parsed_config = TritonModelConfigPb.ModelConfig.FromString(
+        triton_model_config_bytes
+    )
     if config.task == "classify":
         return ClassifyWorkerHandler(
             server,

@@ -16,7 +16,7 @@ from typing import Any, Optional
 from unittest.mock import MagicMock
 
 import pytest
-import tritonclient.grpc.model_config_pb2 as model_config_pb
+import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
 import tritonserver
 
 from dynamo.health_check import HEALTH_CHECK_KEY
@@ -72,7 +72,7 @@ def _make_handler(
     )
 
     return handlers.RequestHandler(
-        server, model, model_config_pb.ModelConfig(max_batch_size=0)
+        server, model, TritonModelConfigPb.ModelConfig(max_batch_size=0)
     )
 
 
