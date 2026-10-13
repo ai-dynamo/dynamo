@@ -13,7 +13,7 @@ import (
 )
 
 func TestComputeDynamoNamespace(t *testing.T) {
-	// Namespace and DGD names from DYN-4887: 36 + 1 + 26 = 63 bytes deploys,
+	// Reported namespace and DGD names: 36 + 1 + 26 = 63 bytes deploys,
 	// 36 + 1 + 27 = 64 bytes was rejected by the Grove admission webhook.
 	const reportNamespace = "dgdr16-ab-length-20261013-abcdefghij"
 	const name63 = "gaaaaaaaaaaaaaaaaaaaaaaaaa"

@@ -5001,7 +5001,7 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 }
 
 func Test_GeneratePodCliqueSetLongDynamoNamespace(t *testing.T) {
-	// From DYN-4887: these valid names join into a 64-byte Dynamo namespace,
+	// These valid names join into a 64-byte Dynamo namespace,
 	// which Grove rejected as a clique label value.
 	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
