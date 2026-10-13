@@ -406,7 +406,7 @@ pub fn validate_logit_bias(
     for (token, bias_value) in logit_bias {
         token.parse::<u32>().map_err(|_| {
             anyhow::anyhow!(
-                "Logit bias key '{}' must be a token id (integer string)",
+                "Logit bias key '{}' must be a non-negative 32-bit integer token id",
                 token
             )
         })?;
@@ -1095,13 +1095,31 @@ mod tests {
     fn test_validate_logit_bias_keys() {
         let bias = |key: &str| Some(HashMap::from([(key.to_string(), json!(1.0))]));
 
-        let err = validate_logit_bias(&bias("not-a-token")).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("'not-a-token'"), "unexpected error: {msg}");
-        assert!(msg.contains("token id"), "unexpected error: {msg}");
+        for key in ["not-a-token", "-1", "", "1.5", "4294967296"] {
+            let msg = validate_logit_bias(&bias(key)).unwrap_err().to_string();
+            assert_eq!(
+                msg,
+                format!("Logit bias key '{key}' must be a non-negative 32-bit integer token id")
+            );
+        }
 
-        assert!(validate_logit_bias(&bias("-1")).is_err());
-        assert!(validate_logit_bias(&bias("50256")).is_ok());
+        for key in ["0", "50256", "4294967295"] {
+            assert!(validate_logit_bias(&bias(key)).is_ok(), "key: {key}");
+        }
+    }
+
+    #[test]
+    fn test_validate_logit_bias_values_with_valid_key() {
+        for (value, expected_error) in [
+            (json!("not-a-number"), "must be a number"),
+            (json!(-101.0), "must be between -100 and 100"),
+            (json!(101.0), "must be between -100 and 100"),
+        ] {
+            let bias = Some(HashMap::from([("50256".to_string(), value)]));
+            let msg = validate_logit_bias(&bias).unwrap_err().to_string();
+            assert!(msg.contains("'50256'"), "unexpected error: {msg}");
+            assert!(msg.contains(expected_error), "unexpected error: {msg}");
+        }
     }
 
     fn unknown_fields() -> HashMap<String, serde_json::Value> {
