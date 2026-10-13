@@ -114,11 +114,13 @@ Use `LoadRestrictionsNone` only with reviewed paths. Inspect the rendered
 ConfigMap, ComputeDomain, and DynamoGraphDeployment before applying them.
 Keep filled cluster values and rendered manifests outside the repository.
 
-### Aggregated Worker Health Probes
+### Worker Health Probes
 
-For `agg-gb200-agentic`, select the optional
-[worker-liveness Component](vllm/agg-gb200-agentic/kustomize/components/worker-liveness/kustomization.yaml)
+Select the optional [aggregated worker-liveness Component](vllm/agg-gb200-agentic/kustomize/components/worker-liveness/kustomization.yaml)
+or [disaggregated worker-liveness Component](vllm/disagg-gb200-agentic/kustomize/components/worker-liveness/kustomization.yaml)
 to allow cold FMHA kernel compilation to finish before a liveness restart.
+The disaggregated Component applies the same settings to both prefill and
+decode workers.
 It sets `/live` on port `9090` with a 10-second interval, a 10-second timeout,
 and 12 consecutive failures before restarting. It also sets readiness on
 `/health` with a 10-second interval, a 4-second timeout, and 18 consecutive
@@ -146,7 +148,7 @@ kustomize build --load-restrictor LoadRestrictionsNone \
   "$LIVENESS_KUSTOMIZATION" > "$LIVENESS_KUSTOMIZATION/rendered.yaml"
 ```
 
-Use the aggregated profile and a separate directory from
+Set `RECIPE_DIR` to the selected profile and use a separate directory from
 `CLUSTER_KUSTOMIZATION`. Review and apply this rendered manifest using the
 commands in [Deploy](#deploy), with its path substituted.
 
