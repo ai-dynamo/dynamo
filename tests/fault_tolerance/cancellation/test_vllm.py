@@ -119,7 +119,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    build_nixl_kv_transfer_config_json(),
+                    build_nixl_kv_transfer_config_json("kv_producer"),
                 ]
             )
             health_check_urls = [
@@ -130,7 +130,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    build_nixl_kv_transfer_config_json(),
+                    build_nixl_kv_transfer_config_json("kv_consumer"),
                 ]
             )
             health_check_urls = [
@@ -153,9 +153,15 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
+        # Every worker launched with --kv-transfer-config opens a NIXL listener,
+        # so each needs its own port; unset means vLLM's host-wide default 5600.
+        if mode != WorkerMode.AGGREGATED:
+            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
+
+        # Only the prefill worker publishes KV events.
         if mode == WorkerMode.PREFILL:
             self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
-            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
             command.extend(
                 [
                     "--kv-events-config",
@@ -169,7 +175,6 @@ class DynamoWorkerProcess(ManagedProcess):
                     ),
                 ]
             )
-            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
         if mode == WorkerMode.PREFILL:
             worker_type = "prefill_worker"

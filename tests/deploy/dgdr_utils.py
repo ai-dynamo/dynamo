@@ -63,6 +63,29 @@ DEFAULT_MOCKER_HARDWARE = {
     "totalGpus": 8,
 }
 
+_CI_PROFILING_CONTAINER_DEFAULTS = {
+    "profiler": {
+        "resources": {
+            "requests": {
+                "cpu": "250m",
+                "memory": "512Mi",
+                "ephemeral-storage": "1Gi",
+            },
+            "limits": {"ephemeral-storage": "4Gi"},
+        }
+    },
+    "output-copier": {
+        "resources": {
+            "requests": {
+                "cpu": "25m",
+                "memory": "64Mi",
+                "ephemeral-storage": "128Mi",
+            },
+            "limits": {"ephemeral-storage": "256Mi"},
+        }
+    },
+}
+
 
 @dataclass(frozen=True)
 class DGDRTestConfig:
@@ -89,6 +112,42 @@ def _deep_merge(target: dict[str, Any], source: dict[str, Any]) -> None:
             _deep_merge(target[key], value)
         else:
             target[key] = copy.deepcopy(value)
+
+
+def _deep_setdefault(target: dict[str, Any], defaults: dict[str, Any]) -> None:
+    for key, value in defaults.items():
+        if key not in target:
+            target[key] = copy.deepcopy(value)
+        elif isinstance(value, dict) and isinstance(target[key], dict):
+            _deep_setdefault(target[key], value)
+
+
+def _set_ci_profiling_job_defaults(spec: dict[str, Any]) -> None:
+    profiling_job = spec.setdefault("overrides", {}).setdefault("profilingJob", {})
+    # Retry once so an evicted Pod can reschedule away from DiskPressure.
+    profiling_job.setdefault("backoffLimit", 1)
+    pod_spec = profiling_job.setdefault("template", {}).setdefault("spec", {})
+
+    containers = pod_spec.setdefault("containers", [])
+    containers_by_name = {container.get("name"): container for container in containers}
+    for name, defaults in _CI_PROFILING_CONTAINER_DEFAULTS.items():
+        container = containers_by_name.get(name)
+        if container is None:
+            container = {"name": name}
+            containers.append(container)
+        _deep_setdefault(container, defaults)
+
+    volumes = pod_spec.setdefault("volumes", [])
+    output_volume = next(
+        (volume for volume in volumes if volume.get("name") == "profiling-output"),
+        None,
+    )
+    if output_volume is None:
+        output_volume = {"name": "profiling-output", "emptyDir": {}}
+        volumes.append(output_volume)
+    empty_dir = output_volume.get("emptyDir")
+    if isinstance(empty_dir, dict):
+        empty_dir.setdefault("sizeLimit", "1Gi")
 
 
 def unique_name(config_: DGDRTestConfig, suffix: str) -> str:
@@ -149,24 +208,35 @@ def build_dgdr(
             profiling_job = spec.setdefault("overrides", {}).setdefault(
                 "profilingJob", {}
             )
-            profiling_job.setdefault("template", {}).setdefault("spec", {})[
-                "containers"
-            ] = [
+            containers = (
+                profiling_job.setdefault("template", {})
+                .setdefault("spec", {})
+                .setdefault("containers", [])
+            )
+            profiler = next(
+                (
+                    container
+                    for container in containers
+                    if container.get("name") == "profiler"
+                ),
+                None,
+            )
+            if profiler is None:
+                profiler = {"name": "profiler"}
+                containers.append(profiler)
+            profiler.setdefault("env", []).append(
                 {
-                    "name": "profiler",
-                    "env": [
-                        {
-                            "name": "HF_TOKEN",
-                            "valueFrom": {
-                                "secretKeyRef": {
-                                    "name": config_.hf_token_secret,
-                                    "key": "HF_TOKEN",
-                                }
-                            },
+                    "name": "HF_TOKEN",
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": config_.hf_token_secret,
+                            "key": "HF_TOKEN",
                         }
-                    ],
+                    },
                 }
-            ]
+            )
+
+    _set_ci_profiling_job_defaults(spec)
 
     return {
         "apiVersion": f"{DGDR_GROUP}/{DGDR_VERSION}",

@@ -92,6 +92,9 @@ func TestComputeBetaDGDWorkersSpecHash_Deterministic(t *testing.T) {
 	h2 := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
 	assert.Equal(t, h1, h2)
 	assert.Len(t, h1, 8)
+	t.Log("Ordinary worker revisions remain stable")
+	ordinary := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	require.Equal(t, "5a3243f6", mustComputeBetaDGDWorkersSpecHash(t, ordinary))
 }
 
 func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *testing.T) {
@@ -99,7 +102,7 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *te
 	base := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
 	base.Spec.Components[0].Experimental = nil
 	omittedHash := mustComputeBetaDGDWorkersSpecHash(t, base)
-	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), base, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), base, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 	require.NoError(t, err)
 
 	t.Log("Compare optional outer objects and explicit false with complete omission")
@@ -117,7 +120,7 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *te
 			candidate := base.DeepCopy()
 			candidate.Spec.Components[0].Experimental = tc.experimental
 			original := candidate.DeepCopy()
-			rendered, err := GenerateGrovePodCliqueSet(context.Background(), candidate, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			rendered, err := GenerateGrovePodCliqueSet(context.Background(), candidate, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 			require.NoError(t, err)
 			require.Equal(t, omittedRendered.Spec, rendered.Spec, "precondition: effective workload must be identical")
 
@@ -221,6 +224,77 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesExplicitRoleOrder(t *testing
 
 	t.Log("Verify optional role cardinality assertions do not create a worker generation")
 	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, explicitReplicas))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_RolePodTemplatesCreateRollout(t *testing.T) {
+	t.Log("Build the same multinode role cardinality with a global template")
+	global := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+		},
+	}))
+	global.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name: commonconsts.MainContainerName, Image: "global:1.5.0",
+	}}}}
+
+	t.Log("Replace the global source with complete role templates")
+	roleTemplates := global.DeepCopy()
+	roleTemplates.Spec.Components[0].PodTemplate = nil
+	roleTemplates.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{
+			Name: v1beta1.ComponentRoleLeader,
+			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: commonconsts.MainContainerName, Image: "leader:1.5.0",
+			}}}},
+		},
+		{
+			Name: v1beta1.ComponentRoleWorker,
+			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: commonconsts.MainContainerName, Image: "worker:1.5.0",
+			}}}},
+		},
+	}
+
+	t.Log("Verify the template-source transition creates a worker generation")
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, global), mustComputeBetaDGDWorkersSpecHash(t, roleTemplates))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_RolePodTemplatesAreOrderIndependent(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+		},
+	}))
+	dgd.Spec.Components[0].PodTemplate = nil
+	dgd.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleLeader, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "leader:1.5.0"}}}}},
+		{Name: v1beta1.ComponentRoleWorker, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "worker:1.5.0"}}}}},
+	}
+	reordered := dgd.DeepCopy()
+	reordered.Spec.Components[0].Roles[0], reordered.Spec.Components[0].Roles[1] = reordered.Spec.Components[0].Roles[1], reordered.Spec.Components[0].Roles[0]
+
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, reordered))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_RoleRuntimeVersionOverrideCreatesRollout(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+		},
+	}))
+	dgd.Spec.Components[0].PodTemplate = nil
+	dgd.Spec.Components[0].RuntimeVersionOverride = "1.5.0"
+	dgd.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleLeader, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "leader:latest"}}}}},
+		{Name: v1beta1.ComponentRoleWorker, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "worker:latest"}}}}},
+	}
+	updated := dgd.DeepCopy()
+	updated.Spec.Components[0].RuntimeVersionOverride = "1.6.0"
+
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, updated))
 }
 
 func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
@@ -561,9 +635,9 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesDisabledCheckpoint(t *testin
 			original := disabled.DeepCopy()
 
 			t.Log("Verify equal rendered workloads and worker hashes")
-			omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 			require.NoError(t, err)
-			disabledRendered, err := GenerateGrovePodCliqueSet(context.Background(), disabled, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			disabledRendered, err := GenerateGrovePodCliqueSet(context.Background(), disabled, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 			require.NoError(t, err)
 			require.Equal(t, omittedRendered.Spec, disabledRendered.Spec)
 			assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, disabled))
@@ -589,9 +663,9 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesCompilationCacheMountPath(t 
 	originalOmitted, originalExplicit := omitted.DeepCopy(), explicit.DeepCopy()
 
 	t.Log("Verify equal rendered workloads and worker hashes without mutating either input")
-	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 	require.NoError(t, err)
-	explicitRendered, err := GenerateGrovePodCliqueSet(context.Background(), explicit, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	explicitRendered, err := GenerateGrovePodCliqueSet(context.Background(), explicit, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, omittedRendered.Spec, explicitRendered.Spec)
 	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, explicit))

@@ -43,8 +43,7 @@ SNAPSHOT_JOB_PLURAL = "snapshotjobs"
 FRONTEND_COMPONENT = "Frontend"
 TARGET_CONTAINER = "main"
 CHECKPOINT_MODEL = "Qwen/Qwen3-0.6B"
-CHECKPOINT_STORAGE_MOUNT_PATH = "/checkpoints"
-TRTLLM_HF_HOME = f"{CHECKPOINT_STORAGE_MOUNT_PATH}/trtllm-hf-cache"
+TRTLLM_HF_HOME = "/tmp/dynamo-trtllm-hf-cache"
 
 SNAPSHOT_JOB_OWNER_LABEL = "nvidia.com/snapshot-job"
 RESTORE_FROM_ANNOTATION = "nvidia.com/restore-from"
@@ -176,8 +175,9 @@ CHECKPOINT_BACKENDS = {
             "--free-gpu-memory-fraction",
             "0.10",
         ),
-        # UCX_TLS is always set. HF_HOME defaults to the snapshot PVC so restore
-        # pods keep weights without a model-cache PVC; when CI passes
+        # UCX_TLS is always set. HF_HOME uses writable container storage so the
+        # runtime image does not need a root-owned /checkpoints directory; the
+        # restored rootfs carries it into the target pod. When CI passes
         # --model-cache-pvc, _new_checkpoint_spec skips this HF_HOME so the
         # shared cache mount can own it (same as regular deploy tests).
         env=(("UCX_TLS", "tcp,self"), ("HF_HOME", TRTLLM_HF_HOME)),
@@ -635,7 +635,7 @@ async def test_dgd_checkpoint_restore_deploy(
     if not image:
         pytest.fail(
             "--image is required for the checkpoint deploy test "
-            f"(expected the CI-built {backend.name} checkpoint placeholder image)",
+            f"(expected the CI-built {backend.name} runtime image)",
             pytrace=False,
         )
     frontend_image = request.config.getoption("--frontend-image")

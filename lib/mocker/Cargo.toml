@@ -22,9 +22,9 @@ test-support = []
 zmq-events = ["dep:tmq"]
 
 [dependencies]
+dynamo-custom-policy-builtin = { workspace = true }
 # repo
 aisimulate-core = { workspace = true }
-dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
 
@@ -33,7 +33,6 @@ anyhow = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
-derive_builder = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }

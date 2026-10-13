@@ -9,7 +9,8 @@ This page is the full reference for the `aiconfigurator` compatibility command s
 [AISimulate](https://pypi.org/project/aisimulate/) Python distribution: sizing aggregated and
 disaggregated Dynamo deployments, generating deployment artifacts, and validating them. Dynamo does
 not depend on the separate `aiconfigurator` or `aiconfigurator-core` distributions. The AISimulate
-wheel preserves the `aiconfigurator` and `aiconfigurator_core` import namespaces for compatibility.
+wheel exposes the `aisimulate` and `aisimulate_core` Python namespaces and retains the
+`aiconfigurator` command for CLI compatibility.
 
 If you only need a parallelism layout for a DGD
 you are already authoring, use the shorter [Sizing with AIConfigurator](../../kubernetes/disaggregated-serving/sizing-with-aiconfigurator.mdx)
@@ -67,11 +68,12 @@ AIConfigurator evaluates two deployment architectures and recommends the best on
 
 ## Quick Start
 
-Use Python 3.11 through 3.13.
+Use Python 3.11 through 3.13. Run the installation command from the Dynamo checkout root to use
+the AISimulate dependency declared by that checkout.
 
 ```bash
 # Install the distribution that provides the compatibility command
-python3 -m pip install "aisimulate==0.12.0"
+python3 -m pip install -r container/deps/requirements.aisimulate.txt
 
 # Optional: check whether the model/system/backend is covered
 aiconfigurator cli support \
@@ -550,7 +552,7 @@ AIConfigurator's default predictions assume no cached prefix.
 
 ### Backends and Versions
 
-For a comprehensive breakdown of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, refer to the [**support matrix**](https://ai-dynamo.github.io/aiconfigurator/support-matrix/). The wheel packages its generated and tested per-system CSV data under `aiconfigurator_core/systems/support_matrix`.
+For a comprehensive breakdown of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, refer to the [**support matrix**](https://ai-dynamo.github.io/aiconfigurator/support-matrix/). The wheel packages its generated and tested per-system CSV data under `aisimulate_core/systems/support_matrix`.
 
 You can also check if a system / framework version is supported via the `aiconfigurator cli support` command. For example:
 ```bash

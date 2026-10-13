@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
+use crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 impl SelectionCore {
     pub async fn upsert_worker(
@@ -127,6 +128,13 @@ impl SelectionCore {
     }
 
     fn prepare_worker(&self, record: &mut WorkerCatalogRecord) -> Result<(), SelectionError> {
+        // Reject before any per-rank work so an oversized range cannot allocate per rank.
+        if record.dp_size() > MAX_DATA_PARALLEL_RANKS_PER_WORKER {
+            return Err(SelectionError::BadRequest(format!(
+                "data_parallel_size {} exceeds the maximum {MAX_DATA_PARALLEL_RANKS_PER_WORKER}",
+                record.dp_size()
+            )));
+        }
         let queueing_enabled = self
             .kv_router_config
             .queueing_enabled(Some(&record.model_name))
@@ -297,9 +305,9 @@ impl SelectionCore {
                     partition: key.clone(),
                     host: self.host.replication.request_leases.clone(),
                 }));
-                let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
+                let replica_inbox = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
                     slots.start_replica_sync(subscriber, self.cancel_token.child_token());
-                    replica_tx
+                    ReplicaInbox::new(replica_tx)
                 });
                 if self.host.replication.request_leases.is_none() {
                     slots.start_periodic_force_expiry_across_all_workers(
@@ -316,9 +324,10 @@ impl SelectionCore {
                         block_size,
                     ))
                 });
-                let selector = self.worker_selection_policy_factory.as_ref().map_or_else(
-                    || WorkerSelectionPolicy::default(self.kv_router_config.clone(), worker_label),
-                    |factory| factory(&self.kv_router_config, self.worker_type, key.as_ref()),
+                let selector = (self.worker_selection_policy_factory)(
+                    &self.kv_router_config,
+                    self.worker_type,
+                    key.as_ref(),
                 );
                 let profile = self
                     .kv_router_config
@@ -349,7 +358,7 @@ impl SelectionCore {
                     indexer,
                     workers_tx,
                     scheduler,
-                    replica_tx,
+                    replica_inbox,
                     affinity: OnceCell::new(),
                     replica_config: self.replica_config.clone(),
                 }))

@@ -93,7 +93,7 @@ Planner 会预测下一个 interval 的三个流量形状值：
 3. `profile_results_dir` 中的 NPZ/JSON fallback data
 4. 没有 pre-deployment data 时的 live FPM regression warmup
 
-Planner 直接调用 AISimulate wheel 中的 `aiconfigurator_core.sdk.RustForwardPassPerfModel`，获取原生 AIC 估算、在线校正和回归回退。Planner 自有的引擎查询层据此前向计算抽象推导 queue drain、TTFT、ITL 和 capacity。KV hit rate 和 speculative accept length 等 runtime metadata 会作为输入特征使用，而不是作为持久 correction-factor flags。
+Planner 通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` 创建 `ais_perf_model.roles` 中各角色的模型。AISimulate 负责完整 schema、选择、调优和预测，Dynamo 绑定 worker 身份与运行时上限。新配置默认 `auto + deny`；auto 仍依次查找 op-level、FPM interpolation 和 regression。未提供配置时显式创建对应角色的冷启动 regression 模型。Planner 自有的引擎查询层据此前向计算抽象推导 queue drain、TTFT、ITL 和 capacity。KV hit rate 和 speculative accept length 等 runtime metadata 会作为输入特征使用，而不是作为持久 correction-factor flags。
 
 ### Step 4: Proposal 和 Lower Bound
 
