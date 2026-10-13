@@ -137,7 +137,7 @@ jobs:
 
   test-xpu-gms:
     needs: [build-xpu]
-    if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
+    if: ${{ !cancelled() && needs.build-xpu.result == 'success' && (inputs.framework || 'vllm') == 'vllm' }}
     runs-on: xpu
     env:
       FRAMEWORK: ${{ inputs.framework || 'vllm' }}

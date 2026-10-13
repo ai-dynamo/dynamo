@@ -12,9 +12,6 @@ if not HAS_GMS:
 if not HAS_XPU:
     pytest.skip("an Intel XPU is required", allow_module_level=True)
 
-if not HAS_SYCL_VMM:
-    pytest.fail("the _sycl_vmm native extension is required", pytrace=False)
-
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.vmm import (
     VMMDeviceType,
@@ -33,6 +30,9 @@ pytestmark = [
 
 
 def test_xpu_vmm_allocates_maps_and_releases_memory():
+    if not HAS_SYCL_VMM:
+        pytest.fail("the _sycl_vmm native extension is required", pytrace=False)
+
     _reset_vmm_singleton()
     vmm = None
     handle = None
