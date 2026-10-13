@@ -4,7 +4,6 @@
 #
 # Disaggregated serving through four vLLM native-gRPC sidecars with KV-aware routing.
 # Requires four GPUs and a vLLM build that exposes KV-event source discovery.
-# See ../README.md for the validated vLLM/vllm-rs source state.
 
 set -e
 
@@ -35,6 +34,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to all four managed vLLM engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                              Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  DYN_HTTP_PORT                      Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1                   First decode sidecar port (default: 8081)"
@@ -71,6 +71,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar vllm SIDECAR_CMD
 
 trap dynamo_exit_trap EXIT
 
@@ -195,23 +197,23 @@ vllm-rs serve "$MODEL" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${VLLM_HOST}:${VLLM_DECODE1_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${VLLM_HOST}:${VLLM_DECODE2_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT3:-8083}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${VLLM_HOST}:${VLLM_PREFILL1_GRPC_PORT}" \
     --component prefill \
     --disaggregation-mode prefill &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT4:-8084}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${VLLM_HOST}:${VLLM_PREFILL2_GRPC_PORT}" \
     --component prefill \
     --disaggregation-mode prefill &

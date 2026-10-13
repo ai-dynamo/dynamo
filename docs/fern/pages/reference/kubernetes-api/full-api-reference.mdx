@@ -461,7 +461,7 @@ Replicas is the desired number of Pods for this component. When scalingAdapter i
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">
-MinAvailable maps to Grove PodClique minAvailable for single-node and Grove PodCliqueScalingGroup minAvailable for multi-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. For Grove-backed DynamoGraphDeployment components, minAvailable defaults to 1 when omitted and is immutable after creation. Positive replica counts must be greater than or equal to minAvailable. Replicas may be scaled to 0 as a special scale-to-zero state; minAvailable remains configured but is not enforced again until replicas is scaled back to a positive value. For non-Grove deployments, setting this field will result in a validation error.
+MinAvailable maps to Grove PodClique minAvailable for single-node and Grove PodCliqueScalingGroup minAvailable for multi-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. Deprecated: use providerOverride.value.spec.minAvailable for a standalone Grove PodClique, or providerOverride.value.minAvailable for a scaling group. The effective minimum is immutable after creation; moving the same value to the new form is supported without changing the update strategy. Grove uses RollingRecreate unless a strategy annotation explicitly overrides it. New Grove deployments default the provider-native form to 1. Scale-to-zero preserves the minimum until replicas becomes positive again. For non-Grove deployments, setting this field will result in a validation error.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -634,7 +634,7 @@ Replicas is the desired number of Pods for this component. When scalingAdapter i
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">
-MinAvailable maps to Grove PodClique minAvailable for single-node and Grove PodCliqueScalingGroup minAvailable for multi-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. For Grove-backed DynamoGraphDeployment components, minAvailable defaults to 1 when omitted and is immutable after creation. Positive replica counts must be greater than or equal to minAvailable. Replicas may be scaled to 0 as a special scale-to-zero state; minAvailable remains configured but is not enforced again until replicas is scaled back to a positive value. For non-Grove deployments, setting this field will result in a validation error.
+MinAvailable maps to Grove PodClique minAvailable for single-node and Grove PodCliqueScalingGroup minAvailable for multi-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. Deprecated: use providerOverride.value.spec.minAvailable for a standalone Grove PodClique, or providerOverride.value.minAvailable for a scaling group. The effective minimum is immutable after creation; moving the same value to the new form is supported without changing the update strategy. Grove uses RollingRecreate unless a strategy annotation explicitly overrides it. New Grove deployments default the provider-native form to 1. Scale-to-zero preserves the minimum until replicas becomes positive again. For non-Grove deployments, setting this field will result in a validation error.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -1661,7 +1661,8 @@ Grove support is restricted as follows:
   - target is `PodCliqueSet`, `PodCliqueTemplateSpec`, or
     `PodCliqueScalingGroupConfig`, according to the field location and
     component shape.
-  - value may set only the target's topologyConstraint subtree.
+  - value may set topologyConstraint, and component contexts may set the
+    native minAvailable field. Availability is not supported at root or role scope.
 
 All other providers, versions, targets, and fields are rejected.
 
@@ -1680,7 +1681,7 @@ target identifies the provider resource kind or embedded provider schema. It may
 </ParamField>
 
 <ParamField path="value" type="JSON" required={true}>
-value is a sparse fragment of the selected provider schema. For Grove, PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded PodCliqueTemplateSpec and PodCliqueScalingGroupConfig targets accept only `topologyConstraint`.
+value is a sparse fragment of the selected provider schema. For Grove, PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded targets accept `topologyConstraint`. Component contexts also accept `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the deprecated component field preserves its value and leaves the update strategy unchanged.
 See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
 **Validation:** Required: \&#123;\&#125;  Type: object
 </ParamField>
@@ -2688,7 +2689,7 @@ replicas is the desired number of Pods for this component. When `scalingAdapter`
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">
-minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components rendered as a scaling group (multi-node, inter-pod GMS, or `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove PodClique minAvailable for all other single-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. For Grove-backed DynamoGraphDeployment components, minAvailable defaults to 1 when omitted and is immutable after creation. Positive replica counts must be greater than or equal to minAvailable. Replicas may be scaled to 0 as a special scale-to-zero state; minAvailable remains configured but is not enforced again until replicas is scaled back to a positive value. For non-Grove deployments, setting this field will result in a validation error.
+minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components rendered as a scaling group (multi-node, inter-pod GMS, or `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove PodClique minAvailable for all other single-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. Deprecated: use providerOverride.value.spec.minAvailable for a standalone Grove PodClique, or providerOverride.value.minAvailable for a scaling group. The effective minimum is immutable after creation; moving the same value to the new form is supported without changing the update strategy. Grove uses RollingRecreate unless a strategy annotation explicitly overrides it. New Grove deployments default the provider-native form to 1. Scale-to-zero preserves the minimum until replicas becomes positive again. For non-Grove deployments, setting this field will result in a validation error.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2803,7 +2804,7 @@ replicas is the desired number of Pods for this component. When `scalingAdapter`
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">
-minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components rendered as a scaling group (multi-node, inter-pod GMS, or `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove PodClique minAvailable for all other single-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. For Grove-backed DynamoGraphDeployment components, minAvailable defaults to 1 when omitted and is immutable after creation. Positive replica counts must be greater than or equal to minAvailable. Replicas may be scaled to 0 as a special scale-to-zero state; minAvailable remains configured but is not enforced again until replicas is scaled back to a positive value. For non-Grove deployments, setting this field will result in a validation error.
+minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components rendered as a scaling group (multi-node, inter-pod GMS, or `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove PodClique minAvailable for all other single-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. Deprecated: use providerOverride.value.spec.minAvailable for a standalone Grove PodClique, or providerOverride.value.minAvailable for a scaling group. The effective minimum is immutable after creation; moving the same value to the new form is supported without changing the update strategy. Grove uses RollingRecreate unless a strategy annotation explicitly overrides it. New Grove deployments default the provider-native form to 1. Scale-to-zero preserves the minimum until replicas becomes positive again. For non-Grove deployments, setting this field will result in a validation error.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3946,7 +3947,8 @@ Grove support is restricted as follows:
   - target is `PodCliqueSet`, `PodCliqueTemplateSpec`, or
     `PodCliqueScalingGroupConfig`, according to the field location and
     component shape.
-  - value may set only the target's topologyConstraint subtree.
+  - value may set topologyConstraint, and component contexts may set the
+    native minAvailable field. Availability is not supported at root or role scope.
 
 All other providers, versions, targets, and fields are rejected.
 
@@ -3965,7 +3967,7 @@ target identifies the provider resource kind or embedded provider schema. It may
 </ParamField>
 
 <ParamField path="value" type="JSON" required={true}>
-value is a sparse fragment of the selected provider schema. For Grove, PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded PodCliqueTemplateSpec and PodCliqueScalingGroupConfig targets accept only `topologyConstraint`.
+value is a sparse fragment of the selected provider schema. For Grove, PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded targets accept `topologyConstraint`. Component contexts also accept `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the deprecated component field preserves its value and leaves the update strategy unchanged.
 See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
 **Validation:** Required: \&#123;\&#125;  Type: object
 </ParamField>

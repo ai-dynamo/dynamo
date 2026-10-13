@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.202610060000000067"
+version = "0.13.0-dev.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa4fe3c1314053a9e439cd7a7595aec5fb2b22af0ae43d48687179846e7ed32"
+checksum = "0879b3cfd9847c74cafe0dfdac8109e1afb326f15e2bfd468d45b07c7e4d0ea0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -285,9 +285,9 @@ checksum = "4288f83726785267c6f2ef073a3d83dc3f9b81464e9f99898240cced85fce35a"
 
 [[package]]
 name = "async-openai"
-version = "0.41.1"
+version = "0.42.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3007014661d5b98168b7b6f1014147bce8b1362a194783543eeb9f6117a20be9"
+checksum = "63077bf55857e6963effefb5f28134c40cc2ee68bc176cc601bbdeb070017fba"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -1168,7 +1168,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "afdf0f7a8a430954ae6cba49be4af8fa3a4bee15d9210aa8a82aee6abca531bd"
 dependencies = [
  "lazy_static",
- "num-bigint",
+ "num-bigint 0.4.6",
  "num-traits",
 ]
 
@@ -2264,6 +2264,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "parking_lot",
+ "percent-encoding",
  "prometheus",
  "prost 0.13.5",
  "rand 0.9.4",
@@ -2347,9 +2348,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "9.2.7"
+version = "10.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a751a31502748c656f69bd1fab01f1d844b6bb629b69e9fbed0b0da9af916b7a"
+checksum = "1564d5bbb66372f478df3f9158df8071b45c523ca4e07b4f82a4ac257038c962"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2371,9 +2372,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.7.17"
+version = "0.7.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f80b88ab86928219f3444822dc33c1ca170d0cc67beeb40d18cf7d6f287bad5e"
+checksum = "f43e47b6a68353cc04d4dfe19c69414a5884c9963b72c68937d019998c5ef72e"
 dependencies = [
  "anyhow",
  "openai-harmony",
@@ -2388,9 +2389,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "6.1.0"
+version = "8.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ef02e31ca224ca8db24b88a990b7db3eb2b99c77697b0d8ae44feaa32709e38"
+checksum = "aca812fe988abff693c44c158147bae058f3051c0585570c2d59cf61d1253e5b"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2451,9 +2452,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "6.0.0"
+version = "8.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc939c7664a55184c789a2878d0d1ac270f4df9844491c10cfe7958d90c81916"
+checksum = "9dc3c1f04389ad78e3f9dad14360a191c27f3e3f574aba108b9986f5592cfea3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2610,9 +2611,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "2.0.0"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cac05c279739c1c192898450ff2445e2e65e0ab99d4682ab664072efb68e45cb"
+checksum = "b2bee9c4bcbcb9c498d03199d4ec6738cc0a9f861463074369fc3f7352539e44"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -4183,12 +4184,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "integer-encoding"
-version = "3.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
-
-[[package]]
 name = "interpolate_name"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5457,23 +5452,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "num"
-version = "0.4.3"
+name = "num-bigint"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
+checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
- "num-complex",
  "num-integer",
- "num-iter",
- "num-rational",
  "num-traits",
 ]
 
 [[package]]
 name = "num-bigint"
-version = "0.4.6"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -5515,23 +5507,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "num-iter"
-version = "0.1.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1429034a0490724d0075ebb2bc9e875d6503c3cf69e235a8941aa757d83ef5bf"
-dependencies = [
- "autocfg",
- "num-integer",
- "num-traits",
-]
-
-[[package]]
 name = "num-rational"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.6",
  "num-integer",
  "num-traits",
 ]
@@ -6086,21 +6067,20 @@ dependencies = [
 
 [[package]]
 name = "parquet"
-version = "55.2.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b17da4150748086bd43352bc77372efa9b6e3dbd06a04831d2a98c041c225cfa"
+checksum = "ff322f54b1a0f9288e614ed1f2d329b380af5476420db19f46ffb865e1163d73"
 dependencies = [
  "ahash",
  "bytes",
  "chrono",
  "half",
- "hashbrown 0.15.5",
- "num",
- "num-bigint",
- "paste",
+ "hashbrown 0.17.1",
+ "num-bigint 0.5.1",
+ "num-integer",
+ "num-traits",
  "seq-macro",
  "snap",
- "thrift",
  "twox-hash",
  "zstd",
 ]
@@ -6711,7 +6691,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "102df7a3d46db9d3891f178dcc826dc270a6746277a9ae6436f8d29fd490a8e1"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.6",
  "num-complex",
  "num-traits",
  "pest",
@@ -8594,17 +8574,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "thrift"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e54bc85fc7faa8bc175c4bab5b92ba8d9a3ce893d0e9f42cc455c8ab16a9e09"
-dependencies = [
- "byteorder",
- "integer-encoding",
- "ordered-float 2.10.1",
 ]
 
 [[package]]

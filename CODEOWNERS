@@ -302,8 +302,6 @@
 /container/Dockerfile.test                                                                              @ai-dynamo/dynamo-ops-codeowners
 /container/launch_message/                                                                              @ai-dynamo/dynamo-ops-codeowners
 /container/Dockerfile.template                                                                          @ai-dynamo/dynamo-ops-codeowners
-/lib/sidecar/build-with-cache.sh                                                                        @ai-dynamo/dynamo-ops-codeowners
-/lib/sidecar/test_build_cache.py                                                                        @ai-dynamo/dynamo-ops-codeowners
 
 # === docs  (@ai-dynamo/dynamo-docs-codeowners) ===
 /docs/                                                                                                  @ai-dynamo/dynamo-docs-codeowners
@@ -340,6 +338,7 @@
 /deploy/operator/docs/                                                                                  @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/hack/                                                                                  @ai-dynamo/dynamo-operator-codeowners
 /examples/deployments/                                                                                  @ai-dynamo/dynamo-operator-codeowners
+/examples/gpu-sharing/                                                                                  @ai-dynamo/dynamo-operator-codeowners
 /deploy/CONTRIBUTING.md                                                                                 @ai-dynamo/dynamo-operator-codeowners
 /deploy/pre-deployment/                                                                                 @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/config/                                                                                @ai-dynamo/dynamo-operator-codeowners

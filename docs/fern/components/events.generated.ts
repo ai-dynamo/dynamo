@@ -22,9 +22,22 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-10-07";
+export const GENERATED_ON = "2026-10-13";
 
 export const UPCOMING_EVENTS: DynamoEvent[] = [
+  {
+    "title": "Dynamo Engineering Sync",
+    "start": "2026-10-13T16:00:00.000Z",
+    "month": "Oct",
+    "day": "13",
+    "year": "2026",
+    "dateLabel": "Tue, Oct 13, 2026",
+    "timeLabel": "9:00 AM",
+    "isPast": false,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Engineering+Sync&dates=20261013T160000Z%2F20261013T170000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzyn-hfqk-asm%0AOr+dial%3A+%28US%29+%2B1+347-486-6566+PIN%3A+403835665%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzyn-hfqk-asm%3Fpin%3D5772284027174%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
   {
     "title": "CoreWeave x NVIDIA Dynamo Meetup",
     "start": "2026-10-16T01:00:00.000Z",
