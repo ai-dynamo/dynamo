@@ -281,7 +281,8 @@ The rank and merged artifacts also contain `speculative_benchmark`:
 | `kv_capacity.context_capacity_tokens` | vLLM's maximum-concurrency capacity calculation applied to that usable pool at `capacity_basis_max_model_len`. Includes target and draft cache groups. |
 | `kv_capacity.lookahead_tokens_per_request` | Speculative lookahead that consumes the same pool in addition to committed context. |
 | `kv_capacity.allocated_kv_tensor_bytes` | Sum of the runtime KV tensor allocations for the recorded rank layout. |
-| `kv_capacity.groups` | Runtime cache group layout and page bytes; `specs_by_layer` retains each layer's dtype and geometry, including heterogeneous groups. |
+| `kv_capacity.tensor_allocations` | Runtime KV tensor sizes and the layer names sharing each tensor. |
+| `kv_capacity.groups` | Scheduler cache groups and representative specs. `specs_by_layer` is populated only when the scheduler retains the original per-layer mapping, otherwise `null`. A representative spec is not every layer's physical geometry. |
 
 Use the capacity only with the recorded model, draft, topology, context limit,
 graph policy and memory budget. It is not a universal sum of committed tokens

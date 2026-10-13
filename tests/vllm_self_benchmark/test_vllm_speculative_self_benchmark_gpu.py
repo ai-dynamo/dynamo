@@ -146,7 +146,13 @@ def test_eagle3_self_benchmark_native_verification(
         assert spec["kv_capacity"]["usable_blocks"] > 0
         assert spec["kv_capacity"]["context_capacity_tokens"] > 0
         assert spec["kv_capacity"]["allocated_kv_tensor_bytes"] > 0
-        assert all(group["specs_by_layer"] for group in spec["kv_capacity"]["groups"])
+        assert (
+            sum(
+                tensor["size_bytes"]
+                for tensor in spec["kv_capacity"]["tensor_allocations"]
+            )
+            == spec["kv_capacity"]["allocated_kv_tensor_bytes"]
+        )
         assert (
             spec["free_blocks_after_benchmark"]
             == spec["kv_capacity"]["free_blocks_before_benchmark"]

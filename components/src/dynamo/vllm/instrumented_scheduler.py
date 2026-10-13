@@ -3199,6 +3199,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 "allocated_kv_tensor_bytes": sum(
                     tensor.size for tensor in cache.kv_cache_tensors
                 ),
+                "tensor_allocations": [
+                    {"size_bytes": tensor.size, "shared_by": list(tensor.shared_by)}
+                    for tensor in cache.kv_cache_tensors
+                ],
+                "layout_scope": "scheduler copy of one worker layout; group spec can be an arbitrary representative layer, not every layer's physical geometry",
                 "definition": "vLLM max-concurrency capacity using the observed free block pool; includes target/draft groups; per-request lookahead consumes this budget",
                 "groups": [
                     {
@@ -3206,19 +3211,21 @@ class InstrumentedScheduler(AsyncScheduler):
                         "layer_names": list(group.layer_names),
                         "spec": _bench_engine_kv_cache_spec(group.kv_cache_spec),
                         "page_size_bytes": group.kv_cache_spec.page_size_bytes,
-                        "specs_by_layer": {
-                            name: {
-                                **_bench_engine_kv_cache_spec(spec),
-                                "page_size_bytes": spec.page_size_bytes,
-                            }
-                            for name, spec in (
-                                getattr(group.kv_cache_spec, "kv_cache_specs", None)
-                                or {
-                                    name: group.kv_cache_spec
-                                    for name in group.layer_names
+                        "specs_by_layer": (
+                            {
+                                name: {
+                                    **_bench_engine_kv_cache_spec(spec),
+                                    "page_size_bytes": spec.page_size_bytes,
                                 }
-                            ).items()
-                        },
+                                for name, spec in wrapped_specs.items()
+                            }
+                            if (
+                                wrapped_specs := getattr(
+                                    group.kv_cache_spec, "kv_cache_specs", None
+                                )
+                            )
+                            else None
+                        ),
                     }
                     for index, group in enumerate(cache.kv_cache_groups)
                 ],
