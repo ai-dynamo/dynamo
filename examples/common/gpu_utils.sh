@@ -19,12 +19,42 @@
 #
 #       Note: TensorRT-LLM uses build_trtllm_override_args_with_mem() instead (requires JSON merging)
 #
+#   dyn_gpu <worker-index> <fallback>
+#       Resolve DYN_ENGINE_GPU_INDEX<N> within CUDA_VISIBLE_DEVICES, or use fallback
+#
 # Usage:
 #   GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 #   python -m dynamo.sglang --model-path "$MODEL" $GPU_MEM_ARGS &
 #
 #   GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 #   python -m dynamo.vllm --model "$MODEL" $GPU_MEM_ARGS &
+
+
+# Resolve managed GPU placement without reinterpreting standalone assignments.
+dyn_gpu() {
+    local selector="DYN_ENGINE_GPU_INDEX${1}"
+    if [[ ! -v "$selector" ]]; then
+        printf '%s\n' "$2"
+        return 0
+    fi
+    local index="${!selector}"
+    if [[ ! "$index" =~ ^[0-9]+$ ]]; then
+        echo "Invalid ${selector}: ${index:-<empty>}" >&2
+        return 1
+    fi
+    if [[ -z "${CUDA_VISIBLE_DEVICES+set}" ]]; then
+        printf '%s\n' "$index"
+        return 0
+    fi
+    local -a visible
+    IFS=',' read -ra visible <<< "${CUDA_VISIBLE_DEVICES// /}"
+    local gpu="${visible[10#${index}]:-}"
+    if [[ -z "$gpu" || "$gpu" == -1 ]]; then
+        echo "${selector}=${index} is not in CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}" >&2
+        return 1
+    fi
+    printf '%s\n' "$gpu"
+}
 
 
 # ---------------------------------------------------------------------------
