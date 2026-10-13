@@ -341,6 +341,11 @@ impl CommonExtProvider for UnifiedRequest {
         Some(&self.inner.common)
     }
 
+    /// Preserve the inner chat override during unified-request sampling conversion.
+    fn structured_response_format(&self) -> Option<&dynamo_protocols::types::ResponseFormat> {
+        self.inner.structured_response_format()
+    }
+
     fn get_guided_json(&self) -> Option<serde_json::Value> {
         // Delegate to the inner impl which handles guided_json and
         // response_format → guided_json derivation.

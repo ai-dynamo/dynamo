@@ -10,6 +10,35 @@
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use utoipa::ToSchema;
 
+/// Both endpoints advertise the nested constraint without claiming that every
+/// JSON value is a schema. Semantic grammar validity still belongs to the backend.
+#[test]
+fn structured_outputs_is_exported_with_its_json_input_union() {
+    use dynamo_llm::http::service::{RouteDoc, openapi_docs::generate_openapi_spec};
+    let routes = [
+        RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions"),
+        RouteDoc::new(axum::http::Method::POST, "/v1/completions"),
+    ];
+    let spec = serde_json::to_value(generate_openapi_spec(&routes)).unwrap();
+    let schemas = &spec["components"]["schemas"];
+    let nested = &schemas["CommonExt"]["properties"]["structured_outputs"];
+    assert!(
+        nested
+            .to_string()
+            .contains("#/components/schemas/StructuredOutputs")
+    );
+    let json_input = &schemas["StructuredOutputs"]["properties"]["json"];
+    assert_eq!(
+        json_input["type"],
+        serde_json::json!(["object", "string", "null"])
+    );
+    for root in ["NvCreateChatCompletionRequest", "NvCreateCompletionRequest"] {
+        let request = schemas[root].to_string();
+        // ChatCommonExt derives from the shared CommonExt; completion uses it directly.
+        assert!(request.contains("CommonExt"), "{root} lost its extensions");
+    }
+}
+
 #[test]
 fn http_export_describes_request_aliases() {
     use dynamo_llm::http::service::{

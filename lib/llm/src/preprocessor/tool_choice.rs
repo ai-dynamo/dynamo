@@ -203,8 +203,12 @@ impl OpenAIPreprocessor {
     }
 }
 
+/// Identify caller-supplied constraints before selecting automatic tool grammars.
+/// A present nested constraint counts even when tools are also supplied; validation
+/// separately rejects invalid constraints and incompatible forced-tool combinations.
 fn has_explicit_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
-    request.common.guided_json.is_some()
+    request.common.structured_outputs.is_some()
+        || request.common.guided_json.is_some()
         || request.common.guided_regex.is_some()
         || request
             .common
