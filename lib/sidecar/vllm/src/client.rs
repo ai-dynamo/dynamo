@@ -190,6 +190,27 @@ impl VllmClient {
             .map_err(|status| status_to_dynamo("GetKvEventSources", status))
     }
 
+    /// Abort by caller request ID. vLLM's GenerateStream producer does not
+    /// watch for a closed client stream, so dropping the stream alone leaves a
+    /// queued request in the engine until a slot frees up.
+    pub(crate) async fn abort(&self, request_id: String) -> Result<(), DynamoError> {
+        let mut client = self.control_client();
+        tokio::time::timeout(
+            ABORT_RPC_DEADLINE,
+            client.abort(pb::AbortRequest {
+                request_ids: vec![request_id],
+            }),
+        )
+        .await
+        .map_err(|_| {
+            dynamo_sidecar_common::connection_timeout(format!(
+                "Abort did not respond within {ABORT_RPC_DEADLINE:?}"
+            ))
+        })?
+        .map(|_| ())
+        .map_err(|status| status_to_dynamo("Abort", status))
+    }
+
     pub(crate) async fn load_lora(
         &self,
         lora_name: String,
@@ -232,6 +253,8 @@ pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
 
 // Bound how long a stalled RPC can hold the lifecycle lock.
 pub(crate) const LORA_RPC_DEADLINE: Duration = Duration::from_secs(60);
+
+const ABORT_RPC_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoraRpcError {
