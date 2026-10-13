@@ -20,6 +20,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use super::block_lookup::BlockLookup;
+use super::node::CleanupEdge;
 use super::types::SharedNode;
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
@@ -139,6 +140,9 @@ impl NodeHolds {
 pub(super) struct LaneLookup {
     workers: FxHashMap<WorkerWithDpRank, BlockLookup<NodeId>>,
     nodes: NodeHolds,
+    /// Leaves this lane's removals left dead, with their parents, awaiting a batched
+    /// unlink when the lane goes idle.
+    pub(super) pending_unlinks: Vec<CleanupEdge>,
 }
 
 impl LaneLookup {
@@ -215,7 +219,7 @@ impl LaneLookup {
     where
         I: Iterator<Item = ExternalSequenceBlockHash> + Clone,
     {
-        let Self { workers, nodes } = self;
+        let Self { workers, nodes, .. } = self;
         let id = nodes.hold(node);
         let changed = workers
             .entry(worker)

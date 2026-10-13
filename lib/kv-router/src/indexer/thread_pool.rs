@@ -97,6 +97,43 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
 
     #[cfg(feature = "bench")]
     observation_active: AtomicBool,
+
+    /// The backend's maintenance thread, if it asked for one.
+    maintenance: Option<MaintenanceThread>,
+}
+
+/// A thread that runs the backend's maintenance off the event lanes. `Drop` stops and
+/// joins it before the lanes.
+struct MaintenanceThread {
+    /// Dropping this stops the thread.
+    stop: flume::Sender<()>,
+    handle: JoinHandle<()>,
+}
+
+impl MaintenanceThread {
+    fn spawn<T: SyncIndexer>(backend: &Arc<T>) -> Option<Self> {
+        let interval = backend.background_maintenance_interval()?;
+        let (stop, stopped) = flume::bounded::<()>(0);
+        // Weak, so the thread never keeps the backend alive.
+        let backend = Arc::downgrade(backend);
+        let handle = std::thread::Builder::new()
+            .name("kv-maint".to_string())
+            .spawn(move || {
+                while let Err(flume::RecvTimeoutError::Timeout) = stopped.recv_timeout(interval) {
+                    let Some(backend) = backend.upgrade() else {
+                        return;
+                    };
+                    backend.run_background_maintenance();
+                }
+            })
+            .expect("failed to spawn kv-maint thread");
+        Some(Self { stop, handle })
+    }
+
+    fn stop_and_join(self) {
+        drop(self.stop);
+        let _ = self.handle.join();
+    }
 }
 
 struct ThreadPoolLruSink {
@@ -319,6 +356,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             cancel
         });
 
+        let maintenance = MaintenanceThread::spawn(&backend);
+
         Self {
             backend,
             worker_assignments,
@@ -333,6 +372,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             approximate_lru_enabled,
             #[cfg(feature = "bench")]
             observation_active: AtomicBool::new(false),
+            maintenance,
         }
     }
 
@@ -563,7 +603,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             })
             .map_err(|_| ObservationError::WorkerOffline(worker_idx))?;
         let accepted_ns = epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-        self.maybe_enqueue_cleanup(worker_idx);
 
         Ok(ObservedEnqueueReceipt {
             accepted_ns,
@@ -627,7 +666,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         self.worker_event_channels[thread_idx]
             .send(WorkerTask::Anchor { worker, anchor })
             .map_err(|_| KvRouterError::IndexerOffline)?;
-        self.maybe_enqueue_cleanup(thread_idx);
         Ok(())
     }
 
@@ -677,17 +715,14 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             self.worker_event_channels[thread_idx]
                 .send(WorkerTask::Event(event.clone()))
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            self.maybe_enqueue_cleanup(thread_idx);
             self.worker_event_channels[second_idx]
                 .send(WorkerTask::Event(event))
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            self.maybe_enqueue_cleanup(second_idx);
             return Ok(());
         }
         self.worker_event_channels[thread_idx]
             .send(WorkerTask::Event(event))
             .map_err(|_| KvRouterError::IndexerOffline)?;
-        self.maybe_enqueue_cleanup(thread_idx);
         Ok(())
     }
 
@@ -702,7 +737,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                     resp: resp_tx,
                 })
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            self.maybe_enqueue_cleanup(idx);
             Ok::<_, KvRouterError>(resp_rx)
         };
         let receivers = if let Some(second_idx) = second_idx {
@@ -815,10 +849,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                 ?error,
                 "Failed to send rank removal task"
             );
-            return;
         }
-
-        self.maybe_enqueue_cleanup(thread_idx);
     }
 
     async fn remove_worker_across_lanes_and_wait(
@@ -857,7 +888,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         resp_rx
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
-        self.maybe_enqueue_cleanup(0);
         Ok(())
     }
 
@@ -989,23 +1019,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                     }
                 }
             });
-        }
-    }
-
-    fn maybe_enqueue_cleanup(&self, thread_idx: usize) {
-        if !self.backend.try_schedule_cleanup() {
-            return;
-        }
-
-        if let Err(e) =
-            self.worker_event_channels[thread_idx].send(WorkerTask::CleanupStaleChildren)
-        {
-            self.backend.cancel_scheduled_cleanup();
-            tracing::error!(
-                "Failed to send cleanup task to worker thread {}: {:?}",
-                thread_idx,
-                e
-            );
         }
     }
 
@@ -1224,6 +1237,10 @@ impl<T: SyncIndexer> Drop for ThreadPoolIndexer<T> {
         }
         if let Some(prune_manager) = &self.prune_manager {
             prune_manager.shutdown();
+        }
+
+        if let Some(maintenance) = self.maintenance.take() {
+            maintenance.stop_and_join();
         }
 
         // Send Terminate to all worker threads so they exit their recv loops
