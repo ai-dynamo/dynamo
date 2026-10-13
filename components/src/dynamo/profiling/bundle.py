@@ -7,8 +7,11 @@ Run outside the serving frontend:
 
     python -m dynamo.profiling.bundle <session-dir> --otel-jsonl <collector.jsonl>
 
-writes <session>/bundle/ and <session>/bundle.tar.gz (with a .sha256 sidecar); the
-archive carries the raw native Kineto/Nsight traces under profiles/<target>/.
+writes <session>/bundle/ with timeline.json.gz, an overall Perfetto timeline of
+the capture window, and <session>/bundle.tar.gz (with a .sha256 sidecar) carrying
+the raw native Kineto/Nsight traces under profiles/<target>/. --per-request also
+writes one timeline per request. Run on an extracted bundle (with --output) to
+regenerate either view from the archive alone.
 
 A request is selected when its `worker.operation.<phase>` span ran on a captured
 target during that target's recording interval, or when the plan named its
@@ -383,8 +386,92 @@ def write_lifecycle(paths: list[Path], selected: set[str], output: Path) -> None
                     lifecycle.write(json.dumps(batch, separators=(",", ":")) + "\n")
 
 
-def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
+def request_lanes(spans: dict, workers: dict) -> dict:
+    """Process lane and flow group per span; router decisions run on the frontend."""
+    lanes = {}
+    for span in spans.values():
+        worker_id, phase = router_decision(spans.get(span.get("parentSpanId")), spans)
+        lanes[span["spanId"]] = (
+            ("frontend", 0)
+            if worker_id is None
+            else (
+                workers.get(worker_id) or f"{phase} worker {worker_id} (not captured)",
+                {"prefill": 1, "decode": 2}.get(phase, 3),
+            )
+        )
+    return lanes
+
+
+def draw_request(timeline, spans: dict, lanes: dict, offsets: dict, track: str) -> None:
+    """One request's span tree on its own track; worker spans on worker clocks."""
+    pid = timeline.pid(("otel",), "Requests · OTel spans", sort=0)
+    tid = timeline.tid(pid, track)
+    for span in sorted(
+        spans.values(), key=lambda s: (start_end(s)[0], -start_end(s)[1])
+    ):
+        lane = lanes[span["spanId"]][0]
+        start, end = start_end(span)
+        timeline.interval(
+            span["name"],
+            "otel",
+            start - offsets.get(lane, 0),
+            end - offsets.get(lane, 0),
+            pid,
+            tid,
+            {
+                "span_id": span["spanId"],
+                "process": lane,
+                "raw_start_unix_ns": start,
+                "router_worker_id": router_worker(
+                    spans.get(span.get("parentSpanId")), spans
+                ),
+            },
+        )
+
+
+def draw_window(timeline, recorded: dict, offsets: dict, controls: list) -> None:
+    """Recording windows per target and control events."""
+    recording = timeline.pid(("recording",), "Recording windows", sort=1)
+    for target, (low, high) in recorded.items():
+        shift = offsets.get(target, 0)
+        timeline.interval(
+            f"{target} recording",
+            "capture",
+            low - shift,
+            high - shift,
+            recording,
+            timeline.tid(recording, target),
+        )
+    for event in controls:
+        timeline.emit(
+            {
+                "ph": "i",
+                "s": "p",
+                "cat": "control",
+                "name": f"{event['target_id']} {event['event']}",
+                "pid": timeline.pid(("control",), "Control"),
+                "tid": 1,
+                "ts": (event["unix_ns"] - timeline.origin) / 1000,
+            }
+        )
+
+
+def build(
+    session: Path, otel_paths: list[Path], output: Path, per_request: bool = False
+) -> dict:
     manifest = json.loads((session / "manifest.json").read_text())
+    if (session / "profiles").is_dir():
+        # An extracted bundle: read its packed raw traces, not the original paths.
+        for item in manifest["artifact_validation"]:
+            for artifact in item.get("artifacts", []):
+                packed = (
+                    session
+                    / "profiles"
+                    / item["target_id"]
+                    / Path(artifact["location"]).name
+                )
+                if packed.exists():
+                    artifact["location"] = str(packed)
     if manifest["state"] not in ("completed", "failed"):
         raise SystemExit(f"Session is still {manifest['state']}")
     traces = load_traces(otel_paths)
@@ -411,7 +498,7 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
         key=lambda event: event["unix_ns"],
     )
 
-    for folder in ("lifecycle", "control", "timelines"):
+    for folder in ("lifecycle", "control") + (("timelines",) if per_request else ()):
         (output / folder).mkdir(parents=True, exist_ok=True)
     shutil.copy2(session / "manifest.json", output / "manifest.json")
     write_lifecycle(
@@ -436,68 +523,38 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
         + [low - offsets.get(t, 0) for t, (low, _) in intervals.items()]
         + [e["unix_ns"] for e in controls]
     )
-    timelines, windows = {}, defaultdict(list)
+    # The window timeline (default) shows every request and every captured
+    # worker for its whole recording; per-request timelines are optional.
+    window = Timeline(output / "timeline.json.gz", origin)
+    views, windows = [], defaultdict(list)
     for entry in index:
         spans = traces[entry["trace_id"]]
+        lanes = request_lanes(spans, workers)
+        route = " → ".join(
+            p["target_id"] or f"{p['phase']} (not captured)" for p in entry["phases"]
+        )
+        label = f"req {(entry['request_id'] or entry['trace_id'])[:8]} · {route}"
+        label += " (trigger)" if entry["trigger"] else ""
+        window.groups.update(dict(set(lanes.values())))
+        draw_request(window, spans, lanes, offsets, label)
+        if not per_request:
+            continue
         name = entry["request_id"] or entry["trace_id"]
         entry["timeline"] = f"timelines/{name}.json.gz"
-        timeline = timelines[entry["trace_id"]] = Timeline(
-            output / entry["timeline"], origin
-        )
-        # One OTel span tree per request: worker spans stay nested under the
-        # frontend router decisions, each shifted onto its worker's clock.
-        lanes = {}
-        for span in spans.values():
-            # A router decision span itself runs on the frontend.
-            parent = spans.get(span.get("parentSpanId"))
-            worker_id, phase = router_decision(parent, spans)
-            lanes[span["spanId"]] = (
-                ("frontend", 0)
-                if worker_id is None
-                else (
-                    workers.get(worker_id)
-                    or f"{phase} worker {worker_id} (not captured)",
-                    {"prefill": 1, "decode": 2}.get(phase, 3),
-                )
-            )
-        # Native tracks follow in flow order: frontend, prefill, decode.
+        timeline = Timeline(output / entry["timeline"], origin)
         timeline.groups = dict(set(lanes.values()))
-        otel = timeline.pid(("otel",), "Request · OTel spans", sort=0)
-        recording = timeline.pid(("recording",), "Recording windows", sort=1)
-        for span in sorted(
-            spans.values(), key=lambda s: (start_end(s)[0], -start_end(s)[1])
-        ):
-            lane = lanes[span["spanId"]][0]
-            start, end = start_end(span)
-            timeline.interval(
-                span["name"],
-                "otel",
-                start - offsets.get(lane, 0),
-                end - offsets.get(lane, 0),
-                otel,
-                timeline.tid(otel, "spans"),
-                {
-                    "span_id": span["spanId"],
-                    "process": lane,
-                    "raw_start_unix_ns": start,
-                    "router_worker_id": router_worker(
-                        spans.get(span.get("parentSpanId")), spans
-                    ),
-                },
-            )
-        # The frontend recording window and control events stay visible; only
-        # its detailed host trace is left off the timeline (see below).
+        draw_request(timeline, spans, lanes, offsets, label)
         recorded = {}
         roots = [s for s in spans.values() if s["name"] == "http-request"]
         if "frontend" in intervals and roots:
             start, end = start_end(roots[0])
-            low, high = intervals["frontend"]
-            if start < high and end > low:
-                recorded["frontend"] = (low, high)
+            if start < intervals["frontend"][1] and end > intervals["frontend"][0]:
+                recorded["frontend"] = intervals["frontend"]
         for phase in entry["phases"]:
             target = phase["target_id"]
             if phase["recording_overlap_ns"]:
                 low, high = intervals[target]
+                recorded[target] = (low, high)
                 windows[target].append(
                     (
                         max(phase["start_unix_ns"], low),
@@ -505,31 +562,13 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
                         timeline,
                     )
                 )
-                recorded[target] = (low, high)
-        for target, (low, high) in recorded.items():
-            shift = offsets.get(target, 0)
-            timeline.interval(
-                f"{target} recording",
-                "capture",
-                low - shift,
-                high - shift,
-                recording,
-                timeline.tid(recording, target),
-            )
-        for event in controls:
-            timeline.emit(
-                {
-                    "ph": "i",
-                    "s": "p",
-                    "cat": "control",
-                    "name": f"{event['target_id']} {event['event']}",
-                    "pid": timeline.pid(("control",), "Control"),
-                    "tid": 1,
-                    "ts": (event["unix_ns"] - origin) / 1000,
-                }
-            )
+        draw_window(timeline, recorded, offsets, controls)
+        views.append((entry, timeline))
+    for target, (low, high) in intervals.items():
+        windows[target].append((low, high, window))
+    draw_window(window, intervals, offsets, controls)
 
-    # Read each native trace once; route events to every overlapping request.
+    # Read each native trace once; route events to every overlapping view.
     native = {}
     for item in manifest["artifact_validation"]:
         target = item["target_id"]
@@ -609,8 +648,9 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
             "events_written": routed,
             "clock_offset_ns": shift,
         }
-    for entry in index:
-        entry["timeline_events"] = timelines[entry["trace_id"]].close()
+    window_events = window.close()
+    for entry, timeline in views:
+        entry["timeline_events"] = timeline.close()
     (output / "lifecycle/trace-index.json").write_text(
         json.dumps(
             {
@@ -627,8 +667,10 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
     summary = {
         "schema_version": 1,
         "session_id": manifest["session_id"],
-        "method": __doc__.split("\n\n", 2)[2].strip(),
+        "method": __doc__.split("\n\n")[-1].strip(),
         "timeline_origin_unix_ns": origin,
+        "timeline": {"file": "timeline.json.gz", "events": window_events},
+        "per_request_timelines": per_request,
         "files": {
             str(p.relative_to(output)): {"bytes": p.stat().st_size, "sha256": sha256(p)}
             for p in sorted(output.rglob("*"))
@@ -690,15 +732,25 @@ def main() -> None:
         "--otel-jsonl",
         type=Path,
         action="append",
-        required=True,
-        help="collector OTLP export-batch JSONL; repeat for multiple files",
+        help="collector OTLP export-batch JSONL; repeat for multiple files "
+        "(default for an extracted bundle: lifecycle/traces.otlp.jsonl)",
     )
     parser.add_argument(
         "--output", type=Path, help="bundle directory (default: <session>/bundle)"
     )
+    parser.add_argument(
+        "--per-request",
+        action="store_true",
+        help="also write one timeline per request under timelines/",
+    )
     args = parser.parse_args()
+    otel = args.otel_jsonl or [args.session / "lifecycle/traces.otlp.jsonl"]
+    if not all(path.is_file() for path in otel):
+        parser.error(
+            "--otel-jsonl is required unless the session is an extracted bundle"
+        )
     output = args.output or args.session / "bundle"
-    summary = build(args.session, args.otel_jsonl, output)
+    summary = build(args.session, otel, output, args.per_request)
     path = archive(output, summary)
     print(json.dumps(summary["coverage"], indent=2))
     print(f"archive: {path} ({path.stat().st_size} bytes, sha256 {sha256(path)})")

@@ -1202,7 +1202,7 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
     otel.write_text(
         json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}) + "\n"
     )
-    summary = bundle.build(session, [otel], tmp_path / "out")
+    summary = bundle.build(session, [otel], tmp_path / "out", per_request=True)
     index = json.loads((tmp_path / "out/lifecycle/trace-index.json").read_text())
     assert index["router_targets"] == {"W1": "decode-0"}
     assert [entry["trace_id"] for entry in index["requests"]] == ["captured"]
@@ -1214,7 +1214,8 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
     exported = (tmp_path / "out/lifecycle/traces.otlp.jsonl").read_text()
     assert "captured" in exported and "uncaptured" not in exported
     assert summary["coverage"]["lifecycle"]["trigger_traces_found"] == "0/1"
-    assert summary["coverage"]["native_timeline"]["decode-0"]["events_written"] == 1
+    # Both kernels in the window timeline, one in the per-request timeline.
+    assert summary["coverage"]["native_timeline"]["decode-0"]["events_written"] == 3
     timeline = tmp_path / "out" / index["requests"][0]["timeline"]
     events = json.loads(gzip.decompress(timeline.read_bytes()))["traceEvents"]
     order = {
@@ -1226,7 +1227,7 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
         e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"
     }
     assert [names[pid] for pid in sorted(order, key=order.get)] == [
-        "Request · OTel spans",
+        "Requests · OTel spans",
         "Recording windows",
         "decode-0 · EngineCore (CPU)",
         "Control",
@@ -1235,6 +1236,30 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
     assert lanes["worker.operation.prefill"] == "prefill worker W3 (not captured)"
     assert lanes["worker.operation.decode"] == "decode-0"
     assert lanes["kv_router.route_request"] == "frontend"
+    # The default window timeline shows every request and each captured
+    # worker for its whole recording, including work outside any request.
+    window = json.loads(
+        gzip.decompress((tmp_path / "out/timeline.json.gz").read_bytes())
+    )["traceEvents"]
+    threads = {e["args"]["name"] for e in window if e.get("name") == "thread_name"}
+    assert "req captured · prefill (not captured) → decode-0" in threads
+    assert sorted(e["name"] for e in window if e.get("cat") == "kernel") == [
+        "before_operation",
+        "inside_operation",
+    ]
+    order = {
+        e["pid"]: e["args"]["sort_index"]
+        for e in window
+        if e.get("name") == "process_sort_index"
+    }
+    names = {
+        e["pid"]: e["args"]["name"] for e in window if e.get("name") == "process_name"
+    }
+    assert [names[pid] for pid in sorted(order, key=order.get)][:3] == [
+        "Requests · OTel spans",
+        "Recording windows",
+        "decode-0 · EngineCore (CPU)",
+    ]
     assert [e["name"] for e in events if e.get("cat") == "kernel"] == [
         "inside_operation"
     ]
@@ -1375,7 +1400,7 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
     otel.write_text(
         json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}) + "\n"
     )
-    bundle.build(session, [otel], tmp_path / "out")
+    bundle.build(session, [otel], tmp_path / "out", per_request=True)
     index = json.loads((tmp_path / "out/lifecycle/trace-index.json").read_text())
     path = tmp_path / "out" / index["requests"][0]["timeline"]
     events = json.loads(gzip.decompress(path.read_bytes()))["traceEvents"]
@@ -1388,7 +1413,7 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
         e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"
     }
     assert [names[pid] for pid in sorted(order, key=order.get)] == [
-        "Request · OTel spans",
+        "Requests · OTel spans",
         "Recording windows",
         "decode-0 · VLLM::EngineCore (CPU)",
         "decode-0 · CUDA device 0 (GPU 0)",
