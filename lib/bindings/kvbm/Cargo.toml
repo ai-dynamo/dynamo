@@ -63,4 +63,4 @@ cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "f
 
 # Post-codefreeze AISimulate source pin for release/1.6.0.
 [patch.crates-io]
-aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "ca990240b85378b4395e820cf2d15fc9a2a7e40a" }
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "1417a59f89491f11fb36bbcabd1fc2ccfa7e85bf" }
