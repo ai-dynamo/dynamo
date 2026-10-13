@@ -10,6 +10,7 @@ import hashlib
 import ipaddress
 import math
 import re
+import secrets
 import socket
 import sys
 from collections.abc import Mapping
@@ -33,6 +34,7 @@ MAX_SINGLE_PUT_BYTES = 64 * 1024 * 1024
 _HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
 _PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 _INVALID_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_INVALID_URL_CHAR = re.compile(r"""[^A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]""")
 _RFC3339 = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
 )
@@ -162,6 +164,7 @@ class PresignedHttpPutTarget:
             not self.url.isascii()
             or self.url != self.url.strip()
             or _INVALID_ESCAPE.search(self.url)
+            or _INVALID_URL_CHAR.search(self.url)
         ):
             raise _invalid(
                 "presigned URL must preserve its encoded ASCII representation"
@@ -473,7 +476,7 @@ async def put_artifact(
     elif isinstance(target, ManagedStoreTarget):
         await _put_managed(data, target, policy, profiles or {})
         provider_identity = None
-        object_id = f"{target.profile}:{target.object_key}"
+        object_id = f"obj_{secrets.token_hex(16)}"
     else:
         raise _invalid("unsupported blob target")
     return PutReceipt(
