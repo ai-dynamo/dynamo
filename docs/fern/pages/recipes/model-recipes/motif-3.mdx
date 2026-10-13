@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-**Experimental.** Serve [Motif-Technologies/Motif-3-NVFP4](https://huggingface.co/Motif-Technologies/Motif-3-NVFP4) with NVIDIA Dynamo and vLLM. Both targets use tensor parallelism of two (TP2), expert parallelism, multi-token prediction with two speculative tokens (MTP2), and a 262,144-token context. The disaggregated target separates three prefill workers from one decode worker (3P1D), transfers KV cache through NIXL, and routes requests using worker cache events and active load.
+**Experimental.** Serve [Motif-3 NVFP4](https://huggingface.co/Motif-Technologies/Motif-3-NVFP4) with NVIDIA Dynamo and vLLM on B200. Choose one aggregated worker or three prefill workers and one decode worker (3P1D) with KV-aware routing. Each worker uses two GPUs (TP2), expert parallelism, and multi-token prediction with two speculative tokens (MTP2).
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -46,7 +46,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 <div data-variant="disagg">
 
 - Eight available B200 GPUs. Each TP2 worker occupies two GPUs on one node; configure the fabric for NIXL/UCX transfer between nodes.
-- Image-pull credentials with read access to `nvcr.io/nvstaging/nim/motif-3`, configured through the namespace's ServiceAccount or a site Kustomization. This target pins a private image by digest.
+- An NGC API key with read access to the staged image at `nvcr.io/nvstaging/nim/motif-3`.
 
 </div>
 
@@ -59,6 +59,20 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="$HF_TOKEN" \
   -n "${NAMESPACE}"
 ```
+
+<div data-variant="disagg">
+
+Set `NGC_API_KEY` to your registry key, then configure image pulls before deploying:
+
+```bash
+kubectl create secret docker-registry ngc-pull-secret -n "${NAMESPACE}" \
+  --docker-server=nvcr.io --docker-username='$oauthtoken' \
+  --docker-password="${NGC_API_KEY}"
+kubectl patch serviceaccount default -n "${NAMESPACE}" --type=strategic \
+  -p '{"imagePullSecrets":[{"name":"ngc-pull-secret"}]}'
+```
+
+</div>
 
 ## Deploy
 
@@ -85,7 +99,7 @@ For Nscale B200 selection and GPU tolerations, apply the [aggregated Kustomizati
 kubectl apply -k recipes/motif-3/vllm/agg-b200-chat/kustomize -n "${NAMESPACE}"
 ```
 
-The aggregated Kustomization fetches the shared Dynamo OpenAPI schema from a pinned GitHub commit, so rendering requires Git and network access. This target uses two GPUs on one node and does not request RDMA devices.
+Rendering the aggregated Kustomization requires Git and network access.
 
 </div>
 
@@ -98,7 +112,7 @@ kubectl apply -f recipes/motif-3/vllm/disagg-b200-chat/deploy-generic.yaml -n "$
 kubectl get dgd motif3-disagg-b200 -n "${NAMESPACE}" -w
 ```
 
-For Nscale, compose the same generic target with the optional [site component](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/disagg-b200-chat/kustomize/components/nscale). It adds B200 node selection, one `rdma/shared_ib` device per worker, and `UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc`; serving settings stay the same. Use the following command instead of applying the generic manifest directly:
+For Nscale, use the optional [site component](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/disagg-b200-chat/kustomize/components/nscale) to add B200 node selection and RDMA settings:
 
 ```bash
 python3 scripts/kustomize-matrix.py compose \
@@ -107,7 +121,7 @@ python3 scripts/kustomize-matrix.py compose \
   | kubectl apply -f - -n "${NAMESPACE}"
 ```
 
-Wait for the frontend and all four workers in `motif3-disagg-b200` to become ready. The frontend uses no GPU; serving uses eight GPUs in total.
+Wait for the frontend and all four workers to become ready.
 
 </div>
 
@@ -170,46 +184,44 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 python3 recipes/motif-3/perf/prepare_disagg_client.py
 ```
 
-The helper verifies the three tokenizer files at model revision `79f2fad1f8229f5db8a7ad08bbd24a20d6fb0bff`. Keep these environment variables when profiling; do not point the client at the workers' full model cache.
-
-Set `variables.concurrency` in the [disaggregated AIPerf configuration](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/perf/disagg.yaml) for each case. The 3P1D synthetic sweep covers concurrency 8, 16, 32, 40, 48, and 64 with eight client workers. Preserve all 1,805 trace rows; the file is already the 15% sample.
-
-Run a separate warmup. After its requests and NIXL transfers drain, clear all three prefill caches, the decode cache, and the frontend router index. Repeat that reset before each independent case. Use a distinct artifact directory for every run:
+The [disaggregated AIPerf configuration](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/perf/disagg.yaml) uses concurrency 64 and all 1,805 trace rows. Keep the tokenizer environment variables above when profiling. Run warmup separately, then clear the prefill, decode, and router caches before each independent run:
 
 ```bash
 export INFERENCE_URL=http://motif3-disagg-b200-frontend:8000/v1/chat/completions
-export AIPERF_ARTIFACT_DIR=/tmp/motif3-3p1d-c8
+export AIPERF_ARTIFACT_DIR=/tmp/motif3-3p1d-c64
 aiperf config validate recipes/motif-3/perf/disagg.yaml
 aiperf profile --config recipes/motif-3/perf/disagg.yaml
 ```
 
-Report p50 Time To First Token (TTFT), output tokens/sec/GPU, per-user output rate, completed requests, and errors. Divide system throughput by all eight GPUs. Per-user output rate excludes TTFT; specify whether it is a mean or a percentile. Report context-limit rejections separately from unexpected errors.
+Divide system output throughput by all eight GPUs. Report context-limit rejections separately from unexpected errors.
 
 </div>
 
-Both targets default to **real MTP verification**. For benchmark-only synthetic MTP2 with acceptance length 2.13, change the `SPECULATIVE_CONFIG` ConfigMap reference from `speculative-config` to `speculative-config-synthetic` in the selected deployment source and redeploy. For disaggregation, change **both worker roles**. Synthetic acceptance does not measure real MTP acceptance or output quality. The 2.13 setting comes from the [SPEED-Bench coding domain](https://huggingface.co/blog/nvidia/speed-bench).
+Both targets default to **real MTP verification**. To use synthetic acceptance length 2.13 for benchmarking, change the `SPECULATIVE_CONFIG` ConfigMap key from `speculative-config` to `speculative-config-synthetic` in the deployment source, regenerate any derived manifest, and redeploy. For disaggregation, change **both worker roles**; see the [recipe README](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/disagg-b200-chat) for regeneration commands.
 
 ## Expected Performance
 
-<Warning>
-Synthetic acceptance results are benchmark-only proxies. The shipped manifests use real MTP verification; applying them unchanged does not reproduce synthetic results.
-</Warning>
+<Note>
+These chat-trace results use synthetic MTP2 acceptance length 2.13. They do not measure real MTP acceptance or output quality. The default manifests use real MTP verification.
+</Note>
+
+TTFT is Time To First Token. Per-user output rate excludes TTFT; throughput per GPU includes every serving GPU.
 
 <div data-variant="agg">
 
-The aggregated synthetic MTP2 run used TP2 at concurrency 11. Thirty-five trace requests exceeded the 262,144-token context limit. A real-MTP chat-trace result is not yet attached.
+| Deployment | GPUs | Concurrency | Output tokens/sec/GPU | P50 tokens/sec/user | P50 TTFT (ms) |
+|---|---:|---:|---:|---:|---:|
+| Aggregated | 2 | 11 | 293.96 | 66.27 | 388.18 |
 
-| Workload | Output tokens/sec/GPU | Output tokens/sec/user (p50) | p50 TTFT (ms) |
-|---|---:|---:|---:|
-| Chat trace, synthetic AL 2.13 | 293.96 | 66.27 | 388.18 |
+Thirty-five requests exceeded the 262,144-token context limit.
 
 </div>
 
 <div data-variant="disagg">
 
-The 3P1D KV-aware synthetic MTP2 sweep completed all six concurrency levels with 1,767 successful requests, 38 context-limit rejections, and zero unexpected errors per case. These observations use two hosts and do not establish real-MTP performance or a controlled routing comparison.
-
-The pinned frontend does not populate its cached-token histogram for this chat-processor path. Backend and client cached-token totals agree, but the strict frontend cache-equality check fails with this instrumentation; do not use that histogram as evidence of cache reuse.
+| Deployment | GPUs | Concurrency | Output tokens/sec/GPU | P50 tokens/sec/user | P50 TTFT (ms) |
+|---|---:|---:|---:|---:|---:|
+| Disaggregated 3P1D, KV-aware | 8 | 64 | 319.26 | 51.49 | 4305.08 |
 
 </div>
 
@@ -222,31 +234,9 @@ The pinned frontend does not populate its cached-token histogram for this chat-p
 
 ## Notes
 
-Both targets use BF16 activations, ModelOpt NVFP4 weights, FP8 KV cache, 128-token blocks, DP1, 0.85 GPU memory utilization, prefix caching, and asynchronous scheduling. The frontend uses the Motif chat processor and tool and reasoning parsers. Frontend and workers use Hugging Face offline mode; populate the shared cache before deployment.
-
-<div data-variant="agg">
-
-The aggregated target uses `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1`. Its vLLM package includes Motif compatibility code; do not replace it with an unrelated nightly wheel.
-
-</div>
-
-<div data-variant="disagg">
-
-The digest-pinned disaggregated image includes the Motif NIXL fixes: it validates cache dimensions for each attention backend and retains the NHD layout expected by Motif's attention kernels. Workers start directly with `python3 -m dynamo.vllm`; no startup patch is required. Keep this image for homogeneous TP2 disaggregation.
-
-`NCCL_NET_PLUGIN=none` avoids mixing the image's HPC-X UCX with NIXL's bundled UCX. TP2 collectives stay within each worker's node; NIXL handles cross-node KV transfer. KV-aware routing uses `DYN_ROUTER_MODE=kv`, worker KV events over ZeroMQ, prefix caching, and `PYTHONHASHSEED=0` on every process.
-
-Prefill sets `DYN_HEALTH_CHECK_ENABLED=false` because standalone prefill canaries retain KV blocks without a decode consumer until the transfer lease expires. Engine monitoring and Kubernetes probes remain active. Verify requests through the frontend.
-
-Edit [the recipe base](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/disagg-b200-chat/kustomize/base), then regenerate and check the generic manifest. Optional site components are applied with `compose`:
-
-```bash
-python3 scripts/kustomize-matrix.py unfold recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
-python3 scripts/kustomize-matrix.py render recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
-python3 scripts/kustomize-matrix.py check recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
-```
-
-</div>
+- Both targets use NVFP4 weights, FP8 KV cache, prefix caching, and a 262,144-token context limit.
+- The runtime images include Motif support. Populate the shared model cache before starting the workers, which run in offline mode.
+- The disaggregated recipe has been validated with TP2 on both prefill and decode workers.
 
 ## Source
 

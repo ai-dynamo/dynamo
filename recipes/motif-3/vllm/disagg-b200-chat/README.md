@@ -22,4 +22,5 @@ Edit [kustomize/base](kustomize/base), then regenerate the manifest:
 ```bash
 python3 scripts/kustomize-matrix.py unfold recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
 python3 scripts/kustomize-matrix.py render recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
+python3 scripts/kustomize-matrix.py check recipes/motif-3/vllm/disagg-b200-chat/.kustomize-matrix.yaml
 ```

@@ -58,4 +58,4 @@ benchmark:
     apiPort: 18080
     workers: 8
 variables:
-  concurrency: 8
+  concurrency: 64

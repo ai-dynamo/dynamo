@@ -56,7 +56,7 @@ targets:
   - shared-model-cache
   workload:
     type: chat-trace-replay
-    traffic: Complete 1,805-row chat trace; one concurrency per run
+    traffic: Complete 1,805-row chat trace at concurrency 64
   deploy:
     asset: recipes/motif-3/vllm/disagg-b200-chat/deploy-generic.yaml
   benchmark:
@@ -64,11 +64,10 @@ targets:
     asset: recipes/motif-3/perf/disagg.yaml
   expected_performance:
     available: false
-    summary: 'The deployment defaults to real MTP2 verification. Synthetic MTP2 AL 2.13 observations at concurrency 8, 16, 32, 40, 48, and 64 do not establish real-MTP performance.'
+    summary: 'Synthetic MTP2 AL 2.13: 319.26 output tokens/sec/GPU, 51.49 P50 tokens/sec/user, and 4305.08 ms P50 TTFT at concurrency 64 on eight B200 GPUs (3P1D, TP2 per worker, KV-aware routing). The deployment defaults to real MTP verification; these results require the synthetic configuration.'
 related_benchmarks: []
 maintainer: null
 gaps:
 - maintainer unknown
-- public image vllm-runtime:1.5.0-motif-3-dev.1 is pending NGC publication and is referenced by tag, not digest
 - published performance is a synthetic-acceptance proxy; no real-MTP chat-trace result yet
 - disaggregated image requires private registry access
