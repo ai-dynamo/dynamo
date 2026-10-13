@@ -711,22 +711,30 @@ impl NvExtResponseFieldSelection {
         finish_reason: Option<&FinishReason>,
         engine_data: Option<&serde_json::Value>,
     ) -> anyhow::Result<()> {
-        if let Some(mode) = self.metadata_upload
-            && finish_reason.is_some_and(|reason| {
-                !matches!(reason, FinishReason::Error(_) | FinishReason::Cancelled)
-            })
-            && !engine_data
-                .and_then(|data| data.get("metadata_upload"))
-                .is_some_and(|result| {
-                    result.get("kind").and_then(serde_json::Value::as_str)
-                        == Some("generation_artifact")
-                        && result
-                            .get("mode")
-                            .cloned()
-                            .and_then(|value| serde_json::from_value::<ArtifactMode>(value).ok())
-                            == Some(mode)
-                })
-        {
+        let Some(mode) = self.metadata_upload else {
+            return Ok(());
+        };
+        if matches!(
+            finish_reason,
+            Some(FinishReason::Error(_) | FinishReason::Cancelled)
+        ) {
+            return Ok(());
+        }
+        let result = engine_data.and_then(|data| data.get("metadata_upload"));
+        let valid = result.is_some_and(|result| {
+            result.get("kind").and_then(serde_json::Value::as_str) == Some("generation_artifact")
+                && result
+                    .get("mode")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|name| {
+                        serde_json::from_value::<ArtifactMode>(serde_json::Value::String(
+                            name.to_owned(),
+                        ))
+                        .ok()
+                    })
+                    == Some(mode)
+        });
+        if (result.is_some() || finish_reason.is_some()) && !valid {
             let message =
                 "backend did not provide the requested generation_artifact delivery result";
             return Err(dynamo_runtime::error::DynamoError::builder()
@@ -918,6 +926,22 @@ pub(crate) fn validate_metadata_upload_single_choice(
     {
         return Err(crate::protocols::common::invalid_argument_error(
             "generation_artifact metadata_upload requires a single prompt and n = best_of = 1",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_metadata_upload_stop_strings(
+    has_stop_strings: bool,
+    nvext: Option<&NvExt>,
+) -> anyhow::Result<()> {
+    if has_stop_strings
+        && nvext
+            .and_then(|ext| ext.metadata_upload.as_ref())
+            .is_some_and(MetadataUpload::is_artifact)
+    {
+        return Err(crate::protocols::common::invalid_argument_error(
+            "generation_artifact metadata_upload does not support stop strings",
         ));
     }
     Ok(())
@@ -1163,6 +1187,7 @@ mod tests {
             serde_json::json!({"url": "s3://bucket/legacy"}),
             serde_json::json!({"kind": "generation_artifact", "mode": "object_store"}),
             serde_json::json!({"kind": "other", "mode": "inline_base64"}),
+            serde_json::json!({"kind": "generation_artifact", "mode": {"inline_base64": null}}),
         ] {
             assert!(
                 selection
@@ -1204,6 +1229,12 @@ mod tests {
                 )
                 .is_ok()
         );
+        assert!(selection
+            .validate_metadata_upload_result(
+                None,
+                Some(&serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "mode": {"inline_base64": null}}})),
+            )
+            .is_err());
         assert!(
             selection
                 .validate_metadata_upload_result(
@@ -1244,6 +1275,41 @@ mod tests {
         )
         .unwrap();
         assert!(validate_metadata_upload_single_choice(2, Some(&legacy)).is_ok());
+    }
+
+    #[test]
+    fn artifact_upload_rejects_frontend_string_stop_before_generation() {
+        use crate::engines::ValidateRequest;
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+        use crate::protocols::openai::completions::NvCreateCompletionRequest;
+
+        let artifact = serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "inline_base64"}});
+        for stop in [serde_json::json!("END"), serde_json::json!(["END"])] {
+            let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}], "stop": stop, "nvext": artifact})).unwrap();
+            assert!(chat.validate().unwrap_err().to_string().contains("stop"));
+            let completion: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "prompt": "hello", "stop": stop, "nvext": artifact})).unwrap();
+            assert!(
+                completion
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("stop")
+            );
+        }
+
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}], "stop_token_ids": [42], "nvext": artifact})).unwrap();
+        assert!(chat.validate().is_ok());
+        let completion: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "prompt": "hello", "stop_token_ids": [42], "nvext": artifact})).unwrap();
+        assert!(completion.validate().is_ok());
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}], "stop": [42], "nvext": artifact})).unwrap();
+        assert!(chat.validate().is_ok());
+        let completion: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "prompt": "hello", "stop": [42], "nvext": artifact})).unwrap();
+        assert!(completion.validate().is_ok());
+
+        let legacy: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}], "stop": "END", "nvext": {"metadata_upload": {"url": "s3://bucket/prefix"}}})).unwrap();
+        assert!(legacy.validate().is_ok());
+        let legacy: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "prompt": "hello", "stop": "END", "nvext": {"metadata_upload": {"url": "s3://bucket/prefix"}}})).unwrap();
+        assert!(legacy.validate().is_ok());
     }
 
     #[test]

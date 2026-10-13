@@ -866,6 +866,17 @@ mod tests {
         let response = generator.choice_from_postprocessor(output).unwrap();
         assert_eq!(response.nvext.unwrap()["metadata_upload"], result);
 
+        let mut malformed = final_backend_output();
+        malformed.engine_data = Some(
+            serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "mode": {"inline_base64": null}}}),
+        );
+        assert!(
+            request
+                .response_generator("artifact-malformed".into())
+                .choice_from_postprocessor(malformed)
+                .is_err()
+        );
+
         let mut cancelled = final_backend_output();
         cancelled.finish_reason = Some(common::FinishReason::Cancelled);
         cancelled.engine_data = None;
