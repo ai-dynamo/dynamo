@@ -806,8 +806,8 @@ jobs:
       framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # Shard 0; ARM uses the CPU runner
-      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod","ci-pre-merge"]'
-      amd_runner_secondary_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east","ci-pre-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod"]'
+      amd_runner_secondary_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -845,7 +845,7 @@ jobs:
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
-      amd_runner_labels: '["prod-tester-amd-gpu-2-v2","aws-ci-prod-east","ci-pre-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-2-v2","aws-ci-prod-east"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -864,8 +864,8 @@ jobs:
       framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # Shard 0; ARM uses the CPU runner
-      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod","ci-pre-merge"]'
-      amd_runner_secondary_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east","ci-pre-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod"]'
+      amd_runner_secondary_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -896,7 +896,7 @@ jobs:
       framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
-      amd_runner_labels: '["prod-tester-amd-gpu-2-v2","aws-ci-prod-east","ci-pre-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-2-v2","aws-ci-prod-east"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -915,8 +915,8 @@ jobs:
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # Shard 0; ARM uses the CPU runner
-      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod","ci-pre-merge"]'
-      amd_runner_secondary_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east","ci-pre-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod"]'
+      amd_runner_secondary_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -947,7 +947,7 @@ jobs:
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
-      amd_runner_labels: '["prod-tester-amd-gpu-2-v2","aws-ci-prod","ci-pre-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-2-v2","aws-ci-prod"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -986,7 +986,7 @@ jobs:
   #     test_suite_name: triton
   #     test_type: QA Test
   #     amd_runner: prod-tester-amd-gpu-v2
-  #     amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod","ci-pre-merge"]'
+  #     amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod"]'
   #     target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
   #     cuda_version: '[""]'
   #     platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
@@ -1075,8 +1075,8 @@ jobs:
       needs.changed-files.outputs.benchmarks == 'true'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
-      rust_gpu_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east","ci-pre-merge"]'
-      python_gpu_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod","ci-pre-merge"]'
+      rust_gpu_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east"]'
+      python_gpu_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       # `defaulted` is applied by the repository-root conftest.py to any test that

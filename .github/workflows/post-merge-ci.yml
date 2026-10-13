@@ -65,8 +65,8 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
-      rust_gpu_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east","ci-post-merge"]'
-      python_gpu_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod","ci-post-merge"]'
+      rust_gpu_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east"]'
+      python_gpu_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       # TODO: widen to include `post_merge` — today it picks up tests
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
@@ -480,7 +480,7 @@ jobs:
       framework: vllm
       test_type: ${{ format('vLLM Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
       amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
-      amd_runner_labels: ${{ format('["{0}","aws-ci-prod-east","ci-post-merge"]', matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2') }}
+      amd_runner_labels: ${{ format('["{0}","aws-ci-prod-east"]', matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2') }}
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
@@ -505,7 +505,7 @@ jobs:
       framework: sglang
       test_type: ${{ format('SGLang Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
       amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
-      amd_runner_labels: ${{ format('["{0}","aws-ci-prod-east","ci-post-merge"]', matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2') }}
+      amd_runner_labels: ${{ format('["{0}","aws-ci-prod-east"]', matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2') }}
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
@@ -526,7 +526,7 @@ jobs:
       framework: trtllm
       test_type: TensorRT-LLM Sidecar 1-GPU E2E Test
       amd_runner: prod-tester-amd-gpu-v2
-      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod","ci-post-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]'
@@ -547,7 +547,7 @@ jobs:
       framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
-      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east","ci-post-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -573,7 +573,7 @@ jobs:
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
-      amd_runner_labels: '["prod-tester-amd-gpu-2-v2","aws-ci-prod-east","ci-post-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-2-v2","aws-ci-prod-east"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -592,7 +592,7 @@ jobs:
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 4-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
-      amd_runner_labels: '["prod-tester-amd-gpu-4-v2","aws-ci-prod","ci-post-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-4-v2","aws-ci-prod"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -629,7 +629,7 @@ jobs:
       framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
-      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east","ci-post-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod-east"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -655,7 +655,7 @@ jobs:
       framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
-      amd_runner_labels: '["prod-tester-amd-gpu-2-v2","aws-ci-prod-east","ci-post-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-2-v2","aws-ci-prod-east"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -674,7 +674,7 @@ jobs:
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
-      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod","ci-post-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -700,7 +700,7 @@ jobs:
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
-      amd_runner_labels: '["prod-tester-amd-gpu-2-v2","aws-ci-prod","ci-post-merge"]'
+      amd_runner_labels: '["prod-tester-amd-gpu-2-v2","aws-ci-prod"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -757,7 +757,7 @@ jobs:
   #     test_suite_name: triton
   #     test_type: QA Test
   #     amd_runner: prod-tester-amd-gpu-v2
-  #     amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod","ci-post-merge"]'
+  #     amd_runner_labels: '["prod-tester-amd-gpu-v2","aws-ci-prod"]'
   #     target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
   #     cuda_version: '[""]'
   #     platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
