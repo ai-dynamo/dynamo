@@ -648,7 +648,10 @@ def build_tool_call_guided_decoding(
     if not sglang_tools:
         return None
 
-    tool_choice = request.get("tool_choice", "auto")
+    tool_choice = request.get("tool_choice")
+    if tool_choice is None:
+        # An explicit null means the OpenAI default, same as an omitted field.
+        tool_choice = "auto"
     if tool_choice == "none":
         return None
 

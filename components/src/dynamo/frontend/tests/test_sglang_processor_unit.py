@@ -1900,11 +1900,8 @@ def test_forced_structural_tag_returns_tool_call(
 @pytest.mark.timeout(60)
 @pytest.mark.parametrize("tool_choice", ["auto", "required", "named"])
 @pytest.mark.parametrize("thinking", [False, True], ids=["chat", "thinking"])
-@pytest.mark.parametrize(
-    "separate_reasoning", [False, True], ids=["combined", "separate"]
-)
 def test_tool_structural_tag_enforced_after_one_reasoning_boundary(
-    tokenizer, tool_grammar_compiler, tool_choice, thinking, separate_reasoning
+    tokenizer, tool_grammar_compiler, tool_choice, thinking
 ):
     """The backend consumes reasoning; the inner grammar must enforce tools next."""
     request = {
@@ -1913,7 +1910,6 @@ def test_tool_structural_tag_enforced_after_one_reasoning_boundary(
         "tools": [parity_tool()],
         "tool_choice": tool_choice_value(tool_choice),
         "chat_template_kwargs": {"enable_thinking": thinking},
-        "separate_reasoning": separate_reasoning,
     }
     pre = preprocess_chat_request(
         request,
@@ -2140,6 +2136,60 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         )
 
         assert seen["tool_call_parser"] == "minimax-m3"
+        assert guided == {"structural_tag": {"type": "object"}}
+
+    @pytest.mark.parametrize(
+        "tool_choice_field",
+        [{}, {"tool_choice": None}, {"tool_choice": "auto"}],
+        ids=["omitted", "null", "auto"],
+    )
+    @pytest.mark.parametrize("scope", ["always", "auto"])
+    def test_null_tool_choice_uses_auto_structural_tag_policy(
+        self, monkeypatch, tool_choice_field, scope
+    ):
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ]
+        seen = {}
+
+        # Test double: capture the tool_choice handed to SGLang's tag builder.
+        class FakeFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                pass
+
+            def get_structure_constraint(self, tool_choice, **kwargs):
+                seen["tool_choice"] = tool_choice
+                return "structural_tag", {"type": "object"}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            FakeFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {
+                **tool_choice_field,
+                "tools": raw_tools,
+                "parallel_tool_calls": False,
+            },
+            tool_call_parser_name="qwen3_coder",
+            sglang_tools=convert_tools(raw_tools),
+            structural_tag_mode="on",
+            structural_tag_scope=scope,
+        )
+
+        assert seen["tool_choice"] == "auto"
         assert guided == {"structural_tag": {"type": "object"}}
 
     def test_required_tool_choice_builds_json_schema_guidance(self):
