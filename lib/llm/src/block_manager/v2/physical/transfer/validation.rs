@@ -89,6 +89,7 @@ pub fn validate_bounce_unique(bounce_block_ids: &[usize]) -> Result<(), BlockVal
 ///
 /// This is a conservative check - if pointers differ, layouts might still be the same
 /// but we treat them as different to avoid false positives in disjoint validation.
+#[cfg(debug_assertions)]
 fn are_same_layout(layout1: &PhysicalLayout, layout2: &PhysicalLayout) -> bool {
     // Compare Arc pointer addresses
     std::ptr::eq(

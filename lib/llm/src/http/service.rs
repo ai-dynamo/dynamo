@@ -33,6 +33,7 @@ pub mod openapi_docs;
 pub mod realtime;
 pub mod service_v2;
 pub mod sglang_generate;
+mod worker_metrics;
 
 pub use axum;
 pub use frontend_extension::{
@@ -273,7 +274,9 @@ mod tests {
                         "name": "lookup",
                         "parameters": {
                             "type": "object",
-                            "properties": {"query": {"type": "string"}}
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                            "additionalProperties": false
                         },
                         "strict": true
                     }]
