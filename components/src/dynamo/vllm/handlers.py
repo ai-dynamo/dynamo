@@ -799,6 +799,12 @@ def build_sampling_params(
     Returns:
         SamplingParams configured from the request
 
+    Raises:
+        VLLMValidationError: Invalid sampling values detected by vLLM's checks.
+        HttpError: Unsupported non-progressing guided JSON reference cycles (400).
+        AttributeError: The installed vLLM lacks an explicitly requested bad-word
+            token-ID or stream-interval field.
+
     RL token-in requests use vLLM's default sampling values instead of model
     `generation_config.json` sampling overrides. Ordinary token-data requests
     keep generation_config defaults for Gateway/backward-compatible traffic.
@@ -838,6 +844,12 @@ def build_sampling_params(
         # Skip guided_decoding - already handled above
         if key == "guided_decoding":
             continue
+        if key == "stream_interval" and value is not None:
+            if not hasattr(sampling_params, key):
+                raise AttributeError(
+                    "vLLM SamplingParams.stream_interval missing; "
+                    "this vLLM version cannot honor the requested interval"
+                )
         if key == "bad_words_token_ids" and value is not None:
             # vLLM has no public setter for token-id bad words; we write the
             # private field directly. Guard so a vLLM upgrade that renames it
@@ -1031,7 +1043,14 @@ def build_sampling_params_openai(
         default_sampling_params: Default sampling parameters to initialize with
 
     Returns:
-        SamplingParams configured from the request
+        New SamplingParams configured from the request; inputs are unchanged.
+
+    Raises:
+        VLLMValidationError: vLLM rejects a supplied sampling value.
+        AttributeError: An explicit stream_interval is unsupported by this vLLM.
+
+    Omitted/null stream_interval retains the configured default. The engine owns
+    grouping, including its server-wide lower bound and first/final flushes.
     """
     sampling_params = SamplingParams(**default_sampling_params)
     sampling_params.detokenize = True
@@ -1049,10 +1068,16 @@ def build_sampling_params_openai(
         "min_p": "min_p",
         "length_penalty": "length_penalty",
         "use_beam_search": "use_beam_search",
+        "stream_interval": "stream_interval",
     }
 
     for req_key, param_key in openai_mapping.items():
         if req_key in request and request[req_key] is not None:
+            if req_key == "stream_interval" and not hasattr(sampling_params, param_key):
+                raise AttributeError(
+                    "vLLM SamplingParams.stream_interval missing; "
+                    "this vLLM version cannot honor the requested interval"
+                )
             if hasattr(sampling_params, param_key):
                 setattr(sampling_params, param_key, request[req_key])
 

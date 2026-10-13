@@ -9,6 +9,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from tests.utils import vllm_protocol
+from tests.utils.openapi_root import root_property as _root_property
 
 protocol_server = vllm_protocol.protocol_server
 generate = vllm_protocol.generate
@@ -24,29 +25,6 @@ pytestmark = [
     pytest.mark.requested_vllm_kv_cache_bytes(1_073_741_824),
     pytest.mark.timeout(235),
 ]
-
-
-def _root_property(document, node, name):
-    """Find a request-root property through these exports' acyclic local refs/allOf.
-
-    Return None for an absent property. Do not descend into arbitrary properties:
-    a same-named field inside messages or tools does not describe this request root.
-    Broken local refs raise KeyError instead of becoming evidence of absence.
-    """
-    if name in node.get("properties", {}):
-        return node["properties"][name]
-    if "$ref" in node:
-        reference = node["$ref"]
-        assert reference.startswith("#/"), reference
-        resolved = document
-        for part in reference[2:].split("/"):
-            resolved = resolved[part.replace("~1", "/").replace("~0", "~")]
-        return _root_property(document, resolved, name)
-    for part in node.get("allOf", []):
-        found = _root_property(document, part, name)
-        if found is not None:
-            return found
-    return None
 
 
 def test_token_controls_are_effective_and_declared(protocol_server):

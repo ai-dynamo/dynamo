@@ -31,6 +31,7 @@ from dynamo.vllm.args import (
     update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.handlers import build_sampling_params
 from dynamo.vllm.headless import build_headless_namespace
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
@@ -1405,6 +1406,68 @@ def test_update_kv_transfer_params_copies_extra_args_before_mutating():
         },
         "other_internal": "kept",
     }
+
+
+@pytest.mark.parametrize("text_mode", [False, True], ids=["token-mode", "text-mode"])
+@pytest.mark.parametrize(
+    "fields, expected",
+    [({}, 5), ({"stream_interval": None}, 5), ({"stream_interval": 3}, 3)],
+)
+def test_stream_interval_delivery_preserves_defaults_and_input(
+    text_mode, fields, expected
+):
+    """Both mappings deliver explicit intervals; null/omission retain defaults.
+
+    The token path uses extra_args, as emitted by the frontend. This proves
+    transport only; real-server tests check grouping and final flushing.
+    """
+    from copy import deepcopy
+
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    request = (
+        fields
+        if text_mode
+        else {"token_ids": [1, 2], "extra_args": {"sampling_options": fields}}
+    )
+    original = deepcopy(request)
+    builder = build_sampling_params_openai if text_mode else build_sampling_params
+    params = builder(request, {"stream_interval": 5})
+    assert params.stream_interval == expected
+    assert request == original
+
+
+@pytest.mark.parametrize("text_mode", [False, True], ids=["token-mode", "text-mode"])
+def test_stream_interval_missing_worker_attribute_fails_visibly(monkeypatch, text_mode):
+    """A worker version without the requested control must not silently drop it."""
+    from dynamo.vllm import handlers
+
+    monkeypatch.setattr(
+        handlers, "SamplingParams", Mock(return_value=SimpleNamespace())
+    )
+    fields = {"stream_interval": 3}
+    request = fields if text_mode else {"extra_args": {"sampling_options": fields}}
+    builder = (
+        handlers.build_sampling_params_openai
+        if text_mode
+        else handlers.build_sampling_params
+    )
+    with pytest.raises(AttributeError, match="SamplingParams.stream_interval missing"):
+        builder(request, {})
+
+
+@pytest.mark.parametrize("text_mode", [False, True], ids=["token-mode", "text-mode"])
+def test_stream_interval_overlay_is_revalidated(text_mode):
+    """Post-construction overlays must still invoke vLLM's positive-value check."""
+    from vllm.exceptions import VLLMValidationError
+
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    fields = {"stream_interval": 0}
+    request = fields if text_mode else {"extra_args": {"sampling_options": fields}}
+    builder = build_sampling_params_openai if text_mode else build_sampling_params
+    with pytest.raises(VLLMValidationError, match="stream_interval"):
+        builder(request, {})
 
 
 def test_build_sampling_params_maps_max_thinking_tokens():
