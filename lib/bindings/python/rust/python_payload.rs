@@ -56,10 +56,74 @@ impl Serialize for PythonPayload {
     where
         S: Serializer,
     {
-        Python::with_gil(|py| {
-            let mut depythonizer = Depythonizer::from_object(self.0.bind(py));
-            serde_transcode::transcode(&mut depythonizer, serializer).map_err(S::Error::custom)
-        })
+        Python::with_gil(|py| PyValue(self.0.bind(py)).serialize(serializer))
+    }
+}
+
+/// Serialize a Python value by walking it directly for the exact builtin types
+/// responses are made of (dict, list, tuple, str, int, float, bool, None).
+/// Anything else, including subclasses and ints outside i64, falls back to the
+/// generic `Depythonizer` transcode, so the wire format is unchanged. The direct
+/// walk skips the per-node Deserializer/Visitor round trip of the transcode,
+/// which is most of the per-token encode cost on the push-egress path.
+struct PyValue<'a, 'py>(&'a Bound<'py, PyAny>);
+
+impl Serialize for PyValue<'_, '_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyTuple};
+        use serde::ser::{SerializeMap, SerializeSeq};
+
+        let obj = self.0;
+        if obj.is_none() {
+            return serializer.serialize_unit();
+        }
+        if let Ok(dict) = obj.downcast_exact::<PyDict>() {
+            let mut map = serializer.serialize_map(Some(dict.len()))?;
+            for (key, value) in dict.iter() {
+                map.serialize_entry(&PyValue(&key), &PyValue(&value))?;
+            }
+            return map.end();
+        }
+        if let Ok(list) = obj.downcast_exact::<PyList>() {
+            let mut seq = serializer.serialize_seq(Some(list.len()))?;
+            for item in list.iter() {
+                seq.serialize_element(&PyValue(&item))?;
+            }
+            return seq.end();
+        }
+        if let Ok(string) = obj.downcast_exact::<PyString>() {
+            // A str that is not valid UTF-8 (lone surrogates) takes the fallback,
+            // which reports it exactly as before.
+            if let Ok(text) = string.to_str() {
+                return serializer.serialize_str(text);
+            }
+        } else if obj.is_exact_instance_of::<PyBool>() {
+            return serializer.serialize_bool(obj.is_truthy().map_err(S::Error::custom)?);
+        }
+        if obj.is_exact_instance_of::<PyInt>() {
+            // Same split as pythonize: non-negative ints as u64, negative as
+            // i64, so msgpack picks the same markers. Ints outside i64 take the
+            // fallback below.
+            if let Ok(value) = obj.extract::<i64>() {
+                return match u64::try_from(value) {
+                    Ok(unsigned) => serializer.serialize_u64(unsigned),
+                    Err(_) => serializer.serialize_i64(value),
+                };
+            }
+        } else if let Ok(float) = obj.downcast_exact::<PyFloat>() {
+            return serializer.serialize_f64(float.value());
+        } else if let Ok(tuple) = obj.downcast_exact::<PyTuple>() {
+            let mut seq = serializer.serialize_seq(Some(tuple.len()))?;
+            for item in tuple.iter() {
+                seq.serialize_element(&PyValue(&item))?;
+            }
+            return seq.end();
+        }
+        let mut depythonizer = Depythonizer::from_object(obj);
+        serde_transcode::transcode(&mut depythonizer, serializer).map_err(S::Error::custom)
     }
 }
 

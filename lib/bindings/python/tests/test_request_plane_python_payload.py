@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import enum
 
 import pytest
 
@@ -13,8 +14,46 @@ pytestmark = [
 ]
 
 
+class _Color(enum.IntEnum):
+    RED = 7
+
+
+class _Label(str):
+    pass
+
+
+def _types_response():
+    """One value of each type handlers commonly yield, plus subclasses and
+    out-of-i64 ints that the encoder must hand to its generic fallback."""
+    return {
+        "none": None,
+        "bools": [True, False],
+        "ints": [
+            0,
+            1,
+            -1,
+            127,
+            128,
+            65536,
+            -(2**31),
+            2**63 - 1,
+            -(2**63),
+            2**64 - 1,
+        ],
+        "floats": [0.0, -0.25, 1e300],
+        "text": "héllo 中",
+        "tuple": (1, "two", None, (3.5,)),
+        "nested": {"empty_list": [], "empty_dict": {}, "rows": [{"id": 1, "ok": True}]},
+        "int_subclass": _Color.RED,
+        "str_subclass": _Label("label"),
+    }
+
+
 async def _generate(request, context):
     assert dict(context.metadata.items()) == request.get("expected_metadata", {})
+    if request["kind"] == "types":
+        yield _types_response()
+        return
     if request["kind"] == "error":
         raise ValueError("direct adapter test error")
     if request["kind"] == "malformed":
@@ -150,3 +189,27 @@ async def test_python_request_plane_plain_annotated_error_and_malformed_frames(
         with pytest.raises(ValueError, match=message):
             async for _ in stream:
                 pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+async def test_python_request_plane_response_value_types(request_plane_client):
+    """Response values keep their meaning through the response encoder,
+    including bool vs int, tuples, subclasses and ints outside i64."""
+    stream = await request_plane_client.generate(
+        {"kind": "types", "expected_metadata": {}}
+    )
+    responses = [response.data() async for response in stream]
+
+    expected = _types_response()
+    expected["tuple"] = [1, "two", None, [3.5]]
+    expected["int_subclass"] = 7
+    expected["str_subclass"] = "label"
+    assert responses == [expected]
+
+    data = responses[0]
+    assert [type(value) for value in data["bools"]] == [bool, bool]
+    assert all(type(value) is int for value in data["ints"])
+    assert type(data["nested"]["rows"][0]["ok"]) is bool
+    assert type(data["int_subclass"]) is int
