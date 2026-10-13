@@ -909,7 +909,7 @@ async fn chat_completions_reject_invalid_logit_bias_keys() {
             assert_openai_error(
                 response,
                 ExpectedError::Validation,
-                "Logit bias key 'not-a-token' must be a non-negative 32-bit integer token id",
+                "Logit bias key must be a non-negative 32-bit integer token id",
             )
             .await;
         }

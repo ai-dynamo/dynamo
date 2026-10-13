@@ -405,10 +405,7 @@ pub fn validate_logit_bias(
 
     for (token, bias_value) in logit_bias {
         token.parse::<u32>().map_err(|_| {
-            anyhow::anyhow!(
-                "Logit bias key '{}' must be a non-negative 32-bit integer token id",
-                token
-            )
+            anyhow::anyhow!("Logit bias key must be a non-negative 32-bit integer token id")
         })?;
 
         let bias = bias_value.as_f64().ok_or_else(|| {
@@ -1091,17 +1088,16 @@ mod tests {
 
     use super::*;
 
-    /// Token IDs at both ends of the `u32` range are valid; malformed IDs name
-    /// the rejected key and accepted range in the validation error.
     #[test]
     fn test_validate_logit_bias_keys() {
         let bias = |key: &str| Some(HashMap::from([(key.to_string(), json!(1.0))]));
+        let oversized_key = "x".repeat(16 * 1024);
 
-        for key in ["not-a-token", "-1", "", "1.5", "4294967296"] {
+        for key in ["not-a-token", "-1", "", "1.5", "4294967296", &oversized_key] {
             let msg = validate_logit_bias(&bias(key)).unwrap_err().to_string();
             assert_eq!(
                 msg,
-                format!("Logit bias key '{key}' must be a non-negative 32-bit integer token id")
+                "Logit bias key must be a non-negative 32-bit integer token id"
             );
         }
 
