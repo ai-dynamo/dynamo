@@ -88,8 +88,10 @@ The `PR Issue Link` check failing means no verifiable reference was found.
 Add one using the table above and edit the PR description; editing re-triggers
 the check. If no issue exists yet, create one first (see Start From an Issue).
 When the failure says Linear references cannot be verified for a fork PR, the
-author is outside the org: ask a maintainer for read collaborator access
-instead of filing a GitHub issue that duplicates the Linear one.
+author account sits outside the org. For an NVIDIA-run agent or bot account,
+keep the Linear reference and do not file a GitHub issue that duplicates it;
+the account's owners get it read collaborator access, after which the Linear
+reference verifies.
 While the check is advisory it does not block merges; its failure message
 names the date it becomes required.
 
