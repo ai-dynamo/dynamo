@@ -114,6 +114,8 @@ spec:
           args:
             - |
               set -euo pipefail
+              # The AIPerf image omits pip; bootstrap it from the bundled ensurepip.
+              python3 -m ensurepip --upgrade
               # GLM-5.3-Flash tokenizer assets require Transformers 5 TokenizersBackend.
               python3 -m pip install --no-cache-dir 'transformers==5.19.0' 'tokenizers==0.23.2'
               MODELS_URL="${INFERENCE_URL%/v1/chat/completions}/v1/models"
