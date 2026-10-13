@@ -23,18 +23,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// ModelReference identifies the model whose deployment configurations are evaluated.
-type ModelReference struct {
+// ModelSpec identifies the model whose deployment configurations are evaluated.
+type ModelSpec struct {
 	// Name identifies the model in the syntax accepted by the selected backend.
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
-
-	// Revision pins repository contents. Backends that do not support revisions reject this field.
-	// +optional
-	Revision string `json:"revision,omitempty"`
 }
 
-// Backend identifies an inference backend searched by Sweeper and used by generated candidates.
+// Backend identifies an inference backend searched by AISimulate and used by generated candidates.
 // +kubebuilder:validation:Enum=vllm;sglang;trtllm
 type Backend string
 
@@ -46,7 +42,7 @@ const (
 
 // GPUHardwareSpec describes accelerator identity and the maximum allocation per candidate.
 type GPUHardwareSpec struct {
-	// SKU identifies the accelerator using the Sweeper hardware catalog name.
+	// SKU identifies the accelerator using the AISimulate hardware catalog name.
 	// +kubebuilder:validation:MinLength=1
 	SKU string `json:"sku"`
 
@@ -61,69 +57,15 @@ type HardwareSpec struct {
 	GPU GPUHardwareSpec `json:"gpu"`
 }
 
-// TracePVCSource identifies a trace artifact on a PersistentVolumeClaim in the DGDR namespace.
-type TracePVCSource struct {
-	// ClaimName is the PersistentVolumeClaim containing the trace.
-	// +kubebuilder:validation:MinLength=1
-	ClaimName string `json:"claimName"`
-
-	// Path is the trace path relative to the root of the claim.
-	// +kubebuilder:validation:MinLength=1
-	Path string `json:"path"`
-}
-
-// TraceSource identifies exactly one trace artifact.
-// +kubebuilder:validation:XValidation:rule="has(self.pvc) != has(self.uri)",message="exactly one of pvc or uri must be specified"
-type TraceSource struct {
-	// PVC reads the artifact from a PersistentVolumeClaim in the DGDR namespace.
-	// +optional
-	PVC *TracePVCSource `json:"pvc,omitempty"`
-
-	// URI identifies an object-storage location supported by the DGDR integration.
-	// +optional
-	// +kubebuilder:validation:MinLength=1
-	URI string `json:"uri,omitempty"`
-}
-
-// TraceReplaySpec configures current Sweeper controls for a decoded trace.
-type TraceReplaySpec struct {
-	// ArrivalSpeedupRatio multiplies the recorded request-arrival rate. 1.0 preserves it.
-	// +optional
-	// +kubebuilder:default=1
-	// +kubebuilder:validation:ExclusiveMinimum=true
-	// +kubebuilder:validation:Minimum=0
-	ArrivalSpeedupRatio *float64 `json:"arrivalSpeedupRatio,omitempty"`
-
-	// Concurrency changes trace replay to closed loop and ignores recorded timestamps.
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	Concurrency *int32 `json:"concurrency,omitempty"`
-}
-
-// TraceWorkloadSpec replays requests from an artifact.
-type TraceWorkloadSpec struct {
-	// Format identifies the trace decoder.
-	// +optional
-	// +kubebuilder:default=mooncake
-	// +kubebuilder:validation:MinLength=1
-	Format string `json:"format,omitempty"`
-
-	// Source identifies exactly one trace artifact.
-	Source TraceSource `json:"source"`
-
-	// Replay configures current Sweeper controls for a decoded trace.
-	// +optional
-	Replay *TraceReplaySpec `json:"replay,omitempty"`
-}
-
 // KVLoadRatio is either a pinned load ratio or a minimum/maximum range.
-// The installed Sweeper performs mode-specific validation.
+// AISimulate performs mode-specific validation.
 // +kubebuilder:validation:MinItems=1
 // +kubebuilder:validation:MaxItems=2
 type KVLoadRatio []float64
 
-// StaticWorkloadSpec defines one of Sweeper's synthetic workload shapes.
+// StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes.
 // +kubebuilder:validation:XValidation:rule="(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) == 1",message="exactly one of requestRate, concurrency, or kvLoadRatio must be specified"
+// +kubebuilder:validation:XValidation:rule="has(self.requestCount) != has(self.numRequestRatio)",message="exactly one of requestCount or numRequestRatio must be specified"
 type StaticWorkloadSpec struct {
 	// ISL is the input sequence length in tokens.
 	// +kubebuilder:validation:Minimum=1
@@ -133,9 +75,16 @@ type StaticWorkloadSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	OSL int32 `json:"osl"`
 
-	// NumRequestRatio sets request count relative to the selected load.
+	// RequestCount is the absolute number of requests evaluated.
+	// +optional
 	// +kubebuilder:validation:Minimum=1
-	NumRequestRatio float64 `json:"numRequestRatio"`
+	RequestCount *int64 `json:"requestCount,omitempty"`
+
+	// NumRequestRatio sets request count relative to the selected load.
+	// +optional
+	// +kubebuilder:validation:ExclusiveMinimum=true
+	// +kubebuilder:validation:Minimum=0
+	NumRequestRatio *float64 `json:"numRequestRatio,omitempty"`
 
 	// RequestRate is a fixed open-loop arrival rate in requests per second.
 	// +optional
@@ -154,33 +103,29 @@ type StaticWorkloadSpec struct {
 	KVLoadRatio KVLoadRatio `json:"kvLoadRatio,omitempty"`
 }
 
-// WorkloadSpec defines exactly one traffic model used for every candidate evaluation.
-// +kubebuilder:validation:XValidation:rule="has(self.trace) != has(self.static)",message="exactly one of trace or static must be specified"
+// WorkloadSpec defines the synthetic traffic model used for every candidate evaluation.
 type WorkloadSpec struct {
-	// Trace replays requests from an artifact.
-	// +optional
-	Trace *TraceWorkloadSpec `json:"trace,omitempty"`
-
-	// Static defines one of Sweeper's synthetic workload shapes.
+	// Static defines one of AISimulate's synthetic workload shapes.
 	// +optional
 	Static *StaticWorkloadSpec `json:"static,omitempty"`
 }
 
 // ObjectiveMode selects scalar optimization or a multi-objective Pareto search.
-// +kubebuilder:validation:Enum=optimize;pareto
+// +kubebuilder:validation:Enum=Optimize;Pareto
 type ObjectiveMode string
 
 const (
-	ObjectiveModeOptimize ObjectiveMode = "optimize"
-	ObjectiveModePareto   ObjectiveMode = "pareto"
+	ObjectiveModeOptimize ObjectiveMode = "Optimize"
+	ObjectiveModePareto   ObjectiveMode = "Pareto"
 )
 
-// ObjectiveMetric is a metric optimized by Sweeper.
-// +kubebuilder:validation:Enum=throughput;throughputPerGpu;throughputPerUser;e2eLatency;goodput;goodputPerGpu
+// ObjectiveMetric is a metric optimized by AISimulate.
+// +kubebuilder:validation:Enum=Throughput;ThroughputPerGPU;ThroughputPerUser;TTFT;E2ELatency;Goodput;GoodputPerGPU
 type ObjectiveMetric string
 
 // ObjectiveSLASpec defines per-request latency bounds used to calculate goodput.
-// +kubebuilder:validation:XValidation:rule="has(self.e2eMs) ? (!has(self.ttftMs) && !has(self.itlMs)) : (has(self.ttftMs) && has(self.itlMs))",message="specify either e2eMs or both ttftMs and itlMs"
+// An empty object disables SLA filtering.
+// +kubebuilder:validation:XValidation:rule="!has(self.e2eMs) || (!has(self.ttftMs) && !has(self.itlMs))",message="e2eMs cannot be combined with ttftMs or itlMs"
 type ObjectiveSLASpec struct {
 	// TTFTMs is the Time To First Token bound in milliseconds.
 	// +optional
@@ -202,54 +147,47 @@ type ObjectiveSLASpec struct {
 }
 
 // ObjectiveSpec defines scalar optimization or a multi-objective Pareto search.
-// +kubebuilder:validation:XValidation:rule="(self.mode == 'optimize' && has(self.metric) && !has(self.metrics)) || (self.mode == 'pareto' && !has(self.metric))",message="optimize requires metric; pareto accepts only metrics"
+// +kubebuilder:validation:XValidation:rule="(self.mode == 'Optimize' && has(self.metric) && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))",message="Optimize requires metric; Pareto requires metrics"
+// +kubebuilder:validation:XValidation:rule="!(has(self.metric) && self.metric in ['Goodput', 'GoodputPerGPU']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Goodput and GoodputPerGPU require at least one SLA bound"
+// +kubebuilder:validation:XValidation:rule="!(has(self.metrics) && self.metrics.exists(m, m in ['Goodput', 'GoodputPerGPU'])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound"
 type ObjectiveSpec struct {
-	// Mode is optimize or pareto.
-	Mode ObjectiveMode `json:"mode"`
+	// Mode selects scalar optimization or a Pareto search.
+	// +optional
+	// +kubebuilder:default=Optimize
+	Mode ObjectiveMode `json:"mode,omitempty"`
 
-	// Metric is the scalar target when mode is optimize.
+	// Metric is the scalar target when mode is Optimize.
 	// +optional
 	Metric *ObjectiveMetric `json:"metric,omitempty"`
 
-	// Metrics lists two or more scalar targets when mode is pareto. Sweeper uses
-	// its default pair when omitted.
+	// Metrics lists two or more distinct scalar targets when mode is Pareto.
 	// +optional
 	// +kubebuilder:validation:MinItems=2
+	// +listType=set
 	Metrics []ObjectiveMetric `json:"metrics,omitempty"`
 
 	// SLA defines per-request latency bounds used to calculate goodput.
 	// +optional
+	// +kubebuilder:default={ttftMs: 2000, itlMs: 30}
 	SLA *ObjectiveSLASpec `json:"sla,omitempty"`
 }
 
-// SearchBudgetSpec maps directly to Sweeper's current SweepConfig.
-type SearchBudgetSpec struct {
-	// MaxRounds is the maximum number of optimizer barrier rounds per resolved deployment-mode branch.
-	// +kubebuilder:validation:Minimum=1
-	MaxRounds int32 `json:"maxRounds"`
-
-	// CandidatesPerRound is the target number of successful unique replay configurations
-	// in one branch round. When omitted, Sweeper uses ParallelEvaluations.
+// AISimulateSpec selects the AISimulate execution artifact and supplies native input.
+type AISimulateSpec struct {
+	// Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
+	// and execution defaults are resolved outside this API.
 	// +optional
-	// +kubebuilder:validation:Minimum=1
-	CandidatesPerRound *int32 `json:"candidatesPerRound,omitempty"`
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image,omitempty"`
 
-	// ParallelEvaluations is the replay worker-process fan-out.
-	// +kubebuilder:validation:Minimum=1
-	ParallelEvaluations int32 `json:"parallelEvaluations"`
-
-	// MaxEvaluationDuration is the timeout for one candidate replay.
+	// VersionOverride declares the AISimulate compatibility version when it
+	// cannot be inferred from the effective image.
 	// +optional
-	MaxEvaluationDuration *metav1.Duration `json:"maxEvaluationDuration,omitempty"`
-}
+	// +kubebuilder:validation:MinLength=1
+	VersionOverride string `json:"versionOverride,omitempty"`
 
-// SearchSpec configures current Sweeper run control and implementation-owned dimensions.
-type SearchSpec struct {
-	// Budget maps directly to Sweeper's current SweepConfig.
-	Budget SearchBudgetSpec `json:"budget"`
-
-	// Parameters contains current Sweeper fields whose nested schema is not copied into the CRD.
-	// The installed Sweeper validates it before evaluating candidates.
+	// Parameters contains native AISimulate input. Field names and nesting use
+	// the upstream AISimulate JSON contract, including snake_case names.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
@@ -258,36 +196,46 @@ type SearchSpec struct {
 
 // RecommendationSpec controls bounded projection into DGDC resources.
 type RecommendationSpec struct {
-	// MaxCandidates is the maximum number of DGDCs owned by one run. It does not limit internal trials.
+	// MaxCandidates is the maximum number of DGDCs owned by one run. Scalar
+	// candidates are ordered best first; Pareto candidates have no scalar rank.
+	// This field does not limit internal trials.
 	// +optional
-	// +kubebuilder:default=5
+	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
 	MaxCandidates int32 `json:"maxCandidates,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
 type DynamoGraphDeploymentRequestSpec struct {
-	// ModelRef identifies the model whose deployment configurations are evaluated.
-	ModelRef ModelReference `json:"modelRef"`
+	// Model identifies the model whose deployment configurations are evaluated.
+	Model ModelSpec `json:"model"`
 
-	// Backends lists one or more inference backends searched by Sweeper and used by generated candidates.
+	// Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+	// +optional
+	// +kubebuilder:default={vllm,sglang,trtllm}
 	// +kubebuilder:validation:MinItems=1
-	Backends []Backend `json:"backends"`
+	Backends []Backend `json:"backends,omitempty"`
 
 	// Hardware bounds the accelerator configurations evaluated by the search.
-	Hardware HardwareSpec `json:"hardware"`
+	// +optional
+	Hardware *HardwareSpec `json:"hardware,omitempty"`
 
-	// Workload defines exactly one traffic model used for every candidate evaluation.
-	Workload WorkloadSpec `json:"workload"`
+	// Workload defines the synthetic traffic model used for every candidate evaluation.
+	// +optional
+	Workload *WorkloadSpec `json:"workload,omitempty"`
 
 	// Objective defines scalar optimization or a multi-objective Pareto search.
-	Objective ObjectiveSpec `json:"objective"`
+	// +optional
+	Objective *ObjectiveSpec `json:"objective,omitempty"`
 
-	// Search configures current Sweeper run control and implementation-owned dimensions.
-	Search SearchSpec `json:"search"`
+	// AISimulate selects the execution artifact and supplies native AISimulate input.
+	// +optional
+	AISimulate *AISimulateSpec `json:"aisimulate,omitempty"`
 
 	// Recommendation controls bounded projection into DGDC resources.
 	// +optional
+	// +kubebuilder:default={}
 	Recommendation *RecommendationSpec `json:"recommendation,omitempty"`
 }
 
@@ -316,12 +264,12 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:unservedversion
 // +kubebuilder:resource:shortName=dgdr
-// +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.modelRef.name`
+// +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model.name`
 // +kubebuilder:printcolumn:name="Active Run",type=string,JSONPath=`.status.activeRunRef.name`
 // +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.conditions[?(@.type=="Accepted")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// DynamoGraphDeploymentRequest is the Schema for replay-backed deployment searches.
+// DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
 type DynamoGraphDeploymentRequest struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

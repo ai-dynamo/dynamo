@@ -13,10 +13,17 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
+	structuraldefaulting "k8s.io/apiextensions-apiserver/pkg/apiserver/schema/defaulting"
+	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema/listtype"
+	apiextensionsvalidation "k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	apitest "k8s.io/apiextensions-apiserver/pkg/test"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/utils/ptr"
@@ -248,6 +255,330 @@ func TestConfigureGeneratedDGDRV1Beta2CRDs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGeneratedDGDRV1Beta2RequestSchema(t *testing.T) {
+	const crdPath = "../../config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml"
+
+	data, err := os.ReadFile(crdPath)
+	require.NoError(t, err)
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	require.NoError(t, yaml.Unmarshal(data, crd))
+
+	var version *apiextensionsv1.CustomResourceDefinitionVersion
+	for index := range crd.Spec.Versions {
+		if crd.Spec.Versions[index].Name == "v1beta2" {
+			version = &crd.Spec.Versions[index]
+			break
+		}
+	}
+	require.NotNil(t, version)
+
+	specSchema := version.Schema.OpenAPIV3Schema.Properties["spec"]
+	require.Equal(t, []string{"model"}, specSchema.Required)
+	for _, removed := range []string{"modelRef", "search", "image", "rerun", "overrides"} {
+		require.NotContains(t, specSchema.Properties, removed)
+	}
+	require.NotContains(t, specSchema.Properties["model"].Properties, "revision")
+	require.NotContains(t, specSchema.Properties["workload"].Properties, "trace")
+
+	var internalSchema apiextensions.JSONSchemaProps
+	require.NoError(t, apiextensionsv1.Convert_v1_JSONSchemaProps_To_apiextensions_JSONSchemaProps(
+		version.Schema.OpenAPIV3Schema,
+		&internalSchema,
+		nil,
+	))
+	schemaValidator, _, err := apiextensionsvalidation.NewSchemaValidator(&internalSchema)
+	require.NoError(t, err)
+	structural, err := structuralschema.NewStructural(&internalSchema)
+	require.NoError(t, err)
+	celValidator := apitest.VersionValidatorsFromFile(t, crdPath)["v1beta2"]
+	require.NotNil(t, celValidator)
+
+	validate := func(t *testing.T, object map[string]interface{}) []string {
+		t.Helper()
+		var messages []string
+		for _, validationErr := range apiextensionsvalidation.ValidateCustomResource(nil, object, schemaValidator) {
+			messages = append(messages, validationErr.Error())
+		}
+		for _, validationErr := range celValidator(object, nil) {
+			messages = append(messages, validationErr.Error())
+		}
+		for _, validationErr := range listtype.ValidateListSetsAndMaps(field.NewPath(""), structural, object) {
+			messages = append(messages, validationErr.Error())
+		}
+		return messages
+	}
+
+	t.Run("defaults", func(t *testing.T) {
+		object := validDGDRV1Beta2Request()
+		spec := object["spec"].(map[string]interface{})
+		delete(spec, "backends")
+		delete(spec["objective"].(map[string]interface{}), "mode")
+		delete(spec["objective"].(map[string]interface{}), "sla")
+		delete(spec, "recommendation")
+
+		structuraldefaulting.Default(object, structural)
+
+		require.Equal(t, []interface{}{"vllm", "sglang", "trtllm"}, spec["backends"])
+		require.Equal(t, "Optimize", spec["objective"].(map[string]interface{})["mode"])
+		require.EqualValues(t, 2000, spec["objective"].(map[string]interface{})["sla"].(map[string]interface{})["ttftMs"])
+		require.EqualValues(t, 30, spec["objective"].(map[string]interface{})["sla"].(map[string]interface{})["itlMs"])
+		require.EqualValues(t, 1, spec["recommendation"].(map[string]interface{})["maxCandidates"])
+
+		optOut := validDGDRV1Beta2Request()
+		optOutSLA := requestObjective(optOut)["sla"].(map[string]interface{})
+		structuraldefaulting.Default(optOut, structural)
+		require.Empty(t, optOutSLA)
+	})
+
+	t.Run("model only", func(t *testing.T) {
+		object := map[string]interface{}{
+			"apiVersion": "nvidia.com/v1beta2",
+			"kind":       "DynamoGraphDeploymentRequest",
+			"metadata":   map[string]interface{}{"name": "model-only"},
+			"spec":       map[string]interface{}{"model": map[string]interface{}{"name": "test/model"}},
+		}
+		structuraldefaulting.Default(object, structural)
+		require.Empty(t, validate(t, object))
+
+		spec := object["spec"].(map[string]interface{})
+		require.NotContains(t, spec, "hardware")
+		require.NotContains(t, spec, "workload")
+		require.NotContains(t, spec, "objective")
+		require.Equal(t, []interface{}{"vllm", "sglang", "trtllm"}, spec["backends"])
+		require.EqualValues(t, 1, spec["recommendation"].(map[string]interface{})["maxCandidates"])
+	})
+
+	t.Run("empty workload placeholder", func(t *testing.T) {
+		object := map[string]interface{}{
+			"apiVersion": "nvidia.com/v1beta2",
+			"kind":       "DynamoGraphDeploymentRequest",
+			"metadata":   map[string]interface{}{"name": "defaultable-workload"},
+			"spec": map[string]interface{}{
+				"model":    map[string]interface{}{"name": "test/model"},
+				"workload": map[string]interface{}{},
+			},
+		}
+		structuraldefaulting.Default(object, structural)
+		require.Empty(t, validate(t, object))
+	})
+
+	tests := []struct {
+		name    string
+		mutate  func(map[string]interface{})
+		wantErr bool
+	}{
+		{
+			name: "request count",
+			mutate: func(object map[string]interface{}) {
+				static := requestStaticWorkload(object)
+				delete(static, "numRequestRatio")
+				static["requestCount"] = int64(100)
+			},
+		},
+		{
+			name: "ratio below one",
+			mutate: func(object map[string]interface{}) {
+				requestStaticWorkload(object)["numRequestRatio"] = 0.5
+			},
+		},
+		{
+			name: "ttft only SLA",
+			mutate: func(object map[string]interface{}) {
+				requestObjective(object)["sla"] = map[string]interface{}{"ttftMs": 100.0}
+			},
+		},
+		{
+			name: "itl only SLA",
+			mutate: func(object map[string]interface{}) {
+				requestObjective(object)["sla"] = map[string]interface{}{"itlMs": 10.0}
+			},
+		},
+		{
+			name: "e2e only SLA",
+			mutate: func(object map[string]interface{}) {
+				requestObjective(object)["sla"] = map[string]interface{}{"e2eMs": 100.0}
+			},
+		},
+		{
+			name: "empty SLA opt out",
+			mutate: func(object map[string]interface{}) {
+				requestObjective(object)["sla"] = map[string]interface{}{}
+			},
+		},
+		{
+			name: "pareto metrics",
+			mutate: func(object map[string]interface{}) {
+				objective := requestObjective(object)
+				objective["mode"] = "Pareto"
+				delete(objective, "metric")
+				objective["metrics"] = []interface{}{"ThroughputPerGPU", "TTFT"}
+			},
+		},
+		{
+			name: "duplicate pareto metrics",
+			mutate: func(object map[string]interface{}) {
+				objective := requestObjective(object)
+				objective["mode"] = "Pareto"
+				delete(objective, "metric")
+				objective["metrics"] = []interface{}{"TTFT", "TTFT"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "both request count controls",
+			mutate: func(object map[string]interface{}) {
+				requestStaticWorkload(object)["requestCount"] = int64(100)
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing request count controls",
+			mutate: func(object map[string]interface{}) {
+				static := requestStaticWorkload(object)
+				delete(static, "numRequestRatio")
+			},
+			wantErr: true,
+		},
+		{
+			name: "zero request ratio",
+			mutate: func(object map[string]interface{}) {
+				requestStaticWorkload(object)["numRequestRatio"] = 0.0
+			},
+			wantErr: true,
+		},
+		{
+			name: "mixed e2e and token SLA",
+			mutate: func(object map[string]interface{}) {
+				requestObjective(object)["sla"] = map[string]interface{}{"e2eMs": 100.0, "ttftMs": 50.0}
+			},
+			wantErr: true,
+		},
+		{
+			name: "goodput without SLA",
+			mutate: func(object map[string]interface{}) {
+				objective := requestObjective(object)
+				objective["metric"] = "Goodput"
+				objective["sla"] = map[string]interface{}{}
+			},
+			wantErr: true,
+		},
+		{
+			name: "legacy metric casing",
+			mutate: func(object map[string]interface{}) {
+				requestObjective(object)["metric"] = "throughputPerGpu"
+			},
+			wantErr: true,
+		},
+		{
+			name: "recommendation limit",
+			mutate: func(object map[string]interface{}) {
+				object["spec"].(map[string]interface{})["recommendation"] = map[string]interface{}{"maxCandidates": int64(101)}
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			object := validDGDRV1Beta2Request()
+			tt.mutate(object)
+			messages := validate(t, object)
+			if tt.wantErr {
+				require.NotEmpty(t, messages)
+				return
+			}
+			require.Empty(t, messages)
+		})
+	}
+}
+
+func TestGeneratedDGDRV1Beta2ResultSchemas(t *testing.T) {
+	tests := []struct {
+		path  string
+		check func(*testing.T, apiextensionsv1.JSONSchemaProps)
+	}{
+		{
+			path: "../../config/crd/bases/nvidia.com_dynamographdeploymentcandidates.yaml",
+			check: func(t *testing.T, root apiextensionsv1.JSONSchemaProps) {
+				spec := root.Properties["spec"]
+				status := root.Properties["status"]
+				require.Contains(t, spec.Required, "parameters")
+				require.Contains(t, spec.Properties, "parameters")
+				require.Contains(t, status.Properties, "metrics")
+				require.Contains(t, status.Properties, "conditions")
+				require.NotContains(t, status.Properties, "rank")
+				require.NotContains(t, status.Properties, "experimental")
+			},
+		},
+		{
+			path: "../../config/crd/bases/nvidia.com_dynamographdeploymentruns.yaml",
+			check: func(t *testing.T, root apiextensionsv1.JSONSchemaProps) {
+				status := root.Properties["status"]
+				require.Contains(t, status.Properties, "candidateRefs")
+				require.NotContains(t, status.Properties, "provenance")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(filepath.Base(tt.path), func(t *testing.T) {
+			data, err := os.ReadFile(tt.path)
+			require.NoError(t, err)
+			crd := &apiextensionsv1.CustomResourceDefinition{}
+			require.NoError(t, yaml.Unmarshal(data, crd))
+			require.Len(t, crd.Spec.Versions, 1)
+			require.Equal(t, "v1beta2", crd.Spec.Versions[0].Name)
+			tt.check(t, *crd.Spec.Versions[0].Schema.OpenAPIV3Schema)
+		})
+	}
+}
+
+func validDGDRV1Beta2Request() map[string]interface{} {
+	return map[string]interface{}{
+		"apiVersion": "nvidia.com/v1beta2",
+		"kind":       "DynamoGraphDeploymentRequest",
+		"metadata": map[string]interface{}{
+			"name": "schema-test",
+		},
+		"spec": map[string]interface{}{
+			"model": map[string]interface{}{"name": "test/model"},
+			"backends": []interface{}{
+				"vllm",
+			},
+			"hardware": map[string]interface{}{
+				"gpu": map[string]interface{}{
+					"sku":    "h100",
+					"budget": int64(8),
+				},
+			},
+			"workload": map[string]interface{}{
+				"static": map[string]interface{}{
+					"isl":             int64(1024),
+					"osl":             int64(128),
+					"numRequestRatio": 1.0,
+					"concurrency":     int64(1),
+				},
+			},
+			"objective": map[string]interface{}{
+				"mode":   "Optimize",
+				"metric": "ThroughputPerGPU",
+				"sla":    map[string]interface{}{},
+			},
+			"recommendation": map[string]interface{}{
+				"maxCandidates": int64(1),
+			},
+		},
+	}
+}
+
+func requestObjective(object map[string]interface{}) map[string]interface{} {
+	return object["spec"].(map[string]interface{})["objective"].(map[string]interface{})
+}
+
+func requestStaticWorkload(object map[string]interface{}) map[string]interface{} {
+	return object["spec"].(map[string]interface{})["workload"].(map[string]interface{})["static"].(map[string]interface{})
 }
 
 func TestConfigureDGDRV1Beta2CRD(t *testing.T) {

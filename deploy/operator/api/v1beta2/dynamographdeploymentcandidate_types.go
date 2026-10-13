@@ -23,8 +23,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// DynamoGraphDeploymentCandidateStatus describes simulation and materialization,
-// never deployment health.
+const (
+	// DynamoGraphDeploymentCandidateConditionEvaluated reports whether AISimulate
+	// successfully evaluated the candidate.
+	DynamoGraphDeploymentCandidateConditionEvaluated = "Evaluated"
+)
+
+// DynamoGraphDeploymentCandidateStatus describes evaluation, never deployment health.
 type DynamoGraphDeploymentCandidateStatus struct {
 	// Metrics are the resolved evaluation metrics for this point.
 	// +optional
@@ -32,7 +37,8 @@ type DynamoGraphDeploymentCandidateStatus struct {
 	// +kubebuilder:validation:Type=object
 	Metrics *runtime.RawExtension `json:"metrics,omitempty"`
 
-	// Conditions describes evaluation and materialization.
+	// Conditions includes the Evaluated condition, whose observedGeneration
+	// identifies the candidate spec generation represented by metrics.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -45,10 +51,9 @@ type DynamoGraphDeploymentCandidateSpec struct {
 	v1beta1.DynamoGraphDeploymentSpec `json:",inline"`
 
 	// Parameters are the resolved evaluation parameters for this point.
-	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
-	Parameters *runtime.RawExtension `json:"parameters,omitempty"`
+	Parameters runtime.RawExtension `json:"parameters"`
 }
 
 // +kubebuilder:object:root=true

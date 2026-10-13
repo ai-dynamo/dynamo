@@ -23,7 +23,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// DynamoGraphDeploymentRunSpec is an immutable, exact copy of an accepted DGDR spec.
+// DynamoGraphDeploymentRunSpec is an immutable, resolved copy of an accepted DGDR spec.
+// Run creators resolve optional Request inputs before persisting the Run.
 type DynamoGraphDeploymentRunSpec = DynamoGraphDeploymentRequestSpec
 
 // DGDRRunPhase is a concise presentation state. Conditions remain authoritative.
@@ -47,38 +48,60 @@ type ResourceReference struct {
 	UID types.UID `json:"uid,omitempty"`
 }
 
-// RoundProgress reports completed and total optimizer rounds.
+// RoundProgress reports completed and planned optimizer rounds.
 type RoundProgress struct {
+	// Completed is the number of finished rounds.
 	Completed int32 `json:"completed"`
-	Total     int32 `json:"total"`
+
+	// Total is the number of planned rounds.
+	Total int32 `json:"total"`
 }
 
-// BranchProgress reports progress for one resolved deployment-mode branch.
+// BranchProgress reports progress for one independently optimized backend and topology branch.
 type BranchProgress struct {
-	Name   string        `json:"name"`
+	// Name is the stable branch identifier chosen by the executor.
+	Name string `json:"name"`
+
+	// Rounds reports optimizer progress for this branch.
 	Rounds RoundProgress `json:"rounds"`
 }
 
 // EvaluationProgress reports unique candidate outcomes without creating one resource per trial.
 type EvaluationProgress struct {
-	Scheduled   int64 `json:"scheduled,omitempty"`
-	Running     int64 `json:"running,omitempty"`
-	Feasible    int64 `json:"feasible,omitempty"`
-	Infeasible  int64 `json:"infeasible,omitempty"`
-	Failed      int64 `json:"failed,omitempty"`
+	// Scheduled is the number of unique evaluations accepted for execution.
+	Scheduled int64 `json:"scheduled,omitempty"`
+
+	// Running is the number of evaluations currently executing.
+	Running int64 `json:"running,omitempty"`
+
+	// Feasible is the number of completed evaluations that satisfy all constraints.
+	Feasible int64 `json:"feasible,omitempty"`
+
+	// Infeasible is the number of completed evaluations that violate at least one constraint.
+	Infeasible int64 `json:"infeasible,omitempty"`
+
+	// Failed is the number of evaluations that ended in an execution error.
+	Failed int64 `json:"failed,omitempty"`
+
+	// Unsupported is the number of configurations rejected as unsupported before evaluation.
 	Unsupported int64 `json:"unsupported,omitempty"`
-	CacheHits   int64 `json:"cacheHits,omitempty"`
+
+	// CacheHits is the number of evaluations satisfied from a prior result.
+	CacheHits int64 `json:"cacheHits,omitempty"`
 }
 
 // CandidateProgress reports bounded Kubernetes publication, not all internal trials.
 type CandidateProgress struct {
+	// ParetoFront is the number of feasible points on the current Pareto front.
 	ParetoFront int64 `json:"paretoFront,omitempty"`
-	Published   int32 `json:"published,omitempty"`
+
+	// Published is the number of Candidate resources currently referenced by this run.
+	Published int32 `json:"published,omitempty"`
 }
 
-// DGDRRunProgress contains branch-aware round limits and evaluation outcome counters.
+// DGDRRunProgress contains branch-aware optimizer and evaluation outcome counters.
 type DGDRRunProgress struct {
-	// Branches reports each resolved deployment-mode branch because MaxRounds applies per branch.
+	// Branches reports each independently optimized backend and topology branch.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
@@ -93,12 +116,6 @@ type DGDRRunProgress struct {
 	Candidates *CandidateProgress `json:"candidates,omitempty"`
 }
 
-// DGDRRunProvenance records execution implementation versions.
-type DGDRRunProvenance struct {
-	SweeperVersion string `json:"sweeperVersion,omitempty"`
-	ReplayVersion  string `json:"replayVersion,omitempty"`
-}
-
 // DynamoGraphDeploymentRunStatus represents one search execution's observed state.
 type DynamoGraphDeploymentRunStatus struct {
 	// Phase is a concise presentation state. Conditions remain authoritative.
@@ -109,7 +126,7 @@ type DynamoGraphDeploymentRunStatus struct {
 	// +optional
 	JobRef *ResourceReference `json:"jobRef,omitempty"`
 
-	// Progress contains branch-aware round limits and evaluation outcome counters.
+	// Progress contains branch-aware optimizer and evaluation outcome counters.
 	// +optional
 	Progress *DGDRRunProgress `json:"progress,omitempty"`
 
@@ -117,10 +134,6 @@ type DynamoGraphDeploymentRunStatus struct {
 	// represents rank, best first, for scalar searches.
 	// +optional
 	CandidateRefs []corev1.LocalObjectReference `json:"candidateRefs,omitempty"`
-
-	// Provenance records execution implementations.
-	// +optional
-	Provenance *DGDRRunProvenance `json:"provenance,omitempty"`
 
 	// StartTime is when execution started.
 	// +optional
@@ -130,7 +143,8 @@ type DynamoGraphDeploymentRunStatus struct {
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
-	// LastProgressTime is the latest progress update or heartbeat.
+	// LastProgressTime is the latest coarse-grained progress update or heartbeat.
+	// Writers should update it periodically, not for every evaluation.
 	// +optional
 	LastProgressTime *metav1.Time `json:"lastProgressTime,omitempty"`
 

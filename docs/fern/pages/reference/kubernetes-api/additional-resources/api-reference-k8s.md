@@ -3108,11 +3108,29 @@ Package v1beta2 contains API Schema definitions for the nvidia.com v1beta2 API g
 
 
 
+#### AISimulateSpec
+
+
+
+AISimulateSpec selects the AISimulate execution artifact and supplies native input.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `image` _string_ | Image selects a Dynamo-compatible AISimulate runner. When omitted, admission<br />and execution defaults are resolved outside this API. |  | MinLength: 1 <br />Optional: \{\} <br /> |
+| `versionOverride` _string_ | VersionOverride declares the AISimulate compatibility version when it<br />cannot be inferred from the effective image. |  | MinLength: 1 <br />Optional: \{\} <br /> |
+| `parameters` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Parameters contains native AISimulate input. Field names and nesting use<br />the upstream AISimulate JSON contract, including snake_case names. |  | Type: object <br />Optional: \{\} <br /> |
+
+
 #### Backend
 
 _Underlying type:_ _string_
 
-Backend identifies an inference backend searched by Sweeper and used by generated candidates.
+Backend identifies an inference backend searched by AISimulate and used by generated candidates.
 
 _Validation:_
 - Enum: [vllm sglang trtllm]
@@ -3131,7 +3149,7 @@ _Appears in:_
 
 
 
-BranchProgress reports progress for one resolved deployment-mode branch.
+BranchProgress reports progress for one independently optimized backend and topology branch.
 
 
 
@@ -3140,8 +3158,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ |  |  |  |
-| `rounds` _[RoundProgress](#roundprogress)_ |  |  |  |
+| `name` _string_ | Name is the stable branch identifier chosen by the executor. |  |  |
+| `rounds` _[RoundProgress](#roundprogress)_ | Rounds reports optimizer progress for this branch. |  |  |
 
 
 #### CandidateProgress
@@ -3157,8 +3175,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `paretoFront` _integer_ |  |  |  |
-| `published` _integer_ |  |  |  |
+| `paretoFront` _integer_ | ParetoFront is the number of feasible points on the current Pareto front. |  |  |
+| `published` _integer_ | Published is the number of Candidate resources currently referenced by this run. |  |  |
 
 
 #### DGDRRunPhase
@@ -3185,7 +3203,7 @@ _Appears in:_
 
 
 
-DGDRRunProgress contains branch-aware round limits and evaluation outcome counters.
+DGDRRunProgress contains branch-aware optimizer and evaluation outcome counters.
 
 
 
@@ -3194,26 +3212,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `branches` _[BranchProgress](#branchprogress) array_ | Branches reports each resolved deployment-mode branch because MaxRounds applies per branch. |  | Optional: \{\} <br /> |
+| `branches` _[BranchProgress](#branchprogress) array_ | Branches reports each independently optimized backend and topology branch. |  | Optional: \{\} <br /> |
 | `evaluations` _[EvaluationProgress](#evaluationprogress)_ | Evaluations reports unique candidate outcomes. |  | Optional: \{\} <br /> |
 | `candidates` _[CandidateProgress](#candidateprogress)_ | Candidates reports bounded Kubernetes publication. |  | Optional: \{\} <br /> |
-
-
-#### DGDRRunProvenance
-
-
-
-DGDRRunProvenance records execution implementation versions.
-
-
-
-_Appears in:_
-- [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `sweeperVersion` _string_ |  |  |  |
-| `replayVersion` _string_ |  |  |  |
 
 
 #### DynamoGraphDeploymentCandidate
@@ -3259,15 +3260,14 @@ _Appears in:_
 | `restart` _[Restart](#restart)_ | restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | topologyConstraint is the deployment-level topology constraint. When<br />set, `spec.topologyConstraint.clusterTopologyName` names the ClusterTopology<br />CR to use. `spec.topologyConstraint.packDomain` is optional at this<br />level and can be omitted when only components carry constraints.<br />Components without their own `topologyConstraint` inherit from this value. |  | Optional: \{\} <br /> |
 | `experimental` _[DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)_ | experimental groups graph-level preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
-| `parameters` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Parameters are the resolved evaluation parameters for this point. |  | Type: object <br />Optional: \{\} <br /> |
+| `parameters` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Parameters are the resolved evaluation parameters for this point. |  | Type: object <br /> |
 
 
 #### DynamoGraphDeploymentCandidateStatus
 
 
 
-DynamoGraphDeploymentCandidateStatus describes simulation and materialization,
-never deployment health.
+DynamoGraphDeploymentCandidateStatus describes evaluation, never deployment health.
 
 
 
@@ -3277,14 +3277,14 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `metrics` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Metrics are the resolved evaluation metrics for this point. |  | Type: object <br />Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions describes evaluation and materialization. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions includes the Evaluated condition, whose observedGeneration<br />identifies the candidate spec generation represented by metrics. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRequest
 
 
 
-DynamoGraphDeploymentRequest is the Schema for replay-backed deployment searches.
+DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
 
 
 
@@ -3312,13 +3312,13 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `modelRef` _[ModelReference](#modelreference)_ | ModelRef identifies the model whose deployment configurations are evaluated. |  |  |
-| `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by Sweeper and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br /> |
-| `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search. |  |  |
-| `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines exactly one traffic model used for every candidate evaluation. |  |  |
-| `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization or a multi-objective Pareto search. |  |  |
-| `search` _[SearchSpec](#searchspec)_ | Search configures current Sweeper run control and implementation-owned dimensions. |  |  |
-| `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  |  |
+| `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. | [vllm sglang trtllm] | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
+| `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation. |  | Optional: \{\} <br /> |
+| `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization or a multi-objective Pareto search. |  | Optional: \{\} <br /> |
+| `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate selects the execution artifact and supplies native AISimulate input. |  | Optional: \{\} <br /> |
+| `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. | \{  \} | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRequestStatus
@@ -3376,12 +3376,11 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `phase` _[DGDRRunPhase](#dgdrrunphase)_ | Phase is a concise presentation state. Conditions remain authoritative. |  | Enum: [Pending Running Succeeded Failed] <br />Optional: \{\} <br /> |
 | `jobRef` _[ResourceReference](#resourcereference)_ | JobRef identifies the controller-owned Job for this run. |  | Optional: \{\} <br /> |
-| `progress` _[DGDRRunProgress](#dgdrrunprogress)_ | Progress contains branch-aware round limits and evaluation outcome counters. |  | Optional: \{\} <br /> |
+| `progress` _[DGDRRunProgress](#dgdrrunprogress)_ | Progress contains branch-aware optimizer and evaluation outcome counters. |  | Optional: \{\} <br /> |
 | `candidateRefs` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core) array_ | CandidateRefs identifies the current bounded DGDC projection. List order<br />represents rank, best first, for scalar searches. |  | Optional: \{\} <br /> |
-| `provenance` _[DGDRRunProvenance](#dgdrrunprovenance)_ | Provenance records execution implementations. |  | Optional: \{\} <br /> |
 | `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when execution started. |  | Optional: \{\} <br /> |
 | `completionTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CompletionTime is present only after a terminal outcome. |  | Optional: \{\} <br /> |
-| `lastProgressTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | LastProgressTime is the latest progress update or heartbeat. |  | Optional: \{\} <br /> |
+| `lastProgressTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | LastProgressTime is the latest coarse-grained progress update or heartbeat.<br />Writers should update it periodically, not for every evaluation. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains standard Kubernetes conditions merged by type. |  | Optional: \{\} <br /> |
 
 
@@ -3398,13 +3397,13 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `scheduled` _integer_ |  |  |  |
-| `running` _integer_ |  |  |  |
-| `feasible` _integer_ |  |  |  |
-| `infeasible` _integer_ |  |  |  |
-| `failed` _integer_ |  |  |  |
-| `unsupported` _integer_ |  |  |  |
-| `cacheHits` _integer_ |  |  |  |
+| `scheduled` _integer_ | Scheduled is the number of unique evaluations accepted for execution. |  |  |
+| `running` _integer_ | Running is the number of evaluations currently executing. |  |  |
+| `feasible` _integer_ | Feasible is the number of completed evaluations that satisfy all constraints. |  |  |
+| `infeasible` _integer_ | Infeasible is the number of completed evaluations that violate at least one constraint. |  |  |
+| `failed` _integer_ | Failed is the number of evaluations that ended in an execution error. |  |  |
+| `unsupported` _integer_ | Unsupported is the number of configurations rejected as unsupported before evaluation. |  |  |
+| `cacheHits` _integer_ | CacheHits is the number of evaluations satisfied from a prior result. |  |  |
 
 
 #### GPUHardwareSpec
@@ -3420,7 +3419,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `sku` _string_ | SKU identifies the accelerator using the Sweeper hardware catalog name. |  | MinLength: 1 <br /> |
+| `sku` _string_ | SKU identifies the accelerator using the AISimulate hardware catalog name. |  | MinLength: 1 <br /> |
 | `budget` _integer_ | Budget is the maximum total number of GPUs one candidate may use. |  | Minimum: 1 <br /> |
 
 
@@ -3445,7 +3444,7 @@ _Appears in:_
 _Underlying type:_ _float array_
 
 KVLoadRatio is either a pinned load ratio or a minimum/maximum range.
-The installed Sweeper performs mode-specific validation.
+AISimulate performs mode-specific validation.
 
 _Validation:_
 - MaxItems: 2
@@ -3456,11 +3455,11 @@ _Appears in:_
 
 
 
-#### ModelReference
+#### ModelSpec
 
 
 
-ModelReference identifies the model whose deployment configurations are evaluated.
+ModelSpec identifies the model whose deployment configurations are evaluated.
 
 
 
@@ -3470,17 +3469,16 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name identifies the model in the syntax accepted by the selected backend. |  | MinLength: 1 <br /> |
-| `revision` _string_ | Revision pins repository contents. Backends that do not support revisions reject this field. |  | Optional: \{\} <br /> |
 
 
 #### ObjectiveMetric
 
 _Underlying type:_ _string_
 
-ObjectiveMetric is a metric optimized by Sweeper.
+ObjectiveMetric is a metric optimized by AISimulate.
 
 _Validation:_
-- Enum: [throughput throughputPerGpu throughputPerUser e2eLatency goodput goodputPerGpu]
+- Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]
 
 _Appears in:_
 - [ObjectiveSpec](#objectivespec)
@@ -3494,15 +3492,15 @@ _Underlying type:_ _string_
 ObjectiveMode selects scalar optimization or a multi-objective Pareto search.
 
 _Validation:_
-- Enum: [optimize pareto]
+- Enum: [Optimize Pareto]
 
 _Appears in:_
 - [ObjectiveSpec](#objectivespec)
 
 | Field | Description |
 | --- | --- |
-| `optimize` |  |
-| `pareto` |  |
+| `Optimize` |  |
+| `Pareto` |  |
 
 
 #### ObjectiveSLASpec
@@ -3510,6 +3508,7 @@ _Appears in:_
 
 
 ObjectiveSLASpec defines per-request latency bounds used to calculate goodput.
+An empty object disables SLA filtering.
 
 
 
@@ -3536,10 +3535,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `mode` _[ObjectiveMode](#objectivemode)_ | Mode is optimize or pareto. |  | Enum: [optimize pareto] <br /> |
-| `metric` _[ObjectiveMetric](#objectivemetric)_ | Metric is the scalar target when mode is optimize. |  | Enum: [throughput throughputPerGpu throughputPerUser e2eLatency goodput goodputPerGpu] <br />Optional: \{\} <br /> |
-| `metrics` _[ObjectiveMetric](#objectivemetric) array_ | Metrics lists two or more scalar targets when mode is pareto. Sweeper uses<br />its default pair when omitted. |  | Enum: [throughput throughputPerGpu throughputPerUser e2eLatency goodput goodputPerGpu] <br />MinItems: 2 <br />Optional: \{\} <br /> |
-| `sla` _[ObjectiveSLASpec](#objectiveslaspec)_ | SLA defines per-request latency bounds used to calculate goodput. |  | Optional: \{\} <br /> |
+| `mode` _[ObjectiveMode](#objectivemode)_ | Mode selects scalar optimization or a Pareto search. | Optimize | Enum: [Optimize Pareto] <br />Optional: \{\} <br /> |
+| `metric` _[ObjectiveMetric](#objectivemetric)_ | Metric is the scalar target when mode is Optimize. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />Optional: \{\} <br /> |
+| `metrics` _[ObjectiveMetric](#objectivemetric) array_ | Metrics lists two or more distinct scalar targets when mode is Pareto. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />MinItems: 2 <br />Optional: \{\} <br /> |
+| `sla` _[ObjectiveSLASpec](#objectiveslaspec)_ | SLA defines per-request latency bounds used to calculate goodput. | \{ itlMs:30 ttftMs:2000 \} | Optional: \{\} <br /> |
 
 
 #### RecommendationSpec
@@ -3555,7 +3554,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `maxCandidates` _integer_ | MaxCandidates is the maximum number of DGDCs owned by one run. It does not limit internal trials. | 5 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `maxCandidates` _integer_ | MaxCandidates is the maximum number of DGDCs owned by one run. Scalar<br />candidates are ordered best first; Pareto candidates have no scalar rank.<br />This field does not limit internal trials. | 1 | Maximum: 100 <br />Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### ResourceReference
@@ -3579,7 +3578,7 @@ _Appears in:_
 
 
 
-RoundProgress reports completed and total optimizer rounds.
+RoundProgress reports completed and planned optimizer rounds.
 
 
 
@@ -3588,51 +3587,15 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `completed` _integer_ |  |  |  |
-| `total` _integer_ |  |  |  |
-
-
-#### SearchBudgetSpec
-
-
-
-SearchBudgetSpec maps directly to Sweeper's current SweepConfig.
-
-
-
-_Appears in:_
-- [SearchSpec](#searchspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `maxRounds` _integer_ | MaxRounds is the maximum number of optimizer barrier rounds per resolved deployment-mode branch. |  | Minimum: 1 <br /> |
-| `candidatesPerRound` _integer_ | CandidatesPerRound is the target number of successful unique replay configurations<br />in one branch round. When omitted, Sweeper uses ParallelEvaluations. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `parallelEvaluations` _integer_ | ParallelEvaluations is the replay worker-process fan-out. |  | Minimum: 1 <br /> |
-| `maxEvaluationDuration` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)_ | MaxEvaluationDuration is the timeout for one candidate replay. |  | Optional: \{\} <br /> |
-
-
-#### SearchSpec
-
-
-
-SearchSpec configures current Sweeper run control and implementation-owned dimensions.
-
-
-
-_Appears in:_
-- [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `budget` _[SearchBudgetSpec](#searchbudgetspec)_ | Budget maps directly to Sweeper's current SweepConfig. |  |  |
-| `parameters` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Parameters contains current Sweeper fields whose nested schema is not copied into the CRD.<br />The installed Sweeper validates it before evaluating candidates. |  | Type: object <br />Optional: \{\} <br /> |
+| `completed` _integer_ | Completed is the number of finished rounds. |  |  |
+| `total` _integer_ | Total is the number of planned rounds. |  |  |
 
 
 #### StaticWorkloadSpec
 
 
 
-StaticWorkloadSpec defines one of Sweeper's synthetic workload shapes.
+StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes.
 
 
 
@@ -3643,86 +3606,18 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `isl` _integer_ | ISL is the input sequence length in tokens. |  | Minimum: 1 <br /> |
 | `osl` _integer_ | OSL is the output sequence length in tokens. |  | Minimum: 1 <br /> |
-| `numRequestRatio` _float_ | NumRequestRatio sets request count relative to the selected load. |  | Minimum: 1 <br /> |
+| `requestCount` _integer_ | RequestCount is the absolute number of requests evaluated. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `numRequestRatio` _float_ | NumRequestRatio sets request count relative to the selected load. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `requestRate` _float_ | RequestRate is a fixed open-loop arrival rate in requests per second. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `concurrency` _integer_ | Concurrency is a fixed closed-loop in-flight request cap. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `kvLoadRatio` _[KVLoadRatio](#kvloadratio)_ | KVLoadRatio derives concurrency from candidate KV capacity. A two-value range<br />is supported only for a Pareto objective. |  | MaxItems: 2 <br />MinItems: 1 <br />Optional: \{\} <br /> |
-
-
-#### TracePVCSource
-
-
-
-TracePVCSource identifies a trace artifact on a PersistentVolumeClaim in the DGDR namespace.
-
-
-
-_Appears in:_
-- [TraceSource](#tracesource)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `claimName` _string_ | ClaimName is the PersistentVolumeClaim containing the trace. |  | MinLength: 1 <br /> |
-| `path` _string_ | Path is the trace path relative to the root of the claim. |  | MinLength: 1 <br /> |
-
-
-#### TraceReplaySpec
-
-
-
-TraceReplaySpec configures current Sweeper controls for a decoded trace.
-
-
-
-_Appears in:_
-- [TraceWorkloadSpec](#traceworkloadspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `arrivalSpeedupRatio` _float_ | ArrivalSpeedupRatio multiplies the recorded request-arrival rate. 1.0 preserves it. | 1 | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
-| `concurrency` _integer_ | Concurrency changes trace replay to closed loop and ignores recorded timestamps. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-
-
-#### TraceSource
-
-
-
-TraceSource identifies exactly one trace artifact.
-
-
-
-_Appears in:_
-- [TraceWorkloadSpec](#traceworkloadspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `pvc` _[TracePVCSource](#tracepvcsource)_ | PVC reads the artifact from a PersistentVolumeClaim in the DGDR namespace. |  | Optional: \{\} <br /> |
-| `uri` _string_ | URI identifies an object-storage location supported by the DGDR integration. |  | MinLength: 1 <br />Optional: \{\} <br /> |
-
-
-#### TraceWorkloadSpec
-
-
-
-TraceWorkloadSpec replays requests from an artifact.
-
-
-
-_Appears in:_
-- [WorkloadSpec](#workloadspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `format` _string_ | Format identifies the trace decoder. | mooncake | MinLength: 1 <br />Optional: \{\} <br /> |
-| `source` _[TraceSource](#tracesource)_ | Source identifies exactly one trace artifact. |  |  |
-| `replay` _[TraceReplaySpec](#tracereplayspec)_ | Replay configures current Sweeper controls for a decoded trace. |  | Optional: \{\} <br /> |
 
 
 #### WorkloadSpec
 
 
 
-WorkloadSpec defines exactly one traffic model used for every candidate evaluation.
+WorkloadSpec defines the synthetic traffic model used for every candidate evaluation.
 
 
 
@@ -3731,8 +3626,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `trace` _[TraceWorkloadSpec](#traceworkloadspec)_ | Trace replays requests from an artifact. |  | Optional: \{\} <br /> |
-| `static` _[StaticWorkloadSpec](#staticworkloadspec)_ | Static defines one of Sweeper's synthetic workload shapes. |  | Optional: \{\} <br /> |
+| `static` _[StaticWorkloadSpec](#staticworkloadspec)_ | Static defines one of AISimulate's synthetic workload shapes. |  | Optional: \{\} <br /> |
 
 
 
