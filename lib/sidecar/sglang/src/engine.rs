@@ -351,7 +351,7 @@ impl LLMEngine for SglangSidecarEngine {
                     "native SGLang Generate is unavailable because no ready incremental HTTP endpoint was discovered",
                 )
             })?;
-            return Ok(native_http.generate(native_request, ctx, self.cancel.clone()));
+            return Ok(native_http.generate(native_request, ctx, self.cancel.child_token()));
         }
         let mut grpc_client = state.pool.stream_client();
 
