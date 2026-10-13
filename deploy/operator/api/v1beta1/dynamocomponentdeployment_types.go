@@ -470,12 +470,8 @@ const dynamoNamespaceHashLength = 8
 // When `globalDynamoNamespace` is true, returns the global namespace constant.
 // Otherwise returns `{k8sNamespace}-{dgdName}` with dots in `dgdName` replaced
 // by hyphens so that the namespace can safely form the first segment of
-// endpoint paths.
-//
-// The result is also used as a label value, so it is capped at 63 bytes. Values
-// of 63 bytes or less are returned unchanged. Longer values keep a prefix and
-// end in `-` plus a short SHA-256 hash of the full value, so the result stays
-// deterministic and distinct for names that share a long prefix.
+// endpoint paths. The result is also a label value, so values over 63 bytes
+// keep a prefix and end in `-` plus a short SHA-256 hash of the full value.
 func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName string) string {
 	if globalDynamoNamespace {
 		return commonconsts.GlobalDynamoNamespace
