@@ -22,10 +22,6 @@ _CANCELLATION_REGISTRATION_WAIT_TIMEOUT_S = 30.0
 _CANCELLATION_DISPATCH_WAIT_TIMEOUT_S = 0.25
 
 
-async def _next_stream_item(iterator: AsyncIterator[Any]) -> Any:
-    return await anext(iterator)
-
-
 def _consume_detached_task(task: asyncio.Task[Any]) -> None:
     """Consume a detached cancellation task result without surfacing closure."""
     try:
@@ -110,106 +106,69 @@ class CancellationMixin:
     ) -> AsyncGenerator[Any, None]:
         """Drain briefly after abort, then stop a stream that did not terminate.
 
-        Until cancellation fires, chunks are awaited directly: racing every chunk
-        against the cancellation task costs a Task plus asyncio.wait() per token.
-        Cancellation arms a timer that interrupts the in-flight read at the drain
-        deadline (at once if the monitor failed); after that, reads race the
-        deadline as before.
+        One reader task per stream fetches a chunk each time the consumer asks,
+        so the consumer only waits on a plain future, not a Task plus
+        asyncio.wait() per chunk. Cancellation resolves that future at the drain
+        deadline (at once if the monitor failed), even if the stream is slow to
+        honor cancellation; the reader is then cancelled and detached.
         """
         iterator = aiter(stream_source)
         loop = asyncio.get_running_loop()
-        drain_deadline: float | None = None
-        if not cancellation_task.done():
-            reader: asyncio.Task[Any] | None = None
-            interrupted = False
-            timer: asyncio.TimerHandle | None = None
+        # Carries the consumer's reply future to the reader.
+        request: asyncio.Future[asyncio.Future[Any]] = loop.create_future()
+        reply: asyncio.Future[Any] | None = None
+        interrupted = False
+        timer: asyncio.TimerHandle | None = None
 
-            def interrupt() -> None:
-                nonlocal interrupted
-                interrupted = True
-                if reader is not None:
-                    reader.cancel()
+        async def read_on_request() -> None:
+            nonlocal request
+            while True:
+                pending = await request
+                request = loop.create_future()
+                try:
+                    item = await anext(iterator)
+                except (Exception, asyncio.CancelledError) as exc:
+                    if not pending.done():
+                        pending.set_exception(exc)
+                    return
+                if pending.done():  # the consumer stopped waiting
+                    return
+                pending.set_result(item)
 
-            def on_cancellation(task: asyncio.Task[Any]) -> None:
-                nonlocal drain_deadline, timer
-                if task.cancelled():
-                    return
-                if task.exception() is not None:
-                    interrupt()
-                    return
-                drain_deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_S
+        def interrupt() -> None:
+            nonlocal interrupted
+            interrupted = True
+            if reply is not None and not reply.done():
+                reply.set_result(None)
+
+        def on_cancellation(task: asyncio.Task[Any]) -> None:
+            nonlocal timer
+            if task.cancelled() or task.exception() is not None:
+                interrupt()
+            else:
                 timer = loop.call_later(_CANCELLATION_DRAIN_TIMEOUT_S, interrupt)
 
-            cancellation_task.add_done_callback(on_cancellation)
-            try:
-                while not cancellation_task.done():
-                    reader = asyncio.current_task()
-                    try:
-                        item = await anext(iterator)
-                    except StopAsyncIteration:
-                        return
-                    except asyncio.CancelledError:
-                        if not interrupted:
-                            raise
-                        # Withdraw our own cancel request; another one still
-                        # pending (the consumer went away too) wins.
-                        current = asyncio.current_task()
-                        uncancel = getattr(current, "uncancel", None)
-                        if uncancel is not None and uncancel() > 0:
-                            raise
-                        cancellation_task.result()  # re-raise a monitor failure
-                        logging.warning(
-                            "Timed out draining SGLang stream after cancellation"
-                        )
-                        return
-                    finally:
-                        reader = None
-                    yield item
-            finally:
-                cancellation_task.remove_done_callback(on_cancellation)
-                if timer is not None:
-                    timer.cancel()
-            cancellation_task.result()  # re-raise a monitor failure
-            if drain_deadline is None:
-                drain_deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_S
-        while True:
-            next_item = asyncio.create_task(_next_stream_item(iterator))
-            try:
-                if drain_deadline is None:
-                    done, _ = await asyncio.wait(
-                        (next_item, cancellation_task),
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if cancellation_task in done:
-                        cancellation_task.result()
-                        drain_deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_S
-                    if next_item in done:
-                        try:
-                            yield next_item.result()
-                        except StopAsyncIteration:
-                            return
-                        continue
-
-                assert drain_deadline is not None
-                remaining = drain_deadline - loop.time()
-                if remaining <= 0:
-                    logging.warning(
-                        "Timed out draining SGLang stream after cancellation"
-                    )
-                    return
-                done, _ = await asyncio.wait((next_item,), timeout=remaining)
-                if next_item not in done:
-                    logging.warning(
-                        "Timed out draining SGLang stream after cancellation"
-                    )
-                    return
+        reader = asyncio.create_task(read_on_request())
+        cancellation_task.add_done_callback(on_cancellation)
+        try:
+            while not interrupted:
+                reply = loop.create_future()
+                request.set_result(reply)
                 try:
-                    yield next_item.result()
+                    item = await reply
                 except StopAsyncIteration:
                     return
-            finally:
-                if not next_item.done():
-                    _cancel_and_detach(next_item)
+                if interrupted:
+                    break
+                yield item
+            cancellation_task.result()  # re-raise a monitor failure
+            logging.warning("Timed out draining SGLang stream after cancellation")
+        finally:
+            cancellation_task.remove_done_callback(on_cancellation)
+            if timer is not None:
+                timer.cancel()
+            if not reader.done():
+                _cancel_and_detach(reader)
 
     @asynccontextmanager
     async def _wait_for_signal(self, context: Context) -> AsyncGenerator[bool, None]:
@@ -491,6 +450,7 @@ class CancellationMixin:
         finally:
             request_id = self._resolved_request_id(request_id_future)
             ordered_abort_task = None
+            owner_cancelled: asyncio.CancelledError | None = None
             try:
                 if not cancellation_task.done() and (
                     context.is_stopped()
@@ -500,10 +460,14 @@ class CancellationMixin:
                 ):
                     # The signal fired and the stream ended first: let the monitor
                     # finish ordering its abort rather than racing a fallback abort.
-                    await asyncio.wait(
-                        (cancellation_task,),
-                        timeout=_CANCELLATION_DISPATCH_WAIT_TIMEOUT_S,
-                    )
+                    try:
+                        await asyncio.wait(
+                            (cancellation_task,),
+                            timeout=_CANCELLATION_DISPATCH_WAIT_TIMEOUT_S,
+                        )
+                    except asyncio.CancelledError as exc:
+                        # Finish the cleanup below, then propagate.
+                        owner_cancelled = exc
                 if not cancellation_task.done():
                     logging.debug(
                         "Cancelling cancellation monitor task for SGLang Request ID %s, Context: %s",
@@ -527,3 +491,5 @@ class CancellationMixin:
 
             if self.shutdown_event and self.shutdown_event.is_set():
                 raise EngineShutdown("Engine was shut down during token generation")
+            if owner_cancelled is not None:
+                raise owner_cancelled

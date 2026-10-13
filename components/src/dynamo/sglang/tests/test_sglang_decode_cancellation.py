@@ -52,6 +52,56 @@ async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
+async def test_cancellation_monitor_cleanup_finishes_when_owner_cancelled(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.cancellation._CANCELLATION_DISPATCH_WAIT_TIMEOUT_S",
+        5,
+    )
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.shutdown_event = None
+    handler._abort_tasks = set()
+    abort_calls = []
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            abort_request=lambda rid, abort_all: abort_calls.append(rid)
+        )
+    )
+    monitor_cancelled = asyncio.Event()
+
+    async def monitor_never_finishes(*_args):
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            monitor_cancelled.set()
+            raise
+
+    handler._handle_cancellation = monitor_never_finishes
+    request_id_future = asyncio.get_running_loop().create_future()
+    request_id_future.set_result("sglang-request-id")
+    context = SimpleNamespace(id=lambda: "request-id", is_stopped=lambda: True)
+    in_cleanup = asyncio.Event()
+
+    async def owner():
+        async with handler._cancellation_monitor(
+            request_id_future, context, request_ids={"sglang-request-id"}
+        ):
+            in_cleanup.set()
+
+    owner_task = asyncio.create_task(owner())
+    await in_cleanup.wait()
+    await asyncio.sleep(0)  # the owner is now waiting on the monitor
+    owner_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await owner_task
+    assert monitor_cancelled.is_set()
+    assert abort_calls == ["sglang-request-id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_cancellation_monitor_keeps_pending_ordered_abort_alive(
     decode_cancellation_case,
 ):
@@ -607,8 +657,9 @@ async def test_cancelled_stream_starts_deadline_when_chunk_is_already_ready(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
+@pytest.mark.parametrize("cancel_during_read", [False, True])
 async def test_cancelled_stream_drain_does_not_wait_for_resistant_iterator(
-    decode_cancellation_case, monkeypatch, caplog
+    decode_cancellation_case, monkeypatch, caplog, cancel_during_read
 ):
     caplog.set_level(logging.WARNING)
     monkeypatch.setattr(
@@ -627,8 +678,11 @@ async def test_cancelled_stream_drain_does_not_wait_for_resistant_iterator(
         iterator_finished.set()
         yield {}
 
-    cancellation_task = asyncio.create_task(asyncio.sleep(0))
-    await cancellation_task
+    if cancel_during_read:
+        cancellation_task = asyncio.create_task(asyncio.sleep(0.005))
+    else:
+        cancellation_task = asyncio.create_task(asyncio.sleep(0))
+        await cancellation_task
     started = asyncio.get_running_loop().time()
     outputs = await _collect(
         decode_cancellation_case.handler._stream_until_cancelled(
@@ -646,7 +700,7 @@ async def test_cancelled_stream_drain_does_not_wait_for_resistant_iterator(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
-async def test_stream_reads_chunks_directly_until_cancellation(
+async def test_stream_does_not_race_each_chunk_against_cancellation(
     decode_cancellation_case, monkeypatch
 ):
     async def no_race(*_args, **_kwargs):
@@ -707,10 +761,8 @@ async def test_cancellation_during_read_is_bounded_by_drain_deadline(
     outputs = await asyncio.wait_for(consumer, timeout=1)
 
     assert outputs == [{"chunk": 0}]
-    assert read_cancelled.is_set()
     assert "Timed out draining SGLang stream after cancellation" in caplog.messages
-    # The interrupt withdraws its own cancel request.
-    assert consumer.cancelling() == 0
+    await asyncio.wait_for(read_cancelled.wait(), timeout=1)
 
 
 @pytest.mark.asyncio
