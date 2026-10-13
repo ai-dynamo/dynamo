@@ -114,6 +114,40 @@ Use `LoadRestrictionsNone` only with reviewed paths. Inspect the rendered
 ConfigMap, ComputeDomain, and DynamoGraphDeployment before applying them.
 Keep filled cluster values and rendered manifests outside the repository.
 
+### Aggregated Worker Liveness
+
+For `agg-gb200-agentic`, select the optional
+[worker-liveness Component](vllm/agg-gb200-agentic/kustomize/components/worker-liveness/kustomization.yaml)
+to allow cold FMHA kernel compilation to finish before a liveness restart.
+It sets `/live` on port `9090` with a 10-second interval, a 10-second timeout,
+and 12 consecutive failures before restarting. Startup and readiness probes
+remain at the operator defaults. With one worker, readiness loss during
+compilation can still temporarily remove the model from discovery and cause
+HTTP 404 responses until readiness recovers.
+
+Validate the private cluster composition first using the commands above.
+The cluster validator accepts only cluster binding Components, so select
+this recipe Component in a separate outer Kustomization:
+
+```bash
+export LIVENESS_KUSTOMIZATION=/absolute/path/to/private/minimax-m3-liveness
+mkdir -p "$LIVENESS_KUSTOMIZATION"
+cat > "$LIVENESS_KUSTOMIZATION/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - $(realpath --relative-to="$LIVENESS_KUSTOMIZATION" "$CLUSTER_KUSTOMIZATION")
+components:
+  - $(realpath --relative-to="$LIVENESS_KUSTOMIZATION" "$RECIPE_DIR/kustomize/components/worker-liveness")
+EOF
+kustomize build --load-restrictor LoadRestrictionsNone \
+  "$LIVENESS_KUSTOMIZATION" > "$LIVENESS_KUSTOMIZATION/rendered.yaml"
+```
+
+Use the aggregated profile and a separate directory from
+`CLUSTER_KUSTOMIZATION`. Review and apply this rendered manifest using the
+commands in [Deploy](#deploy), with its path substituted.
+
 ## Smoke Test
 
 Wait for the selected deployment, then forward its frontend port:

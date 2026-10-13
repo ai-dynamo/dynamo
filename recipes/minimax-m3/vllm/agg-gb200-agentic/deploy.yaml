@@ -169,14 +169,6 @@ spec:
                 - minimax_m3
                 - --kv-events-config
                 - '{"enable_kv_cache_events":true,"publisher":"zmq"}'
-              # Allow first-request FMHA compilation to finish before restarting.
-              livenessProbe:
-                httpGet:
-                  path: /live
-                  port: 9090
-                periodSeconds: 10
-                timeoutSeconds: 10
-                failureThreshold: 12
               securityContext:
                 runAsUser: 0
                 runAsGroup: 0
