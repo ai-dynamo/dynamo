@@ -505,10 +505,10 @@ async def test_parse_args_enables_incremental_streaming_before_resolution(
 
 @pytest.mark.asyncio
 async def test_parse_args_gateway_workers_sets_raw_tokenizer_worker_num(
-    monkeypatch, mock_sglang_cli
+    monkeypatch, mock_sglang_cli, tmp_path
 ):
     # PortArgs.init_new reads the raw tokenizer_worker_num; a resolved-only
-    # value leaves the leader without a worker IPC socket (DYN-4880).
+    # value leaves the leader without a worker IPC socket.
     seen = {}
 
     def resolve(parsed_args):
@@ -522,7 +522,7 @@ async def test_parse_args_gateway_workers_sets_raw_tokenizer_worker_num(
         )
 
     monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
-    mock_sglang_cli("--model-path", "/tmp", "--gateway-workers", "2")
+    mock_sglang_cli("--model-path", str(tmp_path), "--gateway-workers", "2")
 
     await parse_args(sys.argv[1:])
 
@@ -531,7 +531,7 @@ async def test_parse_args_gateway_workers_sets_raw_tokenizer_worker_num(
     seen.clear()
     mock_sglang_cli(
         "--model-path",
-        "/tmp",
+        str(tmp_path),
         "--gateway-workers",
         "3",
         "--tokenizer-worker-num",
