@@ -29,17 +29,28 @@ A single frontend can discover worker generations from multiple supported releas
 
 This guarantee covers the frontend-to-worker discovery metadata and wire protocols owned by Dynamo. It does not establish a compatibility window for direct worker-to-worker protocols, such as prefill-to-decode communication.
 
-For Dynamo 1.5.0 SGLang embedding workers, the Operator supplies an embedding-shaped health-check payload when `--embedding-worker` or a literal `DYN_SGL_EMBEDDING_WORKER` value enables embedding mode. If embedding mode is set only through Kubernetes `valueFrom` or `envFrom`, set `DYN_HEALTH_CHECK_PAYLOAD` explicitly before upgrading to an Operator that enables active health checks. Use a JSON payload with the worker's model name and a text input, for example `{"model":"your-model","input":"Test"}`.
+### SGLang 1.5.0 Embedding Workers
 
-The Operator ignores `envFrom` when deciding whether to inject this default and does not read referenced ConfigMaps or Secrets during rendering. An injected payload in `env` takes precedence over the same variable supplied by `envFrom`. To preserve a custom payload, declare `DYN_HEALTH_CHECK_PAYLOAD` explicitly in `env`, using either a literal value or `valueFrom`, or pass `--health-check-payload`. For example, reference a ConfigMap key explicitly:
+Starting with Operator 1.7.0, the Operator supplies an embedding-shaped health-check payload for Dynamo 1.5.0 SGLang embedding workers when `--embedding-worker` or a truthy literal `DYN_SGL_EMBEDDING_WORKER` value enables embedding mode. If embedding mode is set only through Kubernetes `valueFrom` or `envFrom`, set `DYN_HEALTH_CHECK_PAYLOAD` explicitly before upgrading. Use a JSON payload with the worker's model name and a text input, for example `{"model":"your-model","input":"Test"}`.
+
+The Operator ignores `envFrom` when deciding whether to inject this default and does not read referenced ConfigMaps or Secrets during rendering. An injected payload in `env` takes precedence over the same variable supplied by `envFrom`, replacing the custom probe input or options even if the deployment manifest is unchanged. Before upgrading, preserve a custom payload by declaring `DYN_HEALTH_CHECK_PAYLOAD` explicitly in `env`, using either a literal value or `valueFrom`, or by passing `--health-check-payload`.
+
+The following worker container fragment preserves the payload from the `DYN_HEALTH_CHECK_PAYLOAD` key in an existing ConfigMap. For a Secret, use `secretKeyRef` instead of `configMapKeyRef`:
 
 ```yaml
-env:
-  - name: DYN_HEALTH_CHECK_PAYLOAD
-    valueFrom:
-      configMapKeyRef:
-        name: health-check-settings
-        key: payload
+containers:
+  - name: main
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+    args: ["--embedding-worker"]
+    envFrom:
+      - configMapRef:
+          name: health-check-settings
+    env:
+      - name: DYN_HEALTH_CHECK_PAYLOAD
+        valueFrom:
+          configMapKeyRef:
+            name: health-check-settings
+            key: DYN_HEALTH_CHECK_PAYLOAD
 ```
 
 ### Rolling Update Behavior
