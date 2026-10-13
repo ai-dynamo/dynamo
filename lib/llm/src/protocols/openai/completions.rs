@@ -14,7 +14,7 @@ use super::{
     ContentProvider, OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider,
     OpenAIStopConditionsProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
-    common_ext::{CommonExt, CommonExtProvider},
+    common_ext::{CommonExt, CommonExtProvider, GenerationCommonExt},
     validate,
 };
 use crate::protocols::common::extensions::{
@@ -33,6 +33,7 @@ pub struct NvCreateCompletionRequest {
     pub inner: dynamo_protocols::types::CreateCompletionRequest,
 
     #[serde(flatten)]
+    #[schema(value_type = GenerationCommonExt)]
     pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
