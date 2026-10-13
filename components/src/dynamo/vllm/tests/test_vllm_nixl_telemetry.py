@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import subprocess
 import sys
 import types
 from types import SimpleNamespace
@@ -118,3 +119,36 @@ def test_headless_clears_false_enable_before_workers(monkeypatch):
         "directory": None,
         "port": "19090",
     }
+
+
+def test_vllm_general_plugin_clears_false_enable():
+    pytest.importorskip("vllm")
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("NIXL_TELEMETRY_") and key != "VLLM_PLUGINS"
+    }
+    env.update(
+        NIXL_TELEMETRY_ENABLE="n",
+        NIXL_TELEMETRY_EXPORTER="prometheus",
+        NIXL_TELEMETRY_DIR="/tmp/x",
+    )
+    # Ray workers only reach this path through vLLM's plugin loader.
+    code = (
+        "import os\n"
+        "from vllm.plugins import load_general_plugins\n"
+        "load_general_plugins()\n"
+        "for var in ('NIXL_TELEMETRY_ENABLE', 'NIXL_TELEMETRY_EXPORTER',"
+        " 'NIXL_TELEMETRY_DIR'):\n"
+        "    print(os.environ.get(var, '<unset>'))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=True,
+    )
+
+    assert result.stdout.splitlines()[-3:] == ["<unset>", "NOP", "<unset>"]

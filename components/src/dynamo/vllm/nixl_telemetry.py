@@ -15,6 +15,11 @@ _FALSE = frozenset({"n", "0", "no", "off", "false", "disable"})
 _NOP_EXPORTER = "NOP"
 
 
+# Also registered as a vLLM general plugin (pyproject.toml), so it runs in
+# every vLLM worker process before the NIXL agent is built. Ray actors inherit
+# the raylet's environment, not the driver's, so the driver-side call does not
+# reach them. A VLLM_PLUGINS allowlist that omits dynamo_nixl_telemetry skips
+# this hook. Keep this module import-light: Ray workers import it at init.
 def allow_nixl_telemetry_capture() -> bool:
     """Replace a false NIXL_TELEMETRY_ENABLE with capture-only collection.
 
