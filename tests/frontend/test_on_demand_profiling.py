@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import tarfile
 import tempfile
 import time
 from pathlib import Path
@@ -1404,6 +1405,13 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
     assert summary["coverage"]["native_timeline"]["frontend"]["status"] == "excluded"
     recordings = {e["name"] for e in events if e.get("cat") == "capture"}
     assert recordings == {"frontend recording", "decode-0 recording"}
+    archived = bundle.archive(tmp_path / "out", summary, include_profiles=True)
+    with tarfile.open(archived) as tar:
+        names = set(tar.getnames())
+    assert {"out/bundle.json", "out/" + index["requests"][0]["timeline"]} <= names
+    assert "out/profiles/decode-0/worker.sqlite" in names
+    digest = hashlib.sha256(archived.read_bytes()).hexdigest()
+    assert (tmp_path / "out.tar.gz.sha256").read_text() == f"{digest}  out.tar.gz\n"
 
 
 @pytest.mark.asyncio
