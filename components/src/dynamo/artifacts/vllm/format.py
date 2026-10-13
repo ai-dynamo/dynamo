@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bounded producer and strict reader for the shared generation_artifact_v1 format."""
+"""Bounded producer and strict reader for generation_artifact_v1.
+
+Logprob tensors allow finite values and -Inf (zero probability), but not NaN or +Inf.
+"""
 
 from __future__ import annotations
 
@@ -84,7 +87,7 @@ class Tensor:
 
     @classmethod
     def from_array(cls, value: np.ndarray, *, dtype: str | None = None) -> Tensor:
-        """Copy a bounded native array into the requested wire representation."""
+        """Copy a bounded native array; floating values may include -Inf only."""
         _require(isinstance(value, np.ndarray), "tensor source must be a NumPy array")
         _require(value.nbytes <= MAX_PAYLOAD_BYTES, "source tensor exceeds limit")
         if dtype is None:
@@ -112,6 +115,10 @@ class Tensor:
         else:
             _require(
                 value.dtype.kind == "f", "floating tensor requires floating source"
+            )
+            _require(
+                bool(np.all(np.isfinite(value) | np.isneginf(value))),
+                "floating source contains unsupported nonfinite value",
             )
             finite = value[np.isfinite(value)]
             _require(
@@ -276,6 +283,15 @@ def _validate_component(
     )
     tensor = component.logprobs
     _require(tensor.dtype in _FLOAT_DTYPES, "logprobs require floating dtype")
+    values = tensor.as_array()
+    if tensor.dtype == "bf16":
+        allowed = ((values & 0x7F80) != 0x7F80) | (values == 0xFF80)
+    else:
+        allowed = np.isfinite(values) | np.isneginf(values)
+    _require(
+        bool(np.all(allowed)),
+        "invalid logprob value",
+    )
     start = _integer(component.token_start, 0, sequence, "logprob start")
     _require(start + tensor.shape[0] <= sequence, "logprob rows exceed sequence")
     if isinstance(component, SelectedLogprobs):
@@ -577,9 +593,11 @@ def _parse_manifest(manifest: Any, payload: bytes) -> GenerationArtifactView:
 
 
 def decode_generation_artifact(
-    data: bytes, *, expected_router_ids: tuple[int, ...] | None = None
+    data: bytes,
+    *,
+    expected_router_profile: tuple[tuple[int, int], ...] | None = None,
 ) -> GenerationArtifactView:
-    """Validate the whole object before exposing tensors, optionally binding model order."""
+    """Validate the object, optionally binding ordered router IDs and expert counts."""
     _require(
         type(data) is bytes and _PRELUDE.size <= len(data) <= MAX_OBJECT_BYTES,
         "invalid object size",
@@ -625,13 +643,16 @@ def decode_generation_artifact(
         raise GenerationArtifactFormatError("invalid MessagePack manifest") from exc
     _require(canonical == manifest_data, "noncanonical or duplicate MessagePack keys")
     view = _parse_manifest(manifest, body[payload_start:])
-    if expected_router_ids is not None:
+    if expected_router_profile is not None:
         for choice in view.choices:
             for component in choice.components:
                 if isinstance(component, MoeRoutes):
                     _require(
-                        tuple(router.router_id for router in component.routers)
-                        == expected_router_ids,
-                        "router order differs from model capability",
+                        tuple(
+                            (router.router_id, router.expert_count)
+                            for router in component.routers
+                        )
+                        == expected_router_profile,
+                        "router profile differs from model capability",
                     )
     return view
