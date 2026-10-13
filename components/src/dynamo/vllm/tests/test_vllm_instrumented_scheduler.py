@@ -2537,6 +2537,7 @@ def eagle_benchmark(tmp_path, monkeypatch):
     stub._bench_init(config)
     stub.scheduler_config = SimpleNamespace(long_prefill_token_threshold=0)
     stub.max_num_scheduled_tokens = 128
+    stub.num_lookahead_tokens = 3
     return stub
 
 
@@ -2546,6 +2547,17 @@ def test_eagle_decode_graph_axis_counts_requests_not_verify_tokens(eagle_benchma
     capture, padding, _ = stub._bench_decode_graph_metadata(3, 8)
     assert capture == 16
     assert padding == 4
+
+
+def test_eagle_capacity_reserves_verify_and_next_draft(eagle_benchmark):
+    stub = eagle_benchmark
+    stub.max_model_len = 64
+    stub.block_size = 16
+    stub.cache_config.num_gpu_blocks = 2  # one usable block, plus null block
+    # 12 cached + 4 query tokens fit, but the three-token draft runway does not.
+    assert not stub._bench_decode_point_feasible(1, 12)
+    stub.cache_config.num_gpu_blocks = 3
+    assert stub._bench_decode_point_feasible(1, 12)
 
 
 @pytest.mark.parametrize("draft_count", [2, 3])

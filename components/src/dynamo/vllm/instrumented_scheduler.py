@@ -4284,9 +4284,17 @@ class InstrumentedScheduler(AsyncScheduler):
             for context_len in context_lengths
         ):
             return False
+        # Native verification allocates its query plus the next draft's runway.
+        lookahead = self.num_lookahead_tokens if self._bench_speculative_tokens else 0
         required_blocks = sum(
             self._bench_blocks_per_req(
-                max(context_len, 2) + 1 + self._bench_speculative_tokens
+                min(
+                    max_model_len,
+                    max(context_len, 2)
+                    + 1
+                    + self._bench_speculative_tokens
+                    + lookahead,
+                )
             )
             for context_len in context_lengths
         )
