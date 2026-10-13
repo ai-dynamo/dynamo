@@ -10,6 +10,53 @@
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use utoipa::ToSchema;
 
+/// Word exclusions are optional lists, not nullable or opaque extra fields.
+/// Shape is exported here; runtime tests separately establish sampling effects.
+#[test]
+fn bad_words_schema_is_an_optional_nonnullable_string_array() {
+    use dynamo_llm::http::service::{RouteDoc, openapi_docs::generate_openapi_spec};
+    let routes = [
+        RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions"),
+        RouteDoc::new(axum::http::Method::POST, "/v1/completions"),
+    ];
+    let spec = serde_json::to_value(generate_openapi_spec(&routes)).unwrap();
+    let common = &spec["components"]["schemas"]["CommonExt"];
+    let words = &common["properties"]["bad_words"];
+    assert_eq!(words["type"], "array");
+    assert_eq!(words["items"]["type"], "string");
+    assert!(
+        !common["required"]
+            .as_array()
+            .is_some_and(|required| required.iter().any(|name| name == "bad_words"))
+    );
+    /// Find this root object's field through the known acyclic allOf/ref chain,
+    /// without accepting a same-named property inside a nested request value.
+    fn words_schema<'a>(
+        spec: &'a serde_json::Value,
+        node: &'a serde_json::Value,
+    ) -> Option<&'a serde_json::Value> {
+        if let Some(words) = node
+            .get("properties")
+            .and_then(|fields| fields.get("bad_words"))
+        {
+            return Some(words);
+        }
+        if let Some(reference) = node.get("$ref").and_then(|value| value.as_str()) {
+            return words_schema(spec, spec.pointer(reference.strip_prefix('#')?)?);
+        }
+        node.get("allOf")?
+            .as_array()?
+            .iter()
+            .find_map(|part| words_schema(spec, part))
+    }
+    for root in ["NvCreateChatCompletionRequest", "NvCreateCompletionRequest"] {
+        assert_eq!(
+            words_schema(&spec, &spec["components"]["schemas"][root]),
+            Some(words)
+        );
+    }
+}
+
 #[test]
 fn http_export_describes_request_aliases() {
     use dynamo_llm::http::service::{RouteDoc, openapi_docs::generate_openapi_spec};

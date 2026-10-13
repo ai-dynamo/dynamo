@@ -803,6 +803,11 @@ def build_sampling_params(
     `generation_config.json` sampling overrides. Ordinary token-data requests
     keep generation_config defaults for Gateway/backward-compatible traffic.
     Stop-token defaults from the model config are still applied later.
+
+    ``bad_words`` stays as text until the engine's tokenizer expands word-start
+    and space-prefixed forms. The standard Dynamo launch initializes that
+    tokenizer even for token-input requests. Setting this field proves delivery,
+    not enforcement; engine generation must consume it before claiming support.
     """
     if enable_rl and _is_token_in_request(request):
         # Use vLLM defaults without model generation_config overlays.
