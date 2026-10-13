@@ -43,8 +43,8 @@ Download the composition input pinned by the default manifest:
 
 ```bash
 curl --fail --location \
-  https://raw.githubusercontent.com/64bit/async-openai/884aff958c0461cce41e2d9e9b2fe4f29e76b740/openapi.yaml \
-  --output openai-884aff95.yaml
+  https://raw.githubusercontent.com/64bit/async-openai/d453592328fdbb3f59c1ea74f8e6cdf7f9140efb/openapi.yaml \
+  --output openai-d4535923.yaml
 ```
 
 Set `FRAMEWORK_NAME` to a lowercase identity such as `example-engine` and
@@ -58,7 +58,7 @@ python -m scripts.protocol_compatibility acquire \
 python -m scripts.protocol_compatibility assess \
   --dynamo docs/frontends/openapi.json --framework captures/framework \
   --framework-name "$FRAMEWORK_NAME" \
-  --openai openai-884aff95.yaml --oasdiff /absolute/path/to/oasdiff \
+  --openai openai-d4535923.yaml --oasdiff /absolute/path/to/oasdiff \
   --output-dir assessment
 ```
 
