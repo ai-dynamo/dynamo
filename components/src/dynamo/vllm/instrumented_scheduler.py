@@ -109,7 +109,11 @@ import vllm.envs as vllm_envs
 import zmq
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import get_hash_fn_by_name
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_utils import (
+    get_max_concurrency_for_kv_cache_config,
+    get_request_block_hasher,
+    init_none_hash,
+)
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
@@ -179,6 +183,10 @@ _SPECULATIVE_FIELDS = (
     "model",
     "num_speculative_tokens",
     "draft_tensor_parallel_size",
+    "revision",
+    "rejection_sample_method",
+    "synthetic_acceptance_rates",
+    "parallel_drafting",
 )
 
 
@@ -2296,11 +2304,19 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def has_requests(self) -> bool:
         if self._bench_active:
-            return True
+            # Let EngineCore drain its queued native SD output without inserting
+            # an empty model execution. An empty execution evicts the runner's
+            # current batch while the parent still considers its requests cached.
+            return not (
+                self._bench_speculative_tokens
+                and self._bench_phase == _BenchPhase.DECODE_SWEEP
+                and self._bench_sd_inflight
+            )
         return super().has_requests()
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         if self._bench_active and self._bench_phase != _BenchPhase.IDLE:
+            self._bench_parent_scheduled = False
             try:
                 output = self._bench_step()
             except Exception as error:
@@ -2312,14 +2328,20 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_abort(error)
                 raise
             if output is not None:
-                self.kv_cache_manager.new_step_starts()
-                if self.defer_block_free and output.total_num_scheduled_tokens > 0:
+                if not self._bench_parent_scheduled:
+                    self.kv_cache_manager.new_step_starts()
+                if (
+                    not self._bench_parent_scheduled
+                    and self.defer_block_free
+                    and output.total_num_scheduled_tokens > 0
+                ):
                     # Mirror the parent's schedule(): the fence that guards
                     # deferred block frees and CoW retentions advances once
                     # per non-empty step, and update_from_output processes
                     # this output like any other.
                     self.sched_step_seq += 1
-                self._update_after_schedule(output)
+                if not self._bench_parent_scheduled:
+                    self._update_after_schedule(output)
                 try:
                     self._bench_synchronize_output(output)
                 except Exception as error:
@@ -2498,11 +2520,32 @@ class InstrumentedScheduler(AsyncScheduler):
                         },
                         "cudagraph": _bench_observed_cudagraph(stats),
                     }
+                    if self._bench_speculative_tokens:
+                        benchmark_sample["speculation"] = {
+                            "num_draft_tokens": self._bench_speculative_tokens,
+                            "scheduled_tokens": dict(
+                                scheduler_output.num_scheduled_tokens
+                            ),
+                            "scheduled_draft_tokens": {
+                                req_id: len(tokens)
+                                for req_id, tokens in scheduler_output.scheduled_spec_decode_tokens.items()
+                            },
+                            "output_tokens_per_request": [
+                                len(tokens)
+                                for tokens in model_runner_output.sampled_token_ids
+                            ],
+                        }
             self._publish_or_record_metrics(metrics, benchmark_sample)
         else:
             self._last_update_time = 0.0
 
         self._cleanup_finished(scheduler_output)
+        if (
+            self._bench_active
+            and self._bench_speculative_tokens
+            and scheduler_output.total_num_scheduled_tokens > 0
+        ):
+            self._bench_sd_inflight = False
         return result
 
     def _publish_or_record_metrics(
@@ -2608,6 +2651,7 @@ class InstrumentedScheduler(AsyncScheduler):
         """Synthetic decode benchmark requests register as new requests."""
         return (
             getattr(self, "_bench_active", False)
+            and not self._bench_speculative_tokens
             and getattr(self, "_bench_phase", _BenchPhase.IDLE)
             == _BenchPhase.DECODE_SWEEP
             and req_id in getattr(self, "_bench_active_req_ids", set())
@@ -2648,6 +2692,8 @@ class InstrumentedScheduler(AsyncScheduler):
             return False
         if point.point_type == "prefill":
             return scheduled.num_prefill_requests > 0
+        if self._bench_speculative_tokens and not self._bench_sd_measuring:
+            return False
         return scheduled.num_decode_requests > 0
 
     def _compute_queued(self) -> QueuedRequestMetrics:
@@ -2691,6 +2737,10 @@ class InstrumentedScheduler(AsyncScheduler):
     # ------------------------------------------------------------------
 
     _bench_random_kda: bool = False
+    _bench_speculative_tokens: int = 0
+    _bench_sd_inflight: bool = False
+    _bench_sd_measuring: bool = False
+    _bench_sd_capacity: dict | None = None
     _bench_hybrid_live_state: bool = False
     _bench_content_seed: str = "0"
     _bench_prompt_evidence: dict | None = None
@@ -2815,11 +2865,36 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_config.mode in {"decode", "agg"}
             and getattr(vllm_config, "speculative_config", None) is not None
         ):
-            raise ValueError(
-                "decode self-benchmarking does not yet support speculative "
-                "decoding because its CUDA graph key also depends on the "
-                "decode query length"
+            spec = vllm_config.speculative_config
+            parallel = vllm_config.parallel_config
+            # Offload moved out of CacheConfig in newer vLLM runtimes.
+            offload = getattr(vllm_config, "offload_config", None)
+            weight_offload = (
+                offload.uva.cpu_offload_gb > 0
+                or offload.prefetch.offload_group_size > 0
+                if offload is not None
+                else getattr(self.cache_config, "cpu_offload_gb", 0) > 0
             )
+            if (
+                spec.method != "eagle3"
+                or spec.num_speculative_tokens < 1
+                or getattr(spec, "parallel_drafting", False)
+                or parallel.data_parallel_size != 1
+                or parallel.pipeline_parallel_size != 1
+                or getattr(parallel, "decode_context_parallel_size", 1) != 1
+                or getattr(parallel, "prefill_context_parallel_size", 1) != 1
+                or getattr(parallel, "enable_expert_parallel", False)
+                or weight_offload
+                or getattr(vllm_config, "kv_transfer_config", None) is not None
+            ):
+                raise ValueError(
+                    "SD self-benchmark supports sequential EAGLE3 with TP, DP1/PP1/CP1 "
+                    "and no EP, offload or KV transfer only"
+                )
+            self._bench_speculative_tokens = spec.num_speculative_tokens
+            self._bench_capacity_config = vllm_config
+            self._bench_sd_inflight = False
+            self._bench_sd_measuring = False
 
         if (
             self._bench_config.mode in {"decode", "agg"}
@@ -2874,9 +2949,11 @@ class InstrumentedScheduler(AsyncScheduler):
         )
         self._bench_decode_capture_sizes = (
             [
-                size
+                size // (1 + self._bench_speculative_tokens)
                 for size in self._bench_cudagraph_capture_sizes
-                if size <= self.max_num_running_reqs
+                if size % (1 + self._bench_speculative_tokens) == 0
+                and size // (1 + self._bench_speculative_tokens)
+                <= self.max_num_running_reqs
             ]
             if self._bench_decode_cudagraph_mode != "NONE"
             else []
@@ -3102,6 +3179,34 @@ class InstrumentedScheduler(AsyncScheduler):
                 getattr(getattr(self, "kv_cache_manager", None), "watermark_blocks", 0)
             ),
         )
+        if self._bench_speculative_tokens:
+            usable_blocks = max(0, available_blocks - watermark_blocks)
+            cache = self.kv_cache_manager.kv_cache_config
+            usable_cache = replace(cache, num_blocks=usable_blocks)
+            concurrency = get_max_concurrency_for_kv_cache_config(
+                self._bench_capacity_config, usable_cache
+            )
+            self._bench_sd_capacity = {
+                "status": "observed",
+                "num_gpu_blocks": cache.num_blocks,
+                "free_blocks_before_benchmark": available_blocks,
+                "watermark_blocks": watermark_blocks,
+                "usable_blocks": usable_blocks,
+                "context_capacity_tokens": math.floor(concurrency * self.max_model_len),
+                "capacity_basis_max_model_len": self.max_model_len,
+                "max_concurrency_at_max_model_len": concurrency,
+                "lookahead_tokens_per_request": self.num_lookahead_tokens,
+                "definition": "vLLM max-concurrency capacity using the observed free block pool; includes target/draft groups; per-request lookahead consumes this budget",
+                "groups": [
+                    {
+                        "group_id": index,
+                        "layer_names": list(group.layer_names),
+                        "spec": _bench_engine_kv_cache_spec(group.kv_cache_spec),
+                        "page_size_bytes": group.kv_cache_spec.page_size_bytes,
+                    }
+                    for index, group in enumerate(cache.kv_cache_groups)
+                ],
+            }
         return _BenchmarkCapacityEnvelope(
             max_model_len=int(self.max_model_len),
             max_num_scheduled_tokens=int(self.max_num_scheduled_tokens),
@@ -3116,6 +3221,7 @@ class InstrumentedScheduler(AsyncScheduler):
             # budget (``_BenchmarkSynchronizer.CAPACITY_TIMEOUT_SECONDS``).
             kvwarm_eligible=(
                 self._bench_config.mode in ("decode", "agg")
+                and not self._bench_speculative_tokens
                 and self._kvwarm_warm_eligible()
             ),
         )
@@ -3408,10 +3514,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 return None
             self._bench_raise_explicit_infeasible(path, candidate)
 
-        capture_size, padding_tokens, reasons = self._bench_cudagraph_metadata(
-            candidate.batch_size,
-            self._bench_decode_capture_sizes,
-            self._bench_feasible_max_decode_batch_size,
+        capture_size, padding_tokens, reasons = self._bench_decode_graph_metadata(
+            candidate.batch_size, self._bench_feasible_max_decode_batch_size
         )
         return BenchmarkPoint(
             point_type="decode",
@@ -4046,11 +4150,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 capture_size,
                 padding_tokens,
                 sample_reasons,
-            ) = self._bench_cudagraph_metadata(
-                batch_size,
-                self._bench_decode_capture_sizes,
-                feasible_max_batch,
-            )
+            ) = self._bench_decode_graph_metadata(batch_size, feasible_max_batch)
             kv_read_points = _uniformly_limit_axis(
                 self._bench_decode_kv_read_points(batch_size),
                 self._bench_config.decode_max_kv_read_token_samples,
@@ -4076,6 +4176,19 @@ class InstrumentedScheduler(AsyncScheduler):
                     )
                 )
 
+    def _bench_decode_graph_metadata(
+        self, batch_size: int, max_batch_size: int
+    ) -> tuple[int | None, int | None, list[str]]:
+        capture, padding, reasons = self._bench_cudagraph_metadata(
+            batch_size, self._bench_decode_capture_sizes, max_batch_size
+        )
+        width = 1 + self._bench_speculative_tokens
+        return (
+            capture * width if capture is not None else None,
+            padding * width if padding is not None else None,
+            reasons,
+        )
+
     def _bench_decode_feasible_max_batch_size(self) -> int:
         max_model_len = self._bench_capacity_limit("max_model_len")
         max_num_running_reqs = self._bench_capacity_limit("max_num_running_reqs")
@@ -4098,7 +4211,7 @@ class InstrumentedScheduler(AsyncScheduler):
             0,
             min(
                 max_num_running_reqs,
-                max_num_scheduled_tokens,
+                max_num_scheduled_tokens // (1 + self._bench_speculative_tokens),
                 feasible_max_batch,
             ),
         )
@@ -4151,11 +4264,14 @@ class InstrumentedScheduler(AsyncScheduler):
         # their nominal coordinate).
         max_model_len = self._bench_capacity_limit("max_model_len")
         if any(
-            max(context_len, 2) + 2 > max_model_len for context_len in context_lengths
+            max(context_len, 2) + 2 + self._bench_speculative_tokens > max_model_len
+            for context_len in context_lengths
         ):
             return False
         required_blocks = sum(
-            self._bench_blocks_per_req(max(context_len, 2) + 1)
+            self._bench_blocks_per_req(
+                max(context_len, 2) + 1 + self._bench_speculative_tokens
+            )
             for context_len in context_lengths
         )
         return required_blocks <= self._bench_grid_usable_blocks(
@@ -4478,6 +4594,7 @@ class InstrumentedScheduler(AsyncScheduler):
         expected_kv_read_tokens: Sequence[int] | None = None,
         prompt_token_ids_list: Sequence[Sequence[int]] | None = None,
         content_salts: Sequence[str] | None = None,
+        ignore_eos: bool = False,
     ) -> int:
         """Build and atomically enqueue a possibly heterogeneous prefill batch.
 
@@ -4529,7 +4646,9 @@ class InstrumentedScheduler(AsyncScheduler):
             req = Request(
                 request_id=req_id,
                 prompt_token_ids=prompt,
-                sampling_params=SamplingParams(max_tokens=max_tokens),
+                sampling_params=SamplingParams(
+                    max_tokens=max_tokens, ignore_eos=ignore_eos
+                ),
                 pooling_params=None,
                 block_hasher=self._bench_block_hasher,
                 cache_salt=salt,
@@ -5793,9 +5912,12 @@ class InstrumentedScheduler(AsyncScheduler):
         # Per-process temp name: same-host ranks may download concurrently;
         # the final os.replace is atomic and both produce identical bytes.
         tmp = f"{cached}.{os.getpid()}.part"
-        with urllib.request.urlopen(
-            spec, timeout=self._KVWARM_DOWNLOAD_TIMEOUT_S
-        ) as resp, open(tmp, "wb") as out:
+        with (
+            urllib.request.urlopen(
+                spec, timeout=self._KVWARM_DOWNLOAD_TIMEOUT_S
+            ) as resp,
+            open(tmp, "wb") as out,
+        ):
             shutil.copyfileobj(resp, out)
         digest = self._kvwarm_sha256(tmp)
         if expected_sha and digest != expected_sha:
@@ -5915,6 +6037,11 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _kvwarm_prepare(self, mode: str) -> None:
         """Plan warm-up stages and reorder the decode grid for chain reuse."""
+        if self._bench_speculative_tokens:
+            # SD needs the drafter's real KV/hidden state as well as target KV.
+            # Each point prepares both through native prefill instead of borrowing
+            # AR-only shadow blocks from the parked-chain warm-up.
+            return
         if mode not in ("decode", "agg"):
             return
         if not self._kvwarm_flag_on():
@@ -6939,6 +7066,8 @@ class InstrumentedScheduler(AsyncScheduler):
         return output
 
     def _bench_step_decode(self) -> SchedulerOutput | None:
+        if self._bench_speculative_tokens:
+            return self._bench_step_speculative_decode()
         if self._bench_drain_if_pending():
             pass  # fall through to inject next point
 
@@ -7095,6 +7224,143 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_extra_steps_left = 0
             return None
         self._bench_sync_pending = True
+        return output
+
+    def _bench_step_speculative_decode(self) -> SchedulerOutput | None:
+        """Prepare both models with real prefill, then measure native verification.
+
+        A single outstanding benchmark step keeps rejection-adjusted CPU KV
+        coordinates settled before scheduling the next one. This is benchmark
+        control only: the parent retains ownership of sampling, draft-token
+        placeholders, allocation, acceptance and request updates. It adds no
+        CUDA synchronization and never fabricates draft KV or hidden states.
+        """
+        if self._bench_sd_inflight:
+            return None
+        if self._bench_current_fpms:
+            self._bench_save_current_point()
+            self._bench_cleanup_requests()
+            self._bench_sd_measuring = False
+            self._bench_drain_pending = True
+            return None
+        self._bench_drain_if_pending()
+        if self._bench_frees_pending():
+            return None
+        if self._bench_current_point is None:
+            if self._bench_stop_at_timeout_boundary("decode"):
+                return None
+            point = self._bench_pop_next("decode")
+            if point is None:
+                self._bench_phase = _BenchPhase.DONE
+                return None
+            self._bench_current_point = replace(
+                point,
+                sample_reasons=[
+                    *point.sample_reasons,
+                    "kvwarm_real_kv",
+                    "sd_native_prefill",
+                ],
+            )
+            self._bench_current_fpms = []
+            self._bench_expected_fpms = 1
+            self._bench_sd_measuring = False
+            self._bench_point_deadline = (
+                time.monotonic() + self._bench_point_result_timeout_seconds
+            )
+            contexts = self._bench_decode_context_lengths(
+                point.total_kv_read_tokens, point.batch_size
+            )
+            self._bench_begin_warmup(
+                "speculative_state_prepare",
+                {"point": asdict(point), "prompt_lengths": contexts},
+            )
+            if (
+                self._bench_inject_prefill(
+                    contexts,
+                    max_tokens=self._bench_speculative_tokens + 3,
+                    ignore_eos=True,
+                )
+                != point.batch_size
+            ):
+                raise RuntimeError(
+                    "could not prepare the complete speculative benchmark batch"
+                )
+        point = self._bench_current_point
+        if self._bench_point_result_timed_out():
+            raise TimeoutError(
+                f"SD benchmark point {point.benchmark_id} preparation timed out"
+            )
+        requests = [self.requests.get(req_id) for req_id in self._bench_active_req_ids]
+        if len(requests) != point.batch_size or any(
+            req is None or req.is_finished() for req in requests
+        ):
+            raise RuntimeError(
+                "SD benchmark request finished before its measured verification"
+            )
+        prepared = [
+            req
+            for req in requests
+            if req.num_computed_tokens >= req.num_prompt_tokens
+            and req.num_output_tokens > 0
+        ]
+        ready = len(prepared) == point.batch_size
+        # Keep every lane in the same prefill wave. Parking an already-prefilled
+        # request drops its transient GPU draft-token state in async EAGLE.
+        # Balanced chunks leave at least one prompt token in every lane until
+        # all final chunks fit together. Restore the serving policy immediately;
+        # this controls untimed state preparation, not the measured verify step.
+        threshold = self.scheduler_config.long_prefill_token_threshold
+        if not ready:
+            if prepared:
+                raise RuntimeError(
+                    "SD prefix preparation completed only part of the batch"
+                )
+            remaining = [
+                req.num_prompt_tokens - req.num_computed_tokens for req in requests
+            ]
+            quota = self.max_num_scheduled_tokens // point.batch_size
+            if max(remaining) > quota:
+                quota = min(quota, min(remaining) - 1)
+            if quota < 1:
+                raise RuntimeError(
+                    "SD prefix preparation has no complete-batch token budget"
+                )
+            self.scheduler_config.long_prefill_token_threshold = quota
+        try:
+            output = (
+                super().schedule(False)
+                if _BASE_SCHEDULE_TAKES_THROTTLE
+                else super().schedule()
+            )
+        finally:
+            self.scheduler_config.long_prefill_token_threshold = threshold
+        self._bench_parent_scheduled = True
+        if ready:
+            width = self._bench_speculative_tokens + 1
+            if (
+                set(output.num_scheduled_tokens) != self._bench_active_req_ids
+                or any(count != width for count in output.num_scheduled_tokens.values())
+                or any(
+                    len(output.scheduled_spec_decode_tokens.get(req_id, ()))
+                    != width - 1
+                    for req_id in self._bench_active_req_ids
+                )
+            ):
+                raise RuntimeError(
+                    "native SD scheduler did not schedule the complete verification batch"
+                )
+            measured = self._extract_scheduled(output)
+            if (
+                measured.num_prefill_requests
+                or measured.num_decode_requests != point.batch_size
+                or measured.sum_decode_kv_tokens != point.total_kv_read_tokens
+            ):
+                raise RuntimeError(
+                    f"native SD verification context differs from requested point: {measured}"
+                )
+            self._bench_finish_warmup()
+            self._bench_sd_measuring = True
+        self._bench_sd_inflight = output.total_num_scheduled_tokens > 0
         return output
 
     def _bench_pop_next(self, point_type: str) -> BenchmarkPoint | None:
@@ -7599,6 +7865,18 @@ class InstrumentedScheduler(AsyncScheduler):
             "missing_phases": missing_phases,
             "error": error,
         }
+        if self._bench_speculative_tokens:
+            output["speculative_benchmark"] = {
+                "method": "eagle3",
+                "num_draft_tokens": self._bench_speculative_tokens,
+                "verify_tokens_per_request": self._bench_speculative_tokens + 1,
+                "preparation": "native_target_and_draft_prefill",
+                "measurement": "first_native_verification_after_prefill",
+                "timing_scope": "schedule_to_output_wall",
+                "benchmark_steps_in_flight": 1,
+                "kv_capacity": self._bench_sd_capacity,
+                "free_blocks_after_benchmark": self._bench_available_blocks(),
+            }
         dest = self._bench_config.output_path
         tmp = dest + ".tmp"
         with open(tmp, "w") as f:

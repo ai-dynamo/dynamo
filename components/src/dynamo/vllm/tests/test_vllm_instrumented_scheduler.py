@@ -2482,7 +2482,7 @@ def test_cudagraph_disabled_uses_geometric_fallback(tmp_path):
     ]
 
 
-def test_decode_benchmark_rejects_speculative_decoding(tmp_path):
+def test_decode_benchmark_rejects_unsupported_speculative_decoding(tmp_path):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._fpm_dp_rank = 0
     stub.max_num_running_reqs = 8
@@ -2500,11 +2500,144 @@ def test_decode_benchmark_rejects_speculative_decoding(tmp_path):
             cudagraph_capture_sizes=[],
             max_cudagraph_capture_size=0,
         ),
-        speculative_config=object(),
+        speculative_config=SimpleNamespace(method="ngram", num_speculative_tokens=3),
+        parallel_config=SimpleNamespace(data_parallel_size=1, pipeline_parallel_size=1),
     )
 
-    with pytest.raises(ValueError, match="does not yet support speculative"):
+    with pytest.raises(
+        ValueError, match="SD self-benchmark supports sequential EAGLE3"
+    ):
         InstrumentedScheduler._bench_init(stub, vllm_config)
+
+
+@pytest.fixture
+def eagle_benchmark(tmp_path, monkeypatch):
+    monkeypatch.setattr("dynamo.vllm.gc_policy.start_gc_policy", lambda: None)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._fpm_dp_rank = 0
+    stub.max_num_running_reqs = 8
+    stub._bench_hash_block_size = 16
+    stub.cache_config = SimpleNamespace(enable_prefix_caching=False)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_master_ip="127.0.0.1",
+        ),
+        speculative_config=SimpleNamespace(method="eagle3", num_speculative_tokens=3),
+        additional_config={
+            "benchmark": {"mode": "decode", "output_path": str(tmp_path / "sd.json")}
+        },
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            cudagraph_capture_sizes=[1, 2, 4, 8, 16, 32, 64],
+            max_cudagraph_capture_size=64,
+        ),
+    )
+    stub._bench_init(config)
+    stub.scheduler_config = SimpleNamespace(long_prefill_token_threshold=0)
+    stub.max_num_scheduled_tokens = 128
+    return stub
+
+
+def test_eagle_decode_graph_axis_counts_requests_not_verify_tokens(eagle_benchmark):
+    stub = eagle_benchmark
+    assert stub._bench_decode_capture_sizes == [1, 2, 4, 8]
+    capture, padding, _ = stub._bench_decode_graph_metadata(3, 8)
+    assert capture == 16
+    assert padding == 4
+
+
+@pytest.mark.parametrize("draft_count", [2, 3])
+def test_eagle_native_verify_checks_actual_draft_work(
+    eagle_benchmark, monkeypatch, draft_count
+):
+    stub = eagle_benchmark
+    stub._bench_current_point = BenchmarkPoint(
+        "decode", batch_size=2, total_kv_read_tokens=64
+    )
+    stub._bench_current_fpms = []
+    stub._bench_active_req_ids = {"r0", "r1"}
+    stub.requests = {
+        req_id: SimpleNamespace(
+            request_id=req_id,
+            num_computed_tokens=32,
+            num_prompt_tokens=32,
+            num_output_tokens=1,
+            is_finished=lambda: False,
+        )
+        for req_id in stub._bench_active_req_ids
+    }
+    stub.running = list(stub.requests.values())
+    stub._bench_frees_pending = lambda: False
+    stub._bench_point_result_timed_out = lambda: False
+    output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=_CachedRequestStub(["r0", "r1"], [32, 32]),
+        num_scheduled_tokens={"r0": 4, "r1": 4},
+        total_num_scheduled_tokens=8,
+        scheduled_spec_decode_tokens={
+            "r0": [-1] * draft_count,
+            "r1": [-1] * draft_count,
+        },
+    )
+    parent = MagicMock(return_value=output)
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler, "schedule", parent
+    )
+    if draft_count == 2:
+        with pytest.raises(RuntimeError, match="complete verification batch"):
+            stub._bench_step_speculative_decode()
+    else:
+        assert stub._bench_step_speculative_decode() is output
+        assert stub._bench_parent_scheduled
+        assert stub._bench_sd_measuring and stub._bench_sd_inflight
+        assert stub._bench_step_speculative_decode() is None
+        parent.assert_called_once()
+
+
+def test_eagle_prefill_balances_final_chunks_and_restores_serving_policy(
+    eagle_benchmark, monkeypatch
+):
+    stub = eagle_benchmark
+    stub._bench_current_point = BenchmarkPoint(
+        "decode", batch_size=2, total_kv_read_tokens=128
+    )
+    stub._bench_current_fpms = []
+    ready = SimpleNamespace(
+        request_id="ready",
+        num_computed_tokens=0,
+        num_prompt_tokens=64,
+        num_output_tokens=0,
+        is_finished=lambda: False,
+    )
+    pending = SimpleNamespace(
+        request_id="pending",
+        num_computed_tokens=0,
+        num_prompt_tokens=65,
+        num_output_tokens=0,
+        is_finished=lambda: False,
+    )
+    stub.requests = {"ready": ready, "pending": pending}
+    stub.running = [ready, pending]
+    stub._bench_active_req_ids = set(stub.requests)
+    stub._bench_frees_pending = lambda: False
+    stub._bench_point_result_timed_out = lambda: False
+    output = SimpleNamespace(total_num_scheduled_tokens=48)
+
+    def parent(*_):
+        assert stub.running == [ready, pending]
+        assert stub.scheduler_config.long_prefill_token_threshold == 63
+        return output
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler, "schedule", parent
+    )
+    assert stub._bench_step_speculative_decode() is output
+    assert stub.running == [ready, pending]
+    assert stub.scheduler_config.long_prefill_token_threshold == 0
+    assert not stub._bench_sd_measuring
+    assert stub._bench_sd_inflight
 
 
 @pytest.mark.parametrize(

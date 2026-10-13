@@ -244,6 +244,45 @@ The record count grows with warmup attempts; each attempt retains at most two sc
 Matching prompt hashes establishes only the captured token content. It does not establish matching sampled continuation tokens, initialized cache tensors, memory allocation, graph preparation, or execution history. Full-grid and subset measurements still require a controlled comparison before they can be treated as equivalent repetitions. Adjacent decode steps share preparation and are not independent repetitions; use separate benchmark launches to measure run-to-run variability and retain all attempts.
 </Warning>
 
+## Speculative Decode Self-Benchmarking
+
+**Experimental.** The vLLM self-benchmark supports sequential EAGLE3 with tensor
+parallelism, DP1/PP1/CP1, and no expert parallelism, offload, or KV transfer. Pass
+the target and draft model settings through the ordinary vLLM speculative
+configuration. Other speculative methods remain rejected for decode collection.
+
+Each decode point prepares target and draft state through real, untimed prefill,
+then measures the first native verification step. Balanced preparation chunks
+keep all requests in the same prefill wave. The benchmark drains one outstanding
+step before scheduling another; ordinary serving retains its configured scheduling
+behavior after collection. No explicit CUDA synchronization is added.
+
+With three draft tokens, a decode batch of `B` requests schedules `4 * B` target
+query tokens and three draft candidates per request. The decode sampling axis is
+request count; `expected_capture_size` and `padding_tokens` remain token counts.
+The raw sample's `benchmark_sample.speculation` records actual scheduled-token,
+draft-token and output-token counts. Acceptance changes output progress, not the
+meaning of the measured iteration latency.
+
+The rank artifact also contains `speculative_benchmark`:
+
+| Field | Meaning |
+|---|---|
+| `num_draft_tokens`, `verify_tokens_per_request` | Fixed speculative depth and target query width. |
+| `timing_scope` | `schedule_to_output_wall`: includes host dispatch/output latency; not a CUDA-kernel-only duration. |
+| `benchmark_steps_in_flight` | `1` for the controlled SD measurement. |
+| `kv_capacity.usable_blocks` | Observed free KV blocks before warmup, minus the watermark; permanent reservations are already excluded. |
+| `kv_capacity.context_capacity_tokens` | vLLM's maximum-concurrency capacity calculation applied to that usable pool at `capacity_basis_max_model_len`. Includes target and draft cache groups. |
+| `kv_capacity.lookahead_tokens_per_request` | Speculative lookahead that consumes the same pool in addition to committed context. |
+| `kv_capacity.groups` | Runtime cache group layout, layer ownership, block size, dtype and page bytes. |
+
+Use the capacity only with the recorded model, draft, topology, context limit,
+graph policy and memory budget. It is not a universal sum of committed tokens
+for arbitrary hybrid-cache request lengths. Keep the block/group evidence when
+overriding a simulator's KV estimator. Compare timings only after accounting for
+the recorded timing scope; collecting this artifact does not itself enable SD
+import or agentic replay in AISimulate.
+
 ## Engine Provenance in the Self-Benchmark Artifact
 
 A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-parallel rank plus one merged artifact, both separate from the `dynamo.fpm.trace.v1` records above. Each carries an optional top-level `engine` block, captured when the instrumented scheduler starts. Dynamo does not rewrite these artifacts after the benchmark: the post-run worker probe records the resolved worker configuration in a separate [sidecar file](#worker-probe-sidecar), and per-forward dispatch belongs to the raw samples described above. The artifact's `schema_version` stays `2`. Artifacts whose capture never ran, including older artifacts, omit `engine`.
@@ -350,7 +389,7 @@ The following example shows selected fields from a rank artifact. The `null` and
 - `quantization.checkpoint_config` is the normalized quantization dict the checkpoint itself declared, not the user-facing online-quantization spec (`model_config.quantization_config`, deliberately not read here). `method` is the kernel family vLLM resolved, and `quant_config_class` is that resolved config object's class name.
 - `scheduler` and `model` are read directly from the engine's own `scheduler_config` and `model_config` at startup and need no further resolution. `model.max_model_len` is deliberately not here: vLLM's `--max-model-len -1` auto-fit can resolve it differently per rank depending on each rank's free GPU memory, so it is rank-varying data rather than engine identity, and it is already recorded per rank at the artifact's `limits.max_model_len`.
 - `parallel.data_parallel_rank` differs per rank and is excluded from the startup identity comparison. The post-run probe results described below are recorded after the merge, in the sidecar, so they are not startup identity evidence.
-- `speculative` is `null` unless speculative decoding is configured, in which case it is a four-field summary: `method`, `model`, `num_speculative_tokens`, `draft_tensor_parallel_size`.
+- `speculative` is `null` unless speculative decoding is configured. Its summary records `method`, `model`, `num_speculative_tokens`, `draft_tensor_parallel_size`, `revision`, `rejection_sample_method`, `synthetic_acceptance_rates`, and `parallel_drafting`; unavailable fields remain `null`.
 - `graph` freezes what the engine-core process believed about CUDA graphs before the model worker re-resolved them, tagged `"resolution": "pre_resolution"`. Under a multiprocess executor the engine-core process never sees that rewrite, so this sub-block is never updated after capture. Post-resolution values belong to the individual worker-probe replies in the sidecar, not this startup block.
 - `versions` is a best-effort snapshot (`vllm`, `vllm_build_commit`, `dynamo`, `python`); a single lookup failure leaves just that one key `null` rather than failing the whole block.
 - `resolved` and `resolution` are `null` and `"pending_worker_probe"` in every artifact whose engine capture completed; the [worker probe sidecar](#worker-probe-sidecar) holds their post-run values.
