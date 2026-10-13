@@ -300,10 +300,14 @@ class Coordinator:
                 "workers": session.clocks,
             },
             "artifact_validation": session.artifact_validation,
+            # "present": every target's files exist and are readable; full
+            # inspection runs offline in the bundle job, off the capture path.
             "artifact_status": "verified"
             if statuses == {"verified"}
             else "partial"
             if statuses & {"partial", "invalid"}
+            else "present"
+            if statuses and statuses <= {"verified", "present"}
             else "unverified",
             "errors": session.errors,
         }

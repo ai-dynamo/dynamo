@@ -29,6 +29,7 @@ from dynamo.profiling import (
     Coordinator,
     adapters,
     agent,
+    artifacts,
     bundle,
     collectors,
     errors,
@@ -620,12 +621,23 @@ async def test_worker_capture_identity_clock_and_rank_validation(
     assert manifest["profiles"][0]["identity_verification"] == "control_process_epoch"
     validation = manifest["artifact_validation"][0]
     assert all("old_" not in item["location"] for item in validation["artifacts"])
-    if case == "complete":
+    if case in ("complete", "corrupt"):
+        # Only presence is checked on the capture path; a truncated trace is
+        # caught by the offline inspection in the bundle job.
         assert session.state == "completed"
-        assert manifest["artifact_status"] == "verified"
-        assert validation["coverage"] == "complete"
+        assert manifest["artifact_status"] == "present"
+        assert validation["coverage"] == "present"
         assert len(validation["artifacts"]) == 2
-        for item in validation["artifacts"]:
+        inspected = artifacts.inspect_kineto(validation, config)
+        if case == "corrupt":
+            assert inspected["status"] == "invalid"
+            assert [item["validation"] for item in inspected["artifacts"]] == [
+                "valid",
+                "invalid",
+            ]
+            return
+        assert inspected["status"] == "verified"
+        for item in inspected["artifacts"]:
             assert item["events"] == item["cuda_kernels"] == 1
             raw = gzip.decompress(Path(item["location"]).read_bytes())
             assert item["sha256_uncompressed"] == hashlib.sha256(raw).hexdigest()
@@ -636,10 +648,7 @@ async def test_worker_capture_identity_clock_and_rank_validation(
     else:
         assert session.state == "failed"
         assert manifest["artifact_status"] == "partial"
-        if case == "missing":
-            assert validation["missing_rank_ids"] == [RANKS[1]]
-        else:
-            assert validation["artifacts"][1]["validation"] == "invalid"
+        assert validation["missing_rank_ids"] == [RANKS[1]]
 
 
 def test_clock_offset_bound_and_clock_step_rejection():
@@ -689,11 +698,11 @@ async def test_trace_validation_limits_and_duplicate_rank_files(tmp_path):
     result = await validator.validate(evidence, Config("socket", str(tmp_path)))
     assert result["status"] == "invalid"
     assert result["duplicate_rank_files"] is True
-    result = await validator.validate(
-        evidence, Config("socket", str(tmp_path), max_trace_bytes=10)
+    inspected = artifacts.inspect_kineto(
+        result, Config("socket", str(tmp_path), max_trace_bytes=10)
     )
-    assert all(item["validation"] == "invalid" for item in result["artifacts"])
-    assert "byte limit" in result["artifacts"][0]["error"]
+    assert all(item["validation"] == "invalid" for item in inspected["artifacts"])
+    assert "byte limit" in inspected["artifacts"][0]["error"]
 
 
 @pytest.mark.asyncio
@@ -845,8 +854,10 @@ async def test_native_recording_bounds_preserve_nanosecond_precision(tmp_path, c
         },
         Config("unused", str(tmp_path)),
     )
-    assert result["status"] == "verified"
-    bounds = result["artifacts"][0]["recording_bounds"]
+    assert result["status"] == "present"
+    inspected = artifacts.inspect_kineto(result, Config("unused", str(tmp_path)))
+    assert inspected["status"] == "verified"
+    bounds = inspected["artifacts"][0]["recording_bounds"]
     if case == "observed":
         assert bounds == {
             "status": "observed",
@@ -946,14 +957,11 @@ async def test_nsys_repeated_client_capture_without_subprocess(tmp_path, monkeyp
             assert session.state == "completed", manifest
             assert manifest["frontend"]["profiling_enabled"] is True
             result = manifest["artifact_validation"][0]
-            assert result["status"] == "verified"
+            assert result["status"] == "present"
             assert result["artifacts"][0]["location"].endswith(
                 f"frontend.{window+1}.nsys-rep"
             )
-            assert (
-                result["artifacts"][0]["sha256"]
-                == hashlib.sha256(b"native-report-fixture").hexdigest()
-            )
+            assert result["artifacts"][0]["bytes"] == len(b"native-report-fixture")
     await asyncio.gather(*pending)
     assert len(handles) == 3
 
@@ -1011,19 +1019,27 @@ async def test_nsys_rejects_incomplete_or_ambiguous_exports(tmp_path, defect):
             conn.execute("DELETE FROM META_DATA_EXPORT WHERE name = 'EXPORT_TIME'")
     if defect == "corrupt":
         path.with_suffix(".sqlite").write_bytes(b"not a database")
-    result = await SharedFilesystemValidator().validate(
-        {
-            "collector": "nsys",
-            "output_prefix": str(tmp_path / "worker"),
-            "required_activity": (
-                "cpu_events" if defect == "missing_cpu" else "cuda_events"
-            ),
-            "expected_gpu_processes": 2 if defect == "missing_rank" else 1,
-            "previous_reports": [],
-        },
-        Config("unused", str(tmp_path), artifact_validation_timeout_s=0.03),
-    )
-    assert result["status"] in ("partial", "invalid")
+    evidence = {
+        "collector": "nsys",
+        "output_prefix": str(tmp_path / "worker"),
+        "required_activity": (
+            "cpu_events" if defect == "missing_cpu" else "cuda_events"
+        ),
+        "expected_gpu_processes": 2 if defect == "missing_rank" else 1,
+        "previous_reports": [],
+    }
+    config = Config("unused", str(tmp_path), artifact_validation_timeout_s=0.03)
+    result = await SharedFilesystemValidator().validate(evidence, config)
+    if defect in ("ambiguous", "corrupt", "incomplete"):
+        # Readiness and association are checked on the capture path.
+        assert result["status"] in ("partial", "invalid")
+    else:
+        # Activity and rank checks run offline in the bundle job.
+        assert result["status"] == "present"
+        result = nsys.inspect_nsys(
+            {"artifacts": [{"location": str(path)}]}, evidence, config
+        )
+        assert result["status"] == "invalid"
     assert result["error"]
 
 
@@ -1055,14 +1071,9 @@ async def test_nsys_accepts_cuda_memory_activity(tmp_path, with_kernels):
     with sqlite3.connect(path.with_suffix(".sqlite")) as conn:
         conn.execute("CREATE TABLE CUPTI_ACTIVITY_KIND_MEMCPY(globalPid INTEGER)")
         conn.execute("INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY VALUES (0)")
-    result = await SharedFilesystemValidator().validate(
-        {
-            "collector": "nsys",
-            "output_prefix": str(tmp_path / "worker"),
-            "previous_reports": [],
-            "required_activity": "cuda_events",
-            "expected_gpu_processes": 1,
-        },
+    result = nsys.inspect_nsys(
+        {"artifacts": [{"location": str(path)}]},
+        {"required_activity": "cuda_events", "expected_gpu_processes": 1},
         Config("unused", str(tmp_path), artifact_validation_timeout_s=0.05),
     )
     assert result["status"] == "verified"
@@ -1102,20 +1113,24 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
             "args": {"labels": "CPU"},
         },
     ]
-    native = {"baseTimeNanoseconds": base, "traceEvents": metadata + kernels}
+    marker = {
+        "ph": "X",
+        "cat": "Trace",
+        "name": "PyTorch Profiler (0)",
+        "pid": "Spans",
+        "tid": 0,
+        "ts": 1000,
+        "dur": 3000,
+    }
+    native = {"baseTimeNanoseconds": base, "traceEvents": metadata + kernels + [marker]}
     trace.write_bytes(gzip.compress(json.dumps(native).encode()))
     session = tmp_path / "session"
     session.mkdir()
-    bounds = {
-        "status": "observed",
-        "start_unix_ns": base + 1_000_000,
-        "end_unix_ns": base + 4_000_000,
-    }
     clock = {"alignment": "estimated", "offset_ns": 1000, "hostname": "h", "pid": 42}
     manifest = {
         "session_id": "s",
         "state": "completed",
-        "artifact_status": "verified",
+        "artifact_status": "present",
         "plan": {"trace_ids": ["trigger"]},
         "profiles": [
             {
@@ -1128,14 +1143,8 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
         "artifact_validation": [
             {
                 "target_id": "decode-0",
-                "status": "verified",
-                "artifacts": [
-                    {
-                        "location": str(trace),
-                        "rank_id": "dp0",
-                        "recording_bounds": bounds,
-                    }
-                ],
+                "status": "present",
+                "artifacts": [{"location": str(trace), "rank_id": "dp0"}],
             }
         ],
     }
@@ -1214,8 +1223,10 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
     exported = (tmp_path / "out/lifecycle/traces.otlp.jsonl").read_text()
     assert "captured" in exported and "uncaptured" not in exported
     assert summary["coverage"]["lifecycle"]["trigger_traces_found"] == "0/1"
-    # Both kernels in the window timeline, one in the per-request timeline.
-    assert summary["coverage"]["native_timeline"]["decode-0"]["events_written"] == 3
+    assert summary["artifact_verification"]["decode-0"]["status"] == "verified"
+    # Window: both kernels and the profiler range; per request: the kernel
+    # inside its operation and the overlapping profiler range.
+    assert summary["coverage"]["native_timeline"]["decode-0"]["events_written"] == 5
     timeline = tmp_path / "out" / index["requests"][0]["timeline"]
     events = json.loads(gzip.decompress(timeline.read_bytes()))["traceEvents"]
     order = {
@@ -1230,6 +1241,7 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
         "Requests · OTel spans",
         "Recording windows",
         "decode-0 · EngineCore (CPU)",
+        "decode-0 · Kineto profiler (Spans)",
         "Control",
     ]
     lanes = {e["name"]: e["args"]["process"] for e in events if e.get("cat") == "otel"}
@@ -1288,6 +1300,14 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
             db.executemany(
                 "INSERT INTO StringIds VALUES (?, ?)", [(1, "epoll_wait"), (2, "gemm")]
             )
+            db.execute("CREATE TABLE META_DATA_EXPORT (name, value)")
+            db.executemany(
+                "INSERT INTO META_DATA_EXPORT VALUES (?, ?)",
+                [
+                    ("EXPORT_TIME", "0.01 sec"),
+                    ("EXPORT_PARAM_INPUT_FILE", f"{name}.nsys-rep"),
+                ],
+            )
             db.execute("CREATE TABLE PROCESSES (globalPid, pid, name)")
             db.execute("INSERT INTO PROCESSES VALUES (0, 42, 'VLLM::EngineCore')")
             for table, columns, values in rows:
@@ -1323,10 +1343,10 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
             ),
             (
                 "CUPTI_ACTIVITY_KIND_KERNEL",
-                "start, end, demangledName, deviceId, streamId",
+                "start, end, demangledName, deviceId, streamId, globalPid",
                 [
-                    (1_000_000, 1_100_000, 2, 0, 7),
-                    (2_500_000, 2_600_000, 2, 0, 7),
+                    (1_000_000, 1_100_000, 2, 0, 7, 99),
+                    (2_500_000, 2_600_000, 2, 0, 7, 99),
                 ],
             ),
         ],
@@ -1343,11 +1363,21 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
             {
                 "session_id": "s",
                 "state": "completed",
-                "artifact_status": "verified",
+                "artifact_status": "present",
                 "plan": {"trace_ids": []},
                 "profiles": [
-                    {"target_id": t, "collector": "nsys"}
-                    for t in ("frontend", "decode-0")
+                    {
+                        "target_id": "frontend",
+                        "collector": "nsys",
+                        "required_activity": "cpu_events",
+                        "pid": 42,
+                    },
+                    {
+                        "target_id": "decode-0",
+                        "collector": "nsys",
+                        "required_activity": "cuda_events",
+                        "expected_gpu_processes": 1,
+                    },
                 ],
                 "clock": {
                     "workers": {
@@ -1363,7 +1393,7 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
                 "artifact_validation": [
                     {
                         "target_id": t,
-                        "status": "verified",
+                        "status": "present",
                         "recording_bounds": bounds,
                         "artifacts": [
                             {"location": str(path.with_suffix(".nsys-rep"))},
@@ -1428,6 +1458,10 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
     assert native == [("kernel", "gemm"), ("pytorch", "forward")]
     summary = json.loads((tmp_path / "out/bundle.json").read_text())
     assert summary["coverage"]["native_timeline"]["frontend"]["status"] == "excluded"
+    assert {t: v["status"] for t, v in summary["artifact_verification"].items()} == {
+        "frontend": "verified",
+        "decode-0": "verified",
+    }
     recordings = {e["name"] for e in events if e.get("cat") == "capture"}
     assert recordings == {"frontend recording", "decode-0 recording"}
     archived = bundle.archive(tmp_path / "out", summary)

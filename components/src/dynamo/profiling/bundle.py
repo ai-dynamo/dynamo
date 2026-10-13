@@ -33,10 +33,15 @@ import shutil
 import sqlite3
 import tarfile
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import closing
 from pathlib import Path
 
 import ijson
+
+from .artifacts import inspect_kineto
+from .models import Config
+from .nsys import inspect_nsys
 
 
 def attrs(span: dict) -> dict:
@@ -61,10 +66,34 @@ def load_traces(paths: list[Path]) -> dict[str, dict[str, dict]]:
     return traces
 
 
-def recording_intervals(manifest: dict) -> dict[str, tuple[int, int]]:
+def verify_target(item: dict, evidence: dict) -> dict:
+    """Full offline inspection of one target's native artifacts."""
+    config = Config("unused", "unused", artifact_validation_timeout_s=3600)
+    if evidence.get("collector") == "nsys":
+        return inspect_nsys(item, evidence, config)
+    if evidence.get("collector") == "torch_profiler":
+        return inspect_kineto(item, config)
+    return {
+        "status": item.get("status", "unverified"),
+        "reason": "no offline inspector",
+    }
+
+
+def verify_native(manifest: dict) -> dict[str, dict]:
+    """Inspect every target in parallel processes; the capture only checked presence."""
+    profiles = {p["target_id"]: p for p in manifest["profiles"]}
+    items = manifest["artifact_validation"]
+    with ProcessPoolExecutor(max_workers=max(1, len(items))) as pool:
+        results = pool.map(
+            verify_target, items, [profiles.get(i["target_id"], {}) for i in items]
+        )
+        return {item["target_id"]: result for item, result in zip(items, results)}
+
+
+def recording_intervals(items: list[dict]) -> dict[str, tuple[int, int]]:
     """Observed native bounds per target; Kineto reports them per rank file."""
     intervals = {}
-    for item in manifest["artifact_validation"]:
+    for item in items:
         observed = [
             b
             for b in [item.get("recording_bounds")]
@@ -474,8 +503,20 @@ def build(
                     artifact["location"] = str(packed)
     if manifest["state"] not in ("completed", "failed"):
         raise SystemExit(f"Session is still {manifest['state']}")
+    # Full verification happens here, off the capture path; its results give
+    # the native recording bounds (Kineto bounds need a full trace parse).
+    verification = verify_native(manifest)
+    checked = []
+    for item in manifest["artifact_validation"]:
+        result = verification[item["target_id"]]
+        merged = {**item, **result, "target_id": item["target_id"]}
+        if (result.get("recording_bounds") or {}).get(
+            "status"
+        ) != "observed" and item.get("recording_bounds"):
+            merged["recording_bounds"] = item["recording_bounds"]
+        checked.append(merged)
     traces = load_traces(otel_paths)
-    intervals = recording_intervals(manifest)
+    intervals = recording_intervals(checked)
     offsets = {"frontend": 0} | {
         target: clock["start"]["offset_ns"]
         for target, clock in manifest["clock"]["workers"].items()
@@ -570,7 +611,7 @@ def build(
 
     # Read each native trace once; route events to every overlapping view.
     native = {}
-    for item in manifest["artifact_validation"]:
+    for item in checked:
         target = item["target_id"]
         collector = next(
             (p["collector"] for p in manifest["profiles"] if p["target_id"] == target),
@@ -679,15 +720,25 @@ def build(
         "native_profiles": [
             {
                 k: a[k]
-                for k in ("location", "rank_id", "sha256_uncompressed", "bytes")
+                for k in (
+                    "location",
+                    "rank_id",
+                    "sha256",
+                    "sha256_uncompressed",
+                    "bytes",
+                )
                 if k in a
             }
             | {"target_id": item["target_id"]}
-            for item in manifest["artifact_validation"]
+            for item in checked
             for a in item.get("artifacts", [])
         ],
+        "artifact_verification": verification,
         "coverage": {
-            "profiler": manifest["artifact_status"],
+            "capture": manifest["artifact_status"],
+            "profiler": "verified"
+            if all(v["status"] == "verified" for v in verification.values())
+            else "partial",
             "lifecycle": {
                 "status": "observed" if index else "missing",
                 "requests": len(index),

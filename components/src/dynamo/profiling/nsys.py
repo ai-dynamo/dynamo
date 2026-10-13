@@ -135,6 +135,33 @@ def nsys_collectors(
     return collectors
 
 
+def report_bounds(conn, tables: set) -> dict:
+    """Native recording bounds on the host UTC clock, if the export has them."""
+    bounds = {"status": "unknown"}
+    if {"ANALYSIS_DETAILS", "TARGET_INFO_SESSION_START_TIME"} <= tables:
+        capture = conn.execute(
+            "SELECT startTime, stopTime FROM ANALYSIS_DETAILS"
+        ).fetchall()
+        anchor = conn.execute(
+            "SELECT utcEpochNs, systemClockNs FROM TARGET_INFO_SESSION_START_TIME"
+        ).fetchall()
+        if len(capture) == len(anchor) == 1:
+            start, end = capture[0]
+            utc, clock = anchor[0]
+            if (
+                all(type(value) is int for value in (start, end, utc, clock))
+                and end > start
+            ):
+                bounds = {
+                    "status": "observed",
+                    "clock": "nsight_host_unix_ns_unattested",
+                    "start_unix_ns": utc + start - clock,
+                    "end_unix_ns": utc + end - clock,
+                    "duration_ns": end - start,
+                }
+    return bounds
+
+
 def inspect_report(
     report: Path, evidence: dict, config: Config, deadline: float
 ) -> dict:
@@ -198,28 +225,7 @@ def inspect_report(
                 raise ValueError(
                     "Worker CUDA process count differs from configured rank count"
                 )
-        bounds = {"status": "unknown"}
-        if {"ANALYSIS_DETAILS", "TARGET_INFO_SESSION_START_TIME"} <= tables:
-            capture = conn.execute(
-                "SELECT startTime, stopTime FROM ANALYSIS_DETAILS"
-            ).fetchall()
-            anchor = conn.execute(
-                "SELECT utcEpochNs, systemClockNs FROM TARGET_INFO_SESSION_START_TIME"
-            ).fetchall()
-            if len(capture) == len(anchor) == 1:
-                start, end = capture[0]
-                utc, clock = anchor[0]
-                if (
-                    all(type(value) is int for value in (start, end, utc, clock))
-                    and end > start
-                ):
-                    bounds = {
-                        "status": "observed",
-                        "clock": "nsight_host_unix_ns_unattested",
-                        "start_unix_ns": utc + start - clock,
-                        "end_unix_ns": utc + end - clock,
-                        "duration_ns": end - start,
-                    }
+        bounds = report_bounds(conn, tables)
         diagnostics = (
             [
                 row[0][:512]
@@ -288,10 +294,69 @@ async def validate_reports(evidence: dict, config: Config) -> dict:
             }
         if reports:
             try:
-                return await asyncio.to_thread(
-                    inspect_report, reports[0], evidence, config, deadline
-                )
+                return await asyncio.to_thread(check_report, reports[0], config)
             except (OSError, sqlite3.Error, ValueError, TimeoutError) as exc:
                 error = str(exc)
         await asyncio.sleep(min(0.5, max(0, deadline - time.monotonic())))
     return {"status": "partial", "coverage": "partial", "error": error}
+
+
+def check_report(report: Path, config: Config) -> dict:
+    """Cheap readiness check on the capture path: this report's export finished.
+
+    Full inspection (integrity scan, required activity, GPU process count and
+    hashes) runs offline in the bundle job via inspect_nsys.
+    """
+    paths = (report, report.with_suffix(".sqlite"))
+    sizes = [path.stat().st_size for path in paths]
+    if any(size <= 0 or size > config.max_trace_bytes for size in sizes):
+        raise ValueError("Nsight artifact is empty or exceeds the byte limit")
+    with closing(
+        sqlite3.connect(paths[1].as_uri() + "?mode=ro", uri=True, timeout=0.1)
+    ) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        metadata = dict(conn.execute("SELECT name, value FROM META_DATA_EXPORT"))
+        if (
+            not metadata.get("EXPORT_TIME")
+            or metadata.get("EXPORT_PARAM_INPUT_FILE") != report.name
+        ):
+            raise ValueError(
+                "Nsight SQLite export is incomplete or belongs to another report"
+            )
+        bounds = report_bounds(conn, tables)
+    return {
+        "status": "present",
+        "coverage": "present",
+        "artifacts": [
+            {"location": str(path), "bytes": size} for path, size in zip(paths, sizes)
+        ],
+        "recording_bounds": bounds,
+        "association": "new_report_in_dedicated_launch_prefix",
+        "inspection": "deferred_to_bundle",
+    }
+
+
+def inspect_nsys(item: dict, evidence: dict, config: Config) -> dict:
+    """Full offline inspection of a target's Nsight report and SQLite export."""
+    report = next(
+        (
+            Path(a["location"])
+            for a in item.get("artifacts", [])
+            if a["location"].endswith(".nsys-rep")
+        ),
+        None,
+    )
+    if report is None:
+        return {"status": "invalid", "error": "no Nsight report"}
+    try:
+        return inspect_report(
+            report,
+            evidence,
+            config,
+            time.monotonic() + config.artifact_validation_timeout_s,
+        )
+    except (OSError, sqlite3.Error, ValueError, TimeoutError) as exc:
+        return {"status": "invalid", "error": str(exc)}

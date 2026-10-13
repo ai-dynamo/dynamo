@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared-filesystem Kineto validation; other stores implement the same protocol."""
+"""Artifact checks: a cheap presence check on the capture path, full inspection offline.
+
+The coordinator only confirms that each expected native file exists and is
+readable ("present"). Full parsing, hashing and recording bounds run in the
+post-processing bundle job, off the frontend and the capture's critical path.
+"""
 
 import asyncio
 import gzip
@@ -126,13 +131,35 @@ def inspect_trace(path: Path, config: Config, deadline: float) -> dict:
         }
 
 
+def rank_files(location: str, prefix: str) -> list[tuple[str, Path]]:
+    """Kineto rank traces written under this session's unique prefix."""
+    pattern = re.compile(rf"^{re.escape(prefix)}_(.+)\.\d+\.pt\.trace\.json(?:\.gz)?$")
+    return sorted(
+        (match.group(1), path)
+        for path in Path(location).iterdir()
+        if (match := pattern.fullmatch(path.name)) and path.is_file()
+    )
+
+
+def present(path: Path) -> str | None:
+    """Return why a native trace is unusable, without parsing it."""
+    size = path.stat().st_size
+    if size <= 0:
+        return "empty"
+    if path.suffix == ".gz":
+        with path.open("rb") as stream:
+            if stream.read(2) != b"\x1f\x8b":
+                return "not a gzip file"
+    return None
+
+
 class SharedFilesystemValidator:
+    """Cheap checks only; full inspection is the bundle's job."""
+
     async def validate(self, evidence: dict, config: Config) -> dict:
         if evidence.get("collector") == "nsys":
             return await validate_reports(evidence, config)
-        # Parsing can take seconds for native traces; never run it on the
-        # frontend's serving loop. The reader enforces a cooperative deadline.
-        return await asyncio.to_thread(self._validate, evidence.copy(), config)
+        return await asyncio.to_thread(self._validate, evidence, config)
 
     def _validate(self, evidence: dict, config: Config) -> dict:
         location = evidence.get("artifact_location")
@@ -143,81 +170,81 @@ class SharedFilesystemValidator:
                 "coverage": "unknown",
                 "reason": "no_supported_accessible_store",
             }
-        directory = Path(location)
-        if not directory.is_dir():
+        if not Path(location).is_dir():
             return {
                 "status": "unverified",
                 "coverage": "unknown",
                 "reason": "artifact_store_not_mounted",
                 "location": location,
             }
-        pattern = re.compile(
-            rf"^{re.escape(prefix)}_(.+)\.\d+\.pt\.trace\.json(?:\.gz)?$"
-        )
-        deadline = time.monotonic() + config.artifact_validation_timeout_s
-        artifacts = []
-        ranks = []
         try:
-            for path in directory.iterdir():
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Artifact enumeration deadline expired")
-                match = pattern.fullmatch(path.name)
-                if not match or not path.is_file():
-                    continue
-                rank = match.group(1)
-                ranks.append(rank)
-                try:
-                    artifact = inspect_trace(path, config, deadline)
-                except (
-                    OSError,
-                    EOFError,
-                    ijson.JSONError,
-                    ValueError,
-                    TimeoutError,
-                ) as exc:
-                    artifact = {
+            found = rank_files(location, prefix)
+            artifacts = []
+            for rank, path in found:
+                problem = present(path)
+                artifacts.append(
+                    {
                         "location": str(path),
-                        "validation": "invalid",
-                        "error": str(exc),
+                        "rank_id": rank,
+                        "bytes": path.stat().st_size,
+                        "validation": "present" if problem is None else "invalid",
+                        **({"error": problem} if problem else {}),
                     }
-                artifacts.append({**artifact, "rank_id": rank})
-        except (OSError, TimeoutError) as exc:
-            return {
-                "status": "invalid",
-                "coverage": "partial",
-                "artifacts": artifacts,
-                "error": str(exc),
-            }
-        artifacts.sort(key=lambda artifact: artifact["location"])
-        ranks.sort()
+                )
+        except OSError as exc:
+            return {"status": "invalid", "coverage": "partial", "error": str(exc)}
+        ranks = [rank for rank, _ in found]
         expected = evidence.get("expected_rank_ids", [])
         missing = sorted(set(expected) - set(ranks))
         unexpected = sorted(set(ranks) - set(expected)) if expected else []
         duplicate = len(ranks) != len(set(ranks))
-        invalid = any(artifact["validation"] != "valid" for artifact in artifacts)
+        invalid = any(artifact["validation"] != "present" for artifact in artifacts)
         status = (
             "invalid"
             if invalid or duplicate
             else "partial"
             if missing or unexpected or not artifacts
-            else "verified"
+            else "present"
             if expected
             else "unverified"
         )
         return {
             "status": status,
-            "coverage": "complete"
-            if status == "verified"
+            "coverage": "present"
+            if status == "present"
             else "partial"
             if status in ("invalid", "partial")
             else "unknown",
             "artifacts": artifacts,
             "expected_rank_ids": expected,
-            "observed_rank_ids": ranks,
+            "observed_rank_ids": sorted(ranks),
             "missing_rank_ids": missing,
             "unexpected_rank_ids": unexpected,
             "duplicate_rank_files": duplicate,
             "association": "unique_session_prefix",
             "scope": "engine_rank_files",
+            "inspection": "deferred_to_bundle",
             "excluded": "AsyncLLM CPU traces lack the native profile prefix",
         }
+
+
+def inspect_kineto(item: dict, config: Config) -> dict:
+    """Full offline inspection of a target's Kineto rank traces."""
+    deadline = time.monotonic() + config.artifact_validation_timeout_s
+    artifacts = []
+    for artifact in item.get("artifacts", []):
+        path = Path(artifact["location"])
+        try:
+            result = inspect_trace(path, config, deadline)
+        except (OSError, EOFError, ijson.JSONError, ValueError, TimeoutError) as exc:
+            result = {"location": str(path), "validation": "invalid", "error": str(exc)}
+        artifacts.append({**result, "rank_id": artifact.get("rank_id")})
+    ok = artifacts and all(a["validation"] == "valid" for a in artifacts)
+    return {
+        "status": "verified"
+        if ok and item.get("status") == "present"
+        else "invalid"
+        if not ok
+        else item.get("status"),
+        "artifacts": artifacts,
+    }
