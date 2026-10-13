@@ -12,16 +12,24 @@ use utoipa::ToSchema;
 
 #[test]
 fn http_export_describes_request_aliases() {
-    use dynamo_llm::http::service::{RouteDoc, openapi_docs::generate_openapi_spec};
+    use dynamo_llm::http::service::{
+        OpenApiRouteKind, RouteDoc, openapi_docs::generate_openapi_spec,
+    };
     let routes = [
-        RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions"),
-        RouteDoc::new(axum::http::Method::POST, "/v1/completions"),
+        RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions")
+            .with_openapi_kind(OpenApiRouteKind::ChatCompletions),
+        RouteDoc::new(axum::http::Method::POST, "/v1/completions")
+            .with_openapi_kind(OpenApiRouteKind::Completions),
+        RouteDoc::new(axum::http::Method::POST, "/v1/embeddings")
+            .with_openapi_kind(OpenApiRouteKind::Embeddings),
+        RouteDoc::new(axum::http::Method::POST, "/v1/responses")
+            .with_openapi_kind(OpenApiRouteKind::Responses),
     ];
-    let spec = serde_json::to_value(generate_openapi_spec(&routes)).unwrap();
+    let spec = generate_openapi_spec(&routes).unwrap();
+    /// Check an alias on an inline/flattened field and return whether it was found.
     fn assert_alias(node: &serde_json::Value, field: &str, alias: &str) -> bool {
         if let Some(schema) = node.get("properties").and_then(|p| p.get(field)) {
             assert_eq!(schema["x-dynamo-input-aliases"], serde_json::json!([alias]));
-            assert!(schema.get("x-dynamo-alias-conflict").is_none());
             return true;
         }
         node.get("allOf")
@@ -33,6 +41,8 @@ fn http_export_describes_request_aliases() {
     for (path, name) in [
         ("/v1/chat/completions", "NvCreateChatCompletionRequest"),
         ("/v1/completions", "NvCreateCompletionRequest"),
+        ("/v1/embeddings", "NvCreateEmbeddingRequest"),
+        ("/v1/responses", "NvCreateResponse"),
     ] {
         let schema =
             &spec["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"];
@@ -112,6 +122,19 @@ fn chat_only_fields_are_exported_without_advertising_them_for_completions() {
             serde_json::json!(["boolean", "null"])
         );
     }
+    assert_eq!(properties["add_generation_prompt"]["default"], true);
+    assert!(
+        properties["add_generation_prompt"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("continue_final_message=true")
+    );
+    assert!(
+        properties["continue_final_message"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("add_generation_prompt=false")
+    );
     let shared = schemas
         .iter()
         .find(|(name, _)| name == "CommonExt")

@@ -15,7 +15,7 @@
 
 use axum::http::Method;
 use dynamo_llm::{
-    http::service::{RouteDoc, openapi_docs},
+    http::service::{OpenApiRouteKind, RouteDoc, openapi_docs},
     protocols::openai::{
         chat_completions::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse},
         completions::NvCreateCompletionResponse,
@@ -26,15 +26,23 @@ use serde_json::{Value, json};
 
 /// Export the native test routes with the chosen client-facing reasoning spelling.
 fn document(field: ReasoningField) -> Value {
-    openapi_docs::generate_openapi_spec_with_reasoning_field(
+    openapi_docs::generate_openapi_spec_with_options(
         &[
-            RouteDoc::new(Method::POST, "/v1/chat/completions"),
-            RouteDoc::new(Method::POST, "/v1/completions"),
+            RouteDoc::new(Method::POST, "/v1/chat/completions")
+                .with_openapi_kind(OpenApiRouteKind::ChatCompletions),
+            RouteDoc::new(Method::POST, "/v1/completions")
+                .with_openapi_kind(OpenApiRouteKind::Completions),
             RouteDoc::new(Method::GET, "/v1/chat/completions"),
-            RouteDoc::new(Method::POST, "/v1/embeddings"),
+            RouteDoc::new(Method::POST, "/v1/embeddings")
+                .with_openapi_kind(OpenApiRouteKind::Embeddings),
         ],
-        field,
+        openapi_docs::OpenApiOptions {
+            reasoning_field: field,
+            streaming_tool_dispatch: true,
+            streaming_reasoning_dispatch: true,
+        },
     )
+    .unwrap()
 }
 
 /// Consumers can distinguish a unary body from parsed SSE events and resolve their payloads.

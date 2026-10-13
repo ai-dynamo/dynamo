@@ -33,11 +33,32 @@
 //! 1. View the raw OpenAPI spec: `curl http://localhost:8000/openapi.json`
 //! 2. Access Swagger UI: Open `http://localhost:8000/docs` in a web browser
 
-use axum::Router;
-use utoipa::OpenApi;
-use utoipa::openapi::{PathItem, Paths, RefOr};
+use std::sync::Arc;
 
-use crate::http::service::RouteDoc;
+use axum::{Router, body::Bytes, http::StatusCode, response::IntoResponse};
+use tokio::sync::OnceCell;
+use utoipa::openapi::{PathItem, Paths, RefOr};
+use utoipa::{OpenApi, ToSchema};
+
+use crate::http::service::{OpenApiRouteKind, RouteDoc};
+use crate::protocols::openai::{
+    chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+        NvCreateChatCompletionStreamResponse,
+    },
+    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    embeddings::NvCreateEmbeddingRequest,
+    responses::NvCreateResponse,
+};
+
+/// Response serialization options that must match the service being documented.
+/// Defaults match the frontend: canonical reasoning key and no named dispatches.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenApiOptions {
+    pub reasoning_field: crate::reasoning_field::ReasoningField,
+    pub streaming_tool_dispatch: bool,
+    pub streaming_reasoning_dispatch: bool,
+}
 
 /// OpenAPI documentation structure
 ///
@@ -74,22 +95,19 @@ struct ApiDoc;
 /// Generate the native document with the default `reasoning_content` response key.
 ///
 /// Use when no response-key override is needed. The `route_docs` contract, returned
-/// document, and panics are described by [`generate_openapi_spec_with_reasoning_field`].
-pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> serde_json::Value {
-    generate_openapi_spec_with_reasoning_field(
-        route_docs,
-        crate::reasoning_field::ReasoningField::DEFAULT,
-    )
+/// document, and errors are described by [`generate_openapi_spec_with_options`].
+pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> Result<serde_json::Value, String> {
+    generate_openapi_spec_with_options(route_docs, OpenApiOptions::default())
 }
 
 /// Generate a native OpenAPI document for export or embedding without starting HTTP.
 ///
 /// # Arguments
 ///
-/// * `route_docs` - Routes to describe. Invalid route strings and unsupported methods
-///   are skipped with a warning; supported methods on the same path are combined.
-/// * `reasoning_field` - Response property spelling to advertise; use the same value
-///   as the frontend's response serialization configuration.
+/// * `route_docs` - Registered routes to describe, including their handler kinds.
+///   Unsupported methods are skipped with a warning; methods on one path combine.
+/// * `options` - Response property spelling and dispatch flags; match the service's
+///   configuration, or explicitly enable both dispatches for a full-surface export.
 ///
 /// # Returns
 ///
@@ -98,38 +116,28 @@ pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> serde_json::Value {
 /// fully composed contract. Return JSON rather than Utoipa 5's typed document because
 /// its model cannot retain OpenAPI 3.2 fields. Do not deserialize this into that model.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if compiled schemas violate the alias or reasoning-projection invariants,
-/// rather than publishing stale metadata.
-pub fn generate_openapi_spec_with_reasoning_field(
+/// Returns a diagnostic if schema invariants or serialization fail. No partial
+/// document is returned. HTTP callers must isolate this failure to documentation.
+pub fn generate_openapi_spec_with_options(
     route_docs: &[RouteDoc],
-    reasoning_field: crate::reasoning_field::ReasoningField,
-) -> serde_json::Value {
+    options: OpenApiOptions,
+) -> Result<serde_json::Value, String> {
     let mut openapi = ApiDoc::openapi();
     // Like input aliases below, response projection is a compiled-schema invariant.
-    configure_response_schemas(&mut openapi, reasoning_field)
-        .expect("response reasoning schema locations changed");
+    configure_response_schemas(&mut openapi, options.reasoning_field)?;
 
     // Build paths from route documentation
     let mut paths = Paths::new();
 
     for route in route_docs {
-        let path_str = route.to_string();
-        tracing::debug!("Adding route to OpenAPI spec: {}", path_str);
-
-        // Parse the route to extract method and path
-        let parts: Vec<&str> = path_str.split_whitespace().collect();
-        if parts.len() != 2 {
-            tracing::warn!("Invalid route format: {}", path_str);
-            continue;
-        }
-
-        let method = parts[0];
-        let path = parts[1];
+        tracing::debug!("Adding route to OpenAPI spec: {route}");
+        let method = route.method().as_str();
+        let path = route.path();
 
         // Add operation based on method
-        let operation = create_operation_for_route(method, path);
+        let operation = create_operation_for_route(route);
 
         // Create PathItem with the operation
         use utoipa::openapi::HttpMethod;
@@ -165,41 +173,39 @@ pub fn generate_openapi_spec_with_reasoning_field(
     // these declarations against the actual request deserializer. By definition,
     // x-dynamo-input-aliases rejects multiple spellings of one field together.
     // This is a compiled-schema invariant, not a check of a remote deployment.
-    // Deliberately fail startup rather than publish incomplete alias metadata.
+    // Reject the document rather than publish incomplete alias metadata.
     // `http_export_describes_request_aliases` exercises this path in the
     // pre-merge Rust suite so schema changes must update the declarations too.
-    annotate_request_aliases(&mut openapi).expect("request alias schema locations changed");
+    annotate_request_aliases(&mut openapi)?;
     // Keep the dependency's Utoipa 5 derives, then cross the version boundary once.
     // A round trip back through its typed model would discard itemSchema and cannot
     // represent the 3.2 version. HTTP and file export share this final representation.
-    let mut document = serde_json::to_value(openapi).expect("native OpenAPI serialization failed");
+    let mut document = serde_json::to_value(openapi).map_err(|error| error.to_string())?;
     document["openapi"] = serde_json::json!("3.2.0");
-    for (path, chunk, chat) in [
-        (
-            "/v1/chat/completions",
-            "NvCreateChatCompletionStreamResponse",
-            true,
-        ),
-        ("/v1/completions", "NvCreateCompletionResponse", false),
-    ] {
-        // Only registered POST routes have an SSE response to augment.
-        if let Some(media) = document["paths"][path]["post"]["responses"]["200"]["content"]
-            .get_mut("text/event-stream")
-        {
-            media["itemSchema"] = streaming_event_schema(chunk, chat);
-        }
+    for route in route_docs {
+        let Some((_, chunk, chat)) = completion_response_types(route) else {
+            continue;
+        };
+        // JSON Pointer escaping preserves custom paths, including literal '~'.
+        // Non-inserting lookup must never manufacture an unregistered operation.
+        let path = route.path().replace('~', "~0").replace('/', "~1");
+        let pointer = format!("/paths/{path}/post/responses/200/content/text~1event-stream");
+        let media = document
+            .pointer_mut(&pointer)
+            .ok_or_else(|| format!("missing SSE response for {route}"))?;
+        media["itemSchema"] = streaming_event_schema(&chunk, chat, options);
     }
-    document
+    Ok(document)
 }
 
 /// Describe parsed data-bearing SSE events for a registered completion response.
 ///
-/// `chunk` names a registered payload component; `chat` also enables the named tool
-/// and reasoning dispatch events emitted by the chat handler. The returned schema
+/// `chunk` names a registered payload component; `chat` permits the named tool
+/// and reasoning events enabled in `options`. The returned schema
 /// constrains event envelopes and string-encoded JSON, not ordering or termination.
 /// Consumers must explicitly validate `contentSchema`. Comment-only annotations and
 /// keep-alives have no dispatched data event and are omitted after SSE parsing.
-fn streaming_event_schema(chunk: &str, chat: bool) -> serde_json::Value {
+fn streaming_event_schema(chunk: &str, chat: bool, options: OpenApiOptions) -> serde_json::Value {
     use serde_json::json;
 
     // disconnect.rs emits this error envelope before [DONE]; the shared error type
@@ -219,17 +225,28 @@ fn streaming_event_schema(chunk: &str, chat: bool) -> serde_json::Value {
                     {"contentMediaType": "application/json", "contentSchema": {
                         "type": "object",
                         "required": ["error"],
-                        "properties": {"error": {"$ref": "#/components/schemas/ErrorMessage"}}
+                        "properties": {"error": {"$ref": format!("#/components/schemas/{}", super::openai::ErrorMessage::name())}}
                     }}
                 ]
             }
         }
     })];
     if chat {
-        for (event, payload) in [
-            ("tool_call_dispatch", "ToolCallDispatchPayload"),
-            ("reasoning_dispatch", "ReasoningDispatchPayload"),
+        for (enabled, event, payload) in [
+            (
+                options.streaming_tool_dispatch,
+                "tool_call_dispatch",
+                super::openai::ToolCallDispatchPayload::name(),
+            ),
+            (
+                options.streaming_reasoning_dispatch,
+                "reasoning_dispatch",
+                super::openai::ReasoningDispatchPayload::name(),
+            ),
         ] {
+            if !enabled {
+                continue;
+            }
             events.push(json!({
                 "type": "object",
                 "required": ["event", "data"],
@@ -381,10 +398,13 @@ fn configure_response_schemas(
 }
 
 /// Create an OpenAPI operation for a specific route
-fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path::Operation {
+/// Uses the handler kind for schemas; the registered URL remains the operation ID.
+fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operation {
     use utoipa::openapi::ResponseBuilder;
     use utoipa::openapi::path::OperationBuilder;
 
+    let method = route.method().as_str();
+    let path = route.path();
     let operation_id = format!(
         "{}_{}",
         method.to_lowercase(),
@@ -400,11 +420,11 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
 
     // Add request body for POST methods
     if method.to_uppercase() == "POST" {
-        operation = add_request_body_for_path(operation, path);
+        operation = add_request_body_for_route(operation, route.openapi_kind());
     }
 
     // Add responses
-    operation = operation.response("200", success_response(method, path));
+    operation = operation.response("200", success_response(route));
 
     operation = operation.response(
         "400",
@@ -439,21 +459,15 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
 
 /// Describe success media types for chat/completion POSTs, or omit content otherwise.
 ///
-/// `method` and `path` select the response declaration: only POSTs to
-/// `/v1/chat/completions` and `/v1/completions` get a JSON schema and an SSE media
-/// type. The exporter adds itemSchema after serialization because Utoipa 5 cannot
+/// Only registered chat/completion POST handlers get JSON and SSE declarations,
+/// including at custom paths. The exporter adds itemSchema after serialization because Utoipa 5 cannot
 /// represent it; this intermediate response must not be published on its own.
-fn success_response(method: &str, path: &str) -> utoipa::openapi::Response {
+fn success_response(route: &RouteDoc) -> utoipa::openapi::Response {
     use utoipa::openapi::{ContentBuilder, Ref, ResponseBuilder};
 
     let response = ResponseBuilder::new().description("Successful response");
-    if !method.eq_ignore_ascii_case("POST") {
+    let Some((unary, _, _)) = completion_response_types(route) else {
         return response.build();
-    }
-    let unary = match path {
-        "/v1/chat/completions" => "NvCreateChatCompletionResponse",
-        "/v1/completions" => "NvCreateCompletionResponse",
-        _ => return response.build(),
     };
     response
         .description(
@@ -474,31 +488,58 @@ fn success_response(method: &str, path: &str) -> utoipa::openapi::Response {
         .build()
 }
 
-/// Add request body schema for POST endpoints
-fn add_request_body_for_path(
+/// Select unary/chunk component names and chat status for a registered streaming POST.
+/// All other methods and handler kinds return `None`; URLs do not imply contracts.
+fn completion_response_types(
+    route: &RouteDoc,
+) -> Option<(
+    std::borrow::Cow<'static, str>,
+    std::borrow::Cow<'static, str>,
+    bool,
+)> {
+    if route.method() != axum::http::Method::POST {
+        return None;
+    }
+    match route.openapi_kind()? {
+        OpenApiRouteKind::ChatCompletions => Some((
+            NvCreateChatCompletionResponse::name(),
+            NvCreateChatCompletionStreamResponse::name(),
+            true,
+        )),
+        OpenApiRouteKind::Completions => Some((
+            NvCreateCompletionResponse::name(),
+            NvCreateCompletionResponse::name(),
+            false,
+        )),
+        _ => None,
+    }
+}
+
+/// Add a registered POST handler's request component, or a generic body for unknown handlers.
+fn add_request_body_for_route(
     operation: utoipa::openapi::path::OperationBuilder,
-    path: &str,
+    kind: Option<OpenApiRouteKind>,
 ) -> utoipa::openapi::path::OperationBuilder {
     use utoipa::openapi::ContentBuilder;
     use utoipa::openapi::request_body::RequestBodyBuilder;
 
-    let (description, schema, example) = match path {
-        "/v1/chat/completions" => (
+    let (description, schema, example) = match kind {
+        Some(OpenApiRouteKind::ChatCompletions) => (
             "Chat completion request with model, messages, and optional parameters",
             create_chat_completion_schema(),
             create_chat_completion_example(),
         ),
-        "/v1/completions" => (
+        Some(OpenApiRouteKind::Completions) => (
             "Text completion request with model, prompt, and optional parameters",
             create_completion_schema(),
             create_completion_example(),
         ),
-        "/v1/embeddings" => (
+        Some(OpenApiRouteKind::Embeddings) => (
             "Embedding request with model and input text",
             create_embedding_schema(),
             create_embedding_example(),
         ),
-        "/v1/responses" => (
+        Some(OpenApiRouteKind::Responses) => (
             "Response request with model and input",
             create_response_schema(),
             create_response_example(),
@@ -530,7 +571,7 @@ fn add_request_body_for_path(
 
 /// Reference the registered chat request component without copying its schema.
 fn create_chat_completion_schema() -> RefOr<utoipa::openapi::schema::Schema> {
-    utoipa::openapi::Ref::from_schema_name("NvCreateChatCompletionRequest").into()
+    utoipa::openapi::Ref::from_schema_name(NvCreateChatCompletionRequest::name()).into()
 }
 
 /// Create example for chat completion request
@@ -555,7 +596,7 @@ fn create_chat_completion_example() -> serde_json::Value {
 
 /// Reference the registered completion request component without copying its schema.
 fn create_completion_schema() -> RefOr<utoipa::openapi::schema::Schema> {
-    utoipa::openapi::Ref::from_schema_name("NvCreateCompletionRequest").into()
+    utoipa::openapi::Ref::from_schema_name(NvCreateCompletionRequest::name()).into()
 }
 
 /// Create example for completion request
@@ -569,9 +610,9 @@ fn create_completion_example() -> serde_json::Value {
     })
 }
 
-/// Create schema for embedding request
+/// Reference the registered embedding request component without duplicating its schema.
 fn create_embedding_schema() -> RefOr<utoipa::openapi::schema::Schema> {
-    <crate::protocols::openai::embeddings::NvCreateEmbeddingRequest as utoipa::PartialSchema>::schema()
+    utoipa::openapi::Ref::from_schema_name(NvCreateEmbeddingRequest::name()).into()
 }
 
 /// Create example for embedding request
@@ -582,10 +623,9 @@ fn create_embedding_example() -> serde_json::Value {
     })
 }
 
-/// Create schema for response request
+/// Reference the registered Responses request component without duplicating its schema.
 fn create_response_schema() -> RefOr<utoipa::openapi::schema::Schema> {
-    // Schema derived from NvCreateResponse type via ToSchema
-    <crate::protocols::openai::responses::NvCreateResponse as utoipa::PartialSchema>::schema()
+    utoipa::openapi::Ref::from_schema_name(NvCreateResponse::name()).into()
 }
 
 /// Create example for response request
@@ -663,21 +703,12 @@ fn generate_description_for_path(path: &str) -> String {
     }
 }
 
-/// Build the default-reasoning documentation routes without starting a listener.
-///
-/// Use when no response-key override is needed. `_path` is ignored; the `route_docs`
-/// contract, return values, and panics match [`openapi_router_with_reasoning_field`].
-pub fn openapi_router(route_docs: Vec<RouteDoc>, _path: Option<String>) -> (Vec<RouteDoc>, Router) {
-    openapi_router_with_reasoning_field(route_docs, crate::reasoning_field::ReasoningField::DEFAULT)
-}
-
 /// Build the documentation routes to mount alongside a frontend's API routes.
 ///
 /// # Arguments
 ///
-/// * `route_docs` - API routes to describe, consumed to generate the document under
-///   the rules of [`generate_openapi_spec_with_reasoning_field`].
-/// * `reasoning_field` - Response-key spelling; must match the frontend's serializer.
+/// * `route_docs` - API routes to describe; see [`generate_openapi_spec_with_options`].
+/// * `options` - Response settings; must match the frontend's serializer and flags.
 ///
 /// # Returns
 ///
@@ -686,42 +717,282 @@ pub fn openapi_router(route_docs: Vec<RouteDoc>, _path: Option<String>) -> (Vec<
 /// nor is it automatically added to the generated document. The caller must mount
 /// and serve the router; this function does not start a listener.
 ///
-/// # Panics
-///
-/// Panics on the schema invariants documented by [`generate_openapi_spec_with_reasoning_field`].
-pub fn openapi_router_with_reasoning_field(
+/// Generation is lazy and cached as serialized bytes per router/service. A schema
+/// error is logged once and cached as HTTP 500 for `/openapi.json`; inference remains
+/// available. Neither an invalid partial document nor internal diagnostics are served.
+pub fn openapi_router(
     route_docs: Vec<RouteDoc>,
-    reasoning_field: crate::reasoning_field::ReasoningField,
+    options: OpenApiOptions,
 ) -> (Vec<RouteDoc>, Router) {
-    use utoipa_swagger_ui::SwaggerUi;
-
-    // Generate the OpenAPI spec from route docs
-    let openapi_spec = generate_openapi_spec_with_reasoning_field(&route_docs, reasoning_field);
-
-    // Note: SwaggerUi requires a static string for the URL path, so we ignore the custom path
-    // parameter and always use "/openapi.json"
-    let openapi_path = "/openapi.json";
-
-    // Create Swagger UI with the OpenAPI spec
-    // SwaggerUi automatically serves both the spec at /openapi.json and the UI at /docs
-    // The serialized document deliberately includes fields outside Utoipa 5's
-    // model. Serve it unchanged; the export tests guard the 3.2 representation.
-    let swagger_ui = SwaggerUi::new("/docs").external_url_unchecked(openapi_path, openapi_spec);
-
-    // SwaggerUi handles both routes internally, so we just merge it
-    let router = Router::new().merge(swagger_ui);
+    let document = Arc::new(CachedOpenApi {
+        routes: route_docs,
+        options,
+        bytes: OnceCell::new(),
+    });
+    let router = documentation_router(document);
 
     let docs = vec![
-        RouteDoc::new(axum::http::Method::GET, openapi_path),
+        RouteDoc::new(axum::http::Method::GET, "/openapi.json"),
         RouteDoc::new(axum::http::Method::GET, "/docs"),
     ];
 
     (docs, router)
 }
 
+/// Immutable service-specific inputs and the once-generated document or failure.
+struct CachedOpenApi {
+    routes: Vec<RouteDoc>,
+    options: OpenApiOptions,
+    bytes: OnceCell<Result<Bytes, String>>,
+}
+
+impl CachedOpenApi {
+    /// Generate and serialize once on first access, sharing the result across callers.
+    /// Uses a blocking worker plus an 8 MiB stack for recursive schema derivation;
+    /// schema, serialization, thread creation and panic failures are cached and logged.
+    async fn bytes(self: &Arc<Self>) -> &Result<Bytes, String> {
+        self.bytes.get_or_init(|| async {
+            let document = Arc::clone(self);
+            let result = tokio::task::spawn_blocking(move || {
+                std::thread::Builder::new()
+                    .name("openapi-schema".into())
+                    .stack_size(8 * 1024 * 1024)
+                    .spawn(move || {
+                        let value = generate_openapi_spec_with_options(&document.routes, document.options)?;
+                        serde_json::to_vec(&value).map(Bytes::from).map_err(|error| error.to_string())
+                    })
+                    .map_err(|error| error.to_string())?
+                    .join()
+                    .map_err(|_| "OpenAPI generator panicked".to_owned())?
+            }).await.unwrap_or_else(|error| Err(error.to_string()));
+            if let Err(error) = &result {
+                tracing::error!(%error, "OpenAPI documentation unavailable; inference is unaffected");
+            }
+            result
+        }).await
+    }
+}
+
+/// Mount the cached JSON handler and Swagger assets without eagerly generating schemas.
+fn documentation_router(document: Arc<CachedOpenApi>) -> Router {
+    use utoipa_swagger_ui::{Config, SwaggerUi};
+
+    Router::new()
+        .route("/openapi.json", axum::routing::get(serve_openapi))
+        .with_state(document)
+        .merge(SwaggerUi::new("/docs").config(Config::new(["/openapi.json"])))
+}
+
+/// Serve cached JSON bytes, or a generic 500 when generation failed; never expose diagnostics.
+async fn serve_openapi(
+    axum::extract::State(document): axum::extract::State<Arc<CachedOpenApi>>,
+) -> axum::response::Response {
+    match document.bytes().await {
+        Ok(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            bytes.clone(),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "OpenAPI documentation unavailable",
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Partial and remapped registrations must not invent default or POST routes.
+    #[test]
+    fn registered_handlers_keep_contracts_at_custom_paths() {
+        use super::super::{openai, service_v2::HttpService};
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let registrations = [
+            openai::chat_completions_router(state.clone(), None, Some("/custom/~chat".into())),
+            openai::completions_router(state.clone(), Some("/custom/completions".into())),
+            openai::embeddings_router(state.clone(), Some("/custom/embeddings".into())),
+            openai::responses_router(state, None, Some("/custom/responses".into())),
+        ];
+        for ((routes, _), (request, stream)) in registrations.into_iter().zip([
+            (
+                NvCreateChatCompletionRequest::name(),
+                Some(NvCreateChatCompletionStreamResponse::name()),
+            ),
+            (
+                NvCreateCompletionRequest::name(),
+                Some(NvCreateCompletionResponse::name()),
+            ),
+            (NvCreateEmbeddingRequest::name(), None),
+            (NvCreateResponse::name(), None),
+        ]) {
+            let spec = generate_openapi_spec(&routes).unwrap();
+            assert_eq!(spec["paths"].as_object().unwrap().len(), routes.len());
+            let operation = &spec["paths"][routes[0].path()]["post"];
+            assert_eq!(
+                operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+                format!("#/components/schemas/{request}")
+            );
+            if let Some(stream) = stream {
+                assert_eq!(
+                    operation["responses"]["200"]["content"]["text/event-stream"]["itemSchema"]["anyOf"]
+                        [0]["properties"]["data"]["anyOf"][1]["contentSchema"]["$ref"],
+                    format!("#/components/schemas/{stream}")
+                );
+            }
+        }
+        for routes in [
+            vec![],
+            vec![RouteDoc::new(
+                axum::http::Method::GET,
+                "/v1/chat/completions",
+            )],
+            vec![RouteDoc::new(
+                axum::http::Method::POST,
+                "/v1/chat/completions",
+            )],
+        ] {
+            let spec = generate_openapi_spec(&routes).unwrap();
+            assert_eq!(spec["paths"].as_object().unwrap().len(), routes.len());
+            assert!(
+                spec.pointer("/paths/~1v1~1chat~1completions/post/responses/200/content")
+                    .is_none()
+            );
+        }
+    }
+
+    /// Each dispatch flag independently controls the chat event union, never completions.
+    #[test]
+    fn dispatch_event_contracts_follow_configuration() {
+        let routes = [RouteDoc::new(axum::http::Method::POST, "/chat")
+            .with_openapi_kind(OpenApiRouteKind::ChatCompletions)];
+        for tool in [false, true] {
+            for reasoning in [false, true] {
+                let spec = generate_openapi_spec_with_options(
+                    &routes,
+                    OpenApiOptions {
+                        streaming_tool_dispatch: tool,
+                        streaming_reasoning_dispatch: reasoning,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let events = spec["paths"]["/chat"]["post"]["responses"]["200"]["content"]["text/event-stream"]["itemSchema"]["anyOf"].as_array().unwrap();
+                assert_eq!(events.len(), 1 + usize::from(tool) + usize::from(reasoning));
+                for (event, enabled) in [
+                    ("tool_call_dispatch", tool),
+                    ("reasoning_dispatch", reasoning),
+                ] {
+                    assert_eq!(
+                        events
+                            .iter()
+                            .any(|schema| schema["properties"]["event"]["const"] == event),
+                        enabled
+                    );
+                }
+            }
+        }
+    }
+
+    /// Repeated concurrent HTTP requests reuse bytes; independent routers keep separate options.
+    #[tokio::test]
+    async fn openapi_http_cache_is_lazy_and_per_service() {
+        for tool in [false, true] {
+            let document = Arc::new(CachedOpenApi {
+                routes: vec![
+                    RouteDoc::new(axum::http::Method::POST, "/chat")
+                        .with_openapi_kind(OpenApiRouteKind::ChatCompletions),
+                ],
+                options: OpenApiOptions {
+                    streaming_tool_dispatch: tool,
+                    ..Default::default()
+                },
+                bytes: OnceCell::new(),
+            });
+            let router = documentation_router(document.clone());
+            assert!(
+                document.bytes.get().is_none(),
+                "router construction must be lazy"
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/openapi.json", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let (first, second) = tokio::join!(client.get(&url).send(), client.get(&url).send());
+            let first = first.unwrap();
+            assert_eq!(first.status(), StatusCode::OK);
+            assert_eq!(first.headers()["content-type"], "application/json");
+            let first = first.bytes().await.unwrap();
+            assert_eq!(first, second.unwrap().bytes().await.unwrap());
+            assert_eq!(&first, document.bytes.get().unwrap().as_ref().unwrap());
+            let cached = document.bytes().await.as_ref().unwrap();
+            assert_eq!(
+                cached.as_ptr(),
+                document.bytes().await.as_ref().unwrap().as_ptr()
+            );
+            let spec: serde_json::Value = serde_json::from_slice(&first).unwrap();
+            assert_eq!(
+                spec["paths"]["/chat"]["post"]["responses"]["200"]["content"]["text/event-stream"]
+                    ["itemSchema"]["anyOf"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1 + usize::from(tool)
+            );
+            let initializer = client
+                .get(url.replace("openapi.json", "docs/swagger-initializer.js"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(initializer.status(), StatusCode::OK);
+            assert!(initializer.text().await.unwrap().contains("/openapi.json"));
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    /// A cached generation error returns a generic 500 without disabling unrelated routes.
+    #[tokio::test]
+    async fn openapi_failure_is_confined_to_documentation() {
+        let document = Arc::new(CachedOpenApi {
+            routes: vec![],
+            options: OpenApiOptions::default(),
+            bytes: OnceCell::new_with(Some(Err("internal schema invariant diagnostic".into()))),
+        });
+        let router = documentation_router(document.clone())
+            .route("/inference", axum::routing::get(|| async { "available" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for _ in 0..2 {
+            let response = client
+                .get(format!("{url}/openapi.json"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(
+                response.text().await.unwrap(),
+                "OpenAPI documentation unavailable"
+            );
+        }
+        assert!(document.bytes().await.is_err());
+        assert_eq!(
+            client
+                .get(format!("{url}/inference"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        server.abort();
+        let _ = server.await;
+    }
 
     #[test]
     fn stale_alias_metadata_is_not_silently_ignored() {
@@ -785,11 +1056,12 @@ mod tests {
     #[test]
     fn test_generate_openapi_spec() {
         let routes = vec![
-            RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions"),
+            RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions")
+                .with_openapi_kind(OpenApiRouteKind::ChatCompletions),
             RouteDoc::new(axum::http::Method::GET, "/v1/models"),
         ];
 
-        let spec = generate_openapi_spec(&routes);
+        let spec = generate_openapi_spec(&routes).unwrap();
 
         // Verify basic structure
         assert!(!spec["info"]["title"].as_str().unwrap().is_empty());
@@ -799,6 +1071,8 @@ mod tests {
         // Verify paths were added
         assert!(spec["paths"].get("/v1/chat/completions").is_some());
         assert!(spec["paths"].get("/v1/models").is_some());
+        assert_eq!(spec["paths"].as_object().unwrap().len(), 2);
+        assert!(spec["paths"].get("/v1/completions").is_none());
     }
 
     // Two methods on one path (e.g. built-in GET+POST /busy_threshold, or an
@@ -810,9 +1084,8 @@ mod tests {
             RouteDoc::new(axum::http::Method::POST, "/busy_threshold"),
             RouteDoc::new(axum::http::Method::GET, "/busy_threshold"),
         ];
-        let spec = generate_openapi_spec(&routes);
-        let json = serde_json::to_value(&spec).unwrap();
-        let item = &json["paths"]["/busy_threshold"];
+        let spec = generate_openapi_spec(&routes).unwrap();
+        let item = &spec["paths"]["/busy_threshold"];
         assert!(item.get("get").is_some(), "GET operation missing: {item}");
         assert!(item.get("post").is_some(), "POST operation missing: {item}");
     }

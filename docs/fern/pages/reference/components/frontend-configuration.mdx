@@ -584,7 +584,7 @@ See the [KServe gRPC Frontend](../../developer-guide/knowledge-base/modular-comp
 
 ### Histogram buckets
 
-The frontend's six latency and size histograms use log-spaced buckets, rounded to two significant figures, always starting with a `0` edge. Each histogram is tuned by three environment variables that share a prefix: `_MIN` and `_MAX` bound the range, and `_COUNT` is the total number of bucket edges **including** that leading `0`, so `COUNT - 1` edges are spread across the range. The inter-token latency default of `20` therefore means `0` plus nineteen log-spaced edges. Every edge, including the top one, is rounded to two significant figures, so the highest exported edge is `MAX` rounded rather than `MAX` itself — see the `Top le` column below. These have no CLI equivalent, and they are read once while the frontend builds its metrics, so changing one requires a restart.
+Most frontend latency and size histograms use log-spaced buckets, rounded to two significant figures, always starting with a `0` edge. Each histogram is tuned by three environment variables that share a prefix: `_MIN` and `_MAX` bound the range, and `_COUNT` is the total number of bucket edges **including** that leading `0`, so `COUNT - 1` edges are spread across the range. Every edge, including the top one, is rounded to two significant figures, so the highest exported edge is `MAX` rounded rather than `MAX` itself. These variables have no CLI equivalent, and the frontend reads them once while building its metrics, so changing one requires a restart.
 
 | Histogram | Variable prefix | Min | Max | Count | Top `le` |
 |---|---|---|---|---|---|
@@ -605,6 +605,18 @@ export DYN_METRICS_OUTPUT_SEQUENCE_COUNT=12
 Rounding can move the top edge either way, so pick a `MAX` that is already two significant figures if you need an exact ceiling. Prometheus buckets are inclusive, so `MAX=123` exports `le=120` and only observations *greater than* 120 and up to 123 fall into `+Inf` — a value of exactly 120 still lands in the `le=120` bucket. `MAX=131072` exports `le=130000`. Two of the defaults above are affected: request duration is set to `512` but exports `510`, and input sequence is set to `128000` but exports `130000`.
 
 `dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
+
+Set `DYN_METRICS_ITL_BUCKETS` to an explicit, comma-separated list of ITL boundaries in seconds. The list must contain 1 to 512 finite, non-negative, strictly increasing values and be at most 16,384 bytes long. Boundaries are used as supplied, without logarithmic spacing or rounding.
+
+For example, to use explicit boundaries for an SGLang deployment:
+
+```bash
+export DYN_METRICS_ITL_BUCKETS=0.002,0.004,0.006,0.008,0.010,0.015,0.020,0.025,0.030,0.035,0.040,0.060,0.080,0.100,0.200,0.400,0.600,0.800,1.000,2.000,4.000,6.000,8.000
+```
+
+The explicit list takes precedence over `DYN_METRICS_ITL_MIN`, `DYN_METRICS_ITL_MAX`, and `DYN_METRICS_ITL_COUNT`, including their deprecated names. If the list is invalid, the frontend warns and uses the default log-spaced ITL boundaries, ignoring the older settings. When `DYN_METRICS_ITL_BUCKETS` is unset, the existing log-spaced configuration and defaults remain unchanged, including the 80-second upper boundary.
+
+Matching frontend and backend bucket boundaries reduces differences in quantile interpolation. It does not make their ITL measurement boundaries or observed samples identical.
 
 A histogram's configuration is validated as a set: `MIN` must be above zero, below `MAX`, and `COUNT` must be between 1 and 512. If any part fails, the frontend warns and reverts **all three** values for that histogram together — setting `DYN_METRICS_ITL_MIN=100` against the default `MAX` of `80.0` also discards a perfectly valid `DYN_METRICS_ITL_COUNT=20`.
 

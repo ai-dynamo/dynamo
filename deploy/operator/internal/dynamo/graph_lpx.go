@@ -92,6 +92,13 @@ func RenderLPXWorkloadTemplates(
 		return nil, err
 	}
 
+	// The conductor component owns the complete workload's disruption budget.
+	if component.ProviderOverride != nil {
+		if budget, exists := provideroverride.GroveMaxUnavailable(component.ProviderOverride.Value.Raw); exists {
+			rendered.ScalingGroup.RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(budget)}
+		}
+	}
+
 	// Scope the rendered resources to the graph's Kubernetes namespace.
 	for _, resource := range rendered.Resources {
 		resource.SetNamespace(source.Namespace)

@@ -72,14 +72,6 @@ async def worker(argv: list[str] | None = None):
 
     gateway_count = effective_gateway_workers(config.server_args, config.dynamo_args)
     validate_gateway_mode(config.server_args, config.dynamo_args, gateway_count)
-    if gateway_count > 1 and config.server_args.tokenizer_worker_num != gateway_count:
-        # SGLang launches its MultiTokenizerRouter (the shared-memory handoff the
-        # gateway children join) with exactly tokenizer_worker_num workers.
-        override_server_args(
-            config.server_args,
-            "dynamo.gateway",
-            tokenizer_worker_num=gateway_count,
-        )
     if gateway_worker_count(config.server_args, config.dynamo_args) > 1:
         reserve_system_port_for_children()
 

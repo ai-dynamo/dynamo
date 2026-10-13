@@ -6,7 +6,7 @@
 //! This allows CI and documentation tooling to obtain the frontend API schemas
 //! without starting the HTTP service and scraping the endpoint. File mode also
 //! lists `/docs` and `/openapi.json`: those documentation routes are registered
-//! after the served document is generated, so the full documents differ there.
+//! after the served document's route list is captured, so the documents differ there.
 //!
 //! Usage (from the repository root):
 //! ```bash
@@ -27,6 +27,8 @@
 //! use string `data` with `contentSchema`, which consumers must explicitly validate.
 //! Comments/keep-alives are ignored by SSE parsing; event ordering, termination,
 //! and disconnect behavior require separate lifecycle checks.
+//! Unlike a configured service, this full-surface export includes both optional
+//! named dispatch event variants; HTTP only advertises enabled dispatches.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -80,13 +82,9 @@ fn main() -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Propagates service-construction, serialization, I/O, runtime, signal, or server
-/// errors. A failed write may leave a truncated file; created directories are not
-/// removed on failure.
-///
-/// # Panics
-///
-/// Panics if compiled schema invariants are violated during document generation.
+/// Propagates service-construction, schema-invariant, serialization, I/O, runtime,
+/// signal, or server errors. A failed write may leave a truncated file; created
+/// directories are not removed on failure.
 fn generate_openapi(listen: Option<SocketAddr>) -> anyhow::Result<()> {
     // Build an HttpService instance with all standard OpenAI-compatible
     // frontend endpoints enabled so that the generated OpenAPI document
@@ -132,7 +130,16 @@ fn generate_openapi(listen: Option<SocketAddr>) -> anyhow::Result<()> {
     }
 
     let route_docs = http_service.route_docs().to_vec();
-    let openapi = openapi_docs::generate_openapi_spec(&route_docs);
+    let openapi = openapi_docs::generate_openapi_spec_with_options(
+        &route_docs,
+        openapi_docs::OpenApiOptions {
+            streaming_tool_dispatch: true,
+            streaming_reasoning_dispatch: true,
+            ..Default::default()
+        },
+    )
+    .map_err(anyhow::Error::msg)
+    .context("failed to generate OpenAPI document")?;
 
     // Write the spec to a stable location relative to the repository root.
     let out_dir = PathBuf::from("docs/frontends");
@@ -141,8 +148,7 @@ fn generate_openapi(listen: Option<SocketAddr>) -> anyhow::Result<()> {
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create OpenAPI output directory: {out_dir:?}"))?;
 
-    let json =
-        serde_json::to_string_pretty(&openapi).context("failed to serialize OpenAPI spec")?;
+    let json = serde_json::to_string_pretty(&openapi).context("failed to serialize OpenAPI spec")?;
 
     fs::write(&out_path, json)
         .with_context(|| format!("failed to write OpenAPI spec to: {out_path:?}"))?;
