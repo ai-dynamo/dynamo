@@ -39,9 +39,7 @@ from pathlib import Path
 
 import ijson
 
-from .artifacts import inspect_kineto
-from .models import Config
-from .nsys import inspect_nsys
+from .artifacts import inspect_target
 
 
 def attrs(span: dict) -> dict:
@@ -66,26 +64,13 @@ def load_traces(paths: list[Path]) -> dict[str, dict[str, dict]]:
     return traces
 
 
-def verify_target(item: dict, evidence: dict) -> dict:
-    """Full offline inspection of one target's native artifacts."""
-    config = Config("unused", "unused", artifact_validation_timeout_s=3600)
-    if evidence.get("collector") == "nsys":
-        return inspect_nsys(item, evidence, config)
-    if evidence.get("collector") == "torch_profiler":
-        return inspect_kineto(item, config)
-    return {
-        "status": item.get("status", "unverified"),
-        "reason": "no offline inspector",
-    }
-
-
 def verify_native(manifest: dict) -> dict[str, dict]:
     """Inspect every target in parallel processes; the capture only checked presence."""
     profiles = {p["target_id"]: p for p in manifest["profiles"]}
     items = manifest["artifact_validation"]
     with ProcessPoolExecutor(max_workers=max(1, len(items))) as pool:
         results = pool.map(
-            verify_target, items, [profiles.get(i["target_id"], {}) for i in items]
+            inspect_target, items, [profiles.get(i["target_id"], {}) for i in items]
         )
         return {item["target_id"]: result for item, result in zip(items, results)}
 

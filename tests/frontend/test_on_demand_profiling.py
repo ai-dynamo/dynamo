@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -1212,6 +1214,27 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
         json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}) + "\n"
     )
     summary = bundle.build(session, [otel], tmp_path / "out", per_request=True)
+    # The command runs the module as __main__; parallel verification must work there.
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dynamo.profiling.bundle",
+            str(session),
+            "--otel-jsonl",
+            str(otel),
+            "--output",
+            str(tmp_path / "cli"),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    assert (
+        json.loads((tmp_path / "cli/bundle.json").read_text())["artifact_verification"][
+            "decode-0"
+        ]["status"]
+        == "verified"
+    )
     index = json.loads((tmp_path / "out/lifecycle/trace-index.json").read_text())
     assert index["router_targets"] == {"W1": "decode-0"}
     assert [entry["trace_id"] for entry in index["requests"]] == ["captured"]

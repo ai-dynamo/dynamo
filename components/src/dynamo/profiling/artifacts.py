@@ -20,7 +20,7 @@ from typing import Protocol
 import ijson
 
 from .models import Config
-from .nsys import validate_reports
+from .nsys import inspect_nsys, validate_reports
 
 
 class ArtifactValidator(Protocol):
@@ -247,4 +247,21 @@ def inspect_kineto(item: dict, config: Config) -> dict:
         if not ok
         else item.get("status"),
         "artifacts": artifacts,
+    }
+
+
+def inspect_target(item: dict, evidence: dict) -> dict:
+    """Full offline inspection of one target's native artifacts (bundle job).
+
+    Lives in an importable module so a process pool can run it even when the
+    bundle command executes as ``__main__``.
+    """
+    config = Config("unused", "unused", artifact_validation_timeout_s=3600)
+    if evidence.get("collector") == "nsys":
+        return inspect_nsys(item, evidence, config)
+    if evidence.get("collector") == "torch_profiler":
+        return inspect_kineto(item, config)
+    return {
+        "status": item.get("status", "unverified"),
+        "reason": "no offline inspector",
     }
