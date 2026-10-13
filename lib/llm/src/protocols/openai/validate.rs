@@ -116,9 +116,10 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "allowed_token_ids",
     "bad_words_token_ids",
     "logprob_token_ids",
+    "stream_interval",
 ];
 
-/// Schema-only declarations for token controls captured in the extra-field map.
+/// Schema-only declarations for token/output controls captured in the extra-field map.
 ///
 /// Keep these beside their admission validation: they are not new runtime fields
 /// and must not steal values from existing stop/sampling extraction. Null means
@@ -136,6 +137,12 @@ pub(crate) struct PassthroughTokenControls {
     // Utoipa requires a literal; the export regression checks MAX_STOP_SEQUENCES.
     #[schema(inline, max_items = 32)]
     stop_token_ids: Option<Vec<crate::types::TokenIdType>>,
+    /// Minimum generated-token interval between vLLM output updates. The first
+    /// token and final output may flush earlier; queued updates may be combined.
+    /// Null/omission keeps the server default; the server interval is a lower bound.
+    /// Requires vLLM token-input support; it does not change unary output content.
+    #[schema(minimum = 1)]
+    stream_interval: Option<u64>,
 }
 
 /// Treat null passthrough fields as omitted while preserving unknown fields for validation.
@@ -159,7 +166,8 @@ static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
 
 /// Validates that no unsupported fields are present in the request.
 ///
-/// Fields in `PASSTHROUGH_EXTRA_FIELDS` are validated by downstream handlers.
+/// Named passthrough fields receive structural checks here; backend capability
+/// and model-dependent checks remain with preprocessing and downstream handlers.
 /// Other fields may be ignored and dropped when
 /// `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` is truthy.
 pub fn validate_no_unsupported_fields(
@@ -171,6 +179,8 @@ pub fn validate_no_unsupported_fields(
     )
 }
 
+/// Check named extra-field shapes, rejecting unknown names unless ignore is set.
+/// Ignore mode never bypasses validation of recognized fields; inputs are unchanged.
 fn validate_no_unsupported_fields_with_ignore(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
     ignore_unsupported_fields: bool,
@@ -216,6 +226,13 @@ fn validate_no_unsupported_fields_with_ignore(
     if let Some(value) = unsupported_fields.get("logprob_token_ids") {
         serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
             .map_err(|_| anyhow::anyhow!("`logprob_token_ids` must be an array of token IDs"))?;
+    }
+    if let Some(value) = unsupported_fields.get("stream_interval")
+        && !value.as_u64().is_some_and(|interval| interval > 0)
+    {
+        return Err(crate::protocols::common::invalid_argument_error(
+            "`stream_interval` must be a positive integer",
+        ));
     }
     Ok(())
 }
@@ -1237,6 +1254,7 @@ mod tests {
         assert!(err.to_string().contains("experimental_field"));
     }
 
+    /// Known non-null extras survive decoding and retain their structural checks.
     #[test]
     fn extra_field_deserialization_preserves_non_null_values() {
         #[derive(serde::Deserialize)]
@@ -1252,6 +1270,7 @@ mod tests {
             "allowed_token_ids": [1],
             "bad_words_token_ids": [[2]],
             "logprob_token_ids": [3],
+            "stream_interval": 3,
         }))
         .unwrap();
         validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap();
@@ -1266,6 +1285,7 @@ mod tests {
             ("allowed_token_ids", json!([-1])),
             ("bad_words_token_ids", json!([1])),
             ("logprob_token_ids", json!(["1"])),
+            ("stream_interval", json!(0)),
             ("experimental_field", json!({"nested": null})),
         ] {
             let fields: ExtraFields = serde_json::from_value(json!({field: bad})).unwrap();
@@ -1273,6 +1293,30 @@ mod tests {
             let err =
                 validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap_err();
             assert!(err.to_string().contains(field), "{err}");
+        }
+    }
+
+    /// Explicit intervals must be positive integers even when unknowns are ignored.
+    #[test]
+    fn stream_interval_admission_requires_positive_integer() {
+        for ignore in [false, true] {
+            for value in [json!(1), json!(3), json!(u64::MAX)] {
+                let fields = HashMap::from([("stream_interval".into(), value)]);
+                validate_no_unsupported_fields_with_ignore(&fields, ignore).unwrap();
+            }
+            for value in [
+                json!(0),
+                json!(-1),
+                json!(1.5),
+                json!(true),
+                json!("3"),
+                json!([]),
+            ] {
+                let fields = HashMap::from([("stream_interval".into(), value)]);
+                let error =
+                    validate_no_unsupported_fields_with_ignore(&fields, ignore).unwrap_err();
+                assert!(error.to_string().contains("positive integer"), "{error}");
+            }
         }
     }
 

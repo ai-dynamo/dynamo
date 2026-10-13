@@ -1985,6 +1985,30 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Require an identified vLLM token-input worker for an explicit interval.
+    /// Call after extra-field validation/null normalization. Missing capability
+    /// rejects this opt-in control before dispatch; omission is a no-op. This
+    /// does not establish the installed SamplingParams version: the worker must
+    /// separately reject versions without the field instead of ignoring it.
+    fn validate_stream_interval(
+        extra_fields: Option<&HashMap<String, serde_json::Value>>,
+        runtime: &crate::local_model::runtime_config::ModelRuntimeConfig,
+    ) -> Result<()> {
+        use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+
+        if extra_fields.is_some_and(|fields| fields.contains_key("stream_interval"))
+            && !runtime.supports_runtime_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+        {
+            return Err(invalid_argument_error(
+                "stream_interval requires a worker advertising vLLM token-input generation support",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Copy admitted sampling extras into the existing worker transport map.
+    /// Call only after validation and capability checks; this performs neither.
+    /// Returns None when no named extras exist, without changing the request.
     fn sampling_passthrough_args<R: NvExtProvider>(
         request: &R,
     ) -> Option<serde_json::Map<String, serde_json::Value>> {
@@ -1996,6 +2020,7 @@ impl OpenAIPreprocessor {
                 "allowed_token_ids",
                 "bad_words_token_ids",
                 "logprob_token_ids",
+                "stream_interval",
             ] {
                 if let Some(value) = fields.get(key) {
                     sampling_passthrough.insert(key.to_string(), value.clone());
@@ -3190,6 +3215,7 @@ impl OpenAIPreprocessor {
             ));
         }
         builder.stop_conditions(stop_conditions);
+        Self::validate_stream_interval(request.unsupported_fields(), &self.runtime_config)?;
         builder.sampling_options(request.extract_sampling_options()?);
 
         // Some parsers rely on `<|tool_call>`, `<|channel>`, etc. being
@@ -8635,6 +8661,45 @@ mod tests {
         FinishReason, Role,
     };
     use std::path::PathBuf;
+
+    /// Omission is compatible with unknown workers; explicit intervals need vLLM.
+    /// Parsing normalizes null away before gating, and transport preserves integers.
+    #[test]
+    fn stream_interval_requires_capability_and_preserves_transport() {
+        use crate::local_model::runtime_config::{
+            ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        };
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+        let mut runtime = ModelRuntimeConfig::default();
+        for value in [serde_json::Value::Null, serde_json::json!(3)] {
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "messages": [{"role": "user", "content": "hello"}],
+                    "stream_interval": value
+                }))
+                .unwrap();
+            let result = OpenAIPreprocessor::validate_stream_interval(
+                Some(&request.unsupported_fields),
+                &runtime,
+            );
+            if value.is_null() {
+                result.unwrap();
+                assert!(OpenAIPreprocessor::sampling_passthrough_args(&request).is_none());
+            } else {
+                assert!(result.unwrap_err().to_string().contains("vLLM"));
+                assert_eq!(
+                    OpenAIPreprocessor::sampling_passthrough_args(&request).unwrap()["stream_interval"],
+                    value
+                );
+            }
+        }
+        runtime
+            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
+            .unwrap();
+        let fields = HashMap::from([("stream_interval".into(), serde_json::json!(3))]);
+        OpenAIPreprocessor::validate_stream_interval(Some(&fields), &runtime).unwrap();
+        OpenAIPreprocessor::validate_stream_interval(None, &runtime).unwrap();
+    }
 
     #[tokio::test]
     async fn eight_family_routes_and_tool_suppression() {

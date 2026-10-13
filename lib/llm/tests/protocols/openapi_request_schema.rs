@@ -73,6 +73,34 @@ fn passthrough_token_controls_match_admission_shape() {
     validate::validate_no_unsupported_fields(&request.unsupported_fields).unwrap();
 }
 
+/// Both endpoint roots declare the optional positive interval without inventing
+/// a fixed server default. Runtime grouping is established separately over HTTP.
+#[test]
+fn stream_interval_schema_matches_admission() {
+    use dynamo_llm::http::service::{RouteDoc, openapi_docs::generate_openapi_spec};
+    let spec = generate_openapi_spec(&[
+        RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions"),
+        RouteDoc::new(axum::http::Method::POST, "/v1/completions"),
+    ]);
+    for root in ["NvCreateChatCompletionRequest", "NvCreateCompletionRequest"] {
+        let field = root_property(
+            &spec,
+            &spec["components"]["schemas"][root],
+            "stream_interval",
+        )
+        .unwrap();
+        assert_eq!(field["type"], serde_json::json!(["integer", "null"]));
+        assert_eq!(field["minimum"], 1);
+        assert!(field.get("default").is_none());
+    }
+    let controls = &spec["components"]["schemas"]["PassthroughTokenControls"];
+    assert!(
+        !controls["required"]
+            .as_array()
+            .is_some_and(|fields| fields.iter().any(|field| field == "stream_interval"))
+    );
+}
+
 #[test]
 fn http_export_describes_request_aliases() {
     use dynamo_llm::http::service::{RouteDoc, openapi_docs::generate_openapi_spec};
