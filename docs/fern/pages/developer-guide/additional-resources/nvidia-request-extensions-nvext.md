@@ -95,7 +95,7 @@ KV-cache entries:
 |---------|---------|----------|
 | vLLM | Supported | Router matching and backend KV-cache reuse are isolated by salt. |
 | TensorRT-LLM | Supported | Router matching and backend KV-cache reuse are isolated by salt. |
-| SGLang | Supported for Python text workers | Workers started with `python -m dynamo.sglang` isolate router matching and backend KV-cache reuse in aggregated and disaggregated text generation, including native `/generate`, with SGLang 0.5.18 and 0.5.19. |
+| SGLang | Supported for Python text workers | Workers started with `python -m dynamo.sglang` isolate router matching and backend KV-cache reuse in aggregated and disaggregated text generation, including native `/generate`, with SGLang 0.5.20 and 0.5.21. |
 
 SGLang cache salt routing is available in Dynamo development builds that include
 [PR #14803](https://github.com/ai-dynamo/dynamo/pull/14803). Updating SGLang alone does not

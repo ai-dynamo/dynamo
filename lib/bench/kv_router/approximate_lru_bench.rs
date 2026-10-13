@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use dynamo_bench::kv_router_common::args::CommonArgs;
-use dynamo_bench::kv_router_common::issuer::{pin_current_thread, pin_current_thread_to_cpus};
+use dynamo_bench::kv_router_common::issuer::{
+    parse_cpu_list, pin_current_thread, pin_current_thread_to_cpus,
+};
 use dynamo_bench::kv_router_common::replay::{WorkerReplayArtifacts, generate_replay_artifacts};
 use dynamo_kv_router::indexer::{
     ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruLease, ApproximateLruStats,
@@ -1141,32 +1143,6 @@ fn main() -> anyhow::Result<()> {
         runtime.worker_threads(cpus.len());
     }
     runtime.build()?.block_on(async_main(args, backend_cpus))
-}
-
-fn parse_cpu_list(value: &str) -> anyhow::Result<Vec<usize>> {
-    let mut cpus = Vec::new();
-    for part in value
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        if let Some((start, end)) = part.split_once('-') {
-            let start = start.parse::<usize>()?;
-            let end = end.parse::<usize>()?;
-            if start > end {
-                anyhow::bail!("invalid descending CPU range {part}");
-            }
-            cpus.extend(start..=end);
-        } else {
-            cpus.push(part.parse::<usize>()?);
-        }
-    }
-    cpus.sort_unstable();
-    cpus.dedup();
-    if cpus.is_empty() {
-        anyhow::bail!("CPU list is empty");
-    }
-    Ok(cpus)
 }
 
 async fn quiesce(milliseconds: u64) {

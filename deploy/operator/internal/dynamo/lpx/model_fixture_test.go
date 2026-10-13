@@ -18,7 +18,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-const registryTestTopology = "URSA_V2_1__Q8__8C__G_106__KP_FEC__GHZ_1_0__NO_FPGA"
+const registryTestTopology = "test-topology"
 
 const gbuildManifestJSONFile = "manifest.json"
 
@@ -200,4 +200,5 @@ func setManifestV2LPUArtifact(t *testing.T, partition manifestcapnpv2.PartitionI
 	require.NoError(t, detail.SetTopology(registryTestTopology))
 	detail.SetNumChips(8)
 	detail.SetDevicesPerNode(8)
+	setManifestChipArchitectures(t, detail, []string{"polaris"})
 }

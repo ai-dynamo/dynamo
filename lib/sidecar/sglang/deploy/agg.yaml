@@ -12,8 +12,8 @@
 #
 # The engine's gRPC has no auth/TLS; safe only because it stays on loopback.
 #
-# SGLang can also load the sidecar in-process (`--sidecar dynamo.sglang.sidecar`,
-# see README); this example uses the standalone image for consistency with the
+# SGLang can also load the sidecar in-process (`--sidecar dynamo.sglang.sidecar`);
+# this example uses the standalone image for consistency with the
 # TensorRT-LLM and vLLM sidecars.
 
 apiVersion: nvidia.com/v1beta1
@@ -41,7 +41,7 @@ spec:
         # v0.5.16+; keep this example aligned with Dynamo main's SGLang pin.
         initContainers:
         - name: sglang-engine
-          image: lmsysorg/sglang:v0.5.17
+          image: lmsysorg/sglang:v0.5.21
           restartPolicy: Always
           # gRPC HealthCheck via exec (tcpSocket/grpc: dial the pod IP, not the
           # loopback engine). startupProbe gates `main`; readinessProbe drops dead workers.
@@ -87,8 +87,8 @@ spec:
           - "30001"
           - --incremental-streaming-output
         containers:
-        # Sidecar worker. No published image yet — build from
-        # lib/sidecar/Dockerfile, set <your-registry> (see README), add
+        # Sidecar worker. Use nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>
+        # or build from lib/sidecar/Dockerfile; add
         # imagePullSecrets if private. Must be named "main" (operator injects
         # discovery env + probes by name).
         - name: main

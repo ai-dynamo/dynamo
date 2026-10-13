@@ -33,8 +33,8 @@ use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
-    ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillTokenDeltas, SequenceError,
-    SequencePublisher, SequenceRequest,
+    ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,
+    SequenceError, SequencePublisher, SequenceRequest,
 };
 use dynamo_tokens::SequenceHash;
 
@@ -720,15 +720,16 @@ where
     }
 
     /// `NoChange` when the booking no longer matches or its prefill was
-    /// already marked complete. Success confirms the state mutation and capacity
-    /// notification, not completion of pending admission.
+    /// already marked complete. `Applied` confirms the state mutation, the
+    /// ordered completion event, and a capacity notification when prompt load
+    /// was released; it does not confirm completion of pending admission.
     #[doc(hidden)]
     pub async fn mark_prefill_completed_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
     ) -> Result<LifecycleMutationOutcome, KvSchedulerError> {
         self.queue.ensure_running()?;
-        let outcome = self
+        let completion = self
             .slots
             .mark_prefill_completed_if_booking(
                 &booking.request_id,
@@ -737,10 +738,14 @@ where
                 Instant::now(),
             )
             .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))?;
-        if outcome.is_applied() {
-            self.queue.capacity_changed(Some(booking.worker));
-        }
-        Ok(outcome)
+        Ok(match completion {
+            PrefillCompletion::Unchanged => LifecycleMutationOutcome::NoChange,
+            PrefillCompletion::PhaseChanged => LifecycleMutationOutcome::Applied,
+            PrefillCompletion::LoadReleased => {
+                self.queue.capacity_changed(Some(booking.worker));
+                LifecycleMutationOutcome::Applied
+            }
+        })
     }
 
     /// Republish the ordered prefill-completion event while `booking` is live.
@@ -788,43 +793,42 @@ where
             .add_output_block(&request_id.to_string(), decay_fraction)
     }
 
+    /// Apply output updates before returning, without waiting for admission.
+    ///
+    /// Zero counts and stale or missing bookings return `Ok(())`. A zero count
+    /// does not mutate state or emit load observations. Queue shutdown is checked
+    /// first, including for zero counts.
     #[doc(hidden)]
-    pub async fn add_output_block_if_booking(
+    pub async fn add_output_blocks_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
         self.queue.ensure_running()?;
-        self.add_output_block_if_booking_sync(booking, decay_fraction)
+        self.add_output_blocks_if_booking_sync(booking, num_blocks, decay_fraction)
             .map(|_| ())
             .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
-    /// `add_output_block_if_booking` applied inline, like `add_output_block`,
-    /// for callers that cannot await.
+    /// Apply output updates directly without checking queue shutdown.
+    ///
+    /// Zero counts and stale or missing bookings return `NoChange`. A zero count
+    /// does not mutate state or emit load observations.
     #[doc(hidden)]
-    pub fn add_output_block_if_booking_sync(
+    pub fn add_output_blocks_if_booking_sync(
         &self,
         booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
-        self.slots.add_output_block_if_booking(
+        self.slots.add_output_blocks_if_booking(
             &booking.request_id,
             booking.worker,
             booking.attempt_id,
+            num_blocks,
             decay_fraction,
         )
-    }
-
-    /// Apply an output update before returning, without waiting for admission.
-    #[doc(hidden)]
-    pub async fn enqueue_output_block_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), KvSchedulerError> {
-        self.add_output_block_if_booking(booking, decay_fraction)
-            .await
     }
 
     pub fn get_potential_loads(
@@ -941,10 +945,10 @@ mod tests {
             let before = slots.active_blocks()[&worker];
             // A single poll on this current-thread runtime cannot run the actor.
             assert!(matches!(
-                poll_once(scheduler.enqueue_output_block_if_booking(&booking, None)),
+                poll_once(scheduler.add_output_blocks_if_booking(&booking, 3, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
-            assert!(slots.active_blocks()[&worker] > before);
+            assert_eq!(slots.active_blocks()[&worker], before + 3);
             assert!(matches!(
                 poll_once(scheduler.mark_prefill_completed_if_booking(&booking)),
                 std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
@@ -959,7 +963,7 @@ mod tests {
                 std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
             ));
             assert!(matches!(
-                poll_once(scheduler.add_output_block_if_booking(&booking, None)),
+                poll_once(scheduler.add_output_blocks_if_booking(&booking, 3, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
             slots.assert_completely_drained(Instant::now());
@@ -971,6 +975,47 @@ mod tests {
             }
             cancellation.cancel();
         }
+    }
+
+    #[tokio::test]
+    async fn phase_only_booking_completion_reports_applied_once() {
+        let worker = WorkerWithDpRank::new(0, 0);
+        let (scheduler, _slots, _configs, cancellation) = make_scheduler(
+            HashMap::from([(0, SimpleWorkerConfig::default())]),
+            None,
+            false,
+            None,
+        );
+        let booking = scheduler
+            .add_request_if_registered_guarded(SequenceRequest {
+                request_id: "cached".into(),
+                token_sequence: None,
+                track_prefill_tokens: false,
+                expected_output_tokens: None,
+                prefill_load_hint: None,
+                worker,
+                lora_name: None,
+            })
+            .unwrap()
+            .commit();
+
+        // `Applied` tells the reservation path that the completion event is already
+        // published, so it does not republish it as a fallback.
+        assert_eq!(
+            scheduler
+                .mark_prefill_completed_if_booking(&booking)
+                .await
+                .unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
+        assert_eq!(
+            scheduler
+                .mark_prefill_completed_if_booking(&booking)
+                .await
+                .unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        cancellation.cancel();
     }
 
     impl PrefillLoadEstimator for FixedPrefillLoadEstimator {

@@ -17,7 +17,6 @@ func validateSelectedPropSyncGraph(
 	partitions []BuildPartition,
 	chains [][]int,
 	subject string,
-	requireCompatibleTopology bool,
 ) ([]int, error) {
 	// Empty chain sets have no references or edges to validate.
 	if len(chains) == 0 {
@@ -42,18 +41,13 @@ func validateSelectedPropSyncGraph(
 	// Enforce disjoint forward-adjacent chains and record each ordered physical edge by source position.
 	edgePositions := make([]int, 0)
 	for chainIndex, chain := range chains {
-		rootPosition := partitionPositions[chain[0]]
-		previousPosition := rootPosition
+		previousPosition := partitionPositions[chain[0]]
 		for memberIndex, partitionID := range chain {
 			position, unused := partitionPositions[partitionID]
 			if !unused {
 				return nil, fmt.Errorf("%s %d overlaps partition ID %d", subject, chainIndex, partitionID)
 			}
 			delete(partitionPositions, partitionID)
-			if requireCompatibleTopology &&
-				!partitions[rootPosition].Topology.compatibleWith(partitions[position].Topology) {
-				return nil, fmt.Errorf("%s %d has incompatible topology at partition ID %d", subject, chainIndex, partitionID)
-			}
 			if memberIndex == 0 {
 				continue
 			}
@@ -66,6 +60,17 @@ func validateSelectedPropSyncGraph(
 		}
 	}
 	return edgePositions, nil
+}
+
+func (b *Build) selectXTRuntimePartitions() error {
+	if err := b.consumeRuntimeSelectedPropSyncChain(); err != nil {
+		return err
+	}
+	if b.SupportsCPUEmbeddings && b.StandaloneTokenEmbeddings &&
+		len(b.Partitions) > 1 && b.Partitions[0].SourcePartitionID == 0 {
+		b.Partitions = b.Partitions[1:]
+	}
+	return nil
 }
 
 func (b *Build) consumeRuntimeSelectedPropSyncChain() error {
@@ -102,26 +107,27 @@ func (b *Build) consumeRuntimeSelectedPropSyncChain() error {
 	return nil
 }
 
-// collapseSelectedPropSyncChain projects validated nonempty contiguous physical partitions onto their runtime root.
-func collapseSelectedPropSyncChain(chain []int, partitions []BuildPartition) (BuildPartition, error) {
+// packPropSyncPartitions combines small stages into one whole-node reservation.
+// With 8 chips/node: [4, 4, 4] -> [16]. With 16 chips/node: [8, 8, 8] -> [32].
+// The result keeps the first stage's ID; input stages are unchanged.
+// Partitions must be nonempty and normalized, with positive chip counts and node widths.
+func packPropSyncPartitions(partitions []BuildPartition) []BuildPartition {
+	// Shared-node stages need matching geometry and, for XT, identical topology names.
 	root := partitions[0]
-	totalChipCount := 0
-	totalNodeCount := 0
-	for _, partition := range partitions {
-		totalChipCount += partition.Topology.ChipCount
-		totalNodeCount += partition.effectiveNodeCount()
+	chips, chipsPerNode := root.Topology.ChipCount, root.DevicesPerNode
+	if len(partitions) < 2 || chips >= chipsPerNode || chipsPerNode%chips != 0 {
+		return partitions
+	}
+	for _, partition := range partitions[1:] {
+		if partition.Topology.ChipCount != chips || partition.DevicesPerNode != chipsPerNode ||
+			(len(partition.HXExtent) == 0 && partition.Topology.Raw != root.Topology.Raw) {
+			return partitions
+		}
 	}
 
-	topology, err := root.Topology.withChipCount(totalChipCount)
-	if err != nil {
-		return BuildPartition{}, fmt.Errorf("selected prop-sync chain %s cannot form combined topology: %w", formatPropSyncChain(chain), err)
-	}
-	return BuildPartition{
-		SourcePartitionID: root.SourcePartitionID,
-		PartPath:          root.PartPath,
-		Topology:          topology,
-		runtimeNodeCount:  totalNodeCount,
-	}, nil
+	// Reserve the final node in full even when some of its chips are unused.
+	root.Topology = Topology{ChipCount: ((len(partitions)*chips + chipsPerNode - 1) / chipsPerNode) * chipsPerNode}
+	return []BuildPartition{root}
 }
 
 func formatPropSyncChain(chain []int) string {

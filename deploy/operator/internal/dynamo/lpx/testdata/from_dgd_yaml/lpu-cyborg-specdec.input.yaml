@@ -70,7 +70,7 @@ spec:
               mountPath: /models
             image: example.invalid/cyborg-specdecode:test
             command: [python, -m, dynamo.cyborg]
-            args: [--draft-endpoint, test-lpu-cyborg-specdec/backend/generate]
+            args: [--draft-endpoint, $(DYN_NAMESPACE)/backend/generate]
             resources:
               claims:
               - name: gpu

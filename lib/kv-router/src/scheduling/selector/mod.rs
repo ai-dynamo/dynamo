@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::{cell::Cell, collections::HashMap};
 
 mod policy;
 #[cfg(any(test, feature = "bench"))]
@@ -131,6 +131,8 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
 struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
     context: WorkerSelectionContext<'a>,
+    // Track the maximum over the eligible ranks row() already visits; no second scan.
+    max_raw_cached_tokens: Cell<Option<usize>>,
     cache_snapshot: CacheSnapshot<'a>,
 }
 
@@ -155,6 +157,23 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .as_ref()
                     .and_then(|config| config.router_temperature),
             },
+            max_raw_cached_tokens: Cell::new(request.mode.is_tracked().then_some(0)),
+        }
+    }
+
+    fn max_raw_cached_tokens(&self) -> Option<usize> {
+        self.max_raw_cached_tokens.get()
+    }
+
+    /// Count a worker toward the best eligible cached prefix once every policy
+    /// filter has kept it.
+    fn track_kept_candidate(&self, worker: WorkerWithDpRank) {
+        if let Some(current_max) = self.max_raw_cached_tokens.get() {
+            let raw_cached_tokens = self
+                .request
+                .raw_cached_tokens_for(worker, self.context.block_size);
+            self.max_raw_cached_tokens
+                .set(Some(current_max.max(raw_cached_tokens)));
         }
     }
 
@@ -255,12 +274,16 @@ fn selection_result(
     request: &SchedulingRequest,
     worker: WorkerWithDpRank,
     block_size: u32,
+    max_raw_cached_tokens: Option<usize>,
 ) -> WorkerSelectionResult {
     WorkerSelectionResult {
         worker,
         required_blocks: request.request_blocks(block_size),
         effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
         cached_tokens: request.effective_cached_tokens_for(worker),
+        max_raw_cached_tokens,
+        selected_raw_cached_tokens: max_raw_cached_tokens
+            .map(|_| request.raw_cached_tokens_for(worker, block_size)),
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
     }
@@ -428,7 +451,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(request, worker, block_size);
+    let result = selection_result(request, worker, block_size, input.max_raw_cached_tokens());
     log_selection(
         workers,
         request,
@@ -523,5 +546,114 @@ mod test_support {
                 )
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod cache_reuse_tests {
+    use super::test_support::base_request;
+    use super::*;
+    use crate::test_utils::SimpleWorkerConfig;
+
+    #[test]
+    fn tracked_requests_report_raw_cache_reuse() {
+        let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::Tracked {
+            request_id: "test".into(),
+        };
+        let first = WorkerWithDpRank::from_worker_id(1);
+        let second = WorkerWithDpRank::from_worker_id(2);
+        request.overlap.effective_cached_tokens.insert(first, 120);
+        request.overlap.effective_cached_tokens.insert(second, 16);
+        request.overlap.tier_overlap_blocks.device.insert(first, 2);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .host_pinned
+            .insert(first, 1);
+        request.overlap.tier_overlap_blocks.device.insert(second, 4);
+        request.overlap.tier_overlap_blocks.disk.insert(second, 2);
+        let input = MaterializedSelectionInput::new(&request, 16);
+
+        input.track_kept_candidate(first);
+        input.track_kept_candidate(second);
+
+        assert_eq!(input.max_raw_cached_tokens(), Some(96));
+        let result = selection_result(&request, first, 16, input.max_raw_cached_tokens());
+        assert_eq!(result.max_raw_cached_tokens, Some(96));
+        assert_eq!(result.selected_raw_cached_tokens, Some(48));
+        assert_eq!(result.cached_tokens, 120);
+    }
+
+    #[test]
+    fn query_only_requests_skip_cache_reuse_tracking() {
+        let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::QueryOnly { request_id: None };
+        let worker = WorkerWithDpRank::from_worker_id(1);
+        request.overlap.effective_cached_tokens.insert(worker, 96);
+        let input = MaterializedSelectionInput::new(&request, 16);
+
+        input.track_kept_candidate(worker);
+
+        assert_eq!(input.max_raw_cached_tokens(), None);
+        let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens());
+        assert_eq!(result.max_raw_cached_tokens, None);
+        assert_eq!(result.selected_raw_cached_tokens, None);
+    }
+
+    #[test]
+    fn raw_overlap_is_specific_to_the_selected_dp_rank() {
+        let mut request = base_request(128);
+        let selected = WorkerWithDpRank::new(1, 0);
+        let other_rank = WorkerWithDpRank::new(1, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(selected, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .host_pinned
+            .insert(selected, 2);
+        request.overlap.tier_overlap_blocks.disk.insert(selected, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(other_rank, 7);
+        request.overlap.effective_cached_tokens.insert(selected, 3);
+        assert_eq!(request.raw_cached_tokens_for(selected, 16), 64);
+        assert_eq!(request.raw_cached_tokens_for(other_rank, 16), 112);
+        let result = selection_result(&request, selected, 16, Some(112));
+        assert_eq!(result.selected_raw_cached_tokens, Some(64));
+    }
+
+    #[test]
+    fn cache_reuse_tracking_excludes_out_of_range_dp_rank() {
+        let workers = HashMap::from([(1, SimpleWorkerConfig::default())]);
+        let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::Tracked {
+            request_id: "test".into(),
+        };
+        let invalid_rank = WorkerWithDpRank::new(1, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(invalid_rank, 6);
+        let input = MaterializedSelectionInput::new(&request, 16);
+        let eligibility = request.eligibility();
+
+        eligibility.for_each_eligible_worker_rank(&workers, |worker, _| {
+            input.track_kept_candidate(worker);
+        });
+
+        assert!(
+            eligibility
+                .validate_worker_rank(&workers, invalid_rank)
+                .is_err()
+        );
+        assert_eq!(input.max_raw_cached_tokens(), Some(0));
     }
 }

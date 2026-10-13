@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -151,27 +152,38 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 		name     string
 		family   BuildFamily
 		wantMode lpxv1alpha1.WorkloadMode
+		packed   [2]bool
 	}{
-		{
-			name: "v2", family: BuildFamilyXT,
-			wantMode: lpxv1alpha1.WorkloadModeV2LPUOnly,
-		},
-		{
-			name: "v3", family: BuildFamilyHX,
-			wantMode: lpxv1alpha1.WorkloadModeV3HxLPUOnly,
-		},
+		{name: "v2", family: BuildFamilyXT, wantMode: lpxv1alpha1.WorkloadModeV2LPUOnly},
+		{name: "v2 packed draft", family: BuildFamilyXT, wantMode: lpxv1alpha1.WorkloadModeV2LPUOnly, packed: [2]bool{true, false}},
+		{name: "v2 packed target", family: BuildFamilyXT, wantMode: lpxv1alpha1.WorkloadModeV2LPUOnly, packed: [2]bool{false, true}},
+		{name: "v3", family: BuildFamilyHX, wantMode: lpxv1alpha1.WorkloadModeV3HxLPUOnly},
+		{name: "v3 packed draft", family: BuildFamilyHX, wantMode: lpxv1alpha1.WorkloadModeV3HxLPUOnly, packed: [2]bool{true, false}},
+		{name: "v3 packed target", family: BuildFamilyHX, wantMode: lpxv1alpha1.WorkloadModeV3HxLPUOnly, packed: [2]bool{false, true}},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Acquire the selected family fixtures: shared XT build or distinct HX snapshots")
-			var draftSnapshot, targetSnapshot *BuildSnapshot
-			if test.family == BuildFamilyHX {
-				draftSnapshot = acquireTestSnapshot(t, writeV3CompilerFixture(t))
-				targetSnapshot = acquireTestSnapshot(t, writeV3CompilerFixture(t))
-			} else {
-				draftSnapshot = acquireTestSnapshot(t, writeV2CompilerFixture(t))
-				targetSnapshot = draftSnapshot
+			t.Log("Acquire draft and target fixtures with independently selected packing")
+			var snapshots [2]*BuildSnapshot
+			agentCounts, requestCounts := [2]int32{4, 4}, [2]int{2, 2}
+			for index, packed := range test.packed {
+				fixture := newV2CompilerFixture()
+				if test.family == BuildFamilyHX {
+					fixture = newV3CompilerFixture()
+					agentCounts[index], requestCounts[index] = 1, 1
+				}
+				if packed {
+					fixture.partitions[0].numChips = fixture.partitions[0].devicesPerNode / 2
+					fixture.partitions = []testV3CapnpPartition{fixture.partitions[0], fixture.partitions[0]}
+					fixture.partitions[1].id++
+					fixture.selectedPropSyncChains = [][]uint32{{fixture.partitions[0].id, fixture.partitions[1].id}}
+					fixture.numLPUNodes, agentCounts[index], requestCounts[index] = 1, 1, 1
+				}
+				snapshots[index] = acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+			}
+			if test.family == BuildFamilyXT && test.packed[0] == test.packed[1] {
+				snapshots[1] = snapshots[0]
 			}
 
 			t.Log("Build a selected SpecDecode DGD for the fixture's manifest generation")
@@ -180,14 +192,10 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 				testLPXComponent("small", "draft-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}),
 			)
 			dgd.Spec.Components[1].Replicas = ptr.To(int32(2))
-			compiledAgentCount := int32(1)
-			if test.family == BuildFamilyXT {
-				compiledAgentCount = 4
-			}
-			dgd.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(compiledAgentCount)
+			dgd.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(agentCounts[0])
 			source := staticBuildSnapshotSource{
-				"draft-build":  draftSnapshot,
-				"target-build": targetSnapshot,
+				"draft-build":  snapshots[0],
+				"target-build": snapshots[1],
 			}
 
 			t.Log("Project the selected SpecDecode workload")
@@ -241,7 +249,7 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 
 			t.Log("Agent replica assertions count one compiled model instance, not draft fanout")
 			invalidCount := dgd.DeepCopy()
-			invalidCount.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(compiledAgentCount * 2)
+			invalidCount.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(agentCounts[0] * 2)
 			_, err = ResolveWorkload(t.Context(), invalidCount, singleGroupComponents(t, invalidCount), source)
 			require.ErrorContains(t, err, "must match the compiled count")
 
@@ -254,8 +262,19 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			require.ErrorContains(t, err, "mixed target families")
 
 			t.Log("Preserve compiled placement without repeating runtime-derived model settings")
-			for _, projection := range projections {
-				require.EqualValues(t, compiledAgentCount, projection.agentReplicas)
+			for index, projection := range projections {
+				original := normalizeTestSnapshot(t, snapshots[index/2]).build.Partitions
+				require.EqualValues(t, agentCounts[index/2], projection.agentReplicas)
+				require.EqualValues(t, agentCounts[index/2], plan.Agents[index].Replicas)
+				request := projection.RequestSpec(plan, plan.Agents[index].TemplateName)
+				require.Len(t, request.Partitions, requestCounts[index/2])
+				require.EqualValues(t, original[0].SourcePartitionID, request.Partitions[0].CompilerPartitionID)
+				require.Equal(t, projection.Model(), request.NodeLocal.Model)
+				if test.packed[index/2] {
+					require.Empty(t, request.PropSyncConnectors)
+				}
+				require.Equal(t, original, projection.configuredBuild.Partitions)
+				require.Equal(t, slices.Repeat([]string{projection.Model()}, len(original)), strings.Split(resolvedPartitionData([]*ModelProjection{projection})["partition_models"], "\n"))
 			}
 
 			for _, expansion := range []struct {
