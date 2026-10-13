@@ -19,7 +19,7 @@ use super::{
 };
 use crate::protocols::common::extensions::{
     NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
-    validate_metadata_upload_single_choice,
+    validate_metadata_upload_single_choice, validate_metadata_upload_stop_strings,
 };
 
 mod aggregator;
@@ -491,6 +491,10 @@ impl ValidateRequest for NvCreateCompletionRequest {
                     .n
                     .unwrap_or(1)
                     .max(self.inner.best_of.unwrap_or(1)) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_stop_strings(
+            self.get_stop().is_some_and(|stop| !stop.is_empty()),
             self.nvext.as_ref(),
         )?;
         // none for stream
