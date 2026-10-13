@@ -1,0 +1,465 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import asyncio
+import gc
+import hashlib
+import sqlite3
+import threading
+
+import pytest
+from cryptography.fernet import Fernet
+
+from dynamo.common.artifact_operations import ArtifactOperationStore, ArtifactService
+from dynamo.common.artifact_storage import ArtifactStorageError
+
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.unit,
+    pytest.mark.timeout(15),
+]
+
+
+@pytest.mark.asyncio
+async def test_pending_operation_count_is_bounded(tmp_path):
+    release = asyncio.Event()
+
+    async def transfer(data, target):
+        await release.wait()
+        raise RuntimeError("stop")
+
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    service = ArtifactService(store, transfer, None, max_pending_operations=1)
+    await service.submit(b"x", "owner", [], {})
+    with pytest.raises(ValueError, match="capacity"):
+        await service.submit(b"y", "owner", [], {})
+    release.set()
+    await service.drain()
+    await service.submit(b"z", "owner", [], {})
+    await service.drain()
+    assert service.source_bytes == 0
+
+
+@pytest.fixture
+def blocking_writer():
+    releases = []
+
+    def block(method):
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        release = threading.Event()
+        releases.append(release)
+
+        def writer(*args, **kwargs):
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(5):
+                raise TimeoutError("test writer was not released")
+            return method(*args, **kwargs)
+
+        return writer, entered, release
+
+    yield block
+    for release in releases:
+        release.set()
+
+
+def test_state_is_durable_and_grants_are_encrypted(tmp_path):
+    path = tmp_path / "operations.db"
+    key = Fernet.generate_key()
+    store = ArtifactOperationStore(path, key)
+    pending = store.create("owner", ["moe_routes"], {"url": "SENTINEL_SECRET"})
+    assert pending["state"] == "pending"
+    assert "SENTINEL_SECRET" not in repr(pending)
+    assert b"SENTINEL_SECRET" not in path.read_bytes()
+    assert store.grant(pending["operation_id"]) == {"url": "SENTINEL_SECRET"}
+    with pytest.raises(KeyError):
+        store.get(pending["operation_id"], "other-owner")
+    store.finish(pending["operation_id"], "failed", error_code="source_lost")
+    assert store.grant(pending["operation_id"]) is None
+    reopened = ArtifactOperationStore(path, key)
+    assert reopened.get(pending["operation_id"], "owner")["state"] == "failed"
+    with pytest.raises(ValueError):
+        reopened.finish(pending["operation_id"], "ready", actual_bytes=1)
+
+
+@pytest.mark.asyncio
+async def test_pending_does_not_wait_for_transfer(tmp_path):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def transfer(data, target):
+        entered.set()
+        await release.wait()
+        return {"object_id": "immutable-object", "actual_bytes": len(data)}
+
+    async def verify(data, target, receipt):
+        return {**receipt, "sha256": hashlib.sha256(data).hexdigest()}
+
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    service = ArtifactService(store, transfer, verify)
+    result = await service.submit(b"opaque", "owner", [], {"kind": "managed_store"})
+    assert result["state"] == "pending"
+    await entered.wait()
+    assert store.get(result["operation_id"], "owner")["state"] == "pending"
+    release.set()
+    await service.drain()
+    ready = store.get(result["operation_id"], "owner")
+    assert ready["state"] == "ready"
+    assert ready["sha256"] == hashlib.sha256(b"opaque").hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_failed_verification_never_becomes_ready(tmp_path):
+    async def transfer(data, target):
+        return {"actual_bytes": len(data), "object_id": "object"}
+
+    async def verify(data, target, receipt):
+        return {**receipt, "sha256": "incorrect"}
+
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    service = ArtifactService(store, transfer, verify)
+    pending = await service.submit(b"opaque", "owner", [], {})
+    await service.drain()
+    failed = store.get(pending["operation_id"], "owner")
+    assert failed["state"] == "failed"
+    assert failed["error_code"] == "verification_failed"
+    assert "sha256" not in failed
+
+
+def test_recovery_fails_lost_ephemeral_sources(tmp_path):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    pending = store.create("owner", [], {})
+    assert store.recover() == 1
+    assert store.get(pending["operation_id"], "owner")["error_code"] == "source_lost"
+
+
+@pytest.mark.asyncio
+async def test_queue_budget_releases_after_failure(tmp_path):
+    release = asyncio.Event()
+
+    async def transfer(data, target):
+        await release.wait()
+        raise RuntimeError("SENTINEL_SECRET")
+
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    service = ArtifactService(store, transfer, None, max_source_bytes=6)
+    first = await service.submit(b"opaque", "owner", [], {})
+    with pytest.raises(ValueError, match="capacity"):
+        await service.submit(b"x", "owner", [], {})
+    release.set()
+    await service.drain()
+    failed = store.get(first["operation_id"], "owner")
+    assert "SENTINEL_SECRET" not in repr(failed)
+    assert service.source_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_commit_is_verified_without_a_second_put(tmp_path):
+    attempts = []
+
+    async def transfer(data, target):
+        attempts.append(data)
+        raise ArtifactStorageError("commit_unknown", "ack lost", outcome="ambiguous")
+
+    async def verify(data, target, receipt):
+        assert store.grant(pending["operation_id"]) is not None
+        return {
+            "actual_bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "object_id": "bound-object",
+        }
+
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    service = ArtifactService(store, transfer, verify)
+    pending = await service.submit(b"captured", "owner", [], {"url": "SENTINEL"})
+    await service.drain()
+    assert store.get(pending["operation_id"], "owner")["state"] == "ready"
+    assert len(attempts) == 1
+    assert store.grant(pending["operation_id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_caller_cannot_mutate_a_handed_off_target(tmp_path):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def transfer(data, target):
+        entered.set()
+        await release.wait()
+        assert target["required_headers"]["signed"] == "original"
+        raise RuntimeError("stop")
+
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    service = ArtifactService(store, transfer, None)
+    target = {"required_headers": {"signed": "original"}}
+    await service.submit(b"bytes", "owner", [], target)
+    await entered.wait()
+    target["required_headers"]["signed"] = "changed"
+    release.set()
+    await service.drain()
+    assert service.source_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_repeated_create_cancellation_keeps_source_until_failed_commit(
+    tmp_path, monkeypatch, blocking_writer
+):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    created = []
+    original_create = store.create
+
+    def create(*args, **kwargs):
+        result = original_create(*args, **kwargs)
+        created.append(result["operation_id"])
+        return result
+
+    writer, entered, release = blocking_writer(create)
+    monkeypatch.setattr(store, "create", writer)
+
+    async def transfer(data, target):
+        pytest.fail("cancelled submission must not start transfer")
+
+    service = ArtifactService(store, transfer, None)
+    submission = asyncio.create_task(service.submit(b"owned", "owner", [], {}))
+    await entered.wait()
+    submission.cancel()
+    await asyncio.sleep(0)
+    submission.cancel()
+    await asyncio.sleep(0)
+    assert not submission.done()
+    assert service.source_bytes == len(b"owned")
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await submission
+    assert service.source_bytes == 0
+    assert store.get(created[0], "owner")["state"] == "failed"
+    assert store.grant(created[0]) is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_ready_writer_commits_ready_once(
+    tmp_path, monkeypatch, blocking_writer
+):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    writes = []
+    original_finish = store.finish
+
+    def finish(operation_id, state, **fields):
+        writes.append(state)
+        return original_finish(operation_id, state, **fields)
+
+    writer, entered, release = blocking_writer(finish)
+    monkeypatch.setattr(store, "finish", writer)
+
+    async def transfer(data, target):
+        return {"actual_bytes": len(data), "object_id": "bound-object"}
+
+    async def verify(data, target, receipt):
+        return {**receipt, "sha256": hashlib.sha256(data).hexdigest()}
+
+    service = ArtifactService(store, transfer, verify)
+    pending = await service.submit(b"owned", "owner", [], {})
+    await entered.wait()
+    delivery = next(iter(service._tasks))
+    delivery.cancel()
+    await asyncio.sleep(0)
+    delivery.cancel()
+    await asyncio.sleep(0)
+    assert not delivery.done()
+    assert service.source_bytes == len(b"owned")
+    assert store.get(pending["operation_id"], "owner")["state"] == "pending"
+    release.set()
+    await delivery
+    ready = store.get(pending["operation_id"], "owner")
+    assert ready["state"] == "ready"
+    assert ready["revision"] == 2
+    assert writes == ["ready"]
+    assert service.source_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_repeated_delivery_cancellation_settles_failed_writer(
+    tmp_path, monkeypatch, blocking_writer
+):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    writer, writer_entered, release = blocking_writer(store.finish)
+    monkeypatch.setattr(store, "finish", writer)
+    transfer_entered = asyncio.Event()
+
+    async def transfer(data, target):
+        transfer_entered.set()
+        await asyncio.Event().wait()
+
+    service = ArtifactService(store, transfer, None)
+    pending = await service.submit(b"owned", "owner", [], {})
+    await transfer_entered.wait()
+    delivery = next(iter(service._tasks))
+    delivery.cancel()
+    await writer_entered.wait()
+    delivery.cancel()
+    await asyncio.sleep(0)
+    assert not delivery.done()
+    assert service.source_bytes == len(b"owned")
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await delivery
+    assert store.get(pending["operation_id"], "owner")["state"] == "failed"
+    assert store.grant(pending["operation_id"]) is None
+    assert service.source_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_background_writer_exception_is_observed_without_secret_logs(
+    tmp_path, monkeypatch, caplog
+):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    incidents = []
+    completed = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "call_exception_handler", incidents.append)
+
+    def unavailable(*args, **kwargs):
+        loop.call_soon_threadsafe(completed.set)
+        raise sqlite3.OperationalError("SENTINEL_SECRET")
+
+    monkeypatch.setattr(store, "finish", unavailable)
+
+    async def transfer(data, target):
+        return {"actual_bytes": len(data), "object_id": "bound-object"}
+
+    async def verify(data, target, receipt):
+        return {**receipt, "sha256": hashlib.sha256(data).hexdigest()}
+
+    service = ArtifactService(store, transfer, verify)
+    await service.submit(b"owned", "owner", [], {})
+    await completed.wait()
+    while service._tasks:
+        await asyncio.sleep(0)
+    gc.collect()
+    assert not incidents
+    assert "OperationalError" in caplog.text
+    assert "SENTINEL_SECRET" not in caplog.text
+    assert service.source_bytes == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_drain", [False, True])
+async def test_drain_owns_admission_through_delivery_handoff(
+    tmp_path, monkeypatch, blocking_writer, cancel_drain
+):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    writer, creation_entered, release_creation = blocking_writer(store.create)
+    monkeypatch.setattr(store, "create", writer)
+    transfer_entered = asyncio.Event()
+    release_transfer = asyncio.Event()
+
+    async def transfer(data, target):
+        transfer_entered.set()
+        await release_transfer.wait()
+        return {"actual_bytes": len(data), "object_id": "bound-object"}
+
+    async def verify(data, target, receipt):
+        return {**receipt, "sha256": hashlib.sha256(data).hexdigest()}
+
+    service = ArtifactService(store, transfer, verify)
+    submission = asyncio.create_task(service.submit(b"owned", "owner", [], {}))
+    await creation_entered.wait()
+    draining = asyncio.create_task(service.drain())
+    await asyncio.sleep(0)
+    if cancel_drain:
+        draining.cancel()
+        await asyncio.sleep(0)
+        draining.cancel()
+        await asyncio.sleep(0)
+    assert not draining.done()
+    assert service.source_bytes == len(b"owned")
+    release_creation.set()
+    pending = await submission
+    await transfer_entered.wait()
+    assert not draining.done()
+    assert service.source_bytes == len(b"owned")
+    release_transfer.set()
+    if cancel_drain:
+        with pytest.raises(asyncio.CancelledError):
+            await draining
+    else:
+        await draining
+    assert store.get(pending["operation_id"], "owner")["state"] == "ready"
+    assert service.source_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_mutable_sources_are_rejected_before_admission(tmp_path):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+
+    async def transfer(data, target):
+        pytest.fail("mutable source must not reach storage")
+
+    service = ArtifactService(store, transfer, None)
+    with pytest.raises(ValueError, match="immutable bytes"):
+        await service.submit(bytearray(b"mutable"), "owner", [], {})
+    assert service.source_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_loop_task_cancellation_cannot_detach_sqlite_creation(
+    tmp_path, monkeypatch, blocking_writer
+):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    created = []
+    original_create = store.create
+
+    def create(*args, **kwargs):
+        pending = original_create(*args, **kwargs)
+        created.append(pending["operation_id"])
+        return pending
+
+    writer, entered, release = blocking_writer(create)
+    monkeypatch.setattr(store, "create", writer)
+
+    async def transfer(data, target):
+        pytest.fail("cancelled submission must not start transfer")
+
+    service = ArtifactService(store, transfer, None)
+    existing_tasks = asyncio.all_tasks()
+    submission = asyncio.create_task(service.submit(b"owned", "owner", [], {}))
+    await entered.wait()
+    for task in asyncio.all_tasks() - existing_tasks:
+        task.cancel()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert not submission.done()
+    assert service.source_bytes == len(b"owned")
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await submission
+    assert store.get(created[0], "owner")["state"] == "failed"
+    assert service.source_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_delivery_starts_settles_failed_without_budget_leak(
+    tmp_path, monkeypatch, blocking_writer
+):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    writer, entered, release = blocking_writer(store.finish)
+    monkeypatch.setattr(store, "finish", writer)
+
+    async def transfer(data, target):
+        pytest.fail("cancelled queued delivery must not invoke transfer")
+
+    service = ArtifactService(store, transfer, None)
+    pending = await service.submit(b"owned", "owner", [], {})
+    delivery = next(iter(service._tasks))
+    delivery.cancel()
+    draining = asyncio.create_task(service.drain())
+    await entered.wait()
+    assert not draining.done()
+    assert service.source_bytes == len(b"owned")
+    assert store.get(pending["operation_id"], "owner")["state"] == "pending"
+    release.set()
+    await draining
+    assert store.get(pending["operation_id"], "owner")["state"] == "failed"
+    assert store.grant(pending["operation_id"]) is None
+    assert service.source_bytes == 0

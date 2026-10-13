@@ -19,6 +19,7 @@ use super::{
 };
 use crate::protocols::common::extensions::{
     NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
+    validate_metadata_upload_single_choice,
 };
 
 mod aggregator;
@@ -481,6 +482,15 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_n(self.inner.n)?;
         validate_completion_token_ids_single_choice(
             get_prompt_batch_size(&self.inner.prompt) * self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_single_choice(
+            get_prompt_batch_size(&self.inner.prompt)
+                * self
+                    .inner
+                    .n
+                    .unwrap_or(1)
+                    .max(self.inner.best_of.unwrap_or(1)) as usize,
             self.nvext.as_ref(),
         )?;
         // none for stream

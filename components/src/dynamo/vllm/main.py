@@ -23,6 +23,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
+from dynamo.common.artifact_runtime import close_configured_artifact_runtime
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
@@ -106,6 +107,16 @@ SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
 )
+
+
+async def _close_worker_resources(
+    state_agent_lifecycle: StateAgentLifecycle,
+) -> None:
+    try:
+        await state_agent_lifecycle.close()
+    finally:
+        if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+            await close_configured_artifact_runtime()
 
 
 def uses_modelexpress_load_format(config: Config) -> bool:
@@ -233,6 +244,10 @@ async def worker(argv: list[str] | None = None) -> None:
 
     shutdown_event = asyncio.Event()
     state_agent_lifecycle = StateAgentLifecycle()
+
+    async def close_worker_resources() -> None:
+        await _close_worker_resources(state_agent_lifecycle)
+
     runtime, loop = create_runtime(
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
@@ -252,26 +267,29 @@ async def worker(argv: list[str] | None = None) -> None:
         runtime,
         shutdown_endpoints,
         shutdown_event,
-        pre_shutdown_callback=state_agent_lifecycle.close,
+        pre_shutdown_callback=close_worker_resources,
     )
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
-    factory = WorkerFactory(
-        setup_vllm_engine_fn=setup_vllm_engine,
-        setup_kv_event_publisher_fn=setup_kv_event_publisher,
-        setup_kv_state_attachment_owner_fn=setup_kv_state_attachment_owner,
-        register_vllm_model_fn=register_vllm_model,
-        setup_fpm_relay_fn=setup_fpm_relay,
-        setup_metrics_collection_fn=setup_metrics_collection,
-        state_agent_lifecycle=state_agent_lifecycle,
-    )
-    await factory.create(
-        runtime,
-        config,
-        shutdown_event,
-        shutdown_endpoints,
-        snapshot_engine=snapshot_engine,
-    )
+    try:
+        factory = WorkerFactory(
+            setup_vllm_engine_fn=setup_vllm_engine,
+            setup_kv_event_publisher_fn=setup_kv_event_publisher,
+            setup_kv_state_attachment_owner_fn=setup_kv_state_attachment_owner,
+            register_vllm_model_fn=register_vllm_model,
+            setup_fpm_relay_fn=setup_fpm_relay,
+            setup_metrics_collection_fn=setup_metrics_collection,
+            state_agent_lifecycle=state_agent_lifecycle,
+        )
+        await factory.create(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
+    finally:
+        await close_worker_resources()
 
     logger.debug("Worker function completed, exiting...")
 
