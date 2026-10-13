@@ -220,6 +220,22 @@ func stampDeploymentIdentity(deployment *v1alpha1.LPXGraphDeployment, pcs *grove
 	}
 }
 
+// renderDesiredPodCliqueSet renders the PCS and stamps the DGD's client identity on it.
+func (r *graphReconciler) renderDesiredPodCliqueSet(
+	ctx context.Context,
+	deployment *v1alpha1.LPXGraphDeployment,
+	dgd *v1beta1.DynamoGraphDeployment,
+	workloads map[string]*lpx.Workload,
+	plans map[string]*lpx.MaterializationPlan,
+	existingPCS *grovev1alpha1.PodCliqueSet,
+) (*grovev1alpha1.PodCliqueSet, []client.Object, error) {
+	pcs, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workloads, plans, existingPCS)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pcs, resources, r.stampClientIdentity(ctx, dgd, pcs)
+}
+
 // stampClientIdentity gives every LPX Pod its DGD's UID label, and gives agent Pods the DGD's client
 // key and certificate from Secret lpx-id-<DGD UID> plus the optional lpx-server-ca bundle. The
 // Secret is created once, never rewritten and never adopted. Agent Pods also publish the
@@ -228,12 +244,16 @@ func stampDeploymentIdentity(deployment *v1alpha1.LPXGraphDeployment, pcs *grove
 // key names, so one DGD's key no longer opens another DGD's Pods.
 func (r *graphReconciler) stampClientIdentity(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, pcs *grovev1alpha1.PodCliqueSet) error {
 	name := "lpx-id-" + string(dgd.UID)
+	key := client.ObjectKey{Namespace: dgd.Namespace, Name: name}
 	identity := &corev1.Secret{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: name}, identity)
+	err := r.Get(ctx, key, identity)
 	if apierrors.IsNotFound(err) {
 		if identity, err = newClientIdentitySecret(dgd.Namespace, name); err == nil {
 			if err = controllerutil.SetControllerReference(dgd, identity, r.Scheme()); err == nil {
-				err = r.Create(ctx, identity)
+				// An earlier reconcile may have created it before the cache observed it.
+				if err = r.Create(ctx, identity); apierrors.IsAlreadyExists(err) {
+					err = r.apiReader.Get(ctx, key, identity)
+				}
 			}
 		}
 	}
