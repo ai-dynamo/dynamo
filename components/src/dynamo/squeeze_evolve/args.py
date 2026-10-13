@@ -74,7 +74,7 @@ class SqueezeEvolveRunConfig(KvRouterConfigBase, AisPerfConfigBase):
         )
 
     def validate(self) -> None:  # type: ignore[override]
-        self.apply_load_aware_preset()  # shared KvRouter preset (KvRouterConfigBase)
+        self.apply_router_config()
         if self.router_prefill_load_model == "ais":
             self.ais_perf_kwargs()
         elif self.ais_perf_config is not None:

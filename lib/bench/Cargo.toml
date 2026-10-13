@@ -14,7 +14,7 @@ description = "Lightweight HTTP benchmarks for Dynamo endpoints"
 [features]
 # Preserve the package's default tests; benchmark entrypoints use the
 # documented `--no-default-features` feature sets below.
-default = ["claude-trace-export", "test-support"]
+default = ["claude-trace-export", "codex-trace-export", "test-support"]
 active-sequences = [
   "router-bench",
   "dep:dynamo-mocker",
@@ -25,15 +25,19 @@ active-sequences = [
   "dep:tracing-subscriber",
 ]
 approximate-lru = ["active-sequences"]
-claude-trace-export = [
+coding-trace-export = [
   "dep:chrono",
-  "dep:crossbeam-channel",
   "dep:dynamo-data-gen",
-  "dep:hf-hub",
   "dep:rustc-hash",
   "dep:sha2",
+]
+claude-trace-export = [
+  "coding-trace-export",
+  "dep:crossbeam-channel",
+  "dep:hf-hub",
   "dep:tokenizers",
 ]
+codex-trace-export = ["coding-trace-export"]
 dc-ckf-consumer = []
 dc-ckf-relay = [
   "dep:crossbeam-channel",
@@ -49,6 +53,7 @@ mooncake = [
   "dep:dynamo-mocker",
   "dep:indicatif",
   "dep:libc",
+  "dep:sha2",
   "dep:tokio-util",
 ]
 multiturn = [
@@ -58,7 +63,7 @@ multiturn = [
   "dep:indicatif",
   "dep:rand",
 ]
-offline-replay = ["dep:blake3", "dep:dynamo-mocker"]
+offline-replay = ["dep:blake3", "dep:dynamo-mocker", "dep:libc"]
 router-bench = ["dynamo-kv-router/bench"]
 router-metrics = ["dynamo-kv-router/metrics"]
 router-test-support = [
@@ -74,11 +79,6 @@ router-test-support = [
 ]
 satf = ["dep:dynamo-data-gen"]
 request-trace-to-mooncake = ["dep:blake3", "dep:dynamo-data-gen", "dep:tempfile"]
-weka-to-agentic-mooncake = [
-  "dep:dynamo-data-gen",
-  "dep:dynamo-mocker",
-  "dep:tempfile",
-]
 test-support = [
   "router-test-support",
   "dynamo-mocker/test-support",
@@ -102,6 +102,11 @@ path = "claude_trace_export.rs"
 required-features = ["claude-trace-export"]
 
 [[bin]]
+name = "codex_trace_export"
+path = "codex_trace_export.rs"
+required-features = ["codex-trace-export"]
+
+[[bin]]
 name = "request_trace_to_satf"
 path = "request_trace_to_satf.rs"
 required-features = ["satf"]
@@ -111,20 +116,10 @@ name = "request_trace_to_mooncake"
 path = "request_trace_to_mooncake.rs"
 required-features = ["request-trace-to-mooncake"]
 
-[[bin]]
-name = "weka_to_agentic_mooncake"
-path = "weka_to_agentic_mooncake.rs"
-required-features = ["weka-to-agentic-mooncake"]
-
 [[test]]
 name = "request_trace_to_mooncake"
 path = "tests/request_trace_to_mooncake.rs"
 required-features = ["request-trace-to-mooncake"]
-
-[[test]]
-name = "weka_to_agentic_mooncake"
-path = "tests/weka_to_agentic_mooncake.rs"
-required-features = ["weka-to-agentic-mooncake"]
 
 [[bench]]
 name = "offline_replay_bench"

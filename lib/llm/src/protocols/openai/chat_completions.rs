@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 use serde::{Deserialize, Serialize};
@@ -278,8 +278,18 @@ fn openai_thinking_mode(value: &serde_json::Value) -> anyhow::Result<Option<Open
 pub struct NvCreateChatCompletionResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+}
+
+/// Parser lifecycle evidence carried between serving components, never to OpenAI clients.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallCompletion {
+    pub choice_index: u32,
+    pub tool_index: u32,
+    pub complete: bool,
 }
 
 /// A response structure for streamed chat completions, embedding OpenAI's
@@ -290,10 +300,17 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+    /// Internal prompt logprobs payload for non-streaming response aggregation.
+    /// This must never be serialized to client-facing streams.
+    #[serde(skip)]
+    pub prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
     #[serde(default, skip_serializing)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
+    /// Internal transport evidence; the HTTP chat converter removes it before SSE serialization.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_call_completion: Vec<ToolCallCompletion>,
 }
 
 /// Synthetic chunks reuse a real response envelope but consume no backend data.
@@ -307,7 +324,9 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     let data = response.data.as_mut()?;
     data.inner.usage = None;
     data.llm_metrics = None;
+    data.tool_call_completion.clear();
     data.nvext = None;
+    data.prompt_logprobs = None;
     Some(())
 }
 

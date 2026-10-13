@@ -34,11 +34,12 @@ use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::reasoning_field::ReasoningField;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
-use dynamo_mocker::common::perf_model::PerfModel;
 
-use super::ais_callback::{create_ais_callback, create_ais_prefill_load_estimator};
-use super::replay::MockEngineArgs as PyMockEngineArgs;
-use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
+use super::ais_callback::create_ais_prefill_load_estimator;
+use super::replay::{
+    materialize_mocker_config, mocker_config_from_json, mocker_config_from_python,
+};
+use dynamo_mocker::config::MockerConfig;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
@@ -131,7 +132,7 @@ impl AisPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_approximate_cache_policy="ttl", router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, enable_session_prefix_index=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, conditional_disagg_enabled=false, conditional_disagg_policy="isl_bounding", conditional_disagg_eff_isl_threshold=2048, conditional_disagg_eff_isl_ratio_threshold=0.7, conditional_disagg_prefill_busy_threshold=None, conditional_disagg_decode_busy_threshold=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_prefill_policy=None, router_decode_policy=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_approximate_cache_policy="ttl", router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, enable_session_prefix_index=false, shared_cache_multiplier=None, shared_cache_type="none", router_predicted_ttl_secs=None, conditional_disagg_enabled=false, conditional_disagg_policy="isl_bounding", conditional_disagg_eff_isl_threshold=2048, conditional_disagg_eff_isl_ratio_threshold=0.7, conditional_disagg_prefill_busy_threshold=None, conditional_disagg_decode_busy_threshold=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_prefill_policy=None, router_decode_policy=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -153,7 +154,7 @@ impl KvRouterConfig {
         use_remote_indexer: bool,
         serve_indexer: bool,
         enable_session_prefix_index: bool,
-        shared_cache_multiplier: f64,
+        shared_cache_multiplier: Option<f64>,
         shared_cache_type: &str,
         router_predicted_ttl_secs: Option<f64>,
         conditional_disagg_enabled: bool,
@@ -181,7 +182,7 @@ impl KvRouterConfig {
             );
         }
 
-        let inner = RsKvRouterConfig {
+        let mut inner = RsKvRouterConfig {
             overlap_score_credit,
             overlap_score_credit_decay,
             prefill_load_scale,
@@ -231,15 +232,17 @@ impl KvRouterConfig {
             conditional_disagg_decode_busy_threshold,
             router_predicted_ttl_secs,
         };
+        inner.apply_policy_config().map_err(PyValueError::new_err)?;
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
     }
 
     #[staticmethod]
     fn from_json(config_json: &str) -> PyResult<Self> {
-        let inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
+        let mut inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
             PyValueError::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
         })?;
+        inner.apply_policy_config().map_err(PyValueError::new_err)?;
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
     }
@@ -472,7 +475,7 @@ pub(crate) struct EntrypointArgs {
     tls_key_path: Option<PathBuf>,
     tls_client_ca_cert_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
-    mocker_engine_args: Option<PyMockEngineArgs>,
+    mocker_engine_args: Option<MockerConfig>,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
     namespace_prefix: Option<String>,
@@ -504,7 +507,7 @@ impl EntrypointArgs {
         tls_cert_path: Option<PathBuf>,
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
-        mocker_engine_args: Option<PyMockEngineArgs>,
+        mocker_engine_args: Option<&Bound<'_, PyAny>>,
         runtime_config: Option<ModelRuntimeConfig>,
         namespace: Option<String>,
         namespace_prefix: Option<String>,
@@ -605,7 +608,9 @@ impl EntrypointArgs {
             tls_key_path,
             tls_client_ca_cert_path,
             extra_engine_args,
-            mocker_engine_args,
+            mocker_engine_args: mocker_engine_args
+                .map(|value| mocker_config_from_python(value.py(), value))
+                .transpose()?,
             runtime_config,
             namespace,
             namespace_prefix,
@@ -784,15 +789,13 @@ async fn select_engine(
         }
         EngineType::Mocker => {
             let mut mocker_args = if let Some(mocker_engine_args) = args.mocker_engine_args {
-                mocker_engine_args.inner()
+                mocker_engine_args
             } else if let Some(extra_args_path) = args.extra_engine_args {
                 tokio::fs::read_to_string(&extra_args_path)
                     .await
                     .map_err(anyhow::Error::from)
                     .and_then(|config_json| {
-                        Python::with_gil(|py| {
-                            Ok(PyMockEngineArgs::from_json(py, &config_json)?.inner())
-                        })
+                        Python::with_gil(|py| Ok(mocker_config_from_json(py, &config_json)?))
                     })
                     .map_err(|e| {
                         anyhow::anyhow!(
@@ -805,13 +808,10 @@ async fn select_engine(
                 tracing::warn!(
                     "No extra_engine_args specified for mocker engine. Using default mocker args."
                 );
-                RsMockEngineArgs::default()
+                MockerConfig::default()
             };
 
-            if let Some(config) = mocker_args.ais_perf_config.as_ref() {
-                let callback = Python::with_gil(|py| create_ais_callback(py, config))?;
-                mocker_args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
-            }
+            mocker_args = Python::with_gil(|py| materialize_mocker_config(py, mocker_args))?;
 
             let endpoint = local_model.endpoint_id().clone();
 

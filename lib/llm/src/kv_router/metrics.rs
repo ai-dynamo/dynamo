@@ -5,7 +5,8 @@
 //!
 //! This module centralizes all router-side Prometheus metric definitions:
 //!
-//! - [`WorkerLoadMetrics`]: Per-worker active decode blocks and prefill tokens gauges.
+//! - [`WorkerLoadMetrics`]: Per-worker active decode blocks, prefill tokens, and
+//!   active requests by request phase.
 //!   Registered on the frontend's own `prometheus::Registry` (default port 8000).
 //!   Populated by `KvWorkerMonitor` in the frontend when receiving ActiveLoad events.
 //!   - Frontend (aggregated and disaggregated): available on default port 8000
@@ -63,8 +64,10 @@ use prometheus::{
 };
 
 use crate::http::service::metrics::generate_log_buckets;
+use crate::protocols::common::timing::RequestPhase;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::indexer::ApproximateLruStats;
+use dynamo_kv_router::sequences::LocalWorkerLoad;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
@@ -619,65 +622,102 @@ impl RouterWorkerStatusMetrics {
 pub struct WorkerLoadMetrics {
     pub active_decode_blocks: IntGaugeVec,
     pub active_prefill_tokens: IntGaugeVec,
+    /// Booked requests split by `request_phase`: `prefill` until the request is
+    /// marked prefill-complete, `decode` after.
+    pub active_requests: IntGaugeVec,
 }
 
+const REQUEST_PHASE_PREFILL: &str = "prefill";
+const REQUEST_PHASE_DECODE: &str = "decode";
+
 impl WorkerLoadMetrics {
-    pub fn observe(
-        &self,
-        worker_id: u64,
-        dp_rank: u32,
-        worker_type: &str,
-        active_blocks: usize,
-        active_tokens: usize,
-    ) {
-        let worker_id_str = worker_id.to_string();
-        let dp_rank_str = dp_rank.to_string();
-        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+    fn new() -> Self {
+        let worker_labels = &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE];
+        let gauge = |suffix: &str, help: &str, label_names: &[&str]| {
+            IntGaugeVec::new(
+                Opts::new(format!("{}_{}", name_prefix::FRONTEND, suffix), help),
+                label_names,
+            )
+            .unwrap_or_else(|error| panic!("Failed to create {suffix} gauge: {error}"))
+        };
+        Self {
+            active_decode_blocks: gauge(
+                frontend_service::WORKER_ACTIVE_DECODE_BLOCKS,
+                "Active KV cache decode blocks per worker",
+                worker_labels,
+            ),
+            active_prefill_tokens: gauge(
+                frontend_service::WORKER_ACTIVE_PREFILL_TOKENS,
+                "Active prefill tokens queued per worker",
+                worker_labels,
+            ),
+            active_requests: gauge(
+                frontend_service::WORKER_ACTIVE_REQUESTS,
+                "Active requests booked per worker, by request phase",
+                &[
+                    labels::WORKER_ID,
+                    labels::DP_RANK,
+                    labels::WORKER_TYPE,
+                    labels::REQUEST_PHASE,
+                ],
+            ),
+        }
+    }
+
+    fn register(&self, registry: &prometheus::Registry) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(self.active_decode_blocks.clone()))?;
+        registry.register(Box::new(self.active_prefill_tokens.clone()))?;
+        registry.register(Box::new(self.active_requests.clone()))?;
+        Ok(())
+    }
+
+    pub fn observe(&self, worker_id: u64, dp_rank: u32, worker_type: &str, load: LocalWorkerLoad) {
+        let worker_id = worker_id.to_string();
+        let dp_rank = dp_rank.to_string();
+        let labels = [worker_id.as_str(), dp_rank.as_str(), worker_type];
         self.active_decode_blocks
-            .with_label_values(labels)
-            .set(active_blocks as i64);
+            .with_label_values(&labels)
+            .set(load.active_blocks as i64);
         self.active_prefill_tokens
-            .with_label_values(labels)
-            .set(active_tokens as i64);
+            .with_label_values(&labels)
+            .set(load.active_tokens as i64);
+        let decode_requests = load.active_requests.saturating_sub(load.prefill_requests);
+        for (phase, count) in [
+            (REQUEST_PHASE_PREFILL, load.prefill_requests),
+            (REQUEST_PHASE_DECODE, decode_requests),
+        ] {
+            self.active_requests
+                .with_label_values(&[worker_id.as_str(), dp_rank.as_str(), worker_type, phase])
+                .set(count as i64);
+        }
+    }
+
+    /// Remove every load series for one worker/dp_rank.
+    pub fn remove(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
+        let worker_id = worker_id.to_string();
+        let dp_rank = dp_rank.to_string();
+        let labels = [worker_id.as_str(), dp_rank.as_str(), worker_type];
+        let _ = self.active_decode_blocks.remove_label_values(&labels);
+        let _ = self.active_prefill_tokens.remove_label_values(&labels);
+        for phase in [REQUEST_PHASE_PREFILL, REQUEST_PHASE_DECODE] {
+            let _ = self.active_requests.remove_label_values(&[
+                worker_id.as_str(),
+                dp_rank.as_str(),
+                worker_type,
+                phase,
+            ]);
+        }
     }
 }
 
-pub static WORKER_LOAD_METRICS: LazyLock<WorkerLoadMetrics> = LazyLock::new(|| WorkerLoadMetrics {
-    active_decode_blocks: IntGaugeVec::new(
-        Opts::new(
-            format!(
-                "{}_{}",
-                name_prefix::FRONTEND,
-                frontend_service::WORKER_ACTIVE_DECODE_BLOCKS
-            ),
-            "Active KV cache decode blocks per worker",
-        ),
-        &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
-    )
-    .expect("Failed to create worker_active_decode_blocks gauge"),
-    active_prefill_tokens: IntGaugeVec::new(
-        Opts::new(
-            format!(
-                "{}_{}",
-                name_prefix::FRONTEND,
-                frontend_service::WORKER_ACTIVE_PREFILL_TOKENS
-            ),
-            "Active prefill tokens queued per worker",
-        ),
-        &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
-    )
-    .expect("Failed to create worker_active_prefill_tokens gauge"),
-});
+pub static WORKER_LOAD_METRICS: LazyLock<WorkerLoadMetrics> = LazyLock::new(WorkerLoadMetrics::new);
 
 /// Register the worker load gauges with the given Prometheus registry.
 /// Called during frontend HTTP service setup (`service_v2.rs`), served on port 8000.
 pub fn register_worker_load_metrics(
     registry: &prometheus::Registry,
 ) -> Result<(), prometheus::Error> {
-    let m = &*WORKER_LOAD_METRICS;
-    registry.register(Box::new(m.active_decode_blocks.clone()))?;
-    registry.register(Box::new(m.active_prefill_tokens.clone()))?;
-    Ok(())
+    WORKER_LOAD_METRICS.register(registry)
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,7 +1069,7 @@ pub struct RouterRequestMetrics {
     pub requests_total: prometheus::IntCounter,
     pub time_to_first_token_seconds: prometheus::Histogram,
     pub inter_token_latency_seconds: prometheus::Histogram,
-    pub input_sequence_tokens: prometheus::Histogram,
+    pub input_sequence_tokens: HistogramVec,
     pub output_sequence_tokens: prometheus::Histogram,
     pub kv_hit_rate: prometheus::Histogram,
     pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
@@ -1037,7 +1077,16 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
+    /// Raw cached prefix tokens on the best eligible worker at selection, one observation
+    /// per tracked attempt; labels `phase` (aggregated | prefill | decode) and `model`.
+    pub kv_best_eligible_cached_prefix_tokens: IntCounterVec,
+    /// Raw cached prefix tokens on the selected worker and DP rank at selection; same labels.
+    pub kv_selected_cached_prefix_tokens: IntCounterVec,
+    /// Backend-reported reused tokens, counted once per attempt; same labels.
+    pub kv_worker_reused_tokens: IntCounterVec,
 }
+
+const KV_PHASE_LABEL: &str = "phase";
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
 
@@ -1060,120 +1109,150 @@ impl RouterRequestMetrics {
                 let router_id = instance_id.to_string();
                 let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
 
-                let metrics = component.metrics();
-                let requests_started_total = metrics
-                    .create_intcounter(
-                        &router_metric(frontend_service::REQUESTS_STARTED_TOTAL),
-                        "Total number of requests admitted by the router scheduler",
-                        extra_labels,
-                    )
-                    .expect("failed to create router_requests_started_total");
-                let requests_total = metrics
-                    .create_intcounter(
-                        &router_metric(frontend_service::REQUESTS_TOTAL),
-                        "Total number of requests processed by the router",
-                        extra_labels,
-                    )
-                    .expect("failed to create router_requests_total");
-                let time_to_first_token_seconds = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
-                        "Time to first token observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(0.001, 480.0, 18)),
-                    )
-                    .expect("failed to create router_time_to_first_token_seconds");
-                let inter_token_latency_seconds = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
-                        "Average inter-token latency observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(0.001, 2.0, 13)),
-                    )
-                    .expect("failed to create router_inter_token_latency_seconds");
-                let input_sequence_tokens = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::INPUT_SEQUENCE_TOKENS),
-                        "Input sequence length in tokens observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(50.0, 128000.0, 12)),
-                    )
-                    .expect("failed to create router_input_sequence_tokens");
-                let output_sequence_tokens = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
-                        "Output sequence length in tokens observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(50.0, 32000.0, 10)),
-                    )
-                    .expect("failed to create router_output_sequence_tokens");
-                let kv_hit_rate = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::KV_HIT_RATE),
-                        "Predicted KV cache hit rate at routing time (0.0-1.0)",
-                        extra_labels,
-                        Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
-                    )
-                    .expect("failed to create router_kv_hit_rate");
-                let kv_transfer_estimated_latency_seconds = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS),
-                        "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
-                        extra_labels,
-                        Some(generate_log_buckets(0.001, 10.0, 15)),
-                    )
-                    .expect("failed to create router_kv_transfer_estimated_latency_seconds");
-                let shared_cache_hit_rate = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::SHARED_CACHE_HIT_RATE),
-                        "Fraction of request blocks found in the shared KV cache (0.0-1.0)",
-                        extra_labels,
-                        Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
-                    )
-                    .expect("failed to create router_shared_cache_hit_rate");
-                let shared_cache_beyond_blocks = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::SHARED_CACHE_BEYOND_BLOCKS),
-                        "Shared cache blocks beyond device overlap for the selected worker",
-                        extra_labels,
-                        Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
-                    )
-                    .expect("failed to create router_shared_cache_beyond_blocks");
-                let non_max_overlap_selections_total = metrics
-                    .create_intcountervec(
-                        &router_metric(frontend_service::NON_MAX_OVERLAP_SELECTIONS_TOTAL),
-                        "Total admitted prefill scheduler selections with less KV cache overlap than another eligible worker",
-                        &[labels::WORKER_TYPE],
-                        extra_labels,
-                    )
-                    .expect("failed to create router_non_max_overlap_selections_total");
-                let overlap_blocks_lost = metrics
-                    .create_histogramvec(
-                        &router_metric(frontend_service::OVERLAP_BLOCKS_LOST),
-                        "Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and selected worker",
-                        &[labels::WORKER_TYPE],
-                        extra_labels,
-                        Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
-                    )
-                    .expect("failed to create router_overlap_blocks_lost");
-                non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
-                overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
-                Arc::new(Self {
-                    requests_started_total,
-                    requests_total,
-                    time_to_first_token_seconds,
-                    inter_token_latency_seconds,
-                    input_sequence_tokens,
-                    output_sequence_tokens,
-                    kv_hit_rate,
-                    kv_transfer_estimated_latency_seconds,
-                    shared_cache_hit_rate,
-                    shared_cache_beyond_blocks,
-                    non_max_overlap_selections_total,
-                    overlap_blocks_lost,
-                })
+                Arc::new(Self::build(component, extra_labels))
             })
             .clone()
+    }
+
+    fn build<H: MetricsHierarchy>(hierarchy: &H, extra_labels: &[(&str, &str)]) -> Self {
+        let metrics = hierarchy.metrics();
+        let requests_started_total = metrics
+            .create_intcounter(
+                &router_metric(frontend_service::REQUESTS_STARTED_TOTAL),
+                "Total number of requests admitted by the router scheduler",
+                extra_labels,
+            )
+            .expect("failed to create router_requests_started_total");
+        let requests_total = metrics
+            .create_intcounter(
+                &router_metric(frontend_service::REQUESTS_TOTAL),
+                "Total number of requests processed by the router",
+                extra_labels,
+            )
+            .expect("failed to create router_requests_total");
+        let time_to_first_token_seconds = metrics
+            .create_histogram(
+                &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
+                "Time to first token observed at the router",
+                extra_labels,
+                Some(generate_log_buckets(0.001, 480.0, 18)),
+            )
+            .expect("failed to create router_time_to_first_token_seconds");
+        let inter_token_latency_seconds = metrics
+            .create_histogram(
+                &router_metric(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
+                "Average inter-token latency observed at the router",
+                extra_labels,
+                Some(generate_log_buckets(0.001, 2.0, 13)),
+            )
+            .expect("failed to create router_inter_token_latency_seconds");
+        let input_sequence_tokens = metrics
+            .create_histogramvec(
+                &router_metric(frontend_service::INPUT_SEQUENCE_TOKENS),
+                "Input sequence length in tokens observed at the router",
+                &[KV_PHASE_LABEL, labels::MODEL],
+                extra_labels,
+                Some(generate_log_buckets(50.0, 128000.0, 12)),
+            )
+            .expect("failed to create router_input_sequence_tokens");
+        let output_sequence_tokens = metrics
+            .create_histogram(
+                &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
+                "Output sequence length in tokens observed at the router",
+                extra_labels,
+                Some(generate_log_buckets(50.0, 32000.0, 10)),
+            )
+            .expect("failed to create router_output_sequence_tokens");
+        let kv_hit_rate = metrics
+            .create_histogram(
+                &router_metric(frontend_service::KV_HIT_RATE),
+                "Predicted KV cache hit rate at routing time (0.0-1.0)",
+                extra_labels,
+                Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
+            )
+            .expect("failed to create router_kv_hit_rate");
+        let kv_transfer_estimated_latency_seconds = metrics
+            .create_histogram(
+                &router_metric(frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS),
+                "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
+                extra_labels,
+                Some(generate_log_buckets(0.001, 10.0, 15)),
+            )
+            .expect("failed to create router_kv_transfer_estimated_latency_seconds");
+        let shared_cache_hit_rate = metrics
+            .create_histogram(
+                &router_metric(frontend_service::SHARED_CACHE_HIT_RATE),
+                "Fraction of request blocks found in the shared KV cache (0.0-1.0)",
+                extra_labels,
+                Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
+            )
+            .expect("failed to create router_shared_cache_hit_rate");
+        let shared_cache_beyond_blocks = metrics
+            .create_histogram(
+                &router_metric(frontend_service::SHARED_CACHE_BEYOND_BLOCKS),
+                "Shared cache blocks beyond device overlap for the selected worker",
+                extra_labels,
+                Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
+            )
+            .expect("failed to create router_shared_cache_beyond_blocks");
+        let non_max_overlap_selections_total = metrics
+            .create_intcountervec(
+                &router_metric(frontend_service::NON_MAX_OVERLAP_SELECTIONS_TOTAL),
+                "Total admitted prefill scheduler selections with less KV cache overlap than another eligible worker",
+                &[labels::WORKER_TYPE],
+                extra_labels,
+            )
+            .expect("failed to create router_non_max_overlap_selections_total");
+        let overlap_blocks_lost = metrics
+            .create_histogramvec(
+                &router_metric(frontend_service::OVERLAP_BLOCKS_LOST),
+                "Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and selected worker",
+                &[labels::WORKER_TYPE],
+                extra_labels,
+                Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
+            )
+            .expect("failed to create router_overlap_blocks_lost");
+        non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
+        overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
+        let kv_tokens_counter = |name: &str, help: &str| {
+            metrics
+                .create_intcountervec(
+                    &router_metric(name),
+                    help,
+                    &[KV_PHASE_LABEL, labels::MODEL],
+                    extra_labels,
+                )
+                .expect("failed to create router KV token counter")
+        };
+        let kv_best_eligible_cached_prefix_tokens = kv_tokens_counter(
+            frontend_service::KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL,
+            "Raw cached prefix tokens on the best eligible worker at selection time",
+        );
+        let kv_selected_cached_prefix_tokens = kv_tokens_counter(
+            frontend_service::KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL,
+            "Raw cached prefix tokens on the selected worker and DP rank",
+        );
+        let kv_worker_reused_tokens = kv_tokens_counter(
+            frontend_service::KV_WORKER_REUSED_TOKENS_TOTAL,
+            "Worker-reported reused tokens per routing attempt",
+        );
+        Self {
+            requests_started_total,
+            requests_total,
+            time_to_first_token_seconds,
+            inter_token_latency_seconds,
+            input_sequence_tokens,
+            output_sequence_tokens,
+            kv_hit_rate,
+            kv_transfer_estimated_latency_seconds,
+            shared_cache_hit_rate,
+            shared_cache_beyond_blocks,
+            non_max_overlap_selections_total,
+            overlap_blocks_lost,
+            kv_best_eligible_cached_prefix_tokens,
+            kv_selected_cached_prefix_tokens,
+            kv_worker_reused_tokens,
+        }
     }
 
     /// Use fresh, unregistered lifecycle counters and retain all other metric handles.
@@ -1187,6 +1266,14 @@ impl RouterRequestMetrics {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test(registry: &dynamo_runtime::MetricsRegistry) -> Arc<Self> {
+        let mut hierarchy = kv_publisher_registration_tests::FakeHierarchy::component("", "", 0);
+        hierarchy.registry = registry.clone();
+        hierarchy.connection_id = None;
+        Arc::new(Self::build(&hierarchy, &[]))
+    }
+
     /// Record a selection that sacrificed KV cache overlap.
     pub fn observe_non_max_overlap_selection(&self, worker_type: &str, overlap_blocks_lost: f64) {
         debug_assert!(overlap_blocks_lost > 0.0);
@@ -1196,6 +1283,26 @@ impl RouterRequestMetrics {
         self.overlap_blocks_lost
             .with_label_values(&[worker_type])
             .observe(overlap_blocks_lost);
+    }
+
+    /// Record the router's estimates for one tracked attempt at selection time and
+    /// return its worker-reuse counter, already exported at zero for backends that
+    /// never report.
+    pub fn observe_kv_route_estimate(
+        &self,
+        phase: RequestPhase,
+        model: &str,
+        best_tokens: u64,
+        selected_tokens: u64,
+    ) -> IntCounter {
+        let labels = &[phase.as_str(), model];
+        self.kv_best_eligible_cached_prefix_tokens
+            .with_label_values(labels)
+            .inc_by(best_tokens);
+        self.kv_selected_cached_prefix_tokens
+            .with_label_values(labels)
+            .inc_by(selected_tokens);
+        self.kv_worker_reused_tokens.with_label_values(labels)
     }
 }
 
@@ -1435,6 +1542,71 @@ mod tests {
     use super::*;
     use prometheus::{Encoder, TextEncoder};
 
+    #[test]
+    fn router_request_metrics_register_with_component_labels() {
+        let hierarchy =
+            kv_publisher_registration_tests::FakeHierarchy::component("dynamo", "frontend", 0x123);
+        let metrics = RouterRequestMetrics::build(&hierarchy, &[(labels::ROUTER_ID, "291")]);
+        metrics
+            .observe_kv_route_estimate(RequestPhase::Prefill, "m", 96, 64)
+            .inc_by(72);
+        metrics
+            .input_sequence_tokens
+            .with_label_values(&["prefill", "m"])
+            .observe(100.0);
+        let families = hierarchy.registry.get_prometheus_registry().gather();
+        for name in [
+            "input_sequence_tokens",
+            "kv_best_eligible_cached_prefix_tokens_total",
+            "kv_selected_cached_prefix_tokens_total",
+            "kv_worker_reused_tokens_total",
+        ] {
+            let family = families
+                .iter()
+                .find(|family| family.name() == format!("dynamo_component_router_{name}"))
+                .unwrap();
+            let sample = &family.get_metric()[0];
+            for (name, value) in [
+                (labels::NAMESPACE, "dynamo"),
+                (labels::COMPONENT, "frontend"),
+                (labels::WORKER_ID, "123"),
+                (labels::ROUTER_ID, "291"),
+                (KV_PHASE_LABEL, "prefill"),
+                (labels::MODEL, "m"),
+            ] {
+                assert!(
+                    sample
+                        .get_label()
+                        .iter()
+                        .any(|label| { label.name() == name && label.value() == value }),
+                    "missing {name}={value} on {}",
+                    family.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kv_estimates_and_input_tokens_have_matching_labels() {
+        let registry = dynamo_runtime::MetricsRegistry::new();
+        let metrics = RouterRequestMetrics::for_test(&registry);
+        for (phase, model, input, best) in [
+            (RequestPhase::Prefill, "m", 100, 96),
+            (RequestPhase::Decode, "m", 200, 150),
+            (RequestPhase::Prefill, "other", 300, 250),
+        ] {
+            metrics
+                .input_sequence_tokens
+                .with_label_values(&[phase.as_str(), model])
+                .observe(input as f64);
+            metrics.observe_kv_route_estimate(phase, model, best, best);
+            let output = registry.prometheus_expfmt_combined().unwrap();
+            let phase = phase.as_str();
+            assert!(output.contains(&format!("router_input_sequence_tokens_sum{{model=\"{model}\",phase=\"{phase}\"}} {input}\n")), "{output}");
+            assert!(output.contains(&format!("router_kv_best_eligible_cached_prefix_tokens_total{{model=\"{model}\",phase=\"{phase}\"}} {best}\n")), "{output}");
+        }
+    }
+
     fn gather_pef(registry: &prometheus::Registry) -> String {
         let encoder = TextEncoder::new();
         let mut buffer = Vec::new();
@@ -1443,42 +1615,34 @@ mod tests {
     }
 
     #[test]
+    fn missing_worker_reports_export_zero_reused_tokens() {
+        let registry = dynamo_runtime::MetricsRegistry::new();
+        let metrics = RouterRequestMetrics::for_test(&registry);
+        metrics.observe_kv_route_estimate(RequestPhase::Aggregated, "m", 96, 64);
+        let output = registry.prometheus_expfmt_combined().unwrap();
+        assert!(
+            output.contains("kv_worker_reused_tokens_total{model=\"m\",phase=\"aggregated\"} 0"),
+            "{output}"
+        );
+    }
+
+    #[test]
     fn test_worker_load_metrics_pef() {
         let registry = prometheus::Registry::new();
-        let metrics = WorkerLoadMetrics {
-            active_decode_blocks: IntGaugeVec::new(
-                Opts::new(
-                    format!(
-                        "{}_{}",
-                        name_prefix::FRONTEND,
-                        frontend_service::WORKER_ACTIVE_DECODE_BLOCKS
-                    ),
-                    "Active KV cache decode blocks per worker",
-                ),
-                &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
-            )
-            .unwrap(),
-            active_prefill_tokens: IntGaugeVec::new(
-                Opts::new(
-                    format!(
-                        "{}_{}",
-                        name_prefix::FRONTEND,
-                        frontend_service::WORKER_ACTIVE_PREFILL_TOKENS
-                    ),
-                    "Active prefill tokens queued per worker",
-                ),
-                &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
-            )
-            .unwrap(),
-        };
-        registry
-            .register(Box::new(metrics.active_decode_blocks.clone()))
-            .unwrap();
-        registry
-            .register(Box::new(metrics.active_prefill_tokens.clone()))
-            .unwrap();
+        let metrics = WorkerLoadMetrics::new();
+        metrics.register(&registry).unwrap();
 
-        metrics.observe(123, 0, "decode", 42, 100);
+        metrics.observe(
+            123,
+            0,
+            "decode",
+            LocalWorkerLoad {
+                active_blocks: 42,
+                active_tokens: 100,
+                active_requests: 5,
+                prefill_requests: 2,
+            },
+        );
 
         let output = gather_pef(&registry);
         let expected = "\
@@ -1488,11 +1652,18 @@ dynamo_frontend_worker_active_decode_blocks{dp_rank=\"0\",worker_id=\"123\",work
 # HELP dynamo_frontend_worker_active_prefill_tokens Active prefill tokens queued per worker
 # TYPE dynamo_frontend_worker_active_prefill_tokens gauge
 dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 100
+# HELP dynamo_frontend_worker_active_requests Active requests booked per worker, by request phase
+# TYPE dynamo_frontend_worker_active_requests gauge
+dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"decode\",worker_id=\"123\",worker_type=\"decode\"} 3
+dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",worker_id=\"123\",worker_type=\"decode\"} 2
 ";
         assert_eq!(
             output, expected,
             "\nActual PEF:\n{output}\nExpected PEF:\n{expected}"
         );
+
+        metrics.remove(123, 0, "decode");
+        assert_eq!(gather_pef(&registry), "");
     }
 
     #[test]
@@ -1749,16 +1920,16 @@ mod kv_publisher_registration_tests {
     /// Stand-in for the DRT → Namespace → Component chain, without a live runtime.
     /// `connection_id` is what drives the auto-injected `worker_id` const label,
     /// so it must be set for these tests to reproduce the original conditions.
-    struct FakeHierarchy {
+    pub(super) struct FakeHierarchy {
         basename: String,
         parents: Vec<FakeHierarchy>,
-        registry: MetricsRegistry,
-        connection_id: Option<u64>,
+        pub(super) registry: MetricsRegistry,
+        pub(super) connection_id: Option<u64>,
     }
 
     impl FakeHierarchy {
         /// Mirror a component-level hierarchy: `["" (drt), namespace, component]`.
-        fn component(namespace: &str, component: &str, connection_id: u64) -> Self {
+        pub(super) fn component(namespace: &str, component: &str, connection_id: u64) -> Self {
             Self {
                 basename: component.to_string(),
                 parents: vec![Self::bare(""), Self::bare(namespace)],

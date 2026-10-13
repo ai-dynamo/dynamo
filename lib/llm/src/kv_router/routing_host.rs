@@ -833,11 +833,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // One cleanup budget for this request's whole route through the host.
         let budget = CleanupBudget::default();
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
-            let phase = request
-                .tracker
-                .as_ref()
-                .map(|tracker| tracker.phase())
-                .unwrap_or(RequestPhase::Aggregated);
+            let phase = request.phase();
             return self
                 .select_and_dispatch_builtin(request, phase, |_, _| Ok(()))
                 .await
@@ -845,11 +841,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-        let phase = request
-            .tracker
-            .as_ref()
-            .map(|tracker| tracker.phase())
-            .unwrap_or(RequestPhase::Aggregated);
+        let phase = request.phase();
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let (mut selection, mut operation) = self
@@ -871,9 +863,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 );
                 tracker.record_router_queue_depth(self.kv_router().pending_count());
             }
-            self.request_metrics
-                .input_sequence_tokens
-                .observe(request.token_ids.len() as f64);
             let stream_context = request.context().clone();
             let worker_id_info = request
                 .tracker

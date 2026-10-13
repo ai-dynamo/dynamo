@@ -807,6 +807,10 @@ class TestToolCallingProtocol:
             ],
             tools=TOOLS_WEATHER + TOOLS_SEARCH + TOOLS_CALCULATOR,
             parallel_tool_calls=True,
+            # Keep pinned: with sampling this 0.6B model sometimes answers in
+            # prose instead of calling tools, ending the stream with 'stop'.
+            temperature=0,
+            seed=0,
         )
         assert_finish_reason(result, {"tool_calls"})
         # Models sometimes batch only a subset and emit follow-up calls in

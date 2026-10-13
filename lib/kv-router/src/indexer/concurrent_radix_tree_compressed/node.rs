@@ -193,6 +193,15 @@ impl Node {
         self.children.get(&local_hash)
     }
 
+    /// Number of leading `hashes` present in this node's edge, read under one lock.
+    pub(super) fn leading_edge_hash_count(&self, hashes: &[ExternalSequenceBlockHash]) -> usize {
+        let state = self.state.read();
+        hashes
+            .iter()
+            .take_while(|hash| state.edge_index.contains_key(hash))
+            .count()
+    }
+
     pub(super) fn contains_edge_hash(&self, hash: ExternalSequenceBlockHash) -> bool {
         self.state.read().edge_index.contains_key(&hash)
     }
@@ -707,6 +716,13 @@ impl Node {
         }
 
         if input.first_node {
+            // Every scored worker is covered by the first node, so its coverage bounds
+            // the result size; reserving avoids repeated rehash growth per query.
+            let scored_bound = state.full_edge_workers.len() + state.worker_cutoffs.len();
+            input.scores.scores.reserve(scored_bound);
+            if let Some(last_matched_hashes) = input.last_matched_hashes.as_deref_mut() {
+                last_matched_hashes.reserve(scored_bound);
+            }
             *input.active = state.full_edge_workers.clone();
             for (&worker, &cutoff) in &state.worker_cutoffs {
                 let contribution = cutoff.min(edge_match_len);
@@ -750,6 +766,8 @@ impl Node {
                     }
                 });
             } else if state.full_edge_workers.len() != input.active_count {
+                // Equal sizes are treated as equal sets, skipping the intersection. This
+                // accepts an overcount after head-first eviction; see README "Equal-size skip".
                 input.active.retain(|worker| {
                     if state.full_edge_workers.contains(worker) {
                         true

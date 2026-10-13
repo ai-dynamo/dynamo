@@ -57,21 +57,10 @@ impl ConcurrentRadixTreeCompressed {
             return Err(KvCacheEventError::BlockNotFound);
         }
 
-        let mut group_node: Option<SharedNode> = None;
-        let mut group_hashes: Vec<ExternalSequenceBlockHash> = Vec::new();
+        let block_hashes = op.block_hashes;
+        let mut index = 0;
 
-        for block_hash in op.block_hashes {
-            if group_node
-                .as_ref()
-                .is_some_and(|node| node.contains_edge_hash(block_hash))
-            {
-                group_hashes.push(block_hash);
-                continue;
-            }
-
-            self.apply_removed_group(lookup, worker, group_node.take(), &group_hashes, id);
-            group_hashes.clear();
-
+        while let Some(&block_hash) = block_hashes.get(index) {
             match self.resolve_lookup(
                 lookup,
                 worker,
@@ -79,8 +68,9 @@ impl ConcurrentRadixTreeCompressed {
                 LookupRepairDirection::TowardHead,
             ) {
                 Some(node) => {
-                    group_node = Some(node);
-                    group_hashes.push(block_hash);
+                    let end = index + 1 + node.leading_edge_hash_count(&block_hashes[index + 1..]);
+                    self.apply_removed_group(lookup, worker, &node, &block_hashes[index..end], id);
+                    index = end;
                 }
                 None => {
                     tracing::debug!(
@@ -99,11 +89,10 @@ impl ConcurrentRadixTreeCompressed {
                     // permanently. Mirrors the scrubs in apply_removed_hash's
                     // miss branches.
                     self.remove_lookup_hashes(lookup, worker, [block_hash]);
+                    index += 1;
                 }
             }
         }
-
-        self.apply_removed_group(lookup, worker, group_node, &group_hashes, id);
 
         Ok(())
     }
@@ -112,13 +101,10 @@ impl ConcurrentRadixTreeCompressed {
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
-        node: Option<SharedNode>,
+        cur_node: &SharedNode,
         block_hashes: &[ExternalSequenceBlockHash],
         id: u64,
     ) {
-        let Some(cur_node) = node else {
-            return;
-        };
         if block_hashes.is_empty() {
             return;
         }

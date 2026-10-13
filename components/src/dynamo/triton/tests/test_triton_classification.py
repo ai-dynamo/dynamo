@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import tritonclient.grpc.model_config_pb2 as mc
 from test_triton_handlers import (
     _MockModel,
     assert_dynamo_response,
@@ -398,7 +399,9 @@ def test_generate_rejects_an_invalid_classification_parameter_before_infer():
         [{"name": "OUTPUT0", "datatype": "FP32"}],
         [build_triton_response("req-id", "classifier", {})],
     )
-    handler = handlers.RequestHandler(MagicMock(), model)
+    handler = handlers.RequestHandler(
+        MagicMock(), model, mc.ModelConfig(max_batch_size=0)
+    )
 
     with pytest.raises(ValueError, match="expected >= 1"):
         asyncio.run(

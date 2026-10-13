@@ -221,7 +221,11 @@ fn selection_weights(
             .router_config_override
             .as_ref()
             .and_then(|config| config.shared_cache_multiplier)
-            .unwrap_or(kv_router_config.shared_cache_multiplier),
+            .or(kv_router_config.shared_cache_multiplier)
+            .unwrap_or(match kv_router_config.shared_cache_type {
+                crate::config::SharedCacheType::None => 0.0,
+                crate::config::SharedCacheType::Hicache => 0.5,
+            }),
     }
 }
 
@@ -267,6 +271,7 @@ fn default_row(
     worker: WorkerWithDpRank,
     preferred_taint_multiplier: Option<f64>,
 ) -> CandidateData {
+    input.track_kept_candidate(worker);
     input.row_with_device_overlap(
         worker,
         preferred_taint_multiplier,
@@ -917,7 +922,7 @@ mod tests {
         let config = KvRouterConfig {
             overlap_score_credit: 1.0,
             prefill_load_scale: 1.0,
-            shared_cache_multiplier: 0.0,
+            shared_cache_multiplier: Some(0.0),
             router_temperature: 0.0,
             ..Default::default()
         };
@@ -1005,6 +1010,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.worker.worker_id, 1);
+        assert_eq!(result.max_raw_cached_tokens, None);
     }
 
     #[test]
@@ -1506,7 +1512,7 @@ mod tests {
 
         let config = KvRouterConfig {
             overlap_score_credit: 1.0,
-            shared_cache_multiplier: 0.5,
+            shared_cache_multiplier: Some(0.5),
             router_temperature: 0.0,
             ..Default::default()
         };

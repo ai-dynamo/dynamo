@@ -153,6 +153,11 @@ overrides:
     source: "NVIDIA NVSHMEM License — https://docs.nvidia.com/nvshmem/api/eula.html"
 
   - ecosystem: python
+    name: nvshmem4py-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA NVSHMEM License — https://docs.nvidia.com/nvshmem/api/eula.html"
+
+  - ecosystem: python
     name: nvidia-cudnn-cu13
     license: LicenseRef-NVIDIA-Proprietary
     source: "NVIDIA cuDNN Software License Agreement — https://docs.nvidia.com/deeplearning/cudnn/sla/index.html"
@@ -378,6 +383,7 @@ overrides:
   - { ecosystem: python, name: nvidia-cutlass-dsl-libs-cu12, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs — CUDA 12 variant split wheel introduced in 4.6.0; same NVIDIA proprietary license as nvidia-cutlass-dsl" }
   - { ecosystem: python, name: nvidia-mathdx,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA MathDx SDK license — https://docs.nvidia.com/cuda/mathdx/license.html" }
   - { ecosystem: python, name: openai-harmony,            license: "MIT",       source: "openai-harmony upstream — https://github.com/openai/harmony/blob/main/LICENSE" }
+  - { ecosystem: python, name: oss-harmony,               license: "Apache-2.0", source: "oss-harmony 0.0.11 — https://github.com/oss-harmony/harmony/blob/76e849426cc092f84509e31a17027755f67d662a/LICENSE" }
   - { ecosystem: python, name: pandas,                    license: "BSD-3-Clause",  source: "pandas upstream — https://github.com/pandas-dev/pandas/blob/main/LICENSE" }
   - { ecosystem: python, name: pathspec,                  license: "MPL-2.0",   source: "pathspec upstream — https://github.com/cpburnz/python-pathspec/blob/master/LICENSE" }
   - { ecosystem: python, name: prompt-toolkit,            license: "BSD-3-Clause",  source: "prompt-toolkit upstream — https://github.com/prompt-toolkit/python-prompt-toolkit/blob/main/LICENSE" }
