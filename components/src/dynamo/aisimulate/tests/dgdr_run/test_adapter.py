@@ -291,12 +291,12 @@ def test_many_callbacks_in_one_interval_produce_one_periodic_write(
     config = make_config(tmp_path, snapshot_interval_seconds=0.5)
     adapter = DGDRRunOutputAdapter(config, workload=None)
     adapter.start()
-    assert adapter.snapshot_writes == 1  # initial
+    assert adapter.snapshot_writes == 1
 
     for index in range(300):
         adapter.on_candidate(record(f"p{index:03d}", score=float(index)))
     time.sleep(0.15)
-    assert adapter.snapshot_writes == 1  # still inside the interval
+    assert adapter.snapshot_writes == 1
 
     wait_for(lambda: adapter.snapshot_writes == 2, timeout=5)
     snapshot = load(tmp_path)
