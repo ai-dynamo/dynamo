@@ -99,6 +99,10 @@ if idx == -1:
     sys.exit(0)
 
 alpha_part = content[:idx]
+
+# Keep the v1beta1 heading rewrite inside that package. The generated reference
+# now contains later API packages with the same Go type names, and renaming their
+# headings would recreate ambiguous or missing cross-version anchors.
 next_package_idx = content.find("\n## ", idx + len(marker))
 if next_package_idx == -1:
     beta_part = content[idx:]
@@ -128,6 +132,9 @@ for t in duplicate_types:
 
 content = alpha_part + beta_part + remaining_packages
 content = project_standalone_dcd_schema(content)
+
+# RunSpec aliases RequestSpec, so crd-ref-docs generates a link for the alias
+# but no corresponding type section. Point the link at the emitted shared schema.
 content = content.replace(
     "[DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec)",
     "[DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)",
