@@ -19,7 +19,6 @@ try:
 except (ImportError, OSError, NotImplementedError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
-from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
