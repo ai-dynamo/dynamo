@@ -5,9 +5,10 @@ use dynamo_custom_policy_builtin::{DefaultWorkerSelector, default_policy, defaul
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::{
     KvRouterConfig, RoutingPartitionRef, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
-    WorkerType,
+    WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError, WorkerSelector, WorkerType,
 };
+use std::collections::{HashMap, HashSet};
 use support::*;
 
 #[test]
@@ -64,6 +65,72 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
 }
 
 #[test]
+fn sparse_eligibility_preserves_seeded_scoring_and_sampling() {
+    let allowed = HashSet::from([1, 3, 5, 1000]);
+    let available = HashSet::from([1, 5, 7, 1001]);
+    for temperature in [0.0, 0.7] {
+        for equal_costs in [false, true] {
+            for (has_allowed, has_available) in [(true, false), (false, true), (true, true)] {
+                let (workers, mut request) = fixture(64, 2048);
+                request.allowed_worker_ids = has_allowed.then(|| allowed.clone());
+                let available = has_available.then_some(&available);
+                if equal_costs {
+                    request.worker_loads.clear();
+                    request.overlap = Default::default();
+                }
+                let compact: HashMap<_, _> = workers
+                    .iter()
+                    .filter(|(id, _)| {
+                        request
+                            .allowed_worker_ids
+                            .as_ref()
+                            .is_none_or(|ids| ids.contains(*id))
+                            && available.is_none_or(|ids| ids.contains(*id))
+                    })
+                    .map(|(&id, &config)| (id, config))
+                    .collect();
+                let config = KvRouterConfig {
+                    router_temperature: temperature,
+                    overlap_score_credit_decay: 0.6,
+                    ..Default::default()
+                };
+                let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
+                    Some(config.clone()),
+                    "prefill",
+                    42,
+                );
+                let plugin = DefaultWorkerSelector::new_seeded(Some(config), "prefill", 42);
+                for _ in 0..32 {
+                    let eligibility = request.eligibility().with_available_workers(available);
+                    let expected = reference
+                        .select_worker(WorkerSelectionInput::configured(
+                            &compact,
+                            &request,
+                            eligibility,
+                            16,
+                        ))
+                        .unwrap();
+                    let actual = plugin
+                        .select_worker(WorkerSelectionInput::configured(
+                            &workers,
+                            &request,
+                            eligibility,
+                            16,
+                        ))
+                        .unwrap();
+                    assert_eq!(actual.worker, expected.worker);
+                    assert_eq!(actual.cached_tokens, expected.cached_tokens);
+                    assert_eq!(
+                        actual.potential_decode_blocks,
+                        expected.potential_decode_blocks
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn empty_prompt_routes_by_load() {
     // Workers 0 and 1 sit on the prefill floor with decode backlog. Worker 2 is one
     // prefill block above the floor with no decode backlog, so it must win.
@@ -96,10 +163,14 @@ fn empty_prompt_routes_by_load() {
 
 #[test]
 fn unseeded_sampling_matches_reference_with_the_same_random_draw() {
-    for count in [1, 8, 64] {
+    for (count, is_sparse) in [(1, false), (8, false), (64, false), (64, true)] {
         for temperature in [0.1, 0.7, 1.0, 2.0] {
             for equal_costs in [false, true] {
                 let (workers, mut request) = fixture(count, 2048);
+                let available = is_sparse.then(|| HashSet::from([1, count as u64 - 1, 1000]));
+                if is_sparse {
+                    request.allowed_worker_ids = Some(HashSet::from([1, count as u64 - 1]));
+                }
                 if equal_costs {
                     request.worker_loads.clear();
                     request.overlap = Default::default();
@@ -112,7 +183,14 @@ fn unseeded_sampling_matches_reference_with_the_same_random_draw() {
                     dynamo_kv_router::DefaultWorkerSelector::new(Some(config.clone()), "prefill");
                 let plugin = default_policy(config, "prefill");
                 for seed in 0..64 {
-                    let input = selection_input(&workers, &request, 16);
+                    let input = WorkerSelectionInput::configured(
+                        &workers,
+                        &request,
+                        request
+                            .eligibility()
+                            .with_available_workers(available.as_ref()),
+                        16,
+                    );
                     fastrand::seed(seed);
                     let expected = reference.select_worker(input).unwrap();
                     let next_random = fastrand::u64(..);

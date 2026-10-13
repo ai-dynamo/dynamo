@@ -17,6 +17,7 @@ use super::{
 };
 use crate::protocols::common::extensions::{
     NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
+    validate_metadata_upload_single_choice, validate_metadata_upload_stop_strings,
 };
 
 pub mod aggregator;
@@ -647,6 +648,14 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_n(self.inner.n)?;
         validate_completion_token_ids_single_choice(
             self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_single_choice(
+            self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_stop_strings(
+            self.get_stop().is_some_and(|stop| !stop.is_empty()),
             self.nvext.as_ref(),
         )?;
         // none for modalities
@@ -1725,6 +1734,41 @@ mod tests {
 
         validate::validate_tools(&Some(&tools))
             .expect("omitted function parameters should remain valid");
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_tools_array() {
+        const EMPTY_TOOLS: &str =
+            "tools array cannot be empty; omit the field entirely to disable tool use";
+
+        for tool_choice in [None, Some("required")] {
+            let mut request_json = json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "tools": []
+            });
+            if let Some(tool_choice) = tool_choice {
+                request_json["tool_choice"] = tool_choice.into();
+            }
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+            let err = ValidateRequest::validate(&request).expect_err("empty tools must fail");
+            assert_eq!(err.to_string(), EMPTY_TOOLS, "tool_choice={tool_choice:?}");
+        }
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "system", "content": "", "tools": [{"name": "lookup"}]},
+                {"role": "user", "content": "Hello"}
+            ],
+            "tools": [],
+            "tool_choice": "required"
+        }))
+        .expect("Failed to deserialize request");
+        ValidateRequest::validate(&request)
+            .expect("empty tools with system-message tools should validate");
     }
 
     #[test]
