@@ -708,6 +708,34 @@ async def test_trace_validation_limits_and_duplicate_rank_files(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_uncompressed_rank_traces_are_present_and_inspected(tmp_path):
+    """Workers may write plain JSON (torch_profiler_use_gzip=false)."""
+    payload = {
+        "traceEvents": [{"name": "k", "cat": "kernel", "ph": "X", "ts": 1, "dur": 2}]
+    }
+    for rank in RANKS:
+        path = tmp_path / f"capture_{rank}.1.pt.trace.json"
+        path.write_text(json.dumps(payload))
+    path.write_text(json.dumps(payload)[:-5])
+    evidence = {
+        "collector": "torch_profiler",
+        "artifact_location": str(tmp_path),
+        "artifact_prefix": "capture",
+        "expected_rank_ids": RANKS,
+    }
+    result = await SharedFilesystemValidator().validate(
+        evidence, Config("socket", str(tmp_path))
+    )
+    # Presence does not parse, so the truncated rank is only caught offline.
+    assert result["status"] == "present"
+    inspected = artifacts.inspect_target(result, evidence)
+    assert inspected["status"] == "invalid"
+    assert [a["validation"] for a in inspected["artifacts"]] == ["valid", "invalid"]
+    path.write_text(json.dumps(payload))
+    assert artifacts.inspect_target(result, evidence)["status"] == "verified"
+
+
+@pytest.mark.asyncio
 async def test_embedded_host_uses_pluggable_coordinator_and_drains(
     socket_directory, provider_controller, collector
 ):
