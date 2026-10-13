@@ -901,15 +901,17 @@ fn runtime_has_vllm_generate_capability(
         .unwrap_or(false)
 }
 
+/// vLLM applies EXIF orientation when it loads an image, so a count that
+/// depends on orientation must use the transposed dimensions on that path.
 #[cfg(feature = "mm-routing")]
 fn routing_image_dimension_policy(
     runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
     frontend_decoding: bool,
-    prompt_layout: Option<RoutingImagePromptLayout>,
+    orientation_sensitive_count: bool,
 ) -> RoutingImageDimensionPolicy {
     if runtime_has_vllm_generate_capability(runtime_config)
         && !frontend_decoding
-        && matches!(prompt_layout, Some(RoutingImagePromptLayout::KimiK3 { .. }))
+        && orientation_sensitive_count
     {
         RoutingImageDimensionPolicy::ExifTransposed
     } else {
@@ -1316,6 +1318,44 @@ impl MultimodalCounts {
 #[cfg(feature = "mm-routing")]
 fn checked_add_image_tokens(total: Option<usize>, next: usize) -> Option<usize> {
     total?.checked_add(next)
+}
+
+#[cfg(feature = "mm-routing")]
+fn count_image_tokens_for_metrics(
+    counter: &mm_routing::image::ImageRoutingProcessor,
+    width: u32,
+    height: u32,
+    mm_hash: u64,
+    source: &'static str,
+) -> Option<usize> {
+    match counter.count_tokens(width, height) {
+        Ok(tokens) => {
+            tracing::debug!(
+                target: "mm_routing",
+                model = counter.model_id(),
+                width,
+                height,
+                tokens,
+                mm_hash,
+                source,
+                "image-token count"
+            );
+            Some(tokens)
+        }
+        Err(error) => {
+            tracing::debug!(
+                target: "mm_routing",
+                model = counter.model_id(),
+                width,
+                height,
+                mm_hash,
+                source,
+                %error,
+                "image-token count unavailable"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(feature = "mm-routing")]
@@ -2833,7 +2873,9 @@ impl OpenAIPreprocessor {
         let routing_image_dimension_policy = routing_image_dimension_policy(
             &runtime_config,
             media_loader.is_some(),
-            routing_image_prompt_layout,
+            image_token_counter
+                .as_ref()
+                .is_some_and(mm_routing::image::ImageRoutingProcessor::is_orientation_sensitive),
         );
 
         // Force the dim-fetch HTTP client to build at startup for any
@@ -3777,18 +3819,9 @@ impl OpenAIPreprocessor {
                             .as_ref()
                             .filter(|counter| !counter.uses_request_context_budget())
                         {
-                            let n = counter.count_tokens(w, h);
-                            tracing::debug!(
-                                target: "mm_routing",
-                                model = counter.model_id(),
-                                width = w,
-                                height = h,
-                                tokens = n,
-                                mm_hash = mm_hash,
-                                source = hash_source,
-                                "image-token count"
-                            );
-                            image_tokens = checked_add_image_tokens(image_tokens, n);
+                            image_tokens =
+                                count_image_tokens_for_metrics(counter, w, h, mm_hash, hash_source)
+                                    .and_then(|n| checked_add_image_tokens(image_tokens, n));
                         }
                         mm_routing_entries.push(MmRoutingEntry::Image {
                             mm_hash,
@@ -3883,18 +3916,14 @@ impl OpenAIPreprocessor {
                             .as_ref()
                             .filter(|counter| !counter.uses_request_context_budget())
                         {
-                            let n = counter.count_tokens(w, h);
-                            tracing::debug!(
-                                target: "mm_routing",
-                                model = counter.model_id(),
-                                width = w,
-                                height = h,
-                                tokens = n,
-                                mm_hash = mm_hash,
-                                source = "url_passthrough_header_fetch",
-                                "image-token count"
-                            );
-                            image_tokens = checked_add_image_tokens(image_tokens, n);
+                            image_tokens = count_image_tokens_for_metrics(
+                                counter,
+                                w,
+                                h,
+                                mm_hash,
+                                "url_passthrough_header_fetch",
+                            )
+                            .and_then(|n| checked_add_image_tokens(image_tokens, n));
                         }
                         mm_routing_entries.push(MmRoutingEntry::Image {
                             mm_hash,
@@ -4258,7 +4287,7 @@ impl OpenAIPreprocessor {
                         target: "mm_routing",
                         model = counter.model_id(),
                         %error,
-                        "request-wide image-token accounting failed; skipping MM routing info"
+                        "image-token accounting failed; skipping MM routing info"
                     );
                     return None;
                 }
@@ -4313,7 +4342,20 @@ impl OpenAIPreprocessor {
                             .image_token_counter
                             .as_ref()
                             .expect("image counter requirement checked above");
-                        let token_count = counter.count_tokens(*width, *height);
+                        let token_count = match counter.count_tokens(*width, *height) {
+                            Ok(token_count) => token_count,
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: "mm_routing",
+                                    model = counter.model_id(),
+                                    width = *width,
+                                    height = *height,
+                                    %error,
+                                    "image-token accounting failed; skipping MM routing info"
+                                );
+                                return None;
+                            }
+                        };
                         let mut routing_tokens = Vec::with_capacity(token_count);
                         let mut worker_tokens = Vec::with_capacity(token_count);
                         let image = MmImageEntry {
@@ -11774,6 +11816,75 @@ mod tests {
     }
 
     #[cfg(feature = "mm-routing")]
+    #[test]
+    fn deepseek_v41_exact_routing_expands_each_image_span() {
+        const IMAGE_TOKEN_ID: TokenIdType = 129264;
+        let model_dir = tempfile::tempdir().unwrap();
+        mm_routing::deepseek_v41::write_test_config(model_dir.path());
+        let counter = mm_routing::image::ImageRoutingProcessor::try_new(
+            "deepseek-ai/DeepSeek-V4.1-Flash",
+            Some("deepseek_v41"),
+            model_dir.path(),
+        )
+        .unwrap();
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = match Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap()) {
+            Ok(preprocessor) => preprocessor,
+            Err(_) => panic!("test preprocessor unexpectedly shared"),
+        };
+        preprocessor.image_token_counter = Some(counter);
+        preprocessor.routing_image_token_id = Some(IMAGE_TOKEN_ID);
+        preprocessor.routing_image_prompt_layout = Some(RoutingImagePromptLayout::RepeatedPad);
+        preprocessor.kv_cache_block_size = 16;
+        let images = [
+            MmRoutingEntry::Image {
+                mm_hash: 0x1234,
+                width: 1920,
+                height: 1080,
+            },
+            MmRoutingEntry::Image {
+                mm_hash: 0x5678,
+                width: 1080,
+                height: 1920,
+            },
+        ];
+        let prompt = [7, IMAGE_TOKEN_ID, 8, IMAGE_TOKEN_ID, 9];
+
+        let info = preprocessor
+            .build_mm_exact_routing_info(&images, &prompt, None)
+            .expect("DSV4.1 images should produce exact routing info");
+
+        let fill = |hash| dynamo_kv_router::protocols::pad_value_for_mm_hash(hash);
+        let run_len = |hash| {
+            info.routing_token_ids
+                .iter()
+                .filter(|&&token| token == fill(hash))
+                .count()
+        };
+        // Landscape and portrait spans differ: h * (w + 1) + 2.
+        assert_eq!(run_len(0x1234), 968);
+        assert_eq!(run_len(0x5678), 986);
+        assert_eq!(info.expanded_prompt_len, 3 + 968 + 986);
+        assert!(!info.routing_token_ids.contains(&IMAGE_TOKEN_ID));
+
+        let unplannable = [MmRoutingEntry::Image {
+            mm_hash: 0x1234,
+            width: 0,
+            height: 1080,
+        }];
+        assert!(
+            preprocessor
+                .build_mm_exact_routing_info(&unplannable, &[7, IMAGE_TOKEN_ID, 8], None)
+                .is_none(),
+            "an unplannable image must skip exact routing instead of failing the request"
+        );
+    }
+
+    #[cfg(feature = "mm-routing")]
     #[tokio::test]
     async fn nemotron_exact_routing_uses_vllm_dummy_text_budget() {
         let model_dir = tempfile::tempdir().unwrap();
@@ -15373,19 +15484,14 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
-    fn exif_dimension_policy_is_limited_to_kimi_k3_vllm_url_passthrough() {
+    fn exif_dimension_policy_is_limited_to_orientation_sensitive_vllm_url_passthrough() {
         use crate::local_model::runtime_config::{
             ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
         };
 
-        let kimi_k3 = Some(RoutingImagePromptLayout::KimiK3 {
-            media_begin: 1,
-            media_content: 2,
-            media_end: 3,
-        });
         let mut runtime_config = ModelRuntimeConfig::default();
         assert_eq!(
-            routing_image_dimension_policy(&runtime_config, false, kimi_k3),
+            routing_image_dimension_policy(&runtime_config, false, true),
             RoutingImageDimensionPolicy::Encoded
         );
 
@@ -15394,7 +15500,7 @@ mod tests {
             .set_engine_specific(SGLANG_GENERATE_CAPABILITY, true)
             .unwrap();
         assert_eq!(
-            routing_image_dimension_policy(&sglang_config, false, kimi_k3),
+            routing_image_dimension_policy(&sglang_config, false, true),
             RoutingImageDimensionPolicy::Encoded
         );
 
@@ -15402,19 +15508,15 @@ mod tests {
             .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
             .unwrap();
         assert_eq!(
-            routing_image_dimension_policy(&runtime_config, false, kimi_k3),
+            routing_image_dimension_policy(&runtime_config, false, true),
             RoutingImageDimensionPolicy::ExifTransposed
         );
         assert_eq!(
-            routing_image_dimension_policy(&runtime_config, true, kimi_k3),
+            routing_image_dimension_policy(&runtime_config, true, true),
             RoutingImageDimensionPolicy::Encoded
         );
         assert_eq!(
-            routing_image_dimension_policy(
-                &runtime_config,
-                false,
-                Some(RoutingImagePromptLayout::RepeatedPad),
-            ),
+            routing_image_dimension_policy(&runtime_config, false, false),
             RoutingImageDimensionPolicy::Encoded
         );
     }

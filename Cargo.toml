@@ -82,6 +82,9 @@ dynamo-parsers = { version = "=10.0.2" }
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
 # Native count-before-string early streaming still needs a frontend-crates fix.
 dynamo-parsers-v2 = { version = "=0.7.21" }
+# Pixel-free image geometry for MM-aware routing. Token-count math is part of
+# the routing contract, so bumps stay exact and deliberate.
+dynamo-multimodal = { version = "=0.1.1", default-features = false }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.6.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.6.0" }
 

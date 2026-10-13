@@ -78,7 +78,7 @@ vLLM supports two multimodal KV-routing paths. Both give the router and vLLM the
 |---------------|-----------------------|-----------------------|
 | Frontend work | Hashes media and calculates the routing token layout; exact video routing also samples and decodes the video | Runs vLLM's full Hugging Face multimodal processor |
 | Worker work | Processes the original multimodal input | Consumes processed `mm_kwargs` when transfer succeeds |
-| Model coverage | Models registered in Dynamo's `llm-multimodal` registry | Models supported by vLLM's multimodal processor |
+| Model coverage | Model families with a Dynamo image-routing adapter | Models supported by vLLM's multimodal processor |
 | Data sent to worker | Original image reference or frontend-decoded media, plus modality-grouped hashes | Processed inputs over shared memory or NIXL, with media fallback when available |
 | Best fit | Lowest frontend overhead for a registered model | Broader model coverage or centralized preprocessing |
 
