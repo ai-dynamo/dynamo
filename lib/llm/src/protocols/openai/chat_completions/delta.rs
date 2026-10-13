@@ -858,6 +858,16 @@ mod tests {
         output.engine_data = Some(serde_json::json!({"metadata_upload": result}));
         let response = generator.choice_from_postprocessor(output).unwrap();
         assert_eq!(response.nvext.unwrap()["metadata_upload"], result);
+
+        let mut cancelled = final_backend_output();
+        cancelled.finish_reason = Some(common::FinishReason::Cancelled);
+        cancelled.engine_data = None;
+        let response = request
+            .response_generator("artifact-cancelled".into())
+            .choice_from_postprocessor(cancelled)
+            .expect("cancellation must not require an artifact receipt");
+        let wire = serde_json::to_value(response).unwrap();
+        assert_eq!(wire["choices"][0]["finish_reason"], "stop");
     }
 
     #[tokio::test]
