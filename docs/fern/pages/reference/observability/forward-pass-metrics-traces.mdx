@@ -253,7 +253,10 @@ configuration. Other speculative methods remain rejected for decode collection.
 
 Each decode point prepares target and draft state through real, untimed prefill,
 then measures the first native verification step. Balanced preparation chunks
-keep all requests in the same prefill wave. The benchmark drains one outstanding
+keep all requests in the same prefill wave. A discarded replica of each decode
+coordinate warms the drafter's context-dependent lazy kernels before the measured
+sweep, including CUDA-graph shapes; these replicas are recorded as
+`speculative_shape` warmup evidence. The benchmark drains one outstanding
 step before scheduling another; ordinary serving retains its configured scheduling
 behavior after collection. No explicit CUDA synchronization is added.
 

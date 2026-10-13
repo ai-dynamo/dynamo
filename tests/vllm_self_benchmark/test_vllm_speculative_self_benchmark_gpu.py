@@ -131,6 +131,16 @@ def test_eagle3_self_benchmark_native_verification(
             == "first_native_verification_after_prefill"
         )
         assert len(data["results"]) == 3
+        shape_warmups = [
+            record
+            for record in data["warmup_evidence"]["records"]
+            if record["kind"] == "speculative_shape"
+        ]
+        assert len(shape_warmups) == 3
+        assert all(record["status"] == "completed" for record in shape_warmups)
+        assert all(
+            record["validation"]["status"] == "passed" for record in shape_warmups
+        )
         spec = data["speculative_benchmark"]
         assert spec["verify_tokens_per_request"] == 4
         assert spec["kv_capacity"]["usable_blocks"] > 0

@@ -2560,6 +2560,22 @@ def test_eagle_capacity_reserves_verify_and_next_draft(eagle_benchmark):
     assert stub._bench_decode_point_feasible(1, 12)
 
 
+def test_eagle_warms_captured_shapes_at_each_context(eagle_benchmark):
+    stub = eagle_benchmark
+    points = [
+        BenchmarkPoint(
+            "decode", batch_size=2, total_kv_read_tokens=kv, expected_capture_size=8
+        )
+        for kv in (32, 256)
+    ]
+    stub._bench_grid = deque(points)
+    warmups = stub._bench_eager_warmup_points()
+    assert len(warmups) == 2
+    assert [point.total_kv_read_tokens for point in warmups] == [32, 256]
+    assert all("sd_shape_warmup" in point.sample_reasons for point in warmups)
+    assert all(not point.sample_reasons for point in points)
+
+
 @pytest.mark.parametrize("draft_count", [2, 3])
 def test_eagle_native_verify_checks_actual_draft_work(
     eagle_benchmark, monkeypatch, draft_count
@@ -5272,7 +5288,7 @@ def test_eager_warmup_points_dedupe_and_flag():
             expected_capture_size=256,
         ),
     ]
-    stub = SimpleNamespace(_bench_grid=grid)
+    stub = SimpleNamespace(_bench_grid=grid, _bench_speculative_tokens=0)
     replicas = InstrumentedScheduler._bench_eager_warmup_points(stub)
 
     assert [(p.point_type, p.batch_size, p.total_prefill_tokens) for p in replicas] == [

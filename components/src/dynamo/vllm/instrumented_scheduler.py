@@ -3263,6 +3263,9 @@ class InstrumentedScheduler(AsyncScheduler):
     def _bench_eager_warmup_points(self) -> list[BenchmarkPoint]:
         """One discarded replica per eager shape, executed before the sweep.
 
+        SD additionally warms every real decode coordinate: graph capture alone
+        does not cover the drafter's lazy kernels at the real context length.
+
         Captured shapes are executed during cudagraph capture at startup, so
         their one-time per-shape costs (first kernel launch and selection,
         allocator pool growth) are paid before any measurement. Eager shapes
@@ -3278,6 +3281,14 @@ class InstrumentedScheduler(AsyncScheduler):
         seen: set[tuple[str, int]] = set()
         replicas: list[BenchmarkPoint] = []
         for point in self._bench_grid:
+            if self._bench_speculative_tokens and point.point_type == "decode":
+                replicas.append(
+                    replace(
+                        point,
+                        sample_reasons=[EAGER_WARMUP_REASON, "sd_shape_warmup"],
+                    )
+                )
+                continue
             if point.expected_capture_size is not None:
                 continue
             key = (
@@ -7393,7 +7404,12 @@ class InstrumentedScheduler(AsyncScheduler):
             if pt.point_type == point_type:
                 point = self._bench_grid.popleft()
                 if EAGER_WARMUP_REASON in point.sample_reasons:
-                    self._bench_begin_warmup("eager_shape", asdict(point), eager=True)
+                    kind = (
+                        "speculative_shape"
+                        if "sd_shape_warmup" in point.sample_reasons
+                        else "eager_shape"
+                    )
+                    self._bench_begin_warmup(kind, asdict(point), eager=True)
                 return point
             break
         return None
