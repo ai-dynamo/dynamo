@@ -209,13 +209,18 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         &mut self,
         delta: common::llm_backend::BackendOutput,
     ) -> anyhow::Result<NvCreateCompletionResponse> {
-        self.state
+        if let Err(error) = self
+            .state
             .options()
             .response_fields
             .validate_metadata_upload_result(
                 delta.finish_reason.as_ref(),
                 delta.engine_data.as_ref(),
-            )?;
+            )
+        {
+            self.state.tracker_ref().record_finish();
+            return Err(error);
+        }
         self.state.update_usage_from_backend_output(&delta);
 
         // Keep token IDs available for optional nvext emission only when requested.
@@ -401,11 +406,13 @@ mod tests {
         let nvext = serde_json::from_value(serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "inline_base64"}})).unwrap();
         let request = make_request_with_nvext(nvext);
         let mut generator = request.response_generator("artifact-result".into());
+        assert!(generator.tracker().total_time_ms().is_none());
         assert!(
             generator
                 .choice_from_postprocessor(final_backend_output())
                 .is_err()
         );
+        assert!(generator.tracker().total_time_ms().is_some());
         let mut output = final_backend_output();
         let result = serde_json::json!({"kind": "generation_artifact", "mode": "inline_base64", "inline": {"encoding": "base64", "data": "AQI="}, "backend_specific": {"a": [1, 2]}});
         output.engine_data = Some(serde_json::json!({"metadata_upload": result}));
