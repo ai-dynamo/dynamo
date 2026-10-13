@@ -61,18 +61,23 @@ class AiohttpClient(HttpClient):
         # session never closes it. Hold each one and close it ourselves.
         self._resolvers: dict[bool, BlocklistResolver] = {}
 
-    def _effective_timeout(self, timeout: float) -> aiohttp.ClientTimeout:
+    def _effective_timeout(
+        self, timeout: float, read_timeout: Optional[float] = None
+    ) -> aiohttp.ClientTimeout:
         # The override caps ``total`` (whole request). ``sock_connect``
         # bounds just the TCP+TLS handshake, so a stuck origin fast-fails at
         # the connect budget instead of burning the full ``total`` before any
-        # byte arrives.
+        # byte arrives. ``sock_read`` fails a server that stops sending, and
+        # the override does not change it.
         total = (
             self._config.per_call_timeout_override
             if self._config.per_call_timeout_override is not None
             else timeout
         )
         return aiohttp.ClientTimeout(
-            total=total, sock_connect=self._config.connect_timeout
+            total=total,
+            sock_connect=self._config.connect_timeout,
+            sock_read=read_timeout,
         )
 
     @staticmethod
@@ -164,6 +169,7 @@ class AiohttpClient(HttpClient):
         *,
         max_bytes: Optional[int] = None,
         policy: Optional[UrlValidationPolicy] = None,
+        read_timeout: Optional[float] = None,
     ) -> bytes:
         allow_private = self._connect_allows_private(policy)
         # Only when the check is meant to bite. If private destinations are
@@ -171,7 +177,7 @@ class AiohttpClient(HttpClient):
         if not allow_private:
             await self._require_trusted_egress_proxy(url)
         session = await self._get_session(allow_private)
-        client_timeout = self._effective_timeout(timeout)
+        client_timeout = self._effective_timeout(timeout, read_timeout)
         try:
             async with session.get(
                 url, timeout=client_timeout, allow_redirects=True
@@ -206,6 +212,7 @@ class AiohttpClient(HttpClient):
         *,
         max_bytes: Optional[int] = None,
         policy: Optional[UrlValidationPolicy] = None,
+        read_timeout: Optional[float] = None,
     ) -> tuple[bytes | None, str | None]:
         allow_private = self._connect_allows_private(policy)
         # Only when the check is meant to bite. If private destinations are
@@ -213,7 +220,7 @@ class AiohttpClient(HttpClient):
         if not allow_private:
             await self._require_trusted_egress_proxy(url)
         session = await self._get_session(allow_private)
-        client_timeout = self._effective_timeout(timeout)
+        client_timeout = self._effective_timeout(timeout, read_timeout)
         try:
             async with session.get(
                 url, timeout=client_timeout, allow_redirects=False

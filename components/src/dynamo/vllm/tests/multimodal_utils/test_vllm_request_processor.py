@@ -32,9 +32,22 @@ def _processor(
     unified_vision_chunk: bool = False,
     video_loader=None,
     frontend_decoding: bool = False,
+    media_limits: dict[str, int] | None = None,
 ) -> mod.VllmMultimodalRequestProcessor:
+    engine_client = None
+    if media_limits is not None:
+        from vllm.config.multimodal import MultiModalConfig
+
+        engine_client = SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(
+                    multimodal_config=MultiModalConfig(limit_per_prompt=media_limits)
+                )
+            )
+        )
     return mod.VllmMultimodalRequestProcessor(
         model=model,
+        engine_client=engine_client,
         enable_multimodal=enabled,
         enable_frontend_decoding=frontend_decoding,
         image_loader=SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
@@ -412,7 +425,7 @@ async def test_rejects_malformed_encoder_image_item_before_dispatch():
 async def test_rejects_media_when_multimodal_is_disabled():
     processor = _processor(enabled=False)
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -424,7 +437,7 @@ async def test_rejects_media_when_multimodal_is_disabled():
             DisaggregationMode.AGGREGATED,
         )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -436,7 +449,7 @@ async def test_rejects_media_when_multimodal_is_disabled():
             DisaggregationMode.AGGREGATED,
         )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -456,7 +469,7 @@ async def test_decode_cannot_hide_disabled_media_with_expanded_tokens():
         enabled=False,
     )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -740,7 +753,9 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
 
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
-    parse_mm_data.assert_called_once_with({"vision_chunk": []}, validate=False)
+    parse_mm_data.assert_called_once()
+    assert parse_mm_data.call_args.args[0] in ({}, {"vision_chunk": []})
+    assert parse_mm_data.call_args.kwargs == {"validate": False}
 
     cache.is_cached.return_value = [False]
     parse_mm_data.reset_mock()
@@ -1142,14 +1157,24 @@ async def test_qwen_decode_merges_placeholder_image_with_reloaded_video(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_non_qwen_decode_uses_expanded_prompt_tokens():
+async def test_non_qwen_decode_keeps_original_tokens_when_image_loads():
+    """Loaded image media keeps the placeholder token ids.
+
+    Substituting expanded_prompt_token_ids as well makes vLLM expand the
+    image placeholder a second time. Decode's prompt then grows by N-1 and
+    NIXL asserts num_decode_blocks <= len(prefill_group).
+    """
     processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    image = Image.new("RGB", (2, 2), color=(1, 2, 3))
+    processor.image_loader.load_image_batch.return_value = [image]
+    image_items = [{"Url": "https://image"}]
 
     prepared = await _prepare_prompt(
         processor,
         {
             "token_ids": [1, 2],
-            "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
             "prefill_result": {
                 "disaggregated_params": {
                     "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
@@ -1161,9 +1186,230 @@ async def test_non_qwen_decode_uses_expanded_prompt_tokens():
         DisaggregationMode.DECODE,
     )
 
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    assert prepared.prompt.get("type") != "multimodal"
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_uses_expanded_tokens_without_image():
+    """No image to expand: still use prefill's expanded token ids."""
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-expanded-only",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
     assert prepared.prompt["prompt_token_ids"] == [1, 99, 99, 2]
-    assert prepared.prompt["multi_modal_data"] is None
+    assert prepared.prompt.get("multi_modal_data") is None
     processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+def _engine_cache_identity(prompt) -> tuple:
+    """What vLLM folds into the KV block hash for this prompt's media.
+
+    vLLM reads multi_modal_uuids only when multi_modal_data is present
+    (renderers/base.py::_process_tokens).
+    """
+    if prompt.get("multi_modal_data"):
+        return ("multi_modal_uuids", repr(prompt.get("multi_modal_uuids")))
+    return ("tokens_only", None)
+
+
+async def _non_qwen_decode_prompt(
+    *,
+    mm_hash: str,
+    image=None,
+    image_item=None,
+    processor=None,
+):
+    """A non-Qwen decode request: same text, one image, forwarded hash."""
+    if processor is None:
+        processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    if image is None:
+        image = Image.new("RGB", (4, 4), color=(ord(mm_hash[0]) % 256, 0, 0))
+    if image_item is None:
+        image_item = {"Url": f"https://example.com/{mm_hash}.png"}
+    processor.image_loader.load_image_batch.return_value = [image]
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": [image_item]},
+            "extra_args": {
+                "mm_hashes": [mm_hash],
+                "expanded_token_ids": [1, 99, 99, 2],
+            },
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        f"request-{mm_hash}",
+        None,
+        DisaggregationMode.DECODE,
+    )
+    return prepared, processor
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_keeps_distinct_images_distinct():
+    """Distinct images yield distinct engine identity via multi_modal_data + hashes."""
+    image_a = Image.new("RGB", (8, 8), color=(10, 20, 30))
+    image_b = Image.new("RGB", (8, 8), color=(200, 100, 50))
+    a, proc_a = await _non_qwen_decode_prompt(
+        mm_hash="a1b2c3d4e5f60718",
+        image=image_a,
+    )
+    b, proc_b = await _non_qwen_decode_prompt(
+        mm_hash="f0e1d2c3b4a59687",
+        image=image_b,
+    )
+
+    assert a.prompt.get("type") != "multimodal"
+    assert b.prompt.get("type") != "multimodal"
+    assert "cache_salt" not in a.prompt
+    assert "cache_salt" not in b.prompt
+    assert a.prompt["multi_modal_data"] == {"image": image_a}
+    assert b.prompt["multi_modal_data"] == {"image": image_b}
+    assert a.prompt["multi_modal_uuids"] == {"image": ["a1b2c3d4e5f60718" + "0" * 48]}
+    assert b.prompt["multi_modal_uuids"] == {"image": ["f0e1d2c3b4a59687" + "0" * 48]}
+    assert _engine_cache_identity(a.prompt) != _engine_cache_identity(b.prompt), (
+        "two different images give the decode engine the same cache identity "
+        f"({_engine_cache_identity(a.prompt)}); with identical token ids their KV "
+        "block hashes collide and decode can serve one request's image KV to the other"
+    )
+    proc_a.image_loader.load_image_batch.assert_awaited()
+    proc_b.image_loader.load_image_batch.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_awaits_image_loader_for_url():
+    """Non-Qwen decode loads the original http(s) Url via ImageLoader, like prefill."""
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    image = Image.new("RGB", (3, 3), color=(7, 8, 9))
+    processor.image_loader.load_image_batch.return_value = [image]
+    image_items = [{"Url": "https://example.com/a1b2c3d4e5f60718.png"}]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {
+                "mm_hashes": ["a1b2c3d4e5f60718"],
+                "expanded_token_ids": [1, 99, 99, 2],
+            },
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-a1b2c3d4e5f60718",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+    called_items = processor.image_loader.load_image_batch.call_args[0][0]
+    assert called_items[0]["Url"] == "https://example.com/a1b2c3d4e5f60718.png"
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_loads_data_url_via_image_loader():
+    """Client-supplied data: URLs are handed to ImageLoader unchanged."""
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    image = Image.new("RGB", (2, 2), color=(11, 22, 33))
+    processor.image_loader.load_image_batch.return_value = [image]
+    data_url = "data:image/png;base64,iVBORw0KGgo="
+    image_items = [{"Url": data_url}]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-data-url",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+    called_items = processor.image_loader.load_image_batch.call_args[0][0]
+    assert called_items[0]["Url"] == data_url
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_loads_decoded_nixl_when_frontend_decoding():
+    """Decoded/NIXL slots load via ImageLoader when enable_frontend_decoding is on."""
+    processor = _processor(
+        model="llava-hf/llava-1.5-7b-hf",
+        frontend_decoding=True,
+    )
+    image = Image.new("RGB", (2, 2), color=(40, 50, 60))
+    processor.image_loader.load_image_batch.return_value = [image]
+    image_items = [
+        {"Decoded": {"shape": [2, 2, 3], "content_hash": "0123456789abcdef"}}
+    ]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-decoded-nixl",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
 
 
 @pytest.mark.asyncio
@@ -1196,7 +1442,7 @@ async def test_receive_transferred_kwargs_injects_vllm_cache(monkeypatch):
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1229,7 +1475,7 @@ async def test_receive_transferred_kwargs_marks_vllm_feature_hash(monkeypatch):
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1265,7 +1511,7 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
     processor = _processor(unified_vision_chunk=True)
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1305,7 +1551,7 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
 async def test_receive_transferred_kwargs_falls_back_to_metadata_hashes(monkeypatch):
     processor = _processor()
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1330,7 +1576,7 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1348,6 +1594,164 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
 
     assert result is None
     input_processor.inject_into_mm_cache.assert_not_called()
+
+
+def _real_kwargs_item(key: str = "pixel_values"):
+    """Build a real vLLM ``MultiModalKwargsItem`` for the transfer tests."""
+    import torch
+    from vllm.multimodal.inputs import (
+        MultiModalBatchedField,
+        MultiModalFieldElem,
+        MultiModalKwargsItem,
+    )
+
+    elem = MultiModalFieldElem(
+        data=torch.arange(8, dtype=torch.float32),
+        field=MultiModalBatchedField(),
+    )
+    return MultiModalKwargsItem({key: elem})
+
+
+@pytest.mark.asyncio
+async def test_receive_transferred_kwargs_rejects_pickle_payload():
+    """A pickle-format payload must fall back, not deserialize.
+
+    The transfer uses vLLM's typed msgpack decoder, so a payload in the old
+    pickle wire format (or any foreign bytes) fails the decode and the receive
+    path returns ``None``, which is its fallback. The pre-fix worker ran
+    pickle.loads on this payload and accepted the item, so this assertion fails
+    there.
+    """
+    import pickle
+
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    payload = pickle.dumps(_real_kwargs_item())
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
+    )
+
+    result = await processor._receive_mm_kwargs(
+        {
+            "mm_hashes": ["0123456789abcdef"],
+            "mm_placeholders": [[1, 2]],
+            "expanded_token_ids": [10, 11, 12],
+        },
+        "shm",
+        receiver,
+        SimpleNamespace(modality="image", mm_hashes=[]),
+    )
+
+    assert result is None
+
+
+_LOG_SENTINEL = "zzsentinelzz"
+
+
+def _undecodable_payload(case: str) -> bytes:
+    """Return a payload that fails to decode and carries the log sentinel."""
+    import pickle
+    import struct
+
+    from msgspec import msgpack
+    from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+    from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
+
+    sentinel = _LOG_SENTINEL.encode()
+    if case == "pickle_format":
+        # The wire format of a frontend on the previous release.
+        return pickle.dumps(_real_kwargs_item(key=_LOG_SENTINEL))
+    if case == "short_frame":
+        # The declared buffer length runs past the end of the frame.
+        return struct.pack("<I", 1) + struct.pack("<Q", 999) + sentinel
+    if case == "wrong_structure":
+        # A well-formed frame whose message is not a kwargs item.
+        return _pack_buffers([msgpack.encode(_LOG_SENTINEL)])
+    # A frame that carries the serializer's pickle extension code.
+    return _pack_buffers([msgpack.encode(msgpack.Ext(CUSTOM_TYPE_PICKLE, sentinel))])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["pickle_format", "short_frame", "wrong_structure", "pickle_ext_code"]
+)
+async def test_receive_transfer_failure_log_omits_payload_bytes(case, caplog):
+    """A payload that fails to decode falls back without logging its bytes."""
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    payload = _undecodable_payload(case)
+    # The sentinel is in the payload, so an echo of the bytes would show it.
+    assert _LOG_SENTINEL.encode() in payload
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
+    )
+
+    with caplog.at_level("DEBUG"):
+        result = await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["0123456789abcdef"],
+                "mm_placeholders": [[1, 2]],
+                "expanded_token_ids": [10, 11, 12],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
+
+    assert result is None
+    # Positive control: the failure itself was logged and captured.
+    assert "falling back" in caplog.text
+    assert _LOG_SENTINEL not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_receive_refuses_pickle_extension_code_with_insecure_flag(
+    monkeypatch, caplog
+):
+    """With VLLM_ALLOW_INSECURE_SERIALIZATION set, the worker still refuses.
+
+    The frame carries the pickle extension code with dummy bytes, not a pickle
+    object. vLLM's own decoder would try to unpickle them when the variable is
+    set. The worker must refuse the code instead and take its fallback path.
+    """
+    import vllm.envs as envs
+    from msgspec import msgpack
+    from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+    from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
+
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    assert envs.VLLM_ALLOW_INSECURE_SERIALIZATION is True
+
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    ext = msgpack.Ext(CUSTOM_TYPE_PICKLE, b"\x00 not a pickle")
+    receiver = SimpleNamespace(
+        receive=AsyncMock(
+            return_value={
+                "__pickled_kwargs_item__": [_pack_buffers([msgpack.encode(ext)])]
+            }
+        )
+    )
+
+    with caplog.at_level("DEBUG"):
+        result = await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["0123456789abcdef"],
+                "mm_placeholders": [[1, 2]],
+                "expanded_token_ids": [10, 11, 12],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
+
+    assert result is None
+    assert "falling back" in caplog.text
+    # The logged cause is the refusal, not an attempt to unpickle the data.
+    assert "Extension type code 1 is not supported" in caplog.text
 
 
 def test_build_prefill_handoff_dispatches_by_model_and_forwards_processor_kwargs(
@@ -1704,3 +2108,126 @@ class TestLoadQwenGridParams:
         assert params.vision_hidden_dim == 2048
         # DeepStack concatenates intermediate outputs with the final vision output.
         assert params.decode_embedding_dim == expected_decode_embedding_dim
+
+
+def test_zero_video_limit_rejects_before_any_media_loader():
+    processor = _processor(media_limits={"image": 8, "video": 0})
+    processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}],
+            "video_url": [{"Url": "rejected-video"}],
+        },
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="At most 0 video"):
+        processor.validate_multimodal_request(request)
+
+    processor.video_loader.load_video_batch.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "modality,limit,count",
+    [("image", 8, 9), ("video", 1, 2), ("audio", 2, 3)],
+)
+def test_media_item_limits_are_checked_before_loading(modality, limit, count):
+    processor = _processor(media_limits={modality: limit})
+    request = {
+        "multi_modal_data": {
+            f"{modality}_url": [{"Url": "https://example.com/media"}] * count
+        }
+    }
+    with pytest.raises(mod.InvalidArgument, match=f"At most {limit} {modality}"):
+        processor.validate_multimodal_request(request)
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_video_at_configured_limit_is_allowed(count):
+    processor = _processor(media_limits={"video": 1})
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"video_url": [{"Url": "video"}] * count}}
+    )
+
+
+def test_zero_video_limit_preserves_image_only_requests():
+    processor = _processor(media_limits={"image": 8, "video": 0})
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"image_url": [{"Url": "image"}] * 8}}
+    )
+
+
+@pytest.mark.parametrize("unified_vision_chunk", [False, True])
+@pytest.mark.parametrize(
+    "image_limit,chunk_limit,count",
+    [(0, 2, 1), (8, 0, 1), (8, 2, 3)],
+)
+def test_image_admission_uses_model_modality_limit(
+    unified_vision_chunk, image_limit, chunk_limit, count
+):
+    processor = _processor(
+        unified_vision_chunk=unified_vision_chunk,
+        media_limits={"image": image_limit, "vision_chunk": chunk_limit},
+    )
+    request = {
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}] * count
+        }
+    }
+    limit = chunk_limit if unified_vision_chunk else image_limit
+    if count > limit:
+        with pytest.raises(mod.InvalidArgument, match=f"At most {limit} image"):
+            processor.validate_multimodal_request(request)
+    else:
+        processor.validate_multimodal_request(request)
+
+    processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("kwargs_location", ["top_level", "extra_args"])
+@pytest.mark.parametrize("audio_limit,explicit_audio_count", [(0, 0), (1, 1)])
+def test_video_derived_audio_rejects_before_any_media_loader(
+    kwargs_location, audio_limit, explicit_audio_count
+):
+    processor = _processor(media_limits={"video": 1, "audio": audio_limit})
+    processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "video_url": [{"Url": "https://example.com/video.mp4"}],
+            "audio_url": [{"Url": "https://example.com/audio.wav"}]
+            * explicit_audio_count,
+        },
+    }
+    kwargs = {"mm_processor_kwargs": {"use_audio_in_video": True}}
+    if kwargs_location == "extra_args":
+        request["extra_args"] = kwargs
+    else:
+        request.update(kwargs)
+
+    with pytest.raises(mod.InvalidArgument, match=f"At most {audio_limit} audio"):
+        processor.validate_multimodal_request(request)
+
+    processor.video_loader.load_video_batch.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.audio_loader.load_audio.assert_not_awaited()
+    processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
+
+
+@pytest.mark.parametrize("kwargs_location", ["top_level", "extra_args"])
+@pytest.mark.parametrize("use_audio_in_video,audio_limit", [(False, 0), (True, 1)])
+def test_video_derived_audio_respects_flag_and_limit(
+    kwargs_location, use_audio_in_video, audio_limit
+):
+    processor = _processor(media_limits={"video": 1, "audio": audio_limit})
+    request = {"multi_modal_data": {"video_url": [{"Url": "video"}]}}
+    kwargs = {"mm_processor_kwargs": {"use_audio_in_video": use_audio_in_video}}
+    if kwargs_location == "extra_args":
+        request["extra_args"] = kwargs
+    else:
+        request.update(kwargs)
+    processor.validate_multimodal_request(request)

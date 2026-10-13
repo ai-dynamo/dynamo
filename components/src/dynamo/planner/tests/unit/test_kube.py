@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import threading
+from copy import deepcopy
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch, sentinel
 
@@ -27,6 +30,51 @@ from dynamo.planner.errors import (
     RolloutFailedError,
     SubComponentNotFoundError,
 )
+
+
+class _StatefulScalingAPI:
+    """Minimal DGDSA store that enforces resourceVersion CAS semantics."""
+
+    def __init__(self, *, block_scale: bool = False) -> None:
+        self.adapter = {
+            "metadata": {"resourceVersion": "101", "annotations": {}},
+            "spec": {"replicas": 0},
+        }
+        self.api_client = self
+        self._lock = threading.Lock()
+        self._block_scale = block_scale
+        self.scale_started = threading.Event()
+        self.release_scale = threading.Event()
+
+    def get_namespaced_custom_object(self, **_kwargs) -> dict:
+        with self._lock:
+            return deepcopy(self.adapter)
+
+    def patch_namespaced_custom_object_scale(self, *, body: dict, **_kwargs) -> None:
+        supplied_version = body.get("metadata", {}).get("resourceVersion")
+        self.scale_started.set()
+        if self._block_scale:
+            if not self.release_scale.wait(timeout=2):
+                raise TimeoutError("test did not release blocked Scale PATCH")
+        with self._lock:
+            if supplied_version != self.adapter["metadata"]["resourceVersion"]:
+                raise client.ApiException(status=409)
+            self.adapter["spec"]["replicas"] = body["spec"]["replicas"]
+            self._advance_resource_version()
+
+    def call_api(self, *_args, body: list[dict], **_kwargs) -> object:
+        with self._lock:
+            expected_version = body[0]["value"]
+            if expected_version != self.adapter["metadata"]["resourceVersion"]:
+                raise client.ApiException(status=409)
+            self.adapter["metadata"]["annotations"] = dict(body[1]["value"])
+            self._advance_resource_version()
+        return deepcopy(self.adapter)
+
+    def _advance_resource_version(self) -> None:
+        current = int(self.adapter["metadata"]["resourceVersion"])
+        self.adapter["metadata"]["resourceVersion"] = str(current + 1)
+
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -129,6 +177,71 @@ def test_update_service_replicas_uses_dgdsa_scale(k8s_api, mock_custom_api):
     mock_custom_api.patch_namespaced_custom_object.assert_not_called()
 
 
+def test_get_service_scaling_adapter_reads_named_dgdsa(k8s_api, mock_custom_api):
+    adapter = {
+        "metadata": {"name": "test-deployment-frontend"},
+        "spec": {"replicas": 0},
+    }
+    mock_custom_api.get_namespaced_custom_object.return_value = adapter
+
+    result = k8s_api.get_service_scaling_adapter("test-deployment", "Frontend")
+
+    assert result is adapter
+    mock_custom_api.get_namespaced_custom_object.assert_called_once_with(
+        group="nvidia.com",
+        version="v1beta1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeploymentscalingadapters",
+        name="test-deployment-frontend",
+    )
+
+
+@pytest.mark.parametrize("replicas", [False, -1, 1.5])
+def test_get_scaling_adapter_desired_replicas_rejects_invalid_values(replicas):
+    adapter = {
+        "metadata": {"name": "test-deployment-worker"},
+        "spec": {"replicas": replicas},
+    }
+
+    with pytest.raises(ValueError, match="spec.replicas"):
+        KubernetesAPI.get_scaling_adapter_desired_replicas(adapter)
+
+
+def test_update_scaling_adapter_replicas_is_strict(k8s_api, mock_custom_api):
+    k8s_api.update_scaling_adapter_replicas(
+        "test-deployment", "Frontend", 3, resource_version="101"
+    )
+
+    mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once_with(
+        group="nvidia.com",
+        version="v1beta1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeploymentscalingadapters",
+        name="test-deployment-frontend",
+        body={
+            "spec": {"replicas": 3},
+            "metadata": {"resourceVersion": "101"},
+        },
+    )
+    mock_custom_api.get_namespaced_custom_object.assert_not_called()
+    mock_custom_api.api_client.call_api.assert_not_called()
+
+
+def test_update_scaling_adapter_replicas_never_falls_back_on_404(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=404)
+    )
+
+    with pytest.raises(client.ApiException) as exc_info:
+        k8s_api.update_scaling_adapter_replicas("test-deployment", "Frontend", 3)
+
+    assert exc_info.value.status == 404
+    mock_custom_api.get_namespaced_custom_object.assert_not_called()
+    mock_custom_api.api_client.call_api.assert_not_called()
+
+
 def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
     """Test that update_service_replicas falls back to DGD when DGDSA not found"""
     # DGDSA doesn't exist (404)
@@ -220,18 +333,15 @@ def test_update_graph_replicas_calls_update_service_replicas(k8s_api, mock_custo
 
 
 def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
-    """Test the internal _update_dgd_replicas method"""
+    """The strict DGD path never probes or writes a convention-named DGDSA."""
+    component = {"name": "test-component", "type": "prefill", "replicas": 0}
     mock_custom_api.get_namespaced_custom_object.return_value = {
-        "metadata": {"name": "test-deployment"},
-        "spec": {
-            "components": [
-                {"name": "test-component", "type": "prefill", "replicas": 0},
-            ]
-        },
+        "metadata": {"name": "test-deployment", "resourceVersion": "42"},
+        "spec": {"components": [component]},
     }
     mock_custom_api.patch_namespaced_custom_object.return_value = None
 
-    k8s_api._update_dgd_replicas("test-deployment", "test-component", 1)
+    k8s_api.update_dgd_replicas_directly("test-deployment", "test-component", 1)
 
     mock_custom_api.patch_namespaced_custom_object.assert_not_called()
     mock_custom_api.api_client.call_api.assert_called_once_with(
@@ -252,8 +362,13 @@ def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
         body=[
             {
                 "op": "test",
-                "path": "/spec/components/0/name",
-                "value": "test-component",
+                "path": "/metadata/resourceVersion",
+                "value": "42",
+            },
+            {
+                "op": "test",
+                "path": "/spec/components/0",
+                "value": component,
             },
             {
                 "op": "add",
@@ -266,6 +381,226 @@ def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
         _return_http_data_only=True,
         collection_formats={},
     )
+
+
+def test_update_dgd_replicas_directly_rejects_scaling_adapter_opt_in(
+    k8s_api, mock_custom_api
+):
+    """A DGDSA opt-in after connector preflight must retry via new authority."""
+    mock_custom_api.get_namespaced_custom_object.return_value = {
+        "metadata": {"name": "test-deployment", "resourceVersion": "43"},
+        "spec": {
+            "components": [
+                {
+                    "name": "test-component",
+                    "type": "prefill",
+                    "replicas": 0,
+                    "scalingAdapter": {},
+                }
+            ]
+        },
+    }
+
+    with pytest.raises(client.ApiException) as error:
+        k8s_api.update_dgd_replicas_directly("test-deployment", "test-component", 1)
+
+    assert error.value.status == 409
+    mock_custom_api.api_client.call_api.assert_not_called()
+
+
+def test_fetch_authoritative_targets_allows_cold_restart_at_dgdsa_zero(
+    k8s_api, mock_custom_api
+):
+    deployment = {
+        "metadata": {"name": "graph", "uid": "dgd-uid"},
+        "spec": {
+            "components": [
+                {
+                    "name": "worker",
+                    "type": "worker",
+                    "replicas": 1,
+                    "scalingAdapter": {},
+                }
+            ]
+        },
+        "status": {
+            "components": {
+                "worker": {
+                    "replicas": 0,
+                    "updatedReplicas": 0,
+                    "readyReplicas": 0,
+                    "availableReplicas": 0,
+                }
+            }
+        },
+    }
+    mock_custom_api.get_namespaced_custom_object.return_value = {
+        "metadata": {
+            "name": "graph-worker",
+            "ownerReferences": [
+                {
+                    "apiVersion": "nvidia.com/v1beta1",
+                    "kind": "DynamoGraphDeployment",
+                    "name": "graph",
+                    "uid": "dgd-uid",
+                    "controller": True,
+                }
+            ],
+        },
+        "spec": {
+            "replicas": 0,
+            "dgdRef": {"name": "graph", "componentName": "worker"},
+        },
+    }
+
+    authoritative = k8s_api.fetch_authoritative_replica_targets(deployment)
+
+    assert authoritative["spec"]["components"][0]["replicas"] == 0
+    assert k8s_api.non_planner_components_stable(authoritative) == (True, [])
+    assert deployment["spec"]["components"][0]["replicas"] == 1
+
+
+def test_scaling_adapter_identity_requires_resource_version_only_for_mutation(
+    k8s_api,
+):
+    deployment = {"metadata": {"name": "graph", "uid": "dgd-uid"}}
+    adapter = {
+        "metadata": {
+            "name": "graph-worker",
+            "ownerReferences": [
+                {
+                    "apiVersion": "nvidia.com/v1beta1",
+                    "kind": "DynamoGraphDeployment",
+                    "name": "graph",
+                    "uid": "dgd-uid",
+                    "controller": True,
+                }
+            ],
+        },
+        "spec": {
+            "dgdRef": {"name": "graph", "componentName": "worker"},
+        },
+    }
+
+    assert (
+        k8s_api.scaling_adapter_identity_rejection(deployment, "worker", adapter)
+        is None
+    )
+    assert "resourceVersion" in str(
+        k8s_api.scaling_adapter_identity_rejection(
+            deployment,
+            "worker",
+            adapter,
+            require_resource_version=True,
+        )
+    )
+
+
+def test_patch_scaling_adapter_writer_fence_uses_resource_version_json_patch(
+    k8s_api, mock_custom_api
+):
+    adapter = {
+        "metadata": {
+            "resourceVersion": "42",
+            "annotations": {"keep.example/key": "value"},
+        }
+    }
+
+    k8s_api.patch_scaling_adapter_writer_fence(
+        "test-deployment", "worker", "writer-new", adapter=adapter
+    )
+
+    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
+    mock_custom_api.api_client.call_api.assert_called_once_with(
+        "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}",
+        "PATCH",
+        {
+            "group": "nvidia.com",
+            "version": "v1beta1",
+            "namespace": k8s_api.current_namespace,
+            "plural": "dynamographdeploymentscalingadapters",
+            "name": "test-deployment-worker",
+        },
+        [],
+        {
+            "Accept": "application/json",
+            "Content-Type": "application/json-patch+json",
+        },
+        body=[
+            {
+                "op": "test",
+                "path": "/metadata/resourceVersion",
+                "value": "42",
+            },
+            {
+                "op": "add",
+                "path": "/metadata/annotations",
+                "value": {
+                    "keep.example/key": "value",
+                    "dynamo.nvidia.com/planner-writer-fence": "writer-new",
+                },
+            },
+        ],
+        response_type="object",
+        auth_settings=["BearerToken"],
+        _return_http_data_only=True,
+        collection_formats={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_writer_fence_rejects_delayed_old_scale_patch() -> None:
+    store = _StatefulScalingAPI(block_scale=True)
+    api = object.__new__(KubernetesAPI)
+    api.current_namespace = "default"
+    api.custom_api = store
+    old_snapshot = api.get_service_scaling_adapter("graph", "worker")
+    old_scale = asyncio.create_task(
+        asyncio.to_thread(
+            api.update_scaling_adapter_replicas,
+            "graph",
+            "worker",
+            1,
+            resource_version=old_snapshot["metadata"]["resourceVersion"],
+        )
+    )
+    assert await asyncio.to_thread(store.scale_started.wait, 1)
+
+    fence_snapshot = api.get_service_scaling_adapter("graph", "worker")
+    api.patch_scaling_adapter_writer_fence(
+        "graph", "worker", "writer-new", adapter=fence_snapshot
+    )
+    store.release_scale.set()
+
+    with pytest.raises(client.ApiException) as error:
+        await old_scale
+    assert error.value.status == 409
+    current = api.get_service_scaling_adapter("graph", "worker")
+    assert current["spec"]["replicas"] == 0
+    assert current["metadata"]["resourceVersion"] == "102"
+
+
+def test_writer_fence_retries_after_old_scale_commits_first() -> None:
+    store = _StatefulScalingAPI()
+    api = object.__new__(KubernetesAPI)
+    api.current_namespace = "default"
+    api.custom_api = store
+    stale_fence_snapshot = api.get_service_scaling_adapter("graph", "worker")
+
+    api.update_scaling_adapter_replicas("graph", "worker", 1, resource_version="101")
+    with pytest.raises(client.ApiException) as error:
+        api.patch_scaling_adapter_writer_fence(
+            "graph", "worker", "writer-new", adapter=stale_fence_snapshot
+        )
+    assert error.value.status == 409
+
+    refreshed = api.get_service_scaling_adapter("graph", "worker")
+    api.patch_scaling_adapter_writer_fence(
+        "graph", "worker", "writer-new", adapter=refreshed
+    )
+    current = api.get_service_scaling_adapter("graph", "worker")
+    assert current["spec"]["replicas"] == 1
+    assert current["metadata"]["resourceVersion"] == "103"
 
 
 @pytest.mark.asyncio
@@ -478,6 +813,29 @@ def _stable_worker_dgd(
     }
 
 
+def _owned_scaling_adapter(
+    component_name: str, *, replicas: int, dgd_name: str = "test-deployment"
+) -> Dict[str, Any]:
+    return {
+        "metadata": {
+            "name": f"{dgd_name}-{component_name.lower()}",
+            "ownerReferences": [
+                {
+                    "apiVersion": "nvidia.com/v1beta1",
+                    "kind": "DynamoGraphDeployment",
+                    "name": dgd_name,
+                    "uid": "dgd-uid",
+                    "controller": True,
+                }
+            ],
+        },
+        "spec": {
+            "replicas": replicas,
+            "dgdRef": {"name": dgd_name, "componentName": component_name},
+        },
+    }
+
+
 def _make_pod(
     name: str,
     *,
@@ -580,6 +938,55 @@ async def test_wait_exclude_planner_returns_observed_stable_snapshot(
         ]
         == "300"
     )
+
+
+@pytest.mark.asyncio
+async def test_wait_exclude_planner_uses_adapter_target_after_cold_restart(k8s_api):
+    deployment = {
+        "metadata": {
+            "name": "test-deployment",
+            "uid": "dgd-uid",
+            "generation": 1,
+        },
+        "spec": {
+            "components": [
+                {
+                    "name": "worker",
+                    "type": "worker",
+                    "replicas": 1,
+                    "scalingAdapter": {},
+                },
+                {"name": "Planner", "type": "planner", "replicas": 1},
+            ]
+        },
+        "status": {
+            "observedGeneration": 1,
+            "components": {
+                "worker": {
+                    "readyReplicas": 0,
+                    "updatedReplicas": 0,
+                    "availableReplicas": 0,
+                }
+            },
+        },
+    }
+    adapter = _owned_scaling_adapter("worker", replicas=0)
+    with (
+        patch.object(k8s_api, "get_graph_deployment", return_value=deployment),
+        patch.object(
+            k8s_api, "get_service_scaling_adapter", return_value=adapter
+        ) as get_adapter,
+    ):
+        settled = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            include_planner=False,
+            require_backing_settled=False,
+            max_attempts=1,
+            delay_seconds=0,
+        )
+
+    assert settled is deployment
+    get_adapter.assert_called_once_with("test-deployment", "worker")
 
 
 # ---------------------------------------------------------------------------

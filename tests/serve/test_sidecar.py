@@ -390,7 +390,11 @@ def test_sidecar_kv_routing(
         directory=vllm_sidecar_dir if backend == "vllm" else sglang_sidecar_dir,
         script_name="agg.sh" if dep else "agg_kv_router.sh",
         script_args=(
-            ["--disable-cuda-graph", "--disable-piecewise-cuda-graph"]
+            [
+                "--disable-cuda-graph",
+                "--cuda-graph-backend-prefill",
+                "disabled",
+            ]
             if backend == "sglang"
             else []
         ),

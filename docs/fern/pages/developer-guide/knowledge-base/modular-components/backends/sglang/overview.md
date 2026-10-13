@@ -207,6 +207,15 @@ cd $DYNAMO_HOME/examples/backends/sglang
 
 > **Performance caveat:** Qwen3-0.6B is small enough that the disaggregated pathway is dominated by transport overhead and will often look slower than aggregated. Use it for plumbing validation, not benchmarks. Switch to Qwen3-32B-FP8 or larger for realistic disagg numbers.
 
+### Thinking Token Budgets
+
+Send a root-level `thinking_token_budget` on chat or Responses requests to limit reasoning tokens. Dynamo forwards it to SGLang's `sampling_params.custom_params.thinking_budget`; it does not configure a custom logit processor. Omit the field to keep the engine default. A budget is optional with `--enable-strict-thinking`, and a request that disables thinking ignores the budget.
+
+Start token-generation workers with `--enable-strict-thinking` and a compatible `--reasoning-parser` (for example, `qwen3`). The parser must support SGLang's strict-thinking token filter, either through excluded tokens or a non-negative `SGLANG_MAX_THINK_TOKENS` engine default. Keep tokenizer initialization enabled; `--skip-tokenizer-init` is incompatible with this feature. Apply these settings to both prefill and decode workers in a disaggregated deployment. Diffusion workers do not support thinking token budgets.
+
+> [!WARNING]
+> The multimodal launch scripts `agg_vision.sh`, `multimodal_epd.sh`, and `multimodal_disagg.sh` currently use `--skip-tokenizer-init`. Their defaults cannot enforce thinking token budgets. Removing that flag and configuring strict thinking with a compatible reasoning parser are prerequisites; budget enforcement with those multimodal examples has not been validated end to end.
+
 ### Multi-Node TP
 
 SGLang supports multi-node tensor parallelism via the native `--dist-init-addr`, `--nnodes`, and `--node-rank` flags. See [SGLang server arguments](https://docs.sglang.io/docs/advanced_features/server_arguments) for the canonical reference; the same flags work with `python -m dynamo.sglang`. For a Kubernetes deployment example, see [`disagg-multinode.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/disagg-multinode.yaml).

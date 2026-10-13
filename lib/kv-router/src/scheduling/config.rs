@@ -128,6 +128,13 @@ fn validate_min(field: &str, value: f64, min: f64) -> Result<(), String> {
     Err(format!("{field} must be greater than or equal to {min}"))
 }
 
+fn validate_finite_non_negative(field: &str, value: f64) -> Result<(), String> {
+    if value.is_finite() && value >= 0.0 {
+        return Ok(());
+    }
+    Err(format!("{field} must be finite and non-negative"))
+}
+
 fn validate_range(field: &str, value: f64, min: f64, max: f64) -> Result<(), String> {
     if value >= min && value <= max {
         return Ok(());
@@ -638,10 +645,10 @@ impl RouterConfigOverride {
             validate_overlap_score_credit(value)?;
         }
         if let Some(value) = self.prefill_load_scale {
-            validate_min("prefill_load_scale", value, 0.0)?;
+            validate_finite_non_negative("prefill_load_scale", value)?;
         }
         if let Some(value) = self.router_temperature {
-            validate_min("router_temperature", value, 0.0)?;
+            validate_finite_non_negative("router_temperature", value)?;
         }
         if let Some(value) = self.shared_cache_multiplier {
             validate_range("shared_cache_multiplier", value, 0.0, 1.0)?;
@@ -1427,17 +1434,14 @@ impl KvRouterConfig {
 
     pub fn validate(&self) -> Result<(), String> {
         validate_overlap_score_credit(self.overlap_score_credit)?;
-        validate_min(
+        validate_finite_non_negative(
             "overlap_score_credit_decay",
             self.overlap_score_credit_decay,
-            0.0,
         )?;
-        validate_min("prefill_load_scale", self.prefill_load_scale, 0.0)?;
-        validate_range(
+        validate_finite_non_negative("prefill_load_scale", self.prefill_load_scale)?;
+        validate_finite_non_negative(
             "decode_active_request_weight",
             self.decode_active_request_weight,
-            0.0,
-            f64::MAX,
         )?;
         validate_range(
             "host_cache_hit_weight",
@@ -1451,7 +1455,7 @@ impl KvRouterConfig {
             0.0,
             1.0,
         )?;
-        validate_min("router_temperature", self.router_temperature, 0.0)?;
+        validate_finite_non_negative("router_temperature", self.router_temperature)?;
         validate_min("router_ttl_secs", self.router_ttl_secs, 0.0)?;
         if let Some(value) = self.router_queue_threshold {
             validate_min("router_queue_threshold", value, 0.0)?;
@@ -1909,13 +1913,16 @@ mod tests {
         assert!(amplified.validate_config().is_ok());
 
         for value in ["-0.5", "NaN", "inf"] {
-            let invalid_credit =
-                config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", value)]);
-            assert!(invalid_credit.validate_config().is_err());
-
-            let invalid_active_request_weight =
-                config_from_values(&[("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", value)]);
-            assert!(invalid_active_request_weight.validate_config().is_err());
+            for key in [
+                "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
+                "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
+                "DYN_ROUTER_PREFILL_LOAD_SCALE",
+                "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
+                "DYN_ROUTER_TEMPERATURE",
+            ] {
+                let invalid = config_from_values(&[(key, value)]);
+                assert!(invalid.validate_config().is_err(), "{key}={value}");
+            }
         }
 
         let error = try_config_from_values(&[("DYN_ROUTER_TRACKING_HASH", "mystery")]).unwrap_err();
@@ -2820,6 +2827,82 @@ models:
                 shared_cache_multiplier: None,
             };
             assert!(invalid.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn scoring_weights_must_be_finite_and_non_negative() {
+        let largest = KvRouterConfig {
+            overlap_score_credit_decay: f64::MAX,
+            prefill_load_scale: f64::MAX,
+            decode_active_request_weight: f64::MAX,
+            router_temperature: f64::MAX,
+            ..Default::default()
+        };
+        assert!(largest.validate().is_ok());
+
+        for value in [-0.1, f64::NAN, f64::INFINITY] {
+            let configs = [
+                (
+                    "overlap_score_credit_decay",
+                    KvRouterConfig {
+                        overlap_score_credit_decay: value,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "prefill_load_scale",
+                    KvRouterConfig {
+                        prefill_load_scale: value,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "decode_active_request_weight",
+                    KvRouterConfig {
+                        decode_active_request_weight: value,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "router_temperature",
+                    KvRouterConfig {
+                        router_temperature: value,
+                        ..Default::default()
+                    },
+                ),
+            ];
+            for (field, config) in configs {
+                assert_eq!(
+                    config.validate(),
+                    Err(format!("{field} must be finite and non-negative")),
+                    "{field}={value}"
+                );
+            }
+
+            let overrides = [
+                (
+                    "prefill_load_scale",
+                    RouterConfigOverride {
+                        prefill_load_scale: Some(value),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "router_temperature",
+                    RouterConfigOverride {
+                        router_temperature: Some(value),
+                        ..Default::default()
+                    },
+                ),
+            ];
+            for (field, config_override) in overrides {
+                assert_eq!(
+                    config_override.validate(),
+                    Err(format!("{field} must be finite and non-negative")),
+                    "{field}={value}"
+                );
+            }
         }
     }
 

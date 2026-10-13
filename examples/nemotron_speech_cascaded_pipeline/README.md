@@ -296,6 +296,94 @@ curl --fail --silent --show-error http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+### Measure ASR-to-LLM handoff
+
+The smoke client can pass ASR output to the LLM and report time to first text
+and total LLM latency:
+
+| `--llm-transport` | Behavior |
+| --- | --- |
+| `chat` | Baseline: send the final transcript to streamed chat completions. Works with the default DGD. |
+| `realtime-atomic` | Baseline: establish the LLM WebSocket before ASR, then send the final transcript without speculative prefill. |
+| `realtime` | Incremental: establish the LLM WebSocket before ASR and forward provisional text to overlap prefill with transcription. |
+
+With the default DGD, run the chat baseline:
+
+```bash
+python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
+  --llm-transport chat
+```
+
+> [!NOTE]
+> The incremental text events are an experimental Dynamo extension and may
+> change before stabilization.
+
+For the realtime modes, build both runtime images, including their native
+bindings, from the same checkout. Follow the
+[frontend image instructions](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md#building-the-frontend-image)
+to produce `dynamo:frontend` and the
+[vLLM runtime instructions](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md#1-runtime-target-runs-as-non-root-dynamo-user)
+to produce `dynamo:latest-vllm-runtime`. Using the registry variables above and a
+fresh semantic-version tag matching the source runtime (for example,
+`<runtime-version>-dev.<short-commit>`), push those images and rebuild the speech
+adapter from the matching frontend:
+
+```bash
+export DYNAMO_RUNTIME_VERSION="<source-build-version>"
+export DYNAMO_FRONTEND_IMAGE="${CUSTOM_IMAGE_REGISTRY}/${CUSTOM_IMAGE_REPOSITORY}/dynamo-frontend:${DYNAMO_RUNTIME_VERSION}"
+export DYNAMO_VLLM_IMAGE="${CUSTOM_IMAGE_REGISTRY}/${CUSTOM_IMAGE_REPOSITORY}/vllm-runtime:${DYNAMO_RUNTIME_VERSION}"
+export CUSTOM_SPEECH_ADAPTER_IMAGE="${CUSTOM_IMAGE_REGISTRY}/${CUSTOM_IMAGE_REPOSITORY}/dynamo-nemotron-speech-adapter:${DYNAMO_RUNTIME_VERSION}"
+docker tag dynamo:frontend "${DYNAMO_FRONTEND_IMAGE}"
+docker tag dynamo:latest-vllm-runtime "${DYNAMO_VLLM_IMAGE}"
+docker push "${DYNAMO_FRONTEND_IMAGE}"
+docker push "${DYNAMO_VLLM_IMAGE}"
+./examples/nemotron_speech_cascaded_pipeline/container/build.sh
+docker push "${CUSTOM_SPEECH_ADAPTER_IMAGE}"
+```
+
+The adapter build uses `DYNAMO_FRONTEND_IMAGE` as its base. Use published images
+only after both capabilities are released. In `deploy/agg.yaml`, add
+`--realtime` and `--enable-prefix-caching` to the `main` container's `args` in
+the component named `worker`, leaving its other arguments unchanged. For private
+runtime images, also add `custom-adapter-image-pull-secret` to
+`podTemplate.spec.imagePullSecrets` for the `Frontend` and `worker` components.
+Repeat the deployment command in step 4 with these image variables. The worker
+now serves realtime text instead of chat completions; remove `--realtime` and
+redeploy to return to the chat baseline. After the rollout, run:
+
+```bash
+python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
+  --llm-transport realtime
+```
+
+The smoke client demonstrates the endpoint flow an external orchestrator can
+use: it opens separate ASR and LLM WebSockets through the Dynamo frontend,
+forwards append-only ASR deltas with Dynamo's `input_text.append` extension,
+commits the final transcript, and then requests a response. At ASR completion,
+if the final transcript differs from the forwarded text, it clears the
+speculative text and sends the authoritative final
+transcript with `conversation.item.create`, without starting more speculative
+warming at turn end. Unchanged text uses `input_text.commit`. This is a
+single-turn endpoint smoke test, not a full voice application; it does not
+synthesize the LLM response or add an integration to Pipecat or the Blueprint.
+
+The realtime text path does not currently apply `--dyn-reasoning-parser`.
+Nemotron Nano can include reasoning text before its final answer; this client
+does not filter it. The default 128-token budget can be consumed entirely by
+reasoning; increase `--max-output-tokens` (for example, to `512`) when needed.
+Answer-only output needs separate handling before connecting this stream
+directly to TTS.
+
+Use `--llm-transport realtime-atomic` as the established-connection baseline.
+Compare it with `realtime` using the same image, model, speech, instructions,
+and output-token limit.
+`llm_ttft_from_asr_final_ms` measures the post-transcription handoff, while
+`asr_start_to_llm_first_token_ms` covers the full ASR-to-first-token path.
+These measurements include final-text correction and handoff, but do not prove
+that prefix blocks were reused. Short utterances or frequently revised prefixes
+may provide no overlap benefit. Use matched longer utterances and inspect
+backend prefix-cache reuse when evaluating latency.
+
 The TTS adapter requires a Dynamo runtime with streaming
 `/v1/audio/speech` support. The realtime ASR adapter uses explicit client commits
 (`turn_detection: null`); it does not implement server-side voice activity
@@ -349,15 +437,16 @@ kubectl delete dgd nemotron-speech-cascaded --namespace "${NAMESPACE}"
 Running the adapter workers or unit tests outside the container requires Python
 3.11 or newer.
 
-The example's unit tests cover connection configuration and endpoint resolution
-without installing the Riva client. Model-registration regressions are covered
+The example's unit tests cover connection configuration, endpoint resolution,
+and the external ASR-to-LLM handoff without installing the Riva client.
+Model-registration regressions are covered
 by `lib/bindings/python/tests/test_runtime_data_discovery.py` in the regular
 Dynamo binding suite. The Riva-dependent adapter, worker, and connection modules
 have no automated test coverage. Run the deployed smoke test manually for
 functional validation.
 
 ```bash
-python3 -m pip install pytest
+python3 -m pip install aiohttp pytest pytest-asyncio
 PYTHONPATH=components/src:lib/bindings/python/src \
   python3 -m pytest -xvv examples/nemotron_speech_cascaded_pipeline/tests
 bash -n examples/nemotron_speech_cascaded_pipeline/launch_workers.sh

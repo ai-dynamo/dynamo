@@ -92,6 +92,9 @@ func TestComputeBetaDGDWorkersSpecHash_Deterministic(t *testing.T) {
 	h2 := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
 	assert.Equal(t, h1, h2)
 	assert.Len(t, h1, 8)
+	t.Log("Ordinary worker revisions remain stable")
+	ordinary := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	require.Equal(t, "5a3243f6", mustComputeBetaDGDWorkersSpecHash(t, ordinary))
 }
 
 func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *testing.T) {
