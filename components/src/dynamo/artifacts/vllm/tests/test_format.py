@@ -154,6 +154,72 @@ def test_bfloat16_preserves_raw_bits():
     assert decoded.choices[0].components[0].logprobs == selected.logprobs
 
 
+@pytest.mark.parametrize("dtype", ["fp16", "bf16", "fp32"])
+@pytest.mark.parametrize("value", ["nan", "negative_nan", "positive_infinity"])
+def test_nonfinite_logprobs_rejected_on_encode_and_decode(dtype, value):
+    patterns = {
+        "fp16": {"nan": 0x7E00, "negative_nan": 0xFE00, "positive_infinity": 0x7C00},
+        "bf16": {"nan": 0x7FC0, "negative_nan": 0xFFC0, "positive_infinity": 0x7F80},
+        "fp32": {
+            "nan": 0x7FC00000,
+            "negative_nan": 0xFFC00000,
+            "positive_infinity": 0x7F800000,
+        },
+    }
+    bits = patterns[dtype][value]
+    raw = struct.pack("<I" if dtype == "fp32" else "<H", bits)
+    bad = Tensor(dtype, (1,), raw)
+    with pytest.raises(GenerationArtifactFormatError, match="logprob"):
+        encode_generation_artifact(_view(SelectedLogprobs(2, bad)))
+    with pytest.raises(GenerationArtifactFormatError, match="logprob"):
+        encode_generation_artifact(
+            _view(TopKLogprobs(2, _tensor([[13]], "i32"), Tensor(dtype, (1, 1), raw)))
+        )
+
+    valid = encode_generation_artifact(
+        _view(SelectedLogprobs(2, Tensor(dtype, (1,), bytes(len(raw))))),
+        codec=CODEC_NONE,
+    )
+    manifest, payload = _unpack(valid.data)
+    with pytest.raises(GenerationArtifactFormatError, match="logprob"):
+        decode_generation_artifact(_wire(manifest, payload[: -len(raw)] + raw))
+    valid_topk = encode_generation_artifact(
+        _view(
+            TopKLogprobs(
+                2, _tensor([[13]], "i32"), Tensor(dtype, (1, 1), bytes(len(raw)))
+            )
+        ),
+        codec=CODEC_NONE,
+    )
+    manifest, payload = _unpack(valid_topk.data)
+    with pytest.raises(GenerationArtifactFormatError, match="logprob"):
+        decode_generation_artifact(_wire(manifest, payload[: -len(raw)] + raw))
+
+
+@pytest.mark.parametrize("dtype", ["fp16", "bf16", "fp32"])
+def test_negative_infinity_logprob_is_supported(dtype):
+    raw = struct.pack(
+        "<I" if dtype == "fp32" else "<H",
+        {"fp16": 0xFC00, "bf16": 0xFF80, "fp32": 0xFF800000}[dtype],
+    )
+    selected = SelectedLogprobs(2, Tensor(dtype, (1,), raw))
+    assert (
+        decode_generation_artifact(encode_generation_artifact(_view(selected)).data)
+        .choices[0]
+        .components[0]
+        == selected
+    )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_float_tensor_rejects_nonfinite_source_except_negative_infinity(value):
+    with pytest.raises(GenerationArtifactFormatError, match="floating"):
+        Tensor.from_array(np.asarray([value]), dtype="fp16")
+    assert np.isneginf(
+        Tensor.from_array(np.asarray([float("-inf")]), dtype="fp16").as_array()[0]
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
     ["unknown", "overlap", "gap", "shape", "duplicate", "route_dtype", "route_count"],
@@ -250,14 +316,29 @@ def test_multiple_choices_and_order_rejection():
         encode_generation_artifact(GenerationArtifactView((second, first)))
 
 
-def test_reader_binds_router_order_to_model_capability():
+def test_reader_binds_full_router_profile_to_model_capability():
     routes = compact_routes(
         np.zeros((2, 2, 1), dtype=np.int32), (9, 3), (4, 4), token_start=1
     )
     encoded = encode_generation_artifact(_view(routes))
-    decode_generation_artifact(encoded.data, expected_router_ids=(9, 3))
-    with pytest.raises(GenerationArtifactFormatError, match="router order"):
-        decode_generation_artifact(encoded.data, expected_router_ids=(3, 9))
+    decode_generation_artifact(encoded.data, expected_router_profile=((9, 4), (3, 4)))
+    with pytest.raises(GenerationArtifactFormatError, match="router profile"):
+        decode_generation_artifact(
+            encoded.data, expected_router_profile=((3, 4), (9, 4))
+        )
+    with pytest.raises(GenerationArtifactFormatError, match="router profile"):
+        decode_generation_artifact(
+            encoded.data, expected_router_profile=((9, 4), (3, 5))
+        )
+
+    inflated = np.zeros((2, 2, 1), dtype=np.int32)
+    inflated[:, 1, :] = 4
+    forged = compact_routes(inflated, (9, 3), (4, 5), token_start=1)
+    forged_data = encode_generation_artifact(_view(forged)).data
+    with pytest.raises(GenerationArtifactFormatError, match="router profile"):
+        decode_generation_artifact(
+            forged_data, expected_router_profile=((9, 4), (3, 4))
+        )
 
 
 @pytest.mark.parametrize("dtype", ["u8", "u16", "i32", "i64"])
