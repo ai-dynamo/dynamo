@@ -435,6 +435,42 @@ fn empty_chunks_and_delta_tokens_preserve_terminal_usage() {
 }
 
 #[test]
+fn decode_reports_prefill_cached_tokens_instead_of_transferred_kv() {
+    for prefill_cached in [None, Some(0), Some(2)] {
+        let mut request = minimal_request();
+        request.prefill_result = Some(PrefillResult {
+            prompt_tokens_details: prefill_cached.map(|cached_tokens| PromptTokensDetails {
+                cached_tokens: Some(cached_tokens),
+                ..Default::default()
+            }),
+            ..decode_request().prefill_result.unwrap()
+        });
+        let mut response = sequence_response(true, false, None);
+        // The decode engine counts the whole transferred prompt as cached.
+        response
+            .outputs
+            .as_mut()
+            .unwrap()
+            .finish_info
+            .as_mut()
+            .unwrap()
+            .num_cached_tokens = Some(3);
+        let terminal = ResponseState::new(&request, DisaggregationMode::Decode)
+            .convert(response)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            terminal
+                .completion_usage
+                .unwrap()
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            prefill_cached
+        );
+    }
+}
+
+#[test]
 fn output_logprobs_preserve_opt_in_alignment_and_values() {
     for requested in [None, Some(0), Some(2)] {
         let mut request = minimal_request();

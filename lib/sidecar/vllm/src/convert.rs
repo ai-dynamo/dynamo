@@ -1330,6 +1330,8 @@ pub(crate) struct ResponseState {
     multimodal_prompt_token_ids: Option<Vec<u32>>,
     completion_tokens: u32,
     mode: DisaggregationMode,
+    /// The prefill leg's prefix-cache hit count, when it reported one.
+    prefill_cached_tokens: Option<u32>,
     output_logprobs: Option<u32>,
     expect_prompt_logprobs: bool,
     prompt_info: Option<pb::PromptInfo>,
@@ -1349,6 +1351,11 @@ impl ResponseState {
             multimodal_prompt_token_ids: None,
             completion_tokens: 0,
             mode,
+            prefill_cached_tokens: request
+                .prefill_result
+                .as_ref()
+                .and_then(|prefill| prefill.prompt_tokens_details.as_ref())
+                .and_then(|details| details.cached_tokens),
             output_logprobs: request.output_options.logprobs,
             expect_prompt_logprobs: request.output_options.prompt_logprobs.is_some(),
             prompt_info: None,
@@ -1491,14 +1498,20 @@ impl ResponseState {
                 .then_some(StopReason::Int(i64::from(id))),
             pb::finish_info::StopReason::StopString(value) => Some(StopReason::String(value)),
         });
+        // A decode engine counts the KV received from prefill as cached, which
+        // would read as a ~100% hit on every disaggregated request. The prefill
+        // leg is the only source there, even when it reported no count.
+        let cached_tokens = if self.mode.is_decode() {
+            self.prefill_cached_tokens
+        } else {
+            finish.num_cached_tokens
+        };
         let mut completion_usage = usage(self.prompt_tokens, completion_tokens);
         completion_usage.prompt_tokens_details =
-            finish
-                .num_cached_tokens
-                .map(|cached_tokens| PromptTokensDetails {
-                    cached_tokens: Some(cached_tokens.min(self.prompt_tokens)),
-                    ..Default::default()
-                });
+            cached_tokens.map(|cached_tokens| PromptTokensDetails {
+                cached_tokens: Some(cached_tokens.min(self.prompt_tokens)),
+                ..Default::default()
+            });
         mapped.completion_usage = Some(completion_usage);
         if self.mode.is_encode() {
             if matches!(
