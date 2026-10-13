@@ -503,6 +503,45 @@ async def test_parse_args_enables_incremental_streaming_before_resolution(
     assert config.server_args.incremental_streaming_output is True
 
 
+@pytest.mark.asyncio
+async def test_parse_args_gateway_workers_sets_raw_tokenizer_worker_num(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    # PortArgs.init_new reads the raw tokenizer_worker_num; a resolved-only
+    # value leaves the leader without a worker IPC socket.
+    seen = {}
+
+    def resolve(parsed_args):
+        seen["tokenizer_worker_num"] = parsed_args.tokenizer_worker_num
+        return SimpleNamespace(
+            disaggregation_mode="null",
+            dllm_algorithm=None,
+            kv_events_config=None,
+            tokenizer_worker_num=parsed_args.tokenizer_worker_num,
+            get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+        )
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli("--model-path", str(tmp_path), "--gateway-workers", "2")
+
+    await parse_args(sys.argv[1:])
+
+    assert seen["tokenizer_worker_num"] == 2
+
+    seen.clear()
+    mock_sglang_cli(
+        "--model-path",
+        str(tmp_path),
+        "--gateway-workers",
+        "3",
+        "--tokenizer-worker-num",
+        "2",
+    )
+    with pytest.raises(ValueError, match="conflicts with --tokenizer-worker-num"):
+        await parse_args(sys.argv[1:])
+    assert not seen
+
+
 def _dcp_server_args_stub(**overrides):
     """Minimal resolved ServerArgs surface that parse_args reads."""
     stub = SimpleNamespace(
@@ -1384,6 +1423,18 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
 
     config = await parse_args(sys.argv[1:])
     assert config.dynamo_args.namespace == "custom-ns"
+
+
+@pytest.mark.asyncio
+async def test_rerank_worker_disables_radix_cache(monkeypatch, mock_sglang_cli):
+    """Rerank workers must run each sequence in one forward: no cached prefix, no chunks."""
+    monkeypatch.setattr(sglang_args, "fetch_model", AsyncMock())
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B", "--rerank-worker")
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.disable_radix_cache is True
+    assert config.server_args.chunked_prefill_size == -1
 
 
 @pytest.mark.parametrize(

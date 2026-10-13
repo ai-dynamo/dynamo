@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use super::children::{ChildInsertResult, NodeChildren};
 use super::state::CrtcNodeState;
 use super::types::*;
+use super::worker_set::WorkerSet;
 use crate::protocols::*;
 
 fn record_last_matched_hash(
@@ -269,7 +270,7 @@ impl Node {
         }
     }
 
-    fn has_full_coverage_only_matching(&self, workers: &FxHashSet<WorkerWithDpRank>) -> bool {
+    fn has_full_coverage_only_matching(&self, workers: &WorkerSet) -> bool {
         let state = self.state.read();
         state.worker_cutoffs.is_empty()
             && state.full_edge_workers == *workers
@@ -696,9 +697,9 @@ impl Node {
                         false
                     }
                 });
-            } else if state.full_edge_workers.len() != input.active_count {
-                // Equal sizes are treated as equal sets, skipping the intersection. This
-                // accepts an overcount after head-first eviction; see README "Equal-size skip".
+            } else if !input.active.same_members(&state.full_edge_workers) {
+                // Matching size and fingerprint skip the intersection; see README
+                // "Equal-set skip".
                 input.active.retain(|worker| {
                     if state.full_edge_workers.contains(worker) {
                         true
@@ -710,6 +711,8 @@ impl Node {
                         false
                     }
                 });
+            } else {
+                debug_assert_eq!(**input.active, *state.full_edge_workers);
             }
         }
 
