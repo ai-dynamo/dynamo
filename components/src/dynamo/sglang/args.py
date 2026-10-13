@@ -872,9 +872,8 @@ async def parse_args(args: list[str]) -> Config:
     else:
         # Dynamo expects disjoint output_ids; ServerArgs is read-only after resolution.
         parsed_args.incremental_streaming_output = True
-        # --gateway-workers N must reach SGLang as the raw tokenizer_worker_num:
-        # PortArgs.init_new reads the raw field, so a resolution-only override
-        # leaves the leader without a tokenizer worker IPC socket.
+        # SGLang's PortArgs.init_new reads the raw tokenizer_worker_num; setting
+        # only the resolved value leaves the leader without a tokenizer IPC socket.
         gateway_count = effective_gateway_workers(parsed_args, dynamo_config)
         if gateway_count > 1 and parsed_args.tokenizer_worker_num != gateway_count:
             parsed_args.tokenizer_worker_num = gateway_count

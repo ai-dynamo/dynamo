@@ -507,9 +507,8 @@ async def test_parse_args_enables_incremental_streaming_before_resolution(
 async def test_parse_args_gateway_workers_sets_raw_tokenizer_worker_num(
     monkeypatch, mock_sglang_cli
 ):
-    # SGLang's PortArgs.init_new reads the raw tokenizer_worker_num; a value that
-    # only lands in the resolved view leaves the leader without a worker IPC
-    # socket (DYN-4880).
+    # PortArgs.init_new reads the raw tokenizer_worker_num; a resolved-only
+    # value leaves the leader without a worker IPC socket (DYN-4880).
     seen = {}
 
     def resolve(parsed_args):
