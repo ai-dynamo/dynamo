@@ -33,29 +33,6 @@
     operator: Equal
     value: 'true'
     effect: NoSchedule
-- op: add
-  path: /spec/components/0/podTemplate/spec/volumes
-  value:
-  - name: shared-model-cache
-    persistentVolumeClaim:
-      claimName: shared-model-cache
-- op: add
-  path: /spec/components/0/podTemplate/spec/containers/0/volumeMounts
-  value:
-  - name: shared-model-cache
-    mountPath: /shared-model-cache
-- op: add
-  path: /spec/components/0/podTemplate/spec/containers/0/args/-
-  value: --model-name
-- op: add
-  path: /spec/components/0/podTemplate/spec/containers/0/args/-
-  value: RadixArk/GLM-5.3-Flash-NVFP4
-- op: add
-  path: /spec/components/0/podTemplate/spec/containers/0/args/-
-  value: --model-path
-- op: add
-  path: /spec/components/0/podTemplate/spec/containers/0/args/-
-  value: /shared-model-cache/hub/models--RadixArk--GLM-5.3-Flash-NVFP4/snapshots/f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
 - op: test
   path: /spec/components/1/name
   value: Worker
@@ -92,12 +69,3 @@
     periodSeconds: 10
     timeoutSeconds: 10
     failureThreshold: 18
-- op: add
-  path: /spec/components/1/podTemplate/spec/containers/0/livenessProbe
-  value:
-    httpGet:
-      path: /live
-      port: 9090
-    periodSeconds: 10
-    timeoutSeconds: 10
-    failureThreshold: 12

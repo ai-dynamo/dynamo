@@ -37,14 +37,11 @@ spec:
         - args:
           - -m
           - dynamo.frontend
-          - --router-mode
-          - kv
           - --http-host
           - 0.0.0.0
           - --http-port
           - "8000"
           - --trust-remote-code
-          - --router-kv-events
           - --kv-cache-block-size
           - "64"
           command:
@@ -54,6 +51,8 @@ spec:
             value: "1"
           - name: TRANSFORMERS_OFFLINE
             value: "1"
+          - name: DYN_ROUTER_MODE
+            value: kv
           image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
           imagePullPolicy: IfNotPresent
           name: main
@@ -72,7 +71,6 @@ spec:
           operator: Equal
           value: arm64
     replicas: 1
-    runtimeVersionOverride: 1.6.0
     type: frontend
   - name: PrefillWorker
     podTemplate:
@@ -80,21 +78,21 @@ spec:
         labels:
           app.kubernetes.io/component: worker
           app.kubernetes.io/name: glm53-flash-sglang-disagg-gb200
+          dynamo-recipe-worker: glm53-flash-sglang-disagg-gb200
       spec:
         affinity:
           podAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  app.kubernetes.io/component: worker
-                  app.kubernetes.io/name: glm53-flash-sglang-disagg-gb200
+                  dynamo-recipe-worker: glm53-flash-sglang-disagg-gb200
               topologyKey: nvidia.com/gpu.clique
         containers:
         - args:
           - -m
           - dynamo.sglang
           - --enable-multimodal
-          - --frontend-decoding
+          - --mm-enable-dp-encoder
           - --model-path
           - RadixArk/GLM-5.3-Flash-NVFP4
           - --revision
@@ -158,7 +156,7 @@ spec:
           - --disaggregation-mode
           - prefill
           - --kv-events-config
-          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+          - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","topic":"kv-events"}'
           command:
           - python3
           env:
@@ -168,8 +166,6 @@ spec:
             value: "1"
           - name: TRANSFORMERS_OFFLINE
             value: "1"
-          - name: NCCL_DEBUG
-            value: INFO
           - name: NCCL_MNNVL_ENABLE
             value: "1"
           - name: NCCL_NVLS_ENABLE
@@ -234,7 +230,6 @@ spec:
           persistentVolumeClaim:
             claimName: shared-model-cache
     replicas: 2
-    runtimeVersionOverride: 1.6.0
     sharedMemorySize: 64Gi
     type: prefill
   - name: DecodeWorker
@@ -243,21 +238,21 @@ spec:
         labels:
           app.kubernetes.io/component: worker
           app.kubernetes.io/name: glm53-flash-sglang-disagg-gb200
+          dynamo-recipe-worker: glm53-flash-sglang-disagg-gb200
       spec:
         affinity:
           podAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  app.kubernetes.io/component: worker
-                  app.kubernetes.io/name: glm53-flash-sglang-disagg-gb200
+                  dynamo-recipe-worker: glm53-flash-sglang-disagg-gb200
               topologyKey: nvidia.com/gpu.clique
         containers:
         - args:
           - -m
           - dynamo.sglang
           - --enable-multimodal
-          - --frontend-decoding
+          - --mm-enable-dp-encoder
           - --model-path
           - RadixArk/GLM-5.3-Flash-NVFP4
           - --revision
@@ -325,7 +320,7 @@ spec:
           - --disaggregation-mode
           - decode
           - --kv-events-config
-          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+          - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","topic":"kv-events"}'
           command:
           - python3
           env:
@@ -335,8 +330,6 @@ spec:
             value: "1"
           - name: TRANSFORMERS_OFFLINE
             value: "1"
-          - name: NCCL_DEBUG
-            value: INFO
           - name: NCCL_MNNVL_ENABLE
             value: "1"
           - name: NCCL_NVLS_ENABLE
@@ -399,7 +392,6 @@ spec:
           persistentVolumeClaim:
             claimName: shared-model-cache
     replicas: 1
-    runtimeVersionOverride: 1.6.0
     sharedMemorySize: 64Gi
     type: decode
 ---

@@ -25,20 +25,17 @@ spec:
   - name: Frontend
     type: frontend
     replicas: 1
-    runtimeVersionOverride: 1.6.0
     podTemplate:
       spec:
         containers:
         - name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
           imagePullPolicy: IfNotPresent
           command:
           - python3
           args:
           - -m
           - dynamo.frontend
-          - --router-mode
-          - round-robin
           - --http-host
           - 0.0.0.0
           - --http-port
@@ -51,6 +48,8 @@ spec:
             value: '1'
           - name: HF_HOME
             value: /shared-model-cache
+          - name: DYN_ROUTER_MODE
+            value: round-robin
           ports:
           - name: http
             containerPort: 8000
@@ -61,7 +60,6 @@ spec:
   - name: Worker
     type: worker
     replicas: 1
-    runtimeVersionOverride: 1.6.0
     sharedMemorySize: 64Gi
     podTemplate:
       spec:
@@ -71,7 +69,7 @@ spec:
             claimName: shared-model-cache
         containers:
         - name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -80,8 +78,9 @@ spec:
           - dynamo.sglang
           - --enable-multimodal
           - --frontend-decoding
+          - --mm-enable-dp-encoder
           - --model-path
-          - /shared-model-cache/hub/models--RadixArk--GLM-5.3-Flash-NVFP4/snapshots/f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
+          - RadixArk/GLM-5.3-Flash-NVFP4
           - --revision
           - f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
           - --served-model-name
@@ -146,12 +145,12 @@ spec:
           env:
           - name: HF_HOME
             value: /shared-model-cache
+          - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+            value: '300'
           - name: HF_HUB_OFFLINE
             value: '1'
           - name: TRANSFORMERS_OFFLINE
             value: '1'
-          - name: NCCL_DEBUG
-            value: INFO
           - name: NCCL_MNNVL_ENABLE
             value: '0'
           - name: NCCL_NVLS_ENABLE
@@ -165,6 +164,13 @@ spec:
           ports:
           - name: system
             containerPort: 9090
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: system
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 60
           resources:
             requests:
               cpu: '16'

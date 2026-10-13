@@ -131,7 +131,7 @@ Deploy Z.AI's GLM-5.3-Flash with NVIDIA Dynamo using SGLang or vLLM. The SGLang 
 <div data-recipe-framework="sglang" data-sku="gb200">
 
 - A Kubernetes cluster with the Dynamo operator supporting `nvidia.com/v1beta1`. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
-- GB200 arm64 nodes with four available GPUs per worker Pod: 4 GPUs for aggregated serving or 12 GPUs for disaggregated serving.
+- GB200 arm64 nodes with four available GPUs per worker Pod: 4 GPUs for aggregated serving or 12 GPUs for 2P1D disaggregated serving.
 - The NVIDIA DRA driver and `resource.nvidia.com/v1beta1` ComputeDomain CRD. Disaggregated workers must fit in one NVLink clique; the overlay uses Pod affinity on the `nvidia.com/gpu.clique` node label.
 - Standalone Kustomize v5.8.1 and a checkout of this repository.
 - Access to `RadixArk/GLM-5.3-Flash-NVFP4` at revision `f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35`.
@@ -145,7 +145,7 @@ The scheduling component selects arm64 nodes and `nvidia.com/gpu.product=NVIDIA-
 
 - A Kubernetes cluster with the Dynamo operator supporting `nvidia.com/v1beta1` and four available B200 GPUs on one amd64 node. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - Standalone Kustomize v5.8.1 and a checkout of this repository.
-- A populated ReadWriteMany PVC named `shared-model-cache`, accessible from both frontend and worker Pods, containing `RadixArk/GLM-5.3-Flash-NVFP4` at revision `f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35`.
+- A populated ReadWriteMany PVC named `shared-model-cache`, accessible from the worker Pod, containing `RadixArk/GLM-5.3-Flash-NVFP4` at revision `f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35`.
 - The `inference` priority class, or a private overlay selecting your cluster's priority class.
 
 The `nscale` overlay selects amd64 nodes and `nvidia.com/gpu.product=NVIDIA-B200` for the worker. Both Pods tolerate `nvidia.com/gpu=true:NoSchedule`. Adapt placement and registry access to your cluster. This single-node recipe uses NVLink/NVLS with MNNVL disabled and creates no ComputeDomain or DRA channel claims.
@@ -225,7 +225,7 @@ kubectl wait --for=condition=Complete job/glm53-flash-nvfp4-model-download \
   -n "$NAMESPACE" --timeout=7200s
 ```
 
-All SGLang workers use offline mode. GB200 workers resolve the Hugging Face model ID and pinned revision from the shared cache; their frontends obtain metadata from workers without mounting the cache. The B200 overlay mounts the cache in both Pods and passes the pinned snapshot path explicitly to the frontend and worker.
+All SGLang workers resolve `--model-path RadixArk/GLM-5.3-Flash-NVFP4` and the pinned `--revision` from the shared cache with offline mode enabled. All SGLang frontends obtain model metadata from workers without mounting the cache.
 
 </div>
 
@@ -245,6 +245,8 @@ export RECIPE=recipes/glm-5.3-flash/sglang/agg-gb200-agentic
 export RECIPE=recipes/glm-5.3-flash/sglang/disagg-gb200-agentic
 ```
 
+The [base deployment](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/sglang/disagg-gb200-agentic/kustomize/base/deploy.yaml) runs two prefill workers and one decode worker (2P1D), using 12 GB200 GPUs in one NVLink clique.
+
 </div>
 
 Render and apply the selected GB200 overlay:
@@ -256,7 +258,7 @@ kubectl apply -f /tmp/glm53-sglang.yaml -n "$NAMESPACE"
 kubectl get dynamographdeployment,pods -n "$NAMESPACE"
 ```
 
-The overlay creates a ComputeDomain and connects its channel to the worker claims. Alternatively, apply the generated `"$RECIPE/deploy-gb200.yaml"` manifest. The [SGLang README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/sglang/README.md) documents the base/component layout and regeneration commands.
+The overlay creates a ComputeDomain and connects its channel to the worker claims. Alternatively, apply the generated `"$RECIPE/deploy-gb200.yaml"` manifest. The [SGLang README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/README.md#sglang) documents the base/component layout and regeneration commands.
 
 </div>
 
@@ -272,7 +274,7 @@ kubectl apply -f /tmp/glm53-sglang-b200.yaml -n "$NAMESPACE"
 kubectl get dynamographdeployment,pods -n "$NAMESPACE"
 ```
 
-Alternatively, apply the generated `"$RECIPE/deploy-nscale.yaml"` manifest. See the [SGLang README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/sglang/README.md) for overlay settings and regeneration commands.
+Alternatively, apply the generated `"$RECIPE/deploy-nscale.yaml"` manifest. See the [SGLang README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/README.md#sglang) for overlay settings and regeneration commands.
 
 </div>
 
@@ -371,15 +373,27 @@ curl --fail-with-body http://localhost:8000/v1/chat/completions \
   -d '{"model":"RadixArk/GLM-5.3-Flash-NVFP4","messages":[{"role":"user","content":"What is 2 + 2?"}],"max_tokens":128,"temperature":0}'
 ```
 
-The SGLang workers use the `glm45` reasoning parser and `glm47` tool-call parser. All three recipes enable `--enable-multimodal` and `--frontend-decoding` on every SGLang worker. Send text, image, or video content to the chat completions endpoint; the Dynamo frontend decodes images and videos before passing them to the backend.
+The SGLang workers use the `glm45` reasoning parser and `glm47` tool-call parser. All three recipes enable `--enable-multimodal` and `--mm-enable-dp-encoder`. Aggregated workers enable `--frontend-decoding`, so the Dynamo frontend decodes images and videos before passing them to the backend. Disaggregated workers omit `--frontend-decoding` on both prefill and decode workers. Send text, image, or video content to the chat completions endpoint.
 
 </div>
 
 ## Benchmark
 
-Performance results and benchmark manifests are not published for these targets. Benchmark the selected deployment with your workload before choosing concurrency and latency limits.
+<div data-recipe-framework="sglang" data-sku="b200 gb200">
 
-The SGLang recipes use real speculative verification by default. For GB200, an optional `synthetic-acceptance` Kustomize component reproduces the source configuration's acceptance length of `2.5657`. See the [benchmark reproduction instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/sglang/README.md#changes-from-the-source-configurations). Synthetic acceptance changes token verification; use it only for performance measurements, not accuracy evaluation.
+Use the [AIPerf benchmark guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/perf/README.md) and [benchmark manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/perf/perf.yaml) for agentic text trace replay. 
+
+### Performance Results
+
+The reported measurements use synthetic acceptance; the deployment bases use real speculative verification by default. 
+
+| Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| Agentic (15% subset) | SGLang | Aggregated (1 worker) | B200 | 56 | 579.1 | 50.7 | 189 |
+| Agentic (15% subset) | SGLang | Aggregated (1 worker) | GB200 | 56 | 590.34 | 51.05 | 316 |
+| Agentic (15% subset) | SGLang | Disaggregated (2P1D) | GB200 | 128 | 619.7 | 80.1 | 4,680 |
+
+</div>
 
 ## Compare All Targets
 
@@ -439,8 +453,9 @@ No controlled feature benchmark is linked to this recipe. Browse the [Feature Be
 
 ### SGLang
 
-- GB200 Kustomize components provide placement and ComputeDomain wiring; operator defaults supply health probes. The B200 `nscale` component provides amd64 placement, the `inference` priority class, frontend cache access, and explicit worker startup, readiness, and liveness probes.
-- GB200 disaggregated routing enables `--router-kv-events`. Both prefill and decode workers set `--kv-events-config` to a ZMQ publisher on `tcp://*:5557` with topic `kv-events`. The router block size and SGLang page size are both 64.
+- The pinned SGLang runtime image includes the cuDNN workaround for the vision encoder downsampling operation.
+- All worker bases set `DYN_HEALTH_CHECK_REQUEST_TIMEOUT=300` and an explicit `/live` liveness probe on port `system`, with period 5 seconds, timeout 4 seconds, and failure threshold 60. GB200 components provide placement and ComputeDomain wiring; startup and readiness probes use operator defaults.
+- GB200 disaggregated routing uses worker KV events. Both prefill and decode workers set `--kv-events-config` to a ZMQ publisher on `tcp://*:5557` with topic `kv-events`. The router block size and SGLang page size are both 64.
 - The GB200 default overlays omit the source configurations' `SGLANG_SIMULATE_ACC_*` variables. Add the optional component only when reproducing synthetic acceptance measurements.
 
 ## Source
@@ -450,7 +465,7 @@ No controlled feature benchmark is linked to this recipe. Browse the [Feature Be
 - vLLM disaggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/vllm/disagg-gb200-agentic/deploy.yaml)
 - vLLM aggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/vllm/agg-h200-agentic/deploy.yaml)
 - vLLM disaggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/vllm/disagg-h200-agentic/deploy.yaml)
-- SGLang guide: [README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/sglang/README.md)
+- SGLang guide: [README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/README.md#sglang)
 - SGLang aggregated GB200: [Kustomize overlay](https://github.com/ai-dynamo/dynamo/tree/main/recipes/glm-5.3-flash/sglang/agg-gb200-agentic/kustomize/overlays/gb200), [generated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/sglang/agg-gb200-agentic/deploy-gb200.yaml)
 - SGLang disaggregated GB200: [Kustomize overlay](https://github.com/ai-dynamo/dynamo/tree/main/recipes/glm-5.3-flash/sglang/disagg-gb200-agentic/kustomize/overlays/gb200), [generated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/sglang/disagg-gb200-agentic/deploy-gb200.yaml)
 - SGLang aggregated B200: [Kustomize overlay](https://github.com/ai-dynamo/dynamo/tree/main/recipes/glm-5.3-flash/sglang/agg-b200-agentic/kustomize/overlays/nscale), [generated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/sglang/agg-b200-agentic/deploy-nscale.yaml)

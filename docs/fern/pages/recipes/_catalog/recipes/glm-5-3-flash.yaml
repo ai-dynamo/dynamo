@@ -112,7 +112,7 @@ targets:
     count: 4
   runtime:
     framework: sglang
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
   model:
     hf_id: RadixArk/GLM-5.3-Flash-NVFP4
     revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
@@ -138,7 +138,7 @@ targets:
     count: 4
   runtime:
     framework: sglang
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
   model:
     hf_id: RadixArk/GLM-5.3-Flash-NVFP4
     revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
@@ -165,7 +165,7 @@ targets:
     count: 12
   runtime:
     framework: sglang
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
   model:
     hf_id: RadixArk/GLM-5.3-Flash-NVFP4
     revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
@@ -191,4 +191,4 @@ targets:
 related_benchmarks: []
 maintainer: null
 gaps:
-- Performance numbers are not published.
+- Published synthetic-acceptance measurements do not describe the default real-verification configurations.

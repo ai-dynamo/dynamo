@@ -36,6 +36,7 @@
     labels:
       app.kubernetes.io/name: glm53-flash-sglang-disagg-gb200
       app.kubernetes.io/component: worker
+      dynamo-recipe-worker: glm53-flash-sglang-disagg-gb200
 - op: add
   path: /spec/components/1/podTemplate/spec/nodeSelector
   value:
@@ -59,8 +60,7 @@
       requiredDuringSchedulingIgnoredDuringExecution:
       - labelSelector:
           matchLabels:
-            app.kubernetes.io/name: glm53-flash-sglang-disagg-gb200
-            app.kubernetes.io/component: worker
+            dynamo-recipe-worker: glm53-flash-sglang-disagg-gb200
         topologyKey: nvidia.com/gpu.clique
 - op: test
   path: /spec/components/2/name
@@ -71,6 +71,7 @@
     labels:
       app.kubernetes.io/name: glm53-flash-sglang-disagg-gb200
       app.kubernetes.io/component: worker
+      dynamo-recipe-worker: glm53-flash-sglang-disagg-gb200
 - op: add
   path: /spec/components/2/podTemplate/spec/nodeSelector
   value:
@@ -94,6 +95,5 @@
       requiredDuringSchedulingIgnoredDuringExecution:
       - labelSelector:
           matchLabels:
-            app.kubernetes.io/name: glm53-flash-sglang-disagg-gb200
-            app.kubernetes.io/component: worker
+            dynamo-recipe-worker: glm53-flash-sglang-disagg-gb200
         topologyKey: nvidia.com/gpu.clique
