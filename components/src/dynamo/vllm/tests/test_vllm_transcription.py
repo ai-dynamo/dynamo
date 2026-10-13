@@ -125,8 +125,9 @@ def test_generate_preserves_native_vllm_error_status():
 
 async def _assert_generate_preserves_native_vllm_error_status():
     # Imported here, as in test_realtime_handler, so collection does not need
-    # vLLM's serving modules.
-    from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
+    # vLLM's serving modules; skip where they are not installed.
+    protocol = pytest.importorskip("vllm.entrypoints.serve.engine.protocol")
+    ErrorInfo, ErrorResponse = protocol.ErrorInfo, protocol.ErrorResponse
 
     handler = make_handler()
     handler._run_with_cancellation = AsyncMock(

@@ -2079,6 +2079,13 @@ impl ModelManager {
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
     }
 
+    pub fn remove_transcriptions_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_transcriptions_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
     pub fn remove_generate_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let namespace = format!("__local_generate_{}", model);
         self.remove_worker_set(model, &namespace)
@@ -4457,6 +4464,22 @@ mod tests {
 
     /// Registers one model that occupies `model_type`. Returns false when this test has no
     /// way to occupy that unit, which is the signal the caller turns into a failure.
+    #[test]
+    fn test_add_get_remove_transcriptions_model_round_trip() {
+        let mm = ModelManager::new();
+        mm.add_transcriptions_model("stt", "0", Arc::new(UncalledEngine))
+            .unwrap();
+        assert!(mm.list_transcriptions_models().contains(&"stt".to_string()));
+        assert!(mm.get_transcriptions_engine("stt").is_ok());
+
+        mm.remove_transcriptions_model("stt").unwrap();
+        assert!(!mm.list_transcriptions_models().contains(&"stt".to_string()));
+        assert!(matches!(
+            mm.remove_transcriptions_model("stt"),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
+    }
+
     fn register_model_occupying(manager: &ModelManager, model_type: ModelType) -> bool {
         let name = "occupancy-probe";
         let outcome = if model_type == ModelType::Chat {

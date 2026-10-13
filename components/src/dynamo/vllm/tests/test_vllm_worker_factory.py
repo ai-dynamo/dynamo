@@ -4928,3 +4928,57 @@ async def test_transcription_worker_reuses_snapshot_engine(
     assert register_vllm_model.await_args.args[5] is vllm_config
     endpoint.serve_endpoint.assert_awaited_once()
     handler.cleanup.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_transcription_worker_publishes_metrics_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh transcription worker builds and publishes a stat logger factory,
+    as the realtime worker does, and removes its Prometheus temp dir on exit."""
+    endpoint = Mock()
+    endpoint.connection_id.return_value = "worker-1"
+    endpoint.serve_endpoint = AsyncMock()
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    prometheus_temp_dir = Mock()
+    vllm_config = Mock()
+    vllm_config.cache_config.num_gpu_blocks = 128
+    setup_vllm_engine = Mock(
+        return_value=(Mock(), vllm_config, Mock(), prometheus_temp_dir, Mock())
+    )
+    stat_logger_factory = Mock()
+    stat_logger_factory_cls = Mock(return_value=stat_logger_factory)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory", stat_logger_factory_cls
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", Mock(return_value=(0, 1))
+    )
+    factory = _make_factory(
+        setup_vllm_engine_fn=setup_vllm_engine,
+        register_vllm_model_fn=AsyncMock(),
+    )
+    handler = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.TranscriptionWorkerHandler",
+        Mock(return_value=handler),
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory.register_model_taint_route", Mock())
+    config = SimpleNamespace(
+        namespace="ns",
+        component="worker",
+        endpoint="generate",
+        served_model_name="whisper",
+        model="openai/whisper-tiny",
+    )
+
+    await factory._create_transcription_worker(runtime, config, asyncio.Event(), [])
+
+    stat_logger_factory_cls.assert_called_once_with(endpoint=endpoint)
+    assert setup_vllm_engine.call_args.args[1] is stat_logger_factory
+    stat_logger_factory.set_num_gpu_blocks_all.assert_called_once_with(128)
+    stat_logger_factory.init_publish.assert_called_once_with()
+    handler.cleanup.assert_called_once()
+    prometheus_temp_dir.cleanup.assert_called_once()

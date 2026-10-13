@@ -2052,7 +2052,7 @@ class WorkerFactory:
                 engine_client,
                 vllm_config,
                 _default_sampling_params,
-                _prometheus_temp_dir,
+                prometheus_temp_dir,
                 _component_gauges,
             ) = engine_setup
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
@@ -2061,11 +2061,25 @@ class WorkerFactory:
                 engine_client, vllm_config, fpm_worker_id
             )
         else:
-            engine_client, vllm_config, _, _, _ = self.setup_vllm_engine(
+            # Publish engine metrics like the realtime worker: without a stat
+            # logger factory the worker would report none.
+            stat_logger_factory = StatLoggerFactory(endpoint=generate_endpoint)
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                prometheus_temp_dir,
+                _component_gauges,
+            ) = self.setup_vllm_engine(
                 config,
-                None,
+                stat_logger_factory,
                 fpm_worker_id=fpm_worker_id,
             )
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        stat_logger_factory.set_num_gpu_blocks_all(
+            per_rank_kv_blocks(vllm_config.cache_config.num_gpu_blocks, dp_size) or 0
+        )
+        stat_logger_factory.init_publish()
         handler = TranscriptionWorkerHandler(
             runtime=runtime,
             engine=engine_client,
@@ -2104,6 +2118,8 @@ class WorkerFactory:
             raise
         finally:
             handler.cleanup()
+            if prometheus_temp_dir is not None:
+                prometheus_temp_dir.cleanup()
 
     async def _create_embedding_worker(
         self,
