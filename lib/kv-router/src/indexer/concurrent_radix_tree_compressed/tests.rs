@@ -11,14 +11,14 @@ use crate::test_utils::{
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-type DirectLookup = FxHashMap<WorkerWithDpRank, WorkerLookup>;
+type DirectLookup = LaneLookup;
 
 fn worker(worker_id: u64) -> WorkerWithDpRank {
     WorkerWithDpRank::new(worker_id, 0)
 }
 
 fn direct_lookup() -> DirectLookup {
-    FxHashMap::default()
+    LaneLookup::default()
 }
 
 fn stored_data(event: RouterEvent) -> KvCacheStoreData {
@@ -29,7 +29,15 @@ fn stored_data(event: RouterEvent) -> KvCacheStoreData {
 }
 
 fn worker_lookup_len(lookup: &DirectLookup, worker: WorkerWithDpRank) -> Option<usize> {
-    lookup.get(&worker).map(|worker_lookup| worker_lookup.len())
+    lookup.block_count(worker)
+}
+
+fn lookup_contains(
+    lookup: &DirectLookup,
+    worker: WorkerWithDpRank,
+    hash: ExternalSequenceBlockHash,
+) -> bool {
+    lookup.contains(worker, hash)
 }
 
 async fn index_block_count(index: &ThreadPoolIndexer<ConcurrentRadixTreeCompressed>) -> usize {
@@ -64,6 +72,7 @@ fn apply_direct(
     event: RouterEvent,
 ) {
     index.apply_event(lookup, event, None).unwrap();
+    lookup.assert_invariants();
 }
 
 fn assert_direct_score(
@@ -884,9 +893,7 @@ mod remove_tests {
         );
         let remove_hashes = remove_hashes_with_parent(&[1, 2], &[3, 4, 5]);
         let group_node = lookup0
-            .get(&worker0)
-            .and_then(|worker_lookup| worker_lookup.get(&remove_hashes[0]))
-            .cloned()
+            .node(worker0, remove_hashes[0])
             .expect("remove hash should point to the pre-split group node");
 
         apply_direct(
@@ -905,7 +912,15 @@ mod remove_tests {
             )],
         );
 
-        index.apply_removed_group(&mut lookup0, worker0, &group_node, &remove_hashes, 42);
+        // Only the head of the run is still on the pre-split node; the rest resolve
+        // through lookup repair onto the suffix.
+        assert!(group_node.contains_edge_hash(remove_hashes[0]));
+        assert!(!group_node.contains_edge_hash(remove_hashes[1]));
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_remove_event_with_parent(0, &[1, 2], &[3, 4, 5]),
+        );
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 2);
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
 
@@ -940,9 +955,7 @@ mod remove_tests {
         );
         let remove_hashes = remove_hashes_with_parent(&[1, 2, 3], &[4, 5]);
         let group_node = lookup0
-            .get(&worker0)
-            .and_then(|worker_lookup| worker_lookup.get(&remove_hashes[0]))
-            .cloned()
+            .node(worker0, remove_hashes[0])
             .expect("remove hash should point to the pre-split group node");
 
         apply_direct(
@@ -961,7 +974,18 @@ mod remove_tests {
             )],
         );
 
-        index.apply_removed_group(&mut lookup0, worker0, &group_node, &remove_hashes, 42);
+        // The whole run moved off the node the lookup still names, so the grouped
+        // removal declines without touching it and the remove path repairs instead.
+        assert!(
+            group_node
+                .remove_worker_for_leading_hashes(worker0, &remove_hashes)
+                .is_none()
+        );
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_remove_event_with_parent(0, &[1, 2, 3], &[4, 5]),
+        );
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 3);
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
         assert_eq!(worker_lookup_len(&lookup0, worker0), Some(3));
@@ -975,6 +999,181 @@ mod remove_tests {
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 4);
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
         assert_eq!(worker_lookup_len(&lookup0, worker0), Some(4));
+    }
+
+    /// Removing block 1 unlinks the subtree [2, 20, 21] while the worker's
+    /// lookup entries still name it. Re-storing [1] and [2, 20] puts 20 into a
+    /// new live node. Removing [20, 21] then resolves 21 to the unlinked node,
+    /// which also contains 20 but must not consume it: 20's lookup entry names
+    /// the live node, which still holds the worker's coverage of 20.
+    fn remove_after_partial_restore_of_unlinked_subtree(tail_first: bool) {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup = direct_lookup();
+        let mut removed = remove_hashes_with_parent(&[1, 2], &[20, 21]);
+        if tail_first {
+            removed.reverse();
+        }
+
+        for event in [
+            make_store_event(0, &[1, 30]),
+            make_store_event_with_parent(0, &[1], &[2, 20, 21]),
+            make_remove_event_with_parent(0, &[], &[1]),
+            make_store_event(0, &[1]),
+            make_store_event_with_parent(0, &[1], &[2, 20]),
+            remove_event(0, 0, 0, removed),
+        ] {
+            apply_direct(&index, &mut lookup, event);
+        }
+
+        assert_direct_score(&index, &[1, 2, 20], worker(0), 2);
+        // Neither evicted entry leaks; 1, 2 and the never-evicted 30 remain.
+        for hash in remove_hashes_with_parent(&[1, 2], &[20, 21]) {
+            assert!(!lookup_contains(&lookup, worker(0), hash));
+        }
+        assert_eq!(worker_lookup_len(&lookup, worker(0)), Some(3));
+    }
+
+    #[test]
+    fn tail_first_remove_after_partial_restore_of_unlinked_subtree() {
+        remove_after_partial_restore_of_unlinked_subtree(true);
+    }
+
+    #[test]
+    fn head_first_remove_after_partial_restore_of_unlinked_subtree() {
+        remove_after_partial_restore_of_unlinked_subtree(false);
+    }
+
+    /// Randomized differential check against sets of held blocks: worker 0's
+    /// score must never exceed its held prefix of the query. Worker 0 removes
+    /// one block or a held run in either order, leaving mid-chain holes that
+    /// later stores partially refill. The other workers share and split its
+    /// edges but evict only leaves, so the documented equal-size skip in
+    /// `find_matches` cannot credit worker 0 past its prefix. Workers are spread
+    /// over two event lanes, so splits also reach worker 0 through lazy repair.
+    #[test]
+    fn randomized_removes_never_overcount_held_prefix() {
+        const SEEDS: u64 = 32;
+        const OPS: usize = 300;
+        const WORKERS: u64 = 3;
+
+        for seed in 0..SEEDS {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let mut docs: Vec<Vec<u64>> = vec![(1..=16).collect()];
+            for d in 1..8 {
+                let parent = &docs[rng.usize(..docs.len())];
+                let mut doc = parent[..rng.usize(1..parent.len())].to_vec();
+                doc.extend((0..rng.u64(1..=8)).map(|i| 1000 * d + i));
+                docs.push(doc);
+            }
+            let seqs: Vec<Vec<u64>> = docs
+                .iter()
+                .map(|doc| compute_seq_hash_for_block(&local_hashes(doc)))
+                .collect();
+            let mut children = FxHashMap::<u64, Vec<u64>>::default();
+            for pair in seqs.iter().flat_map(|seq| seq.windows(2)) {
+                children.entry(pair[0]).or_default().push(pair[1]);
+            }
+
+            let index = ConcurrentRadixTreeCompressed::new();
+            let mut lanes = [direct_lookup(), direct_lookup()];
+            let mut held = vec![FxHashSet::<u64>::default(); WORKERS as usize];
+
+            for step in 0..OPS {
+                let w = rng.u64(..WORKERS);
+                let held_w = &mut held[w as usize];
+                let d = rng.usize(..docs.len());
+                let (doc, seq) = (&docs[d], &seqs[d]);
+                let held_positions: Vec<usize> = (0..seq.len())
+                    .filter(|&i| held_w.contains(&seq[i]))
+                    .collect();
+
+                let event = match rng.u32(..100) {
+                    0..50 => {
+                        let starts: Vec<usize> = (0..doc.len())
+                            .filter(|&s| s == 0 || held_w.contains(&seq[s - 1]))
+                            .collect();
+                        let start = starts[rng.usize(..starts.len())];
+                        let end = rng.usize(start + 1..=doc.len());
+                        held_w.extend(&seq[start..end]);
+                        make_store_event_with_parent(w, &doc[..start], &doc[start..end])
+                    }
+                    50..97 if w > 0 => {
+                        let leaves: Vec<usize> = held_positions
+                            .into_iter()
+                            .filter(|&i| {
+                                children
+                                    .get(&seq[i])
+                                    .is_none_or(|kids| !kids.iter().any(|kid| held_w.contains(kid)))
+                            })
+                            .collect();
+                        if leaves.is_empty() {
+                            continue;
+                        }
+                        let i = leaves[rng.usize(..leaves.len())];
+                        held_w.remove(&seq[i]);
+                        remove_event(w, step as u64, 0, vec![ExternalSequenceBlockHash(seq[i])])
+                    }
+                    50..97 if !held_positions.is_empty() => {
+                        let first = held_positions[rng.usize(..held_positions.len())];
+                        let mut positions = match rng.u8(..3) {
+                            0 => vec![first],
+                            _ => held_positions.into_iter().filter(|&i| i >= first).collect(),
+                        };
+                        if rng.bool() {
+                            positions.reverse();
+                        }
+                        let hashes = positions
+                            .into_iter()
+                            .map(|i| {
+                                held_w.remove(&seq[i]);
+                                ExternalSequenceBlockHash(seq[i])
+                            })
+                            .collect();
+                        remove_event(w, step as u64, 0, hashes)
+                    }
+                    97.. => {
+                        held_w.clear();
+                        make_clear_event_with_dp_rank(w, 0)
+                    }
+                    _ => continue,
+                };
+                let lane = &mut lanes[(w % 2) as usize];
+                let _ = index.apply_event(lane, event, None);
+                lane.assert_invariants();
+
+                // A lookup entry for a block the worker no longer holds is a leak.
+                for (lw, held_lw) in held.iter().enumerate() {
+                    let lane = &lanes[lw % 2];
+                    for &hash in seqs.iter().flatten() {
+                        assert!(
+                            held_lw.contains(&hash)
+                                || !lookup_contains(
+                                    lane,
+                                    worker(lw as u64),
+                                    ExternalSequenceBlockHash(hash)
+                                ),
+                            "seed={seed} step={step}: worker {lw} keeps a lookup entry for {hash}"
+                        );
+                    }
+                }
+
+                for (doc, seq) in docs.iter().zip(&seqs) {
+                    for len in 1..=doc.len() {
+                        let scores = index.find_matches_impl(&local_hashes(&doc[..len]), false);
+                        let reference = seq[..len]
+                            .iter()
+                            .take_while(|h| held[0].contains(h))
+                            .count();
+                        let score = scores.scores.get(&worker(0)).copied().unwrap_or(0);
+                        assert!(
+                            score as usize <= reference,
+                            "seed={seed} step={step} query={:?}: score {score} exceeds held prefix {reference}",
+                            &doc[..len],
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1448,9 +1647,8 @@ fn successful_repair_does_not_restore_scrubbed_other_worker_entries() {
     // A resolve-miss remove scrubs lookup state but cannot update coverage on
     // the node it failed to find. Model that boundary directly while keeping
     // the resolved live node's coverage intact.
-    let scrubbed_lookup = shared_lookup.get_mut(&scrubbed_worker).unwrap();
-    for hash in &suffix_hashes {
-        scrubbed_lookup.remove(hash);
+    for &hash in &suffix_hashes {
+        shared_lookup.remove(scrubbed_worker, hash);
     }
     assert_eq!(worker_lookup_len(&shared_lookup, scrubbed_worker), Some(2));
     assert_direct_score(&index, &[1, 2, 3, 4], scrubbed_worker, 4);
@@ -1466,16 +1664,304 @@ fn successful_repair_does_not_restore_scrubbed_other_worker_entries() {
         )
         .expect("repairing worker should resolve the split suffix");
 
-    let repairing_lookup = shared_lookup.get(&repairing_worker).unwrap();
-    for hash in &suffix_hashes {
-        assert!(Arc::ptr_eq(repairing_lookup.get(hash).unwrap(), &resolved));
+    for &hash in &suffix_hashes {
+        let entry = shared_lookup.node(repairing_worker, hash).unwrap();
+        assert!(Arc::ptr_eq(&entry, &resolved));
     }
 
-    let scrubbed_lookup = shared_lookup.get(&scrubbed_worker).unwrap();
     for hash in suffix_hashes {
         assert!(
-            !scrubbed_lookup.contains_key(&hash),
+            !shared_lookup.contains(scrubbed_worker, hash),
             "repair for another worker restored a scrubbed lookup entry"
         );
+    }
+    shared_lookup.assert_invariants();
+}
+
+mod lookup_redirect_tests {
+    use super::*;
+
+    /// Workers 0 and 1 both hold [1] -> [2, 20, 21]. Evicting [1] from both unlinks
+    /// [2, 20, 21] while their lookup entries still name it. Worker 0 then stores
+    /// [1] and [2, 20] again, on a new live node. Worker 1 stores behind 2 through
+    /// its stale entry, splitting the unlinked node into [2] and [20, 21], and
+    /// worker 0 evicts 21 and 20. Neither the split nor the lookup repair for 21
+    /// may repoint worker 0's entry for 20, which names the live node.
+    fn split_of_unlinked_node_keeps_live_entries(grouped: bool, same_lane: bool) {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lanes = [direct_lookup(), direct_lookup()];
+        let tail = remove_hashes_with_parent(&[1, 2], &[20, 21]);
+        let mut events = vec![
+            make_store_event(0, &[1, 30]),
+            make_store_event_with_parent(0, &[1], &[2, 20, 21]),
+            make_store_event(1, &[1]),
+            make_store_event_with_parent(1, &[1], &[2, 20, 21]),
+            make_remove_event_with_parent(0, &[], &[1]),
+            make_remove_event_with_parent(1, &[], &[1]),
+            make_store_event(0, &[1]),
+            make_store_event_with_parent(0, &[1], &[2, 20]),
+            make_store_event_with_parent(1, &[1, 2], &[26]),
+        ];
+        if grouped {
+            events.push(remove_event(0, 0, 0, vec![tail[1], tail[0]]));
+        } else {
+            events.push(remove_event(0, 0, 0, vec![tail[1]]));
+            events.push(remove_event(0, 1, 0, vec![tail[0]]));
+        }
+        for event in events {
+            let lane = if same_lane {
+                0
+            } else {
+                event.worker_id as usize
+            };
+            apply_direct(&index, &mut lanes[lane], event);
+        }
+
+        assert_direct_score(&index, &[1, 2, 20], worker(0), 2);
+        // Neither evicted entry leaks; 1, 2 and the never-evicted 30 remain.
+        for hash in tail {
+            assert!(!lookup_contains(&lanes[0], worker(0), hash));
+        }
+        assert_eq!(worker_lookup_len(&lanes[0], worker(0)), Some(3));
+    }
+
+    /// The splitting lane also holds worker 0, so the split's own lookup update
+    /// must leave worker 0's live entry alone.
+    #[test]
+    fn same_lane_split_of_unlinked_node_keeps_live_entries() {
+        for grouped in [true, false] {
+            split_of_unlinked_node_keeps_live_entries(grouped, true);
+        }
+    }
+
+    /// Worker 0's lane repairs its stale entry for 21 lazily, so the repair must
+    /// leave worker 0's live entry for 20 alone.
+    #[test]
+    fn cross_lane_repair_into_unlinked_suffix_keeps_live_entries() {
+        for grouped in [true, false] {
+            split_of_unlinked_node_keeps_live_entries(grouped, false);
+        }
+    }
+}
+
+mod fused_lookup_validation_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn repair_scans(index: &ConcurrentRadixTreeCompressed) -> u64 {
+        index
+            .bench_metrics
+            .lookup_repair_scans
+            .load(Ordering::Relaxed)
+    }
+
+    fn split_six_block_chain_at_three() -> (ConcurrentRadixTreeCompressed, DirectLookup) {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event(0, &[1, 2, 3, 4, 5, 6]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event(1, &[1, 2, 3, 4, 5, 6]),
+        );
+        // A store on another event thread splits the edge; lookup0 still names the
+        // prefix node for the moved suffix.
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event_with_parent(1, &[1, 2, 3], &[7]),
+        );
+        (index, lookup0)
+    }
+
+    #[test]
+    fn remove_with_stale_head_repairs_once_and_consumes_run_on_suffix() {
+        let (index, mut lookup0) = split_six_block_chain_at_three();
+        let worker0 = worker(0);
+        let worker1 = worker(1);
+        let prefix = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        let suffix = prefix.child_snapshot(LocalBlockHash(4)).unwrap();
+        let moved = remove_hashes_with_parent(&[1, 2, 3], &[4, 5, 6]);
+        assert!(Arc::ptr_eq(
+            &lookup0.node(worker0, moved[1]).unwrap(),
+            &prefix
+        ));
+        assert_eq!(repair_scans(&index), 0);
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            remove_event(0, 0, 0, moved[1..].to_vec()),
+        );
+
+        // One scan resolves the run head; the rest of the run is consumed on the
+        // suffix under the same lock instead of being resolved hash by hash.
+        assert_eq!(repair_scans(&index), 1);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 4);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+        assert_eq!(worker_lookup_len(&lookup0, worker0), Some(4));
+        // Head-ward repair pointed the surviving suffix entry at the suffix, so a
+        // later remove of it needs no second scan.
+        assert!(Arc::ptr_eq(
+            &lookup0.node(worker0, moved[0]).unwrap(),
+            &suffix
+        ));
+        apply_direct(&index, &mut lookup0, remove_event(0, 1, 0, vec![moved[0]]));
+        assert_eq!(repair_scans(&index), 1);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 3);
+        assert_eq!(worker_lookup_len(&lookup0, worker0), Some(3));
+    }
+
+    #[test]
+    fn store_with_stale_parent_reports_missing_and_repairs_once() {
+        let (index, mut lookup0) = split_six_block_chain_at_three();
+        let worker0 = worker(0);
+        let prefix = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        let continuation = stored_data(make_store_event_with_parent(0, &[1, 2, 3, 4, 5, 6], &[8]));
+        let parent_hash = continuation.parent_hash.unwrap();
+        assert!(Arc::ptr_eq(
+            &lookup0.node(worker0, parent_hash).unwrap(),
+            &prefix
+        ));
+        assert!(matches!(
+            prefix.parent_coverage(worker0, parent_hash),
+            ParentCoverage::Missing
+        ));
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event_with_parent(0, &[1, 2, 3, 4, 5, 6], &[8]),
+        );
+
+        assert_eq!(repair_scans(&index), 1);
+        assert_eq!(
+            index.edge_topology_for_test(),
+            vec![edge_topology(
+                &[1, 2, 3],
+                vec![
+                    edge_topology(&[4, 5, 6, 8], vec![]),
+                    edge_topology(&[7], vec![])
+                ],
+            )],
+        );
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6, 8], worker0, 7);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker(1), 6);
+    }
+
+    #[test]
+    fn store_with_resolved_but_uncovered_stale_parent_fails_without_spinning() {
+        let (index, mut lookup0) = split_six_block_chain_at_three();
+        let worker0 = worker(0);
+        let prefix = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        // A worker-removal sweep on another lane drops worker 0 from the tree while
+        // lookup0, which that sweep did not see, keeps the stale entry.
+        index.erase_worker_coverage(
+            &mut direct_lookup(),
+            WorkerRemovalTarget::WorkerId(worker0.worker_id),
+            true,
+        );
+        let continuation = make_store_event_with_parent(0, &[1, 2, 3, 4, 5, 6], &[8]);
+        let parent_hash = stored_data(continuation.clone()).parent_hash.unwrap();
+        assert!(Arc::ptr_eq(
+            &lookup0.node(worker0, parent_hash).unwrap(),
+            &prefix
+        ));
+
+        // Repair resolves the suffix but cannot rewrite the entry, because worker 0
+        // no longer covers the parent there. Re-reading the entry would spin.
+        let result = index.apply_event(&mut lookup0, continuation, None);
+
+        assert!(matches!(
+            result,
+            Err(KvCacheEventError::ParentBlockNotFound)
+        ));
+        assert_eq!(repair_scans(&index), 1);
+        assert!(lookup0.contains_worker(worker0));
+        assert!(lookup0.node(worker0, parent_hash).is_none());
+        lookup0.assert_invariants();
+    }
+
+    #[test]
+    fn store_with_detached_stale_parent_fails_without_spinning() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup1 = direct_lookup();
+        let mut lookup2 = direct_lookup();
+        apply_direct(&index, &mut lookup1, make_store_event(1, &[1, 2, 3, 4]));
+        apply_direct(&index, &mut lookup2, make_store_event(2, &[1, 2, 9]));
+        // Evicting the shared head for both workers detaches the split suffix, so
+        // lookup1's entries for [3, 4] name a node whose subtree no longer has them.
+        let head = remove_hashes_with_parent(&[], &[1, 2]);
+        apply_direct(&index, &mut lookup1, remove_event(1, 0, 0, head.clone()));
+        apply_direct(&index, &mut lookup2, remove_event(2, 1, 0, head));
+        assert_eq!(worker_lookup_len(&lookup1, worker(1)), Some(2));
+
+        let result = index.apply_event(
+            &mut lookup1,
+            make_store_event_with_parent(1, &[1, 2, 3, 4], &[5]),
+            None,
+        );
+
+        assert!(matches!(
+            result,
+            Err(KvCacheEventError::ParentBlockNotFound)
+        ));
+        assert_eq!(repair_scans(&index), 0);
+    }
+
+    #[test]
+    fn anchor_flag_agrees_with_anchor_map() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup = direct_lookup();
+        apply_direct(&index, &mut lookup, make_store_event(0, &[1, 2]));
+        let regular = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        let regular_hashes = remove_hashes_with_parent(&[], &[1, 2]);
+
+        // Anchor ids borrow router-owned prefix hashes, so one can equal a block
+        // hash that a regular node also holds.
+        let shared_id = regular_hashes[1];
+        let private_id = ExternalSequenceBlockHash(0xA11C_0000);
+        for anchor_id in [shared_id, private_id] {
+            index
+                .apply_anchor(
+                    worker(1),
+                    AnchorTask {
+                        anchor_id,
+                        anchor_local_hash: LocalBlockHash(2),
+                        anchor_depth: 2,
+                    },
+                )
+                .unwrap();
+        }
+
+        let map_says = |hash: ExternalSequenceBlockHash, node: &SharedNode| {
+            index
+                .anchor_nodes
+                .get(&hash)
+                .is_some_and(|anchor| Arc::ptr_eq(anchor.value(), node))
+        };
+        let shared_anchor = index.anchor_nodes.get(&shared_id).unwrap().clone();
+        let private_anchor = index.anchor_nodes.get(&private_id).unwrap().clone();
+        let cases = [
+            (shared_id, &shared_anchor, true),
+            (private_id, &private_anchor, true),
+            (shared_id, &regular, false),
+            (regular_hashes[0], &regular, false),
+        ];
+        for (hash, node, expected) in cases {
+            assert_eq!(map_says(hash, node), expected);
+            assert_eq!(index.is_anchor_node(hash, node), expected);
+        }
+
+        // A store under the anchor takes the anchor path and never extends its edge.
+        let continuation = make_store_event_with_parent(3, &[1, 2], &[5]);
+        apply_direct(&index, &mut lookup, continuation);
+        assert_eq!(shared_anchor.edge_len_for_test(), 1);
+        assert_eq!(shared_anchor.children_snapshot().len(), 1);
     }
 }
