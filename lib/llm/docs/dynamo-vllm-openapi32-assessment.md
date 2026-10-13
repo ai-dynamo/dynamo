@@ -97,6 +97,77 @@ JSON `response_format` overrides `structured_outputs.json` in the tested case.
 Whitespace modifiers still allow spaces in the observed output, so acceptance
 does not prove their effect. Other combinations remain uninvestigated.
 
+### Multiple choices: a missing default is not a runtime default mismatch
+
+The `n` groups `REQUEST-f3ad9b33807f` (chat) and `REQUEST-34ff6995732a`
+(completion) report vLLM's `default: 1` versus no Dynamo default annotation.
+That difference alone does **not** imply different behavior when clients omit
+`n`: both real servers return one choice. This is a demonstrated false positive
+for the **omitted-default claim**, not a disposition of the entire `n` field.
+
+This historical follow-up used Dynamo `7d31af16e147e48f88914550da31cb7cc59ffbfa` plus the
+profile's startup prerequisite, unchanged vLLM
+`b04e80127bea278758743ca3277d40a234f73b09`, and the pinned model/tokenizer and
+parser configuration above. It reuses the runtime wheel built from the exact
+production-equivalent pre-commit tree; it is not a fresh committed-source build.
+That tested runtime is not an implementation dependency of this evidence-only change.
+
+To reproduce, ask chat to reply with exactly the word hello and set
+`chat_template_kwargs: {"enable_thinking": false}`. For completions, use
+`<|im_start|>user\nReply with exactly the word hello.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`
+as the prompt so the configured reasoner has already ended. Set `temperature: 1`, `seed: 0`,
+`max_tokens: 4`, and `allowed_token_ids: [22]` (the pinned tokenizer's single
+token for `7`). Send each row below to both endpoints with `stream: false` and
+`stream: true`. The greedy control overrides temperature to zero. Do not use
+greedy sampling for the successful multi-choice cases: both servers reject
+`n > 1` at temperature zero. The singleton token set makes content deterministic
+without introducing that invalid combination.
+
+| `n` input | Direct vLLM | Dynamo | Interpretation |
+| --- | --- | --- | --- |
+| Omitted or integer `1` | One choice | One choice | Effective default agrees |
+| Integer `2` or `128` | Requested choice count | Requested choice count | Valid multi-choice effect agrees |
+| `null`, chat | One choice | One choice | Valid nullable input agrees |
+| `null`, completion | HTTP 400 | One choice | Dynamo-only/additive admission |
+| Integer `129` | 129 choices | HTTP 400 | Confirmed limit divergence; decision pending |
+| String `"2"` | Two choices | HTTP 400 | Reference coercion outside its integer schema |
+| Integer `0` or `-1` | HTTP 400 | HTTP 400 | Shared rejection, not equal error envelopes |
+| Integer `2`, temperature `0` | HTTP 400 | HTTP 400 | Invalid greedy multi-choice control |
+
+All successful choices have indices `0..n-1`, text `7777`, and exactly one
+`length` finish per choice. Unary responses contain each index once. Streaming
+responses combine deltas only within an index and end with exactly one `[DONE]`,
+with no error events. This establishes the observed per-choice effect, not just
+HTTP acceptance. The 40-case matrix yields 80 captured HTTP exchanges: 18 matching
+valid pairs, four limit divergences, four coercion differences, two additive-null
+pairs, and 12 shared rejections.
+
+The limit is a separate policy question. Dynamo's
+[`validate_n`](../src/protocols/openai/validate.rs) caps `n` at 128, introduced in
+[#1674](https://github.com/ai-dynamo/dynamo/pull/1674). The same module also caps
+`batch_size × n` at 128, introduced in
+[#3953](https://github.com/ai-dynamo/dynamo/pull/3953). This probe uses single
+prompts; it does not qualify batch interactions or authorize changing either
+limit. Nor does vLLM's acceptance of a numeric string make that value part of its
+exported integer contract. Retain these differences instead of labeling the
+whole field compatible.
+
+The evidence archive contains capture run `20261012T222018Z-7d31af16e147-5bfbf6`
+and audit run `20261012T222607Z-7d31af16e147-e13c1b`. The first audit attempt
+failed because it assumed a direct `properties` request root; Dynamo uses
+`allOf`. The corrected audit follows that composition and rechecks all raw
+requests, headers and bodies. The capture remains a compatibility **failure**
+because of the real differences; the audit's success certifies the observations,
+not parity. No server was changed or rerun to repair the checker.
+
+For future tooling, retain absent-default and union-representation deltas as
+review candidates rather than asserting a runtime change. Add a fixture pairing
+an absent default annotation with verified identical omission behavior, while
+preserving separately observed effective-default differences, such as completion
+`max_tokens`. A schema
+annotation is not proof of effective server defaults; blanket suppression would
+hide real incompatibilities.
+
 Other endpoints and model-specific capabilities remain outside this text-model
 execution evidence. Missing response-body contracts, unsupported schema features,
 stream ordering/termination/cancellation, and unresolved candidate groups are
