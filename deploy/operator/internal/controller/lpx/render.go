@@ -252,6 +252,8 @@ func (r *graphReconciler) stampClientIdentity(ctx context.Context, dgd *v1beta1.
 			if err = controllerutil.SetControllerReference(dgd, identity, r.Scheme()); err == nil {
 				// An earlier reconcile may have created it before the cache observed it.
 				if err = r.Create(ctx, identity); apierrors.IsAlreadyExists(err) {
+					// Decode into a fresh object, so nothing generated above survives into the ownership check.
+					identity = &corev1.Secret{}
 					err = r.apiReader.Get(ctx, key, identity)
 				}
 			}
