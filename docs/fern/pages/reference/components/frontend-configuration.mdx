@@ -64,8 +64,9 @@ see the [TLS reference](tls-configuration.mdx#http-tls-and-mtls).
   A prefix matches whole path segments, and the longest prefix wins. Built-in routes always take
   precedence: only requests that no Frontend route matches are forwarded, with their method, path,
   query, end-to-end headers, and body. Responses, including SSE, are streamed back. WebSocket
-  upgrades are tunnelled over HTTP/1.1; other upgrade requests are forwarded as plain requests. Paths containing `.` or `..` segments,
-  including ones separated by an encoded `/` or `\`, or backslashes are not forwarded.
+  upgrades are tunnelled over HTTP/1.1; other upgrade requests are forwarded as plain requests.
+  Paths with `.` or `..` segments (even when separated by an encoded `/` or `\`) or with
+  backslashes are not forwarded.
 
   Request bodies are subject to `DYN_HTTP_BODY_LIMIT_MB` (`413`); a body without a known length is
   read within that limit before it is sent. The Frontend returns `502` if the upstream is

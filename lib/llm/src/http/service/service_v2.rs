@@ -89,28 +89,16 @@ async fn unmatched_route_fallback(
     axum::extract::State(state): axum::extract::State<UnmatchedRouteState>,
     request: axum::extract::Request,
 ) -> axum::response::Response {
-    let request = match &state.forward_routes {
-        Some(routes) if routes.covers(request.uri().path()) => {
-            // Admit forwarded work like inference: not while draining, and
-            // close the race with a drain that starts after the first check.
-            if !state.service.is_ready() {
-                return super::openai::ErrorMessage::_service_unavailable().into_response();
-            }
-            let permit = state.service.acquire_inflight();
-            if !state.service.is_ready() {
-                drop(permit);
-                return super::openai::ErrorMessage::_service_unavailable().into_response();
-            }
-            match routes
-                .forward(request, state.service.stopping_token().clone(), permit)
-                .await
-            {
-                Ok(response) => return response,
-                Err(request) => request,
-            }
-        }
-        _ => request,
-    };
+    if let Some(routes) = &state.forward_routes
+        && let Some(target) = routes.resolve(request.uri())
+    {
+        // Forwarded work is admitted like inference.
+        let Some(permit) = admit_inflight(&state.service) else {
+            return super::openai::ErrorMessage::_service_unavailable().into_response();
+        };
+        let cancel = state.service.stopping_token().clone();
+        return routes.forward(request, target, cancel, permit).await;
+    }
     let (method, uri) = (request.method(), request.uri());
     match state.anthropic_path.as_deref() {
         Some(path) if path_within_namespace(uri.path(), path) => {
@@ -127,16 +115,12 @@ fn path_within_namespace(path: &str, namespace: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
-async fn track_inflight_inference(
-    axum::extract::State(state): axum::extract::State<Arc<State>>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    use futures::StreamExt;
-
+/// Admits a request whose response counts as inflight until the returned
+/// permit drops, or refuses it (`None`) once the frontend is draining.
+fn admit_inflight(state: &State) -> Option<InflightPermit> {
     // Requests rejected during draining should not extend the drain window.
     if !state.is_ready() {
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return None;
     }
 
     let permit = state.acquire_inflight();
@@ -144,8 +128,21 @@ async fn track_inflight_inference(
     // before this request is counted as inflight.
     if !state.is_ready() {
         drop(permit);
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return None;
     }
+    Some(permit)
+}
+
+async fn track_inflight_inference(
+    axum::extract::State(state): axum::extract::State<Arc<State>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use futures::StreamExt;
+
+    let Some(permit) = admit_inflight(&state) else {
+        return super::openai::ErrorMessage::_service_unavailable().into_response();
+    };
 
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
