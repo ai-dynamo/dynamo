@@ -189,16 +189,6 @@ pub enum ArtifactMode {
     RelayStore,
 }
 
-impl ArtifactMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::InlineBase64 => "inline_base64",
-            Self::ObjectStore => "object_store",
-            Self::RelayStore => "relay_store",
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationArtifactUpload {
