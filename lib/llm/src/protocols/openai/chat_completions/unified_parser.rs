@@ -57,7 +57,6 @@ use crate::protocols::openai::GuidedToolConstraint;
 
 use super::NvCreateChatCompletionStreamResponse;
 
-#[cfg(test)]
 use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 
 /// The `dynamo-parsers-v2` unified family that serves Qwen3.
@@ -245,13 +244,49 @@ pub(crate) fn selected_batch_family(
     selected
 }
 
+/// The unified family to actually use for this request, or `None` to keep the
+/// existing split reasoning-parser + tool-call-jail path.
+///
+/// Besides the generation policy in [`selected_family`], a forced tool choice
+/// (`required`/named) is admitted to the unified parser whenever the configured
+/// parser pair selects one. In `V2` that is already [`selected_family`]'s arm;
+/// extending it to `Auto` keeps a forced request off the v1 immediate jail,
+/// which buffers the whole completion and only parses at EOF — a long forced
+/// generation then shows the client nothing but SSE keep-alives, and a
+/// `finish_reason=length` EOF can discard the entire completion. Non-forced
+/// requests keep their staged Auto routes, and `V1` keeps the legacy path for
+/// every choice.
 pub(crate) fn selected_request_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
-    _tool_choice: Option<&dynamo_protocols::types::ChatCompletionToolChoiceOption>,
+    tool_choice: Option<&ChatCompletionToolChoiceOption>,
     _constraint: &GuidedToolConstraint,
 ) -> Option<&'static str> {
-    selected_family(tool_call_parser, reasoning_parser)
+    let selected = selected_family(tool_call_parser, reasoning_parser);
+    if selected.is_some() {
+        return selected;
+    }
+    let forced_tool_choice = matches!(
+        tool_choice,
+        Some(ChatCompletionToolChoiceOption::Required)
+            | Some(ChatCompletionToolChoiceOption::Named(_))
+    ) && matches!(
+        super::tool_parser_v2::selected_version(),
+        Ok(super::tool_parser_v2::ParserVersion::Auto)
+    );
+    if !forced_tool_choice {
+        return None;
+    }
+    let configured = configured_family(tool_call_parser, reasoning_parser);
+    tracing::debug!(
+        target: "dynamo_unified",
+        ?tool_call_parser,
+        ?reasoning_parser,
+        ?configured,
+        ?tool_choice,
+        "unified parser path decision: auto mode admitted a forced tool choice"
+    );
+    configured
 }
 
 /// Whether the operator explicitly selected V2 parsing.
@@ -9238,6 +9273,13 @@ pub(crate) mod tests {
     }
     #[test]
     fn kimi_pair_routing_preserves_forced_modes() {
+        let forced = [
+            ChatCompletionToolChoiceOption::Required,
+            serde_json::from_value::<ChatCompletionToolChoiceOption>(serde_json::json!({
+                "type": "function", "function": {"name": "tool"}
+            }))
+            .unwrap(),
+        ];
         for (tool, reason, family) in [
             ("kimi_k2", "kimi_k25", KIMI_K2_UNIFIED_FAMILY),
             ("kimi_k3", "kimi_k3", KIMI_K3_UNIFIED_FAMILY),
@@ -9247,44 +9289,119 @@ pub(crate) mod tests {
         ] {
             assert_eq!(configured_family(Some(tool), Some(reason)), Some(family));
             let selected = parsers_v2_selected().then_some(family);
-            assert_eq!(
-                selected_request_family(
-                    Some(tool),
-                    Some(reason),
-                    None,
-                    &GuidedToolConstraint::None
-                ),
-                selected
-            );
-            assert_eq!(
-                selected_request_family(
-                    Some(tool),
-                    Some(reason),
-                    Some(&ChatCompletionToolChoiceOption::Auto),
-                    &GuidedToolConstraint::None
-                ),
-                selected
-            );
-            assert_eq!(
-                selected_request_family(
-                    Some(tool),
-                    Some(reason),
-                    Some(&ChatCompletionToolChoiceOption::Required),
-                    &GuidedToolConstraint::None
-                ),
-                selected
-            );
-            assert_eq!(
-                selected_request_family(
-                    Some(tool),
-                    Some(reason),
-                    Some(&ChatCompletionToolChoiceOption::None),
-                    &GuidedToolConstraint::None
-                ),
-                selected
-            );
+            for choice in [
+                None,
+                Some(&ChatCompletionToolChoiceOption::Auto),
+                Some(&ChatCompletionToolChoiceOption::None),
+            ] {
+                assert_eq!(
+                    selected_request_family(
+                        Some(tool),
+                        Some(reason),
+                        choice,
+                        &GuidedToolConstraint::None
+                    ),
+                    selected
+                );
+            }
+            // A forced tool choice never stays on the buffering v1 immediate
+            // jail when the pair has a unified parser: Auto mode admits it the
+            // same way an explicit V2 selection does.
+            for choice in forced.iter() {
+                assert_eq!(
+                    selected_request_family(
+                        Some(tool),
+                        Some(reason),
+                        Some(choice),
+                        &GuidedToolConstraint::None
+                    ),
+                    Some(family)
+                );
+            }
         }
         assert_eq!(configured_family(Some("kimi_k2"), Some("kimi_k3")), None);
+    }
+
+    #[test]
+    fn auto_forced_choice_admits_configured_families_to_unified() {
+        let named: ChatCompletionToolChoiceOption = serde_json::from_value(serde_json::json!({
+            "type": "function", "function": {"name": "get_weather"}
+        }))
+        .unwrap();
+        for (tool, reasoning, family) in [
+            ("deepseek_v4", "deepseek_v4", DEEPSEEK_V4_UNIFIED_FAMILY),
+            ("deepseek-v4", "deepseekv4", DEEPSEEK_V4_UNIFIED_FAMILY),
+            ("glm47", "glm45", GLM47_UNIFIED_FAMILY),
+            ("gemma4", "gemma-4", GEMMA4_UNIFIED_FAMILY),
+            ("qwen3_coder", "qwen3", QWEN3_UNIFIED_FAMILY),
+        ] {
+            // Non-forced choices keep the staged Auto routes of these families.
+            for choice in [
+                None,
+                Some(&ChatCompletionToolChoiceOption::Auto),
+                Some(&ChatCompletionToolChoiceOption::None),
+            ] {
+                assert_eq!(
+                    selected_request_family(
+                        Some(tool),
+                        Some(reasoning),
+                        choice,
+                        &GuidedToolConstraint::None
+                    ),
+                    parsers_v2_selected().then_some(family),
+                    "{tool}/{reasoning} {choice:?}"
+                );
+            }
+            // Forced choices are admitted to the incremental unified parser.
+            for choice in [&ChatCompletionToolChoiceOption::Required, &named] {
+                assert_eq!(
+                    selected_request_family(
+                        Some(tool),
+                        Some(reasoning),
+                        Some(choice),
+                        &GuidedToolConstraint::None
+                    ),
+                    Some(family),
+                    "{tool}/{reasoning} {choice:?}"
+                );
+            }
+        }
+        // deepseek_v41 remains selected for every choice in Auto.
+        for choice in [
+            None,
+            Some(&ChatCompletionToolChoiceOption::Auto),
+            Some(&ChatCompletionToolChoiceOption::Required),
+            Some(&named),
+        ] {
+            assert_eq!(
+                selected_request_family(
+                    Some(DEEPSEEK_V41_UNIFIED_FAMILY),
+                    Some(DEEPSEEK_V41_UNIFIED_FAMILY),
+                    choice,
+                    &GuidedToolConstraint::None
+                ),
+                Some(DEEPSEEK_V41_UNIFIED_FAMILY)
+            );
+        }
+        // No unified family configured: a forced choice must not invent one.
+        assert_eq!(
+            selected_request_family(
+                Some("hermes"),
+                Some("hermes"),
+                Some(&ChatCompletionToolChoiceOption::Required),
+                &GuidedToolConstraint::None
+            ),
+            None
+        );
+        assert_eq!(
+            selected_request_family(
+                Some("deepseek_v4"),
+                Some("hermes"),
+                Some(&ChatCompletionToolChoiceOption::Required),
+                &GuidedToolConstraint::None
+            ),
+            None
+        );
     }
 
     #[test]
@@ -10151,7 +10268,6 @@ pub(crate) mod tests {
                 None,
                 Some(ChatCompletionToolChoiceOption::Auto),
                 Some(ChatCompletionToolChoiceOption::None),
-                Some(ChatCompletionToolChoiceOption::Required),
             ] {
                 for constraint in [
                     GuidedToolConstraint::None,
@@ -10169,6 +10285,36 @@ pub(crate) mod tests {
                             &constraint
                         ),
                         selected_family(Some(tool), Some(reason))
+                    );
+                }
+            }
+            // A forced tool choice is also admitted to the unified parser in
+            // Auto mode; only the staging of non-forced requests differs.
+            let named = ChatCompletionToolChoiceOption::Named(
+                dynamo_protocols::types::ChatCompletionNamedToolChoice {
+                    r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+                    function: dynamo_protocols::types::FunctionName {
+                        name: "write_file".into(),
+                    },
+                },
+            );
+            for choice in [Some(ChatCompletionToolChoiceOption::Required), Some(named)] {
+                for constraint in [
+                    GuidedToolConstraint::None,
+                    GuidedToolConstraint::StructuralTag,
+                    GuidedToolConstraint::GuidedJsonRequired,
+                    GuidedToolConstraint::GuidedJsonNamed {
+                        tool_name: "write_file".into(),
+                    },
+                ] {
+                    assert_eq!(
+                        selected_request_family(
+                            Some(tool),
+                            Some(reason),
+                            choice.as_ref(),
+                            &constraint
+                        ),
+                        Some(family)
                     );
                 }
             }

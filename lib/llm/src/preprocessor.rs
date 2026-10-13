@@ -8694,7 +8694,17 @@ mod tests {
                 {
                     assert!(matches!(route, ToolProcessingRoute::MuseUnified(_)));
                 } else {
-                    assert!(!matches!(route, ToolProcessingRoute::Unified(_)));
+                    // A forced choice leaves the buffering v1 immediate jail for
+                    // the incremental unified parser even in Auto mode.
+                    let forced = choice == "required" || choice.is_object();
+                    if forced {
+                        assert!(
+                            matches!(route, ToolProcessingRoute::Unified(actual) if actual == family),
+                            "{family} {choice}"
+                        );
+                    } else {
+                        assert!(!matches!(route, ToolProcessingRoute::Unified(_)));
+                    }
                 }
             }
             if unified_parser::selected_family(tool, reason).is_none() {
@@ -9566,6 +9576,216 @@ mod tests {
         );
     }
 
+    fn streaming_chunk_choices(
+        payload: serde_json::Value,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        Annotated::from_data(serde_json::from_value(payload).unwrap())
+    }
+
+    fn streaming_content_chunk(content: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        streaming_chunk_choices(serde_json::json!({
+            "id":"test", "object":"chat.completion.chunk", "created":0,
+            "model":"test",
+            "choices":[{"index":0,"delta":{"content":content},"finish_reason":null}]
+        }))
+    }
+
+    fn streaming_finish_chunk(reason: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        streaming_chunk_choices(serde_json::json!({
+            "id":"test", "object":"chat.completion.chunk", "created":0,
+            "model":"test",
+            "choices":[{"index":0,"delta":{},"finish_reason":reason}]
+        }))
+    }
+
+    fn deepseek_v4_preprocessor() -> Arc<OpenAIPreprocessor> {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        card.runtime_config.tool_call_parser = Some("deepseek_v4".to_string());
+        card.runtime_config.reasoning_parser = Some("deepseek_v4".to_string());
+        OpenAIPreprocessor::new(card).unwrap()
+    }
+
+    // Forced tool_choice on a family with an incremental (unified) parser must
+    // not regress into the v1 immediate jail's buffer-to-EOF behavior: the
+    // guided-decoding payload streams as reasoning plus call envelopes when the
+    // backend honors the grammar, and both the reasoning and the tool-call
+    // argument deltas must reach the client while generation is in flight — not
+    // one burst at stream end.
+    #[tokio::test]
+    async fn deepseek_v4_forced_choice_streams_tool_calls_incrementally() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::deepseek_v4_forced_choice_streams_tool_calls_incrementally"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let preprocessor = deepseek_v4_preprocessor();
+        let request = parser_route_test_request(ChatCompletionToolChoiceOption::Required);
+        // Reasoning delimiters written as escapes so the marker bytes are
+        // unambiguous in source control and diff tools.
+        let think_open = "\u{3c}think\u{3e}";
+        let think_close = "\u{3c}/think\u{3e}";
+        // The `required` guided payload: an array of call envelopes, split
+        // across wire chunks the way an engine streams its tokens.
+        let pieces = [
+            think_open,
+            "reason",
+            "ing thoroughly",
+            think_close,
+            "[{\"name\":\"get_weather\",",
+            "\"parameters\":{\"city\":\"Par",
+            "is\",",
+            "\"unit\":\"Celsius\"}}]",
+        ];
+        let chunks = pieces
+            .iter()
+            .map(|piece| streaming_content_chunk(piece))
+            .chain([streaming_finish_chunk("stop")])
+            .collect::<Vec<_>>();
+        let output = preprocessor
+            .postprocessor_parsing_stream(stream::iter(chunks), &request, false, false)
+            .unwrap();
+        let events = output.collect::<Vec<_>>().await;
+
+        let mut saw_reasoning = false;
+        let mut first_tool_chunk: Option<usize> = None;
+        let mut finish_chunk: Option<usize> = None;
+        let mut tool_chunks = 0usize;
+        for (index, event) in events.iter().enumerate() {
+            let Some(data) = event.data.as_ref() else {
+                continue;
+            };
+            for choice in &data.inner.choices {
+                if choice
+                    .delta
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|reasoning| !reasoning.is_empty())
+                {
+                    saw_reasoning = true;
+                }
+                let carries_tool_calls = choice
+                    .delta
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty());
+                if carries_tool_calls {
+                    tool_chunks += 1;
+                    first_tool_chunk.get_or_insert(index);
+                }
+                if choice.finish_reason.is_some() {
+                    finish_chunk.get_or_insert(index);
+                }
+            }
+        }
+        assert!(saw_reasoning, "reasoning must stream before the tool call");
+        let first_tool_chunk =
+            first_tool_chunk.expect("the stream must emit tool-call deltas at all");
+        let finish_chunk = finish_chunk.expect("the stream must carry a finish_reason chunk");
+        assert!(
+            first_tool_chunk < finish_chunk,
+            "tool-call deltas must be released while the stream is in flight, not at EOF"
+        );
+        assert!(
+            tool_chunks >= 2,
+            "argument fragments must arrive progressively; saw {tool_chunks} tool-call chunks"
+        );
+
+        let result =
+            crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply(
+                stream::iter(events),
+                crate::protocols::openai::ParsingOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.inner.choices[0].finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+        let calls = result.inner.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments).unwrap(),
+            serde_json::json!({"city":"Paris","unit":"Celsius"})
+        );
+    }
+
+    // `finish_reason=length` under a forced tool_choice must not silently
+    // discard the whole completion: whatever the parser already committed to
+    // the client stays delivered, and only the truncated tail is dropped.
+    #[tokio::test]
+    async fn deepseek_v4_forced_choice_length_eof_keeps_committed_calls() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::deepseek_v4_forced_choice_length_eof_keeps_committed_calls"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let preprocessor = deepseek_v4_preprocessor();
+        let request = parser_route_test_request(ChatCompletionToolChoiceOption::Required);
+        let think_open = "\u{3c}think\u{3e}";
+        let think_close = "\u{3c}/think\u{3e}";
+        // Two complete call envelopes, then max_tokens interrupts a third one
+        // in the middle of its argument value.
+        let pieces = [
+            think_open,
+            "reasoning",
+            " thoroughly",
+            think_close,
+            "[{\"name\":\"get_weather\",\"parameters\":{\"city\":\"Paris\"}},",
+            "{\"name\":\"get_weather\",\"parameters\":{\"city\":\"Tokyo\"}},",
+            "{\"name\":\"get_weather\",\"parameters\":{\"city\":\"Tok",
+        ];
+        let chunks = pieces
+            .iter()
+            .map(|piece| streaming_content_chunk(piece))
+            .chain([streaming_finish_chunk("length")])
+            .collect::<Vec<_>>();
+        let output = preprocessor
+            .postprocessor_parsing_stream(stream::iter(chunks), &request, false, false)
+            .unwrap();
+        let events = output.collect::<Vec<_>>().await;
+
+        let tool_chunks = events
+            .iter()
+            .filter(|event| {
+                event.data.as_ref().is_some_and(|data| {
+                    data.inner.choices.iter().any(|choice| {
+                        choice
+                            .delta
+                            .tool_calls
+                            .as_ref()
+                            .is_some_and(|calls| !calls.is_empty())
+                    })
+                })
+            })
+            .count();
+        assert!(
+            tool_chunks > 0,
+            "the committed call must be delivered, not dropped wholesale at length EOF"
+        );
+        let saw_length = events.iter().any(|event| {
+            event.data.as_ref().is_some_and(|data| {
+                data.inner.choices.iter().any(|choice| {
+                    choice.finish_reason == Some(dynamo_protocols::types::FinishReason::Length)
+                })
+            })
+        });
+        assert!(
+            saw_length,
+            "the length finish_reason must survive the parser"
+        );
+    }
+
     #[tokio::test]
     async fn muse_prompt_prefill_follows_request_route() {
         const CHILD: &str = "DYNAMO_MUSE_PREFILL_ROUTE_CHILD";
@@ -9623,7 +9843,10 @@ mod tests {
                         let route = preprocessor
                             .tool_processing_route(&request, &constraint)
                             .unwrap();
-                        let unified = explicit_v2 || (!structural_tag && !forced);
+                        // A forced choice routes through the incremental unified
+                        // parser (Auto mirrors V2's forced-choice semantics); a
+                        // non-forced choice stays on muse's staged Auto route.
+                        let unified = explicit_v2 || forced || !structural_tag;
                         assert_eq!(
                             matches!(
                                 route,
@@ -9994,6 +10217,16 @@ mod tests {
             let preprocessor = OpenAIPreprocessor::new(card).unwrap();
             let is_default_v2 = family == "deepseek_v41";
             for choice in &choices {
+                // A forced tool choice routes through the incremental unified
+                // parser even in Auto mode (Auto mirrors V2's forced-choice
+                // semantics instead of leaving the request on the v1 immediate
+                // jail, which buffers the whole completion with no progress
+                // deltas until EOF).
+                let forced = matches!(
+                    choice,
+                    ChatCompletionToolChoiceOption::Required
+                        | ChatCompletionToolChoiceOption::Named(_)
+                );
                 for structural_tag in [false, true] {
                     for has_tools in [true, false] {
                         let mut request = parser_route_test_request(choice.clone());
@@ -10027,7 +10260,7 @@ mod tests {
                             );
                             continue;
                         }
-                        if is_default_v2 {
+                        if is_default_v2 || forced {
                             assert_eq!(
                                 route,
                                 ToolProcessingRoute::Unified(family),
@@ -10045,6 +10278,85 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // Forced tool_choice must route through the incremental unified parser in
+    // default (Auto) parser mode whenever the configured family has one, while
+    // non-forced requests keep their staged Auto routes. The v1 immediate jail
+    // that Auto previously fell back to buffers the whole completion and only
+    // parses at EOF, so a long forced generation shows the client nothing but
+    // SSE keep-alives.
+    #[test]
+    fn auto_mode_routes_forced_tool_choice_through_incremental_parsers() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::auto_mode_routes_forced_tool_choice_through_incremental_parsers"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let named: ChatCompletionToolChoiceOption = serde_json::from_value(serde_json::json!({
+            "type": "function", "function": {"name": "get_weather"}
+        }))
+        .unwrap();
+        for (tool, reasoning, unified_family) in [
+            ("deepseek_v4", "deepseek_v4", "deepseek_v4"),
+            ("glm47", "glm45", "glm47"),
+        ] {
+            let mut card = ModelDeploymentCard::load_from_disk(model_path.clone(), None).unwrap();
+            card.runtime_config.tool_call_parser = Some(tool.to_string());
+            card.runtime_config.reasoning_parser = Some(reasoning.to_string());
+            let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+            for choice in [ChatCompletionToolChoiceOption::Required, named.clone()] {
+                let request = parser_route_test_request(choice.clone());
+                let constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
+                    &request,
+                    Some(tool),
+                    Some(reasoning),
+                    false,
+                )
+                .unwrap();
+                assert_eq!(
+                    preprocessor
+                        .tool_processing_route(&request, &constraint)
+                        .unwrap(),
+                    ToolProcessingRoute::Unified(unified_family),
+                    "{tool}/{reasoning} {choice:?}"
+                );
+            }
+            // Non-forced choices keep their staged Auto routes: the marker-based
+            // jail for `auto`, and passthrough for an explicit `none`.
+            for (choice, expected) in [
+                (
+                    ChatCompletionToolChoiceOption::Auto,
+                    ToolProcessingRoute::LegacyJail(Some(tool.to_string())),
+                ),
+                (
+                    ChatCompletionToolChoiceOption::None,
+                    ToolProcessingRoute::PassThrough,
+                ),
+            ] {
+                let request = parser_route_test_request(choice.clone());
+                let constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
+                    &request,
+                    Some(tool),
+                    Some(reasoning),
+                    false,
+                )
+                .unwrap();
+                assert_eq!(
+                    preprocessor
+                        .tool_processing_route(&request, &constraint)
+                        .unwrap(),
+                    expected,
+                    "{tool}/{reasoning} {choice:?}"
+                );
             }
         }
     }
