@@ -741,9 +741,9 @@ def run_parallel(
     # --- Scheduling state ---
     t0 = time.monotonic()
     stage_deadline = _stage_deadline()
+    own_children = frozenset(c.pid for c in psutil.Process().children())
     # Keeps orphaned test processes findable so the deadline can kill them.
     subreaper = stage_deadline is not None and _set_child_subreaper(True)
-    own_children = frozenset(c.pid for c in psutil.Process().children())
     if stage_deadline is not None:
         _print(
             f"Stage deadline in {stage_deadline - time.time():.0f}s "
