@@ -39,6 +39,10 @@ Before writing code, find or create the issue for the work and start from it.
 The issue carries the context, the discussion history, and the record of why
 the change exists; an agent pointed at the issue first inherits all of it.
 
+- **Existing ticket**: search first. When a Linear issue already tracks the
+  work (a `DYN-` flaky-test or QA ticket, a `DGH-` issue), reference it and do
+  not file a GitHub issue that restates it. A duplicate mirrors into DGH as a
+  second ticket for the same work.
 - **Community contributors**: create or claim a GitHub issue on
   `ai-dynamo/dynamo` (`gh issue create`). Contributions are expected to have
   one.
@@ -83,6 +87,9 @@ work issue for the change as well.
 The `PR Issue Link` check failing means no verifiable reference was found.
 Add one using the table above and edit the PR description; editing re-triggers
 the check. If no issue exists yet, create one first (see Start From an Issue).
+When the failure says Linear references cannot be verified for a fork PR, the
+author is outside the org: ask a maintainer for read collaborator access
+instead of filing a GitHub issue that duplicates the Linear one.
 While the check is advisory it does not block merges; its failure message
 names the date it becomes required.
 
