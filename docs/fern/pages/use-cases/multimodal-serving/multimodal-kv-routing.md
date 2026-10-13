@@ -226,8 +226,8 @@ Nemotron 3 Nano Omni exact image and video routing currently requires the vLLM b
 
 | Backend | Routing Path | Status |
 |---------|--------------|--------|
-| [vLLM](multimodal-vllm.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> |
-| [vLLM](multimodal-vllm.md#multimodal-kv-routing) | Python chat processor | <Badge intent="success" minimal>Yes</Badge> |
+| [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> |
+| [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Python chat processor | <Badge intent="success" minimal>Yes</Badge> |
 | SGLang | — | — |
 | TensorRT-LLM | — | — |
 
