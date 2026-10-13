@@ -1,0 +1,191 @@
+diff --git a/python/sglang/kernels/jit/csrc/attention/kda_prefill.cu b/python/sglang/kernels/jit/csrc/attention/kda_prefill.cu
+index 3b84b658abe0..66e2f71e89a6 100644
+--- a/python/sglang/kernels/jit/csrc/attention/kda_prefill.cu
++++ b/python/sglang/kernels/jit/csrc/attention/kda_prefill.cu
+@@ -3179,7 +3179,7 @@ static CUtensorMap enc2dgb(void* ptr, uint64_t rows, uint64_t cols) {
+ 
+ // Cached workspace, keyed by (device, T, nc_tot, H, npieces, N). The factor
+ // tensors are torch allocations (caching allocator -> stream-safe reuse,
+-// freed with the process). The CUDA tensor maps encode over these tensors'
++// freed when the cache is cleared). The CUDA tensor maps encode over these tensors'
+ // data pointers, which are stable for the cache entry's lifetime — so the
+ // maps are encoded ONCE here rather than per call (this IS the
+ // (pointer, shape) tensor-map cache; a fresh encode is only host-cheap ~us,
+@@ -3188,6 +3188,9 @@ static CUtensorMap enc2dgb(void* ptr, uint64_t rows, uint64_t cols) {
+ // lower-triangular cells, the TMA-read upper cells must stay zero.
+ // The gate map is the exception: g is a CALLER tensor, so its pointer is only
+ // stable while the allocator hands back the same block. One-entry memo.
++// Serving sees a new (T, N) on almost every batch and an entry is ~400 MiB at
++// 16K tokens and 16 heads, so the cache is cleared at kMaxWorkspaces entries.
++constexpr size_t kMaxWorkspaces = 4;
+ struct Workspace {
+   torch::Tensor P, u0, kdec, qdec, aqk_h, aqk_l, gC, pieceL, piecec, pflags;
+   torch::Tensor h0z;         // zeros initial state (lazy)
+@@ -3320,11 +3323,12 @@ static Route pick_route(const std::vector<int64_t>& cu, int64_t T, int64_t H, bo
+ 
+ static Workspace&
+ get_workspace(const torch::Device& dev, int64_t T, int64_t nc, int64_t H, int64_t npieces, int64_t N) {
+-  // guarded by the GIL (single writer); entries live for the process
++  // guarded by the GIL (single writer)
+   static std::map<std::array<int64_t, 6>, Workspace> cache;
+   const std::array<int64_t, 6> key{dev.index(), T, nc, H, npieces, N};
+   auto it = cache.find(key);
+   if (it != cache.end()) return it->second;
++  if (cache.size() >= kMaxWorkspaces) cache.clear();
+   Workspace ws;
+   const auto ob = torch::TensorOptions().dtype(torch::kBFloat16).device(dev);
+   const auto of = torch::TensorOptions().dtype(torch::kFloat).device(dev);
+diff --git a/python/sglang/srt/layers/attention/linear/kernels/kda_ptx.py b/python/sglang/srt/layers/attention/linear/kernels/kda_ptx.py
+index 1d5e07896866..4f59d76df9f0 100644
+--- a/python/sglang/srt/layers/attention/linear/kernels/kda_ptx.py
++++ b/python/sglang/srt/layers/attention/linear/kernels/kda_ptx.py
+@@ -68,6 +68,7 @@ def __init__(self):
+         # source tensor: this kernel instance is shared by every KDA layer.
+         self._param_flat = {}
+         self._unsupported_logged = False
++        self._no_lower_bound_logged = False
+         # (bucket, H, K, V, device) -> staging dict for ragged token counts.
+         self._staging = {}
+ 
+@@ -225,6 +226,9 @@ def extend(
+             )
+         eligible = (
+             not kwargs.get("is_spec_decode")
++            # Only the safe gate is supported: without a lower bound the
++            # per-chunk decay overflows fp32 exp and the kernel returns NaN.
++            and lower_bound is not None
+             # The native kernel cannot write the fp32 track snapshot buffer;
+             # a batch carrying one must take the Triton fallback, which
+             # forwards the snapshot arguments (see _triton_extend). Leaving
+@@ -235,6 +239,12 @@ def extend(
+             and supported_shape
+         )
+         if not eligible:
++            if lower_bound is None and not self._no_lower_bound_logged:
++                self._no_lower_bound_logged = True
++                logger.warning(
++                    "PTX KDA prefill needs a gate lower bound (safe gate), and "
++                    "this model has none. Falling back to Triton."
++                )
+             if shape_known and not supported_shape and not self._unsupported_logged:
+                 self._unsupported_logged = True
+                 logger.warning(
+diff --git a/test/registered/kernels/ops/attention/test_kda_prefill.py b/test/registered/kernels/ops/attention/test_kda_prefill.py
+index a15bac22a306..5fee89166d4c 100644
+--- a/test/registered/kernels/ops/attention/test_kda_prefill.py
++++ b/test/registered/kernels/ops/attention/test_kda_prefill.py
+@@ -203,6 +203,93 @@ def test_ptx_prefill(self):
+             atol=3e-2,
+         )
+ 
++    @torch.inference_mode()
++    def test_ptx_without_lower_bound_matches_triton(self):
++        """Without a gate lower bound (Kimi-Linear) the kernel's per-chunk decay
++        overflows to NaN; prefill must still return Triton's result."""
++        if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (
++            10,
++            3,
++        ):
++            self.skipTest("PTX KDA prefill requires GB300")
++
++        def run(kernel):
++            # Fresh inputs per call: Triton may mutate them.
++            q, k, v, gate, beta, _, dt_bias, state = _inputs(3, seq_len=256)
++            out = kernel.extend(
++                q=q,
++                k=k,
++                v=v,
++                g=gate,
++                beta=beta,
++                ssm_states=state,
++                cache_indices=torch.zeros(1, device="cuda", dtype=torch.int32),
++                query_start_loc=torch.tensor(
++                    [0, 256], device="cuda", dtype=torch.int32
++                ),
++                # exp(A_log) ~ 200, the top of Kimi-Linear-48B's first KDA layer.
++                A_log=torch.full((q.shape[2],), 5.3, device="cuda"),
++                dt_bias=dt_bias,
++                lower_bound=None,
++                beta_is_raw=True,
++                extend_seq_lens_cpu=[256],
++            )
++            return out, state
++
++        actual, actual_state = run(PtxKDAKernel())
++        expected, expected_state = run(TritonKDAKernel())
++        self.assertTrue(torch.isfinite(actual).all())
++        torch.testing.assert_close(
++            actual.float(), expected.float(), rtol=2e-2, atol=3e-2
++        )
++        torch.testing.assert_close(actual_state, expected_state, rtol=2e-2, atol=3e-2)
++
++    @torch.inference_mode()
++    def test_ptx_workspace_memory_is_bounded(self):
++        """Each new (tokens, sequences) shape gets a kernel workspace, and serving
++        sees a new shape almost every batch: the device memory they hold must stay
++        bounded instead of growing with every shape seen."""
++        if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (
++            10,
++            3,
++        ):
++            self.skipTest("PTX KDA prefill requires GB300")
++        q, k, v, gate, beta, a_log, dt_bias, _ = _inputs(4, seq_len=2048)
++        num_heads, chunks = q.shape[2], 2048 // 64
++        retained = []
++        prev = torch.cuda.memory_allocated()
++        for num_seqs in range(1, 17):
++            base, extra = divmod(chunks, num_seqs)
++            lens = [64 * (base + (i < extra)) for i in range(num_seqs)]
++            cu_cpu = torch.tensor([0, *lens], dtype=torch.int32).cumsum(0).int()
++            out, final_state = ptx_chunk_kda_fwd(
++                q=q,
++                k=k,
++                v=v,
++                g=gate,
++                beta=beta,
++                scale=q.shape[-1] ** -0.5,
++                initial_state=torch.zeros(num_seqs, num_heads, 128, 128, device="cuda"),
++                output_final_state=True,
++                cu_seqlens=cu_cpu.cuda(),
++                cu_seqlens_cpu=cu_cpu,
++                safe_gate=True,
++                lower_bound=-5.0,
++                use_gate_in_kernel=True,
++                A_log=a_log,
++                dt_bias=dt_bias,
++                use_qk_l2norm_in_kernel=True,
++                use_beta_sigmoid_in_kernel=True,
++            )[:2]
++            del out, final_state
++            torch.cuda.synchronize()
++            now = torch.cuda.memory_allocated()
++            retained.append(now - prev)
++            prev = now
++        # An unbounded cache keeps one more workspace per shape, 12 over the last
++        # 12 shapes; a bounded one holds a few whatever it held before the test.
++        self.assertLess(sum(retained[4:]), 4 * max(retained))
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/test/registered/unit/layers/attention/linear/kernels/test_kda_ptx.py b/test/registered/unit/layers/attention/linear/kernels/test_kda_ptx.py
+index 5509c7ef70e5..dc1c1929e732 100644
+--- a/test/registered/unit/layers/attention/linear/kernels/test_kda_ptx.py
++++ b/test/registered/unit/layers/attention/linear/kernels/test_kda_ptx.py
+@@ -52,6 +52,8 @@ def vals(offset):
+             ),
+             "A_log": torch.zeros(H, dtype=torch.float32),
+             "dt_bias": torch.zeros(H * D, dtype=torch.float32),
++            # Safe gate; without a lower bound every batch takes Triton.
++            "lower_bound": -5.0,
+             "extend_seq_lens_cpu": list(seq_lens),
+         }
+ 
+@@ -77,6 +79,7 @@ def test_batch_with_track_state_routes_to_triton(self):
+                 query_start_loc=x["query_start_loc"],
+                 A_log=x["A_log"],
+                 dt_bias=x["dt_bias"],
++                lower_bound=x["lower_bound"],
+                 return_intermediate_states=True,
+                 track_ssm_h_src=torch.tensor([1], dtype=torch.long),
+                 track_state=track_state,

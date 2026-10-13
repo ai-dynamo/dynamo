@@ -1,0 +1,51 @@
+diff --git a/python/sglang/srt/disaggregation/decode.py b/python/sglang/srt/disaggregation/decode.py
+index 2ee23a973011..5ccbf0de97cb 100644
+--- a/python/sglang/srt/disaggregation/decode.py
++++ b/python/sglang/srt/disaggregation/decode.py
+@@ -1713,6 +1713,9 @@ def _request_state_payload():
+             self.pending_reqs = [
+                 r for r in self.pending_reqs if id(r) not in failed_ids
+             ]
++            for decode_req in failed_reqs:
++                if decode_req.req.kv.holds_mamba and not decode_req.req.kv.holds_kv:
++                    release_kv_cache(decode_req.req, self.tree_cache, is_insert=False)
+ 
+         self.queue = [
+             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
+diff --git a/test/registered/unit/disaggregation/test_decode_queue_cleanup.py b/test/registered/unit/disaggregation/test_decode_queue_cleanup.py
+index 9a5fac457014..a997377e70c4 100644
+--- a/test/registered/unit/disaggregation/test_decode_queue_cleanup.py
++++ b/test/registered/unit/disaggregation/test_decode_queue_cleanup.py
+@@ -11,7 +11,7 @@
+ )
+ from sglang.srt.disaggregation.fake.conn import FakeKVManager, FakeKVReceiver
+ from sglang.srt.disaggregation.utils import DisaggregationMode
+-from sglang.srt.managers.schedule_batch import FINISH_ABORT
++from sglang.srt.managers.schedule_batch import FINISH_ABORT, ReqKvInfo
+ from sglang.srt.managers.scheduler import Scheduler
+ from sglang.srt.runtime_context import get_context, publish, reset_context
+ from sglang.srt.server_args import ServerArgs
+@@ -110,6 +110,7 @@ def test_prealloc_abort_clears_receiver_before_removing_request(self):
+         req = SimpleNamespace(
+             rid="abort-prealloc",
+             bootstrap_room=42,
++            kv=ReqKvInfo(),
+             finished_reason=None,
+             return_logprob=False,
+         )
+@@ -173,6 +174,7 @@ def __eq__(self, other):
+         req = SimpleNamespace(
+             rid="abort-shared",
+             finished_reason=FINISH_ABORT("aborted"),
++            kv=ReqKvInfo(),
+             return_logprob=False,
+         )
+         decode_req = SimpleNamespace(req=req, kv_receiver=receiver)
+@@ -214,6 +216,7 @@ def test_swa_reclaim_failure_rejects_only_request(self):
+         req = SimpleNamespace(
+             rid="swa-reclaim-failed",
+             origin_input_ids=[1, 2, 3],
++            kv=ReqKvInfo(),
+             output_ids=[],
+             finished_reason=None,
+             return_logprob=False,

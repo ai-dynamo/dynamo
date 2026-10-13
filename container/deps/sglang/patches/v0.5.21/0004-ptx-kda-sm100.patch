@@ -1,0 +1,469 @@
+diff --git a/python/sglang/kernels/jit/csrc/attention/kda_prefill.cu b/python/sglang/kernels/jit/csrc/attention/kda_prefill.cu
+index 66e2f71e89a6..56cf71e3dbc4 100644
+--- a/python/sglang/kernels/jit/csrc/attention/kda_prefill.cu
++++ b/python/sglang/kernels/jit/csrc/attention/kda_prefill.cu
+@@ -32,8 +32,10 @@
+ //   h_per_chunk is an optional preallocated per-chunk state output.
+ //
+ // Build (torch cpp_extension JIT):
+-//   -O3 -std=c++20 -gencode arch=compute_103a,code=sm_103a -use_fast_math
+-//   -lineinfo, link -lcuda (cuTensorMapEncodeTiled). sm_103a (GB300) only.
++//   -O3 -std=c++20 -gencode arch=compute_{100a,103a},code=sm_{100a,103a}
++//   (the device's arch) -use_fast_math -lineinfo, link -lcuda
++//   (cuTensorMapEncodeTiled). Only the tcgen05 cta_group::1 subset that sm_100a
++//   and sm_103a share is used, so both B200 and B300 run it.
+ 
+ #include <ATen/cuda/CUDAContext.h>
+ #include <c10/cuda/CUDAGuard.h>
+diff --git a/python/sglang/kernels/ops/attention/linear/kda_ptx_prefill/__init__.py b/python/sglang/kernels/ops/attention/linear/kda_ptx_prefill/__init__.py
+index beed204142b9..7da64e24d725 100644
+--- a/python/sglang/kernels/ops/attention/linear/kda_ptx_prefill/__init__.py
++++ b/python/sglang/kernels/ops/attention/linear/kda_ptx_prefill/__init__.py
+@@ -1,5 +1,5 @@
+ # SPDX-License-Identifier: Apache-2.0
+-"""Hand-written PTX/tcgen05 KDA chunked-prefill kernel (GB300 / sm_103a).
++"""Hand-written PTX/tcgen05 KDA chunked-prefill kernel (sm_100a / sm_103a).
+ 
+ Vendored from the upstream ``kda_prefill`` artifact (commit 33583615): the CUDA
+ source in ``kernels/jit/csrc/attention/kda_prefill.cu`` plus the FLA-signature
+@@ -10,6 +10,10 @@
+ The extension is JIT-compiled with ``torch.utils.cpp_extension`` on first use
+ (~1-2 min, cached under ``TORCH_EXTENSIONS_DIR``); concurrent TP ranks
+ serialize on torch's build lock and then load the cached .so.
++
++The kernel uses only the tcgen05 subset that sm_100a and sm_103a share, so it
++is built for whichever of the two the device is (arch-specific cubins do not
++run across them).
+ """
+ 
+ import os
+@@ -19,6 +23,9 @@
+ K = 128  # head dim (qk == v), fixed by the kernel
+ CHUNK = 64  # kernel chunk size, fixed
+ 
++# Compute capability -> build target: B200 / GB200 and B300 / GB300.
++SM_ARCHS = {(10, 0): "100a", (10, 3): "103a"}
++
+ _EXT_NAME = "kda_prefill_ptx"
+ _ext = None
+ 
+@@ -43,8 +50,16 @@ def load_ext():
+         stubs = os.path.join(
+             cpp_extension.CUDA_HOME or "/usr/local/cuda", "lib64", "stubs"
+         )
++        capability = torch.cuda.get_device_capability()
++        if capability not in SM_ARCHS:
++            raise RuntimeError(
++                "PTX KDA prefill needs SM100 or SM103, got "
++                f"SM{capability[0]}{capability[1]}"
++            )
++        arch = SM_ARCHS[capability]
+         _ext = load_extension_with_recovery(
+-            name=_EXT_NAME,
++            # One cached build per arch, so a shared extensions dir can hold both.
++            name=f"{_EXT_NAME}_sm{arch}",
+             sources=[src],
+             extra_cuda_cflags=[
+                 "-O3",
+@@ -52,7 +67,7 @@ def load_ext():
+                 "-use_fast_math",
+                 "-lineinfo",
+                 "-gencode",
+-                "arch=compute_103a,code=sm_103a",
++                f"arch=compute_{arch},code=sm_{arch}",
+             ],
+             extra_cflags=["-O3"],
+             extra_ldflags=[f"-L{stubs}", "-lcuda"],
+diff --git a/python/sglang/srt/layers/attention/linear/kda_backend.py b/python/sglang/srt/layers/attention/linear/kda_backend.py
+index 321646259423..be4f804ba05a 100644
+--- a/python/sglang/srt/layers/attention/linear/kda_backend.py
++++ b/python/sglang/srt/layers/attention/linear/kda_backend.py
+@@ -173,7 +173,7 @@ def __init__(
+             else:
+                 self.extend_kernel = triton_kernel
+                 rank0_log(
+-                    "PTX KDA prefill needs SM103 (GB300); falling back to Triton "
++                    "PTX KDA prefill needs SM100 or SM103; falling back to Triton "
+                     "extend."
+                 )
+         elif prefill_backend.is_nvidia_kda():
+@@ -196,7 +196,7 @@ def __init__(
+                 f"Unsupported KDA prefill backend: {prefill_backend}. "
+                 "KDA supports 'triton', 'helion', 'flashkda', 'cutedsl', "
+                 "'nvidia_kda', or 'ptx_kda' (cutedsl/nvidia_kda prefill need "
+-                "SM100, ptx_kda SM103)."
++                "SM100, ptx_kda SM100 or SM103)."
+             )
+ 
+         self.supports_packed_decode = getattr(
+diff --git a/python/sglang/srt/layers/attention/linear/kernels/kda_ptx.py b/python/sglang/srt/layers/attention/linear/kernels/kda_ptx.py
+index 4f59d76df9f0..a84e1d122f05 100644
+--- a/python/sglang/srt/layers/attention/linear/kernels/kda_ptx.py
++++ b/python/sglang/srt/layers/attention/linear/kernels/kda_ptx.py
+@@ -1,7 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ """PTX/tcgen05 KDA chunked-prefill backend (``--linear-attn-prefill-backend ptx_kda``).
+ 
+-Wraps the vendored hand-CUDA ``kda_ptx_prefill`` kernel (GB300 / sm_103a) through
++Wraps the vendored hand-CUDA ``kda_ptx_prefill`` kernel (sm_100a / sm_103a) through
+ its FLA-compatible ``chunk_kda_fwd`` interface. The kernel selects a fused
+ long-sequence route or a two-launch high-head/many-sequence route at the KDA
+ serving shape: K = V = 128, chunk 64.
+@@ -58,9 +58,11 @@ class PtxKDAKernel(LinearAttnKernelBase):
+     supports_track_state_snapshot: bool = True
+ 
+     def __init__(self):
+-        # tcgen05 + TMEM with sm_103a-only encodings: GB300 (SM103) only.
+-        self.supports_prefill = torch.cuda.is_available() and (
+-            torch.cuda.get_device_capability() == (10, 3)
++        from sglang.kernels.ops.attention.linear.kda_ptx_prefill import SM_ARCHS
++
++        # tcgen05 + TMEM: B200 / GB200 (SM100) and B300 / GB300 (SM103).
++        self.supports_prefill = (
++            torch.cuda.is_available() and torch.cuda.get_device_capability() in SM_ARCHS
+         )
+         self._fwd = None
+         self._triton = TritonKDAKernel()
+@@ -82,7 +84,7 @@ def _ensure_loaded(self):
+             logger.info("Building the PTX KDA prefill extension (first use, ~1-2 min)")
+             load_ext()
+             self._fwd = chunk_kda_fwd
+-            logger.info("Using PTX KDA chunked prefill (GB300 / sm_103a)")
++            logger.info("Using PTX KDA chunked prefill")
+ 
+     def decode(self, *args, **kwargs):
+         raise NotImplementedError("PtxKDAKernel is prefill-only")
+diff --git a/test/registered/e2e/models/test_glm53_flash_kda_ptx_prefill_blackwell.py b/test/registered/e2e/models/test_glm53_flash_kda_ptx_prefill_blackwell.py
+new file mode 100644
+index 000000000000..1a744e868a60
+--- /dev/null
++++ b/test/registered/e2e/models/test_glm53_flash_kda_ptx_prefill_blackwell.py
+@@ -0,0 +1,270 @@
++"""GLM-5.3-Flash accuracy parity for the PTX KDA prefill backend on Blackwell.
++
++``--linear-attn-prefill-backend ptx_kda`` selects the hand-written tcgen05
++chunked-prefill kernel, JIT-built for the running device's arch (sm_100a on
++B200, sm_103a on GB300 / B300). GLM-5.3-Flash is the target: its 34 KDA layers
++use the safe gate (``gate_lower_bound=-5``), the only gate mode the kernel
++handles. Without a lower bound (Kimi-Linear) the per-chunk decay overflows and
++the kernel returns NaN.
++
++Its failure modes are silent: the dispatcher swaps in Triton when it rejects
++the arch, and the wrapper hands individual batches to Triton (spec
++draft-extend, track-state snapshots, unsupported shapes, a kernel exception).
++None of that reaches the HTTP result, so this file
++
++* reads the server log to prove the dispatcher picked ``PtxKDAKernel`` and
++  that no batch fell back, and
++* scores the kernel against the same server on the default Triton prefill:
++
++  - GSM8K, 20-shot completion, greedy, 500 questions. The many-sequence
++    batches take the kernel's builder + chain route, and every batch has a new
++    shape, which is what exposes per-shape state in the kernel.
++  - Prompt logprobs of one 2040-token prefill (the head of
++    ``python/sglang/test/long_prompt.txt``), which takes the single-sequence
++    fused route through the wrapper's padding path (2040 is not a multiple of
++    the 64-token chunk). It stays below the DSA indexer's top-k (2048): past
++    that the sparse key selection is not run-to-run reproducible, and the
++    comparison would measure that instead of the KDA kernel.
++
++Server args follow the cookbook's Blackwell TP4 recipe with two changes, both
++made on the Triton and PTX servers alike:
++
++* ``--disable-radix-cache``. With the radix cache on, the mamba cache
++  strategy resolves to ``extra_buffer`` (``no_buffer`` needs page size 1, and
++  DSA pins 64), whose tracked prefill batches carry a track-state buffer; the
++  PTX wrapper routes exactly those batches to Triton, so the kernel under
++  test would barely run. It also sends every GSM8K few-shot prefix through
++  prefill instead of the cache.
++* ``--chunked-prefill-size 16384``, the B200 default, pinned so GB300 runs the
++  same batch sizes.
++
++    python -m pytest \\
++        test/registered/e2e/models/test_glm53_flash_kda_ptx_prefill_blackwell.py -v
++"""
++
++import math
++import os
++import tempfile
++import unittest
++from types import SimpleNamespace
++
++import requests
++import torch
++from transformers import AutoTokenizer
++
++import sglang.test
++from sglang.test.ci.ci_register import register_cuda_ci
++from sglang.test.run_eval import run_eval
++from sglang.test.test_utils import (
++    DEFAULT_URL_FOR_TEST,
++    CustomTestCase,
++    _wait_for_gpu_idle_in_ci,
++    is_in_ci,
++    popen_launch_server,
++    terminate_and_kill_process_tree,
++    try_cached_model,
++    write_github_step_summary,
++)
++
++# Measured on B200: 822 s for both servers, including the PTX extension build.
++register_cuda_ci(est_time=900, stage="nightly", runner_config="4-gpu-b200")
++register_cuda_ci(est_time=900, stage="nightly", runner_config="4-gpu-gb300")
++
++MODEL = os.environ.get("SGLANG_TEST_GLM53_FLASH_MODEL") or try_cached_model(
++    "zai-org/GLM-5.3-Flash"
++)
++# Offline hosts can point this at a local copy of the GSM8K test.jsonl.
++GSM8K_DATA_PATH = os.environ.get("SGLANG_TEST_GSM8K_DATA_PATH")
++SERVER_LAUNCH_TIMEOUT = 3600
++GSM8K_NUM_EXAMPLES = 500
++GSM8K_NUM_SHOTS = 20
++GSM8K_NUM_THREADS = 128
++# Collapse guard only; test_glm53_flash_b200.py owns the recipe's 0.93 floor.
++GSM8K_SCORE_FLOOR = 0.90
++# Measured gap 0.000 at 500 questions (0.930 / 0.930); 1 sigma is ~0.011.
++GSM8K_MAX_GAP = 0.03
++PROBE_TOKENS = 2040
++# Measured on B200 over the probe: mean |dlogprob| 0.080 and 0.2% of tokens
++# past 1 nat, identical across fresh and loaded servers because both backends
++# are bit-reproducible here. That is the kernels' numeric difference, amplified
++# by MoE routing; a wrong state or a NaN lands far above both bars.
++MAX_MEAN_ABS_DLOGPROB = 0.2
++MAX_FRAC_ABOVE_1NAT = 0.02
++
++LONG_PROMPT_PATH = os.path.join(
++    os.path.dirname(sglang.test.__file__), "long_prompt.txt"
++)
++
++COMMON_ARGS = [
++    "--tp-size",
++    "4",
++    "--dsa-prefill-backend",
++    "trtllm",
++    "--dsa-decode-backend",
++    "trtllm",
++    "--kv-cache-dtype",
++    "fp8_e4m3",
++    "--moe-runner-backend",
++    "flashinfer_trtllm",
++    "--chunked-prefill-size",
++    "16384",
++    "--disable-radix-cache",
++]
++PTX_ARGS = COMMON_ARGS + ["--linear-attn-prefill-backend", "ptx_kda"]
++
++DISPATCHER_PTX = "extend=PtxKDAKernel"
++DISPATCHER_TRITON = "extend=TritonKDAKernel"
++PTX_LOADED = "Using PTX KDA chunked prefill"
++FALLBACK_MARKERS = (
++    "falling back to Triton extend",  # dispatcher rejected the arch
++    "Falling back to Triton",  # wrapper: unsupported shape / dtype
++    "fell back to Triton",  # wrapper: kernel raised, state restored
++)
++
++
++def _ptx_supported() -> bool:
++    if not torch.cuda.is_available():
++        return False
++    from sglang.kernels.ops.attention.linear.kda_ptx_prefill import SM_ARCHS
++
++    return torch.cuda.get_device_capability() in SM_ARCHS
++
++
++class TestGLM53FlashKdaPtxPrefill(CustomTestCase):
++    """PTX KDA prefill vs Triton on the same weights: GSM8K and prompt logprobs."""
++
++    process = None
++    log_file = None
++
++    @classmethod
++    def setUpClass(cls):
++        if not _ptx_supported():
++            raise unittest.SkipTest("PTX KDA prefill requires SM100 or SM103")
++        cls.model = MODEL
++        cls.base_url = DEFAULT_URL_FOR_TEST
++        with open(LONG_PROMPT_PATH) as f:
++            text = f.read()
++        tokenizer = AutoTokenizer.from_pretrained(cls.model, trust_remote_code=True)
++        cls.probe_ids = tokenizer.encode(text)[:PROBE_TOKENS]
++
++    @classmethod
++    def tearDownClass(cls):
++        cls._stop_server()
++
++    @classmethod
++    def _stop_server(cls):
++        if cls.process is not None:
++            terminate_and_kill_process_tree(cls.process)
++            cls.process = None
++            _wait_for_gpu_idle_in_ci()
++        if cls.log_file is not None:
++            cls.log_file.close()
++            cls.log_file = None
++
++    @classmethod
++    def _start_server(cls, other_args):
++        cls._stop_server()
++        cls.log_file = tempfile.NamedTemporaryFile(
++            "w", prefix="kda_ptx_prefill_", suffix=".log", delete=False
++        )
++        cls.process = popen_launch_server(
++            cls.model,
++            cls.base_url,
++            timeout=SERVER_LAUNCH_TIMEOUT,
++            other_args=other_args,
++            return_stdout_stderr=(cls.log_file, cls.log_file),
++        )
++
++    @classmethod
++    def _server_log(cls) -> str:
++        cls.log_file.flush()
++        with open(cls.log_file.name) as f:
++            return f.read()
++
++    def _gsm8k(self) -> float:
++        requests.get(self.base_url + "/flush_cache")
++        args = SimpleNamespace(
++            base_url=self.base_url,
++            model=self.model,
++            eval_name="gsm8k",
++            api="completion",
++            max_tokens=512,
++            num_examples=GSM8K_NUM_EXAMPLES,
++            num_shots=GSM8K_NUM_SHOTS,
++            num_threads=GSM8K_NUM_THREADS,
++            gsm8k_data_path=GSM8K_DATA_PATH,
++        )
++        metrics = run_eval(args)
++        print(f"gsm8k {metrics=}")
++        return metrics["score"]
++
++    def _probe_logprobs(self) -> list:
++        requests.get(self.base_url + "/flush_cache")
++        response = requests.post(
++            self.base_url + "/generate",
++            json={
++                "input_ids": self.probe_ids,
++                "sampling_params": {"temperature": 0, "max_new_tokens": 1},
++                "return_logprob": True,
++                "logprob_start_len": 0,
++            },
++            timeout=300,
++        )
++        response.raise_for_status()
++        # Entries are [logprob, token_id, text]. The first token has no logprob,
++        # and the JSON encoder writes NaN as null, so count the nulls.
++        entries = response.json()["meta_info"]["input_token_logprobs"][1:]
++        logprobs = [lp for lp, *_ in entries]
++        num_null = sum(lp is None for lp in logprobs)
++        self.assertEqual(num_null, 0, f"{num_null} null (NaN) prompt logprobs")
++        self.assertEqual(len(logprobs), PROBE_TOKENS - 1)
++        return logprobs
++
++    def _run_backend(self, other_args):
++        self._start_server(other_args)
++        score = self._gsm8k()
++        logprobs = self._probe_logprobs()
++        log = self._server_log()
++        self._stop_server()
++        return score, logprobs, log
++
++    def test_ptx_prefill_matches_triton(self):
++        triton_score, triton_lp, triton_log = self._run_backend(COMMON_ARGS)
++        self.assertIn(DISPATCHER_TRITON, triton_log)
++
++        ptx_score, ptx_lp, ptx_log = self._run_backend(PTX_ARGS)
++
++        # The arch gate and the per-batch fallbacks only show in the log.
++        self.assertIn(DISPATCHER_PTX, ptx_log, "dispatcher did not pick PtxKDAKernel")
++        self.assertIn(PTX_LOADED, ptx_log, "PTX extension never ran a batch")
++        for marker in FALLBACK_MARKERS:
++            self.assertNotIn(marker, ptx_log, f"PTX prefill fell back: {marker}")
++
++        diff = [p - t for p, t in zip(ptx_lp, triton_lp)]
++        mean_abs = sum(abs(d) for d in diff) / len(diff)
++        frac_above_1 = sum(abs(d) > 1 for d in diff) / len(diff)
++        max_abs = max(abs(d) for d in diff)
++        # k3 (the KL estimator of kl_test_utils) is carried by a few tail tokens;
++        # reported for reference, not asserted.
++        k3 = sum(math.exp(d) - 1 - d for d in diff) / len(diff)
++
++        summary = (
++            f"gsm8k triton={triton_score:.3f} ptx_kda={ptx_score:.3f} "
++            f"gap={ptx_score - triton_score:+.3f} | {PROBE_TOKENS}-token prefill: "
++            f"mean|dlogprob|={mean_abs:.4f} frac>1nat={frac_above_1:.4f} "
++            f"max={max_abs:.3f} k3={k3:.2e}"
++        )
++        print(summary)
++        if is_in_ci():
++            write_github_step_summary(
++                f"### test_glm53_flash_kda_ptx_prefill\n{summary}\n"
++            )
++
++        self.assertGreaterEqual(ptx_score, GSM8K_SCORE_FLOOR)
++        self.assertGreaterEqual(ptx_score, triton_score - GSM8K_MAX_GAP)
++        self.assertLess(mean_abs, MAX_MEAN_ABS_DLOGPROB)
++        self.assertLess(frac_above_1, MAX_FRAC_ABOVE_1NAT)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/test/registered/kernels/ops/attention/test_kda_prefill.py b/test/registered/kernels/ops/attention/test_kda_prefill.py
+index 5fee89166d4c..00ce31bc8c3e 100644
+--- a/test/registered/kernels/ops/attention/test_kda_prefill.py
++++ b/test/registered/kernels/ops/attention/test_kda_prefill.py
+@@ -8,6 +8,9 @@
+ from sglang.kernels.ops.attention.linear.kda_nvidia_prefill import (
+     chunk_kda_fwd as nvidia_chunk_kda_fwd,
+ )
++from sglang.kernels.ops.attention.linear.kda_ptx_prefill import (
++    SM_ARCHS,
++)
+ from sglang.kernels.ops.attention.linear.kda_ptx_prefill import (
+     chunk_kda_fwd as ptx_chunk_kda_fwd,
+ )
+@@ -16,10 +19,14 @@
+ from sglang.test.ci.ci_register import register_cuda_ci
+ from sglang.test.test_utils import CustomTestCase
+ 
+-register_cuda_ci(est_time=180, stage="base-b-kernel-unit", runner_config="4-gpu-b200")
++register_cuda_ci(est_time=300, stage="base-b-kernel-unit", runner_config="4-gpu-b200")
+ register_cuda_ci(est_time=80, stage="base-c", runner_config="4-gpu-gb300")
+ 
+ 
++def _ptx_supported():
++    return torch.cuda.is_available() and torch.cuda.get_device_capability() in SM_ARCHS
++
++
+ def _inputs(seed, seq_len=128):
+     generator = torch.Generator(device="cuda").manual_seed(seed)
+     batch_size, num_heads, head_dim = 1, 2, 128
+@@ -85,11 +92,8 @@ class TestKdaPrefill(CustomTestCase):
+     @torch.inference_mode()
+     def test_ptx_padded_raw_beta(self):
+         """Raw beta must match Triton, including final state after neutral padding."""
+-        if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (
+-            10,
+-            3,
+-        ):
+-            self.skipTest("PTX KDA prefill requires GB300")
++        if not _ptx_supported():
++            self.skipTest("PTX KDA prefill requires SM100 or SM103")
+         q, k, v, gate, beta, a_log, dt_bias, state = _inputs(2, seq_len=1025)
+         state.fill_(0.1)
+         actual_state = state.clone()
+@@ -159,11 +163,8 @@ def test_nvidia_prefill(self):
+ 
+     @torch.inference_mode()
+     def test_ptx_prefill(self):
+-        if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (
+-            10,
+-            3,
+-        ):
+-            self.skipTest("PTX KDA prefill requires GB300")
++        if not _ptx_supported():
++            self.skipTest("PTX KDA prefill requires SM100 or SM103")
+         q, k, v, gate, beta_logits, a_log, dt_bias, state = _inputs(1)
+         actual, actual_state = ptx_chunk_kda_fwd(
+             q=q,
