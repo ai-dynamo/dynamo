@@ -15,8 +15,7 @@ permissions:
 
 jobs:
   org-cpu-runner:
-    # The stg label exists only on the staging scale set. Drop it for production.
-    runs-on: [stg, cpu, amd64, 4gi]
+    runs-on: [cpu, amd64, 4gi]
     timeout-minutes: 10
     steps:
       - name: Runner details
