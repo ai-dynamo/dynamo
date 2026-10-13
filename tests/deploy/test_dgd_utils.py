@@ -243,7 +243,54 @@ def test_request_reraises_unexpected_port_forward_stop_error(tmp_path) -> None:
         )
 
 
-async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> None:
+@pytest.mark.parametrize("main_started", [True, False])
+async def test_pod_status_includes_native_sidecar(tmp_path, main_started) -> None:
+    deployment = managed_deployment(tmp_path)
+    runtime = SimpleNamespace(
+        name="runtime",
+        restart_count=3,
+        state=SimpleNamespace(
+            waiting=SimpleNamespace(reason="CrashLoopBackOff", message="backoff"),
+            terminated=None,
+            running=None,
+        ),
+    )
+    main = SimpleNamespace(
+        name="main",
+        restart_count=0,
+        state=SimpleNamespace(waiting=None, terminated=None, running=SimpleNamespace()),
+    )
+    pod = SimpleNamespace(
+        metadata=SimpleNamespace(name="worker-0"),
+        status=SimpleNamespace(
+            phase="Running" if main_started else "Pending",
+            init_container_statuses=[runtime],
+            container_statuses=[main] if main_started else None,
+        ),
+    )
+    deployment._core_api = SimpleNamespace(
+        list_namespaced_pod=AsyncMock(return_value=SimpleNamespace(items=[pod]))
+    )
+
+    details = await deployment._get_pod_status_details()
+
+    assert len(details) == (2 if main_started else 1)
+    sidecar = next(detail for detail in details if detail.container_name == "runtime")
+    assert sidecar.state == "Waiting"
+    assert sidecar.reason == "CrashLoopBackOff"
+    assert sidecar.restart_count == 3
+    if main_started:
+        engine = next(detail for detail in details if detail.container_name == "main")
+        assert engine.state == "Running"
+
+
+@pytest.mark.parametrize(
+    ("container_name", "main_started"),
+    [("main", True), ("runtime", True), ("runtime", False)],
+)
+async def test_in_flight_restart_preserves_bounded_previous_log(
+    tmp_path, container_name, main_started
+) -> None:
     """Keep a bounded previous-instance log before Kubernetes rotates again."""
     deployment = ManagedDeployment(
         log_dir=str(tmp_path),
@@ -252,13 +299,23 @@ async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> Non
     )
     terminated = SimpleNamespace(reason="Error", exit_code=1)
     container_status = SimpleNamespace(
-        name="main",
+        name=container_name,
         restart_count=1,
         last_state=SimpleNamespace(terminated=terminated),
     )
+    main_statuses = (
+        [SimpleNamespace(name="main", restart_count=0)] if main_started else None
+    )
+    if container_name == "main":
+        main_statuses = [container_status]
     pod = SimpleNamespace(
         metadata=SimpleNamespace(name="worker-0"),
-        status=SimpleNamespace(container_statuses=[container_status]),
+        status=SimpleNamespace(
+            init_container_statuses=(
+                [container_status] if container_name == "runtime" else None
+            ),
+            container_statuses=main_statuses,
+        ),
     )
     deployment._core_api = SimpleNamespace(
         list_namespaced_pod=AsyncMock(return_value=SimpleNamespace(items=[pod])),
@@ -273,15 +330,23 @@ async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> Non
     assert "first line" not in warnings[0]
     assert "second line" in warnings[0]
     assert "third line" in warnings[0]
-    preserved = tmp_path / "restarts" / "worker-0.main.restart-1.previous.log"
+    preserved = (
+        tmp_path / "restarts" / f"worker-0.{container_name}.restart-1.previous.log"
+    )
     assert preserved.read_text() == "first line\nsecond line\nthird line\n"
     deployment._core_api.read_namespaced_pod_log.assert_awaited_once_with(
         name="worker-0",
         namespace="default",
-        container="main",
+        container=container_name,
         previous=True,
         tail_lines=50000,
     )
+
+    assert await deployment._dump_in_flight_restart_logs() == []
+    assert deployment._core_api.read_namespaced_pod_log.await_count == 1
+    container_status.restart_count = 2
+    assert len(await deployment._dump_in_flight_restart_logs()) == 1
+    assert deployment._core_api.read_namespaced_pod_log.await_count == 2
 
 
 @pytest.mark.parametrize(
