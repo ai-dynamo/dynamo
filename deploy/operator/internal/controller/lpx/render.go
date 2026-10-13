@@ -296,6 +296,8 @@ func (r *graphReconciler) stampClientIdentity(ctx context.Context, dgd *v1beta1.
 			}
 		}
 		if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] != lpxv1alpha1.PodRoleAgent {
+			// Only agents publish a certificate; one authored on any other role is dropped.
+			delete(clique.Annotations, clientCertAnnotation)
 			continue
 		}
 		clique.Annotations[clientCertAnnotation] = base64.StdEncoding.EncodeToString(block.Bytes)

@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gotest.tools/v3/golden"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/utils/ptr"
@@ -1237,4 +1238,45 @@ func TestStampClientIdentity(t *testing.T) {
 	secret.OwnerReferences = nil
 	require.NoError(t, r.Update(ctx, secret))
 	require.ErrorContains(t, r.stampClientIdentity(ctx, dgd, again), "is not controlled by this DGD")
+}
+
+func TestOnlyLPXAgentsHoldLPUsOrPublishACertificate(t *testing.T) {
+	ctx := t.Context()
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	dgd.UID = "dgd-uid"
+
+	t.Log("A hybrid DGD authors an LPU request and a certificate on its GPU worker")
+	const forged = "Zm9yZ2Vk"
+	template := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
+	if template.Annotations == nil {
+		template.Annotations = map[string]string{}
+	}
+	template.Annotations[clientCertAnnotation] = forged
+	for i := range template.Spec.Containers {
+		resources := &template.Spec.Containers[i].Resources
+		if resources.Requests == nil {
+			resources.Requests = corev1.ResourceList{}
+		}
+		if resources.Limits == nil {
+			resources.Limits = corev1.ResourceList{}
+		}
+		resources.Requests["lpu.nvidia.com/lpu"], resources.Limits["lpu.nvidia.com/lpu"] = resource.MustParse("8"), resource.MustParse("8")
+	}
+	r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+	pcs := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+
+	others := 0
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {
+			require.NotEqual(t, forged, clique.Annotations[clientCertAnnotation], clique.Name)
+			continue
+		}
+		others++
+		require.NotContains(t, clique.Annotations, clientCertAnnotation, clique.Name)
+		for _, container := range clique.Spec.PodSpec.Containers {
+			require.NotContains(t, container.Resources.Requests, corev1.ResourceName("lpu.nvidia.com/lpu"), clique.Name)
+			require.NotContains(t, container.Resources.Limits, corev1.ResourceName("lpu.nvidia.com/lpu"), clique.Name)
+		}
+	}
+	require.Positive(t, others)
 }

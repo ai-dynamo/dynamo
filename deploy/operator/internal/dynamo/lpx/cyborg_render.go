@@ -30,6 +30,8 @@ func configureHybridCyborg(
 	cyborgConfigHash string,
 ) error {
 	container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
+	// Like the conductor, Cyborg never holds LPUs; only agents do.
+	stripLPUResources(&cyborg.Spec.PodSpec)
 
 	// Apply manifest-aware runtime bindings to the selected Cyborg container.
 	cyborgStoragePath, err := lpuModelStoragePath(cyborg.Spec.PodSpec)
