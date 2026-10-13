@@ -389,12 +389,12 @@ spec:
                   description: Progress contains branch-aware optimizer and evaluation outcome counters.
                   properties:
                     branches:
-                      description: Branches reports independently optimized AISimulate deployment modes.
+                      description: Branches reports independently optimized AISimulate branches.
                       items:
-                        description: BranchProgress reports progress for one AISimulate deployment-mode branch.
+                        description: BranchProgress reports progress for one independently optimized AISimulate branch.
                         properties:
-                          deploymentMode:
-                            description: DeploymentMode identifies the AISimulate search-space deployment mode.
+                          name:
+                            description: Name is the executor-defined stable branch identifier.
                             type: string
                           rounds:
                             description: Rounds reports optimizer progress for this branch.
@@ -412,12 +412,12 @@ spec:
                               - total
                             type: object
                         required:
-                          - deploymentMode
+                          - name
                           - rounds
                         type: object
                       type: array
                       x-kubernetes-list-map-keys:
-                        - deploymentMode
+                        - name
                       x-kubernetes-list-type: map
                     candidates:
                       description: Candidates reports bounded Kubernetes publication.

@@ -3149,7 +3149,7 @@ _Appears in:_
 
 
 
-BranchProgress reports progress for one AISimulate deployment-mode branch.
+BranchProgress reports progress for one independently optimized AISimulate branch.
 
 
 
@@ -3158,7 +3158,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `deploymentMode` _string_ | DeploymentMode identifies the AISimulate search-space deployment mode. |  |  |
+| `name` _string_ | Name is the executor-defined stable branch identifier. |  |  |
 | `rounds` _[RoundProgress](#roundprogress)_ | Rounds reports optimizer progress for this branch. |  |  |
 
 
@@ -3212,7 +3212,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `branches` _[BranchProgress](#branchprogress) array_ | Branches reports independently optimized AISimulate deployment modes. |  | Optional: \{\} <br /> |
+| `branches` _[BranchProgress](#branchprogress) array_ | Branches reports independently optimized AISimulate branches. |  | Optional: \{\} <br /> |
 | `evaluations` _[EvaluationProgress](#evaluationprogress)_ | Evaluations reports unique candidate outcomes. |  | Optional: \{\} <br /> |
 | `candidates` _[CandidateProgress](#candidateprogress)_ | Candidates reports bounded Kubernetes publication. |  | Optional: \{\} <br /> |
 

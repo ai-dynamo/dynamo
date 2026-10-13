@@ -57,10 +57,10 @@ type RoundProgress struct {
 	Total int32 `json:"total"`
 }
 
-// BranchProgress reports progress for one AISimulate deployment-mode branch.
+// BranchProgress reports progress for one independently optimized AISimulate branch.
 type BranchProgress struct {
-	// DeploymentMode identifies the AISimulate search-space deployment mode.
-	DeploymentMode string `json:"deploymentMode"`
+	// Name is the executor-defined stable branch identifier.
+	Name string `json:"name"`
 
 	// Rounds reports optimizer progress for this branch.
 	Rounds RoundProgress `json:"rounds"`
@@ -101,10 +101,10 @@ type CandidateProgress struct {
 
 // DGDRRunProgress contains branch-aware optimizer and evaluation outcome counters.
 type DGDRRunProgress struct {
-	// Branches reports independently optimized AISimulate deployment modes.
+	// Branches reports independently optimized AISimulate branches.
 	// +optional
 	// +listType=map
-	// +listMapKey=deploymentMode
+	// +listMapKey=name
 	Branches []BranchProgress `json:"branches,omitempty"`
 
 	// Evaluations reports unique candidate outcomes.

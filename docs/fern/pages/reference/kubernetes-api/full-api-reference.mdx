@@ -4315,14 +4315,14 @@ Backend identifies an inference backend searched by AISimulate and used by gener
 </Accordion>
 
 <Accordion id="branchprogress" title="BranchProgress">
-BranchProgress reports progress for one AISimulate deployment-mode branch.
+BranchProgress reports progress for one independently optimized AISimulate branch.
 
 
 **Kind:** `type`
 **Appears in:** [DGDRRunProgress](#dgdrrunprogress)
 
-<ParamField path="deploymentMode" type="string">
-DeploymentMode identifies the AISimulate search-space deployment mode.
+<ParamField path="name" type="string">
+Name is the executor-defined stable branch identifier.
 </ParamField>
 
 <ParamField path="rounds" type="RoundProgress">
@@ -4372,7 +4372,7 @@ DGDRRunProgress contains branch-aware optimizer and evaluation outcome counters.
 **Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
 
 <ParamField path="branches" type="BranchProgress array">
-Branches reports independently optimized AISimulate deployment modes.
+Branches reports independently optimized AISimulate branches.
 See [BranchProgress](#branchprogress).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
