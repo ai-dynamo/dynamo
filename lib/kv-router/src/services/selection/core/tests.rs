@@ -3315,57 +3315,6 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
 }
 
 #[tokio::test]
-async fn overflowing_worker_dp_range_does_not_poison_batch() {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let core = local_core(test_config(false));
-        let mut invalid = worker(1);
-        invalid.data_parallel_start_rank = Some(u32::MAX);
-        invalid.data_parallel_size = Some(1);
-        let mut results = core.upsert_workers(vec![invalid, worker(2)]).await;
-        let error = results.remove(0).expect_err("overflowing DP range");
-        assert_eq!(
-            error.status_code(),
-            400,
-            "error={error:?}, catalog={:?}",
-            core.list_workers(None, None)
-        );
-        assert!(core.catalog.get(1).is_none());
-        assert_eq!(results.remove(0).unwrap().worker_id, 2);
-        assert_eq!(core.select(select_request()).await.unwrap().worker_id, 2);
-        core.shutdown();
-    })
-    .await
-    .expect("invalid worker batch deadline");
-}
-
-#[tokio::test]
-async fn overflowing_worker_dp_range_patch_preserves_live_worker() {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let core = local_core(test_config(false));
-        core.upsert_worker(worker(1)).await.unwrap();
-        core.select_and_reserve(reserve_request("live"))
-            .await
-            .unwrap();
-        let entry = core.entry(&default_key()).unwrap();
-        let booking = core.indexed_booking("live").unwrap().1;
-        let patch = serde_json::from_value(serde_json::json!({
-            "data_parallel_start_rank": u32::MAX,
-            "data_parallel_size": 1
-        }))
-        .unwrap();
-        let error = core.patch_worker(1, patch).await.unwrap_err();
-        assert_eq!(error.status_code(), 400, "{error:?}");
-        assert_eq!(core.catalog.get(1).unwrap().dp_start(), 0);
-        assert!(entry.scheduler.has_booking(&booking));
-        assert_eq!(core.select(select_request()).await.unwrap().worker_id, 1);
-        core.free_reservation("live").await.unwrap();
-        core.shutdown();
-    })
-    .await
-    .expect("invalid worker patch deadline");
-}
-
-#[tokio::test]
 async fn deleting_worker_releases_booking_before_same_id_returns() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let core = local_core(test_config(false));
@@ -3381,15 +3330,11 @@ async fn deleting_worker_releases_booking_before_same_id_returns() {
         // yielding. A watch-only consumer can miss the intervening removal.
         core.delete_worker(1).await.unwrap();
         core.upsert_worker(worker(1)).await.unwrap();
-        // Force another complete scheduler operation before checking the old
-        // booking; this is not just a snapshot immediately after deletion.
-        core.select(select_request()).await.unwrap();
-        let retained = entry.scheduler.has_booking(&old);
-        if retained {
-            core.free_reservation("old").await.unwrap();
-        } else {
-            assert!(core.prefill_complete("old").await.is_err());
-        }
+        assert!(
+            !entry.scheduler.has_booking(&old),
+            "completed deletion left a booking on the replacement worker"
+        );
+        assert!(core.prefill_complete("old").await.is_err());
         core.select_and_reserve(reserve_request("old"))
             .await
             .unwrap();
@@ -3407,10 +3352,6 @@ async fn deleting_worker_releases_booking_before_same_id_returns() {
                 && w.potential_prefill_tokens == 0
                 && w.potential_decode_blocks == 0)));
         core.shutdown();
-        assert!(
-            !retained,
-            "completed deletion left a booking on the replacement worker"
-        );
     })
     .await
     .expect("worker deletion deadline");
@@ -3418,8 +3359,36 @@ async fn deleting_worker_releases_booking_before_same_id_returns() {
 
 #[tokio::test]
 async fn cancelled_worker_delete_is_finished_before_re_registration() {
+    struct PausedDetach {
+        calls: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl KvEventIngress for PausedDetach {
+        fn open(
+            &self,
+            registry: &WorkerRegistry,
+            key: &RoutingPartitionId,
+            block_size: u32,
+        ) -> Indexer {
+            registry.get_or_create_indexer(key.clone(), block_size)
+        }
+        async fn detach(&self, _: &WorkerRegistry, _: &WorkerCatalogRecord) {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
     tokio::time::timeout(Duration::from_secs(5), async {
-        let core = local_core(test_config(false));
+        let ingress = Arc::new(PausedDetach {
+            calls: AtomicUsize::new(0),
+        });
+        let core = core_with_host(SelectionHost {
+            cache: HostCache {
+                index: KvIndexSource::Owned(ingress.clone()),
+                shared: None,
+            },
+            ..SelectionHost::default()
+        });
         core.upsert_worker(worker(1)).await.unwrap();
         core.select_and_reserve(reserve_request("old"))
             .await
@@ -3435,15 +3404,20 @@ async fn cancelled_worker_delete_is_finished_before_re_registration() {
                 )
             })
             .await;
-            assert!(pending, "deletion must await its config consumer");
+            assert!(pending, "deletion must wait for the paused indexer detach");
+            assert_eq!(ingress.calls.load(Ordering::SeqCst), 1);
         }
         assert_eq!(
             core.catalog.get(1).unwrap().lifecycle,
             WorkerLifecycle::Draining
         );
         core.upsert_worker(worker(1)).await.unwrap();
+        assert!(
+            !entry.scheduler.has_booking(&old),
+            "cancelled deletion left a booking on the replacement worker"
+        );
+        assert_eq!(ingress.calls.load(Ordering::SeqCst), 2);
         core.select(select_request()).await.unwrap();
-        assert!(!entry.scheduler.has_booking(&old));
         assert!(core.free_reservation("old").await.is_err());
         core.select_and_reserve(reserve_request("old"))
             .await

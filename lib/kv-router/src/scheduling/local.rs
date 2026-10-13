@@ -5,10 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
-#[cfg(feature = "standalone-selection")]
-use tokio::sync::mpsc;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -47,11 +46,6 @@ enum WorkerConfigReconcileOutcome {
     Rejected,
 }
 
-type WorkerConfigBarrier = (
-    Option<WorkerId>,
-    oneshot::Sender<Result<(), KvSchedulerError>>,
-);
-
 pub struct LocalScheduler<
     P,
     C,
@@ -67,10 +61,8 @@ pub struct LocalScheduler<
     queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
     request_classifier: OnceLock<Arc<RequestClassifierRuntime>>,
-    #[cfg(feature = "standalone-selection")]
-    config_barriers: mpsc::Sender<WorkerConfigBarrier>,
-    #[cfg(feature = "standalone-selection")]
-    config_monitor_cancel: CancellationToken,
+    worker_configs: watch::Receiver<HashMap<WorkerId, C>>,
+    applied_worker_configs: Arc<Mutex<Option<HashMap<WorkerId, C>>>>,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
@@ -197,38 +189,28 @@ where
         ));
 
         let (queue_updates, _) = watch::channel(());
-        #[cfg(feature = "standalone-selection")]
-        let config_monitor_cancel = cancellation_token.clone();
+        let applied_worker_configs = Arc::new(Mutex::new(None));
 
-        #[cfg(feature = "standalone-selection")]
-        let (config_barriers, mut barrier_rx) = mpsc::channel::<WorkerConfigBarrier>(1);
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
+            let applied_configs_monitor = Arc::clone(&applied_worker_configs);
             let queue_config_updates = Arc::clone(&queue);
             let queue_updates_config = queue_updates.clone();
             let mut monitor_rx = workers_with_configs.clone();
             let monitor_cancel_token = cancellation_token.clone();
             tokio::spawn(async move {
                 tracing::trace!("LocalScheduler workers monitoring task started");
-                let mut last_workers = None;
-                Self::reconcile_worker_configs(
-                    &slots_monitor,
-                    monitor_rx.borrow_and_update().clone(),
-                    &mut last_workers,
-                );
+                {
+                    let mut applied = applied_configs_monitor.lock();
+                    Self::reconcile_worker_configs(
+                        &slots_monitor,
+                        monitor_rx.borrow_and_update().clone(),
+                        &mut applied,
+                    );
+                }
 
                 loop {
-                    let next_barrier = async {
-                        #[cfg(feature = "standalone-selection")]
-                        {
-                            barrier_rx.recv().await
-                        }
-                        #[cfg(not(feature = "standalone-selection"))]
-                        {
-                            std::future::pending::<Option<WorkerConfigBarrier>>().await
-                        }
-                    };
-                    let barrier = tokio::select! {
+                    tokio::select! {
                         _ = monitor_cancel_token.cancelled() => {
                             tracing::trace!("LocalScheduler workers monitoring task shutting down");
                             break;
@@ -238,40 +220,22 @@ where
                                 tracing::warn!("LocalScheduler worker config watch dropped, shutting down");
                                 break;
                             }
-                            None
                         }
-                        barrier = next_barrier => {
-                            let Some(barrier) = barrier else { break; };
-                            Some(barrier)
-                        }
-                    };
+                    }
 
-                    let current_workers = monitor_rx.borrow_and_update().clone();
-                    let removed = barrier.as_ref().is_none_or(|(worker, _)| {
-                        worker.is_none_or(|worker| !current_workers.contains_key(&worker))
-                    });
-                    let outcome = Self::reconcile_worker_configs(
-                        &slots_monitor,
-                        current_workers,
-                        &mut last_workers,
-                    );
-                    if outcome == WorkerConfigReconcileOutcome::Applied {
-                        queue_config_updates.update().await;
-                        let _ = queue_updates_config.send(());
+                    {
+                        // Read the watch while holding the same lock as synchronous publishers.
+                        let mut applied = applied_configs_monitor.lock();
+                        Self::reconcile_worker_configs(
+                            &slots_monitor,
+                            monitor_rx.borrow_and_update().clone(),
+                            &mut applied,
+                        );
                     }
-                    // Acknowledgement lets the catalog publish its next snapshot.
-                    // Finish rechecking the queue before releasing that ordering.
-                    if let Some((worker, ack)) = barrier {
-                        let result = if removed && outcome != WorkerConfigReconcileOutcome::Rejected
-                        {
-                            Ok(())
-                        } else {
-                            Err(KvSchedulerError::InitFailed(format!(
-                                "worker config barrier {worker:?} was not reconciled"
-                            )))
-                        };
-                        let _ = ack.send(result);
-                    }
+                    // A publisher may already have applied this topology. The queue still
+                    // needs every observed config update to recheck pending requests.
+                    queue_config_updates.update().await;
+                    let _ = queue_updates_config.send(());
                 }
             });
         }
@@ -320,49 +284,30 @@ where
             }
         });
 
-        Self {
+        let scheduler = Self {
             slots,
             queue,
             queue_updates,
             request_classifier: OnceLock::new(),
-            #[cfg(feature = "standalone-selection")]
-            config_barriers,
-            #[cfg(feature = "standalone-selection")]
-            config_monitor_cancel,
+            worker_configs: workers_with_configs,
+            applied_worker_configs,
             track_prefill_tokens_default,
             worker_type,
+        };
+        if monitor_worker_configs {
+            scheduler.apply_published_worker_configs();
         }
+        scheduler
     }
 
-    /// Wait for a freshly processed snapshot while the caller holds the
-    /// catalog mutation lock. This is a completion barrier, not a cached
-    /// membership check that could accept an older absent-worker snapshot.
-    #[cfg(feature = "standalone-selection")]
-    pub(crate) async fn wait_for_worker_config(&self) -> Result<(), KvSchedulerError> {
-        self.worker_config_barrier(None).await
-    }
-
-    #[cfg(feature = "standalone-selection")]
-    pub(crate) async fn wait_for_worker_removal(
-        &self,
-        worker: WorkerId,
-    ) -> Result<(), KvSchedulerError> {
-        self.worker_config_barrier(Some(worker)).await
-    }
-
-    #[cfg(feature = "standalone-selection")]
-    async fn worker_config_barrier(
-        &self,
-        removed_worker: Option<WorkerId>,
-    ) -> Result<(), KvSchedulerError> {
-        tokio::select! {
-            _ = self.config_monitor_cancel.cancelled() => Err(KvSchedulerError::SubscriberShutdown),
-            result = async {
-                let (ack, result) = oneshot::channel();
-                self.config_barriers.send((removed_worker, ack)).await.map_err(|_| KvSchedulerError::SubscriberShutdown)?;
-                result.await.map_err(|_| KvSchedulerError::SubscriberShutdown)?
-            } => result,
-        }
+    /// Apply published topology before a subsequent catalog mutation can replace it.
+    pub(crate) fn apply_published_worker_configs(&self) {
+        let mut applied = self.applied_worker_configs.lock();
+        Self::reconcile_worker_configs(
+            &self.slots,
+            self.worker_configs.borrow().clone(),
+            &mut applied,
+        );
     }
 
     pub async fn schedule_request(
