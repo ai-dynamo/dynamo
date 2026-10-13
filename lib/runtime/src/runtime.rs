@@ -43,6 +43,31 @@ pub(crate) fn graceful_shutdown_timeout() -> Duration {
     Duration::from_secs(timeout_secs)
 }
 
+/// Velo bounds its own drain to five seconds; leave headroom for transport close.
+const VELO_RESPONSE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run teardown in its own task, so a hang or panic cannot keep the caller
+/// from reaching the next shutdown phase. On timeout the task is detached,
+/// not cancelled.
+async fn bounded_teardown(
+    name: &str,
+    timeout: Duration,
+    teardown: impl Future<Output = ()> + Send + 'static,
+) {
+    match tokio::time::timeout(timeout, tokio::spawn(teardown)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::error!(%error, "{name} shutdown failed; proceeding with runtime teardown");
+        }
+        Err(_) => {
+            tracing::error!(
+                timeout_secs = timeout.as_secs(),
+                "{name} shutdown timed out; proceeding with runtime teardown"
+            );
+        }
+    }
+}
+
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone, Debug)]
 pub(crate) enum RuntimeType {
@@ -406,8 +431,14 @@ impl Runtime {
             }
 
             // Close the response service after endpoint drain. Other Runtime
-            // owners in this process keep their shared service alive.
-            velo_response_service.shutdown().await;
+            // owners in this process keep their shared service alive. A hung
+            // transport close must not keep backend connections open.
+            bounded_teardown(
+                "Velo response service",
+                VELO_RESPONSE_SHUTDOWN_TIMEOUT,
+                async move { velo_response_service.shutdown().await },
+            )
+            .await;
 
             // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
             tracing::info!("Phase 3: Connections to backend services will now be disconnected");
@@ -505,5 +536,37 @@ mod tests {
             },
         )
         .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_teardown_returns_after_timeout() {
+        let started = tokio::time::Instant::now();
+        bounded_teardown(
+            "test",
+            Duration::from_secs(10),
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert!(started.elapsed() >= Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn bounded_teardown_isolates_panics() {
+        bounded_teardown("test", Duration::from_secs(10), async {
+            panic!("teardown failed");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bounded_teardown_runs_to_completion() {
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        bounded_teardown("test", Duration::from_secs(10), async move {
+            tokio::task::yield_now().await;
+            flag.store(true, Ordering::Release);
+        })
+        .await;
+        assert!(done.load(Ordering::Acquire));
     }
 }
