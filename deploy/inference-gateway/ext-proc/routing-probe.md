@@ -96,16 +96,45 @@ shape `{"error":{"code":"probe_timeout"}}`. An unavailable estimate is not a cac
       "predicted_gpu_hit_rate": 0.9920508744038156,
       "predicted_cpu_inclusive_hit_rate": null,
       "predicted_disk_inclusive_hit_rate": null,
-      "effective_prefill_tokens": 5
+      "effective_prefill_tokens": 5,
+      "longest_prefix_tokens": 624,
+      "gpu_uncached_tokens": 5
     },
     "load": {
       "active_prefill_tokens": 0,
       "prefill_token_capacity": 16384,
       "potential_decode_blocks": 40,
-      "total_kv_blocks": 10214
+      "total_kv_blocks": 10214,
+      "active_requests": 0,
+      "active_decode_blocks": 0,
+      "additional_decode_blocks": 40,
+      "prefill_pressure_ratio": 0.0,
+      "decode_pressure_ratio": 0.003916193459956922,
+      "prefill_busy": null,
+      "decode_busy": null
     }
   },
-  "pool": {"pending_requests": 0, "pending_input_tokens": 0}
+  "pool": {
+    "pending_requests": 0,
+    "pending_input_tokens": 0,
+    "pending_cached_tokens": 0,
+    "received_attempts_total": 10,
+    "deadline_rejected_attempts_total": 0
+  },
+  "tracking": {
+    "kv_events": true,
+    "prefill_tokens": true,
+    "active_blocks": true,
+    "output_blocks": false,
+    "assume_kv_reuse": true,
+    "replica_sync": false,
+    "predicted_cache_ttl_secs": null
+  },
+  "timing": {
+    "preprocessing_ms": 1.2,
+    "selection_ms": 0.3,
+    "total_ms": 1.6
+  }
 }
 ```
 
@@ -127,6 +156,34 @@ is projected usage including this request. Disabled tracking and unavailable cap
 are null. Pool fields describe pending inference requests, excluding advisory probes.
 Load reflects the EPP's tracking and configured synchronization; it is not GPU utilization.
 
+Additional signals are collected for analysis; they do not change admission or selection:
+
+| Field | Meaning |
+| --- | --- |
+| `cache.longest_prefix_tokens` | Largest raw cumulative prefix reported across the candidate's cache tiers; unknown without an index |
+| `cache.gpu_uncached_tokens` | Prompt length minus the GPU prefix; unlike effective prefill, no cache weights are applied |
+| `load.active_requests` | Booked prefill and decode requests in the selection snapshot; unknown if no worker load was materialized |
+| `load.active_decode_blocks` | Tracked active blocks before adding this request; not physical cache occupancy |
+| `load.additional_decode_blocks` | Projected blocks minus active blocks; accounts for active-prefix sharing, not GPU cache misses |
+| `load.prefill_pressure_ratio` | Active prefill tokens divided by prefill capacity |
+| `load.decode_pressure_ratio` | Projected decode blocks divided by total KV capacity |
+| `load.prefill_busy`, `load.decode_busy` | SelectionService's conditional-disaggregation busy evaluations; unknown without tracking, capacity or configured thresholds. These are not admission decisions. |
+| `pool.pending_cached_tokens` | Scheduler-accounted cached tokens in pending inference requests, summed across policy classes |
+| `pool.received_attempts_total` | Admission attempts since this router started; includes retries, excludes probes |
+| `pool.deadline_rejected_attempts_total` | Attempts rejected because their scheduler due time passed; not every rejection |
+| `tracking` | Configured event, prefill, active/output-block tracking, reuse assumption, replica synchronization and predicted-cache TTL settings |
+| `timing` | Probe preprocessing (including CPU-task wait), advisory selection and total router-call time in milliseconds; excludes HTTP body read and response delivery |
+
+Pressure ratios can exceed one and are unknown for zero or missing capacity. Prefill
+capacity is the scheduler's value, which may be its default when the worker has not
+advertised one. KV capacity follows the scheduler's worker-level estimate. Neither
+ratio is a hardware-utilization measurement. Pool counters are replica-local and read
+separately from the candidate snapshot; synchronized worker load does not make the queue global.
+
+Tracking flags describe configuration, not stream health or freshness. This API does
+not yet expose last-applied KV-event age, index recovery readiness, queue waiting time,
+physical `kv_used_blocks`, or calibrated inference latency. Probe timing is not TTFT.
+
 ## Compare with response usage
 
 EPP emits an `observed cache reuse` log using response `usage.prompt_tokens` and
@@ -136,7 +193,9 @@ Missing usage stays unknown. Streaming clients should request
 `stream_options: {"include_usage": true}`.
 
 Switchyard emits `predicted cache reuse` for each probed candidate using the same
-request/session IDs. Join by request ID and model, then compare candidate and selected
+request/session IDs. Its `probe_response` log field preserves the complete JSON response,
+including unknown values, and `probe_elapsed_ms` measures the HTTP call through body receipt.
+Join by request ID and model, then compare candidate and selected
 worker IDs. Do not treat an unselected model's prediction as having an observed outcome.
 Prompts are not included in these records.
 

@@ -209,6 +209,8 @@ impl SelectionCore {
             });
         let worker_load = advisory_load.map(|load| SelectionWorkerLoad {
             active_prefill_tokens: load.active_prefill_tokens,
+            active_decode_blocks: load.active_decode_blocks,
+            active_requests: load.active_requests,
             prefill_token_capacity: load.prefill_token_capacity,
             total_kv_blocks,
             prefill_busy: self

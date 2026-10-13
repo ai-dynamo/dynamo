@@ -642,6 +642,11 @@ pub struct SelectResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SelectionWorkerLoad {
     pub active_prefill_tokens: usize,
+    /// Scheduler-tracked blocks before adding this request, from the selection snapshot.
+    /// Absent when worker load was not materialized; not physical GPU occupancy.
+    pub active_decode_blocks: Option<usize>,
+    /// Booked requests in either phase in the same snapshot; absent without load data.
+    pub active_requests: Option<usize>,
     pub prefill_token_capacity: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_kv_blocks: Option<u64>,

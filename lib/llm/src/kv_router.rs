@@ -1648,6 +1648,27 @@ impl KvRouter {
         self.selection.scheduler().pending_isl_tokens()
     }
 
+    /// Sum this replica's per-class admission counters. Reads do not enter the queue.
+    pub fn queue_stats(&self) -> dynamo_kv_router::queue::ClassQueueStats {
+        let mut total = dynamo_kv_router::queue::ClassQueueStats {
+            pending_count: 0,
+            pending_isl_tokens: 0,
+            pending_cached_tokens: 0,
+            received_total: 0,
+            rejected_due_time_passed_total: 0,
+        };
+        let mut index = 0;
+        while let Some(stats) = self.selection.scheduler().class_queue_stats(index) {
+            total.pending_count += stats.pending_count;
+            total.pending_isl_tokens += stats.pending_isl_tokens;
+            total.pending_cached_tokens += stats.pending_cached_tokens;
+            total.received_total += stats.received_total;
+            total.rejected_due_time_passed_total += stats.rejected_due_time_passed_total;
+            index += 1;
+        }
+        total
+    }
+
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,

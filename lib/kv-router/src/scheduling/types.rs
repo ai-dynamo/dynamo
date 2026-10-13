@@ -223,6 +223,8 @@ pub struct AdvisorySchedulingResponse {
 #[derive(Debug, Clone, Copy)]
 pub struct AdvisoryWorkerLoad {
     pub active_prefill_tokens: usize,
+    pub active_decode_blocks: Option<usize>,
+    pub active_requests: Option<usize>,
     pub prefill_token_capacity: usize,
     pub total_kv_blocks: Option<usize>,
 }

@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::http::StatusCode;
@@ -40,7 +40,9 @@ use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
     ResponseUsage, resolve_cache_namespace,
 };
-use crate::probe::{Cache, Candidate, Error, Load, Pool, ProbeResponse, hit_rate};
+use crate::probe::{
+    Cache, Candidate, Error, Load, Pool, ProbeResponse, Timing, Tracking, hit_rate,
+};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
@@ -272,6 +274,7 @@ impl Router {
         headers: axum::http::HeaderMap,
         permit: Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> std::result::Result<crate::probe::ProbeResponse, crate::probe::Error> {
+        let started = Instant::now();
         if !self.pod_store_ready.load(Ordering::Acquire) {
             return Err(Error(StatusCode::SERVICE_UNAVAILABLE, "not_ready"));
         }
@@ -305,6 +308,7 @@ impl Router {
         })
         .await
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "preprocessing_failed"))??;
+        let preprocessing_ms = started.elapsed().as_secs_f64() * 1000.0;
         // Worker discovery does not advertise namespaced KV-event support yet.
         if prepared.cache_namespace.is_some() {
             return Err(crate::probe::unsupported());
@@ -331,6 +335,7 @@ impl Router {
             routing_constraints: prepared.routing_constraints,
             advisory: true,
         };
+        let selection_started = Instant::now();
         let selected = self
             .decode_router
             .probe(request, policy_class)
@@ -339,6 +344,7 @@ impl Router {
                 tracing::debug!(%error, "Routing probe unavailable");
                 Error(StatusCode::SERVICE_UNAVAILABLE, "selection_unavailable")
             })?;
+        let selection_ms = selection_started.elapsed().as_secs_f64() * 1000.0;
         if self.resolve_worker_endpoint(selected.worker_id).is_none() {
             return Err(Error(StatusCode::SERVICE_UNAVAILABLE, "no_ready_workers"));
         }
@@ -362,6 +368,7 @@ impl Router {
         let rate =
             |tokens: Option<u32>| hit_rate(tokens.map(u64::from), Some(prompt_tokens as u64));
         crate::metrics::observe_predicted_reuse(rate(gpu), rate(cpu), rate(disk));
+        let queue = self.decode_router.queue_stats();
         Ok(ProbeResponse {
             model: self.served_model.clone(),
             epp_instance: std::env::var("HOSTNAME").unwrap_or_default(),
@@ -391,25 +398,37 @@ impl Router {
                     predicted_cpu_inclusive_hit_rate: rate(cpu),
                     predicted_disk_inclusive_hit_rate: rate(disk),
                     effective_prefill_tokens: selected.effective_prefill_tokens,
+                    longest_prefix_tokens: gpu.map(|_| selected.overlap.longest_matched),
+                    gpu_uncached_tokens: gpu
+                        .and_then(|cached| prompt_tokens.checked_sub(cached as usize)),
                 },
-                load: Load {
-                    active_prefill_tokens: config
-                        .router_track_prefill_tokens
-                        .then(|| load.as_ref().map(|l| l.active_prefill_tokens))
-                        .flatten(),
-                    prefill_token_capacity: load
-                        .as_ref()
-                        .map(|l| l.prefill_token_capacity)
-                        .filter(|n| *n > 0),
-                    potential_decode_blocks: config
-                        .router_track_active_blocks
-                        .then_some(selected.potential_decode_blocks),
-                    total_kv_blocks: load.and_then(|l| l.total_kv_blocks),
-                },
+                load: Load::from_selection(
+                    config,
+                    load,
+                    selected.potential_decode_blocks,
+                    selected.decode_busy,
+                ),
             },
             pool: Pool {
-                pending_requests: self.decode_router.pending_count(),
-                pending_input_tokens: self.decode_router.pending_isl_tokens(),
+                pending_requests: queue.pending_count,
+                pending_input_tokens: queue.pending_isl_tokens,
+                pending_cached_tokens: queue.pending_cached_tokens,
+                received_attempts_total: queue.received_total,
+                deadline_rejected_attempts_total: queue.rejected_due_time_passed_total,
+            },
+            tracking: Tracking {
+                kv_events: config.use_kv_events,
+                prefill_tokens: config.router_track_prefill_tokens,
+                active_blocks: config.router_track_active_blocks,
+                output_blocks: config.router_track_output_blocks,
+                assume_kv_reuse: config.router_assume_kv_reuse,
+                replica_sync: config.router_replica_sync,
+                predicted_cache_ttl_secs: config.router_predicted_ttl_secs,
+            },
+            timing: Timing {
+                preprocessing_ms,
+                selection_ms,
+                total_ms: started.elapsed().as_secs_f64() * 1000.0,
             },
         })
     }

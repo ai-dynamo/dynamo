@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use dynamo_kv_router::{config::KvRouterConfig, services::selection::SelectionWorkerLoad};
 use dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest;
 use serde::Serialize;
 use serde_json::Value;
@@ -133,6 +134,8 @@ pub(crate) struct ProbeResponse {
     pub block_size: u32,
     pub candidate: Candidate,
     pub pool: Pool,
+    pub tracking: Tracking,
+    pub timing: Timing,
 }
 
 #[derive(Serialize)]
@@ -153,20 +156,102 @@ pub(crate) struct Cache {
     pub predicted_cpu_inclusive_hit_rate: Option<f64>,
     pub predicted_disk_inclusive_hit_rate: Option<f64>,
     pub effective_prefill_tokens: usize,
+    pub longest_prefix_tokens: Option<u32>,
+    pub gpu_uncached_tokens: Option<usize>,
 }
 
 #[derive(Serialize)]
 pub(crate) struct Load {
+    pub active_requests: Option<usize>,
     pub active_prefill_tokens: Option<usize>,
     pub prefill_token_capacity: Option<usize>,
     pub potential_decode_blocks: Option<u64>,
     pub total_kv_blocks: Option<u64>,
+    pub active_decode_blocks: Option<usize>,
+    pub additional_decode_blocks: Option<u64>,
+    pub prefill_pressure_ratio: Option<f64>,
+    pub decode_pressure_ratio: Option<f64>,
+    pub prefill_busy: Option<bool>,
+    pub decode_busy: Option<bool>,
+}
+
+impl Load {
+    pub(crate) fn from_selection(
+        config: &KvRouterConfig,
+        snapshot: Option<SelectionWorkerLoad>,
+        projected_blocks: u64,
+        decode_busy: Option<bool>,
+    ) -> Self {
+        let active_prefill_tokens = snapshot
+            .filter(|_| config.router_track_prefill_tokens)
+            .map(|load| load.active_prefill_tokens);
+        let prefill_token_capacity = snapshot
+            .map(|load| load.prefill_token_capacity)
+            .filter(|n| *n > 0);
+        let active_decode_blocks = snapshot
+            .filter(|_| config.router_track_active_blocks)
+            .and_then(|load| load.active_decode_blocks);
+        let potential_decode_blocks = config
+            .router_track_active_blocks
+            .then_some(projected_blocks);
+        let total_kv_blocks = snapshot
+            .and_then(|load| load.total_kv_blocks)
+            .filter(|n| *n > 0);
+        Self {
+            active_requests: snapshot.and_then(|load| load.active_requests),
+            active_prefill_tokens,
+            prefill_token_capacity,
+            potential_decode_blocks,
+            total_kv_blocks,
+            active_decode_blocks,
+            additional_decode_blocks: potential_decode_blocks
+                .zip(active_decode_blocks)
+                .and_then(|(projected, active)| projected.checked_sub(active as u64)),
+            prefill_pressure_ratio: pressure_ratio(
+                active_prefill_tokens.map(|n| n as u64),
+                prefill_token_capacity.map(|n| n as u64),
+            ),
+            decode_pressure_ratio: pressure_ratio(potential_decode_blocks, total_kv_blocks),
+            prefill_busy: snapshot
+                .filter(|_| active_prefill_tokens.is_some() && prefill_token_capacity.is_some())
+                .and_then(|load| load.prefill_busy),
+            decode_busy: potential_decode_blocks
+                .zip(total_kv_blocks)
+                .and(decode_busy),
+        }
+    }
+}
+
+fn pressure_ratio(load: Option<u64>, capacity: Option<u64>) -> Option<f64> {
+    let (load, capacity) = (load?, capacity?);
+    (capacity > 0).then(|| load as f64 / capacity as f64)
 }
 
 #[derive(Serialize)]
 pub(crate) struct Pool {
     pub pending_requests: usize,
     pub pending_input_tokens: usize,
+    pub pending_cached_tokens: usize,
+    pub received_attempts_total: u64,
+    pub deadline_rejected_attempts_total: u64,
+}
+
+#[derive(Serialize)]
+pub(crate) struct Tracking {
+    pub kv_events: bool,
+    pub prefill_tokens: bool,
+    pub active_blocks: bool,
+    pub output_blocks: bool,
+    pub assume_kv_reuse: bool,
+    pub replica_sync: bool,
+    pub predicted_cache_ttl_secs: Option<f64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct Timing {
+    pub preprocessing_ms: f64,
+    pub selection_ms: f64,
+    pub total_ms: f64,
 }
 
 pub(crate) fn hit_rate(cached: Option<u64>, prompt: Option<u64>) -> Option<f64> {
@@ -246,4 +331,49 @@ pub(crate) async fn start(
             shutdown.cancel();
         }
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_signals_preserve_unknowns_and_overload() {
+        let mut config = KvRouterConfig {
+            router_track_prefill_tokens: true,
+            router_track_active_blocks: true,
+            ..Default::default()
+        };
+        let snapshot = SelectionWorkerLoad {
+            active_prefill_tokens: 150,
+            prefill_token_capacity: 100,
+            active_decode_blocks: Some(80),
+            active_requests: Some(3),
+            total_kv_blocks: Some(100),
+            prefill_busy: Some(true),
+        };
+        let load = Load::from_selection(&config, Some(snapshot), 120, Some(true));
+        assert_eq!(load.active_requests, Some(3));
+        assert_eq!(load.additional_decode_blocks, Some(40));
+        assert_eq!(load.prefill_pressure_ratio, Some(1.5));
+        assert_eq!(load.decode_pressure_ratio, Some(1.2));
+        assert_eq!(load.prefill_busy, Some(true));
+        assert_eq!(load.decode_busy, Some(true));
+
+        config.router_track_prefill_tokens = false;
+        config.router_track_active_blocks = false;
+        let load = Load::from_selection(&config, Some(snapshot), 120, Some(true));
+        assert_eq!(load.active_prefill_tokens, None);
+        assert_eq!(load.active_decode_blocks, None);
+        assert_eq!(load.additional_decode_blocks, None);
+        assert_eq!(load.prefill_pressure_ratio, None);
+        assert_eq!(load.decode_pressure_ratio, None);
+        assert_eq!(load.prefill_busy, None);
+        assert_eq!(load.decode_busy, None);
+        let load = Load::from_selection(&config, None, 120, None);
+        assert_eq!(load.active_requests, None);
+        assert_eq!(load.total_kv_blocks, None);
+        assert_eq!(pressure_ratio(Some(1), Some(0)), None);
+        assert_eq!(pressure_ratio(None, Some(100)), None);
+    }
 }
