@@ -1098,6 +1098,37 @@ class TestDecodeWorkerMultimodalBranching:
         assert chunks[0]["token_ids"] == []
         assert "embedding metadata" in chunks[0]["finish_reason"]
 
+    async def test_aggregated_transfer_failure_returns_actionable_error(self):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        transfer_error = mod.MultimodalTransferError(
+            "shm", "the worker could not open the shared-memory segment"
+        )
+        handler._multimodal_request_processor.prepare_input = AsyncMock(
+            side_effect=transfer_error
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler._generate_token_mode(
+                request, MagicMock(), "req-transfer-error"
+            )
+        ]
+
+        assert chunks == [
+            {
+                "finish_reason": f"error: {transfer_error}",
+                "index": 0,
+                "token_ids": [],
+            }
+        ]
+        assert "use DYNAMO_MM_TRANSFER=nixl" in chunks[0]["finish_reason"]
+
     async def test_decode_only_non_qwen_proceeds_without_embedding_params(self):
         """Decode-only non-Qwen with prefill_result but no embedding_params -> proceeds.
 
