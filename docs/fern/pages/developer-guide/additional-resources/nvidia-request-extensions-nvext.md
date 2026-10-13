@@ -143,6 +143,68 @@ for routing behavior and TTL settings.
 For trace sink configuration and JSONL schema details, see
 [Agent Tracing](../../use-cases/agents/agent-tracing.md).
 
+## Root-Level Structured Output Constraints
+
+**Experimental.** Development builds accept the vLLM-style `structured_outputs` field on
+`/v1/chat/completions` and `/v1/completions`, for unary and streaming generation. Place it at the
+request root, **not inside `nvext`**. The validated path is a Dynamo frontend with a vLLM text
+worker; this does not establish support for other backends or deployment modes.
+
+For example, send this chat request with your registered model name:
+
+```json
+{
+    "model": "my-model",
+    "messages": [{"role": "user", "content": "Choose a color."}],
+    "max_tokens": 64,
+    "structured_outputs": {"choice": ["violet", "blue"]}
+}
+```
+
+On successful, completed generation, the assistant content is one of the allowed strings.
+Constraints apply to generated content, not the HTTP response envelope. A token limit can still
+truncate an answer. With reasoning models, the configured reasoning parser determines when the
+constraint starts; it need not constrain the reasoning phase.
+
+Choose exactly one non-null constraint:
+
+| Member | Value | Meaning |
+|--------|-------|---------|
+| `json` | JSON Schema object or JSON-encoded schema string | Constrain output to the schema supported by the backend. |
+| `json_object` | `true` | Require a JSON object without a specific property schema. |
+| `choice` | Non-empty array of strings | Select one complete string. |
+| `regex` | String | Constrain output with a backend-supported regular expression. |
+| `grammar` | String | Constrain output with a backend-supported grammar. |
+| `structural_tag` | JSON-encoded string | Supply a backend-supported object with `"type": "structural_tag"`. |
+
+Omitting `structured_outputs` or setting it to `null` adds no constraint. An empty object,
+multiple selected constraints, an empty `choice`, or an effective `json_object: false` is invalid.
+Do not combine this field with legacy `guided_*` fields, or with `tool_choice: "required"` or a
+named tool choice. Dynamo rejects these combinations rather than overwriting a caller constraint.
+
+On chat completions, `response_format` replaces the matching nested constraint before its content
+is validated: `json_schema` replaces `json`, and `json_object` replaces `json_object`. It cannot
+repair an empty selection or remove a different selected constraint. `response_format: {"type":
+"text"}` leaves the nested constraint unchanged. The completions endpoint does not currently
+accept `response_format`.
+
+The optional modifiers `disable_any_whitespace` and `disable_additional_properties` default to
+`false`; `whitespace_pattern` defaults to absent. Dynamo delivers these values to the vLLM worker,
+but delivery does not guarantee engine enforcement. In the validated vLLM implementation,
+xgrammar uses its server-wide whitespace policy rather than the request-level override; see
+[vLLM issue #48765](https://github.com/vllm-project/vllm/issues/48765). Do not rely on these modifiers
+for per-request formatting guarantees.
+
+Dynamo validates the selection and outer values; vLLM owns grammar compilation and constrained
+decoding. Errors detected before streaming return an HTTP error. Backend errors after streaming
+starts appear as error events, so HTTP 200 alone does not establish successful generation.
+Error timing and envelopes are not guaranteed to match direct vLLM for every malformed grammar.
+
+During a rolling upgrade, the frontend translates constraints to the existing `guided_decoding`
+worker representation. Older workers retain their existing constraint handling but ignore the
+new boolean modifier fields. New workers accept requests from older frontends that omit these
+fields. This preserves the wire representation, not a per-request modifier-enforcement guarantee.
+
 ## Agent Hints
 
 The `agent_hints` sub-object carries per-request hints that the router uses for scheduling, load balancing, and KV cache optimization.

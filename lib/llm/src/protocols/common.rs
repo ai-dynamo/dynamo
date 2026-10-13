@@ -496,10 +496,21 @@ pub struct GuidedDecodingOptions {
     /// If specified, xgrammar structural tag constraint for guided decoding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structural_tag: Option<serde_json::Value>,
+
+    /// Optional backend modifier. Older workers retain their configured policy;
+    /// the pinned vLLM engine also uses server-level whitespace configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_any_whitespace: Option<bool>,
+
+    /// Optional backend modifier; effectiveness depends on backend configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_additional_properties: Option<bool>,
 }
 
 impl GuidedDecodingOptions {
-    /// Construct without validation
+    /// Construct owned worker options without checking constraint validity.
+    /// Optional inputs are preserved, and backend boolean modifiers start unset.
+    /// Use [`Self::validated`] to check exclusivity and grammar limits before dispatch.
     pub fn new(
         json: Option<serde_json::Value>,
         regex: Option<String>,
@@ -517,10 +528,14 @@ impl GuidedDecodingOptions {
             backend,
             whitespace_pattern,
             structural_tag,
+            disable_any_whitespace: None,
+            disable_additional_properties: None,
         }
     }
 
-    /// Construct and validate (fallible)
+    /// Construct owned options and check [`Self::validate`], returning its error
+    /// for conflicting constraints or excessive grammar nesting. Backend grammar
+    /// compilation is not performed; boolean modifiers remain unset.
     pub fn validated(
         json: Option<serde_json::Value>,
         regex: Option<String>,
