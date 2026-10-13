@@ -14,12 +14,9 @@ import (
 )
 
 const (
-	gbuildManifestV2CapnpFile             = "manifest.v2.capnp.bin"
-	chipArchXT                            = "polaris"
-	chipArchHX                            = "polarisB0"
-	runtimeIOProtocolHost          uint16 = 0
-	runtimeIOProtocolMultiEndpoint uint16 = 1
-	runtimeIOMaxMode               uint16 = 2
+	gbuildManifestV2CapnpFile = "manifest.v2.capnp.bin"
+	chipArchXT                = "polaris"
+	chipArchHX                = "polarisB0"
 )
 
 func decodeGbuildManifestV2(data []byte) (manifestcapnpv2.Manifest, error) {
@@ -62,13 +59,6 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 	if err != nil {
 		return nil, fmt.Errorf("reading %s deployment.program: %w", gbuildManifestV2CapnpFile, err)
 	}
-	batchSize, err := positiveManifestUInt32ToInt(
-		fmt.Sprintf("%s deployment.program.batchSize", gbuildManifestV2CapnpFile),
-		program.BatchSize(),
-	)
-	if err != nil {
-		return nil, err
-	}
 	chains, err := selectedPropSyncChainsFromManifestV2(deployment)
 	if err != nil {
 		return nil, err
@@ -77,9 +67,7 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 	if err != nil {
 		return nil, err
 	}
-	if err := validateManifestBatchSize(gbuildManifestV2CapnpFile, batchSize, ioFPGACount, ioFanoutFactor); err != nil {
-		return nil, err
-	}
+
 	if !manifest.HasArtifacts() {
 		return nil, fmt.Errorf("%s is missing artifacts", gbuildManifestV2CapnpFile)
 	}
@@ -87,18 +75,6 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 	if err != nil {
 		return nil, fmt.Errorf("reading %s artifacts: %w", gbuildManifestV2CapnpFile, err)
 	}
-	runtimeTokenEmbeddingsPath, err := runtimeTokenEmbeddingsPathFromManifestV2(artifacts)
-	if err != nil {
-		return nil, err
-	}
-	// Validate runtime embedding assets before projecting scheduler-facing artifacts.
-	if runtimeTokenEmbeddingsPath != "" && !program.SupportsCpuEmbeddings() {
-		return nil, fmt.Errorf("%s artifacts.runtimeAssets.tokenEmbeddingsPath requires supportsCpuEmbeddings=true", gbuildManifestV2CapnpFile)
-	}
-	if program.SupportsCpuEmbeddings() && program.StandaloneTokenEmbeddings() && runtimeTokenEmbeddingsPath == "" {
-		return nil, fmt.Errorf("%s artifacts.runtimeAssets.tokenEmbeddingsPath is required when standaloneTokenEmbeddings=true", gbuildManifestV2CapnpFile)
-	}
-
 	build := &Build{
 		Path:                      buildRef,
 		CompilationMode:           compilationMode,
@@ -110,7 +86,7 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 	}
 
 	// Complete the normalized build with scheduler-facing LPU artifacts.
-	if err := addLPUArtifactsFromManifestV2(artifacts, deployment, build); err != nil {
+	if err := addLPUArtifactsFromManifestV2(artifacts, build); err != nil {
 		return nil, err
 	}
 	return build, nil
@@ -133,18 +109,6 @@ func runtimeIOFromManifestV2(deployment manifestcapnpv2.DeploymentInfo) (int32, 
 	fanoutFactor := runtimeIO.FanoutFactor()
 	if fanoutFactor == 0 || fanoutFactor > math.MaxInt32 {
 		return 0, 0, fmt.Errorf("%s deployment.runtimeIo.fanoutFactor must be in [1, %d], got %d", gbuildManifestV2CapnpFile, math.MaxInt32, fanoutFactor)
-	}
-	switch runtimeIO.Protocol() {
-	case runtimeIOProtocolHost:
-		if count != 1 {
-			return 0, 0, fmt.Errorf("%s host runtime I/O requires ioFpgaCount 1, got %d", gbuildManifestV2CapnpFile, count)
-		}
-	case runtimeIOProtocolMultiEndpoint:
-	default:
-		return 0, 0, fmt.Errorf("%s deployment.runtimeIo.protocol %d is not supported", gbuildManifestV2CapnpFile, runtimeIO.Protocol())
-	}
-	if mode := runtimeIO.Reserved1(); mode > runtimeIOMaxMode {
-		return 0, 0, fmt.Errorf("%s deployment.runtimeIo mode %d is not supported", gbuildManifestV2CapnpFile, mode)
 	}
 	return int32(count), int32(fanoutFactor), nil
 }
@@ -180,7 +144,6 @@ func selectedPropSyncChainsFromManifestV2(deployment manifestcapnpv2.DeploymentI
 
 func addLPUArtifactsFromManifestV2(
 	artifacts manifestcapnpv2.ArtifactInfo,
-	deployment manifestcapnpv2.DeploymentInfo,
 	build *Build,
 ) error {
 	rawPartitions, err := artifacts.Partitions()
@@ -188,16 +151,14 @@ func addLPUArtifactsFromManifestV2(
 		return fmt.Errorf("reading %s artifacts.partitions: %w", gbuildManifestV2CapnpFile, err)
 	}
 	partitions := make([]BuildPartition, 0, rawPartitions.Len())
-	hxDoubleNodeCount := true
 	for index := 0; index < rawPartitions.Len(); index++ {
-		partition, compatible, err := buildPartitionFromManifestV2(rawPartitions.At(index))
+		partition, err := buildPartitionFromManifestV2(rawPartitions.At(index))
 		if err != nil {
 			return err
 		}
-		// Nonempty paths mark LPU artifacts; only metadata-less HX partitions permit the historical doubled node count.
+		// Nonempty paths mark LPU artifacts.
 		if partition.PartPath != "" {
 			partitions = append(partitions, partition)
-			hxDoubleNodeCount = hxDoubleNodeCount && compatible
 		}
 	}
 	// An LPU-only build cannot silently discard packaged CUDA or CPU partitions.
@@ -211,59 +172,49 @@ func addLPUArtifactsFromManifestV2(
 		return fmt.Errorf("%s artifacts contain no LPU partitions", gbuildManifestV2CapnpFile)
 	}
 	partialSelection := artifacts.HasPartSelect()
-	family, packagedNodes, partitionZeroNodes, err := classifyManifestPartitions(gbuildManifestV2CapnpFile, partitions, partialSelection)
-	if err == nil && family == BuildFamilyXT {
-		err = validateManifestV2PartSelect(artifacts, partitions)
-	}
+	family, err := classifyManifestPartitions(gbuildManifestV2CapnpFile, partitions, partialSelection)
 	if err != nil {
 		return err
 	}
 
-	// Publish the artifact projection before validating the complete deployment geometry.
+	// Publish the scheduler-facing artifact projection.
 	build.Partitions = partitions
 	build.Family = family
 
-	want, err := positiveManifestUInt32ToInt(
-		fmt.Sprintf("%s deployment.numLpuNodes", gbuildManifestV2CapnpFile),
-		deployment.NumLpuNodes(),
-	)
-	if err != nil {
-		return err
-	}
-	return validateManifestPartitionNodeCount(gbuildManifestV2CapnpFile, want, build, partialSelection, hxDoubleNodeCount, packagedNodes, partitionZeroNodes)
+	return nil
 }
 
-func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (BuildPartition, bool, error) {
+func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (BuildPartition, error) {
 	if !raw.HasPartition() {
-		return BuildPartition{}, false, fmt.Errorf("%s artifact partition is missing partition ref", gbuildManifestV2CapnpFile)
+		return BuildPartition{}, fmt.Errorf("%s artifact partition is missing partition ref", gbuildManifestV2CapnpFile)
 	}
 	ref, err := raw.Partition()
 	if err != nil {
-		return BuildPartition{}, false, fmt.Errorf("reading %s artifact partition ref: %w", gbuildManifestV2CapnpFile, err)
+		return BuildPartition{}, fmt.Errorf("reading %s artifact partition ref: %w", gbuildManifestV2CapnpFile, err)
 	}
 	if ref.DeviceType() != manifestcapnpv2.DeviceType_lpu {
-		return BuildPartition{}, false, nil
+		return BuildPartition{}, nil
 	}
 	if raw.Detail().Which() != manifestcapnpv2.PartitionInfo_detail_Which_lpu || !raw.Detail().HasLpu() {
-		return BuildPartition{}, false, fmt.Errorf("%s artifact partition %d has deviceType lpu without LPU detail", gbuildManifestV2CapnpFile, ref.PartitionId())
+		return BuildPartition{}, fmt.Errorf("%s artifact partition %d has deviceType lpu without LPU detail", gbuildManifestV2CapnpFile, ref.PartitionId())
 	}
 	detail, err := raw.Detail().Lpu()
 	if err != nil {
-		return BuildPartition{}, false, fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildManifestV2CapnpFile, ref.PartitionId(), err)
+		return BuildPartition{}, fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildManifestV2CapnpFile, ref.PartitionId(), err)
 	}
 	subject := fmt.Sprintf("%s LPU partition %d", gbuildManifestV2CapnpFile, ref.PartitionId())
 	programs, err := detail.Reserved4()
 	if err != nil || programs.List().Len() == 0 {
-		return BuildPartition{}, false, fmt.Errorf("%s programs are missing or invalid", subject)
+		return BuildPartition{}, fmt.Errorf("%s programs are missing or invalid", subject)
 	}
 
 	chips, err := programs.List().Struct(0).Ptr(1)
 	if err != nil || chips.List().Len() == 0 {
-		return BuildPartition{}, false, fmt.Errorf("%s program chips are missing or invalid", subject)
+		return BuildPartition{}, fmt.Errorf("%s program chips are missing or invalid", subject)
 	}
 	architecture, err := chips.List().Struct(0).Ptr(1)
 	if err != nil {
-		return BuildPartition{}, false, fmt.Errorf("%s reading chip architecture: %w", subject, err)
+		return BuildPartition{}, fmt.Errorf("%s reading chip architecture: %w", subject, err)
 	}
 
 	switch architecture.Text() {
@@ -272,53 +223,6 @@ func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (BuildParti
 	case chipArchXT:
 		return buildLPUArtifact(gbuildManifestV2CapnpFile, ref.PartitionId(), detail, BuildFamilyXT)
 	default:
-		return BuildPartition{}, false, fmt.Errorf("%s unsupported chip architecture %q", subject, architecture.Text())
+		return BuildPartition{}, fmt.Errorf("%s unsupported chip architecture %q", subject, architecture.Text())
 	}
-}
-
-func validateManifestV2PartSelect(artifacts manifestcapnpv2.ArtifactInfo, partitions []BuildPartition) error {
-	if !artifacts.HasPartSelect() {
-		return nil
-	}
-	partSelect, err := artifacts.PartSelect()
-	if err != nil {
-		return fmt.Errorf("reading %s artifacts.partSelect: %w", gbuildManifestV2CapnpFile, err)
-	}
-	selected, err := partSelect.Partitions()
-	if err != nil {
-		return fmt.Errorf("reading %s artifacts.partSelect.partitions: %w", gbuildManifestV2CapnpFile, err)
-	}
-	if selected.Len() == 0 {
-		return fmt.Errorf("%s artifacts.partSelect.partitions is empty", gbuildManifestV2CapnpFile)
-	}
-	selectedIDs := make([]int, 0, selected.Len())
-	for index := 0; index < selected.Len(); index++ {
-		ref := selected.At(index)
-		if ref.DeviceType() != manifestcapnpv2.DeviceType_lpu {
-			continue
-		}
-		selectedIDs = append(selectedIDs, int(ref.PartitionId()))
-	}
-	return validateSelectedLPUPartitions(gbuildManifestV2CapnpFile, "artifacts.partSelect", selectedIDs, partitions)
-}
-
-func runtimeTokenEmbeddingsPathFromManifestV2(artifacts manifestcapnpv2.ArtifactInfo) (string, error) {
-	if !artifacts.HasRuntimeAssets() {
-		return "", nil
-	}
-	runtimeAssets, err := artifacts.RuntimeAssets()
-	if err != nil {
-		return "", fmt.Errorf("reading %s artifacts.runtimeAssets: %w", gbuildManifestV2CapnpFile, err)
-	}
-	if !runtimeAssets.HasTokenEmbeddingsPath() {
-		return "", nil
-	}
-	rawPath, err := runtimeAssets.TokenEmbeddingsPath()
-	if err != nil {
-		return "", fmt.Errorf("reading %s artifacts.runtimeAssets.tokenEmbeddingsPath: %w", gbuildManifestV2CapnpFile, err)
-	}
-	return cleanManifestRelativeBuildPath(
-		fmt.Sprintf("%s artifacts.runtimeAssets.tokenEmbeddingsPath", gbuildManifestV2CapnpFile),
-		rawPath,
-	)
 }

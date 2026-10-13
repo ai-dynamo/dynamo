@@ -49,7 +49,6 @@ type BuildSnapshot struct {
 	contentID     string
 	manifestBytes []byte
 	format        buildContractFormat
-	inventory     []string
 }
 
 // AcquireBuildSnapshot fences the selected compiler contract with inventories
@@ -179,7 +178,6 @@ func (r *defaultModelRegistry) AcquireBuildSnapshot(ctx context.Context, id stri
 		contentID:     fmt.Sprintf("sha256:%x", hash.Sum(nil)),
 		manifestBytes: manifestData,
 		format:        format,
-		inventory:     pre,
 	}, nil
 }
 

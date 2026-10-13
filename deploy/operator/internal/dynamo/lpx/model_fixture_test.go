@@ -174,7 +174,6 @@ func newManifestV2ContractFixture(t *testing.T) manifestcapnpv2.Manifest {
 	program.SetBatchSize(8)
 	runtimeIO, err := deployment.NewRuntimeIo()
 	require.NoError(t, err)
-	runtimeIO.SetProtocol(runtimeIOProtocolMultiEndpoint)
 	runtimeIO.SetReserved1(2)
 	runtimeIO.SetIoFpgaCount(4)
 	runtimeIO.SetFanoutFactor(2)

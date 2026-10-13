@@ -214,7 +214,6 @@ func writeTestV3CapnpManifest(t *testing.T, buildDir string, fixture testV3Capnp
 	program.SetStandaloneTokenEmbeddings(fixture.cpuEmbeddings)
 	runtimeIO, err := deployment.NewRuntimeIo()
 	require.NoError(t, err)
-	runtimeIO.SetProtocol(runtimeIOProtocolHost)
 	runtimeIO.SetReserved1(0)
 	runtimeIO.SetIoFpgaCount(1)
 	runtimeIO.SetFanoutFactor(1)

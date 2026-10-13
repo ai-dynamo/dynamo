@@ -6,7 +6,6 @@
 package lpx
 
 import (
-	"crypto/sha256"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,9 +25,6 @@ func newDeploymentV1ContractFixture(t *testing.T) deploymentcapnpv1.Deployment {
 	deployment, err := deploymentcapnpv1.NewRootDeployment(seg)
 	require.NoError(t, err)
 	deployment.SetContractRevision(deploymentcapnpv1.CurrentContractRevision)
-	identity, err := deployment.NewIdentity()
-	require.NoError(t, err)
-	require.NoError(t, identity.SetBuildId("build-id"))
 	config, err := deployment.NewConfig()
 	require.NoError(t, err)
 	config.SetCompilationMode(deploymentcapnpv1.CompilationMode_lpx)
@@ -39,7 +35,6 @@ func newDeploymentV1ContractFixture(t *testing.T) deploymentcapnpv1.Deployment {
 	runtimeIO, err := config.NewRuntimeIo()
 	require.NoError(t, err)
 	runtimeIO.SetProtocol(deploymentcapnpv1.RuntimeIoProtocol_fpgaRoce)
-	runtimeIO.SetFpgaMode(deploymentcapnpv1.FpgaIoMode_dibDeb)
 	runtimeIO.SetIoFpgaCount(4)
 	runtimeIO.SetFanoutFactor(2)
 	partitions, err := deployment.NewPartitions(1)
@@ -54,11 +49,6 @@ func newDeploymentV1ContractFixture(t *testing.T) deploymentcapnpv1.Deployment {
 	detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_lp20)
 	detail.SetNumChips(8)
 	detail.SetDevicesPerNode(8)
-	execution, err := deployment.NewExecution()
-	require.NoError(t, err)
-	require.NoError(t, execution.SetPath("execution.v1.capnp.bin"))
-	digest := sha256.Sum256([]byte("opaque runtime bytes"))
-	require.NoError(t, execution.SetSha256(digest[:]))
 	return deployment
 }
 
@@ -104,8 +94,35 @@ func TestDeploymentContractPreservesNormalizedBuild(t *testing.T) {
 	require.Equal(t, legacy, build)
 }
 
+func TestDeploymentContractIgnoresRuntimeProtocol(t *testing.T) {
+	t.Log("Normalize a deployment with FPGA runtime I/O")
+	deployment := newDeploymentV1ContractFixture(t)
+	want, err := buildFromGbuildDeploymentV1("gs://models/build", deployment)
+	require.NoError(t, err)
+	config, err := deployment.Config()
+	require.NoError(t, err)
+	runtimeIO, err := config.RuntimeIo()
+	require.NoError(t, err)
+
+	for _, test := range []struct {
+		name     string
+		protocol deploymentcapnpv1.RuntimeIoProtocol
+	}{
+		{"host", deploymentcapnpv1.RuntimeIoProtocol_host},
+		{"unknown", deploymentcapnpv1.RuntimeIoProtocol(99)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Preserve the normalized build when only the runtime protocol changes")
+			runtimeIO.SetProtocol(test.protocol)
+			got, err := buildFromGbuildDeploymentV1("gs://models/build", deployment)
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+		})
+	}
+}
+
 func TestDeploymentContractRejectsInvalidFacts(t *testing.T) {
-	for _, name := range []string{"revision", "future revision", "I/O protocol", "zero endpoints", "zero fanout", "host endpoints", "batch splitting", "unknown device", "missing architecture", "unknown architecture"} {
+	for _, name := range []string{"revision", "future revision", "zero endpoints", "zero fanout", "unknown device", "missing architecture", "unknown architecture"} {
 		t.Run(name, func(t *testing.T) {
 			t.Log("Alter one typed deployment fact and retain the other valid fields")
 			deployment := newDeploymentV1ContractFixture(t)
@@ -138,9 +155,6 @@ func TestDeploymentContractRejectsInvalidFacts(t *testing.T) {
 			case "zero fanout":
 				runtimeIO.SetFanoutFactor(0)
 				wantErr = "fanoutFactor"
-			case "host endpoints":
-				runtimeIO.SetProtocol(deploymentcapnpv1.RuntimeIoProtocol_host)
-				wantErr = "host runtime I/O"
 			case "unknown device":
 				partitions, err := deployment.Partitions()
 				require.NoError(t, err)
@@ -148,14 +162,6 @@ func TestDeploymentContractRejectsInvalidFacts(t *testing.T) {
 				require.NoError(t, err)
 				ref.SetDeviceType(commoncapnpv1.DeviceType(99))
 				wantErr = "deviceType"
-			case "I/O protocol":
-				runtimeIO.SetProtocol(deploymentcapnpv1.RuntimeIoProtocol(99))
-				wantErr = "protocol"
-			case "batch splitting":
-				program, err := config.Program()
-				require.NoError(t, err)
-				program.SetBatchSize(7)
-				wantErr = "divisible"
 			}
 
 			t.Log("Reject the malformed scheduler input before producing a build")
@@ -223,7 +229,7 @@ func TestDeploymentContractAcquisitionAndRuntimePath(t *testing.T) {
 			}, container.Env)
 
 			t.Log("Bind exact deployment bytes to snapshot identity")
-			identity, err := deployment.Identity()
+			identity, err := deployment.NewIdentity()
 			require.NoError(t, err)
 			require.NoError(t, identity.SetBuildId("different-build"))
 			changed, err := deployment.Message().Marshal()
@@ -302,7 +308,7 @@ func TestDeploymentContractBoundsAcquisition(t *testing.T) {
 }
 
 func TestDeploymentContractSupportedGeometry(t *testing.T) {
-	for _, name := range []string{"host XT", "HX metadata", "HX legacy geometry", "HX subnode", "XT sixteen-chip node", "partial XT", "hybrid CPU", "CPU embedding asset"} {
+	for _, name := range []string{"host XT", "HX metadata", "HX legacy geometry", "HX subnode", "XT sixteen-chip node", "partial XT", "hybrid CPU", "CPU embeddings"} {
 		t.Run(name, func(t *testing.T) {
 			t.Log("Configure one supported geometry on a deployment-only fixture")
 			deployment := newDeploymentV1ContractFixture(t)
@@ -320,7 +326,6 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 				runtimeIO, err := config.RuntimeIo()
 				require.NoError(t, err)
 				runtimeIO.SetProtocol(deploymentcapnpv1.RuntimeIoProtocol_host)
-				runtimeIO.SetFpgaMode(deploymentcapnpv1.FpgaIoMode_simple)
 				runtimeIO.SetIoFpgaCount(1)
 				wantIO = 1
 			case "HX metadata", "HX legacy geometry", "HX subnode":
@@ -368,13 +373,10 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 				ref.SetDeviceType(commoncapnpv1.DeviceType_cpu)
 				_, err = expanded.At(1).Detail().NewCpu()
 				require.NoError(t, err)
-			case "CPU embedding asset":
+			case "CPU embeddings":
 				program, err := config.Program()
 				require.NoError(t, err)
 				program.SetSupportsCpuEmbeddings(true)
-				assets, err := deployment.NewRuntimeAssets()
-				require.NoError(t, err)
-				require.NoError(t, assets.SetTokenEmbeddingsPath("runtime/embeddings.npz"))
 			}
 
 			t.Log("Preserve scheduler geometry while excluding non-LPU execution details")
@@ -382,6 +384,7 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, wantFamily, build.Family)
 			require.Equal(t, wantIO, build.IOFPGACount)
+			require.Equal(t, name == "CPU embeddings", build.SupportsCPUEmbeddings)
 			require.Len(t, build.Partitions, 1)
 			if wantFamily == BuildFamilyHX {
 				require.Equal(t, []int64{16, int64(wantNodes), 1, 1}, build.Partitions[0].HXExtent)
