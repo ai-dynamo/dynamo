@@ -13671,8 +13671,6 @@ mod tests {
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
     }
 
-    /// Records the stop conditions the operator dispatches, then fails the
-    /// request so the test does not need a response stream.
     #[derive(Default)]
     struct StopConditionsCapture(std::sync::Mutex<Option<StopConditions>>);
 
