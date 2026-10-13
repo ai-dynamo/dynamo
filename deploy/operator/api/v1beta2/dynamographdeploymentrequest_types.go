@@ -67,7 +67,6 @@ type KVLoadRatio []float64
 
 // StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes.
 // +kubebuilder:validation:XValidation:rule="(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) <= 1",message="at most one of requestRate, concurrency, or kvLoadRatio may be specified"
-// +kubebuilder:validation:XValidation:rule="!(has(self.requestCount) && has(self.numRequestRatio))",message="requestCount and numRequestRatio are mutually exclusive"
 type StaticWorkloadSpec struct {
 	// ISL is the input sequence length in tokens.
 	// +optional
@@ -78,12 +77,6 @@ type StaticWorkloadSpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	OSL *int32 `json:"osl,omitempty"`
-
-	// RequestCount is the absolute number of requests evaluated. When both
-	// request-count controls are omitted, the execution underlay supplies its default.
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	RequestCount *int64 `json:"requestCount,omitempty"`
 
 	// NumRequestRatio sets request count relative to the selected load.
 	// +optional
@@ -128,7 +121,7 @@ const (
 )
 
 // ObjectiveMetric is a metric optimized by AISimulate.
-// +kubebuilder:validation:Enum=Throughput;ThroughputPerGPU;ThroughputPerUser;TTFT;E2ELatency;Goodput;GoodputPerGPU
+// +kubebuilder:validation:Enum=Throughput;ThroughputPerGpu;ThroughputPerUser;TTFT;E2ELatency;Goodput;GoodputPerGpu
 type ObjectiveMetric string
 
 // ObjectiveSLASpec defines per-request latency bounds used to calculate goodput.
@@ -156,8 +149,8 @@ type ObjectiveSLASpec struct {
 
 // ObjectiveSpec defines scalar optimization or a multi-objective Pareto search.
 // +kubebuilder:validation:XValidation:rule="(self.mode == 'Optimize' && has(self.metric) && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))",message="Optimize requires metric; Pareto requires metrics"
-// +kubebuilder:validation:XValidation:rule="!(has(self.metric) && self.metric in ['Goodput', 'GoodputPerGPU']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Goodput and GoodputPerGPU require at least one SLA bound"
-// +kubebuilder:validation:XValidation:rule="!(has(self.metrics) && self.metrics.exists(m, m in ['Goodput', 'GoodputPerGPU'])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound"
+// +kubebuilder:validation:XValidation:rule="!(has(self.metric) && self.metric in ['Goodput', 'GoodputPerGpu']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Goodput and GoodputPerGpu require at least one SLA bound"
+// +kubebuilder:validation:XValidation:rule="!(has(self.metrics) && self.metrics.exists(m, m in ['Goodput', 'GoodputPerGpu'])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Pareto metrics containing Goodput or GoodputPerGpu require at least one SLA bound"
 type ObjectiveSpec struct {
 	// Mode selects scalar optimization or a Pareto search.
 	// +optional

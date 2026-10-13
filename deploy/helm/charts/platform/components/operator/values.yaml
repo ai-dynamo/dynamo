@@ -30,8 +30,7 @@ lpx:
   # -- Configure the LPU model registry used by the LPX integration.
   modelRegistryURL: ""
 
-# Experimental operator features. Disabled gates do not change existing stable APIs.
-featureGates:
+dgdrV1Beta2:
   # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2
   # API schemas. DynamoGraphDeploymentRun and DynamoGraphDeploymentCandidate objects
   # created through these schemas are persisted in etcd. Incompatible schema changes
@@ -39,7 +38,7 @@ featureGates:
   # CRD init container omits those resources and removes v1beta2 from
   # DynamoGraphDeploymentRequest before installation. The operator does not reconcile
   # v1beta2 resources.
-  DGDRV1Beta2: false
+  enabled: false
 
 # Environment variables to pass to operator Deployment.
 env: []

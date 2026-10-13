@@ -23,12 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-const (
-	// DynamoGraphDeploymentCandidateConditionEvaluated reports whether AISimulate
-	// successfully evaluated the candidate.
-	DynamoGraphDeploymentCandidateConditionEvaluated = "Evaluated"
-)
-
 // DynamoGraphDeploymentCandidateStatus describes evaluation, never deployment health.
 type DynamoGraphDeploymentCandidateStatus struct {
 	// Metrics are the resolved evaluation metrics for this point.
@@ -36,13 +30,6 @@ type DynamoGraphDeploymentCandidateStatus struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
 	Metrics *runtime.RawExtension `json:"metrics,omitempty"`
-
-	// Conditions includes the Evaluated condition, whose observedGeneration
-	// identifies the candidate spec generation represented by metrics.
-	// +optional
-	// +listType=map
-	// +listMapKey=type
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // DynamoGraphDeploymentCandidateSpec is an immutable evaluated point: the
@@ -60,7 +47,6 @@ type DynamoGraphDeploymentCandidateSpec struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgdc
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || self.spec == oldSelf.spec",message="spec is immutable"
-// +kubebuilder:printcolumn:name="Evaluated",type=string,JSONPath=`.status.conditions[?(@.type=="Evaluated")].status`
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backendFramework`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

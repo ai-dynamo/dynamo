@@ -188,40 +188,6 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 	}
 }
 
-func TestParseFeatureGates(t *testing.T) {
-	tests := []struct {
-		name    string
-		value   string
-		enabled bool
-		wantErr bool
-	}{
-		{name: "default disabled"},
-		{name: "explicitly enabled", value: "DGDRV1Beta2=true", enabled: true},
-		{name: "explicitly disabled", value: "DGDRV1Beta2=false"},
-		{name: "unknown gate", value: "Unknown=true", wantErr: true},
-		{name: "invalid value", value: "DGDRV1Beta2=yes", wantErr: true},
-		{name: "missing value", value: "DGDRV1Beta2", wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gates, err := parseFeatureGates(tt.value)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("parseFeatureGates() succeeded, want error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseFeatureGates() error = %v", err)
-			}
-			if got := gates[dgdrV1Beta2Gate]; got != tt.enabled {
-				t.Fatalf("%s = %v, want %v", dgdrV1Beta2Gate, got, tt.enabled)
-			}
-		})
-	}
-}
-
 func TestConfigureGeneratedDGDRV1Beta2CRDs(t *testing.T) {
 	tests := []struct {
 		file      string
@@ -390,14 +356,6 @@ func TestGeneratedDGDRV1Beta2RequestSchema(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "request count",
-			mutate: func(object map[string]interface{}) {
-				static := requestStaticWorkload(object)
-				delete(static, "numRequestRatio")
-				static["requestCount"] = int64(100)
-			},
-		},
-		{
 			name: "ratio below one",
 			mutate: func(object map[string]interface{}) {
 				requestStaticWorkload(object)["numRequestRatio"] = 0.5
@@ -433,7 +391,7 @@ func TestGeneratedDGDRV1Beta2RequestSchema(t *testing.T) {
 				objective := requestObjective(object)
 				objective["mode"] = "Pareto"
 				delete(objective, "metric")
-				objective["metrics"] = []interface{}{"ThroughputPerGPU", "TTFT"}
+				objective["metrics"] = []interface{}{"ThroughputPerGpu", "TTFT"}
 			},
 		},
 		{
@@ -447,14 +405,7 @@ func TestGeneratedDGDRV1Beta2RequestSchema(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "both request count controls",
-			mutate: func(object map[string]interface{}) {
-				requestStaticWorkload(object)["requestCount"] = int64(100)
-			},
-			wantErr: true,
-		},
-		{
-			name: "omitted request count uses underlay default",
+			name: "omitted request ratio uses underlay default",
 			mutate: func(object map[string]interface{}) {
 				static := requestStaticWorkload(object)
 				delete(static, "numRequestRatio")
@@ -544,7 +495,7 @@ func TestGeneratedDGDRV1Beta2ResultSchemas(t *testing.T) {
 				require.Contains(t, spec.Required, "parameters")
 				require.Contains(t, spec.Properties, "parameters")
 				require.Contains(t, status.Properties, "metrics")
-				require.Contains(t, status.Properties, "conditions")
+				require.NotContains(t, status.Properties, "conditions")
 				require.NotContains(t, status.Properties, "rank")
 				require.NotContains(t, status.Properties, "experimental")
 			},
@@ -600,7 +551,7 @@ func validDGDRV1Beta2Request() map[string]interface{} {
 			},
 			"objective": map[string]interface{}{
 				"mode":   "Optimize",
-				"metric": "ThroughputPerGPU",
+				"metric": "ThroughputPerGpu",
 				"sla":    map[string]interface{}{},
 			},
 			"recommendation": map[string]interface{}{

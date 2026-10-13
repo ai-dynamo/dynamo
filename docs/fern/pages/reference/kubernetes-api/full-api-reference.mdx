@@ -4315,14 +4315,14 @@ Backend identifies an inference backend searched by AISimulate and used by gener
 </Accordion>
 
 <Accordion id="branchprogress" title="BranchProgress">
-BranchProgress reports progress for one independently optimized backend and topology branch.
+BranchProgress reports progress for one AISimulate deployment-mode branch.
 
 
 **Kind:** `type`
 **Appears in:** [DGDRRunProgress](#dgdrrunprogress)
 
-<ParamField path="name" type="string">
-Name is the stable branch identifier chosen by the executor.
+<ParamField path="deploymentMode" type="string">
+DeploymentMode identifies the AISimulate search-space deployment mode.
 </ParamField>
 
 <ParamField path="rounds" type="RoundProgress">
@@ -4372,7 +4372,7 @@ DGDRRunProgress contains branch-aware optimizer and evaluation outcome counters.
 **Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
 
 <ParamField path="branches" type="BranchProgress array">
-Branches reports each independently optimized backend and topology branch.
+Branches reports independently optimized AISimulate deployment modes.
 See [BranchProgress](#branchprogress).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4500,12 +4500,6 @@ DynamoGraphDeploymentCandidateStatus describes evaluation, never deployment heal
 Metrics are the resolved evaluation metrics for this point.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="conditions" type="Condition array">
-Conditions includes the Evaluated condition, whose observedGeneration identifies the candidate spec generation represented by metrics.
-See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
-**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4798,7 +4792,7 @@ ObjectiveMetric is a metric optimized by AISimulate.
 
 **Kind:** `type`
 **Underlying type:** `string`
-**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]
+**Validation:** Enum: [Throughput ThroughputPerGpu ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGpu]
 **Appears in:** [ObjectiveSpec](#objectivespec)
 </Accordion>
 
@@ -4857,13 +4851,13 @@ See [ObjectiveMode](#objectivemode).
 <ParamField path="metric" type="ObjectiveMetric">
 Metric is the scalar target when mode is Optimize.
 See [ObjectiveMetric](#objectivemetric).
-**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  Optional: \&#123;\&#125;
+**Validation:** Enum: [Throughput ThroughputPerGpu ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGpu]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="metrics" type="ObjectiveMetric array">
 Metrics lists two or more distinct scalar targets when mode is Pareto.
 See [ObjectiveMetric](#objectivemetric).
-**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  MinItems: 2  Optional: \&#123;\&#125;
+**Validation:** Enum: [Throughput ThroughputPerGpu ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGpu]  MinItems: 2  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="sla" type="ObjectiveSLASpec" default="\{ itlMs:30 ttftMs:2000 \}">
@@ -4934,11 +4928,6 @@ ISL is the input sequence length in tokens.
 
 <ParamField path="osl" type="integer">
 OSL is the output sequence length in tokens.
-**Validation:** Minimum: 1  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="requestCount" type="integer">
-RequestCount is the absolute number of requests evaluated. When both request-count controls are omitted, the execution underlay supplies its default.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 

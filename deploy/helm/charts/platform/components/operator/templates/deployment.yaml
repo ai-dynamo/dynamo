@@ -75,9 +75,9 @@ spec:
           - "--crds-dir=/opt/dynamo-operator/crds/"
           - "--version={{ .Chart.AppVersion }}"
           - "--lpx-enabled={{ .Values.lpx.enabled }}"
+          - "--dgdr-v1beta2-enabled={{ .Values.dgdrV1Beta2.enabled }}"
           - "--conversion-webhook-service-name={{ include "dynamo-operator.fullname" . }}-webhook-service"
           - "--conversion-webhook-service-namespace={{ .Release.Namespace }}"
-          - "--feature-gates=DGDRV1Beta2={{ .Values.featureGates.DGDRV1Beta2 }}"
       {{- end }}
       containers:
       - args:

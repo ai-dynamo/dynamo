@@ -3149,7 +3149,7 @@ _Appears in:_
 
 
 
-BranchProgress reports progress for one independently optimized backend and topology branch.
+BranchProgress reports progress for one AISimulate deployment-mode branch.
 
 
 
@@ -3158,7 +3158,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name is the stable branch identifier chosen by the executor. |  |  |
+| `deploymentMode` _string_ | DeploymentMode identifies the AISimulate search-space deployment mode. |  |  |
 | `rounds` _[RoundProgress](#roundprogress)_ | Rounds reports optimizer progress for this branch. |  |  |
 
 
@@ -3212,7 +3212,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `branches` _[BranchProgress](#branchprogress) array_ | Branches reports each independently optimized backend and topology branch. |  | Optional: \{\} <br /> |
+| `branches` _[BranchProgress](#branchprogress) array_ | Branches reports independently optimized AISimulate deployment modes. |  | Optional: \{\} <br /> |
 | `evaluations` _[EvaluationProgress](#evaluationprogress)_ | Evaluations reports unique candidate outcomes. |  | Optional: \{\} <br /> |
 | `candidates` _[CandidateProgress](#candidateprogress)_ | Candidates reports bounded Kubernetes publication. |  | Optional: \{\} <br /> |
 
@@ -3277,7 +3277,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `metrics` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Metrics are the resolved evaluation metrics for this point. |  | Type: object <br />Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions includes the Evaluated condition, whose observedGeneration<br />identifies the candidate spec generation represented by metrics. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRequest
@@ -3480,7 +3479,7 @@ _Underlying type:_ _string_
 ObjectiveMetric is a metric optimized by AISimulate.
 
 _Validation:_
-- Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]
+- Enum: [Throughput ThroughputPerGpu ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGpu]
 
 _Appears in:_
 - [ObjectiveSpec](#objectivespec)
@@ -3538,8 +3537,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `mode` _[ObjectiveMode](#objectivemode)_ | Mode selects scalar optimization or a Pareto search. | Optimize | Enum: [Optimize Pareto] <br />Optional: \{\} <br /> |
-| `metric` _[ObjectiveMetric](#objectivemetric)_ | Metric is the scalar target when mode is Optimize. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />Optional: \{\} <br /> |
-| `metrics` _[ObjectiveMetric](#objectivemetric) array_ | Metrics lists two or more distinct scalar targets when mode is Pareto. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />MinItems: 2 <br />Optional: \{\} <br /> |
+| `metric` _[ObjectiveMetric](#objectivemetric)_ | Metric is the scalar target when mode is Optimize. |  | Enum: [Throughput ThroughputPerGpu ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGpu] <br />Optional: \{\} <br /> |
+| `metrics` _[ObjectiveMetric](#objectivemetric) array_ | Metrics lists two or more distinct scalar targets when mode is Pareto. |  | Enum: [Throughput ThroughputPerGpu ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGpu] <br />MinItems: 2 <br />Optional: \{\} <br /> |
 | `sla` _[ObjectiveSLASpec](#objectiveslaspec)_ | SLA defines per-request latency bounds used to calculate goodput. | \{ itlMs:30 ttftMs:2000 \} | Optional: \{\} <br /> |
 
 
@@ -3608,7 +3607,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `isl` _integer_ | ISL is the input sequence length in tokens. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `osl` _integer_ | OSL is the output sequence length in tokens. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `requestCount` _integer_ | RequestCount is the absolute number of requests evaluated. When both<br />request-count controls are omitted, the execution underlay supplies its default. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `numRequestRatio` _float_ | NumRequestRatio sets request count relative to the selected load. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `requestRate` _float_ | RequestRate is a fixed open-loop arrival rate in requests per second. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `concurrency` _integer_ | Concurrency is a fixed closed-loop in-flight request cap. |  | Minimum: 1 <br />Optional: \{\} <br /> |
