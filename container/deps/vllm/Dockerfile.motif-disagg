@@ -13,9 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The CI base was built from d11469cbc14d540498175fe9a5eb18e4b6adf1c2.
-# Its tree is identical to db6a3705c1d9a9df4f94324636c454e45dc000aa:
-# c3a1bd9474d38139c76f9ceebab819906606085d. Reuse those exact binaries.
+# Apply the Motif NIXL compatibility patch to the pinned runtime image.
 FROM nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1@sha256:de58c43b05c5754ae4b6b80933a86b00e064bc6e04316102dd5b47a5951b067e
 
 USER root
