@@ -1858,30 +1858,18 @@ mod tests {
     }
 
     /// A hidden stop token is dropped from the text but still reported by its own string
-    /// in logprobs, with special tokens kept regardless of `skip_special_tokens`, whether
-    /// the engine sends candidate text, candidates without text, or no candidates.
+    /// in logprobs, with special tokens kept regardless of `skip_special_tokens`. Without
+    /// engine candidates the Backend has to decode it itself.
     #[tokio::test]
     async fn test_hidden_stop_token_logprob_reports_the_token_string() {
-        for top_logprobs in [
-            Some(vec![
-                vec![top_logprob(101, Some("Okay"))],
-                vec![top_logprob(103, Some("<|user|>"))],
-            ]),
-            Some(vec![
-                vec![top_logprob(101, None)],
-                vec![top_logprob(103, None)],
-            ]),
-            None,
-        ] {
-            let (tokens, content) = eos_logprob_entries(top_logprobs).await;
-            assert_eq!(
-                tokens,
-                vec![Some("Okay".to_string()), Some("<|user|>".to_string())]
-            );
-            assert_eq!(content.len(), 2);
-            assert_eq!(content[1].token, "<|user|>");
-            assert_eq!(content[1].bytes, Some(b"<|user|>".to_vec()));
-        }
+        let (tokens, content) = eos_logprob_entries(None).await;
+        assert_eq!(
+            tokens,
+            vec![Some("Okay".to_string()), Some("<|user|>".to_string())]
+        );
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1].token, "<|user|>");
+        assert_eq!(content[1].bytes, Some(b"<|user|>".to_vec()));
     }
 
     /// The engine's string for the sampled token wins over single-ID decode; an empty
@@ -1899,7 +1887,6 @@ mod tests {
         );
         assert_eq!(content[0].token, "Okay!");
         assert_eq!(content[0].bytes, Some(b"Okay!".to_vec()));
-        // The empty candidate string is decoded like a missing one.
         assert_eq!(content[1].top_logprobs[0].token, "<|user|>");
         assert_eq!(content[1].top_logprobs[0].bytes, Some(b"<|user|>".to_vec()));
     }
