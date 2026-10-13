@@ -112,8 +112,7 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 #
 # Development and build-only dependencies cannot be linked into these binaries
 # and are omitted from the SBOMs.
-# sccache wraps only the sidecar `cargo build` calls below, not the
-# cargo-cyclonedx tool install.
+# sccache wraps only the sidecar `cargo build` calls, not the cargo-cyclonedx install.
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-tools-${TARGETARCH},target=/tmp/cargo-tools,sharing=locked \

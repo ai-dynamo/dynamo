@@ -166,14 +166,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p sidecar-binaries
-          # Match the build-args docker-remote-build passes so the
-          # sidecar-builder stage cache-hits instead of rebuilding.
+          # Match docker-remote-build's sccache build-args so sidecar-builder cache-hits.
           EXTRA_ARGS="--build-arg USE_SCCACHE=true"
           EXTRA_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_S3_BUCKET}"
           EXTRA_ARGS+=" --build-arg SCCACHE_REGION=${AWS_DEFAULT_REGION}"
-          # Forward the IRSA secrets only when sccache is configured and the
-          # runner's web-identity credentials exist (same conditional as
-          # compliance-extract).
+          # Forward IRSA secrets as compliance-extract does, for a cache-missed rebuild.
           SECRET_ARGS=""
           if [ -n "${SCCACHE_S3_BUCKET:-}" ]; then
             TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
