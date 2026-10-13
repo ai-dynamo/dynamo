@@ -252,8 +252,30 @@ impl<'a> RoutingEligibility<'a> {
                 return (dp_start..dp_end).contains(&dp_rank)
                     && predicate(WorkerWithDpRank::new(target.worker_id, dp_rank), config);
             }
-            for dp_rank in dp_start..dp_end {
-                if predicate(WorkerWithDpRank::new(target.worker_id, dp_rank), config) {
+            return any_worker_rank(target.worker_id, config, &mut predicate);
+        }
+
+        let inclusion = match (self.allowed_worker_ids, self.available_worker_ids) {
+            (Some(allowed), Some(available)) => {
+                Some(if allowed.capacity() <= available.capacity() {
+                    allowed
+                } else {
+                    available
+                })
+            }
+            (allowed, available) => allowed.or(available),
+        };
+        // Hash iteration scans capacity, not length. The half-capacity cutoff
+        // is a conservative heuristic for the extra worker lookups.
+        if let Some(inclusion) = inclusion.filter(|ids| ids.capacity() < workers.capacity() / 2) {
+            for &worker_id in inclusion {
+                let Some(config) = workers.get(&worker_id) else {
+                    continue;
+                };
+                if !self.allows_worker(worker_id, config) {
+                    continue;
+                }
+                if any_worker_rank(worker_id, config, &mut predicate) {
                     return true;
                 }
             }
@@ -265,12 +287,8 @@ impl<'a> RoutingEligibility<'a> {
                 continue;
             }
 
-            let dp_start = config.data_parallel_start_rank();
-            let dp_end = dp_start + config.data_parallel_size();
-            for dp_rank in dp_start..dp_end {
-                if predicate(WorkerWithDpRank::new(worker_id, dp_rank), config) {
-                    return true;
-                }
+            if any_worker_rank(worker_id, config, &mut predicate) {
+                return true;
             }
         }
 
@@ -320,6 +338,17 @@ impl<'a> RoutingEligibility<'a> {
             worker_id: pinned_worker.worker_id,
         })
     }
+}
+
+#[inline]
+fn any_worker_rank<C, F>(worker_id: WorkerId, config: &C, predicate: &mut F) -> bool
+where
+    C: WorkerConfigLike,
+    F: FnMut(WorkerWithDpRank, &C) -> bool,
+{
+    let dp_start = config.data_parallel_start_rank();
+    let dp_end = dp_start + config.data_parallel_size();
+    (dp_start..dp_end).any(|dp_rank| predicate(WorkerWithDpRank::new(worker_id, dp_rank), config))
 }
 
 pub(super) fn worker_config_for_rank<C: WorkerConfigLike>(
@@ -635,6 +664,60 @@ mod tests {
             ranks,
             vec![WorkerWithDpRank::new(8, 4), WorkerWithDpRank::new(8, 5)]
         );
+    }
+
+    #[test]
+    fn sparse_inclusion_preserves_worker_checks_and_dp_expansion() {
+        let config = TestWorkerConfig {
+            dp_start: 2,
+            dp_size: 2,
+            taints: HashSet::from(["zone-a".to_string()]),
+        };
+        let mut workers: HashMap<_, _> = (0..64).map(|id| (id, config.clone())).collect();
+        workers.get_mut(&1).unwrap().taints.clear();
+        let allowed = HashSet::from([0, 1, 2, 3, 1000]);
+        let available = HashSet::from([0, 1, 2, 4, 1001]);
+        let overloaded = HashSet::from([2]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from(["zone-a".to_string()]),
+            ..Default::default()
+        };
+        for (allowed, available, expected) in [
+            (Some(&allowed), None, vec![(0, 2), (0, 3), (3, 2), (3, 3)]),
+            (None, Some(&available), vec![(0, 2), (0, 3), (4, 2), (4, 3)]),
+            (Some(&allowed), Some(&available), vec![(0, 2), (0, 3)]),
+        ] {
+            let eligibility =
+                RoutingEligibility::new(allowed, Some(&overloaded), None, &constraints)
+                    .with_available_workers(available);
+            let mut ranks = Vec::new();
+            eligibility.for_each_eligible_worker_rank(&workers, |worker, _| {
+                ranks.push((worker.worker_id, worker.dp_rank));
+            });
+            ranks.sort_unstable();
+            assert_eq!(ranks, expected);
+        }
+    }
+
+    #[test]
+    fn sparse_inclusion_stops_at_first_matching_rank() {
+        let config = TestWorkerConfig {
+            dp_start: 2,
+            dp_size: 3,
+            ..Default::default()
+        };
+        let workers = (0..64).map(|id| (id, config.clone())).collect();
+        let available = HashSet::from([7, 1000]);
+        let constraints = RoutingConstraints::default();
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints)
+            .with_available_workers(Some(&available));
+        let mut ranks = Vec::new();
+
+        assert!(eligibility.any_eligible_worker_rank(&workers, |worker, _| {
+            ranks.push(worker.dp_rank);
+            worker.dp_rank == 3
+        }));
+        assert_eq!(ranks, vec![2, 3]);
     }
 
     #[test]
