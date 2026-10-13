@@ -510,7 +510,6 @@ class TestI2VEngineInputs:
 
     @pytest.mark.asyncio
     async def test_invalid_reference_preserves_http_status(self):
-        """Preserve an unsupported-media response before starting generation."""
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
         handler._image_loader = ImageLoader()

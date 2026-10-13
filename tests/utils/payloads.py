@@ -19,14 +19,21 @@ import logging
 import math
 import re
 import struct
+import tempfile
 import time
 import wave
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, cast
 
 import requests
+
+try:
+    import imageio_ffmpeg
+except ImportError:
+    imageio_ffmpeg = None  # Optional for suites that do not decode video responses.
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
@@ -2475,6 +2482,9 @@ class VideoGenerationPayload(BasePayload):
 
     endpoint: str = "/v1/videos"
     timeout: int = 600
+    # Opt-in decode checks require inline media, so a URL alone cannot pass.
+    expected_video_shape: Optional[tuple[int, int, int]] = None  # frames, height, width
+    expected_video_fps: Optional[float] = None
 
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
@@ -2488,11 +2498,44 @@ class VideoGenerationPayload(BasePayload):
         ), f"Missing 'data' in response. Keys: {list(result.keys())}"
         assert len(result["data"]) > 0, "Empty data in video response"
         entry = result["data"][0]
+        if self.expected_video_shape is not None or self.expected_video_fps is not None:
+            assert entry.get("b64_json"), "Video decode checks require b64_json media"
+            self._validate_video(base64.b64decode(entry["b64_json"], validate=True))
         if "url" in entry:
             assert entry["url"], "Video response url is empty"
             return entry["url"]
         assert entry.get("b64_json"), "Video response b64_json is empty"
         return "b64_video_returned"
+
+    def _validate_video(self, video_bytes: bytes) -> None:
+        if imageio_ffmpeg is None:
+            raise RuntimeError("imageio-ffmpeg is required for video decode checks")
+        assert video_bytes[4:8] == b"ftyp", "Expected an MP4 container"
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            video.write(video_bytes)
+            video.flush()
+            # Use the shipped FFmpeg; runtime images deliberately omit PyAV.
+            with closing(
+                imageio_ffmpeg.read_frames(video.name, output_params=["-vsync", "0"])
+            ) as frames:
+                metadata = next(frames)
+                if self.expected_video_fps is not None:
+                    assert metadata["fps"] == self.expected_video_fps, (
+                        f"Expected {self.expected_video_fps} FPS, "
+                        f"got {metadata['fps']}"
+                    )
+                if self.expected_video_shape is not None:
+                    _, height, width = self.expected_video_shape
+                    assert metadata["size"] == (width, height), (
+                        f"Expected {width}x{height} video, "
+                        f"got {metadata['size'][0]}x{metadata['size'][1]}"
+                    )
+                frame_count = sum(1 for _ in frames)
+            assert frame_count > 0, "Decoded video contains no frames"
+            if self.expected_video_shape is not None:
+                assert (
+                    frame_count == self.expected_video_shape[0]
+                ), f"Expected {self.expected_video_shape[0]} frames, got {frame_count}"
 
     def validate(self, response: Any, content: str) -> None:
         assert content, "Video response content is empty"
