@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# EXPERIMENTAL. Aggregated SGLang deployment using the Rust sidecar.
+# EXPERIMENTAL: engine-primary SGLang with the Dynamo native sidecar
 #
 # Worker pod = two containers:
-#   - main: Dynamo worker (dynamo-sglang-sidecar), no GPU; talks to the engine
-#     over gRPC on 127.0.0.1 and auto-discovers the model/role (no --model-path).
-#     Must be named "main" (operator injects env + probes).
-#   - sglang-engine: stock SGLang image, holds the GPU, runs its native gRPC
-#     server as a native sidecar (see initContainers).
+#   - main: stock SGLang image, holds the GPU, and serves native gRPC on
+#     127.0.0.1:30001.
+#   - runtime: Dynamo worker (dynamo-sglang-sidecar), no GPU; runs as a
+#     restartable init container and talks to the engine over loopback.
 #
 # The engine's gRPC has no auth/TLS; safe only because it stays on loopback.
 #
@@ -36,15 +35,26 @@ spec:
     replicas: 1
     podTemplate:
       spec:
-        # sglang-engine as a native sidecar (initContainer + restartPolicy: Always):
-        # starts before `main`, stops after. Native gRPC `--grpc-port` needs SGLang
-        # v0.5.16+; keep this example aligned with Dynamo main's SGLang pin.
+        # The reserved `runtime` init container activates Dynamo sidecar mode.
+        # It starts before `main`, stops after it, and receives Dynamo runtime
+        # defaults, discovery configuration, and probes from the operator.
         initContainers:
-        - name: sglang-engine
-          image: lmsysorg/sglang:v0.5.21
+        - name: runtime
+          image: <your-registry>/dynamo-sidecar:1.6.0
+          command:
+          - dynamo-sglang-sidecar
+          args:
+          - --grpc-endpoint
+          - 127.0.0.1:30001
           restartPolicy: Always
-          # gRPC HealthCheck via exec (tcpSocket/grpc: dial the pod IP, not the
-          # loopback engine). startupProbe gates `main`; readinessProbe drops dead workers.
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+        containers:
+        # Engine must be named `main`; it owns the GPU and model lifecycle.
+        - name: main
+          image: lmsysorg/sglang:v0.5.21
+          # Native gRPC `--grpc-port` needs SGLang v0.5.16+.
           startupProbe:
             exec:
               command:
@@ -63,6 +73,15 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3)
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -86,18 +105,4 @@ spec:
           - --grpc-port
           - "30001"
           - --incremental-streaming-output
-        containers:
-        # Sidecar worker. Use nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>
-        # or build from lib/sidecar/Dockerfile; add
-        # imagePullSecrets if private. Must be named "main" (operator injects
-        # discovery env + probes by name).
-        - name: main
-          image: <your-registry>/dynamo-sidecar:1.3.0
-          command:
-          - dynamo-sglang-sidecar
-          args:
-          - --grpc-endpoint
-          - 127.0.0.1:30001
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
+  backendFramework: sglang
