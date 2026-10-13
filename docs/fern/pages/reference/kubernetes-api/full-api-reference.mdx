@@ -4561,7 +4561,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="workload" type="WorkloadSpec">
+<ParamField path="workload" type="WorkloadSpec" default="\{ \}">
 Workload defines the synthetic traffic model used for every candidate evaluation.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
@@ -4775,7 +4775,7 @@ AISimulate performs mode-specific validation.
 
 **Kind:** `type`
 **Underlying type:** `float array`
-**Validation:** MaxItems: 2; MinItems: 1
+**Validation:** MaxItems: 2; MinItems: 1; items:Maximum: 1; items:Minimum: 0
 **Appears in:** [StaticWorkloadSpec](#staticworkloadspec)
 </Accordion>
 
@@ -4929,16 +4929,16 @@ StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes.
 
 <ParamField path="isl" type="integer">
 ISL is the input sequence length in tokens.
-**Validation:** Minimum: 1
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="osl" type="integer">
 OSL is the output sequence length in tokens.
-**Validation:** Minimum: 1
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="requestCount" type="integer">
-RequestCount is the absolute number of requests evaluated.
+RequestCount is the absolute number of requests evaluated. When both request-count controls are omitted, the execution underlay supplies its default.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -4958,9 +4958,9 @@ Concurrency is a fixed closed-loop in-flight request cap.
 </ParamField>
 
 <ParamField path="kvLoadRatio" type="KVLoadRatio">
-KVLoadRatio derives concurrency from candidate KV capacity. A two-value range is supported only for a Pareto objective.
+KVLoadRatio derives concurrency from candidate KV capacity. A two-value range requires a bounded AISimulate sweep.
 See [KVLoadRatio](#kvloadratio).
-**Validation:** MaxItems: 2  MinItems: 1  Optional: \&#123;\&#125;
+**Validation:** MaxItems: 2  MinItems: 1  items:Maximum: 1  items:Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4971,8 +4971,8 @@ WorkloadSpec defines the synthetic traffic model used for every candidate evalua
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec)
 
-<ParamField path="static" type="StaticWorkloadSpec">
-Static defines one of AISimulate's synthetic workload shapes.
+<ParamField path="static" type="StaticWorkloadSpec" default="\{ isl:4000 kvLoadRatio:[0 1] osl:1000 \}">
+Static defines one of AISimulate's synthetic workload shapes. When omitted, it searches the full KV-load ratio range at ISL 4000 and OSL 1000. An explicit empty object opts out of this underlay.
 See [StaticWorkloadSpec](#staticworkloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

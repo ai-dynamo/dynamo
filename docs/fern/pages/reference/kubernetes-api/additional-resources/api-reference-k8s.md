@@ -3315,7 +3315,7 @@ _Appears in:_
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  |  |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. | [vllm sglang trtllm] | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search. |  | Optional: \{\} <br /> |
-| `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation. | \{  \} | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization or a multi-objective Pareto search. |  | Optional: \{\} <br /> |
 | `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate selects the execution artifact and supplies native AISimulate input. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. | \{  \} | Optional: \{\} <br /> |
@@ -3449,6 +3449,8 @@ AISimulate performs mode-specific validation.
 _Validation:_
 - MaxItems: 2
 - MinItems: 1
+- items:Maximum: 1
+- items:Minimum: 0
 
 _Appears in:_
 - [StaticWorkloadSpec](#staticworkloadspec)
@@ -3604,13 +3606,13 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `isl` _integer_ | ISL is the input sequence length in tokens. |  | Minimum: 1 <br /> |
-| `osl` _integer_ | OSL is the output sequence length in tokens. |  | Minimum: 1 <br /> |
-| `requestCount` _integer_ | RequestCount is the absolute number of requests evaluated. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `isl` _integer_ | ISL is the input sequence length in tokens. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `osl` _integer_ | OSL is the output sequence length in tokens. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `requestCount` _integer_ | RequestCount is the absolute number of requests evaluated. When both<br />request-count controls are omitted, the execution underlay supplies its default. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `numRequestRatio` _float_ | NumRequestRatio sets request count relative to the selected load. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `requestRate` _float_ | RequestRate is a fixed open-loop arrival rate in requests per second. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `concurrency` _integer_ | Concurrency is a fixed closed-loop in-flight request cap. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `kvLoadRatio` _[KVLoadRatio](#kvloadratio)_ | KVLoadRatio derives concurrency from candidate KV capacity. A two-value range<br />is supported only for a Pareto objective. |  | MaxItems: 2 <br />MinItems: 1 <br />Optional: \{\} <br /> |
+| `kvLoadRatio` _[KVLoadRatio](#kvloadratio)_ | KVLoadRatio derives concurrency from candidate KV capacity. A two-value<br />range requires a bounded AISimulate sweep. |  | MaxItems: 2 <br />MinItems: 1 <br />items:Maximum: 1 <br />items:Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### WorkloadSpec
@@ -3626,7 +3628,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `static` _[StaticWorkloadSpec](#staticworkloadspec)_ | Static defines one of AISimulate's synthetic workload shapes. |  | Optional: \{\} <br /> |
+| `static` _[StaticWorkloadSpec](#staticworkloadspec)_ | Static defines one of AISimulate's synthetic workload shapes. When omitted,<br />it searches the full KV-load ratio range at ISL 4000 and OSL 1000.<br />An explicit empty object opts out of this underlay. | \{ isl:4000 kvLoadRatio:[0 1] osl:1000 \} | Optional: \{\} <br /> |
 
 
 

@@ -344,10 +344,11 @@ func TestGeneratedDGDRV1Beta2RequestSchema(t *testing.T) {
 
 		spec := object["spec"].(map[string]interface{})
 		require.NotContains(t, spec, "hardware")
-		require.NotContains(t, spec, "workload")
 		require.NotContains(t, spec, "objective")
+		require.NotContains(t, spec, "aisimulate")
 		require.Equal(t, []interface{}{"vllm", "sglang", "trtllm"}, spec["backends"])
 		require.EqualValues(t, 1, spec["recommendation"].(map[string]interface{})["maxCandidates"])
+		requireDefaultOptionAWorkload(t, spec)
 	})
 
 	t.Run("empty workload placeholder", func(t *testing.T) {
@@ -362,6 +363,25 @@ func TestGeneratedDGDRV1Beta2RequestSchema(t *testing.T) {
 		}
 		structuraldefaulting.Default(object, structural)
 		require.Empty(t, validate(t, object))
+		requireDefaultOptionAWorkload(t, object["spec"].(map[string]interface{}))
+	})
+
+	t.Run("explicit empty static opts out", func(t *testing.T) {
+		object := map[string]interface{}{
+			"apiVersion": "nvidia.com/v1beta2",
+			"kind":       "DynamoGraphDeploymentRequest",
+			"metadata":   map[string]interface{}{"name": "native-workload"},
+			"spec": map[string]interface{}{
+				"model": map[string]interface{}{"name": "test/model"},
+				"workload": map[string]interface{}{
+					"static": map[string]interface{}{},
+				},
+			},
+		}
+		static := requestStaticWorkload(object)
+		structuraldefaulting.Default(object, structural)
+		require.Empty(t, validate(t, object))
+		require.Empty(t, static)
 	})
 
 	tests := []struct {
@@ -434,10 +454,27 @@ func TestGeneratedDGDRV1Beta2RequestSchema(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "missing request count controls",
+			name: "omitted request count uses underlay default",
 			mutate: func(object map[string]interface{}) {
 				static := requestStaticWorkload(object)
 				delete(static, "numRequestRatio")
+			},
+		},
+		{
+			name: "KV load ratio below range",
+			mutate: func(object map[string]interface{}) {
+				static := requestStaticWorkload(object)
+				delete(static, "concurrency")
+				static["kvLoadRatio"] = []interface{}{-0.1}
+			},
+			wantErr: true,
+		},
+		{
+			name: "KV load ratio above range",
+			mutate: func(object map[string]interface{}) {
+				static := requestStaticWorkload(object)
+				delete(static, "concurrency")
+				static["kvLoadRatio"] = []interface{}{1.1}
 			},
 			wantErr: true,
 		},
@@ -579,6 +616,17 @@ func requestObjective(object map[string]interface{}) map[string]interface{} {
 
 func requestStaticWorkload(object map[string]interface{}) map[string]interface{} {
 	return object["spec"].(map[string]interface{})["workload"].(map[string]interface{})["static"].(map[string]interface{})
+}
+
+func requireDefaultOptionAWorkload(t *testing.T, spec map[string]interface{}) {
+	t.Helper()
+	static := spec["workload"].(map[string]interface{})["static"].(map[string]interface{})
+	require.EqualValues(t, 4000, static["isl"])
+	require.EqualValues(t, 1000, static["osl"])
+	ratio := static["kvLoadRatio"].([]interface{})
+	require.Len(t, ratio, 2)
+	require.EqualValues(t, 0, ratio[0])
+	require.EqualValues(t, 1, ratio[1])
 }
 
 func TestConfigureDGDRV1Beta2CRD(t *testing.T) {

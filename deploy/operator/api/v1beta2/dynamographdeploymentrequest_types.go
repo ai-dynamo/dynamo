@@ -61,21 +61,26 @@ type HardwareSpec struct {
 // AISimulate performs mode-specific validation.
 // +kubebuilder:validation:MinItems=1
 // +kubebuilder:validation:MaxItems=2
+// +kubebuilder:validation:items:Minimum=0
+// +kubebuilder:validation:items:Maximum=1
 type KVLoadRatio []float64
 
 // StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes.
-// +kubebuilder:validation:XValidation:rule="(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) == 1",message="exactly one of requestRate, concurrency, or kvLoadRatio must be specified"
-// +kubebuilder:validation:XValidation:rule="has(self.requestCount) != has(self.numRequestRatio)",message="exactly one of requestCount or numRequestRatio must be specified"
+// +kubebuilder:validation:XValidation:rule="(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) <= 1",message="at most one of requestRate, concurrency, or kvLoadRatio may be specified"
+// +kubebuilder:validation:XValidation:rule="!(has(self.requestCount) && has(self.numRequestRatio))",message="requestCount and numRequestRatio are mutually exclusive"
 type StaticWorkloadSpec struct {
 	// ISL is the input sequence length in tokens.
+	// +optional
 	// +kubebuilder:validation:Minimum=1
-	ISL int32 `json:"isl"`
+	ISL *int32 `json:"isl,omitempty"`
 
 	// OSL is the output sequence length in tokens.
+	// +optional
 	// +kubebuilder:validation:Minimum=1
-	OSL int32 `json:"osl"`
+	OSL *int32 `json:"osl,omitempty"`
 
-	// RequestCount is the absolute number of requests evaluated.
+	// RequestCount is the absolute number of requests evaluated. When both
+	// request-count controls are omitted, the execution underlay supplies its default.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	RequestCount *int64 `json:"requestCount,omitempty"`
@@ -97,16 +102,19 @@ type StaticWorkloadSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	Concurrency *int32 `json:"concurrency,omitempty"`
 
-	// KVLoadRatio derives concurrency from candidate KV capacity. A two-value range
-	// is supported only for a Pareto objective.
+	// KVLoadRatio derives concurrency from candidate KV capacity. A two-value
+	// range requires a bounded AISimulate sweep.
 	// +optional
 	KVLoadRatio KVLoadRatio `json:"kvLoadRatio,omitempty"`
 }
 
 // WorkloadSpec defines the synthetic traffic model used for every candidate evaluation.
 type WorkloadSpec struct {
-	// Static defines one of AISimulate's synthetic workload shapes.
+	// Static defines one of AISimulate's synthetic workload shapes. When omitted,
+	// it searches the full KV-load ratio range at ISL 4000 and OSL 1000.
+	// An explicit empty object opts out of this underlay.
 	// +optional
+	// +kubebuilder:default={isl: 4000, osl: 1000, kvLoadRatio: {0.0, 1.0}}
 	Static *StaticWorkloadSpec `json:"static,omitempty"`
 }
 
@@ -223,6 +231,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 
 	// Workload defines the synthetic traffic model used for every candidate evaluation.
 	// +optional
+	// +kubebuilder:default={}
 	Workload *WorkloadSpec `json:"workload,omitempty"`
 
 	// Objective defines scalar optimization or a multi-objective Pareto search.

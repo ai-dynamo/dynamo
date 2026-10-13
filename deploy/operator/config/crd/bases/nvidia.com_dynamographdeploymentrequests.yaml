@@ -9700,10 +9700,20 @@ spec:
                       type: integer
                   type: object
                 workload:
+                  default: {}
                   description: Workload defines the synthetic traffic model used for every candidate evaluation.
                   properties:
                     static:
-                      description: Static defines one of AISimulate's synthetic workload shapes.
+                      default:
+                        isl: 4000
+                        kvLoadRatio:
+                          - 0
+                          - 1
+                        osl: 1000
+                      description: |-
+                        Static defines one of AISimulate's synthetic workload shapes. When omitted,
+                        it searches the full KV-load ratio range at ISL 4000 and OSL 1000.
+                        An explicit empty object opts out of this underlay.
                       properties:
                         concurrency:
                           description: Concurrency is a fixed closed-loop in-flight request cap.
@@ -9717,9 +9727,11 @@ spec:
                           type: integer
                         kvLoadRatio:
                           description: |-
-                            KVLoadRatio derives concurrency from candidate KV capacity. A two-value range
-                            is supported only for a Pareto objective.
+                            KVLoadRatio derives concurrency from candidate KV capacity. A two-value
+                            range requires a bounded AISimulate sweep.
                           items:
+                            maximum: 1
+                            minimum: 0
                             type: number
                           maxItems: 2
                           minItems: 1
@@ -9735,7 +9747,9 @@ spec:
                           minimum: 1
                           type: integer
                         requestCount:
-                          description: RequestCount is the absolute number of requests evaluated.
+                          description: |-
+                            RequestCount is the absolute number of requests evaluated. When both
+                            request-count controls are omitted, the execution underlay supplies its default.
                           format: int64
                           minimum: 1
                           type: integer
@@ -9744,15 +9758,12 @@ spec:
                           exclusiveMinimum: true
                           minimum: 0
                           type: number
-                      required:
-                        - isl
-                        - osl
                       type: object
                       x-kubernetes-validations:
-                        - message: exactly one of requestRate, concurrency, or kvLoadRatio must be specified
-                          rule: '(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) == 1'
-                        - message: exactly one of requestCount or numRequestRatio must be specified
-                          rule: has(self.requestCount) != has(self.numRequestRatio)
+                        - message: at most one of requestRate, concurrency, or kvLoadRatio may be specified
+                          rule: '(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) <= 1'
+                        - message: requestCount and numRequestRatio are mutually exclusive
+                          rule: '!(has(self.requestCount) && has(self.numRequestRatio))'
                   type: object
               required:
                 - model
