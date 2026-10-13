@@ -49,8 +49,6 @@ spec:
             value: "1"
           - name: TRANSFORMERS_OFFLINE
             value: "1"
-          - name: HF_HOME
-            value: /shared-model-cache
           - name: DYN_ROUTER_MODE
             value: round-robin
           image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
@@ -80,6 +78,7 @@ spec:
         - args:
           - -m
           - dynamo.sglang
+          - --trust-remote-code
           - --enable-multimodal
           - --frontend-decoding
           - --mm-enable-dp-encoder

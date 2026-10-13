@@ -381,11 +381,7 @@ The SGLang workers use the `glm45` reasoning parser and `glm47` tool-call parser
 
 <div data-recipe-framework="sglang" data-sku="b200 gb200">
 
-Use the [AIPerf benchmark guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/perf/README.md) and [benchmark manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/perf/perf.yaml) for agentic text trace replay. 
-
-### Performance Results
-
-The reported measurements use synthetic acceptance; the deployment bases use real speculative verification by default. 
+Use the [AIPerf benchmark guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/perf/README.md) and [benchmark manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/perf/perf.yaml) for agentic text trace replay.  These measurements describe the source configurations with simulated acceptance length `2.5657`, method `match-expected`, and token mode `real-draft-token`.
 
 | Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |

@@ -35,8 +35,8 @@ benchmark tokenizer are pinned to revision
 `--revision`; AIPerf sets `benchmark.tokenizer.revision` through
 `TOKENIZER_REVISION`. AIPerf sends the served model name to the endpoint;
 the deployment controls which checkpoint is loaded.
-The benchmark uses AIPerf 0.13.0 and installs Transformers 5.19.0 with
-Tokenizers 0.23.2 to read this checkpoint's `TokenizersBackend` tokenizer.
+The benchmark uses AIPerf 0.13.0, bootstraps pip with the bundled `ensurepip`,
+and installs Transformers 5.19.0 with Tokenizers 0.23.2 to read this checkpoint's `TokenizersBackend` tokenizer.
 Package installation requires network access. Model assets must already be on
 the shared cache as described in the [SGLang deployment guide](../README.md#sglang).
 
@@ -48,6 +48,11 @@ cluster-specific taints.
 The deployment bases use real speculative verification by default. The perf Job
 does not enable synthetic acceptance or change serving flags. Record any optional
 synthetic-acceptance component separately when comparing results.
+
+For GB200 synthetic measurements, first follow the
+[synthetic deployment procedure](../README.md#synthetic-acceptance) and wait for
+the replacement workers to become ready. It sets acceptance length `2.5657`,
+method `match-expected`, and token mode `real-draft-token`. 
 
 ## Trace and load settings
 

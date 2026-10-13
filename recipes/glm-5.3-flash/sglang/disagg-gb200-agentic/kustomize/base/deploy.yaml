@@ -76,6 +76,7 @@ spec:
               args:
                 - -m
                 - dynamo.sglang
+                - --trust-remote-code
                 - --enable-multimodal
                 - --mm-enable-dp-encoder
                 - --model-path
@@ -216,6 +217,7 @@ spec:
               args:
                 - -m
                 - dynamo.sglang
+                - --trust-remote-code
                 - --enable-multimodal
                 - --mm-enable-dp-encoder
                 - --model-path

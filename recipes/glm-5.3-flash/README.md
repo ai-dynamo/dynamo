@@ -190,10 +190,15 @@ python3 scripts/kustomize-matrix.py check "$RECIPE/.kustomize-matrix.yaml"
 - GB200 disaggregated routing uses worker KV events. Both prefill and decode
   workers configure a ZMQ publisher with topic `kv-events` and endpoint
   `tcp://*:5557`. The router block size and worker page size are both 64.
-- Real speculative verification is the default for all three targets. For
-  GB200, reproduce the source's synthetic acceptance length of `2.5657` by
-  selecting the aggregated or disaggregated recipe and composing its optional
-  component:
+
+### Synthetic Acceptance
+
+Real speculative verification is the default for all three targets. To use
+synthetic acceptance on GB200, select the aggregated or disaggregated recipe
+and compose its optional component. The component sets
+`SGLANG_SIMULATE_ACC_LEN=2.5657`, `SGLANG_SIMULATE_ACC_METHOD=match-expected`,
+and `SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token` on the aggregated worker
+or disaggregated decode worker.
 
 ```bash
 export MODE=agg  # or disagg
@@ -202,6 +207,8 @@ python3 scripts/kustomize-matrix.py compose \
   "$RECIPE/kustomize/overlays/gb200" \
   "$RECIPE/kustomize/components/synthetic-acceptance" \
   > "/tmp/glm53-sglang-${MODE}-synthetic.yaml"
+kubectl apply --dry-run=server -f "/tmp/glm53-sglang-${MODE}-synthetic.yaml" -n "$NAMESPACE"
+kubectl apply -f "/tmp/glm53-sglang-${MODE}-synthetic.yaml" -n "$NAMESPACE"
 ```
 
 Synthetic acceptance changes token verification and is for performance
