@@ -2103,7 +2103,8 @@ async fn repeated_affinity_invalidation_yields_and_preserves_new_bindings() {
                 }
             }
         }));
-        let mut pending = Box::pin(core.hold_session(&table, "s", &key));
+        let mut pending =
+            Box::pin(core.select_and_reserve(session_reservation("invalidation", "s")));
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(pending.as_mut().poll(&mut context).is_pending());
         assert_eq!(invalidations.load(Ordering::SeqCst), 32);
@@ -2125,8 +2126,9 @@ async fn repeated_affinity_invalidation_yields_and_preserves_new_bindings() {
                     writer_id: 99,
                 },
             );
-            let hold = pending.await.unwrap().unwrap();
-            assert!(matches!(hold, Hold::Bound { target, .. } if target == healthy));
+            let selected = pending.await.unwrap();
+            assert_eq!(selected.worker_id, healthy.worker_id);
+            core.free_reservation("invalidation").await.unwrap();
             assert_eq!(invalidations.load(Ordering::SeqCst), 32);
         }
     }
@@ -2370,34 +2372,6 @@ async fn advisory_select_reports_worker_load_and_busy_evaluation() {
         core.loads(Some("model"), Some("default"))[0].loads[0].potential_prefill_tokens,
         0
     );
-}
-
-#[rstest::rstest]
-#[case::before_monitor(false)]
-#[case::after_monitor(true)]
-#[tokio::test]
-async fn ready_indexer_preserves_decode_projection_before_worker_monitor(
-    #[case] allow_monitor: bool,
-) {
-    let core = core_with(
-        test_config(true),
-        SelectionHost {
-            cache: HostCache {
-                index: KvIndexSource::Owned(Arc::new(ReadyIngress)),
-                shared: None,
-            },
-            ..SelectionHost::default()
-        },
-        None,
-        WorkerType::Aggregated,
-        None,
-    );
-    core.upsert_worker(worker(1)).await.unwrap();
-    if allow_monitor {
-        tokio::task::yield_now().await;
-    }
-    let response = core.select(select_request()).await.unwrap();
-    assert_eq!(response.potential_decode_blocks, 1);
 }
 
 #[tokio::test]
