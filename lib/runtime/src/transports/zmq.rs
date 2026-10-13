@@ -400,6 +400,31 @@ mod tests {
         }
     }
 
+    /// The root `.cargo/config.toml` selects libzmq's eventfd signaler through
+    /// `CXXFLAGS_<target>`. If that flag stops reaching the vendored libzmq build (a pre-set
+    /// `CXXFLAGS_<target>`, a build outside the repository tree), libzmq silently falls back to
+    /// a socketpair and nothing else fails.
+    #[cfg(all(
+        target_os = "linux",
+        target_env = "gnu",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[tokio::test]
+    async fn libzmq_signaler_is_eventfd() -> Result<()> {
+        use std::os::fd::AsRawFd;
+
+        let context = TmqContext::new();
+        let socket = dealer(&context).bind("inproc://libzmq-signaler-is-eventfd")?;
+        let fd = socket.get_socket().as_raw_fd();
+        let target = std::fs::read_link(format!("/proc/self/fd/{fd}"))?;
+        assert_eq!(
+            target.to_str(),
+            Some("anon_inode:[eventfd]"),
+            "libzmq signaler is not an eventfd; .cargo/config.toml CXXFLAGS_<target> did not reach zmq-sys"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_basic_communication() -> Result<()> {
         let context = TmqContext::new();
