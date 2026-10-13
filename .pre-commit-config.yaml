@@ -168,8 +168,11 @@ repos:
     - id: gen-recipe-nav
       name: Regenerate the Recipes sidebar, provider filter, and card order from the catalog
       # Write mode, not --check: a catalog edit regenerates the sidebar, the
-      # overview's provider filter and counts, and the provider CSS, and the
-      # hook fails only so the regenerated files get staged.
+      # overview's provider filter and card order, and the provider CSS, and the
+      # hook fails only so the regenerated files get staged. Every generated
+      # line is per provider or per recipe, never a catalog-wide total: the
+      # overview's counts come from the RecipeCount component in the browser,
+      # so two recipe PRs that merge cleanly cannot leave main stale.
       entry: python docs/fern/scripts/gen_recipe_nav.py
       language: python
       files: ^docs/fern/(index\.yml|components/RecipeStyles\.tsx|pages/recipes/(_catalog/.*|model-recipes/overview\.mdx)|scripts/gen_recipe_nav\.py)$

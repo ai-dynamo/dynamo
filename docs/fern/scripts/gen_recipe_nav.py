@@ -11,9 +11,9 @@ the catalog and the provider order cannot drift between surfaces:
   * ``index.yml``: the Model Recipes sidebar, one section per provider
     (``recipe-nav`` span).
   * ``model-recipes/overview.mdx``: the provider filter's radio inputs and
-    chips (``provider-inputs`` and ``provider-chips`` spans), the catalog
-    counts (``family-count`` and ``config-count`` spans), and the order of the
-    model cards (``recipe-cards`` span).
+    chips (``provider-inputs`` and ``provider-chips`` spans), and the order of
+    the model cards and each card's ``data-targets`` list (``recipe-cards``
+    span).
   * ``components/RecipeStyles.tsx``: the per-provider chip-highlight and
     card-filter CSS rules (``provider-chip-rules`` and
     ``provider-filter-rules`` spans).
@@ -33,7 +33,10 @@ titles; recipes that still tie keep their ``index.yaml`` order.
 The overview's model cards stay hand-written: this script only sorts them into
 the same order. Each active recipe needs exactly one card, matched by the card's
 ``href`` to the recipe page, and the card's ``data-provider`` must equal the
-recipe's ``provider``, so every filter chip finds its cards.
+recipe's ``provider``, so every filter chip finds its cards. The script sets
+each card's ``data-targets`` to the recipe's target ids; the ``RecipeCount``
+component counts the cards and those ids in the browser. A per-card list, not a
+committed total, keeps the counts right when two recipe PRs merge cleanly.
 
 Usage (from any cwd; paths resolve relative to this file):
 
@@ -78,6 +81,8 @@ VARIANT_TAGS = tuple(
 CARD_START = re.compile(r'^(\s*)<div className="dynamo-model-card"')
 CARD_PROVIDER = re.compile(r'data-recipe-card\b[^>]*?\bdata-provider="([^"]*)"')
 CARD_PAGE = re.compile(r'className="dynamo-card-link" href="([^"]+)"')
+CARD_TARGETS = re.compile(r' data-targets="[^"]*"')
+TARGET_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class CatalogError(Exception):
@@ -98,7 +103,7 @@ class Recipe:
     provider: str
     page: str
     slug: str
-    targets: int
+    targets: tuple[str, ...]
     generation: tuple[int, ...] = (0,)
 
 
@@ -164,9 +169,21 @@ def parse_recipe(entry: dict, providers: dict[str, Provider], source: str) -> Re
         provider=provider,
         page=page,
         slug=entry.get("slug") or Path(page).stem,
-        targets=len(entry.get("targets") or []),
+        targets=parse_targets(entry, source),
         generation=parse_generation(entry, source),
     )
+
+
+def parse_targets(entry: dict, source: str) -> tuple[str, ...]:
+    """Return the recipe's target ids, which the overview's cards list."""
+    ids = tuple(str(t.get("id")) for t in entry.get("targets") or [])
+    for tid in ids:
+        if not TARGET_ID.match(tid):
+            raise CatalogError(
+                f"{source}: target id {tid!r} must be letters, digits, '.', '_' "
+                "or '-'"
+            )
+    return ids
 
 
 def parse_generation(entry: dict, source: str) -> tuple[int, ...]:
@@ -297,14 +314,6 @@ def render_provider_chips(groups: list[Group]) -> list[str]:
     return lines
 
 
-def render_family_count(recipes: list[Recipe], indent: str) -> list[str]:
-    return [f"{indent}<h3>{len(recipes)} model families</h3>"]
-
-
-def render_config_count(recipes: list[Recipe], indent: str) -> list[str]:
-    return [f"{indent}<strong>{sum(r.targets for r in recipes)}</strong>"]
-
-
 def render_chip_rules(groups: list[Group]) -> list[str]:
     return [
         f"#provider-{k}:checked ~ .dynamo-recipe-browser " f'label[for="provider-{k}"],'
@@ -430,13 +439,18 @@ def sort_cards(body: list[str], groups: list[Group]) -> list[str]:
             )
         if page in by_page:
             raise CatalogError(f"overview.mdx: two model cards link to {page}")
+        if not card[0].rstrip().endswith(">"):
+            raise CatalogError(
+                f"overview.mdx: the {recipe.title} card's opening <div> must end on "
+                "its first line"
+            )
         provider = CARD_PROVIDER.search(card[0])
         if not provider or provider.group(1) != recipe.provider:
             raise CatalogError(
                 f"overview.mdx: the {recipe.title} card needs "
                 f'data-provider="{recipe.provider}" to match its catalog entry'
             )
-        by_page[page] = card
+        by_page[page] = [set_targets(card[0], recipe), *card[1:]]
     missing = [r.title for page, r in recipes.items() if page not in by_page]
     if missing:
         raise CatalogError(
@@ -445,6 +459,12 @@ def sort_cards(body: list[str], groups: list[Group]) -> list[str]:
             + "; add one between the recipe-cards markers"
         )
     return [line for page in recipes for line in by_page[page]]
+
+
+def set_targets(line: str, recipe: Recipe) -> str:
+    """Write the recipe's target ids into its card's ``data-targets``."""
+    line = CARD_TARGETS.sub("", line.rstrip())
+    return f'{line[:-1]} data-targets="{" ".join(recipe.targets)}">'
 
 
 def build() -> dict[Path, str]:
@@ -472,18 +492,6 @@ def build() -> dict[Path, str]:
         overview,
         "provider-chips",
         lambda _: render_provider_chips(groups),
-        OVERVIEW_MDX,
-    )
-    overview = splice(
-        overview,
-        "family-count",
-        lambda ind: render_family_count(recipes, ind),
-        OVERVIEW_MDX,
-    )
-    overview = splice(
-        overview,
-        "config-count",
-        lambda ind: render_config_count(recipes, ind),
         OVERVIEW_MDX,
     )
 

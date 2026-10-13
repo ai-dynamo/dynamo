@@ -37,6 +37,8 @@ providers:
     name: Google
   lg:
     name: LG AI Research
+  meta:
+    name: Meta
   minimax:
     name: MiniMax
   moonshot:

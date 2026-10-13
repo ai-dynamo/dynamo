@@ -32,7 +32,8 @@ CSS-coupled vocabulary. For the machine-readable catalog contract, see the
 3. **Generate the Model Recipes navigation**: run
    `python3 docs/fern/scripts/gen_recipe_nav.py` (the `gen-recipe-nav` pre-commit
    hook runs it for you). Do not edit the Model Recipes sidebar, the overview's
-   provider filter, its counts, its card order, or the provider CSS by hand; see
+   provider filter, its card order, its cards' `data-targets`, or the provider
+   CSS by hand; see
    [Provider order](#provider-order). Feature Benchmark pages are still wired
    by hand under the Feature Benchmarks section of `docs/fern/index.yml`.
 4. **Patch `docs/fern/main.css` only if** the page introduces a picker axis value not
@@ -105,9 +106,12 @@ last. If a title would mislead the rule, set `model.generation` on the entry to
 a quoted override, such as `generation: "4.1"`. Within a generation, a title tagged
 `Pro` comes first, then `Flash`, then untagged titles (DeepSeek-V4-Pro,
 DeepSeek-V4-Flash, then a plain DeepSeek-V4). Recipes that still tie keep
-their `index.yaml` order. The generator also writes the overview's model-family and
-configuration counts, the provider CSS rules in `components/RecipeStyles.tsx`,
-and the order of `index.yaml`. Each generated span sits between
+their `index.yaml` order. The generator also writes each overview card's
+`data-targets` (the recipe's target ids), the provider CSS rules in
+`components/RecipeStyles.tsx`, and the order of `index.yaml`. The overview's
+model-family and configuration counts are not committed: the `RecipeCount`
+component counts the cards and their target ids in the browser, so two recipe
+PRs that merge cleanly cannot leave a stale total. Each generated span sits between
 `<name>:begin` and `<name>:end` markers. The `gen-recipe-nav` pre-commit hook
 regenerates them on every commit that touches the catalog, and CI fails if
 they are stale. A page's URL slug defaults to its file name; set `slug:` on the

@@ -29,7 +29,10 @@ def providers(ranked: list[str], names: dict[str, str]):
 
 
 def recipe(
-    rid: str, provider: str, targets: int = 1, generation: tuple[int, ...] = (1,)
+    rid: str,
+    provider: str,
+    targets: tuple[str, ...] = ("agg",),
+    generation: tuple[int, ...] = (1,),
 ) -> gen.Recipe:
     return gen.Recipe(
         rid, rid.upper(), provider, f"pages/{rid}.mdx", rid, targets, generation
@@ -100,7 +103,13 @@ def test_pro_then_flash_then_untagged_within_a_generation():
     titles = ["V4", "V4-Flash", "V4-Pro-0813", "V4-Pro", "V4.1-Flash", "V4-Profile"]
     recipes = [
         gen.Recipe(
-            t, t, "deepseek", f"pages/{t}.mdx", t, 1, (4, 1) if "4.1" in t else (4,)
+            t,
+            t,
+            "deepseek",
+            f"pages/{t}.mdx",
+            t,
+            ("agg",),
+            (4, 1) if "4.1" in t else (4,),
         )
         for t in titles
     ]
@@ -208,10 +217,13 @@ def groups_for(*keys: str) -> list[gen.Group]:
     return gen.group_recipes(registry, ranked, [recipe(k, k) for k in keys])
 
 
-def card(page: str, provider: str, indent: str = "  ") -> list[str]:
+def card(
+    page: str, provider: str, indent: str = "  ", targets: str | None = None
+) -> list[str]:
+    listed = "" if targets is None else f' data-targets="{targets}"'
     return [
         f'{indent}<div className="dynamo-model-card" data-recipe-card '
-        f'data-provider="{provider}">',
+        f'data-provider="{provider}"{listed}>',
         f"{indent}  <div><h3>{page}</h3></div>",
         f'{indent}  <a className="dynamo-card-link" href="{page}.mdx">Open</a>',
         f"{indent}</div>",
@@ -221,7 +233,37 @@ def card(page: str, provider: str, indent: str = "  ") -> list[str]:
 def test_cards_follow_sidebar_order_and_drop_blank_lines():
     groups = groups_for("zai", "qwen")
     body = card("qwen", "qwen") + [""] + card("zai", "zai")
-    assert gen.sort_cards(body, groups) == card("zai", "zai") + card("qwen", "qwen")
+    assert gen.sort_cards(body, groups) == card("zai", "zai", targets="agg") + card(
+        "qwen", "qwen", targets="agg"
+    )
+
+
+def test_cards_list_their_recipe_targets_replacing_stale_ones():
+    registry, ranked = providers(["zai"], {"zai": "Z.ai"})
+    groups = gen.group_recipes(
+        registry, ranked, [recipe("zai", "zai", targets=("vllm-agg", "vllm-disagg"))]
+    )
+    body = card("zai", "zai", targets="old-target")
+    assert gen.sort_cards(body, groups) == card(
+        "zai", "zai", targets="vllm-agg vllm-disagg"
+    )
+
+
+def test_card_opening_div_must_end_on_its_first_line():
+    body = [
+        '  <div className="dynamo-model-card" data-recipe-card',
+        '    data-provider="zai">',
+        '    <a className="dynamo-card-link" href="zai.mdx">Open</a>',
+        "  </div>",
+    ]
+    with pytest.raises(gen.CatalogError, match="must end on its first line"):
+        gen.sort_cards(body, groups_for("zai"))
+
+
+@pytest.mark.parametrize("tid", ["has space", 'quo"te', ""])
+def test_target_ids_must_be_attribute_safe(tid):
+    with pytest.raises(gen.CatalogError, match="target id"):
+        gen.parse_targets({"targets": [{"id": tid}]}, "recipes/x.yaml")
 
 
 @pytest.mark.parametrize(

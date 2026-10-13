@@ -210,8 +210,8 @@ Each page is a triple — page + catalog entry + nav:
    `provider:` must be a key in `_catalog/providers.yaml`; add a new model maker there first.
 3. **Navigation**: for a **recipe**, run `python3 docs/fern/scripts/gen_recipe_nav.py` (the
    `gen-recipe-nav` pre-commit hook does it for you). It generates the Model Recipes sidebar in
-   `docs/fern/index.yml`, the overview's provider filter and counts, the order of the overview's
-   model cards, and the provider CSS from the catalog; never edit those spans by hand. Provider
+   `docs/fern/index.yml`, the overview's provider filter, the order of the overview's model cards
+   and their `data-targets`, and the provider CSS from the catalog; never edit those spans by hand. Provider
    order is popularity-ranked, then alphabetical; within a provider, the newest model generation
    (the first version number in the title) comes first, and within a generation a `Pro` title precedes `Flash`, which precedes untagged
    titles (see the catalog README's Provider order section). For a **benchmark**, add the `- page:` under
@@ -225,7 +225,8 @@ Each page is a triple — page + catalog entry + nav:
 5. **Add the landing card** in `docs/fern/pages/recipes/model-recipes/overview.mdx`, anywhere between the
    `recipe-cards` markers; the generator sorts it. Every active recipe needs exactly one card, with
    `data-provider` set to the recipe's `provider:` key and a `dynamo-card-link` whose `href` is the
-   recipe's page file. The model/target counts are generated.
+   recipe's page file. Leave out `data-targets`: the generator writes it, and the page's model and
+   configuration counts are computed from the cards in the browser.
 6. **Validate**: `python3 docs/fern/pages/recipes/_catalog/validate.py` (covers both catalogs), then `fern
    check` and `fern docs broken-links`.
 
@@ -300,7 +301,7 @@ A catalog page is a triple (page + entry + nav) — never touch just one part:
   card; add a redirect.
 
 Then run `python3 docs/fern/scripts/gen_recipe_nav.py` to regenerate the sidebar, provider filter,
-card order, and counts, and `python3 docs/fern/pages/recipes/_catalog/validate.py`.
+and card order, and `python3 docs/fern/pages/recipes/_catalog/validate.py`.
 
 ### Add an Example or Recipe (code)
 
@@ -455,7 +456,7 @@ reload, no token).
 ## Commit
 
 ```bash
-git add docs/fern/pages docs/fern/index.yml docs/fern/docs.yml   # also recipes/ examples/ docs/fern/main.css when touched
+git add docs/fern/pages docs/fern/index.yml docs/fern/docs.yml docs/fern/components/RecipeStyles.tsx   # also recipes/ examples/ docs/fern/main.css when touched
 git commit -s -m "docs: <add|update|move|remove> <page-title>"
 ```
 
