@@ -36,6 +36,7 @@ use super::openai::{
     get_or_create_request_id, smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
+use crate::discovery::{ModelManagerError, SessionInitGuard, SessionSelection};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessed_mm_identifier;
 use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
@@ -944,22 +945,64 @@ async fn handler_generate(
         return response.into_response();
     }
 
-    let selection = match state
+    // The session identity must be known before the WorkerSet is selected, so the
+    // request context is built first and the preprocessed request joins it below.
+    let request_id = request_context.request_id;
+    let context: Context<()> = match context_from_headers((), request_id.clone(), &headers) {
+        Ok(context) => context,
+        Err(response) => {
+            metric_lifecycle.mark_error(generate_metric_error_type(response.0));
+            return response.into_response();
+        }
+    };
+    // `x-dynamo-dp-rank` is an explicit serving target; Generate has no query-only mode.
+    let session = match SessionSelection::from_context(
+        &context,
+        request_context.data_parallel_rank.is_some(),
+        false,
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            metric_lifecycle.mark_error(ErrorType::Validation);
+            return generate_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                error.to_string(),
+            );
+        }
+    };
+    let (selection, session_init_guard) = match state
         .manager()
-        .get_generate_engine_for_capability_with_routing(
+        .get_generate_engine_for_capability_with_routing_for_session(
             &model,
             VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-        ) {
+            session.as_ref(),
+        )
+        .await
+    {
         Ok(selection) => selection,
         Err(error) => {
-            let (status, error_type) = match error {
-                crate::discovery::ModelManagerError::ModelUnavailable(_) => {
-                    (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
+            return match error.downcast_ref::<ModelManagerError>() {
+                Some(model_error) => {
+                    let (status, error_type) = match model_error {
+                        ModelManagerError::ModelUnavailable(_) => {
+                            (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
+                        }
+                        _ => (StatusCode::NOT_FOUND, "not_found"),
+                    };
+                    metric_lifecycle.mark_error(generate_metric_error_type(status));
+                    generate_error_response(status, error_type, model_error.to_string())
                 }
-                _ => (StatusCode::NOT_FOUND, "not_found"),
+                None if super::metrics::request_was_cancelled(error.as_ref()) => {
+                    metric_lifecycle.mark_error(ErrorType::Cancelled);
+                    generate_cancelled_response()
+                }
+                None => {
+                    metric_lifecycle.mark_error(ErrorType::Internal);
+                    tracing::error!(%request_id, %error, "generate engine selection failed");
+                    generate_internal_error_response()
+                }
             };
-            metric_lifecycle.mark_error(generate_metric_error_type(status));
-            return generate_error_response(status, error_type, error.to_string());
         }
     };
     let routing_metadata = GenerateRoutingMetadata {
@@ -973,7 +1016,7 @@ async fn handler_generate(
         request,
         &model,
         request_context.data_parallel_rank,
-        &request_context.request_id,
+        &request_id,
         routing_metadata,
         tracker,
     ) {
@@ -988,15 +1031,7 @@ async fn handler_generate(
         }
     };
 
-    let request_id = request_context.request_id;
-    let context: Context<PreprocessedRequest> =
-        match context_from_headers(preprocessed, request_id.clone(), &headers) {
-            Ok(context) => context,
-            Err(response) => {
-                metric_lifecycle.mark_error(generate_metric_error_type(response.0));
-                return response.into_response();
-            }
-        };
+    let context: Context<PreprocessedRequest> = context.map(|()| preprocessed);
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: metric_lifecycle.metric_model.clone(),
@@ -1021,6 +1056,7 @@ async fn handler_generate(
             state.clone(),
             response_options,
             metric_lifecycle,
+            session_init_guard,
         )
         .instrument(dispatch_span),
     )
@@ -1037,6 +1073,7 @@ async fn handler_generate(
     response
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn generate_dispatch(
     engine: crate::types::openai::generate::GenerateStreamingEngine,
     context: Context<PreprocessedRequest>,
@@ -1044,6 +1081,7 @@ async fn generate_dispatch(
     state: Arc<service_v2::State>,
     response_options: GenerateResponseOptions,
     metric_lifecycle: GenerateMetricLifecycle,
+    session_init_guard: Option<SessionInitGuard>,
 ) -> Response {
     let GenerateMetricLifecycle {
         metric_model,
@@ -1052,13 +1090,16 @@ async fn generate_dispatch(
     } = metric_lifecycle;
     let request_context = context.context();
     let generate_result =
-        match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
-            Some(result) => result,
-            None => {
-                inflight_guard.mark_error(ErrorType::Cancelled);
-                return generate_cancelled_response();
-            }
-        };
+        run_until_killed(request_context.as_ref(), engine.generate(context)).await;
+    // Dispatch has returned (or been abandoned); the router committed any session binding.
+    drop(session_init_guard);
+    let generate_result = match generate_result {
+        Some(result) => result,
+        None => {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+            return generate_cancelled_response();
+        }
+    };
     if request_context.is_killed() {
         inflight_guard.mark_error(ErrorType::Cancelled);
         return generate_cancelled_response();
@@ -2588,6 +2629,7 @@ pub(crate) mod tests {
             state,
             response_options,
             metric_lifecycle,
+            None,
         )
         .await
     }

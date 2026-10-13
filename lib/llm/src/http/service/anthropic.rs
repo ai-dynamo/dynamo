@@ -507,34 +507,6 @@ async fn anthropic_messages(
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 
-    // Look up engine and parsing options early so we know whether a reasoning
-    // parser is configured before converting the request.
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| match e {
-            // Registered but not ready to serve yet → retryable 503 (mapped to
-            // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
-            // canonical, customer-facing message so both APIs report the same
-            // text. Anything else is a genuine missing model → 404.
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => AnthropicHandlerError::new(
-                ErrorClass::Unavailable,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "overloaded_error",
-                super::openai::model_not_ready_message(&model),
-                ErrorType::Unavailable,
-            )
-            .into_marked_response(&mut inflight_guard),
-            _ => AnthropicHandlerError::new(
-                ErrorClass::NotFound,
-                StatusCode::NOT_FOUND,
-                "not_found_error",
-                format!("Model '{}' not found", model),
-                ErrorType::NotFound,
-            )
-            .into_marked_response(&mut inflight_guard),
-        })?;
-
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
@@ -576,6 +548,62 @@ async fn anthropic_messages(
         return Err(AnthropicHandlerError::validation(error.message())
             .into_marked_response(&mut inflight_guard));
     }
+
+    // Select the engine once routing overrides are applied, so an explicit worker
+    // pin or a session identity steers WorkerSet selection exactly as on the
+    // OpenAI paths. The parsing options tell us whether a reasoning parser is
+    // configured before the thinking arguments below are derived.
+    let session = super::openai::session_selection_for(&context, chat_request.nvext.as_ref())
+        .map_err(|error| {
+            AnthropicHandlerError::validation(format!("Invalid session affinity context: {error}"))
+                .into_marked_response(&mut inflight_guard)
+        })?;
+    let (engine, parsing_options, session_init_guard) = state
+        .manager()
+        .get_chat_completions_engine_with_parsing_for_session(&model, session.as_ref())
+        .await
+        .map_err(
+            |e| match e.downcast_ref::<crate::discovery::ModelManagerError>() {
+                // Registered but not ready to serve yet → retryable 503 (mapped to
+                // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
+                // canonical, customer-facing message so both APIs report the same
+                // text. Any other lookup failure is a genuine missing model → 404.
+                Some(crate::discovery::ModelManagerError::ModelUnavailable(_)) => {
+                    AnthropicHandlerError::new(
+                        ErrorClass::Unavailable,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "overloaded_error",
+                        super::openai::model_not_ready_message(&model),
+                        ErrorType::Unavailable,
+                    )
+                    .into_marked_response(&mut inflight_guard)
+                }
+                Some(_) => AnthropicHandlerError::new(
+                    ErrorClass::NotFound,
+                    StatusCode::NOT_FOUND,
+                    "not_found_error",
+                    format!("Model '{}' not found", model),
+                    ErrorType::NotFound,
+                )
+                .into_marked_response(&mut inflight_guard),
+                // The client left while this request waited for its session's first
+                // request to select a WorkerSet.
+                None if super::metrics::request_was_cancelled(e.as_ref()) => {
+                    AnthropicHandlerError::sanitized(
+                        SanitizedError::Cancelled,
+                        format!("{e:#}"),
+                        ErrorType::Cancelled,
+                    )
+                    .into_marked_response(&mut inflight_guard)
+                }
+                None => AnthropicHandlerError::sanitized(
+                    SanitizedError::Internal,
+                    format!("Failed to select Anthropic messages engine: {e}"),
+                    ErrorType::Internal,
+                )
+                .into_marked_response(&mut inflight_guard),
+            },
+        )?;
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
     //
@@ -703,6 +731,8 @@ async fn anthropic_messages(
         )
         .into_marked_response(&mut inflight_guard)
     })?;
+    // The router committed any session binding before returning the stream.
+    drop(session_init_guard);
 
     let ctx = engine_stream.context();
 

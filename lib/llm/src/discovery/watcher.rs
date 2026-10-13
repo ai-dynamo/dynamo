@@ -690,6 +690,13 @@ impl ModelWatcher {
             } else {
                 None
             };
+            if let Some(routing) = preprocessed_routing.as_ref() {
+                // Every pipeline below dispatches through this one routing host,
+                // so its session bindings identify the sessions this set serves.
+                worker_set.set_session_binding_lookup(super::SessionBindingLookup::RoutingHost(
+                    routing.routing_host().clone(),
+                ));
+            }
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {

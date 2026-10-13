@@ -55,6 +55,7 @@ use super::{
     },
     service_v2::{self, BackendErrorCheck},
 };
+use crate::discovery::SessionSelection;
 use crate::engines::ValidateRequest;
 use crate::preprocessor::{
     PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
@@ -1137,6 +1138,32 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     }
 }
 
+/// The session facts WorkerSet selection needs, read from a request whose context already
+/// carries the session identity. An explicit serving target (`decode_worker_id`,
+/// `backend_instance_id`, or `dp_rank`) keeps the existing selection and validation path,
+/// and a `query_instance_id` request may read bindings but never initialize one.
+pub(super) fn session_selection_for<T: Send + Sync + 'static>(
+    request: &Context<T>,
+    nvext: Option<&CommonNvExt>,
+) -> Result<Option<SessionSelection>, anyhow::Error> {
+    let has_explicit_target = nvext.is_some_and(|nvext| {
+        nvext.decode_worker_id.is_some()
+            || nvext.backend_instance_id.is_some()
+            || nvext.dp_rank.is_some()
+    });
+    let query_only = nvext.is_some_and(CommonNvExt::has_query_instance_id_annotation);
+    SessionSelection::from_context(request, has_explicit_target, query_only)
+}
+
+/// Map a session-aware engine selection failure. Model lookup failures keep their
+/// 404/503 mapping; a cancelled initialization wait keeps the cancellation mapping.
+pub(super) fn selection_error_response(error: anyhow::Error, alt_msg: &str) -> ErrorResponse {
+    match error.downcast_ref::<crate::discovery::ModelManagerError>() {
+        Some(model_error) => ErrorMessage::from_model_error(model_error),
+        None => ErrorMessage::from_anyhow(error, alt_msg),
+    }
+}
+
 /// Warn once when the disabled NvExt policy discards a field or routing header.
 /// Honored cache salts and `x-tenant-id` headers do not cause this warning.
 pub(super) fn warn_nvext_disabled(endpoint: &str, discarded: bool) {
@@ -1296,11 +1323,17 @@ async fn completions_single(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // todo - error handling should be more robust
-    let (engine, parsing_options) = state
+    let session = session_selection_for(&request, request.nvext.as_ref()).map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Invalid session affinity context");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+    let (engine, parsing_options, session_init_guard) = state
         .manager()
-        .get_completions_engine_with_parsing(&model)
+        .get_completions_engine_with_parsing_for_session(&model, session.as_ref())
+        .await
         .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
+            let err_response = selection_error_response(e, "Failed to select completions engine");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -1323,6 +1356,8 @@ async fn completions_single(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
+    // The router committed any session binding before returning the stream.
+    drop(session_init_guard);
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -1590,11 +1625,19 @@ async fn completions_batch(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
-    let (engine, parsing_options) = state
+    // One WorkerSet serves the whole batch: the first child dispatch establishes the
+    // session binding, and later children route by it.
+    let session = session_selection_for(&request, request.nvext.as_ref()).map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Invalid session affinity context");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+    let (engine, parsing_options, mut session_init_guard) = state
         .manager()
-        .get_completions_engine_with_parsing(&model)
+        .get_completions_engine_with_parsing_for_session(&model, session.as_ref())
+        .await
         .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
+            let err_response = selection_error_response(e, "Failed to select completions engine");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -1643,6 +1686,7 @@ async fn completions_batch(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+        drop(session_init_guard.take());
 
         parent_ctx.link_child(stream.context());
 
@@ -3548,11 +3592,18 @@ async fn chat_completions(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let (engine, parsing_options) = state
+    let session = session_selection_for(&request, request.nvext.as_ref()).map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Invalid session affinity context");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+    let (engine, parsing_options, session_init_guard) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model)
+        .get_chat_completions_engine_with_parsing_for_session(&model, session.as_ref())
+        .await
         .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
+            let err_response =
+                selection_error_response(e, "Failed to select chat completions engine");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -3604,6 +3655,8 @@ async fn chat_completions(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
+    // The router committed any session binding before returning the stream.
+    drop(session_init_guard);
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -4259,11 +4312,18 @@ async fn responses(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let (engine, parsing_options) = state
+    let session = session_selection_for(&request, request.nvext.as_ref()).map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Invalid session affinity context");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+    let (engine, parsing_options, session_init_guard) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model)
+        .get_chat_completions_engine_with_parsing_for_session(&model, session.as_ref())
+        .await
         .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
+            let err_response =
+                selection_error_response(e, "Failed to select chat completions engine");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -4327,6 +4387,8 @@ async fn responses(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
+    // The router committed any session binding before returning the stream.
+    drop(session_init_guard);
 
     // Capture the context to cancel the stream if the client disconnects
     let ctx = engine_stream.context();
@@ -6593,6 +6655,51 @@ mod tests {
                 .unwrap()
                 .input_trigger,
             Some(InputTrigger::Other)
+        );
+    }
+
+    #[test]
+    fn session_selection_bypasses_explicit_targets_and_marks_query_only() {
+        let mut request = Context::new(());
+        request.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new("session-1"),
+        );
+        let selection = session_selection_for(&request, None)
+            .unwrap()
+            .expect("a session identity selects by affinity");
+        assert_eq!(selection.key().as_str(), "session-1");
+        assert!(!selection.query_only());
+
+        for pinned in [
+            CommonNvExt::builder().decode_worker_id(7).build().unwrap(),
+            CommonNvExt::builder()
+                .backend_instance_id(7)
+                .build()
+                .unwrap(),
+            CommonNvExt::builder().dp_rank(1).build().unwrap(),
+        ] {
+            assert!(
+                session_selection_for(&request, Some(&pinned))
+                    .unwrap()
+                    .is_none(),
+                "explicit serving targets keep the existing selection path: {pinned:?}"
+            );
+        }
+
+        let query = CommonNvExt::builder()
+            .annotations(vec!["query_instance_id:".to_string()])
+            .build()
+            .unwrap();
+        let selection = session_selection_for(&request, Some(&query))
+            .unwrap()
+            .expect("query-only requests still read bindings");
+        assert!(selection.query_only());
+
+        assert!(
+            session_selection_for(&Context::new(()), None)
+                .unwrap()
+                .is_none()
         );
     }
 

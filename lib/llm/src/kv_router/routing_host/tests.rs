@@ -2951,6 +2951,88 @@ async fn config_watch_gap_preserves_hard_affinity() {
     runtime.shutdown();
 }
 
+/// The pre-selection WorkerSet check reads bindings through `session_binding`: only a
+/// `Hard` binding whose worker is still discovered with a valid DP rank counts, and the
+/// read takes no hold.
+#[tokio::test]
+async fn session_binding_reports_live_hard_bindings_only() {
+    let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+    assert!(router.has_hard_session_affinity());
+    let affinity = router.affinity.as_ref().unwrap();
+
+    let live = SessionAffinityId::new("binding-live");
+    let live_target = AffinityTarget::new(7, Some(0));
+    assert_eq!(router.session_binding(&live), None);
+    bind_affinity_target(&router, &live, live_target).await;
+    assert_eq!(router.session_binding(&live), Some(live_target));
+    assert_eq!(
+        affinity.query_target(&live, None).unwrap(),
+        Some(live_target),
+        "the lookup must not take or refresh the binding"
+    );
+
+    let departed = SessionAffinityId::new("binding-departed-worker");
+    bind_affinity_target(&router, &departed, AffinityTarget::new(8, Some(0))).await;
+    assert_eq!(
+        router.session_binding(&departed),
+        None,
+        "a binding to an undiscovered worker is not usable"
+    );
+
+    let bad_rank = SessionAffinityId::new("binding-bad-rank");
+    bind_affinity_target(&router, &bad_rank, AffinityTarget::new(7, Some(5))).await;
+    assert_eq!(
+        router.session_binding(&bad_rank),
+        None,
+        "a binding with a DP rank the worker does not have is not usable"
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn session_binding_is_absent_without_hard_affinity() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("session-binding-soft".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let load_context = test_load_context(&client).await;
+
+    let inner = PushRouter::from_client(client.clone(), RouterMode::RoundRobin)
+        .await
+        .unwrap();
+    let (soft, _) = builtin_host_with_affinity(
+        inner,
+        load_context.clone(),
+        crate::session_affinity::SessionAffinityMode::Soft,
+    );
+    let session_id = SessionAffinityId::new("soft-bound");
+    bind_affinity_target(&soft, &session_id, AffinityTarget::worker(worker_id)).await;
+    assert!(!soft.has_hard_session_affinity());
+    assert_eq!(soft.session_binding(&session_id), None);
+
+    let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+        .await
+        .unwrap();
+    let disabled = RoutingHost::new_builtin(inner, load_context).unwrap();
+    assert!(!disabled.has_hard_session_affinity());
+    assert_eq!(disabled.session_binding(&session_id), None);
+
+    drop(soft);
+    drop(disabled);
+    runtime.shutdown();
+}
+
 #[tokio::test]
 async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escaping_hard_pins() {
     let mut constrained_worker = ModelRuntimeConfig::default();

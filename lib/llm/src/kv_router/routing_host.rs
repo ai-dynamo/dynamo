@@ -41,7 +41,7 @@ use crate::{
     },
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
-        explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
+        explicit_target, from_table, invalid_argument, subagent_group_binding_id,
     },
 };
 
@@ -591,26 +591,46 @@ impl RoutingHost {
         }
     }
 
-    /// The group key for a subagent: a request that carries a parent session id binds under the
-    /// parent's group instead of its own session, so siblings share a worker while the parent
-    /// keeps its own binding. An explicit per-request target stays on the request's own session so
-    /// it cannot be rejected against, or rebind, the group.
+    /// The group key for a subagent; see [`subagent_group_binding_id`].
     fn group_binding_id(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         explicit: Option<AffinityTarget>,
     ) -> Option<Arc<SessionAffinityId>> {
-        if explicit.is_some() {
+        subagent_group_binding_id(
+            request
+                .content()
+                .agent_context
+                .as_ref()
+                .and_then(|context| context.parent_session_id.as_deref()),
+            explicit,
+        )
+    }
+
+    /// Whether this host binds sessions in `Hard` mode, the only mode the
+    /// pre-selection WorkerSet affinity check honors.
+    pub(crate) fn has_hard_session_affinity(&self) -> bool {
+        self.affinity.is_some() && self.session_affinity_mode == SessionAffinityMode::Hard
+    }
+
+    /// The live `Hard` binding for `session_id`, if this host owns one.
+    ///
+    /// Read-only: takes no hold and refreshes nothing. A binding counts only
+    /// while its worker is still a discovered member of this host's pool and
+    /// its DP rank is still valid for that worker, so the WorkerSet that owns
+    /// a session can be preferred before any router is committed to. Returns
+    /// `None` while another request is initializing the session.
+    pub(crate) fn session_binding(&self, session_id: &SessionAffinityId) -> Option<AffinityTarget> {
+        if !self.has_hard_session_affinity() {
             return None;
         }
-        let parent_session_id = request
-            .content()
-            .agent_context
-            .as_ref()
-            .and_then(|context| context.parent_session_id.as_deref())?;
-        Some(Arc::new(SessionAffinityId::new(
-            subagent_group_affinity_id(parent_session_id),
-        )))
+        let target = self
+            .affinity
+            .as_ref()?
+            .query_target(session_id, None)
+            .ok()
+            .flatten()?;
+        self.affinity_target_is_valid(target).then_some(target)
     }
 
     /// Commit a held session to the dispatched worker; a request without a

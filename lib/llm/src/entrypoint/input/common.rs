@@ -52,6 +52,9 @@ type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>
 pub struct PreprocessedRouting {
     backend_engine:
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+    /// The same host as `backend_engine`, retained concretely so discovery can
+    /// hand the WorkerSet a read-only session-binding lookup.
+    routing_host: Arc<RoutingHost>,
     prefill_router: Arc<PrefillRouter>,
     encoder_router: Arc<EncoderRouter>,
 }
@@ -309,9 +312,10 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
             .set_decode_routing_host(routing_host.clone())
             .context("install conditional-disagg decode RoutingHost")?;
     }
-    let backend_engine: ServiceEngine<_, _> = routing_host;
+    let backend_engine: ServiceEngine<_, _> = routing_host.clone();
     Ok(PreprocessedRouting {
         backend_engine,
+        routing_host,
         prefill_router,
         encoder_router,
     })
@@ -468,6 +472,11 @@ where
 }
 
 impl PreprocessedRouting {
+    /// The routing host every pipeline built from this routing dispatches through.
+    pub(crate) fn routing_host(&self) -> &Arc<RoutingHost> {
+        &self.routing_host
+    }
+
     /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
     pub fn build_pipeline<Req, Resp>(
         &self,

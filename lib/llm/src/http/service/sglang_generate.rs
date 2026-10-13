@@ -34,6 +34,7 @@ use super::openai::{
     get_body_limit, get_or_create_request_id,
 };
 use super::{RouteDoc, service_v2};
+use crate::discovery::{ModelManagerError, SessionInitGuard, SessionSelection};
 use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
@@ -298,39 +299,65 @@ async fn handler(
     if let Err(response) = check_model_serving_ready(&state, &model) {
         return adapt_openai_error(response);
     }
-    let engine = match state
+
+    // The session identity must be known before the WorkerSet is selected, so the
+    // request context is built first and the preprocessed request joins it below.
+    let request_context = resolve_request_context(&headers, request.rid.as_deref());
+    let request_id = request_context.request_id;
+    let context: Context<()> = match context_from_headers((), request_id.clone(), &headers) {
+        Ok(context) => context,
+        Err(response) => return adapt_openai_error(response),
+    };
+    // `x-dynamo-dp-rank` is an explicit serving target; this surface has no query-only mode.
+    let session = match SessionSelection::from_context(
+        &context,
+        request_context.data_parallel_rank.is_some(),
+        false,
+    ) {
+        Ok(session) => session,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    let (engine, session_init_guard) = match state
         .manager()
-        .get_generate_engine_for_capability(&model, SGLANG_GENERATE_CAPABILITY)
+        .get_generate_engine_for_capability_for_session(
+            &model,
+            SGLANG_GENERATE_CAPABILITY,
+            session.as_ref(),
+        )
+        .await
     {
         Ok(engine) => engine,
         Err(error) => {
-            let status = match error {
-                crate::discovery::ModelManagerError::ModelUnavailable(_) => {
-                    StatusCode::SERVICE_UNAVAILABLE
+            return match error.downcast_ref::<ModelManagerError>() {
+                Some(model_error) => {
+                    let status = match model_error {
+                        ModelManagerError::ModelUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+                        _ => StatusCode::NOT_FOUND,
+                    };
+                    error_response(status, model_error.to_string())
                 }
-                _ => StatusCode::NOT_FOUND,
+                None if super::metrics::request_was_cancelled(error.as_ref()) => {
+                    cancelled_response()
+                }
+                None => {
+                    tracing::error!(%request_id, %error, "SGLang generate engine selection failed");
+                    internal_error_response()
+                }
             };
-            return error_response(status, error.to_string());
         }
     };
 
-    let request_context = resolve_request_context(&headers, request.rid.as_deref());
     let preprocessed = match preprocessed_request(
         request,
         &model,
         request_context.data_parallel_rank,
-        &request_context.request_id,
+        &request_id,
     ) {
         Ok(preprocessed) => preprocessed,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
     };
 
-    let request_id = request_context.request_id;
-    let context: Context<PreprocessedRequest> =
-        match context_from_headers(preprocessed, request_id.clone(), &headers) {
-            Ok(context) => context,
-            Err(response) => return adapt_openai_error(response),
-        };
+    let context: Context<PreprocessedRequest> = context.map(|()| preprocessed);
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
@@ -357,6 +384,7 @@ async fn handler(
             model,
             state.clone(),
             stream_handle,
+            session_init_guard,
         )
         .instrument(dispatch_span),
     )
@@ -373,6 +401,7 @@ async fn handler(
     response
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     engine: crate::types::openai::generate::GenerateStreamingEngine,
     context: Context<PreprocessedRequest>,
@@ -380,6 +409,7 @@ async fn dispatch(
     model: String,
     state: Arc<service_v2::State>,
     stream_handle: ConnectionHandle,
+    session_init_guard: Option<SessionInitGuard>,
 ) -> Response {
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         state.manager().metric_model_for(&model),
@@ -389,13 +419,16 @@ async fn dispatch(
     );
     let request_context = context.context();
     let generate_result =
-        match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
-            Some(result) => result,
-            None => {
-                inflight_guard.mark_error(ErrorType::Cancelled);
-                return cancelled_response();
-            }
-        };
+        run_until_killed(request_context.as_ref(), engine.generate(context)).await;
+    // Dispatch has returned (or been abandoned); the router committed any session binding.
+    drop(session_init_guard);
+    let generate_result = match generate_result {
+        Some(result) => result,
+        None => {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+            return cancelled_response();
+        }
+    };
     if request_context.is_killed() {
         inflight_guard.mark_error(ErrorType::Cancelled);
         return cancelled_response();
@@ -522,6 +555,7 @@ mod tests {
             "test-model".to_string(),
             state.clone(),
             ConnectionHandle::create_disabled(tx),
+            None,
         )
         .await;
 
@@ -708,6 +742,7 @@ mod tests {
             "test-model".to_string(),
             state.clone(),
             stream_handle,
+            None,
         )
         .await;
         connection_handle.disarm();

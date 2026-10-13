@@ -892,3 +892,15 @@ fn a_subagent_group_id_is_namespaced_and_fixed_size() {
     assert_eq!(long.len(), a.len());
     assert!(long.len() <= MAX_SESSION_AFFINITY_ID_BYTES);
 }
+
+#[test]
+fn subagent_group_binding_id_groups_children_except_explicit_targets() {
+    let grouped = super::subagent_group_binding_id(Some("parent-1"), None)
+        .expect("a child binds under its parent's group");
+    assert_eq!(grouped.as_str(), subagent_group_affinity_id("parent-1"));
+    assert!(
+        super::subagent_group_binding_id(Some("parent-1"), Some(target(7, None))).is_none(),
+        "an explicit target stays on the request's own session"
+    );
+    assert!(super::subagent_group_binding_id(None, None).is_none());
+}
