@@ -59,6 +59,8 @@ redirects:
     destination: "/dynamo/dev/recipes/gemma-4-31b"
 
   # Documentation navigation consolidation on dev.
+  - source: "/dynamo/dev/kubernetes/model-deployment/sidecar-backends-experimental"
+    destination: "/dynamo/dev/knowledge-base/concepts/system-architecture/sidecar-backends"
   - source: "/dynamo/dev/cli/model-deployment/multi-node-deployment"
     destination: "/dynamo/dev/kubernetes/installation/multinode-orchestration"
   - source: "/dynamo/dev/knowledge-base/concepts/system-architecture/architecture-flow"

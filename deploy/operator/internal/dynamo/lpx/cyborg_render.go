@@ -19,6 +19,7 @@ import (
 
 // configureHybridCyborg consumes a fresh hybrid clique from an admitted source
 // whose conductor resources were validated during workload selection.
+// cyborgConfigMap is the nonnil Agent-address ConfigMap rendered for that workload.
 func configureHybridCyborg(
 	cyborg *grovev1alpha1.PodCliqueTemplateSpec,
 	projection *ModelProjection,
@@ -51,12 +52,10 @@ func configureHybridCyborg(
 		lpxv1alpha1.PodRoleCyborgWorker,
 		workloadDigest,
 	)
-	if cyborgConfigMap != nil {
-		if err := withLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name, true); err != nil {
-			return err
-		}
-		cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = cyborgConfigHash
+	if err := withLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name, true); err != nil {
+		return err
 	}
+	cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = cyborgConfigHash
 	cyborg.Spec.StartsAfter = slices.Clone(agentTemplateNames)
 	return nil
 }

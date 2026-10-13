@@ -25,10 +25,8 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         name="Qwen/Qwen3.5-0.8B",
         short_name="qwen3.5-0.8b",
         topologies={
-            # qwen3_5 hybrid GDN: needs --mamba-scheduler-strategy extra_buffer
-            # (set in examples/backends/sglang/launch/agg_multimodal_router.sh);
-            # default no_buffer silently disables the prefix cache. Filler 120
-            # → ~6 routing blocks → ceiling ≈0.83; threshold 0.7.
+            # Filler 120 produces about six routing blocks, so the expected
+            # cache-hit-rate ceiling is approximately 0.83; threshold 0.7.
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,

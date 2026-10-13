@@ -659,6 +659,11 @@ impl SamplingOptions {
 /// Collection of options that control what information the inference engine returns in the response.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct OutputOptions {
+    /// Preserve matched stop strings and stop/EOS token text during decoding.
+    /// Omitted by older frontends; stop-token visibility is frontend-owned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_stop_trim: Option<bool>,
+
     /// Number of log probabilities to return per output token.
     /// Note that the implementation follows the OpenAI API: The return
     /// result includes the log probabilities on the `logprobs` most likely
