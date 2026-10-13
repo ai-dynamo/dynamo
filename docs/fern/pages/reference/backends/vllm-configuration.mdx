@@ -80,16 +80,27 @@ If workers do not publish KV events, configure the frontend with `--no-router-kv
 A worker started with `--disaggregation-mode prefill` must be passed `--kv-transfer-config` explicitly. Without it, the worker raises a `ValueError` during argument parsing and never starts. All non-prefill modes — `agg`, `pd`, `decode`, and `encode` — do not enforce this check.
 </Warning>
 
-The value is a JSON object. For NIXL-based prefill/decode disaggregation:
+The value is a JSON object. For NIXL-based prefill/decode disaggregation, configure each worker with its role.
+
+Prefill worker:
 
 ```bash
 python -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --disaggregation-mode prefill \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
 ```
 
-Only the prefill worker is required to set it, but both halves of a NIXL pair must agree on a connector for transfers to succeed. Pass the same `--kv-transfer-config` value to the decode worker, as the [disaggregated vLLM launch script](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg.sh) does.
+Decode worker:
+
+```bash
+python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --disaggregation-mode decode \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+```
+
+Only prefill workers must set `--kv-transfer-config` to pass Dynamo's startup check. Decode workers also need `NixlConnector` with `kv_consumer` to receive transferred KV, as the [disaggregated vLLM launch script](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg.sh) shows.
 
 The earlier `--connector` flag is no longer accepted by the vLLM backend. Setting it — on the command line or through the `DYN_CONNECTOR` environment variable — raises a `ValueError` during argument parsing. The message depends on the value:
 

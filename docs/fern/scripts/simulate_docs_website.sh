@@ -18,6 +18,8 @@
 #      frozen ../pages-<TAG>/ snapshot.
 #   3. The pages-<TAG> snapshot drops exactly the shared reference files and
 #      keeps the versioned ones (runtime-config, observability).
+#  11. A tag-only reference/general page (removed on main after the cut) stays
+#      in the snapshot, its nav stays on ../pages-<TAG>/, and propagation keeps it.
 #   4. No React .tsx leaks into pages-dev/components/ (doc pages only).
 #   5. Pre-rework version files gain no shared-reference pointers.
 #   6. Round two: a page added to the General variant on a later main push
@@ -150,7 +152,7 @@ propagate_shared_reference() {
     if [ "$(yq "[$GEN_SEL] | length" "$vfile")" != "0" ]; then
       ENTRIES="$WT/.ref_general.yml" \
         yq -i "(.navigation[] | select(.tab == \"reference\") | .layout) |=
-               (load(strenv(ENTRIES)) + [.[] | select([.. | select(has(\"path\")) | .path] | any_c(test(\"/reference/general/\")) | not)])" "$vfile"
+               (load(strenv(ENTRIES)) + [.[] | select([.. | select(has(\"path\")) | .path] | any_c(test(\"/pages-dev/reference/general/\")) | not)])" "$vfile"
     fi
   done
 }
@@ -185,9 +187,14 @@ cd "$WT"
 [ -f "fern/versions/$TAG.yml" ] && { echo "ERROR: versions/$TAG.yml already exists"; exit 1; }
 
 cp -r fern/pages-dev "fern/pages-$TAG"
-# The shared group is a directory, so the drop is a plain path operation — no
-# nav traversal, and no yq assignment against a file it only means to read.
-rm -rf "fern/pages-$TAG/reference/general"
+# A page the tag carries under reference/general/ that main has since removed.
+TAG_ONLY="reference/general/sim-tag-only.mdx"
+printf -- '---\ntitle: Sim Tag Only\n---\n\nTag-only fixture.\n' > "fern/pages-$TAG/$TAG_ONLY"
+# Drop only the shared pages pages-dev still carries; the rest stay frozen.
+while IFS= read -r f; do
+  rel="${f#fern/pages-"$TAG"/}"
+  [ -e "fern/pages-dev/$rel" ] && rm -f "$f"
+done < <(find "fern/pages-$TAG/reference/general" -type f)
 find "fern/pages-$TAG/reference" -type d -empty -delete 2>/dev/null || true
 
 if [ -d "$SRC/translations" ]; then
@@ -217,10 +224,16 @@ fi
 VERSION_FILE="fern/versions/$TAG.yml"
 cp fern/versions/dev.yml "$VERSION_FILE"
 perl -pi -e "s|path: \.\./pages-dev/|path: ../pages-$TAG/|g" "$VERSION_FILE"
+FIXTURE_PATH="../pages-$TAG/$TAG_ONLY" yq -i '(.navigation[] | select(.tab == "reference") | .layout) +=
+  [{"page": "Sim Tag Only", "path": strenv(FIXTURE_PATH), "slug": "sim-tag-only"}]' "$VERSION_FILE"
 # Text substitution, not a yq assignment: a yq assignment whose left-hand side
 # traverses a missing key auto-creates it, which is how the old `.variants[]`
 # form injected `variants: []` and invalidated the navigation.
 perl -pi -e "s|path: \.\./pages-$TAG/reference/general/|path: ../pages-dev/reference/general/|g" "$VERSION_FILE"
+while IFS= read -r f; do
+  rel="${f#fern/pages-"$TAG"/}"
+  perl -pi -e "s|path: \.\./pages-dev/\Q$rel\E|path: ../pages-$TAG/$rel|g" "$VERSION_FILE"
+done < <(find "fern/pages-$TAG/reference/general" -type f)
 perl -pi -e "s|href: /dynamo/dev/|href: /dynamo/$TAG/|g" "$VERSION_FILE"
 
 DEV_IDX=$(yq '.versions | to_entries | map(select(.value.display-name == "dev")) | .[0].key' fern/docs.yml)
@@ -256,10 +269,14 @@ assert "2. $TAG.yml: reference/general shared ($shared pages-dev refs)" "$s1"
 [ "$frozen" -eq 1 ] && s2=ok || s2=FAIL
 assert "2. $TAG.yml: Components section frozen (runtime configuration)" "$s2"
 
-[ ! -d "fern/pages-$TAG/reference/general" ] && \
+[ "$(find "fern/pages-$TAG/reference/general" -type f)" = "fern/pages-$TAG/$TAG_ONLY" ] && \
   [ -e "fern/pages-$TAG/reference/components/runtime-configuration.mdx" ] && \
   [ -d "fern/pages-$TAG/reference/observability" ] && s3=ok || s3=FAIL
 assert "3. snapshot drops shared files, keeps versioned reference/" "$s3"
+
+grep -q "path: \.\./pages-$TAG/$TAG_ONLY" "$VERSION_FILE" && \
+  ! grep -q "path: \.\./pages-dev/$TAG_ONLY" "$VERSION_FILE" && s12=ok || s12=FAIL
+assert "11. tag-only reference/general page stays on pages-$TAG" "$s12"
 
 # The find target must exist, or find errors to stderr, wc counts 0 and the
 # assertion reports ok on a failure — which it did once pages-dev/components/
@@ -294,6 +311,8 @@ FAKE="$FAKE" yq -i '(.navigation[] | select(.tab == "reference") | .layout) += [
 propagate_shared_reference
 grep -q "sim-test-page" "$VERSION_FILE" && s6=ok || s6=FAIL
 assert "6. round-two propagation reaches the cut version's nav" "$s6"
+grep -q "path: \.\./pages-$TAG/$TAG_ONLY" "$VERSION_FILE" && s13=ok || s13=FAIL
+assert "11. propagation keeps the tag-only page in the cut version's nav" "$s13"
 # Undo before fern check (the fake page has no backing file). Propagation
 # rewrites every synced version file, so scrub them all, not just the two
 # this test touched directly.

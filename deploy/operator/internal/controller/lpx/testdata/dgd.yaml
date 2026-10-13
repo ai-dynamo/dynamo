@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: selected-source
+  namespace: test
+  uid: source-uid
+  generation: 3
+spec:
+  components:
+  - name: lpx
+    type: lpx
+    replicas: 1
+    lpx:
+      buildId: build-v2
+    roles:
+    - name: conductor
+      podTemplate:
+        spec:
+          containers:
+          - name: main
+            image: lpu-runtime
+            command: [/bin/nova]
+            volumeMounts: &runtime-mounts
+            - {name: model-storage, mountPath: /models}
+            - {name: config, mountPath: /configs}
+            - {name: host-dev, mountPath: /dev}
+            - {name: host-sys, mountPath: /sys}
+            - {name: ssh-secret, mountPath: /ssh-pk, readOnly: true}
+            - {name: hugepages, mountPath: /dev/hugepages}
+            - {name: single-v2-ssh-key, mountPath: /tmp/dynamo-lpu-ssh}
+          volumes: &runtime-volumes
+          - {name: model-storage, emptyDir: {}}
+          - {name: host-dev, hostPath: {path: /dev, type: Directory}}
+          - {name: host-sys, hostPath: {path: /sys, type: Directory}}
+          - {name: hugepages, emptyDir: {medium: HugePages}}
+          - {name: ssh-secret, secret: {secretName: ssh-secret, defaultMode: 420}}
+          - {name: single-v2-ssh-key, emptyDir: {}}
+    - name: agent
+      podTemplate:
+        spec:
+          volumes: *runtime-volumes
+          containers:
+          - name: main
+            image: lpu-runtime
+            command: [/bin/quasar-entrypoint]
+            volumeMounts: *runtime-mounts

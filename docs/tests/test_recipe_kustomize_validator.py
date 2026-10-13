@@ -242,10 +242,17 @@ def _filled_disagg_case(
         text = path.read_text()
         for placeholder, value in PLACEHOLDERS.items():
             text = text.replace(placeholder, value)
-        text = text.replace(
-            "your-kv-transfer-config",
-            "cluster-kv-transfer-config",
-        ).replace("your-sglang-nixl-backend", "GDS")
+        text = (
+            text.replace(
+                "your-prefill-kv-transfer-config",
+                "cluster-prefill-kv-transfer-config",
+            )
+            .replace(
+                "your-decode-kv-transfer-config",
+                "cluster-decode-kv-transfer-config",
+            )
+            .replace("your-sglang-nixl-backend", "GDS")
+        )
         path.write_text(text)
     return case
 
@@ -842,6 +849,26 @@ def test_validator_rejects_hook_patch_missing_canonical_component(
     _assert_error(_validate(case), "merge-patch")
 
 
+@pytest.mark.parametrize(
+    "patch_name",
+    [
+        "vllm-kv-transfer-config.yaml",
+        "vllm-compute-domain-kv-transfer-config.yaml",
+    ],
+)
+def test_vllm_hook_patches_use_separate_role_configs(patch_name: str) -> None:
+    patch = yaml.safe_load((SCAFFOLD / "patches" / patch_name).read_text())
+    components = patch["spec"]["components"]
+    values = {}
+    for component in components[1:]:
+        env = component["podTemplate"]["spec"]["containers"][0]["env"]
+        values[component["name"]] = env[0]["value"]
+    assert values == {
+        "PrefillWorker": "your-prefill-kv-transfer-config",
+        "DecodeWorker": "your-decode-kv-transfer-config",
+    }
+
+
 def test_validator_lowers_hook_patch_to_named_env_override(tmp_path: Path) -> None:
     case = _filled_disagg_case(tmp_path, *DISAGG_CASES[0])
 
@@ -866,11 +893,15 @@ def test_validator_lowers_hook_patch_to_named_env_override(tmp_path: Path) -> No
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    expected_values = {
+        "PrefillWorker": "cluster-prefill-kv-transfer-config",
+        "DecodeWorker": "cluster-decode-kv-transfer-config",
+    }
     for component in dgd["spec"]["components"][1:]:
         env = component["podTemplate"]["spec"]["containers"][0]["env"]
         hooks = [entry for entry in env if entry["name"] == "KV_TRANSFER_CONFIG"]
         assert hooks == [
-            {"name": "KV_TRANSFER_CONFIG", "value": "cluster-kv-transfer-config"}
+            {"name": "KV_TRANSFER_CONFIG", "value": expected_values[component["name"]]}
         ]
 
 

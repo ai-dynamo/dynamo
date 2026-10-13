@@ -27,12 +27,14 @@ use worker_selection::WorkerSelectionPolicyFactory;
 #[derive(Clone, Default)]
 pub struct RouterPlugins {
     worker_selection: Option<WorkerSelectionPolicyFactory>,
+    custom_worker_selection: bool,
     request_classifier: Option<RequestClassifierFactory>,
 }
 
 impl RouterPlugins {
     pub fn with_worker_selection(mut self, factory: WorkerSelectionPolicyFactory) -> Self {
         self.worker_selection = Some(factory);
+        self.custom_worker_selection = true;
         self
     }
 
@@ -43,6 +45,17 @@ impl RouterPlugins {
 
     pub fn is_empty(&self) -> bool {
         self.worker_selection.is_none() && self.request_classifier.is_none()
+    }
+
+    /// Whether worker selection was explicitly supplied, rather than filled by the host default.
+    /// Hosts use this to require typed worker discovery without delaying stock router startup.
+    pub fn has_custom_worker_selection(&self) -> bool {
+        self.custom_worker_selection
+    }
+
+    /// Whether explicit policy or classifier choices require custom-plugin frontend support.
+    pub fn has_custom_plugins(&self) -> bool {
+        self.custom_worker_selection || self.request_classifier.is_some()
     }
 
     pub fn worker_selection(&self) -> Option<&WorkerSelectionPolicyFactory> {

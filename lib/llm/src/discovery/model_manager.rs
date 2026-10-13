@@ -171,6 +171,8 @@ pub struct ModelManager {
     /// Controller-owned committed groups, keyed by the controller's stable GroupKey encoding.
     discovery_groups: DashMap<String, CommittedDiscoveryGroup>,
 
+    worker_inventory: super::worker_inventory::WorkerInventory,
+
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     ///
     /// NOTE: These shared receivers currently live for the manager lifetime. Rebinding to a new
@@ -214,12 +216,70 @@ impl Default for ModelManager {
 }
 
 impl ModelManager {
+    pub(crate) fn publish_worker_group_observation(
+        &self,
+        group_id: String,
+        observation: Option<super::worker_inventory::WorkerGroupObservation>,
+    ) {
+        self.worker_inventory.publish(group_id, observation);
+    }
+
+    pub(crate) fn worker_inventory(
+        &self,
+    ) -> Vec<(String, super::worker_inventory::WorkerGroupObservation)> {
+        self.worker_inventory.snapshot()
+    }
+
+    pub(crate) fn worker_group_available_ids(
+        &self,
+        group_id: &str,
+        endpoint: &EndpointId,
+    ) -> HashSet<u64> {
+        let Some((mut available, primary, namespace)) =
+            self.discovery_groups.get(group_id).map(|group| {
+                (
+                    group.worker_set.available_worker_ids().unwrap_or_default(),
+                    group.primary.clone(),
+                    group.namespace.clone(),
+                )
+            })
+        else {
+            return HashSet::new();
+        };
+        // Hop clients have their own local fault inhibition. A worker remains available if
+        // any active consumer can route to it, but must still belong to the admitted group.
+        let mut hops = None::<HashSet<u64>>;
+        for group in self.discovery_groups.iter() {
+            if group.primary != primary || group.namespace != namespace {
+                continue;
+            }
+            let prefill = group
+                .worker_set
+                .prefill_router
+                .as_ref()
+                .and_then(|router| router.available_worker_ids_for(group_id, endpoint));
+            let encode = group
+                .worker_set
+                .encoder_router
+                .as_ref()
+                .and_then(|router| router.available_worker_ids_for(group_id, endpoint));
+            for ids in prefill.into_iter().chain(encode) {
+                hops.get_or_insert_with(HashSet::new).extend(ids);
+            }
+        }
+        if let Some(hops) = hops {
+            available.retain(|worker| hops.contains(worker));
+        }
+        available
+    }
+
     pub fn new() -> Self {
         Self {
             models: DashMap::new(),
             catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
             discovery_groups: DashMap::new(),
+            worker_inventory: Default::default(),
             runtime_configs: DashMap::new(),
             hicache_caches: DashMap::new(),
             kv_source_memberships: DashMap::new(),
@@ -2252,7 +2312,7 @@ impl ModelManager {
         client: Client,
         kv_cache_block_size: u32,
         policy: SelectionPolicySource,
-        kv_router_config: Option<KvRouterConfig>,
+        mut kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
@@ -2261,6 +2321,9 @@ impl ModelManager {
         scheduler_load: crate::kv_router::SchedulerLoadSender,
         cancellation_token: CancellationToken,
     ) -> anyhow::Result<Arc<KvRouter>> {
+        if let Some(config) = &mut kv_router_config {
+            config.apply_policy_config().map_err(anyhow::Error::msg)?;
+        }
         let endpoint = client.endpoint.clone();
         let lora_domain = self.lora_domain(&endpoint.id());
 
@@ -2323,19 +2386,12 @@ impl ModelManager {
             None
         };
 
-        let kv_event_source_requirement =
-            KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
-        let cache_required = wants_cache
-            || effective_kv_router_config.serve_indexer
-            || effective_kv_router_config.enable_session_prefix_index
-            || matches!(
-                kv_event_source_requirement,
-                KvEventSourceRequirement::ConditionalDisaggDecodeCache
-                    | KvEventSourceRequirement::Unknown
-            );
-        let kv_source_membership = if cache_required
-            && kv_event_source_requirement.should_subscribe(&effective_kv_router_config)
-        {
+        let kv_event_source_requirement = KvEventSourceRequirement::derive(
+            worker_role,
+            &effective_kv_router_config,
+            policy.inputs(),
+        );
+        let kv_source_membership = if kv_event_source_requirement.should_subscribe() {
             Some(
                 self.get_or_create_kv_source_membership_watch(&endpoint)
                     .await?,
@@ -2835,6 +2891,88 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    #[test]
+    fn worker_inventory_availability_follows_active_hops_and_group_admission() {
+        struct Hop {
+            group_id: String,
+            endpoint: EndpointId,
+            ids: Arc<parking_lot::Mutex<HashSet<u64>>>,
+        }
+        impl crate::kv_router::prefill_router::PrefillRouterLifecycle for Hop {
+            fn set_target(&self, _: Option<crate::discovery::WorkerSetTarget>) {}
+
+            fn available_worker_ids_for(
+                &self,
+                group_id: &str,
+                endpoint: &EndpointId,
+            ) -> Option<HashSet<u64>> {
+                (group_id == self.group_id && endpoint == &self.endpoint)
+                    .then(|| self.ids.lock().clone())
+            }
+        }
+        let manager = ModelManager::new();
+        let endpoint = EndpointId::from("ns.prefill.generate");
+        let (tx, rx) = tokio::sync::watch::channel(vec![1, 2]);
+        let mut target = make_worker_set("ns", "target");
+        target.set_instance_watcher(rx);
+        let insert = |key: &str, worker_set: WorkerSet| {
+            manager.discovery_groups.insert(
+                key.to_string(),
+                CommittedDiscoveryGroup {
+                    primary: "model".into(),
+                    namespace: "ns".into(),
+                    worker_set_key: key.into(),
+                    aliases: Vec::new(),
+                    cards: HashMap::new(),
+                    adapters: HashMap::new(),
+                    representative: ModelDeploymentCard::default(),
+                    worker_set: Arc::new(worker_set),
+                },
+            );
+        };
+        insert("target", target);
+        assert_eq!(
+            manager.worker_group_available_ids("target", &endpoint),
+            HashSet::from([1, 2])
+        );
+        let ids = Arc::new(parking_lot::Mutex::new(HashSet::from([2, 99])));
+        let mut consumer = make_worker_set("ns", "consumer");
+        let (_consumer_tx, consumer_rx) = tokio::sync::watch::channel(vec![3]);
+        consumer.set_instance_watcher(consumer_rx);
+        consumer.prefill_router = Some(Arc::new(Hop {
+            group_id: "target".into(),
+            endpoint: endpoint.clone(),
+            ids: ids.clone(),
+        }));
+        insert("consumer", consumer);
+        assert_eq!(
+            manager.worker_group_available_ids("consumer", &endpoint),
+            HashSet::from([3])
+        );
+        assert_eq!(
+            manager.worker_group_available_ids("target", &endpoint),
+            HashSet::from([2])
+        );
+        ids.lock().clear();
+        assert!(
+            manager
+                .worker_group_available_ids("target", &endpoint)
+                .is_empty()
+        );
+        ids.lock().extend([1, 2]);
+        tx.send_replace(vec![1]);
+        assert_eq!(
+            manager.worker_group_available_ids("target", &endpoint),
+            HashSet::from([1])
+        );
+        manager.discovery_groups.remove("target");
+        assert!(
+            manager
+                .worker_group_available_ids("target", &endpoint)
+                .is_empty()
+        );
     }
 
     fn insert_runtime_configs(

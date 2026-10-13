@@ -3,12 +3,11 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
-use validator::Validate;
 
 mod aggregator;
 mod nvext;
 
-pub use nvext::{NvExt, NvExtProvider};
+pub use nvext::NvExt;
 
 /// Image generation request with NVIDIA extensions.
 ///
@@ -17,7 +16,7 @@ pub use nvext::{NvExt, NvExtProvider};
 /// struct's keys too. The manual impls keep one external contract, typed
 /// fields at the top level plus unknown top-level fields retained in
 /// [`Self::passthrough`].
-#[derive(Validate, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct NvCreateImageRequest {
     pub inner: dynamo_protocols::types::CreateImageRequest,
 
@@ -127,7 +126,7 @@ impl Serialize for NvCreateImageRequest {
 ///
 /// # Fields
 /// - `inner`: The base OpenAI image response, embedded using `serde(flatten)`.
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvImagesResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::ImagesResponse,
@@ -146,15 +145,6 @@ impl NvImagesResponse {
                 usage: None,
             },
         }
-    }
-}
-
-/// Implements `NvExtProvider` for `NvCreateImageRequest`,
-/// providing access to NVIDIA-specific extensions.
-impl NvExtProvider for NvCreateImageRequest {
-    /// Returns a reference to the optional `NvExt` extension, if available.
-    fn nvext(&self) -> Option<&NvExt> {
-        self.nvext.as_ref()
     }
 }
 

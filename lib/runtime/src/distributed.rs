@@ -60,6 +60,49 @@ mod unit_tests {
     use super::parse_tcp_response_stream_port;
     use crate::pipeline::PipelineError;
 
+    #[tokio::test]
+    async fn completed_runtime_initialization_rejects_shutdown_before_http_bind() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::completed_runtime_initialization_rejects_shutdown_before_http_bind"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
+        use super::{DistributedConfig, DistributedRuntime, Runtime};
+        use crate::system_status_server::SystemProbePolicy;
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_SYSTEM_HOST", Some("127.0.0.1")),
+                ("DYN_SYSTEM_PORT", Some("0")),
+            ],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                runtime.mark_shutting_down();
+                // Exercise the final bind guard directly: the public constructor
+                // would reject shutdown before polling build at all.
+                let result = DistributedRuntime::build(
+                    runtime.clone(),
+                    DistributedConfig::process_local(),
+                    SystemProbePolicy::RuntimeOnly,
+                )
+                .await;
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("runtime shut down during initialization")
+                );
+                runtime.shutdown();
+            },
+        )
+        .await;
+    }
+
     #[test]
     fn response_stream_port_trims_and_treats_empty_as_unset() {
         for value in [None, Some(""), Some(" \t ")] {
@@ -170,6 +213,34 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
+        Self::new_with_probe_policy(
+            runtime,
+            config,
+            system_status_server::SystemProbePolicy::Worker,
+        )
+        .await
+    }
+
+    /// Initialize runtime dependencies, then bind HTTP with the selected probe policy.
+    /// Shutdown cancels pending initialization; no listener exists until it completes.
+    pub async fn new_with_probe_policy(
+        runtime: Runtime,
+        config: DistributedConfig,
+        policy: system_status_server::SystemProbePolicy,
+    ) -> Result<Self> {
+        let shutdown = runtime.shutdown_started_token();
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => anyhow::bail!("runtime shut down during initialization"),
+            result = Self::build(runtime, config, policy) => result,
+        }
+    }
+
+    async fn build(
+        runtime: Runtime,
+        config: DistributedConfig,
+        policy: system_status_server::SystemProbePolicy,
+    ) -> Result<Self> {
         let (discovery_backend, nats_config, request_plane, response_plane, event_transport_kind) =
             config.dissolve();
         let response_plane = match response_plane {
@@ -177,31 +248,14 @@ impl DistributedRuntime {
             None => ResponsePlaneMode::configured()?,
         };
 
+        let config = crate::config::RuntimeConfig::from_settings()?;
         let nats_client = match nats_config {
-            Some(nc) => Some(nc.connect().await?),
+            Some(nc) => Some(
+                nc.connect_with_cancellation(runtime.primary_token())
+                    .await?,
+            ),
             None => None,
         };
-
-        // Start system status server for health and metrics if enabled in configuration
-        let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
-        // IMPORTANT: We must extract cancel_token from runtime BEFORE moving runtime into the struct below.
-        // This is because after moving, runtime is no longer accessible in this scope (ownership rules).
-        let cancel_token = if config.system_server_enabled() {
-            Some(runtime.clone().child_token())
-        } else {
-            None
-        };
-        let starting_health_status = config.starting_health_status.clone();
-        let use_endpoint_health_status = config.use_endpoint_health_status.clone();
-        let health_endpoint_path = config.system_health_path.clone();
-        let live_endpoint_path = config.system_live_path.clone();
-        let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
-            starting_health_status,
-            use_endpoint_health_status,
-            config.health_check_enabled,
-            health_endpoint_path,
-            live_endpoint_path,
-        )));
 
         // Initialize discovery client based on backend configuration
         let (discovery_client, discovery_metadata) = match discovery_backend {
@@ -240,6 +294,18 @@ impl DistributedRuntime {
                 )
             }
         };
+
+        let starting_health_status = config.starting_health_status.clone();
+        let use_endpoint_health_status = config.use_endpoint_health_status.clone();
+        let health_endpoint_path = config.system_health_path.clone();
+        let live_endpoint_path = config.system_live_path.clone();
+        let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
+            starting_health_status,
+            use_endpoint_health_status,
+            config.health_check_enabled,
+            health_endpoint_path,
+            live_endpoint_path,
+        )));
 
         let component_registry = component::Registry::new();
 
@@ -341,49 +407,6 @@ impl DistributedRuntime {
             }
         }
 
-        // Handle system status server initialization
-        if let Some(cancel_token) = cancel_token {
-            // System server is enabled - start both the state and HTTP server
-            let host = config.system_host.clone();
-            let port = config.system_port as u16;
-
-            // Start system status server (it creates SystemStatusState internally)
-            match crate::system_status_server::spawn_system_status_server(
-                &host,
-                port,
-                cancel_token,
-                Arc::new(distributed_runtime.clone()),
-                distributed_runtime.discovery_metadata.clone(),
-            )
-            .await
-            {
-                Ok((addr, handle)) => {
-                    tracing::info!("System status server started successfully on {addr}");
-
-                    // Store system status server information
-                    let system_status_server_info =
-                        crate::system_status_server::SystemStatusServerInfo::new(
-                            addr,
-                            Some(handle),
-                        );
-
-                    // Initialize the system_status_server field
-                    distributed_runtime
-                        .system_status_server
-                        .set(Arc::new(system_status_server_info))
-                        .expect("System status server info should only be set once");
-                }
-                Err(e) => {
-                    tracing::error!("System status server startup failed: {e}");
-                }
-            }
-        } else {
-            // System server HTTP is disabled, but uptime metrics are still being tracked via SystemHealth
-            tracing::debug!(
-                "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
-            );
-        }
-
         // Start health check manager if enabled
         if config.health_check_enabled {
             let health_check_config = crate::health_check::HealthCheckConfig {
@@ -409,12 +432,69 @@ impl DistributedRuntime {
             }
         }
 
+        anyhow::ensure!(
+            !distributed_runtime.runtime.is_shutting_down(),
+            "runtime shut down during initialization"
+        );
+        if config.system_server_enabled() {
+            // Keep sidecar probes alive through unregister/drain. Ordinary workers
+            // retain their existing endpoint-shutdown lifetime.
+            let stop = match policy {
+                system_status_server::SystemProbePolicy::Worker => {
+                    distributed_runtime.runtime.child_token()
+                }
+                system_status_server::SystemProbePolicy::RuntimeOnly => {
+                    distributed_runtime.runtime.primary_token().child_token()
+                }
+            };
+            match system_status_server::spawn_system_status_server(
+                &config.system_host,
+                config.system_port as u16,
+                stop,
+                Arc::new(distributed_runtime.clone()),
+                distributed_runtime.discovery_metadata.clone(),
+                policy,
+            )
+            .await
+            {
+                Ok((address, handle)) => {
+                    distributed_runtime
+                        .system_status_server
+                        .set(Arc::new(system_status_server::SystemStatusServerInfo::new(
+                            address,
+                            Some(handle),
+                        )))
+                        .expect("System status server info should only be set once");
+                    tracing::info!(%address, ?policy, "System HTTP listener started");
+                }
+                // Preserve ordinary workers' optional-HTTP failure behavior.
+                Err(error) if policy == system_status_server::SystemProbePolicy::Worker => {
+                    tracing::error!(%error, "System status server startup failed");
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(distributed_runtime)
     }
 
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
         let config = DistributedConfig::try_from_settings()?;
         Self::new(runtime, config).await
+    }
+
+    /// Check configured runtime dependencies, independently of model registration.
+    /// The HTTP caller bounds this operation; it never performs inference.
+    pub(crate) async fn check_dependencies(&self) -> Result<()> {
+        anyhow::ensure!(!self.runtime.is_shutting_down(), "runtime is shutting down");
+        if let Some(client) = &self.nats_client {
+            anyhow::ensure!(
+                client.client().connection_state() == async_nats::connection::State::Connected,
+                "NATS is disconnected"
+            );
+        }
+        self.discovery_client.check_connection().await?;
+        anyhow::ensure!(!self.runtime.is_shutting_down(), "runtime is shutting down");
+        Ok(())
     }
 
     pub fn runtime(&self) -> &Runtime {
@@ -766,6 +846,33 @@ impl DistributedRuntime {
         });
 
         rx
+    }
+}
+
+#[cfg(test)]
+mod parser_env_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn distributed_runtime_rejects_invalid_parser_version() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::distributed_runtime_rejects_invalid_parser_version"
+            ),
+            &[(
+                crate::config::environment_names::llm::DYN_PARSER_VERSION,
+                "v3",
+            )],
+        ) {
+            return;
+        }
+
+        let runtime = Runtime::from_current().unwrap();
+        let error = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .expect_err("invalid parser configuration must fail runtime construction");
+        assert!(error.to_string().contains("DYN_PARSER_VERSION"));
     }
 }
 
@@ -1145,6 +1252,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_disabled() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_drt_uptime_after_delay_system_disabled"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         use crate::config::environment_names::runtime::system as env_system;
         // Test uptime with system status server disabled
         temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
@@ -1172,9 +1289,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_enabled() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_drt_uptime_after_delay_system_enabled"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         use crate::config::environment_names::runtime::system as env_system;
         // Test uptime with system status server enabled
-        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, Some("8081"))], async {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, Some("0"))], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 

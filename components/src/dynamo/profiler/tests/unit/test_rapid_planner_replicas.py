@@ -7,7 +7,7 @@ Background
 ----------
 `docs/components/profiler/profiler-guide.md` documents the "Autoscale" picking
 mode as picking prefill / decode engines "each with 1 replica" and letting the
-planner scale at runtime. The picker (`aiconfigurator.sdk.picking.pick_autoscale`)
+planner scale at runtime. The picker (`aisimulate.sdk.picking.pick_autoscale`)
 honours this by hardcoding `(p)workers=1` / `(d)workers=1` on every returned
 row. However, AIC's generator (`module_bridge.task_config_to_generator_config`)
 then rescales workers by `total_gpus // gpus_per_replica` whenever `total_gpus`
@@ -32,7 +32,7 @@ pytestmark = [
 ]
 
 try:
-    from aiconfigurator.sdk.task_v2 import Task
+    from aisimulate.sdk.task_v2 import Task
 
     from dynamo.profiler.rapid import _generate_dgd_from_pick
     from dynamo.profiler.utils.dgdr_v1beta1_types import (

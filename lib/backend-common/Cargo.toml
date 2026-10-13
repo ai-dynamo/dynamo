@@ -46,5 +46,6 @@ tracing-opentelemetry = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 serial_test = "3"
+tempfile = { workspace = true }
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 tracing-subscriber = { workspace = true }

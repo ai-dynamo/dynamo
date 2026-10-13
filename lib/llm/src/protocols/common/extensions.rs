@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::http::HeaderMap;
 use derive_builder::Builder;
@@ -74,32 +75,6 @@ pub enum InputTrigger {
     Other,
 }
 
-/// Metadata for an inference request that creates a compacted session summary.
-///
-/// Fields are optional because harnesses may expose different levels of detail.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
-pub struct AgentCompaction {
-    /// How the compaction was initiated, such as `manual` or `automatic`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trigger: Option<String>,
-
-    /// Why the compaction was initiated.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-
-    /// Compaction mechanism selected by the harness.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub implementation: Option<String>,
-
-    /// Position of this inference within the compaction flow.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-
-    /// Summary or checkpoint strategy selected by the harness.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strategy: Option<String>,
-}
-
 /// Identity metadata for agentic workloads.
 // Not `deny_unknown_fields`: `AgentContext` is part of the frontend->worker wire
 // format (`PreprocessedRequest.agent_context`), so additive fields must be tolerated
@@ -119,10 +94,19 @@ pub struct AgentContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_final: Option<bool>,
 
-    /// Present when the current inference creates a compacted session summary.
-    #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction: Option<AgentCompaction>,
+    /// Opaque coding-agent HTTP headers captured at ingress for this request.
+    ///
+    /// Names are lowercase; values retain their text and repetition order.
+    /// Capture includes open `x-claude-code-*` and `x-codex-*` families plus
+    /// supported session/subagent headers. It skips sensitive or non-text values
+    /// and bounds capture to 64 values, 16 KiB per value, and 32 KiB total
+    /// (including name bytes per value), omitting whole values over the limits.
+    /// Absence does not imply a negative signal. Consumers own interpretation,
+    /// including compaction, unknown values, and malformed embedded JSON.
+    /// Shared across pipeline clones; serialized as a JSON object of arrays.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "agent_headers_empty")]
+    pub agent_headers: Arc<BTreeMap<String, Vec<String>>>,
 
     /// Causal trigger that produced the request, derived from inbound request content.
     #[builder(default, setter(strip_option))]
@@ -136,6 +120,10 @@ impl AgentContext {
     pub fn builder() -> AgentContextBuilder {
         AgentContextBuilder::default()
     }
+}
+
+fn agent_headers_empty(headers: &Arc<BTreeMap<String, Vec<String>>>) -> bool {
+    headers.is_empty()
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -369,7 +357,7 @@ impl From<AgentContextHeaderValues> for AgentContext {
             session_id: values.session_id,
             parent_session_id: values.parent_session_id,
             session_final: values.session_final,
-            compaction: values.compaction,
+            agent_headers: values.agent_headers,
             input_trigger: None,
         }
     }
@@ -889,8 +877,8 @@ mod tests {
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
         HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
-        HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL,
-        HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID,
+        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[derive(Default)]
@@ -920,15 +908,31 @@ mod tests {
     }
 
     #[test]
-    fn agent_context_accepts_nested_compaction() {
+    fn agent_context_preserves_wire_compatibility() {
         let context = serde_json::from_str::<AgentContext>(
             r#"{"session_id":"root","compaction":{"trigger":"manual"}}"#,
         )
         .unwrap();
-        assert_eq!(
-            context.compaction.and_then(|compaction| compaction.trigger),
-            Some("manual".to_string())
-        );
+        // Older frontends may send the optional normalized field. It never
+        // drove core behavior and is now ignored by tolerant wire readers.
+        assert!(context.agent_headers.is_empty());
+        assert_eq!(context.session_id, "root");
+        let wire = serde_json::to_value(context).unwrap();
+        assert!(wire.get("compaction").is_none());
+        assert!(wire.get("agent_headers").is_none());
+
+        #[derive(Deserialize)]
+        struct LegacyAgentContext {
+            session_id: String,
+            compaction: Option<serde_json::Value>,
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "root".parse().unwrap());
+        headers.insert("x-codex-future", "unknown".parse().unwrap());
+        let wire = serde_json::to_value(agent_context_from_headers(&headers).unwrap()).unwrap();
+        let legacy: LegacyAgentContext = serde_json::from_value(wire).unwrap();
+        assert_eq!(legacy.session_id, "root");
+        assert!(legacy.compaction.is_none());
     }
 
     #[test]
@@ -1322,7 +1326,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
         headers.insert(
-            HEADER_CODEX_TURN_METADATA,
+            "x-codex-turn-metadata",
             r#"{"request_kind":"compaction","compaction":{"trigger":"manual","reason":"user_requested","implementation":"responses_compact","phase":"standalone_turn","strategy":"memento"}}"#
                 .parse()
                 .unwrap(),
@@ -1330,56 +1334,35 @@ mod tests {
 
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(
-            agent_context.compaction,
-            Some(AgentCompaction {
-                trigger: Some("manual".to_string()),
-                reason: Some("user_requested".to_string()),
-                implementation: Some("responses_compact".to_string()),
-                phase: Some("standalone_turn".to_string()),
-                strategy: Some("memento".to_string()),
-            })
+            agent_context.agent_headers["x-codex-turn-metadata"],
+            [headers["x-codex-turn-metadata"].to_str().unwrap()]
         );
 
         headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "canonical");
         assert_eq!(
-            agent_context
-                .compaction
-                .and_then(|compaction| compaction.strategy),
-            Some("memento".to_string())
+            agent_context.agent_headers["x-codex-turn-metadata"],
+            [headers["x-codex-turn-metadata"].to_str().unwrap()]
         );
     }
 
     #[test]
-    fn agent_context_ignores_invalid_or_non_compaction_codex_metadata() {
+    fn agent_context_preserves_codex_metadata_without_interpreting_it() {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
-        headers.insert(HEADER_CODEX_TURN_METADATA, "{".parse().unwrap());
-        assert_eq!(
-            agent_context_from_headers(&headers).unwrap().compaction,
-            None
-        );
-
-        headers.insert(
-            HEADER_CODEX_TURN_METADATA,
-            r#"{"request_kind":"turn","compaction":{"trigger":"manual"}}"#
-                .parse()
-                .unwrap(),
-        );
-        assert_eq!(
-            agent_context_from_headers(&headers).unwrap().compaction,
-            None
-        );
-
-        headers.insert(
-            HEADER_CODEX_TURN_METADATA,
-            r#"{"request_kind":"compaction"}"#.parse().unwrap(),
-        );
-        assert_eq!(
-            agent_context_from_headers(&headers).unwrap().compaction,
-            Some(AgentCompaction::default())
-        );
+        for raw in [
+            "{",
+            r#"{"request_kind":"future","extra":{"nested":true}}"#,
+            r#"{"request_kind":"compaction"}"#,
+        ] {
+            headers.insert("x-codex-turn-metadata", raw.parse().unwrap());
+            let context = agent_context_from_headers(&headers).unwrap();
+            assert_eq!(context.agent_headers["x-codex-turn-metadata"], [raw]);
+            let restored: AgentContext =
+                serde_json::from_value(serde_json::to_value(&context).unwrap()).unwrap();
+            assert_eq!(restored, context);
+        }
     }
 
     #[test]
