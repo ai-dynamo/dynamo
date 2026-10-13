@@ -247,7 +247,6 @@
 /components/src/dynamo/common/                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /tests/test_models_dir_flag.py                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /tests/report_pytest_markers.py                                                                         @ai-dynamo/dynamo-runtime-codeowners
-/components/src/dynamo/artifacts/                                                                       @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/multimodal_profiles/                                                                       @ai-dynamo/dynamo-runtime-codeowners
 /tests/test_predownload_models.py                                                                       @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/lora/                                                                     @ai-dynamo/dynamo-runtime-codeowners
@@ -551,7 +550,6 @@ requirements.txt                                                                
 /lib/llm/src/block_manager/connector/                                                                   @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/offload.rs                                                                   @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/storage.rs                                                                   @ai-dynamo/dynamo-kv-memory-codeowners
-/components/src/dynamo/artifacts/vllm/                                                                  @ai-dynamo/dynamo-backend-vllm-codeowners
 /dev/observability/xpu-alert-rules.yml                                                                  @ai-dynamo/dynamo-xpu-codeowners
 /dev/observability/xpu_smi_exporter.py                                                                  @ai-dynamo/dynamo-xpu-codeowners
 /lib/llm/src/block_manager/controller/                                                                  @ai-dynamo/dynamo-kv-memory-codeowners
