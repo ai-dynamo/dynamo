@@ -3,7 +3,7 @@ name: issue-first
 description: Ensures every piece of work in ai-dynamo/dynamo starts from a tracked issue and every pull request references one. Use when starting new work, opening or editing a pull request, or when the "PR Issue Link" check fails and needs remediation.
 license: Apache-2.0
 metadata:
-  author: NVIDIA
+  author: Dan Gil <dagil@nvidia.com>
   tags:
     - dynamo
     - github
@@ -80,7 +80,13 @@ pull-request numbers.
 A DEP does not satisfy the check on its own. It is a proposal umbrella that
 stays open across many pull requests, so it records what the work is part of
 and not what one change is. Keep the `Part of #<dep>` reference and file a
-work issue for the change as well.
+work issue for the change as well. The PR description carries both lines; a
+new work issue adds a reference, it never replaces the DEP one:
+
+```text
+Part of #<dep>
+Closes DYN-1234
+```
 
 ### Remediate a Failing Check
 
