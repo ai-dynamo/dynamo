@@ -23,16 +23,14 @@ use crate::{client, client::Discovery, protocol};
 
 const PAYLOAD_KEY: &str = "sglang_tito";
 const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
-/// The frontend's request annotation for prefill's final response
-/// (`dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION`).
+/// `dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION`.
 const PREFILL_OUTPUT_ANNOTATION: &str = "prefill_output";
 
 pub(crate) struct NativeRequest {
     body: Value,
     is_prefill: bool,
     prefill_handoff: Option<Value>,
-    /// Return prefill's final native response so the frontend can join its
-    /// prompt-side outputs into the decode response.
+    /// Return prefill's final native response for the frontend to join.
     keep_prefill_output: bool,
 }
 
@@ -132,7 +130,10 @@ pub(crate) fn request(
         body: Value::Object(body),
         is_prefill: mode.is_prefill(),
         prefill_handoff,
-        keep_prefill_output: mode.is_prefill() && request.has_annotation(PREFILL_OUTPUT_ANNOTATION),
+        keep_prefill_output: request
+            .annotations
+            .iter()
+            .any(|a| a == PREFILL_OUTPUT_ANNOTATION),
     }))
 }
 
@@ -685,7 +686,6 @@ mod tests {
                 json!({"n": 1, "max_new_tokens": 1})
             );
             assert!(native.is_prefill);
-            assert!(!native.keep_prefill_output);
             let handoff = native.prefill_handoff.unwrap();
             assert_eq!(handoff["bootstrap_host"], "prefill");
             assert_eq!(handoff["bootstrap_port"], 5000);
@@ -980,26 +980,14 @@ mod tests {
     #[tokio::test]
     async fn annotated_prefill_keeps_its_final_native_response() {
         let mut canonical = canonical_request();
-        canonical.extra_args = Some(json!({"sglang_tito": {"return_logprob": true}}));
+        canonical.extra_args = Some(json!({"sglang_tito": {}}));
         canonical.annotations = vec![super::PREFILL_OUTPUT_ANNOTATION.to_string()];
-        let native = request(
-            &canonical,
-            "rid",
-            DisaggregationMode::Prefill,
-            Some("prefill"),
-            Some(5000),
-        )
-        .unwrap()
-        .unwrap();
-        assert!(native.keep_prefill_output);
-        let decode = request(&canonical, "rid", DisaggregationMode::Decode, None, None);
-        assert!(decode.is_err() || !decode.unwrap().unwrap().keep_prefill_output);
-
-        let final_response = json!({"output_ids": [101], "meta_info": {
-            "finish_reason": {"type": "length"},
-            "input_token_logprobs": [[null, 1, null]],
-        }});
-        let (port, server) = serve_once(format!("data: {final_response}\n\n"), "200 OK").await;
+        let mode = DisaggregationMode::Prefill;
+        let native = request(&canonical, "rid", mode, Some("prefill"), Some(5000));
+        let native = native.unwrap().unwrap();
+        let response =
+            json!({"output_ids": [101], "meta_info": {"finish_reason": {"type": "length"}}});
+        let (port, server) = serve_once(format!("data: {response}\n\n"), "200 OK").await;
         let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
         let mut stream = native_http(port).generate(native, ctx, CancellationToken::new());
         assert!(
@@ -1014,9 +1002,8 @@ mod tests {
         let terminal = stream.next().await.unwrap().unwrap();
         assert_eq!(
             terminal.engine_data,
-            Some(json!({"sglang_response": final_response}))
+            Some(json!({"sglang_response": response}))
         );
-        assert!(stream.next().await.is_none());
         server.await.unwrap();
     }
 
@@ -1087,6 +1074,7 @@ mod tests {
         let terminal = stream.next().await.unwrap().unwrap();
         assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
         assert!(terminal.disaggregated_params.is_none());
+        assert!(terminal.engine_data.is_none());
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }

@@ -4,5 +4,5 @@
 //! SGLang-native HTTP protocol types.
 
 pub mod generate;
-pub(crate) mod merge;
+pub mod merge;
 pub(crate) mod stream;

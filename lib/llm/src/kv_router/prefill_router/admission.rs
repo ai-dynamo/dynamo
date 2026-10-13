@@ -12,10 +12,7 @@ use dynamo_runtime::{
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
-use super::{
-    PrefillCompletion, PrefillError, PrefillRouter,
-    handoff::{PrefillTask, keep_engine_data},
-};
+use super::{PrefillCompletion, PrefillError, PrefillRouter, handoff::PrefillTask};
 use crate::protocols::common::{
     llm_backend::{FinishReason, LLMEngineOutput},
     timing::RequestTracker,
@@ -59,18 +56,15 @@ impl PrefillRouter {
                     && obj.contains_key("bootstrap_room")
             });
 
-        let mut prefill_output = None;
         let completion = if !is_bootstrap {
             if let Some(ref tracker) = tracker {
                 tracker.record_prefill_complete();
             }
-            keep_engine_data(&first_output, &mut prefill_output);
             while let Some(next) = prefill_response.next().await {
                 if let Some(error) = next.err() {
                     let detail = format!("Prefill router returned error in output stream: {error}");
                     return Err(PrefillError::PrefillError(detail, Some(Box::new(error))));
                 }
-                keep_engine_data(&next, &mut prefill_output);
                 if let Some(output) = next.data.as_ref()
                     && prompt_tokens_details.is_none()
                 {
@@ -87,7 +81,9 @@ impl PrefillRouter {
                 let mut prefill_output = None;
                 while let Some(output) = prefill_response.next().await {
                     PrefillTask::check_output(&output)?;
-                    keep_engine_data(&output, &mut prefill_output);
+                    if let Some(engine_data) = output.data.and_then(|data| data.engine_data) {
+                        prefill_output = Some(engine_data);
+                    }
                 }
                 // Bootstrap details unblock decode, but do not mean prefill is
                 // complete. Record completion only after its stream finishes.
@@ -152,7 +148,6 @@ impl PrefillRouter {
             },
             worker_link: output.worker_trace_link.clone(),
             completion,
-            prefill_output: prefill_output.map(Box::new),
         })
     }
 
@@ -170,12 +165,10 @@ impl PrefillRouter {
                     completion: Some(task),
                     ..
                 } => task.wait().await,
-                PrefillCompletion::Handoff { prefill_output, .. } => {
-                    Ok(prefill_output.map(|output| *output))
-                }
                 PrefillCompletion::Terminal { output } => {
                     PrefillTask::check_output(&output).map(|()| None)
                 }
+                _ => Ok(None),
             }
         })
     }
@@ -183,6 +176,7 @@ impl PrefillRouter {
 
 #[cfg(test)]
 mod tests {
+    use crate::protocols::response_merge::PrefillNeed;
     use futures::stream;
     use serde_json::json;
 
@@ -240,7 +234,7 @@ mod tests {
             let decode: ManyOut<Annotated<LLMEngineOutput>> =
                 ResponseStream::new(Box::pin(stream::pending()), context.clone());
             match completion
-                .forward_decode(async { Ok(decode) }, context)
+                .forward_decode(async { Ok(decode) }, context, PrefillNeed::None)
                 .await
             {
                 Err(error) => assert!(error.to_string().contains("Prefill")),

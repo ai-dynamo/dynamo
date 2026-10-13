@@ -28,14 +28,14 @@ use futures::stream::{self, StreamExt};
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, SelectionPolicySource},
-    protocols::{
-        common::{
-            extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
-            llm_backend::{LLMEngineOutput, PreprocessedRequest},
-            preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
-            timing::{RequestPhase, RequestTracker},
-        },
-        response_merge::PREFILL_OUTPUT_ANNOTATION,
+    protocols::common::{
+        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        llm_backend::{LLMEngineOutput, PreprocessedRequest},
+        preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
+        timing::{RequestPhase, RequestTracker},
+    },
+    protocols::response_merge::{
+        PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
     },
     session_affinity::{AffinityTarget, SessionAffinityMode},
 };
@@ -175,8 +175,6 @@ enum PrefillCompletion {
         result: PrefillResult,
         worker_link: Option<TraceLink>,
         completion: Option<PrefillTask>,
-        /// Last `engine_data` of a prefill that finished before the handoff.
-        prefill_output: Option<Box<serde_json::Value>>,
     },
     Terminal {
         output: Box<Annotated<LLMEngineOutput>>,
@@ -493,7 +491,6 @@ impl
 
         let router = &binding.router;
         let endpoint_id = &binding.endpoint_id;
-        let emit_prefill_output = req.has_annotation(PREFILL_OUTPUT_ANNOTATION);
         let mut prefill_completion = None;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
@@ -521,12 +518,8 @@ impl
                         result,
                         worker_link,
                         completion,
-                        prefill_output,
                     } => {
-                        prefill_completion = completion.or_else(|| {
-                            emit_prefill_output
-                                .then(|| PrefillTask::ready(prefill_output.map(|output| *output)))
-                        });
+                        prefill_completion = completion;
                         if let Some(bootstrap_info) =
                             extract_bootstrap_info(&result.disaggregated_params)
                         {
@@ -622,14 +615,18 @@ impl
             self.conditional_disagg_policy.is_enabled(),
         ));
 
+        let annotated = |name| decode_req.annotations.iter().any(|a| a == name);
+        let output = match (
+            annotated(PREFILL_OUTPUT_ANNOTATION),
+            annotated(PREFILL_OUTPUT_FIRST_ANNOTATION),
+        ) {
+            (false, _) => PrefillNeed::None,
+            (true, false) => PrefillNeed::BeforeLast,
+            (true, true) => PrefillNeed::BeforeFirst,
+        };
         let decode = next.generate(context.map(|_| decode_req));
         match prefill_completion {
-            Some(completion) if emit_prefill_output => {
-                completion
-                    .forward_decode_with_output(decode, engine_ctx)
-                    .await
-            }
-            Some(completion) => completion.forward_decode(decode, engine_ctx).await,
+            Some(completion) => completion.forward_decode(decode, engine_ctx, output).await,
             None => decode.await,
         }
     }
@@ -913,7 +910,11 @@ mod tests {
             // Decode can enter its phase even though prefill is still observed.
             let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
             let error = task
-                .forward_decode(std::future::pending(), Context::new(()).context())
+                .forward_decode(
+                    std::future::pending(),
+                    Context::new(()).context(),
+                    PrefillNeed::None,
+                )
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("prefill connection lost"));

@@ -9,40 +9,36 @@ use dynamo_runtime::{
     pipeline::{AsyncEngineContext, AsyncEngineContextProvider, ManyOut, ResponseStream},
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
-use futures::StreamExt;
+use futures::{StreamExt, stream};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 use super::PrefillError;
 use crate::protocols::{
     common::llm_backend::{FinishReason, LLMEngineOutput},
-    response_merge::PREFILL_OUTPUT_ANNOTATION,
+    response_merge::{PREFILL_OUTPUT_ANNOTATION, PrefillNeed},
 };
 
-/// Prefill's last `engine_data`, kept for frontends that join prompt-side
-/// output into the decode response.
+/// Prefill's last `engine_data`.
 pub(super) type PrefillOutput = Option<serde_json::Value>;
 
 /// Dropping the observer detaches the task: client disconnects must not abort a
 /// prefill whose KV transfer may still be needed by the decode worker.
 pub(super) struct PrefillTask(JoinHandle<Result<PrefillOutput, PrefillError>>);
 
-/// Remember the newest `engine_data` a prefill output carries.
-pub(super) fn keep_engine_data(output: &Annotated<LLMEngineOutput>, last: &mut PrefillOutput) {
-    if let Some(engine_data) = output
-        .data
-        .as_ref()
-        .and_then(|data| data.engine_data.as_ref())
-    {
-        *last = Some(engine_data.clone());
-    }
+/// Prefill's output as a stream item tagged with [`PREFILL_OUTPUT_ANNOTATION`].
+fn output_item(output: PrefillOutput) -> Option<Annotated<LLMEngineOutput>> {
+    let engine_data = Some(output?);
+    Some(Annotated {
+        event: Some(PREFILL_OUTPUT_ANNOTATION.to_string()),
+        ..Annotated::from_data(LLMEngineOutput {
+            engine_data,
+            ..Default::default()
+        })
+    })
 }
 
 impl PrefillTask {
-    pub(super) fn ready(output: PrefillOutput) -> Self {
-        Self::spawn(async move { Ok(output) })
-    }
-
     pub(super) fn spawn(
         future: impl Future<Output = Result<PrefillOutput, PrefillError>> + Send + 'static,
     ) -> Self {
@@ -95,21 +91,28 @@ impl PrefillTask {
     /// Observe prefill failures both during decode dispatch and while streaming.
     /// Successful prefill does not delay tokens; a successful decode terminal is
     /// held until prefill finishes so a late failure cannot follow success.
+    /// `output` sends prefill's output into the stream as soon as prefill
+    /// finishes (`BeforeLast`), or before any decode output (`BeforeFirst`).
     pub(super) async fn forward_decode(
         self,
         decode: impl Future<Output = anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>>>,
         request_context: Arc<dyn AsyncEngineContext>,
+        output: PrefillNeed,
     ) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        let emit = output != PrefillNeed::None;
         let mut completion = Box::pin(self.wait());
         tokio::pin!(decode);
         let mut response = tokio::select! {
             biased;
             result = &mut completion => {
-                if let Err(error) = result {
-                    request_context.stop_generating();
-                    return Err(error.into());
+                let prefill = result.inspect_err(|_| request_context.stop_generating())?;
+                let response = decode.await?;
+                if !emit {
+                    return Ok(response);
                 }
-                return decode.await;
+                let context = response.context();
+                let stream = stream::iter(output_item(prefill)).chain(response);
+                return Ok(ResponseStream::new(Box::pin(stream), context));
             }
             result = &mut decode => result?,
         };
@@ -118,15 +121,39 @@ impl PrefillTask {
         let context = response.context();
         let stream_context = context.clone();
         let stream = async_stream::stream! {
+            if output == PrefillNeed::BeforeFirst {
+                match completion.as_mut().await {
+                    Ok(output) => {
+                        if let Some(item) = output_item(output) {
+                            yield item;
+                        }
+                    }
+                    Err(error) => {
+                        request_context.stop_generating();
+                        stream_context.stop_generating();
+                        yield Annotated::from_err(error);
+                        return;
+                    }
+                }
+                while let Some(output) = response.next().await {
+                    yield output;
+                }
+                return;
+            }
             loop {
                 tokio::select! {
                     biased;
                     result = &mut completion => {
-                        if let Err(error) = result {
-                            request_context.stop_generating();
-                            stream_context.stop_generating();
-                            yield Annotated::from_err(error);
-                            return;
+                        match result {
+                            Ok(prefill) => if emit && let Some(item) = output_item(prefill) {
+                                yield item;
+                            },
+                            Err(error) => {
+                                request_context.stop_generating();
+                                stream_context.stop_generating();
+                                yield Annotated::from_err(error);
+                                return;
+                            }
                         }
                         while let Some(output) = response.next().await {
                             yield output;
@@ -146,13 +173,18 @@ impl PrefillTask {
                         let terminal = output.as_ref().is_none_or(|output| {
                             output.data.as_ref().is_some_and(|data| data.finish_reason.is_some())
                         });
-                        if terminal
-                            && let Err(error) = completion.as_mut().await
-                        {
-                            request_context.stop_generating();
-                            stream_context.stop_generating();
-                            yield Annotated::from_err(error);
-                            return;
+                        if terminal {
+                            match completion.as_mut().await {
+                                Ok(prefill) => if emit && let Some(item) = output_item(prefill) {
+                                    yield item;
+                                },
+                                Err(error) => {
+                                    request_context.stop_generating();
+                                    stream_context.stop_generating();
+                                    yield Annotated::from_err(error);
+                                    return;
+                                }
+                            }
                         }
                         match output {
                             Some(output) => yield output,
@@ -163,61 +195,6 @@ impl PrefillTask {
                         }
                     }
                 }
-            }
-        };
-        Ok(ResponseStream::new(Box::pin(stream), context))
-    }
-
-    /// Like [`Self::forward_decode`], but the stream first waits for prefill,
-    /// then sends its output as a [`PREFILL_OUTPUT_ANNOTATION`] event, then the
-    /// decode outputs. Prefill is done before any decode output, so a late
-    /// prefill failure cannot follow decode tokens.
-    pub(super) async fn forward_decode_with_output(
-        self,
-        decode: impl Future<Output = anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>>>,
-        request_context: Arc<dyn AsyncEngineContext>,
-    ) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
-        let mut completion = Box::pin(self.wait());
-        tokio::pin!(decode);
-        let mut finished = None;
-        let mut response = tokio::select! {
-            biased;
-            result = &mut completion => {
-                match result {
-                    Ok(output) => finished = Some(output),
-                    Err(error) => {
-                        request_context.stop_generating();
-                        return Err(error.into());
-                    }
-                }
-                decode.await?
-            }
-            result = &mut decode => result?,
-        };
-        let context = response.context();
-        let stream_context = context.clone();
-        let stream = async_stream::stream! {
-            let output = match finished {
-                Some(output) => Ok(output),
-                None => completion.await,
-            };
-            match output {
-                Err(error) => {
-                    request_context.stop_generating();
-                    stream_context.stop_generating();
-                    yield Annotated::from_err(error);
-                    return;
-                }
-                Ok(Some(output)) => {
-                    match Annotated::from_annotation(PREFILL_OUTPUT_ANNOTATION, &output) {
-                        Ok(annotation) => yield annotation,
-                        Err(error) => tracing::warn!(%error, "cannot encode prefill output"),
-                    }
-                }
-                Ok(None) => {}
-            }
-            while let Some(output) = response.next().await {
-                yield output;
             }
         };
         Ok(ResponseStream::new(Box::pin(stream), context))
@@ -251,7 +228,11 @@ mod tests {
     async fn failure_interrupts_pending_decode_dispatch() {
         let (tx, task) = pending_prefill();
         let context = Arc::new(Controller::default());
-        let mut response = Box::pin(task.forward_decode(std::future::pending(), context.clone()));
+        let mut response = Box::pin(task.forward_decode(
+            std::future::pending(),
+            context.clone(),
+            PrefillNeed::None,
+        ));
         assert!(response.as_mut().now_or_never().is_none());
         tx.send(failure()).unwrap();
         let error = tokio::time::timeout(std::time::Duration::from_secs(1), response)
@@ -269,7 +250,7 @@ mod tests {
         let decode: ManyOut<Annotated<LLMEngineOutput>> =
             ResponseStream::new(Box::pin(stream::pending()), context.clone());
         let mut response = task
-            .forward_decode(async { Ok(decode) }, context.clone())
+            .forward_decode(async { Ok(decode) }, context.clone(), PrefillNeed::None)
             .await
             .unwrap();
         tx.send(failure()).unwrap();
@@ -304,7 +285,7 @@ mod tests {
             context.clone(),
         );
         let mut response = task
-            .forward_decode(async { Ok(decode) }, context.clone())
+            .forward_decode(async { Ok(decode) }, context.clone(), PrefillNeed::None)
             .await
             .unwrap();
         assert_eq!(response.next().await.unwrap().data.unwrap().token_ids, [42]);
@@ -329,7 +310,7 @@ mod tests {
             context.clone(),
         );
         let mut response = task
-            .forward_decode(async { Ok(decode) }, context)
+            .forward_decode(async { Ok(decode) }, context, PrefillNeed::None)
             .await
             .unwrap();
         assert!(response.next().now_or_never().is_none());
@@ -356,7 +337,7 @@ mod tests {
             context.clone(),
         );
         let mut response = task
-            .forward_decode(async { Ok(decode) }, context)
+            .forward_decode(async { Ok(decode) }, context, PrefillNeed::None)
             .await
             .unwrap();
         assert!(
@@ -385,7 +366,7 @@ mod tests {
             context.clone(),
         );
         let mut response = task
-            .forward_decode(async { Ok(decode) }, context.clone())
+            .forward_decode(async { Ok(decode) }, context.clone(), PrefillNeed::None)
             .await
             .unwrap();
         assert_eq!(
@@ -409,7 +390,7 @@ mod tests {
         let decode: ManyOut<Annotated<LLMEngineOutput>> =
             ResponseStream::new(Box::pin(stream::pending()), context.clone());
         let response = task
-            .forward_decode(async { Ok(decode) }, context.clone())
+            .forward_decode(async { Ok(decode) }, context.clone(), PrefillNeed::None)
             .await
             .unwrap();
         context.stop_generating();
@@ -422,39 +403,93 @@ mod tests {
             .unwrap();
     }
 
-    fn tokens_then_length() -> ManyOut<Annotated<LLMEngineOutput>> {
-        let token = LLMEngineOutput {
-            token_ids: vec![42],
-            ..Default::default()
-        };
-        ResponseStream::new(
-            Box::pin(stream::iter([
-                Annotated::from_data(token),
-                Annotated::from_data(LLMEngineOutput::length()),
-            ])),
-            Arc::new(Controller::default()),
-        )
+    #[tokio::test]
+    async fn emitted_prefill_output_precedes_ready_decode_tokens() {
+        for prefill_first in [false, true] {
+            let (tx, task) = pending_prefill();
+            let mut tx = Some(tx);
+            let output = serde_json::json!({"sglang_response": {}});
+            if prefill_first {
+                tx.take().unwrap().send(Ok(Some(output.clone()))).unwrap();
+                tokio::task::yield_now().await;
+            }
+            let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(
+                    LLMEngineOutput::length(),
+                )])),
+                Arc::new(Controller::default()),
+            );
+            let context = Arc::new(Controller::default());
+            let mut response = task
+                .forward_decode(
+                    async { Ok(decode) },
+                    context.clone(),
+                    PrefillNeed::BeforeFirst,
+                )
+                .await
+                .unwrap();
+            if !prefill_first {
+                assert!(response.next().now_or_never().is_none());
+                tx.take().unwrap().send(Ok(Some(output.clone()))).unwrap();
+            }
+            let item = response.next().await.unwrap();
+            assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
+            assert_eq!(item.data.unwrap().engine_data, Some(output));
+            assert!(
+                response
+                    .next()
+                    .await
+                    .unwrap()
+                    .data
+                    .unwrap()
+                    .finish_reason
+                    .is_some()
+            );
+        }
+
+        let (tx, task) = pending_prefill();
+        let context = Arc::new(Controller::default());
+        let decode: ManyOut<Annotated<LLMEngineOutput>> =
+            ResponseStream::new(Box::pin(stream::pending()), context.clone());
+        let response = task.forward_decode(
+            async { Ok(decode) },
+            context.clone(),
+            PrefillNeed::BeforeFirst,
+        );
+        let mut response = response.await.unwrap();
+        tx.send(failure()).unwrap();
+        assert!(response.next().await.unwrap().err().is_some());
+        assert!(context.is_stopped());
     }
 
     #[tokio::test]
-    async fn prefill_output_precedes_ready_decode_tokens() {
+    async fn prefill_output_before_last_does_not_hold_decode_tokens() {
         let (tx, task) = pending_prefill();
+        let token = Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![7],
+            ..Default::default()
+        });
+        let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
+            Box::pin(stream::iter([
+                token,
+                Annotated::from_data(LLMEngineOutput::length()),
+            ])),
+            Arc::new(Controller::default()),
+        );
         let context = Arc::new(Controller::default());
-        let decode = tokens_then_length();
         let mut response = task
-            .forward_decode_with_output(async { Ok(decode) }, context.clone())
+            .forward_decode(async { Ok(decode) }, context, PrefillNeed::BeforeLast)
             .await
             .unwrap();
-        assert!(response.next().now_or_never().is_none());
-        tx.send(Ok(Some(serde_json::json!({"prompt": [1, 2]}))))
-            .unwrap();
-        let annotation = response.next().await.unwrap();
-        assert_eq!(annotation.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&annotation.comment.unwrap()[0]).unwrap(),
-            serde_json::json!({"prompt": [1, 2]})
-        );
-        assert_eq!(response.next().await.unwrap().data.unwrap().token_ids, [42]);
+        assert_eq!(response.next().await.unwrap().data.unwrap().token_ids, [7]);
+        let terminal = response.next();
+        tokio::pin!(terminal);
+        assert!((&mut terminal).now_or_never().is_none());
+        let output = serde_json::json!({"sglang_response": {}});
+        tx.send(Ok(Some(output.clone()))).unwrap();
+        let item = terminal.await.unwrap();
+        assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
+        assert_eq!(item.data.unwrap().engine_data, Some(output));
         assert!(
             response
                 .next()
@@ -465,52 +500,5 @@ mod tests {
                 .finish_reason
                 .is_some()
         );
-        assert!(response.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn finished_prefill_output_is_kept_while_decode_dispatches() {
-        let (tx, task) = pending_prefill();
-        tx.send(Ok(Some(serde_json::json!({"done": true}))))
-            .unwrap();
-        tokio::task::yield_now().await;
-        let (decode_tx, decode_rx) = oneshot::channel();
-        let response = task.forward_decode_with_output(
-            async move { Ok(decode_rx.await.unwrap()) },
-            Arc::new(Controller::default()),
-        );
-        decode_tx.send(tokens_then_length()).ok();
-        let events: Vec<_> = response.await.unwrap().collect().await;
-        assert_eq!(events.len(), 3);
-        assert_eq!(events[0].event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-    }
-
-    #[tokio::test]
-    async fn prefill_without_output_or_with_failure() {
-        let task = PrefillTask::ready(None);
-        let events: Vec<_> = task
-            .forward_decode_with_output(
-                async { Ok(tokens_then_length()) },
-                Arc::new(Controller::default()),
-            )
-            .await
-            .unwrap()
-            .collect()
-            .await;
-        assert_eq!(events.len(), 2);
-        assert!(events.iter().all(|event| event.event.is_none()));
-
-        let (tx, task) = pending_prefill();
-        let context = Arc::new(Controller::default());
-        let decode = tokens_then_length();
-        let response = task
-            .forward_decode_with_output(async { Ok(decode) }, context.clone())
-            .await
-            .unwrap();
-        tx.send(failure()).unwrap();
-        let events: Vec<_> = response.collect().await;
-        assert_eq!(events.len(), 1);
-        assert!(events[0].err().is_some());
-        assert!(context.is_stopped());
     }
 }

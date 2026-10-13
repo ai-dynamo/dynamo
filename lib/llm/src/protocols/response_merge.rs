@@ -3,237 +3,284 @@
 
 //! Joining the pieces of one engine response.
 //!
-//! One client response can reach the frontend in pieces, split at two seams:
-//!
-//! - [`Seam::Steps`]: the engine streams the response. Some fields in each
-//!   chunk hold only what is new since the last chunk.
-//! - [`Seam::PrefillDecode`]: in disaggregated serving, only the prefill worker
-//!   runs the prompt, so prompt-side outputs exist only in its response.
-//!
-//! A [`ResponseMerger`] owns one engine's rules for both seams. [`RuleSet`] is
-//! the declarative implementation and the intended plugin format: a list of
-//! [`FieldRule`]s that config can supply. [`ResponseAssembler`] drives a
-//! merger for one request.
+//! A response reaches the frontend in pieces at two seams: an engine streams it
+//! in chunks, and in P/D only the prefill worker computes prompt-side outputs.
+//! A [`ResponseMerger`] owns one engine's rules for both seams; [`RuleSet`]
+//! implements it from declarative [`FieldRule`]s, the intended plugin format.
+//! Merges move or swap values, so no field is copied.
 
-use std::{fmt, sync::Arc};
+use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Request annotation asking the prefill router to send prefill's final
-/// `engine_data` ahead of the decode stream, as an annotation event of the
-/// same name.
-pub(crate) const PREFILL_OUTPUT_ANNOTATION: &str = "prefill_output";
+/// `engine_data` into the decode stream, in an item with this event name. It
+/// arrives before decode's final output.
+pub const PREFILL_OUTPUT_ANNOTATION: &str = "prefill_output";
+/// With [`PREFILL_OUTPUT_ANNOTATION`]: hold decode output until it arrives.
+pub const PREFILL_OUTPUT_FIRST_ANNOTATION: &str = "prefill_output_first";
 
-/// Where a response is split into pieces.
+/// When a response needs prefill's output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefillNeed {
+    None,
+    /// Only the final chunk carries prefill's values.
+    BeforeLast,
+    /// Every chunk carries prefill's values.
+    BeforeFirst,
+}
+
+pub trait ResponseMerger: Send + Sync {
+    /// Whether, and how early, the request needs output only prefill produces.
+    fn prefill_need(&self, request: &Value) -> PrefillNeed;
+
+    /// Join the next streamed chunk onto the response so far. Fields without
+    /// a rule take `next`'s value.
+    fn join_step(&self, joined: &mut Value, next: Value);
+
+    /// Move prefill's prompt-side values into a decode response or chunk.
+    fn join_prefill(&self, prefill: &mut Value, decode: &mut Value);
+
+    /// Undo [`Self::join_prefill`]'s moves, so `prefill` serves the next chunk.
+    fn restore_prefill(&self, prefill: &mut Value, decode: &mut Value);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Seam {
-    /// `earlier` is the response joined so far; `later` is the next chunk.
-    Steps,
-    /// `earlier` is prefill's final response; `later` is a decode response or
-    /// decode chunk.
-    PrefillDecode,
-}
-
-/// One engine's rules for joining response pieces.
-pub(crate) trait ResponseMerger: Send + Sync + fmt::Debug {
-    /// Whether the request asks for output that only prefill produces.
-    fn wants_prefill_output(&self, request: &Value) -> bool;
-
-    /// Join `earlier` into `later` at `seam`. Afterwards `later` holds the
-    /// joined value. Fields without a rule keep `later`'s value.
-    fn merge(&self, seam: Seam, earlier: Value, later: &mut Value) -> Result<(), MergeError>;
-
-    /// Check a fully joined response before it is returned.
-    fn finish(&self, _response: &mut Value) -> Result<(), MergeError> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum MergeError {
-    #[error("expected {expected} at {path}")]
-    Shape {
-        path: String,
-        expected: &'static str,
-    },
-    #[error("invalid base64 at {path}: {source}")]
-    Base64 {
-        path: String,
-        source: base64::DecodeError,
-    },
-    #[error("{0}")]
-    Invalid(String),
-}
-
-/// How the two values of one field combine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum JoinOp {
-    /// Earlier's items, then later's items. A missing side counts as empty.
+pub enum JoinOp {
+    /// Streamed chunks: earlier items or text, then later ones.
     Append,
-    /// Earlier's text, then later's text. A missing side counts as empty.
-    AppendText,
-    /// Earlier's value whenever earlier has one.
-    TakeEarlier,
-    /// Decode both base64 blobs. Keep earlier's bytes, then later's bytes past
-    /// that length. Applies only when both sides have the field.
+    /// P/D: prefill's value replaces decode's.
+    TakePrefill,
+    /// P/D: prefill's base64 bytes overwrite the start of decode's.
     OverlayBase64Prefix,
 }
 
-/// What to do with later's value when earlier has none to join.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum OnMissing {
-    /// Keep later's value. Right when a partial value is visibly partial.
-    #[default]
-    KeepLater,
-    /// Remove the field. Right when later's value looks complete but is wrong.
-    Remove,
-}
-
-/// One declarative join rule. `path` is a JSON pointer.
+/// One rule; `path` is a JSON pointer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct FieldRule {
-    pub seam: Seam,
+pub struct FieldRule {
     pub path: String,
     pub op: JoinOp,
+    /// Remove decode's value when prefill has none, for values that look
+    /// complete but are wrong without prefill's part.
     #[serde(default)]
-    pub on_missing: OnMissing,
+    pub drop_if_missing: bool,
 }
 
-impl FieldRule {
-    pub(crate) fn new(seam: Seam, path: &str, op: JoinOp, on_missing: OnMissing) -> Self {
+struct Rule {
+    parent: Vec<String>,
+    key: String,
+    op: JoinOp,
+    drop_if_missing: bool,
+}
+
+pub struct RuleSet {
+    rules: Vec<Rule>,
+    before_first: Vec<Vec<String>>,
+    before_last: Vec<Vec<String>>,
+}
+
+impl RuleSet {
+    /// A request needs prefill's output when every top-level field of some
+    /// group is set: `true`, a non-negative number, or a list holding one.
+    /// `before_first` groups ask for values every chunk carries; `before_last`
+    /// groups for values only the final chunk carries.
+    pub fn new(
+        rules: impl IntoIterator<Item = FieldRule>,
+        before_first: &[&[&str]],
+        before_last: &[&[&str]],
+    ) -> Self {
+        let rules = rules
+            .into_iter()
+            .map(|rule| {
+                let mut parent: Vec<String> = rule.path.split('/').skip(1).map(unescape).collect();
+                let key = parent.pop().unwrap_or_default();
+                Rule {
+                    parent,
+                    key,
+                    op: rule.op,
+                    drop_if_missing: rule.drop_if_missing,
+                }
+            })
+            .collect();
+        let groups = |groups: &[&[&str]]| {
+            groups
+                .iter()
+                .map(|group| group.iter().map(|field| field.to_string()).collect())
+                .collect()
+        };
         Self {
-            seam,
-            path: path.to_string(),
-            op,
-            on_missing,
-        }
-    }
-
-    fn apply(&self, earlier: &mut Value, later: &mut Value) -> Result<(), MergeError> {
-        let (parent, key) = split_pointer(&self.path)?;
-        let head = earlier
-            .pointer_mut(parent)
-            .and_then(Value::as_object_mut)
-            .and_then(|object| object.remove(&key))
-            .filter(|value| !value.is_null());
-        let Some(container) = later.pointer_mut(parent).and_then(Value::as_object_mut) else {
-            return Ok(());
-        };
-        let Some(head) = head else {
-            if self.on_missing == OnMissing::Remove {
-                container.remove(&key);
-            }
-            return Ok(());
-        };
-        let shape = |expected| MergeError::Shape {
-            path: self.path.clone(),
-            expected,
-        };
-        let tail = container.get_mut(&key).filter(|value| !value.is_null());
-        match self.op {
-            JoinOp::Append => match (head, tail) {
-                (Value::Array(mut head), Some(Value::Array(tail))) => {
-                    head.append(tail);
-                    *tail = head;
-                }
-                (head @ Value::Array(_), None) => {
-                    container.insert(key, head);
-                }
-                _ => return Err(shape("arrays")),
-            },
-            JoinOp::AppendText => match (head, tail) {
-                (Value::String(mut head), Some(Value::String(tail))) => {
-                    head.push_str(tail);
-                    *tail = head;
-                }
-                (head @ Value::String(_), None) => {
-                    container.insert(key, head);
-                }
-                _ => return Err(shape("strings")),
-            },
-            JoinOp::TakeEarlier => {
-                container.insert(key, head);
-            }
-            JoinOp::OverlayBase64Prefix => match (head, tail) {
-                (_, None) => {}
-                (Value::String(head), Some(Value::String(tail))) => {
-                    let base64 = |source| MergeError::Base64 {
-                        path: self.path.clone(),
-                        source,
-                    };
-                    let mut bytes = STANDARD.decode(&head).map_err(base64)?;
-                    let rest = STANDARD.decode(tail.as_bytes()).map_err(base64)?;
-                    bytes.extend_from_slice(rest.get(bytes.len()..).unwrap_or_default());
-                    *tail = STANDARD.encode(bytes);
-                }
-                _ => return Err(shape("base64 strings")),
-            },
-        }
-        Ok(())
-    }
-
-    fn discard(&self, later: &mut Value) {
-        if self.on_missing == OnMissing::Remove
-            && let Ok((parent, key)) = split_pointer(&self.path)
-            && let Some(container) = later.pointer_mut(parent).and_then(Value::as_object_mut)
-        {
-            container.remove(&key);
+            rules,
+            before_first: groups(before_first),
+            before_last: groups(before_last),
         }
     }
 }
 
-/// Declarative [`ResponseMerger`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RuleSet {
-    pub rules: Vec<FieldRule>,
-    /// Top-level request fields that turn on prefill-only output. A field
-    /// counts when it is `true`, or a list containing `true`.
-    #[serde(default)]
-    pub prefill_request_flags: Vec<String>,
+fn unescape(token: &str) -> String {
+    token.replace("~1", "/").replace("~0", "~")
+}
+
+fn object<'a>(mut value: &'a mut Value, path: &[String]) -> Option<&'a mut Map<String, Value>> {
+    for key in path {
+        value = value.get_mut(key.as_str())?;
+    }
+    value.as_object_mut()
+}
+
+/// The field's value, inserting `null` first when the key is absent.
+fn slot<'a>(object: &'a mut Map<String, Value>, key: &str) -> &'a mut Value {
+    if !object.contains_key(key) {
+        object.insert(key.to_owned(), Value::Null);
+    }
+    object.get_mut(key).expect("key was just inserted")
 }
 
 impl ResponseMerger for RuleSet {
-    fn wants_prefill_output(&self, request: &Value) -> bool {
-        self.prefill_request_flags
-            .iter()
-            .any(|flag| match request.get(flag) {
-                Some(Value::Bool(value)) => *value,
-                Some(Value::Array(values)) => values.contains(&Value::Bool(true)),
+    fn prefill_need(&self, request: &Value) -> PrefillNeed {
+        fn set(value: &Value) -> bool {
+            match value {
+                Value::Bool(value) => *value,
+                Value::Number(number) => number.as_f64().is_some_and(|n| n >= 0.0),
+                Value::Array(values) => values.iter().any(set),
                 _ => false,
-            })
-    }
-
-    fn merge(&self, seam: Seam, mut earlier: Value, later: &mut Value) -> Result<(), MergeError> {
-        if !later.is_object() {
-            return Err(MergeError::Shape {
-                path: String::new(),
-                expected: "a JSON object",
-            });
-        }
-        for rule in self.rules.iter().filter(|rule| rule.seam == seam) {
-            if let Err(error) = rule.apply(&mut earlier, later) {
-                tracing::warn!(path = %rule.path, ?seam, %error, "cannot join response field");
-                rule.discard(later);
             }
         }
-        Ok(())
+        let any = |groups: &[Vec<String>]| {
+            groups
+                .iter()
+                .any(|group| group.iter().all(|f| request.get(f).is_some_and(set)))
+        };
+        if any(&self.before_first) {
+            PrefillNeed::BeforeFirst
+        } else if any(&self.before_last) {
+            PrefillNeed::BeforeLast
+        } else {
+            PrefillNeed::None
+        }
+    }
+
+    fn join_step(&self, joined: &mut Value, mut next: Value) {
+        for rule in self.rules.iter().filter(|rule| rule.op == JoinOp::Append) {
+            let Some(head) = object(joined, &rule.parent).and_then(|o| o.remove(&rule.key)) else {
+                continue;
+            };
+            let Some(target) = object(&mut next, &rule.parent) else {
+                continue;
+            };
+            match (head, slot(target, &rule.key)) {
+                (Value::Array(mut head), Value::Array(tail)) => {
+                    head.append(tail);
+                    *tail = head;
+                }
+                (Value::String(mut head), Value::String(tail)) => {
+                    head.push_str(tail);
+                    *tail = head;
+                }
+                (head, tail) if tail.is_null() => *tail = head,
+                _ => tracing::warn!(key = %rule.key, "cannot append mismatched values"),
+            }
+        }
+        *joined = next;
+    }
+
+    fn join_prefill(&self, prefill: &mut Value, decode: &mut Value) {
+        self.swap_prefill(prefill, decode, true);
+    }
+
+    fn restore_prefill(&self, prefill: &mut Value, decode: &mut Value) {
+        self.swap_prefill(prefill, decode, false);
     }
 }
 
-/// Builds one client response from engine pieces using a [`ResponseMerger`].
-pub(crate) struct ResponseAssembler {
+impl RuleSet {
+    /// TakePrefill values are swapped, so swapping again restores them; only
+    /// a join overlays and drops.
+    fn swap_prefill(&self, prefill: &mut Value, decode: &mut Value, join: bool) {
+        for rule in self.rules.iter().filter(|rule| rule.op != JoinOp::Append) {
+            let Some(target) = object(decode, &rule.parent) else {
+                continue;
+            };
+            let source = object(prefill, &rule.parent).and_then(|o| o.get_mut(&rule.key));
+            let joined = match (rule.op, source) {
+                (JoinOp::TakePrefill, Some(source)) => {
+                    std::mem::swap(source, slot(target, &rule.key));
+                    true
+                }
+                (JoinOp::OverlayBase64Prefix, _) if !join => true,
+                (JoinOp::OverlayBase64Prefix, Some(Value::String(source))) => {
+                    match target.get_mut(&rule.key) {
+                        Some(Value::String(target)) => overlay_base64_prefix(source, target),
+                        _ => true,
+                    }
+                }
+                _ => false,
+            };
+            if join && !joined && rule.drop_if_missing {
+                target.remove(&rule.key);
+            }
+        }
+    }
+}
+
+/// Make `target` encode `prefix`'s bytes followed by `target`'s bytes past
+/// that length, in place. Whole 4-character groups are copied as text; only
+/// the group where `prefix`'s bytes end is decoded. Returns false, leaving
+/// `target` unchanged, when either value is not padded standard base64.
+fn overlay_base64_prefix(prefix: &str, target: &mut String) -> bool {
+    let decoded_len = |text: &str| text.trim_end_matches('=').len() * 3 / 4;
+    let grouped = |text: &str| text.len().is_multiple_of(4);
+    let len = decoded_len(prefix);
+    let whole = len / 3 * 4;
+    if !grouped(prefix) || !grouped(target) || !prefix.is_char_boundary(whole) {
+        return false;
+    }
+    if decoded_len(target) <= len {
+        target.replace_range(.., prefix);
+        return true;
+    }
+    // The 4-character group holding prefix's last bytes and target's next ones.
+    let mut group = [0u8; 4];
+    let mut group_len = 0;
+    if !len.is_multiple_of(3) {
+        let (mut head, mut tail) = ([0u8; 3], [0u8; 3]);
+        let Some(target_group) = target.get(whole..whole + 4) else {
+            return false;
+        };
+        let (Ok(_), Ok(tail_len)) = (
+            STANDARD.decode_slice(&prefix[whole..], &mut head),
+            STANDARD.decode_slice(target_group, &mut tail),
+        ) else {
+            return false;
+        };
+        tail[..len % 3].copy_from_slice(&head[..len % 3]);
+        let Ok(written) = STANDARD.encode_slice(&tail[..tail_len], &mut group) else {
+            return false;
+        };
+        group_len = written;
+    }
+    if !target.is_char_boundary(whole) || !target.is_char_boundary(whole + group_len) {
+        return false;
+    }
+    // Overwrite in place: memcpy, then one validation pass to get a `String` back.
+    let mut bytes = std::mem::take(target).into_bytes();
+    bytes[..whole].copy_from_slice(&prefix.as_bytes()[..whole]);
+    bytes[whole..whole + group_len].copy_from_slice(&group[..group_len]);
+    *target = String::from_utf8(bytes).expect("char-aligned UTF-8 writes keep UTF-8 valid");
+    true
+}
+
+/// Builds one client response from engine pieces.
+pub struct ResponseAssembler {
     merger: Arc<dyn ResponseMerger>,
     prefill: Option<Value>,
     joined: Option<Value>,
 }
 
 impl ResponseAssembler {
-    pub(crate) fn new(merger: Arc<dyn ResponseMerger>) -> Self {
+    pub fn new(merger: Arc<dyn ResponseMerger>) -> Self {
         Self {
             merger,
             prefill: None,
@@ -241,49 +288,38 @@ impl ResponseAssembler {
         }
     }
 
-    /// Record prefill's final response.
-    pub(crate) fn set_prefill(&mut self, prefill: Value) {
+    pub fn set_prefill(&mut self, prefill: Value) {
         self.prefill = Some(prefill);
     }
 
-    /// Streaming: return `chunk` with prefill's outputs joined in.
-    pub(crate) fn stream_chunk(&self, mut chunk: Value) -> Result<Value, MergeError> {
-        if let Some(prefill) = &self.prefill {
-            self.merger
-                .merge(Seam::PrefillDecode, prefill.clone(), &mut chunk)?;
-        }
-        Ok(chunk)
+    /// Streaming: `render` sees `chunk` with prefill's values swapped in;
+    /// they are swapped back out afterwards for the next chunk.
+    pub fn render_chunk<T>(&mut self, mut chunk: Value, render: impl FnOnce(&Value) -> T) -> T {
+        let Some(prefill) = &mut self.prefill else {
+            return render(&chunk);
+        };
+        self.merger.join_prefill(prefill, &mut chunk);
+        let rendered = render(&chunk);
+        self.merger.restore_prefill(prefill, &mut chunk);
+        rendered
     }
 
     /// Unary: join `chunk` onto the response so far.
-    pub(crate) fn push(&mut self, mut chunk: Value) -> Result<(), MergeError> {
-        if let Some(earlier) = self.joined.take() {
-            self.merger.merge(Seam::Steps, earlier, &mut chunk)?;
+    pub fn push(&mut self, chunk: Value) {
+        match &mut self.joined {
+            Some(joined) => self.merger.join_step(joined, chunk),
+            None => self.joined = Some(chunk),
         }
-        self.joined = Some(chunk);
-        Ok(())
     }
 
-    /// Unary: the joined response with prefill's outputs, or `None` when no
-    /// chunk arrived.
-    pub(crate) fn finish(self) -> Result<Option<Value>, MergeError> {
-        let Some(mut response) = self.joined else {
-            return Ok(None);
-        };
-        if let Some(prefill) = self.prefill {
-            self.merger
-                .merge(Seam::PrefillDecode, prefill, &mut response)?;
+    /// Unary: the joined response, or `None` when no chunk arrived.
+    pub fn finish(self) -> Option<Value> {
+        let mut response = self.joined?;
+        if let Some(mut prefill) = self.prefill {
+            self.merger.join_prefill(&mut prefill, &mut response);
         }
-        self.merger.finish(&mut response)?;
-        Ok(Some(response))
+        Some(response)
     }
-}
-
-fn split_pointer(path: &str) -> Result<(&str, String), MergeError> {
-    let (parent, key) = path
-        .rsplit_once('/')
-        .ok_or_else(|| MergeError::Invalid(format!("`{path}` is not a JSON pointer")))?;
-    Ok((parent, key.replace("~1", "/").replace("~0", "~")))
 }
 
 #[cfg(test)]
@@ -292,193 +328,101 @@ mod tests {
 
     use super::*;
 
-    fn rules(rules: Vec<FieldRule>) -> Arc<dyn ResponseMerger> {
-        Arc::new(RuleSet {
-            rules,
-            prefill_request_flags: vec!["return_x".into()],
-        })
-    }
-
-    fn b64(bytes: &[u8]) -> String {
-        STANDARD.encode(bytes)
+    fn rules() -> Arc<dyn ResponseMerger> {
+        let rule = |path: &str, op, drop_if_missing| FieldRule {
+            path: path.into(),
+            op,
+            drop_if_missing,
+        };
+        Arc::new(RuleSet::new(
+            [
+                rule("/text", JoinOp::Append, false),
+                rule("/m/ids", JoinOp::Append, false),
+                rule("/m/prompt", JoinOp::TakePrefill, false),
+                rule("/m/blob", JoinOp::OverlayBase64Prefix, true),
+            ],
+            &[&["need", "start"]],
+            &[&["want"]],
+        ))
     }
 
     #[test]
     fn steps_append_deltas_and_keep_the_last_snapshot() {
-        let merger = rules(vec![
-            FieldRule::new(
-                Seam::Steps,
-                "/text",
-                JoinOp::AppendText,
-                OnMissing::KeepLater,
-            ),
-            FieldRule::new(Seam::Steps, "/ids", JoinOp::Append, OnMissing::KeepLater),
-        ]);
-        let mut assembler = ResponseAssembler::new(merger);
-        for chunk in [
-            json!({"text": "a", "ids": [1], "meta": {"count": 1}}),
-            json!({"text": "b", "ids": [2, 3], "meta": {"count": 3}}),
-            json!({"text": "", "ids": [], "meta": {"count": 3, "done": true}}),
+        let mut assembler = ResponseAssembler::new(rules());
+        assembler.push(json!({"text": "a", "m": {"ids": [1], "n": 1}}));
+        assembler.push(json!({"text": "b", "m": {"n": 2}}));
+        assembler.push(json!({"text": "c", "m": {"ids": [2, 3], "n": 3}}));
+        assert_eq!(
+            assembler.finish().unwrap(),
+            json!({"text": "abc", "m": {"ids": [1, 2, 3], "n": 3}})
+        );
+    }
+
+    #[test]
+    fn prefill_values_move_into_decode_and_back() {
+        let merger = rules();
+        let mut prefill = json!({"m": {"prompt": [1, 2], "blob": STANDARD.encode([9, 9])}});
+        let original = prefill.clone();
+        for decode in [
+            json!({"m": {"prompt": [], "blob": STANDARD.encode([0, 0, 5])}}),
+            json!({"m": {}}),
         ] {
-            assembler.push(chunk).unwrap();
+            let mut chunk = decode.clone();
+            merger.join_prefill(&mut prefill, &mut chunk);
+            assert_eq!(chunk["m"]["prompt"], json!([1, 2]));
+            if decode["m"].get("blob").is_some() {
+                assert_eq!(chunk["m"]["blob"], STANDARD.encode([9, 9, 5]));
+            }
+            merger.restore_prefill(&mut prefill, &mut chunk);
+            assert_eq!(prefill, original);
         }
-        assert_eq!(
-            assembler.finish().unwrap().unwrap(),
-            json!({"text": "ab", "ids": [1, 2, 3], "meta": {"count": 3, "done": true}})
-        );
-    }
-
-    #[test]
-    fn steps_keep_joined_items_when_a_chunk_omits_the_field() {
-        let merger = rules(vec![FieldRule::new(
-            Seam::Steps,
-            "/meta/custom",
-            JoinOp::Append,
-            OnMissing::KeepLater,
-        )]);
-        let mut assembler = ResponseAssembler::new(merger);
-        assembler.push(json!({"meta": {"custom": [1]}})).unwrap();
-        assembler.push(json!({"meta": {}})).unwrap();
-        assembler.push(json!({"meta": {"custom": [2]}})).unwrap();
-        assert_eq!(
-            assembler.finish().unwrap().unwrap(),
-            json!({"meta": {"custom": [1, 2]}})
-        );
-    }
-
-    #[test]
-    fn prefill_outputs_join_every_streamed_chunk_and_the_unary_response() {
-        let merger = rules(vec![
-            FieldRule::new(Seam::Steps, "/ids", JoinOp::Append, OnMissing::KeepLater),
-            FieldRule::new(
-                Seam::PrefillDecode,
-                "/meta/prompt",
-                JoinOp::TakeEarlier,
-                OnMissing::KeepLater,
+        let mut chunk = json!({"m": {"blob": STANDARD.encode([0, 5])}});
+        merger.join_prefill(&mut json!({"m": {}}), &mut chunk);
+        assert_eq!(chunk, json!({"m": {}}));
+        for (request, need) in [
+            (json!({"want": [false, true]}), PrefillNeed::BeforeLast),
+            (
+                json!({"want": true, "need": true, "start": 0}),
+                PrefillNeed::BeforeFirst,
             ),
-        ]);
-        let prefill = json!({"ids": [9], "meta": {"prompt": [1, 2]}});
-        let mut streamed = ResponseAssembler::new(merger.clone());
-        streamed.set_prefill(prefill.clone());
-        assert_eq!(
-            streamed
-                .stream_chunk(json!({"ids": [7], "meta": {"prompt": []}}))
-                .unwrap(),
-            json!({"ids": [7], "meta": {"prompt": [1, 2]}})
-        );
-
-        let mut unary = ResponseAssembler::new(merger);
-        unary.set_prefill(prefill);
-        unary
-            .push(json!({"ids": [7], "meta": {"prompt": []}}))
-            .unwrap();
-        unary
-            .push(json!({"ids": [8], "meta": {"prompt": []}}))
-            .unwrap();
-        assert_eq!(
-            unary.finish().unwrap().unwrap(),
-            json!({"ids": [7, 8], "meta": {"prompt": [1, 2]}})
-        );
-    }
-
-    #[test]
-    fn overlay_keeps_earlier_prefix_and_missing_values_follow_policy() {
-        let rule = FieldRule::new(
-            Seam::PrefillDecode,
-            "/meta/blob",
-            JoinOp::OverlayBase64Prefix,
-            OnMissing::Remove,
-        );
-        let merger = rules(vec![rule]);
-        let mut later = json!({"meta": {"blob": b64(&[0, 0, 0, 4, 5])}});
-        merger
-            .merge(
-                Seam::PrefillDecode,
-                json!({"meta": {"blob": b64(&[1, 2, 3])}}),
-                &mut later,
-            )
-            .unwrap();
-        assert_eq!(later, json!({"meta": {"blob": b64(&[1, 2, 3, 4, 5])}}));
-
-        for earlier in [json!({"meta": {}}), json!({"meta": {"blob": "%%"}})] {
-            let mut later = json!({"meta": {"blob": b64(&[0, 4]), "other": 1}});
-            merger
-                .merge(Seam::PrefillDecode, earlier, &mut later)
-                .unwrap();
-            assert_eq!(later, json!({"meta": {"other": 1}}));
+            (json!({"want": false}), PrefillNeed::None),
+            (json!({"need": true}), PrefillNeed::None),
+            (json!({"need": true, "start": -1}), PrefillNeed::None),
+        ] {
+            assert_eq!(merger.prefill_need(&request), need, "{request}");
         }
-
-        let mut later = json!({"meta": {}});
-        merger
-            .merge(
-                Seam::PrefillDecode,
-                json!({"meta": {"blob": b64(&[1])}}),
-                &mut later,
-            )
-            .unwrap();
-        assert_eq!(later, json!({"meta": {}}));
     }
 
     #[test]
-    fn shape_errors_keep_later_unless_removal_is_requested() {
-        let merger = rules(vec![FieldRule::new(
-            Seam::Steps,
-            "/ids",
-            JoinOp::Append,
-            OnMissing::KeepLater,
-        )]);
-        let mut later = json!({"ids": [2]});
-        merger
-            .merge(Seam::Steps, json!({"ids": "oops"}), &mut later)
-            .unwrap();
-        assert_eq!(later, json!({"ids": [2]}));
-        assert!(
-            merger
-                .merge(Seam::Steps, json!({}), &mut json!("not an object"))
-                .is_err()
-        );
+    fn overlay_matches_decode_splice_encode_for_every_boundary() {
+        for prefix_len in 0..12usize {
+            for target_len in 0..14usize {
+                let prefix: Vec<u8> = (0..prefix_len).map(|i| 200 + i as u8).collect();
+                let target: Vec<u8> = (0..target_len).map(|i| i as u8).collect();
+                let mut expected = prefix.clone();
+                expected.extend_from_slice(target.get(prefix_len..).unwrap_or_default());
+                let mut encoded = STANDARD.encode(&target);
+                assert!(overlay_base64_prefix(
+                    &STANDARD.encode(&prefix),
+                    &mut encoded
+                ));
+                assert_eq!(
+                    encoded,
+                    STANDARD.encode(&expected),
+                    "{prefix_len} {target_len}"
+                );
+            }
+        }
+        assert!(!overlay_base64_prefix("AAA", &mut "AAAA".into()));
     }
 
     #[test]
-    fn request_flags_select_prefill_output() {
-        let merger = rules(Vec::new());
-        assert!(merger.wants_prefill_output(&json!({"return_x": true})));
-        assert!(merger.wants_prefill_output(&json!({"return_x": [false, true]})));
-        assert!(!merger.wants_prefill_output(&json!({"return_x": false})));
-        assert!(!merger.wants_prefill_output(&json!({"other": true})));
-    }
-
-    #[test]
-    fn rule_sets_have_a_stable_declarative_format() {
-        let parsed: RuleSet = serde_json::from_value(json!({
-            "prefill_request_flags": ["return_routed_experts"],
-            "rules": [
-                {"seam": "steps", "path": "/meta_info/custom", "op": "append"},
-                {
-                    "seam": "prefill_decode",
-                    "path": "/meta_info/routed_experts",
-                    "op": "overlay_base64_prefix",
-                    "on_missing": "remove"
-                }
-            ]
+    fn rules_have_a_declarative_format() {
+        let rule: FieldRule = serde_json::from_value(json!({
+            "path": "/meta_info/routed_experts", "op": "overlay_base64_prefix", "drop_if_missing": true,
         }))
         .unwrap();
-        assert_eq!(
-            parsed.rules,
-            [
-                FieldRule::new(
-                    Seam::Steps,
-                    "/meta_info/custom",
-                    JoinOp::Append,
-                    OnMissing::KeepLater
-                ),
-                FieldRule::new(
-                    Seam::PrefillDecode,
-                    "/meta_info/routed_experts",
-                    JoinOp::OverlayBase64Prefix,
-                    OnMissing::Remove
-                ),
-            ]
-        );
+        assert_eq!(rule.op, JoinOp::OverlayBase64Prefix);
+        assert!(rule.drop_if_missing);
     }
 }
