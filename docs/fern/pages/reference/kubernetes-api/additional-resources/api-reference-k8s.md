@@ -3149,7 +3149,7 @@ _Appears in:_
 
 
 
-BranchProgress reports progress for one independently optimized backend and topology branch.
+BranchProgress reports progress for one independently optimized AISimulate branch.
 
 
 
@@ -3158,7 +3158,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name is the stable branch identifier chosen by the executor. |  |  |
+| `name` _string_ | Name is the executor-defined stable branch identifier. |  |  |
 | `rounds` _[RoundProgress](#roundprogress)_ | Rounds reports optimizer progress for this branch. |  |  |
 
 
@@ -3212,7 +3212,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `branches` _[BranchProgress](#branchprogress) array_ | Branches reports each independently optimized backend and topology branch. |  | Optional: \{\} <br /> |
+| `branches` _[BranchProgress](#branchprogress) array_ | Branches reports independently optimized AISimulate branches. |  | Optional: \{\} <br /> |
 | `evaluations` _[EvaluationProgress](#evaluationprogress)_ | Evaluations reports unique candidate outcomes. |  | Optional: \{\} <br /> |
 | `candidates` _[CandidateProgress](#candidateprogress)_ | Candidates reports bounded Kubernetes publication. |  | Optional: \{\} <br /> |
 
@@ -3277,7 +3277,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `metrics` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Metrics are the resolved evaluation metrics for this point. |  | Type: object <br />Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions includes the Evaluated condition, whose observedGeneration<br />identifies the candidate spec generation represented by metrics. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRequest
@@ -3314,9 +3313,9 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  |  |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. | [vllm sglang trtllm] | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
-| `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search. |  | Optional: \{\} <br /> |
+| `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />Admission discovers any omitted hardware values from the cluster. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation. | \{  \} | Optional: \{\} <br /> |
-| `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization or a multi-objective Pareto search. |  | Optional: \{\} <br /> |
+| `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization or a multi-objective Pareto search.<br />When omitted, the schema supplies the default Optimize mode and SLA;<br />admission supplies the conditional scalar metric. | \{  \} | Optional: \{\} <br /> |
 | `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate selects the execution artifact and supplies native AISimulate input. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. | \{  \} | Optional: \{\} <br /> |
 
@@ -3419,8 +3418,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `sku` _string_ | SKU identifies the accelerator using the AISimulate hardware catalog name. |  | MinLength: 1 <br /> |
-| `budget` _integer_ | Budget is the maximum total number of GPUs one candidate may use. |  | Minimum: 1 <br /> |
+| `sku` _string_ | SKU identifies the accelerator using the AISimulate hardware catalog name.<br />When omitted, admission discovers the accelerator from the cluster. |  | MinLength: 1 <br />Optional: \{\} <br /> |
+| `budget` _integer_ | Budget is the maximum total number of GPUs one candidate may use.<br />When omitted, admission derives the available GPU budget from the cluster. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### HardwareSpec
@@ -3436,7 +3435,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpu` _[GPUHardwareSpec](#gpuhardwarespec)_ | GPU describes accelerator identity and the maximum allocation per candidate. |  |  |
+| `gpu` _[GPUHardwareSpec](#gpuhardwarespec)_ | GPU describes accelerator identity and the maximum allocation per candidate.<br />Omitted fields are resolved independently by admission. |  | Optional: \{\} <br /> |
 
 
 #### KVLoadRatio
@@ -3538,7 +3537,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `mode` _[ObjectiveMode](#objectivemode)_ | Mode selects scalar optimization or a Pareto search. | Optimize | Enum: [Optimize Pareto] <br />Optional: \{\} <br /> |
-| `metric` _[ObjectiveMetric](#objectivemetric)_ | Metric is the scalar target when mode is Optimize. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />Optional: \{\} <br /> |
+| `metric` _[ObjectiveMetric](#objectivemetric)_ | Metric is the scalar target when mode is Optimize.<br />When omitted in Optimize mode, admission defaults it to ThroughputPerGPU. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />Optional: \{\} <br /> |
 | `metrics` _[ObjectiveMetric](#objectivemetric) array_ | Metrics lists two or more distinct scalar targets when mode is Pareto. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />MinItems: 2 <br />Optional: \{\} <br /> |
 | `sla` _[ObjectiveSLASpec](#objectiveslaspec)_ | SLA defines per-request latency bounds used to calculate goodput. | \{ itlMs:30 ttftMs:2000 \} | Optional: \{\} <br /> |
 
@@ -3608,7 +3607,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `isl` _integer_ | ISL is the input sequence length in tokens. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `osl` _integer_ | OSL is the output sequence length in tokens. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `requestCount` _integer_ | RequestCount is the absolute number of requests evaluated. When both<br />request-count controls are omitted, the execution underlay supplies its default. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `numRequestRatio` _float_ | NumRequestRatio sets request count relative to the selected load. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `requestRate` _float_ | RequestRate is a fixed open-loop arrival rate in requests per second. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `concurrency` _integer_ | Concurrency is a fixed closed-loop in-flight request cap. |  | Minimum: 1 <br />Optional: \{\} <br /> |

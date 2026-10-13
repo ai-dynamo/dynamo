@@ -9583,26 +9583,29 @@ spec:
                   minItems: 1
                   type: array
                 hardware:
-                  description: Hardware bounds the accelerator configurations evaluated by the search.
+                  description: |-
+                    Hardware bounds the accelerator configurations evaluated by the search.
+                    Admission discovers any omitted hardware values from the cluster.
                   properties:
                     gpu:
-                      description: GPU describes accelerator identity and the maximum allocation per candidate.
+                      description: |-
+                        GPU describes accelerator identity and the maximum allocation per candidate.
+                        Omitted fields are resolved independently by admission.
                       properties:
                         budget:
-                          description: Budget is the maximum total number of GPUs one candidate may use.
+                          description: |-
+                            Budget is the maximum total number of GPUs one candidate may use.
+                            When omitted, admission derives the available GPU budget from the cluster.
                           format: int32
                           minimum: 1
                           type: integer
                         sku:
-                          description: SKU identifies the accelerator using the AISimulate hardware catalog name.
+                          description: |-
+                            SKU identifies the accelerator using the AISimulate hardware catalog name.
+                            When omitted, admission discovers the accelerator from the cluster.
                           minLength: 1
                           type: string
-                      required:
-                        - budget
-                        - sku
                       type: object
-                  required:
-                    - gpu
                   type: object
                 model:
                   description: Model identifies the model whose deployment configurations are evaluated.
@@ -9615,10 +9618,16 @@ spec:
                     - name
                   type: object
                 objective:
-                  description: Objective defines scalar optimization or a multi-objective Pareto search.
+                  default: {}
+                  description: |-
+                    Objective defines scalar optimization or a multi-objective Pareto search.
+                    When omitted, the schema supplies the default Optimize mode and SLA;
+                    admission supplies the conditional scalar metric.
                   properties:
                     metric:
-                      description: Metric is the scalar target when mode is Optimize.
+                      description: |-
+                        Metric is the scalar target when mode is Optimize.
+                        When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
                       enum:
                         - Throughput
                         - ThroughputPerGPU
@@ -9678,8 +9687,8 @@ spec:
                           rule: '!has(self.e2eMs) || (!has(self.ttftMs) && !has(self.itlMs))'
                   type: object
                   x-kubernetes-validations:
-                    - message: Optimize requires metric; Pareto requires metrics
-                      rule: (self.mode == 'Optimize' && has(self.metric) && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))
+                    - message: Optimize accepts only metric; Pareto requires metrics
+                      rule: (self.mode == 'Optimize' && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))
                     - message: Goodput and GoodputPerGPU require at least one SLA bound
                       rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGPU'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
                     - message: Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound
@@ -9746,13 +9755,6 @@ spec:
                           format: int32
                           minimum: 1
                           type: integer
-                        requestCount:
-                          description: |-
-                            RequestCount is the absolute number of requests evaluated. When both
-                            request-count controls are omitted, the execution underlay supplies its default.
-                          format: int64
-                          minimum: 1
-                          type: integer
                         requestRate:
                           description: RequestRate is a fixed open-loop arrival rate in requests per second.
                           exclusiveMinimum: true
@@ -9762,8 +9764,6 @@ spec:
                       x-kubernetes-validations:
                         - message: at most one of requestRate, concurrency, or kvLoadRatio may be specified
                           rule: '(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) <= 1'
-                        - message: requestCount and numRequestRatio are mutually exclusive
-                          rule: '!(has(self.requestCount) && has(self.numRequestRatio))'
                   type: object
               required:
                 - model

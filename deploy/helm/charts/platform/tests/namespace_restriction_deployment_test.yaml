@@ -17,7 +17,7 @@ tests:
           value: Deployment
       - contains:
           path: spec.template.spec.initContainers[0].args
-          content: --feature-gates=DGDRV1Beta2=false
+          content: --dgdr-v1beta2-enabled=false
         documentSelector:
           path: kind
           value: Deployment
@@ -25,11 +25,11 @@ tests:
   - it: enables experimental DGDR v1beta2 CRD installation
     template: charts/dynamo-operator/templates/deployment.yaml
     set:
-      dynamo-operator.featureGates.DGDRV1Beta2: true
+      dynamo-operator.dgdrV1Beta2.enabled: true
     asserts:
       - contains:
           path: spec.template.spec.initContainers[0].args
-          content: --feature-gates=DGDRV1Beta2=true
+          content: --dgdr-v1beta2-enabled=true
         documentSelector:
           path: kind
           value: Deployment
