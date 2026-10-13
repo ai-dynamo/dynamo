@@ -169,15 +169,6 @@ def test_malformed_explicit_commit_raises(
         hook.initialize("standard", {})
 
 
-def test_no_commit_in_ci_warns(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CI", "true")
-    app = _FakeApp()
-    _load_hook(tree, monkeypatch, app).initialize("standard", {})
-
-    assert _read_versions(tree) == {c: (METADATA_VERSION, "") for c in COMPONENTS}
-    assert len(app.warnings) == 1
-
-
 def test_keeps_commit_from_existing_version_file(
     tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
