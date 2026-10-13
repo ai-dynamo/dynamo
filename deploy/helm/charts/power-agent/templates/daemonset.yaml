@@ -96,6 +96,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             {{- if eq (include "power-agent.effectiveNamespaceRestricted" .) "true" }}
             - name: POD_NAMESPACE
               valueFrom:

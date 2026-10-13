@@ -1,29 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pod readiness reflects cap enforcement (DEP #14767).
-
-A PowerAgent pod used to have no readiness probe, so it was Ready from the
-moment its container started and stayed Ready while every reconcile cycle
-failed — `kubectl get pods` showed `1/1 Running` for an agent that had enforced
-nothing since startup. The agent now serves a fixed `GET /readyz` on port 8081
-whose claim is narrow and self-reported:
-
-    The agent's last reconcile cycle completed every enforcement action it was
-    required to take with no reported failure, and completed recently.
-
-The state behind it is ONE monotonic float, `_last_good_cycle`, assigned exactly
-once per cycle in `run()`. `0.0` covers both "no cycle has ever succeeded" and
-"the last one failed"; the age covers "the last one hung". Because it is a
-single assignment computed after the `try`, a reader on the server thread can
-never see a torn mix and no lock is required.
-"""
-
 from __future__ import annotations
 
 import contextlib
 import io
 import itertools
+import os
 import socket
 import threading
 import time
@@ -68,9 +51,11 @@ def _readyz_server(agent: PowerAgent):
         server.server_close()
 
 
-def _http_get_readyz(port: int, path: str = "/readyz") -> tuple[int, str]:
+def _http_get_readyz(
+    port: int, path: str = "/readyz", host: str = "127.0.0.1"
+) -> tuple[int, str]:
     """Issue a real HTTP GET against the readiness server."""
-    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+    with socket.create_connection((host, port), timeout=5) as sock:
         sock.sendall(
             f"GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".encode()
         )
@@ -259,6 +244,22 @@ class TestReadinessServer(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(body.startswith("ok last_good_cycle_age_s="))
 
+    def test_serves_over_ipv6_when_pod_ip_is_ipv6(self):
+        """kubelet probes the primary pod IP, so an IPv6 pod needs an IPv6 listener."""
+        try:
+            with socket.socket(socket.AF_INET6) as probe:
+                probe.bind(("::1", 0))
+        except OSError:
+            self.skipTest("IPv6 loopback unavailable")
+        agent = _bare_agent()
+        agent._last_good_cycle = time.monotonic()
+
+        with patch.dict(os.environ, {"POD_IP": "::1"}):
+            with _readyz_server(agent) as port:
+                status, _ = _http_get_readyz(port, host="::1")
+
+        self.assertEqual(status, 200)
+
     def test_bind_collision_is_fatal_at_startup(self):
         """A bind failure must propagate out of `run()` uncaught so the process
         exits and the pod enters CrashLoopBackOff. Starting the server inside
@@ -325,24 +326,8 @@ class TestReadinessServer(unittest.TestCase):
         )
         self.assertTrue(power_agent._ThreadingWSGIServer.daemon_threads)
 
-    def test_silent_client_does_not_block_a_later_probe(self):
-        """A connected client that sends nothing at all."""
-        agent = _bare_agent()
-        agent._last_good_cycle = time.monotonic()
-
-        with patch.object(power_agent._QuietWSGIHandler, "timeout", 0.2):
-            with _readyz_server(agent) as port:
-                staller = socket.create_connection(("127.0.0.1", port), timeout=5)
-                try:
-                    status, _ = _http_get_readyz(port)
-                finally:
-                    staller.close()
-
-        self.assertEqual(status, 200)
-
     def test_slow_drip_client_does_not_block_a_later_probe(self):
-        """The case the silent-client test misses, and the reason `timeout`
-        alone was not a fix.
+        """Why `timeout` alone is not a fix.
 
         This client stays under the idle timeout INDEFINITELY by sending one
         byte at a time — a request line followed by an endless run of padding

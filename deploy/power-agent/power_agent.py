@@ -1330,6 +1330,10 @@ class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
     daemon_threads = True
 
 
+class _IPv6ThreadingWSGIServer(_ThreadingWSGIServer):
+    address_family = socket.AF_INET6
+
+
 class _QuietWSGIHandler(WSGIRequestHandler):
     """WSGI handler that does not log a line per request, and refuses to be
     held open indefinitely.
@@ -1901,15 +1905,19 @@ class PowerAgent:
         through the termination grace period, which is what `reconcile_once`'s
         shutdown-fold rule is for.
 
+        Listens on the family of the primary pod IP (`POD_IP`), because that is
+        the address kubelet probes; unset keeps IPv4.
+
         The return value is unused in production — the daemon thread owns the
         server for the process lifetime. It exists so tests can shut a server
         down rather than leak a listener per test.
         """
+        ipv6 = ":" in os.environ.get("POD_IP", "")
         server = make_server(
-            "",
+            "::" if ipv6 else "",
             READYZ_PORT,
             self._readyz_app,
-            server_class=_ThreadingWSGIServer,
+            server_class=_IPv6ThreadingWSGIServer if ipv6 else _ThreadingWSGIServer,
             handler_class=_QuietWSGIHandler,
         )
         threading.Thread(

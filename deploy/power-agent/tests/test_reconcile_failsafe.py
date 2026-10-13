@@ -337,15 +337,6 @@ class _DcgmStyleActuator:
 
 
 class TestCycleEnforcementBoolean(unittest.TestCase):
-    """`reconcile_once` returns the whole-cycle enforcement boolean (DEP #14767).
-
-    True iff every enforcement action the cycle was REQUIRED to take completed
-    and the inputs it depended on were obtained. This is what `/readyz`
-    publishes, so every path that swallows a failure to keep the loop running
-    must drive it false — the agent's failure handling is deliberately
-    non-fatal, and without this fold none of it is observable as state.
-    """
-
     def setUp(self):
         power_agent._shutdown.clear()
         power_agent._managed_gpu_indices.clear()
