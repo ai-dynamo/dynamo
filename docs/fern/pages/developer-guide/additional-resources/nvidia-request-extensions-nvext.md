@@ -182,11 +182,45 @@ multiple selected constraints, an empty `choice`, or an effective `json_object: 
 Do not combine this field with legacy `guided_*` fields, or with `tool_choice: "required"` or a
 named tool choice. Dynamo rejects these combinations rather than overwriting a caller constraint.
 
-On chat completions, `response_format` replaces the matching nested constraint before its content
+On both endpoints, `response_format` replaces the matching nested constraint before its content
 is validated: `json_schema` replaces `json`, and `json_object` replaces `json_object`. It cannot
 repair an empty selection or remove a different selected constraint. `response_format: {"type":
-"text"}` leaves the nested constraint unchanged. The completions endpoint does not currently
-accept `response_format`.
+"text"}` or `null` leaves the nested constraint unchanged.
+
+For `/v1/completions`, supply `response_format` at the request root, with or without
+`structured_outputs`:
+
+| `type` | Additional Members | Effect |
+|--------|--------------------|--------|
+| `text` | None | Add no constraint; preserve any nested constraint. |
+| `json_object` | None | Require a JSON object. |
+| `json_schema` | `json_schema` object with required string `name` and object `schema` | Constrain output to the supplied schema. Optional `description` and `strict` metadata are accepted; the backend owns enforcement. |
+| `structural_tag` | `format`, or legacy `structures` and `triggers` arrays | Replace the nested `structural_tag` with the complete format object encoded for the backend compiler. |
+
+For example, this completion format requests a JSON object whose `answer` is `"violet"`:
+
+```json
+{
+    "type": "json_schema",
+    "json_schema": {
+        "name": "answer",
+        "schema": {
+            "type": "object",
+            "properties": {"answer": {"const": "violet"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        }
+    }
+}
+```
+
+A missing or null completion `json_schema.schema` clears the nested `json` member; admission
+still requires exactly one effective constraint. A non-text completion format cannot be combined
+with legacy `guided_*` fields. Each legacy structural-tag entry has string `begin` and `end`
+delimiters and an optional object `schema`; `triggers` contains strings. A tag constrains content
+after its trigger appears, but does not force the model to emit that trigger. Structural-tag
+grammar validity is checked by the backend, so malformed formats can fail after streaming starts.
+These completion-specific structural-tag formats do not extend the chat `response_format` union.
 
 The optional modifiers `disable_any_whitespace` and `disable_additional_properties` default to
 `false`; `whitespace_pattern` defaults to absent. Dynamo delivers these values to the vLLM worker,

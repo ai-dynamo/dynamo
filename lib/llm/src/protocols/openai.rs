@@ -189,7 +189,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         }
 
         // Admission and dispatch must resolve the same constraint and precedence.
-        let guided_decoding = common_ext::extract_guided_decoding_options(self)?;
+        let guided_decoding = self.resolve_guided_decoding()?;
         Ok(common::SamplingOptions {
             n,
             best_of,
