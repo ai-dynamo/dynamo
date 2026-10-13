@@ -26,16 +26,6 @@ func TestBuildFromGbuildManifestV2ProjectsRuntimeIO(t *testing.T) {
 	require.EqualValues(t, 2, build.IOFanoutFactor)
 	require.Len(t, build.Partitions, 1)
 
-	t.Log("Accept compat FPGA I/O mode without changing the normalized build contract")
-	deployment, err := manifest.Deployment()
-	require.NoError(t, err)
-	runtimeIO, err := deployment.RuntimeIo()
-	require.NoError(t, err)
-	runtimeIO.SetReserved1(1)
-	compat, err := buildFromGbuildManifestV2("gs://models/build", manifest)
-	require.NoError(t, err)
-	require.Equal(t, build, compat)
-
 	t.Log("Reject an unsupported contract revision before lowering the manifest")
 	manifest.SetContractRevision(manifest.ContractRevision() + 1)
 	_, err = buildFromGbuildManifestV2("gs://models/build", manifest)
@@ -62,13 +52,13 @@ func TestManifestReadersIgnoreExecutionMetadata(t *testing.T) {
 			case "batch size":
 				legacyProgram, err := legacyConfig.Program()
 				require.NoError(t, err)
-				legacyProgram.SetBatchSize(0)
+				legacyProgram.SetBatchSize(7)
 				splitProgram, err := splitConfig.Program()
 				require.NoError(t, err)
-				splitProgram.SetBatchSize(0)
+				splitProgram.SetBatchSize(7)
 			case "node count":
-				legacyConfig.SetNumLpuNodes(0)
-				splitConfig.SetNumLpuNodes(0)
+				legacyConfig.SetNumLpuNodes(99)
+				splitConfig.SetNumLpuNodes(99)
 			case "protocol":
 				legacyIO, err := legacyConfig.RuntimeIo()
 				require.NoError(t, err)

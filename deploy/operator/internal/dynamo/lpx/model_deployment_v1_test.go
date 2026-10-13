@@ -28,10 +28,8 @@ func newDeploymentV1ContractFixture(t *testing.T) deploymentcapnpv1.Deployment {
 	config, err := deployment.NewConfig()
 	require.NoError(t, err)
 	config.SetCompilationMode(deploymentcapnpv1.CompilationMode_lpx)
-	config.SetNumLpuNodes(1)
-	program, err := config.NewProgram()
+	_, err = config.NewProgram()
 	require.NoError(t, err)
-	program.SetBatchSize(8)
 	runtimeIO, err := config.NewRuntimeIo()
 	require.NoError(t, err)
 	runtimeIO.SetProtocol(deploymentcapnpv1.RuntimeIoProtocol_fpgaRoce)
@@ -339,7 +337,6 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 				}
 				if name == "HX metadata" {
 					wantNodes = 2
-					config.SetNumLpuNodes(2)
 					detail.SetNumChips(32)
 					metadata, err := detail.NewTopologyMetadata()
 					require.NoError(t, err)
@@ -354,7 +351,6 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 				detail.SetNumChips(16)
 				detail.SetDevicesPerNode(16)
 			case "partial XT":
-				config.SetNumLpuNodes(4)
 				ref, err := partitions.At(0).Partition()
 				require.NoError(t, err)
 				ref.SetPartitionId(3)

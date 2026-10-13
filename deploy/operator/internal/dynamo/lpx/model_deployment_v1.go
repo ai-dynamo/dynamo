@@ -56,9 +56,6 @@ func (format buildContractFormat) filename() (string, error) {
 
 // decodeGbuildDeploymentV1 reads the scheduler contract without execution/report schemas.
 func decodeGbuildDeploymentV1(data []byte) (deploymentcapnpv1.Deployment, error) {
-	if len(data) > maxBuildSnapshotMetadataBytes {
-		return deploymentcapnpv1.Deployment{}, fmt.Errorf("%s: %w", gbuildDeploymentV1CapnpFile, errBuildFileTooLarge)
-	}
 	msg, err := capnp.Unmarshal(data)
 	if err != nil {
 		return deploymentcapnpv1.Deployment{}, fmt.Errorf("parsing %s: %w", gbuildDeploymentV1CapnpFile, err)
