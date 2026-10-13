@@ -45,7 +45,7 @@ The raw export contains explicit `x-dynamo-schema-import` slots because the pinn
 `async-openai` 0.42.1 types lack the schema annotations needed to compile them into the
 native export. Assessment temporarily resolves those slots from a checksum-pinned OpenAI
 document and applies guarded corrections reviewed against Dynamo's Rust types. The
-[composition invariants](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/docs/protocol-openapi-composition.md)
+[composition invariants](https://github.com/ai-dynamo/dynamo/blob/main/scripts/protocol_compatibility/README.md#composition-invariants)
 describe this dependency boundary and its implementation guards.
 
 `async-openai` 0.42.2 includes the annotations, but frontend-crates must enable and compile
@@ -85,6 +85,32 @@ and configuration scopes. Capture verifies the served declaration, not inference
 Keep framework launch, recapture, and cleanup instructions in its recipe. Exclude credentials
 and full environment dumps from retained evidence.
 
+## Native Response Schemas
+
+Both completion endpoints declare HTTP 200 `application/json` and `text/event-stream`
+responses. Chat uses separate unary and chunk types; legacy completions share one type.
+The export derives Dynamo-owned schemas from Rust types and preserves these serialization
+details through native definitions and guarded import corrections:
+
+- Always-emitted nullable chat fields are required, including choice
+  `finish_reason`/`logprobs` and message `content`/`refusal`.
+- Chat messages and chunks use the configured reasoning key (`reasoning_content` by
+  default, or `reasoning`). The separate `reasoning_dispatch` payload always uses
+  `reasoning_content`. Capture the server for non-default settings; the offline
+  generator uses defaults.
+- Client-facing chunks exclude internal `llm_metrics`, `tool_call_completion`, and
+  streaming `prompt_logprobs`. Unary `prompt_logprobs` remains exposed.
+- Chat usage omits absent detail members; legacy usage emits null detail members.
+  Separate import paths preserve that distinction.
+- Legacy completions always emit nullable `usage` and `system_fingerprint`, but omit
+  absent choice `logprobs` and `finish_reason`.
+
+Derived optional types can remain nullable where serializers omit absent fields. The
+export does not certify numeric representability, conditional values, or every response
+variant. Non-stream error body schemas remain a coverage gap. See the
+[response-schema tests](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/tests/protocols/openapi_response_schema.rs)
+for the native export assertions and shared serialization fixtures.
+
 ## Additional Handling Beyond the Comparator
 
 Pinned `oasdiff` provides the structural comparison. The workflow adds the bounded
@@ -112,10 +138,21 @@ whole-contract compatibility. The complete request delta remains unchanged.
 
 ### Streaming responses
 
+Native OpenAPI 3.2 `itemSchema` describes parsed SSE events with string `data`.
+`contentSchema` describes JSON chunks and structured errors decoded from that string;
+literal `[DONE]` is a separate alternative. Chat also declares named dispatch events.
+Comment-only annotations, keep-alives, and usage/finish ordering require behavioral checks.
+
 For comparison, the response projection turns OpenAPI 3.2 `itemSchema` events into explicit
 decoded-data alternatives. JSON data retains its `contentSchema`; literal data such as
 `[DONE]` stays distinct. These comparison-only objects are not server payloads, and raw exports
 remain unchanged. Missing or unsupported event representations become coverage gaps.
+
+The native exporter derives components with Utoipa 5, then adds OpenAPI 3.2 fields to
+the serialized JSON. Do not deserialize that document back into Utoipa 5: its typed model
+cannot preserve `itemSchema`. The bundled Swagger UI has limited `itemSchema` rendering
+([upstream issue](https://github.com/swagger-api/swagger-ui/issues/11065)); inspect
+`/openapi.json` for the full declaration.
 
 ## Reading the Result
 

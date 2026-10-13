@@ -11,16 +11,11 @@ Compare Dynamo and framework OpenAPI 3.1/3.2 request and response contracts for
 for scope, provenance, normalization, aliases, and interpretation. Schema agreement
 does not establish actual acceptance or behavioral compatibility.
 
-This package composes and compares schemas from the independent native export;
-see the [composition guide](../../lib/llm/docs/protocol-openapi-composition.md).
-Native schema export is an independent prerequisite. Offline composition lives
-in this tooling package alongside independent request and response comparison.
-Native `/openapi.json` still contains explicit dependency import slots because the
-pinned async-openai 0.42.1 types lack the schema annotations needed to compile them
-into the export. Composition is a temporary offline bridge and does not modify the
-running frontend. Async-openai 0.42.2 contains the annotations; track the remaining
-frontend-crates integration and removal of obsolete composition mappings in
-[frontend-crates issue #351](https://github.com/ai-dynamo/frontend-crates/issues/351).
+This package composes explicit dependency imports from the native export, then
+compares requests and responses independently. Composition is a temporary offline
+step; the guide explains the
+[async-openai annotation gap and removal condition](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#schema-inputs-and-provenance).
+It does not modify the running frontend's `/openapi.json` or `/docs`.
 
 ## Installation
 
@@ -90,6 +85,47 @@ The framework identity does not select an adapter or schema exceptions. URLs mus
 be direct HTTP(S), with no credentials, query strings, fragments, or redirects.
 Downloads are bounded to 32 MiB and 30 seconds; proxies are disabled. Review paths,
 URLs, and annotations for secrets before publishing artifacts.
+
+## Composition
+
+The shared request/response
+[manifest](composition/async-openai-0.42.1.yaml) records the expected
+`dynamo-protocols` and `async-openai` versions, OpenAI source revision and checksum,
+import mappings, and corrections reviewed against Rust serialization. A dependency
+upgrade requires reviewing these inputs and revalidating schema/Serde agreement
+and runtime consumers. Never change a checksum to bypass a failed correction guard.
+
+To compose without running the comparator, use the native export and pinned OpenAI
+file from the CLI examples:
+
+```bash
+python -m scripts.protocol_compatibility.composition.responses \
+  --raw docs/frontends/openapi.json \
+  --openai openai-d4535923.yaml \
+  --output-dir composed
+```
+
+Despite the module name, this uses the same engine and manifest for both request
+and response imports. It requires a new output directory and writes
+`openapi.composed.json` and `composition.yaml`. Keep the raw capture and acquisition
+metadata separately. This command does not require the `oasdiff` executable.
+
+### Composition Invariants
+
+- Preserve raw inputs, Dynamo endpoints, owned fields, and SSE envelopes in a
+  separate composed document. Never fill gaps from a framework's schema.
+- Resolve explicit import slots and their reachable components only. Namespace
+  imported components; reject collisions, unmapped slots, external references,
+  and unsupported reference constructs.
+- Guard each JSON Patch correction with a preceding `test` of the affected value
+  (or parent for additions) and record its Rust-code rationale.
+- Redirect references to corrected definitions so nested uses receive the same
+  corrections. Preserve recursion as references and walk schema positions only;
+  literal examples and defaults remain data.
+
+A passing checksum or patch guard verifies input assumptions, not runtime fidelity.
+An explicit `serde_json::Value` is intentionally untyped; an unresolved import is
+a coverage gap. Record Dynamo-specific `nvext` exclusions without claiming parity.
 
 ## Outputs and Exit Codes
 
@@ -164,6 +200,10 @@ The helper returns `None` on success and raises on invalid or unsupported input.
 It does not parse raw frames, count events, or establish a valid stream lifecycle.
 
 ## Validation
+
+Rust serialization and composed-schema checks share fixtures under
+`lib/llm/tests/fixtures/openapi/`. Add a shared case when correcting a schema/Serde
+disagreement, and keep each correction tied to its Rust-code rationale.
 
 ```bash
 OASDIFF_BIN=/absolute/path/to/oasdiff \
