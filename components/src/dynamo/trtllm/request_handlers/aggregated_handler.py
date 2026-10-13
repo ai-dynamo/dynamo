@@ -40,10 +40,18 @@ class AggregatedHandler(HandlerBase):
 
     # Must stay outermost -- see push_egress.py.
     @push_egress_capable
-    async def generate(
+    def generate(self, request: dict, context: Context) -> AsyncGenerator[dict, None]:
+        """Generate response, optionally using remote encoder for multimodal."""
+        if self.multimodal_processor and self.encode_client:
+            return self._generate_with_encoder(request, context)
+        # Text-only: hand back generate_locally's generator itself rather than
+        # re-yielding every chunk through one more async-generator hop.
+        # HandlerBase still rejects unsupported multimodal UUIDs.
+        return self.generate_locally(request, context, None, None)
+
+    async def _generate_with_encoder(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
-        """Generate response, optionally using remote encoder for multimodal."""
         # Reject before optional remote encoder/cache work. HandlerBase keeps a
         # second guard as a backstop for paths without these early side effects.
         reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))

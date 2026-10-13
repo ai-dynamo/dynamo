@@ -3,6 +3,8 @@
 
 """Unit tests for AggregatedHandler."""
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -16,6 +18,7 @@ from tensorrt_llm.llmapi import DisaggregatedParams
 
 from dynamo.trtllm.request_handlers.aggregated_handler import AggregatedHandler
 from dynamo.trtllm.tests.request_handlers.utils import (
+    create_mock_context,
     create_mock_encoder_cache,
     run_generate_with_mock_fetch,
     setup_multimodal_config,
@@ -72,3 +75,26 @@ class TestAggregatedHandlerGenerate:
 
         assert embeddings is None
         assert ep_params is expected_params
+
+    @pytest.mark.asyncio
+    async def test_text_path_returns_generate_locally_stream(self):
+        """Without a remote encoder, generate returns generate_locally's stream
+        itself instead of re-yielding each chunk through another generator."""
+        handler = AggregatedHandler(create_mock_request_handler_config())
+        request = {"token_ids": [1, 2, 3]}
+        context = create_mock_context()
+        chunks = [{"token_ids": [4]}, {"token_ids": [5]}]
+
+        async def local_stream():
+            for chunk in chunks:
+                yield chunk
+
+        stream = local_stream()
+        with patch.object(
+            handler, "generate_locally", return_value=stream
+        ) as generate_locally:
+            result = handler.generate(request, context)
+
+        assert result is stream
+        generate_locally.assert_called_once_with(request, context, None, None)
+        assert [chunk async for chunk in result] == chunks
