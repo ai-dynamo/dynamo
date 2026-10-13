@@ -4970,6 +4970,7 @@ func TestGeneratePodCliqueSet_DynamoNamespace(t *testing.T) {
 					Namespace: tt.namespace,
 				},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: string(BackendFrameworkVLLM),
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 						"Frontend": {
 							ComponentType:         commonconsts.ComponentTypeFrontend,
@@ -4980,17 +4981,34 @@ func TestGeneratePodCliqueSet_DynamoNamespace(t *testing.T) {
 							ComponentType: commonconsts.ComponentTypePlanner,
 							Replicas:      ptr.To(int32(1)),
 						},
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(1)),
+							ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+								MainContainer: &corev1.Container{
+									Image:   "vllm:1.6.0",
+									Command: []string{"python3"},
+									Args:    []string{"-m", "dynamo.vllm"},
+									Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+										corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+									}},
+								},
+							},
+						},
 					},
 				},
 			}
 
 			converted := betaDGD(t, dynamoDeployment)
-			got, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+			workerHash, err := ComputeDGDWorkersSpecHash(converted)
+			require.NoError(t, err)
+			require.NotEmpty(t, workerHash)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, true, nil)
 			if !assert.NoError(t, err) {
 				return
 			}
 
-			if !assert.Len(t, got.Spec.Template.Cliques, 2) {
+			if !assert.Len(t, got.Spec.Template.Cliques, 3) {
 				return
 			}
 
@@ -5005,8 +5023,22 @@ func TestGeneratePodCliqueSet_DynamoNamespace(t *testing.T) {
 					expectedNamespace := v1beta1.ComputeDynamoNamespace(false, tt.namespace, tt.dgdName)
 					assert.Equal(t, expectedNamespace, clique.Labels[commonconsts.KubeLabelDynamoNamespace])
 					assertDYNNamespace(t, clique.Spec.PodSpec, expectedNamespace)
+				case "worker":
+					expectedNamespace := v1beta1.ComputeDynamoNamespace(false, tt.namespace, tt.dgdName)
+					assert.Equal(t, expectedNamespace, clique.Labels[commonconsts.KubeLabelDynamoNamespace])
+					assertDYNNamespace(t, clique.Spec.PodSpec, expectedNamespace)
+					assert.Equal(t, workerHash, clique.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+
+					t.Log("Verify the worker suffix remains separate from the bounded base identity")
+					require.Len(t, clique.Spec.PodSpec.Containers, 1)
+					env := make(map[string]string)
+					for _, variable := range clique.Spec.PodSpec.Containers[0].Env {
+						env[variable.Name] = variable.Value
+					}
+					assert.Equal(t, workerHash, env[commonconsts.DynamoNamespaceWorkerSuffixEnvVar])
+					assert.NotEqual(t, expectedNamespace+"-"+workerHash, clique.Labels[commonconsts.KubeLabelDynamoNamespace])
 				default:
-					t.Errorf("GenerateGrovePodCliqueSet() clique = %v, want %v", clique.Name, "frontend or planner")
+					t.Errorf("GenerateGrovePodCliqueSet() clique = %v, want %v", clique.Name, "frontend, planner or worker")
 				}
 			}
 

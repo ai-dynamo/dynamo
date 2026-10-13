@@ -459,8 +459,9 @@ func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
 	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.GetNamespace(), s.GetParentGraphDeploymentName())
 }
 
-// ComputeDynamoNamespace returns the global namespace when requested; otherwise
-// it combines the Kubernetes namespace and DGD name, replacing dots with hyphens
+// ComputeDynamoNamespace is the single source of truth for derived Dynamo namespaces.
+// It returns the global namespace when requested; otherwise it combines the
+// Kubernetes namespace and DGD name, replacing dots with hyphens
 // for endpoint path parsing. Values over the Kubernetes label limit are shortened
 // with a 16-character SHA-256 suffix derived from the original namespace/name pair.
 // Inputs must be valid Kubernetes namespace and DGD names.
