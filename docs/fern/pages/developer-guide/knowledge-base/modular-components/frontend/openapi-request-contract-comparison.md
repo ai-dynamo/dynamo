@@ -5,54 +5,58 @@ title: OpenAPI Request-Contract Comparison
 subtitle: Compare declared request and response schemas without treating agreement as support
 ---
 
-The OpenAPI workflow compares NVIDIA Dynamo's declared request and response schemas with a selected
-framework server's declarations. It is a practical companion to
-[Protocol Field Handling](protocol-field-handling.md), which remains authoritative for
-the source contract, semantic ownership, complete field lifecycle, and the two acceptance layers.
+Compare NVIDIA Dynamo's declared request and response schemas with an OpenAPI 3.1 or 3.2
+framework contract. The workflow composes dependency-owned schemas, normalizes selected
+equivalent representations, and reports request differences, response differences, and
+coverage gaps.
 
-This workflow implements only part of
-[source-contract conformance](protocol-field-handling.md#verify-source-contract-and-behavioral-conformance):
-declared schema comparison. It does not prove actual request acceptance,
-forwarding or backend effects, response or error conformance, streaming behavior, or
-behavioral compatibility. A schema match does not redefine what it means to support a field.
+[Protocol Field Handling](protocol-field-handling.md) remains authoritative for semantic
+ownership, the complete field lifecycle, and the two acceptance layers.
+
+> [!IMPORTANT]
+> Schema agreement does not prove request acceptance, backend effects, response behavior,
+> error behavior, or streaming lifecycle compatibility.
 
 For installation, CLI arguments, runnable examples, output files, and exit codes, use the
 [tooling README](https://github.com/ai-dynamo/dynamo/blob/main/scripts/protocol_compatibility/README.md).
 
 ## Comparison Scope
 
-Both inputs must be OpenAPI 3.1 or 3.2 documents containing JSON POST request schemas for
-`/v1/chat/completions` and `/v1/completions`. Chat completion is primary; completion is
-included for compatibility. Missing endpoints, unresolved references, or remote schema
-references fail visibly rather than producing an empty success.
+Both inputs must contain JSON POST request schemas for `/v1/chat/completions` and
+`/v1/completions`. Missing endpoints and unresolved or remote references fail visibly
+rather than producing an empty success.
 
 Responses are compared separately by status code, media type, and payload schema.
 SSE comparison requires OpenAPI 3.2 `itemSchema` and explicit data encoding; older
 payload-only streaming declarations produce coverage gaps. Headers, other endpoints,
 ordering, cancellation, and termination behavior are outside this comparison.
 
-The workflow is framework-neutral within this bounded surface, not a comparator for arbitrary
-APIs. The framework name is a provenance and reporting identity, not an adapter selector or a
-schema-correction switch. Framework recipes own concrete version/model/configuration pins,
-deployment inspection, recapture, and cleanup; comparison does not manage server lifecycles.
+The workflow is framework-neutral within this bounded surface. A framework name identifies
+provenance and reports; it does not select an adapter or schema correction. Framework recipes
+own version, model, and configuration pins as well as deployment and cleanup procedures.
 
 ## Schema Inputs and Provenance
 
-Use `generate-frontend-openapi` as the default Dynamo schema source. It builds the actual
-frontend router without starting a listener and writes `docs/frontends/openapi.json`.
-Pass that file directly to the assessor. No model, GPU, or deployment is required.
+Use `generate-frontend-openapi` as the default Dynamo source. It builds the frontend router
+without a listener and writes `docs/frontends/openapi.json`; no model, GPU, or deployment is
+required.
 
-The generated file is a raw export. Some upstream types are represented by explicit
-`x-dynamo-schema-import` slots rather than complete schemas. Assessment resolves them
-using a pinned OpenAI document and guarded corrections reviewed against Dynamo's Rust
-types. Generation does not replace composition. The
+The raw export contains explicit `x-dynamo-schema-import` slots for some upstream types.
+Assessment resolves them from a checksum-pinned OpenAI document and applies guarded
+corrections reviewed against Dynamo's Rust types. The
 [composition invariants](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/docs/protocol-openapi-composition.md)
-describe the dependency boundary and implementation guards.
+describe this dependency boundary and its implementation guards.
 
-Retain the source revision and any local patch, `Cargo.lock`, exact generation command
-including feature flags, and the output checksum. For a framework, use a revision-pinned
-generated, checked-in, or published JSON/YAML spec when available. The optional acquisition
-command retains exact file or HTTP(S) bytes and records their checksum and origin.
+Retain:
+
+- The source revision and any local patch
+- `Cargo.lock` and the exact generation command, including feature flags
+- The raw schema bytes and checksum
+- The composition manifest, comparator version, and coverage catalog
+
+For a framework, prefer a revision-pinned generated, checked-in, or published JSON/YAML
+document. The optional acquisition command retains exact file or HTTP(S) bytes with their
+checksum and origin.
 
 These inputs answer different questions:
 
@@ -62,139 +66,83 @@ These inputs answer different questions:
 | Is a generated spec current with its source? | Regeneration from the recorded source and a freshness diff |
 | Does a deployment expose or implement that contract? | Deployment inspection and served spec; behavioral tests for actual acceptance and effects |
 
-A published or checked-in spec supports repeatable comparison without launching its server.
-If publishing a generated spec, change its authoritative definitions and regenerate it;
-do not hand-edit the output. Review the generated diff and add freshness validation to the
-publishing workflow. The comparison workflow itself introduces neither a full checked-in
-spec snapshot nor a freshness gate.
-
-Acquisition observes bytes, URL/path, timestamp, and HTTP status where applicable. Caller
-annotations are retained as unverified metadata. Neither those annotations nor checksums
-attest the source build, dependencies, configuration, or runtime fidelity. The composition
-manifest states the dependency versions its mapping was reviewed against; selecting a
-matching document remains the caller's responsibility.
+Change authoritative definitions and regenerate published schemas; do not hand-edit generated
+output. Acquisition metadata and checksums support repeatability but do not attest the source
+build, dependencies, configuration, or runtime fidelity. Select dependency documents matching
+the versions recorded in the composition manifest.
 
 ### Optional Deployment Inspection
 
-Use Dynamo HTTP capture when the question is what a particular deployment exposes.
-The helper's optional `--serve IP:PORT` mode exposes the actual router with in-memory
-discovery and no workers; it checks HTTP schema export, not inference.
-
-The helper enables all standard endpoint families. A deployment can enable a subset or
-add routes, so compare matching endpoint and configuration scope. Even with matching
-configuration, file mode additionally documents `/docs` and `/openapi.json`: those
-routes are registered after the HTTP-served document is generated. The two assessed request
-contracts match; full-document byte equality is not the comparison criterion.
-
-Keep concrete framework inputs and deployment/recapture procedures in the framework's
-recipe, including immutable image/source/model pins, startup configuration, selected
-inspection evidence, and cleanup. Avoid credentials or full environment dumps in evidence.
+Use HTTP capture when the question is what a deployment exposes, and compare matching endpoint
+and configuration scopes. Capture verifies the served declaration, not inference behavior.
+Keep framework launch, recapture, and cleanup instructions in its recipe. Exclude credentials
+and full environment dumps from retained evidence.
 
 ## Additional Handling Beyond the Comparator
 
-Pinned `oasdiff` provides the underlying comparison. The normalization and alias handling
-below are workflow-specific additions on top of it, not new definitions of support.
+Pinned `oasdiff` provides the structural comparison. The workflow adds the bounded
+normalization, alias matching, and streaming projection described below; none redefines
+runtime support.
 
 ### Equivalent representations versus contract differences
 
-Before invoking `oasdiff`, the workflow treats
-`anyOf: [{type: string}, {type: null}]` and `type: [string, null]` as equivalent,
-in either branch/type order. This is a
-comparison-only normalization, not a change to either server's exported spec.
-Original `*.requests.json` files are retained alongside
-`*.requests.normalized.json`; `normalization.json` and the report record each
-rewrite. `oasdiff.json` is the comparator result on the normalized inputs.
-
-Only bare string/null alternatives are canonicalized. Constraints and defaults
-remain significant; constrained branches, references inside unions, `oneOf`, and
-other type unions are not simplified. Literal values inside examples/defaults
-are never rewritten. Equivalent encoding does not establish runtime parity.
+The workflow treats `anyOf: [{type: string}, {type: null}]` and
+`type: [string, null]` as equivalent, regardless of order. It records each rewrite and
+retains both original and normalized projections. Only bare string/null alternatives are
+canonicalized; constraints, defaults, references, `oneOf`, other unions, and literal data
+remain significant.
 
 ### Input aliases
 
-Dynamo exports `x-dynamo-input-aliases`
-on `chat_template_args` (alias `chat_template_kwargs`) and assistant-message
-`reasoning_content` (alias `reasoning`). This custom extension lists alternative
-input names and, by definition, rejects multiple spellings of the same field in
-one object, even when their values are equal. No spelling takes precedence and
-no separate conflict-policy marker is needed. It describes Serde input behavior,
-not a standard JSON Schema validation rule or output alias; ordinary validators
-do not enforce it. Rust tests check both spellings and rejection of equal and
-unequal values when both occur together.
+Dynamo's `x-dynamo-input-aliases` extension declares alternative accepted names and rejects
+multiple spellings in the same object. It describes Serde input behavior, not a standard JSON
+Schema rule or output alias.
 
-Older captures carrying the redundant `x-dynamo-alias-conflict: reject` marker
-remain supported. A contradictory legacy marker is rejected as invalid metadata.
+The assessor matches declared aliases at the same request instance path and compares their
+value schemas. Ambiguous ownership remains a coverage gap. A match establishes declared name
+coverage only; it does not prove runtime acceptance, requiredness, union behavior, or
+whole-contract compatibility. The complete request delta remains unchanged.
 
-On top of the complete request comparison, the assessor matches explicitly
-declared aliases at the same request instance path, including nested message
-fields. Ambiguous ownership or repeated backend
-union declarations remain coverage gaps. `alias-matches.json` records the match,
-parent constraints, and separate value-schema comparisons using pinned oasdiff.
-Array-item path segments are represented by JSON `null`, distinct from any key.
+### Streaming responses
 
-A name match establishes declared input-name coverage, not actual acceptance or
-whole-contract compatibility. Value constraints are still compared; requiredness, union context,
-and simultaneous-name behavior require separate review. The complete request
-delta is retained unchanged. The human-readable top-level summary classifies
-matched spellings separately from genuinely missing names; it does not silently
-rename properties or clear the report's incomplete-coverage status. Older captures
-without these extensions cannot establish alias coverage.
+For comparison, the response projection turns OpenAPI 3.2 `itemSchema` events into explicit
+decoded-data alternatives. JSON data retains its `contentSchema`; literal data such as
+`[DONE]` stays distinct. These comparison-only objects are not server payloads, and raw exports
+remain unchanged. Missing or unsupported event representations become coverage gaps.
 
 ## Reading the Result
 
-Assessment creates separate projections for the two POST JSON request bodies and
-their declared responses, each with its reachable schema components.
-Raw exports and the composed Dynamo document remain separate retained inputs. Scoped
-validation does not certify unrelated routes or the full API document.
+Assessment creates independent request and response projections with their reachable schema
+components. Raw exports and the composed Dynamo document remain separate. The comparator is
+pinned to oasdiff 1.33.0 with external reference fetching disabled; it flattens `allOf` only
+when the coverage scan finds no unsupported constructs.
 
-The response projection makes SSE `itemSchema` and embedded JSON `contentSchema`
-visible to the pinned comparator, which does not consume those media keywords
-directly. It preserves the event envelope and tags decoded data as JSON or a literal
-marker. These comparison-only objects are not server payloads. The
-[response comparison boundaries](https://github.com/ai-dynamo/dynamo/blob/main/scripts/protocol_compatibility/README.md#response-comparison-boundaries)
-describe the supported representation, retained artifacts, and required E2E checks.
+The direction is framework → Dynamo: additions are Dynamo-only and deletions are
+framework-only. Direction alone does not classify compatibility. Start with `report.md`, then
+inspect the complete delta and normalization and alias audits.
 
-The comparator is pinned to oasdiff 1.33.0 with external reference fetching disabled.
-It flattens `allOf` only when the coverage scan finds no unsupported constructs; otherwise
-those constructs stay in the inputs and appear as gaps. This is not a general JSON Schema
-equivalence prover.
+| Outcome | Meaning |
+| --- | --- |
+| Declared difference | Candidate for source-contract investigation, not proof of runtime incompatibility |
+| Coverage gap | The export or comparison cannot establish the contract; a gap prevents complete coverage |
+| Intentional exclusion | Outside the comparison claim, not a declaration of compatibility |
 
-The comparison direction is framework → Dynamo: additions are Dynamo-only, deletions are
-framework-only. That orientation alone does not classify compatibility: requests a
-framework client sends must retain their meaning, and Dynamo responses must meet
-that client's expectations. Keep reverse-direction and additive differences separate.
-Start with `report.md`, then inspect the complete delta and the normalization
-and alias audits. Review three outcomes separately:
-
-- Declared differences are candidates for source-contract investigation, not proof of
-  runtime incompatibility.
-- Coverage gaps identify what the export or comparison cannot establish. Catalogued
-  request gaps and input-specific response gaps prevent a complete-coverage result,
-  even if no new differences are found.
-- Intentional exclusions, such as the contents of Dynamo-specific `nvext`, are outside the
-  comparison claim, not declarations of compatibility.
-
-The report does not replace the
-[field-handling development checklist](protocol-field-handling.md#development-checklist).
-Resolve findings against the authoritative source contract, then collect the missing acceptance,
-delivery, effect, response, and error evidence for the claimed path.
+Resolve findings against the authoritative source contract, then use the
+[field-handling development checklist](protocol-field-handling.md#development-checklist) to
+collect acceptance, delivery, effect, response, and error evidence.
 
 ## Maintenance and Validation
 
-When dependencies or framework versions/configuration change, select matching revision-pinned
-inputs and review import mappings, guarded corrections, and coverage gaps. Never update a
-checksum just to bypass a failed guard. Remove a fidelity gap only with a fix and a test of
-the newly represented input shape. Retain a fresh direct Dynamo-versus-framework assessment;
-an upstream-only version diff is supporting context, not a replacement.
+When dependencies or framework configuration changes:
 
-Python tests exercise the pipeline with synthetic framework identities and the real pinned
-comparator. Shared Rust and composed-schema tests currently cover 48 aligned cases and six
-known-gap witnesses, plus seven successful response fixtures. SSE projection tests
-verify payload constraints and literal-marker distinctions; real-comparator tests
-verify differences reach the engine. These are not real-server or stream-lifecycle
-tests. The tooling README lists the commands.
+- Select matching revision-pinned inputs.
+- Review import mappings, guarded corrections, and coverage gaps.
+- Never change a checksum to bypass a failed guard.
+- Remove a coverage gap only with a fix and a test for the newly represented shape.
+- Retain a fresh direct Dynamo-versus-framework assessment; an upstream-only diff is supporting
+  context, not a replacement.
 
-The root pre-merge Rust job runs schema generation after its tests using its default features.
-Generation failure fails that job. Its 14-day `frontend-openapi-<sha>` artifact retains the
-raw spec, revision, lockfile, command, and checksums. This checks generation, not composed
-contract completeness, deployment correspondence, spec freshness, or behavioral conformance.
+Rust, composed-schema, and Python tests cover export fidelity, normalization, aliases, SSE
+projection, and the pinned comparator. They are not real-server or stream-lifecycle tests. See
+the [tooling README](https://github.com/ai-dynamo/dynamo/blob/main/scripts/protocol_compatibility/README.md)
+for validation commands and artifact details.
