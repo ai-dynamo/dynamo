@@ -1231,26 +1231,13 @@ async def test_prefill_keeps_raw_media_for_decode_handoff():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("metadata_key", "guidance"),
-    [
-        (
-            "mm_kwargs_shm",
-            "use DYNAMO_MM_TRANSFER=nixl for separate pods or nodes",
-        ),
-        (
-            "mm_kwargs_nixl",
-            "Verify NIXL connectivity between the frontend and worker",
-        ),
-    ],
-)
+@pytest.mark.parametrize("metadata_key", ["mm_kwargs_shm", "mm_kwargs_nixl"])
 async def test_prefill_transfer_without_raw_media_fails_closed(
     metadata_key,
-    guidance,
 ):
     processor = _processor()
 
-    with pytest.raises(mod.MultimodalTransferError, match=guidance):
+    with pytest.raises(mod.MultimodalTransferError) as excinfo:
         await _prepare_prompt(
             processor,
             {
@@ -1262,6 +1249,9 @@ async def test_prefill_transfer_without_raw_media_fails_closed(
             DisaggregationMode.PREFILL,
         )
 
+    assert "DYNAMO_DISABLE_NIXL_MM=1" in str(excinfo.value)
+    assert "DYNAMO_MM_TRANSFER=nixl" not in str(excinfo.value)
+    assert "Verify NIXL connectivity" not in str(excinfo.value)
     processor.image_loader.load_image_batch.assert_not_awaited()
 
 

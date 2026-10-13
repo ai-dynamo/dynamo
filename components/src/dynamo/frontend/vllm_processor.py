@@ -67,7 +67,6 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "eos": FinishReason.STOP,
     "stop": FinishReason.STOP,
     "length": FinishReason.LENGTH,
-    "error": FinishReason.ERROR,
     "cancelled": FinishReason.ABORT,
     "content_filter": FinishReason.STOP,
 }
@@ -391,20 +390,27 @@ class _ReasoningUsageAnnotator:
         return annotated
 
 
+def _finish_reason_error_message(
+    raw_reason: str | dict[str, Any] | None,
+) -> str | None:
+    """Extract a backend error before OpenAI finish-reason projection."""
+    if isinstance(raw_reason, dict):
+        error_message = raw_reason.get("error")
+        return error_message if isinstance(error_message, str) else None
+    if isinstance(raw_reason, str) and raw_reason.startswith("error"):
+        _, separator, detail = raw_reason.partition(":")
+        return detail.strip() if separator and detail.strip() else raw_reason
+    return None
+
+
 def map_finish_reason(
     raw_reason: str | dict[str, Any] | None,
 ) -> FinishReason | None:
     if raw_reason is None:
         return None
     if isinstance(raw_reason, dict):
-        error_message = raw_reason.get("error")
-        if isinstance(error_message, str):
-            logger.error("Router reported a generation error: %s", error_message)
-            return FinishReason.ERROR
         logger.warning("Malformed error finish_reason from router")
         return None
-    if raw_reason.startswith("error"):
-        return FinishReason.ERROR
     if raw_reason.startswith("abort"):
         return FinishReason.ABORT
     if raw_reason.startswith("content_filter"):
@@ -1302,6 +1308,19 @@ class VllmProcessor:
                     )
                     break
 
+                raw_finish_reason = engine_response.get("finish_reason")
+                error_message = _finish_reason_error_message(raw_finish_reason)
+                if error_message is not None:
+                    logger.error(
+                        "Router reported a generation error for request %s: %s",
+                        request_id,
+                        error_message,
+                    )
+                    yield as_error_envelope(
+                        make_internal_error(request_id, error_message)
+                    )
+                    break
+
                 # Count before any choice gate — tool/reasoning parsers may
                 # consume tokens without emitting a visible delta.
                 chunk_tokens = len(engine_response.get("token_ids") or [])
@@ -1330,7 +1349,6 @@ class VllmProcessor:
                     engine_response.get("top_logprobs"),
                 )
 
-                raw_finish_reason = engine_response.get("finish_reason")
                 finish_reason = map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
 

@@ -1262,16 +1262,6 @@ def _logprobs_processor(vllm_processor_module):
     )
 
 
-def test_map_finish_reason_handles_rust_error_map(vllm_processor_module, caplog):
-    message = "Multimodal SHM transfer failed; use DYNAMO_MM_TRANSFER=nixl"
-
-    with caplog.at_level("ERROR"):
-        finish_reason = vllm_processor_module.map_finish_reason({"error": message})
-
-    assert finish_reason is vllm_processor_module.FinishReason.ERROR
-    assert message in caplog.text
-
-
 def test_disabled_mm_transfer_omits_shm_requirement_log(
     vllm_processor_module,
     monkeypatch,
@@ -1858,6 +1848,43 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 
 class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "finish_reason",
+        [
+            {"error": "Multimodal SHM transfer failed"},
+            "error: Multimodal SHM transfer failed",
+        ],
+    )
+    async def test_generation_error_ends_stream_with_error_envelope(
+        self,
+        vllm_processor_module,
+        finish_reason,
+    ):
+        class _UnexpectedOutputProcessor(_FakeOutputProcessor):
+            def process_outputs(self, outputs):
+                raise AssertionError("error response reached normal output processing")
+
+        routed_engine = _FakeRoutedEngine(
+            [
+                {"token_ids": [], "index": 0, "finish_reason": finish_reason},
+                {"token_ids": [101], "index": 0, "finish_reason": None},
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        processor.output_processor = _UnexpectedOutputProcessor()
+
+        chunks = await _run_generate(processor, _base_preproc())
+
+        assert chunks == [
+            {
+                "_dynamo_annotated": True,
+                "event": "error",
+                "comment": ["Multimodal SHM transfer failed"],
+            }
+        ]
+        assert routed_engine.yielded == 1
+
     @pytest.mark.asyncio
     async def test_backend_rejection_keeps_the_backend_status(
         self, vllm_processor_module

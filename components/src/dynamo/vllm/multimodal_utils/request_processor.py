@@ -303,15 +303,21 @@ class MissingMultimodalHandoffError(ValueError):
 class MultimodalTransferError(RuntimeError):
     """Processed multimodal inputs could not reach the selected worker."""
 
-    def __init__(self, transport: str, detail: str) -> None:
+    def __init__(
+        self,
+        transport: str,
+        detail: str,
+        *,
+        guidance: str | None = None,
+    ) -> None:
         self.transport = transport
-        if transport == "shm":
+        if guidance is None and transport == "shm":
             guidance = (
                 "The frontend and worker must share /dev/shm when "
                 "DYNAMO_MM_TRANSFER=shm; use DYNAMO_MM_TRANSFER=nixl for "
                 "separate pods or nodes."
             )
-        else:
+        elif guidance is None:
             guidance = "Verify NIXL connectivity between the frontend and worker."
         super().__init__(
             f"Multimodal {transport.upper()} transfer failed: {detail}. {guidance}"
@@ -1032,6 +1038,10 @@ class VllmMultimodalRequestProcessor:
                     transport,
                     "P/D prefill requires usable raw media to construct "
                     "decode handoff metadata",
+                    guidance=(
+                        "Set DYNAMO_DISABLE_NIXL_MM=1 on the frontend so raw "
+                        "media is forwarded."
+                    ),
                 )
 
         return PreparedMultimodalInput(
