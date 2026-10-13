@@ -7,7 +7,19 @@ use super::*;
 
 #[test]
 fn request_maps_sampling_stop_and_output_fields() {
-    let request = request();
+    let mut request = request();
+    let tool_parameters = json!({
+        "type": "object",
+        "properties": {"location": {"type": "string"}},
+        "required": ["location"],
+        "additionalProperties": false,
+    });
+    request
+        .sampling_options
+        .guided_decoding
+        .as_mut()
+        .unwrap()
+        .json = Some(tool_parameters.clone());
     let proto = build_generate_request(&request, "req-1", "served-model", None, AGG)
         .expect("build request");
     assert_eq!(proto.request_id, "req-1");
@@ -67,8 +79,54 @@ fn request_maps_sampling_stop_and_output_fields() {
     }
 
     match proto.guided.as_ref().unwrap().guide.as_ref().unwrap() {
-        pb::guided_decoding::Guide::JsonSchema(guide) => assert!(guide.contains("object")),
+        pb::guided_decoding::Guide::JsonSchema(guide) => assert_eq!(
+            serde_json::from_str::<serde_json::Value>(guide).expect("JSON schema"),
+            tool_parameters,
+        ),
         other => panic!("expected JSON schema guide, got {other:?}"),
+    }
+}
+
+#[test]
+fn tool_call_regex_and_structural_tag_constraints_are_preserved() {
+    use dynamo_backend_common::GuidedDecodingOptions;
+    use pb::guided_decoding::Guide;
+
+    let regex = r"\{\}";
+    let structural_tag = json!({
+        "type": "structural_tag",
+        "structures": [{
+            "begin": "<tool_call>",
+            "schema": {
+                "type": "object",
+                "properties": {"name": {"const": "get_server_time"}},
+                "required": ["name"],
+            },
+            "end": "</tool_call>",
+        }],
+        "triggers": ["<tool_call>"],
+    });
+    for (options, expected) in [
+        (
+            GuidedDecodingOptions {
+                regex: Some(regex.to_string()),
+                ..Default::default()
+            },
+            Guide::Regex(regex.to_string()),
+        ),
+        (
+            GuidedDecodingOptions {
+                structural_tag: Some(structural_tag.clone()),
+                ..Default::default()
+            },
+            Guide::StructuralTag(structural_tag.to_string()),
+        ),
+    ] {
+        let mut request = request();
+        request.sampling_options.guided_decoding = Some(options);
+        let proto = build_generate_request(&request, "req", "model", None, AGG)
+            .expect("tool constraint is supported");
+        assert_eq!(proto.guided.expect("guided decoding").guide, Some(expected));
     }
 }
 

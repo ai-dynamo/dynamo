@@ -15,6 +15,7 @@ from tests.router.common import _test_frontend_kv_routing
 from tests.router.helper import generate_random_suffix
 from tests.serve.common import (
     WORKSPACE_DIR,
+    managed_serve_deployment,
     params_with_model_mark,
     run_serve_deployment,
 )
@@ -28,6 +29,7 @@ from tests.utils.port_utils import (
     deallocate_ports,
     reserved_ports,
 )
+from tests.utils.tool_calling import collect_stream, parse_and_validate_tool_call
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/vllm"
@@ -321,6 +323,160 @@ def test_serve_deployment(
             )
     else:
         run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+def _chat_tool_response(client, body):
+    if body["stream"]:
+        with client.chat.completions.create(**body) as stream:
+            result = collect_stream(stream)
+        return {
+            "role": "assistant",
+            "content": result.content or None,
+            "reasoning_content": result.reasoning_content,
+            "tool_calls": result.tool_calls,
+        }, result.finish_reason
+    response = client.chat.completions.create(**body)
+    assert len(response.choices) == 1
+    choice = response.choices[0]
+    return choice.message.model_dump(exclude_none=True), choice.finish_reason
+
+
+@pytest.mark.core
+@pytest.mark.sidecar
+@pytest.mark.e2e
+@pytest.mark.post_merge
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.timeout(780)
+@pytest.mark.parametrize(
+    "backend",
+    [
+        pytest.param(
+            "vllm",
+            marks=[
+                pytest.mark.vllm,
+                pytest.mark.profiled_vram_gib(3.5),
+                pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
+            ],
+        ),
+        pytest.param(
+            "sglang",
+            marks=[
+                pytest.mark.sglang,
+                pytest.mark.profiled_vram_gib(6.8),
+                pytest.mark.requested_sglang_kv_tokens(4096),
+            ],
+        ),
+        pytest.param(
+            "trtllm",
+            marks=[
+                pytest.mark.trtllm,
+                pytest.mark.requested_trtllm_kv_tokens(4096),
+                pytest.mark.skipif(
+                    not _trtllm_serves_openengine(),
+                    reason=TRTLLM_OPENENGINE_SKIP_REASON,
+                ),
+            ],
+        ),
+    ],
+)
+def test_sidecar_tool_calling_round_trip(
+    backend,
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
+):
+    """Run a tool call and its result through a real native sidecar deployment."""
+    from openai import OpenAI
+
+    config = dataclasses.replace(
+        sidecar_configs[f"{backend}_aggregated"],
+        env={
+            **sidecar_configs[f"{backend}_aggregated"].env,
+            "DYN_NAMESPACE": f"sidecar-tools-{generate_random_suffix()}",
+            "DYN_TOOL_CALL_PARSER": "qwen25",
+            "DYN_REASONING_PARSER": "qwen3",
+        },
+    )
+    parameters = {
+        "type": "object",
+        "properties": {"location": {"type": "string"}},
+        "required": ["location"],
+        "additionalProperties": False,
+    }
+    body = {
+        "model": config.model,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Use get_weather to find the weather in Paris.",
+            }
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the current weather for a city.",
+                    "parameters": parameters,
+                },
+            }
+        ],
+        "tool_choice": "auto",
+        "temperature": 0,
+        "max_tokens": 256,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+    with reserved_ports(2, start_port=DynamoPortRange.SERVE.value) as engine_ports:
+        engine_env = {f"{backend.upper()}_GRPC_PORT": str(engine_ports[1])}
+        if backend != "trtllm":
+            http_key = "VLLM_RS_HTTP_PORT" if backend == "vllm" else "SGLANG_HTTP_PORT"
+            engine_env[http_key] = str(engine_ports[0])
+        with (
+            managed_serve_deployment(
+                config, request, ports=dynamo_dynamic_ports, extra_env=engine_env
+            ),
+            OpenAI(
+                base_url=f"http://localhost:{dynamo_dynamic_ports.frontend_port}/v1",
+                api_key="EMPTY",
+                timeout=60,
+                max_retries=0,
+            ) as client,
+        ):
+            for is_streaming in (False, True):
+                message, finish = _chat_tool_response(
+                    client, {**body, "stream": is_streaming}
+                )
+                assert finish == "tool_calls", message
+                calls = message.get("tool_calls") or []
+                assert len(calls) == 1, message
+                args = parse_and_validate_tool_call(
+                    calls[0], {"get_weather": parameters}, expected_name="get_weather"
+                )
+                assert args["location"].lower() == "paris", args
+                for key in ("content", "reasoning_content"):
+                    assert "<tool_call>" not in (message.get(key) or ""), message
+                    assert "</tool_call>" not in (message.get(key) or ""), message
+
+                followup = {
+                    **body,
+                    "stream": is_streaming,
+                    "tool_choice": "none",
+                    "messages": [
+                        *body["messages"],
+                        message,
+                        {
+                            "role": "tool",
+                            "tool_call_id": calls[0]["id"],
+                            "content": '{"location":"Paris","temperature_celsius":17}',
+                        },
+                    ],
+                }
+                answer, finish = _chat_tool_response(client, followup)
+                assert finish == "stop", answer
+                assert not answer.get("tool_calls"), answer
+                assert "17" in (answer.get("content") or ""), answer
 
 
 @pytest.mark.router

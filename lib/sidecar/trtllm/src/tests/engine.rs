@@ -496,11 +496,20 @@ fn parsed_arguments_map_onto_the_worker_registration() {
         "operator-chosen",
         "--dyn-default-thinking-mode",
         "disabled",
+        "--dyn-tool-call-parser",
+        "hermes",
+        "--dyn-reasoning-parser",
+        "qwen3",
+        "--exclude-tools-when-tool-choice-none",
+        "false",
     ])
     .expect("aggregated parses");
     assert_eq!(aggregated.component, "operator-chosen");
     assert_eq!(aggregated.disaggregation_mode, AGG);
     assert_eq!(aggregated.model_name, "model-source");
+    assert_eq!(aggregated.tool_call_parser.as_deref(), Some("hermes"));
+    assert_eq!(aggregated.reasoning_parser.as_deref(), Some("qwen3"));
+    assert!(!aggregated.exclude_tools_when_tool_choice_none);
     assert_eq!(
         aggregated.default_thinking_mode.as_deref(),
         Some("disabled")
