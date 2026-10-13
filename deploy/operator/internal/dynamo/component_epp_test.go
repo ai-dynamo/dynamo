@@ -19,6 +19,7 @@ import (
 func eppContainerFor(t *testing.T, eppConfig *nvidiacomv1beta1.EPPConfig) corev1.Container {
 	t.Helper()
 	container, err := NewEPPDefaults().GetBaseContainer(ComponentContext{
+		RuntimeContainerName:           commonconsts.MainContainerName,
 		DynamoNamespace:                "ns-dgd",
 		ComponentType:                  commonconsts.ComponentTypeEPP,
 		ParentGraphDeploymentName:      "dgd",
@@ -81,6 +82,7 @@ func TestEPPCacheVolumeMatchesTheMount(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			podSpec, err := NewEPPDefaults().GetBasePodSpec(ComponentContext{
+				RuntimeContainerName:           commonconsts.MainContainerName,
 				ComponentType:                  commonconsts.ComponentTypeEPP,
 				ParentGraphDeploymentName:      "dgd",
 				ParentGraphDeploymentNamespace: "ns",

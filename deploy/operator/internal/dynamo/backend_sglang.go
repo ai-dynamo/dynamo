@@ -27,7 +27,9 @@ const (
 	sglang15EmbeddingHealthCheckPayload = `{"model":"health-check","input":"Test"}`
 )
 
-type SGLangBackend struct{}
+type SGLangBackend struct {
+	roleLaunchOwnership roleLaunchOwnership
+}
 
 // isPythonCommand checks if the command is a Python interpreter
 func isPythonCommand(cmd string) bool {
@@ -79,9 +81,18 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		container.ReadinessProbe = nil
 		container.StartupProbe = nil
 	}
+	if b.roleLaunchOwnership == roleLaunchOwnedByPodTemplate {
+		return nil
+	}
 
 	// Generate the flags to add
-	flags, needsShell := b.getMultinodeFlags(numberOfNodes, role, serviceName, multinodeDeployer)
+	flags, needsShell := b.getMultinodeFlags(
+		numberOfNodes,
+		role,
+		serviceName,
+		multinodeDeployer,
+		usesMultinodeTopologyAliases(GetPodTemplateAnnotations(component)),
+	)
 	if flags == "" {
 		return nil
 	}
@@ -313,14 +324,26 @@ func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 	// do nothing
 }
 
-// getMultinodeFlags returns the multinode flags and whether shell interpretation is needed
-func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, serviceName string, multinodeDeployer MultinodeDeployer) (string, bool) {
+// getMultinodeFlags returns the multinode flags and whether shell interpretation
+// is needed. Topology aliases keep new DGD command lines provider-independent.
+func (b *SGLangBackend) getMultinodeFlags(
+	numberOfNodes int32,
+	role Role,
+	serviceName string,
+	multinodeDeployer MultinodeDeployer,
+	useTopologyAliases bool,
+) (string, bool) {
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
+	if useTopologyAliases {
+		leaderHostname = commonconsts.DynamoLeaderAddressEnvVarReference
+	}
 
 	var nodeRank string
 	var needsShell bool
 
-	if role == RoleLeader {
+	if useTopologyAliases {
+		nodeRank = commonconsts.DynamoRankEnvVarReference
+	} else if role == RoleLeader {
 		nodeRank = "0"
 		needsShell = false
 	} else {

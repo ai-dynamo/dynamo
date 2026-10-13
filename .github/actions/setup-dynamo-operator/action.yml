@@ -467,7 +467,7 @@ runs:
       shell: bash
       env:
         # Keep in lockstep with .github/actions/setup-snapshot-agent/action.yml.
-        SNAPSHOT_CHART_VERSION: 0.1.0-rc.1
+        SNAPSHOT_CHART_VERSION: 0.2.0-rc.1
       run: |
         echo "::group::Install snapshot CRDs before operator start"
         set -euo pipefail
@@ -587,61 +587,43 @@ runs:
         done
         echo "::endgroup::"
 
-    - name: Wait for operator containers to be ready
+    - name: Wait for operator Deployments to be available
       shell: bash
-      env:
-        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
       run: |
-        echo "::group::Wait for operator container readiness (host namespace)"
-        # Poll the host namespace instead of the vCluster API because Pod status
-        # propagation can lag in either direction. The READY column confirms
-        # container readiness reported by each webhook-aware probe; the
-        # admission smoke tests below are the authoritative end-to-end gate.
-        end=$((SECONDS + 1800))
-        while true; do
-          POD_STATUSES=()
-          mapfile -t POD_STATUSES < <(
-            kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
-              | awk '
-                  $1 ~ /^dynamo-platform-dynamo-operator-controller-manager-/ ||
-                  $1 ~ /^grove-operator-/ {
-                    print $1 "=" $2
-                  }
-                '
-          )
-          if [ "${#POD_STATUSES[@]}" -eq 2 ] \
-            && [ "${POD_STATUSES[0]#*=}" = "1/1" ] \
-            && [ "${POD_STATUSES[1]#*=}" = "1/1" ]; then
-            echo "Dynamo and Grove operator containers ready (${POD_STATUSES[*]})"
-            break
-          fi
-          if [ "${SECONDS}" -ge "${end}" ]; then
-            echo "::error::Expected two ready 1/1 operator Pods after 1800s (last status: ${POD_STATUSES[*]:-not found})"
-            exit 1
-          fi
-          echo "Waiting for two ready 1/1 operator Pods... status=${POD_STATUSES[*]:-not found}"
-          sleep 15
-        done
+        echo "::group::Wait for operator Deployment rollouts (vCluster)"
+        VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
+        # `Available` ignores the terminal Pods an eviction leaves behind, and is
+        # held back while `observedGeneration` lags. Unlike `rollout status` it
+        # does not give up at the Deployment's 600s progress deadline. One
+        # deadline covers both, and the release is `deployed` by now so they exist.
+        if ! kubectl --kubeconfig="${VKUBECONFIG}" -n default wait --timeout=1800s \
+          --for=condition=Available \
+          deployment/dynamo-platform-dynamo-operator-controller-manager \
+          deployment/grove-operator; then
+          echo "::error::Operator Deployments did not become available within 1800s"
+          exit 1
+        fi
         echo "::endgroup::"
 
     - name: Verify operator image and admission webhooks
       shell: bash
-      env:
-        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
       run: |
         set -euo pipefail
         VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
 
-        OPERATOR_POD=$(kubectl get pods -n "${NAMESPACE}" -o name \
-          | grep 'dynamo-platform-dynamo-operator-controller-manager' \
-          | head -1 || true)
+        # The Deployment's own selector; the field selector drops terminal Pods,
+        # whose image is not the one now running.
+        OPERATOR_POD=$(kubectl --kubeconfig="${VKUBECONFIG}" -n default get pods \
+          -l control-plane=controller-manager \
+          --field-selector=status.phase=Running \
+          -o name | awk 'NR==1')
         if [ -z "${OPERATOR_POD}" ]; then
-          echo "::error::Operator Pod disappeared after manager container readiness"
+          echo "::error::No Running operator Pod after its Deployment reported available"
           exit 1
         fi
 
         echo "::group::Resolved operator image identity"
-        kubectl get "${OPERATOR_POD}" -n "${NAMESPACE}" \
+        kubectl --kubeconfig="${VKUBECONFIG}" -n default get "${OPERATOR_POD}" \
           -o jsonpath='{range .status.initContainerStatuses[*]}initContainer={.name} image={.image} imageID={.imageID}{"\n"}{end}{range .status.containerStatuses[*]}container={.name} image={.image} imageID={.imageID}{"\n"}{end}'
         echo "::endgroup::"
 
@@ -716,17 +698,6 @@ runs:
         webhook_restarted=false
 
         restart_operator_for_webhook() {
-          local old_pod
-          local ready_pod
-          local restart_deadline
-
-          old_pod=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
-            | awk '$1 ~ /dynamo-platform-dynamo-operator-controller-manager/ {print $1; exit}' || true)
-          if [ -z "${old_pod}" ]; then
-            echo "::error::Operator pod disappeared before webhook recovery"
-            return 1
-          fi
-
           # The certificate secret can be created after the optional volume was
           # mounted. Restart once so kubelet projects the completed secret.
           kubectl --kubeconfig="${VKUBECONFIG}" -n default \
@@ -735,22 +706,14 @@ runs:
           kubectl --kubeconfig="${VKUBECONFIG}" -n default rollout restart \
             deployment/dynamo-platform-dynamo-operator-controller-manager
 
-          restart_deadline=$((SECONDS + 300))
-          while true; do
-            ready_pod=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
-              | awk -v old="${old_pod}" \
-                '$1 != old && $1 ~ /dynamo-platform-dynamo-operator-controller-manager/ && $2 == "1/1" {print $1; exit}' \
-              || true)
-            if [ -n "${ready_pod}" ]; then
-              echo "Replacement operator pod Ready: ${ready_pod}"
-              return 0
-            fi
-            if [ "${SECONDS}" -ge "${restart_deadline}" ]; then
-              echo "::error::Replacement operator pod not Ready after 300s"
-              return 1
-            fi
-            sleep 5
-          done
+          # Tracks observedGeneration, so the outgoing Pod cannot satisfy it.
+          if ! kubectl --kubeconfig="${VKUBECONFIG}" -n default rollout status \
+            deployment/dynamo-platform-dynamo-operator-controller-manager \
+            --timeout=300s; then
+            echo "::error::Replacement operator Pod not ready within 300s"
+            return 1
+          fi
+          echo "Operator restarted and its replacement Pod is ready"
         }
 
         SMOKE_OUTPUT=
@@ -874,19 +837,21 @@ runs:
         kubectl describe pods -n ${NAMESPACE} 2>&1 || true
         echo "::endgroup::"
 
-        OPERATOR_POD=$(kubectl get pods -n "${NAMESPACE}" \
-          -l control-plane=controller-manager \
-          -o name 2>/dev/null | head -1)
-        if [ -n "${OPERATOR_POD}" ]; then
-          echo "::group::Operator Pod YAML (host namespace)"
-          kubectl get "${OPERATOR_POD}" -n "${NAMESPACE}" -o yaml 2>&1 || true
+        # Report every operator Pod: a terminal one is usually the evidence this
+        # step exists to capture, and picking one by name can miss the live Pod.
+        OPERATOR_PODS=$(kubectl get pods -n "${NAMESPACE}" \
+          -l "vcluster.loft.sh/managed-by=${VCLUSTER_NAME},vcluster.loft.sh/namespace=default,control-plane=controller-manager" \
+          -o name 2>/dev/null || true)
+        for operator_pod in ${OPERATOR_PODS}; do
+          echo "::group::Operator Pod YAML (host namespace): ${operator_pod}"
+          kubectl get "${operator_pod}" -n "${NAMESPACE}" -o yaml 2>&1 || true
           echo "::endgroup::"
 
-          echo "::group::Operator logs (host namespace)"
-          kubectl logs "${OPERATOR_POD}" -n "${NAMESPACE}" \
+          echo "::group::Operator logs (host namespace): ${operator_pod}"
+          kubectl logs "${operator_pod}" -n "${NAMESPACE}" \
             --all-containers --tail=200 --prefix=true 2>&1 || true
           echo "::endgroup::"
-        fi
+        done
 
         HOST_WEBHOOK_SERVICE=$(kubectl get services -n "${NAMESPACE}" \
           -l app.kubernetes.io/component=webhook \

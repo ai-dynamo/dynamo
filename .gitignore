@@ -178,6 +178,12 @@ docs/fern/components/nightly-selector-data.generated.ts
 # Local git worktrees
 .worktrees/
 
+# Local discovery data for the vLLM image mock launch example
+.dynamo-mm-mock/
+
 
 # Optimization-run artifacts (EXP_ROOT lives at runs/<EXP_ID>/ in the repo root)
 /runs/
+
+# Agent skill-tool scratch: a per-session lease marker, never shared state.
+.agents/skills/.lease.json

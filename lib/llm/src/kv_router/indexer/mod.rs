@@ -54,7 +54,6 @@ pub(crate) use recovery::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResolvedApproximatePrimaryPolicy {
-    Disabled,
     Ttl,
     Lru,
     TtlRemoteFallback,
@@ -69,9 +68,6 @@ fn resolve_approximate_primary_policy(
         anyhow::bail!(
             "router_approximate_cache_policy=lru requires use_kv_events=false; the local side indexer is TTL-only"
         );
-    }
-    if config.overlap_score_credit <= 0.0 {
-        return Ok(ResolvedApproximatePrimaryPolicy::Disabled);
     }
     if config.use_kv_events
         || config.router_approximate_cache_policy == ApproximateCachePolicyKind::Ttl
@@ -94,10 +90,6 @@ pub(crate) async fn build(
     session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 ) -> Result<Indexer> {
     let approximate_policy = resolve_approximate_primary_policy(kv_router_config)?;
-    if approximate_policy == ResolvedApproximatePrimaryPolicy::Disabled {
-        return Ok(Indexer::None);
-    }
-
     if approximate_policy == ResolvedApproximatePrimaryPolicy::TtlRemoteFallback {
         tracing::warn!(
             use_remote_indexer = kv_router_config.use_remote_indexer,

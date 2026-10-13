@@ -17,7 +17,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use clap::Parser;
 use dc_ckf_parity::{DirectCkfParityConfig, DirectCkfParityIndexer, DirectCkfParityMatchMode};
+use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::replay::{
     WorkerReplayArtifacts, generate_replay_artifacts, generate_replay_artifacts_with_args,
     process_mooncake_trace,
@@ -30,7 +32,7 @@ use dynamo_kv_router::protocols::{
     KvCacheStoredBlockData, OverlapScores, StorageTier, TokensWithHashes, WorkerWithDpRank,
 };
 use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
-use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
+use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
 use dynamo_mocker::loadgen::{ReplayRequestHashes, SessionTrace, Trace, TurnTrace};
 use dynamo_mocker::replay::{
     ReplayTimedKvEvent, ReplayTimedRequest, ReplayWorkerArtifacts, native_g1_parent_chain_artifact,
@@ -105,26 +107,25 @@ impl MockEngineParityKind {
         }
     }
 
-    fn mock_engine_args(self) -> anyhow::Result<MockEngineArgs> {
-        let mut builder = MockEngineArgs::builder()
-            .engine_type(self.engine_type())
-            .num_gpu_blocks(PARITY_NUM_GPU_BLOCKS)
-            .block_size(BLOCK_SIZE as usize)
-            .speedup_ratio(10.0)
-            .enable_prefix_caching(true)
-            .max_num_batched_tokens(None)
-            .max_num_seqs(None);
-
+    fn mock_engine_args(self) -> anyhow::Result<MockerConfig> {
+        let mut config = serde_json::json!({
+            "engine": {
+                "backend": self.engine_type(),
+                "num_gpu_blocks": PARITY_NUM_GPU_BLOCKS,
+                "block_size": BLOCK_SIZE as usize,
+                "speedup_ratio": 10.0,
+                "enable_prefix_caching": true,
+                "max_num_batched_tokens": usize::MAX,
+                "max_num_seqs": usize::MAX
+            }
+        });
         if matches!(self, Self::Sglang) {
-            builder = builder.sglang(Some(SglangArgs {
-                page_size: Some(BLOCK_SIZE as usize),
-                max_prefill_tokens: Some(SGLANG_PARITY_PREFILL_TOKENS),
-                chunked_prefill_size: Some(SGLANG_PARITY_PREFILL_TOKENS),
-                ..Default::default()
-            }));
+            config["engine"]["sglang"] = serde_json::json!({
+                "max_prefill_tokens":SGLANG_PARITY_PREFILL_TOKENS,
+                "chunked_prefill_size":SGLANG_PARITY_PREFILL_TOKENS
+            });
         }
-
-        builder.build()?.normalized()
+        MockerConfig::from_value(config)
     }
 }
 
@@ -826,6 +827,38 @@ fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<
     Ok(())
 }
 
+#[derive(Parser)]
+struct CommonArgsCli {
+    #[clap(flatten)]
+    common: CommonArgs,
+}
+
+#[test]
+fn default_cli_args_load_the_canonical_512_token_fixture() -> anyhow::Result<()> {
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let parse = |extra: &[&str]| {
+        let mut argv = vec![
+            "mooncake_bench",
+            fixture.as_str(),
+            "--num-unique-inference-workers",
+            "2",
+        ];
+        argv.extend_from_slice(extra);
+        CommonArgsCli::try_parse_from(argv).map(|cli| cli.common)
+    };
+
+    // The Mooncake, Active Sequences, and approximate-LRU benches all load traces
+    // through `load_mooncake_trace`; default arguments must expand 512-token hash_ids.
+    assert!(!parse(&[])?.load_mooncake_trace(&fixture)?.is_empty());
+    // The 128-token engine block size cannot expand this fixture's prompts.
+    assert!(
+        parse(&["--trace-block-size", "128"])?
+            .load_mooncake_trace(&fixture)
+            .is_err()
+    );
+    Ok(())
+}
+
 #[test]
 fn removed_legacy_branch_sharded_name_is_rejected() {
     let removed_name = format!("{}-{}-branch-sharded-crtc", "anchor", "aware");
@@ -1092,7 +1125,6 @@ async fn native_g1_parent_chain_replays_across_indexer_variants() -> anyhow::Res
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
-        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
     ];
@@ -1126,7 +1158,6 @@ async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Resul
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
-        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
     ];
 
@@ -1186,7 +1217,6 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
-        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
     ];

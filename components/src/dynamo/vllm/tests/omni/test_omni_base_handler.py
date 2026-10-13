@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests that every DiffusionParallelConfig field is either exposed in Dynamo or intentionally skipped."""
+"""Tests for the configuration passed from Dynamo to vLLM-Omni."""
 
 import dataclasses
 from types import SimpleNamespace
@@ -11,6 +11,7 @@ import pytest
 
 try:
     from vllm_omni.config import DeployConfig, VllmOmniConfig
+    from vllm_omni.config.config_factory import StageConfigFactory
     from vllm_omni.diffusion.data import DiffusionParallelConfig
     from vllm_omni.model_executor.models.qwen3_tts.pipeline import QWEN3_TTS_PIPELINE
 
@@ -22,7 +23,9 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
+    pytest.mark.xpu_1,
     pytest.mark.pre_merge,
 ]
 
@@ -82,6 +85,18 @@ def _parallel_config_without(*excluded_fields):
         if field.name not in excluded_fields
     ]
     return dataclasses.make_dataclass("LegacyDiffusionParallelConfig", fields)
+
+
+def test_init_initializes_pause_state():
+    config = _make_config()
+    with (
+        patch.object(BaseOmniHandler, "_build_omni_kwargs", return_value={}),
+        patch("dynamo.vllm.omni.base_handler.AsyncOmni", return_value=MagicMock()),
+    ):
+        handler = BaseOmniHandler(None, config, {})
+
+    assert handler._paused is False
+    assert not handler._pause_lock.locked()
 
 
 class TestDiffusionParallelConfigCoverage:
@@ -168,6 +183,26 @@ class TestDiffusionParallelConfigCoverage:
 
         assert kwargs["output_modalities"] == ["image"]
 
+    @pytest.mark.parametrize("output_modality", ["image", "video"])
+    @pytest.mark.parametrize("layerwise_offload", [None, False, True])
+    def test_diffusion_kwargs_accepted_by_upstream(
+        self, output_modality, layerwise_offload
+    ):
+        """Exercise Omni's real validator without loading weights or using a GPU."""
+        config = _make_config()
+        config.output_modalities = [output_modality]
+        config.diffusion.enable_layerwise_offload = layerwise_offload
+
+        stages = StageConfigFactory.create_default_diffusion(_build_kwargs(config))
+
+        assert len(stages) == 1
+        assert stages[0]["stage_type"] == "diffusion"
+        if layerwise_offload is not None:
+            assert (
+                stages[0]["engine_args"]["enable_layerwise_offload"]
+                is layerwise_offload
+            )
+
     def test_tts_kwargs_accepted_by_upstream_pipeline(self):
         config = _make_config()
         config.diffusion.enforce_eager = True
@@ -197,14 +232,40 @@ class TestDiffusionParallelConfigCoverage:
             OmniDiffusionKwargs(),
             task_type="fl2va",
             lora_path=["/models/fasth3/adapter_model.safetensors"],
-            diffusion_attention_backend="TRTLLM_ATTN",
+            diffusion_attention_backend="FASTVIDEO_VSA",
+            fastvideo_vsa_topk=64,
         )
 
         kwargs = _build_kwargs(config)
 
         assert kwargs["task_type"] == "fl2va"
         assert kwargs["lora_path"] == ["/models/fasth3/adapter_model.safetensors"]
-        assert kwargs["diffusion_attention_backend"] == "TRTLLM_ATTN"
+        assert kwargs["diffusion_attention_backend"] == "FASTVIDEO_VSA"
+        assert kwargs["fastvideo_vsa_topk"] == 64
+
+    def test_diffusion_only_defaults_not_forwarded_to_async_omni(self):
+        kwargs = _build_kwargs(_make_config())
+
+        for field in (
+            "enable_layerwise_offload",
+            "layerwise_num_gpu_layers",
+            "vae_use_slicing",
+            "vae_use_tiling",
+            "boundary_ratio",
+            "enable_cache_dit_summary",
+            "enable_cpu_offload",
+        ):
+            assert field not in kwargs
+
+    def test_explicit_false_diffusion_option_forwarded_to_async_omni(self):
+        config = _make_config()
+        config.diffusion = dataclasses.replace(
+            OmniDiffusionKwargs(), vae_use_tiling=False
+        )
+
+        kwargs = _build_kwargs(config)
+
+        assert kwargs["vae_use_tiling"] is False
 
     def test_lora_disabled_resolves_no_capacity(self):
         config = _make_config()

@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# The image contains the tested Motif vLLM/Dynamo compatibility shim.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: motif3-agg-b200-chat-config
+  labels:
+    app.kubernetes.io/name: motif3-agg-b200-chat
+    app.kubernetes.io/part-of: dynamo
+data:
+  # Actual MTP verification used by the portable recipe.
+  speculative-config: |-
+    {
+      "method": "mtp",
+      "num_speculative_tokens": 2
+    }
+  # Benchmark-only: synthetic rejection sampling with a fixed coding
+  # acceptance length. Change the SPECULATIVE_CONFIG env key below to
+  # speculative-config-synthetic when reproducing a synthetic-AL trial.
+  speculative-config-synthetic: |-
+    {
+      "method": "mtp",
+      "num_speculative_tokens": 2,
+      "rejection_sample_method": "synthetic",
+      "synthetic_acceptance_length": 2.13
+    }
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: motif3-agg-b200
+  labels:
+    app.kubernetes.io/name: motif3-agg-b200
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      runtimeVersionOverride: 1.5.0
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+              imagePullPolicy: IfNotPresent
+              command: [python3]
+              args:
+                - -m
+                - dynamo.frontend
+                - --dyn-chat-processor
+                - vllm
+                - --model-name
+                - Motif-Technologies/Motif-3-NVFP4
+                - --trust-remote-code
+                - --http-port
+                - "8000"
+                - --tool-call-parser
+                - motif
+                - --reasoning-parser
+                - motif
+                - --enable-auto-tool-choice
+              resources: {}
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: DYN_ROUTER_MODE
+                  value: round-robin
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+
+    - name: Worker
+      type: worker
+      replicas: 1
+      runtimeVersionOverride: 1.5.0
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+              imagePullPolicy: IfNotPresent
+              command: [python3, -m, dynamo.vllm]
+              args:
+                - --model=Motif-Technologies/Motif-3-NVFP4
+                - --served-model-name=Motif-Technologies/Motif-3-NVFP4
+                - --trust-remote-code
+                - --quantization=modelopt_nvfp4
+                - --speculative-config=$(SPECULATIVE_CONFIG)
+                - --tensor-parallel-size=2
+                - --data-parallel-size=1
+                - --data-parallel-size-local=1
+                - --enable-expert-parallel
+                - --dtype=bfloat16
+                - --gpu-memory-utilization=0.85
+                - --max-model-len=262144
+                - --block-size=128
+                - --kv-cache-dtype=fp8
+                - --scheduler-cls
+                - vllm.v1.core.sched.async_scheduler.AsyncScheduler
+                - --dyn-enable-structural-tag
+              env:
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: DYN_SELF_HOST_METADATA
+                  value: "1"
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: VLLM_USE_V2_MODEL_RUNNER
+                  value: "1"
+                - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+                  value: "300"
+                - name: SPECULATIVE_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: motif3-agg-b200-chat-config
+                      key: speculative-config
+              resources:
+                requests:
+                  nvidia.com/gpu: "2"
+                limits:
+                  nvidia.com/gpu: "2"
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache

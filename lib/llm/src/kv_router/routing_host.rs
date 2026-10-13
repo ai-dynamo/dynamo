@@ -41,7 +41,7 @@ use crate::{
     },
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
-        explicit_target, from_table, invalid_argument,
+        explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
     },
 };
 
@@ -543,6 +543,14 @@ impl RoutingHost {
         }
     }
 
+    pub(crate) fn available_worker_ids(&self) -> HashSet<u64> {
+        self.inner
+            .client
+            .available_instance_ids()
+            .map(|ids| ids.as_ref().clone())
+            .unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub(crate) fn occupancy_for_test(&self, worker_id: u64) -> u64 {
         self.inner.occupancy_for_test(worker_id)
@@ -581,6 +589,28 @@ impl RoutingHost {
             RoutingPolicy::Direct => None,
             RoutingPolicy::Kv(_) => None,
         }
+    }
+
+    /// The group key for a subagent: a request that carries a parent session id binds under the
+    /// parent's group instead of its own session, so siblings share a worker while the parent
+    /// keeps its own binding. An explicit per-request target stays on the request's own session so
+    /// it cannot be rejected against, or rebind, the group.
+    fn group_binding_id(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        explicit: Option<AffinityTarget>,
+    ) -> Option<Arc<SessionAffinityId>> {
+        if explicit.is_some() {
+            return None;
+        }
+        let parent_session_id = request
+            .content()
+            .agent_context
+            .as_ref()
+            .and_then(|context| context.parent_session_id.as_deref())?;
+        Some(Arc::new(SessionAffinityId::new(
+            subagent_group_affinity_id(parent_session_id),
+        )))
     }
 
     /// Commit a held session to the dispatched worker; a request without a
@@ -709,6 +739,9 @@ impl RoutingHost {
             return Ok((select(None).await?, None));
         };
         let explicit = explicit_target(request.content(), phase)?;
+        let session_id = self
+            .group_binding_id(request, explicit)
+            .unwrap_or(session_id);
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
             return Ok((select(target).await?, None));
@@ -808,11 +841,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // One cleanup budget for this request's whole route through the host.
         let budget = CleanupBudget::default();
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
-            let phase = request
-                .tracker
-                .as_ref()
-                .map(|tracker| tracker.phase())
-                .unwrap_or(RequestPhase::Aggregated);
+            let phase = request.phase();
             return self
                 .select_and_dispatch_builtin(request, phase, |_, _| Ok(()))
                 .await
@@ -820,11 +849,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-        let phase = request
-            .tracker
-            .as_ref()
-            .map(|tracker| tracker.phase())
-            .unwrap_or(RequestPhase::Aggregated);
+        let phase = request.phase();
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let (mut selection, mut operation) = self
@@ -846,9 +871,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 );
                 tracker.record_router_queue_depth(self.kv_router().pending_count());
             }
-            self.request_metrics
-                .input_sequence_tokens
-                .observe(request.token_ids.len() as f64);
             let stream_context = request.context().clone();
             let worker_id_info = request
                 .tracker
