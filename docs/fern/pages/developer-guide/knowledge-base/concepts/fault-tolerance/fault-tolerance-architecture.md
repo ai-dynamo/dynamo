@@ -9,9 +9,7 @@ Dynamo fault tolerance spans requests, runtime and discovery, inference engines,
 and the deployment platform. Each layer detects and handles different failures.
 Dynamo does not yet coordinate them through one recovery policy.
 
-This page documents current behavior. Proposed ownership, policies, and shared
-recovery flows remain in the corresponding Dynamo Enhancement Proposal (DEP)
-until approved.
+This page documents current behavior and known coverage limits.
 
 The diagrams show Kubernetes deployments. Local deployments use the same
 application layers, but rely on a process supervisor instead of Kubernetes to
@@ -127,7 +125,8 @@ flowchart TB
 
 The request layer can retry eligible work, the runtime controls endpoint
 eligibility, and the platform restores capacity. The exact conditions for
-returning an endpoint to traffic vary by backend and require owner confirmation.
+returning an endpoint to traffic vary by backend. Dynamo does not define one
+cross-backend return-to-service contract.
 
 ## Component Responsibilities
 
@@ -164,19 +163,19 @@ for Shadow Engine Failover, the [Snapshot workflow](../../../../kubernetes/model
 for `PodSnapshot` startup behavior, and the [GPU Memory Service architecture](https://github.com/ai-dynamo/dynamo/blob/main/lib/gpu_memory_service/README.md)
 for its memory-lifetime model.
 
-## Candidate Combinations
+## Common Compositions and Limits
 
-These combinations are starting points for owner review, not supported guidance.
+Current mechanisms can be combined without forming one shared recovery policy.
 
-| Goal | Candidate combination | Known boundary | Validation status |
-| --- | --- | --- | --- |
-| Preserve eligible requests during worker loss | Compatible spare workers, discovery, local inhibition, and request migration | Migration eligibility varies by request type | Frontend and runtime review required |
-| Protect planned rollout or scale-down | Graceful shutdown, sufficient Pod termination time, and request migration | Kubernetes can terminate the Pod when its deadline expires | Frontend and Operator review required |
-| Keep disaggregated serving available | Spare prefill and decode capacity, discovery, request migration, and workload replacement | A request can still fail when transfer or an entire pool is unavailable | Backend, runtime, and Operator review required |
-| Reduce same-node process recovery time | Shadow Engine Failover with GMS on a supported backend and topology | Does not preserve requests or KV cache and does not cover GPU or node loss | GMS, backend, and Operator review required |
-| Reduce initialized-worker startup time | Snapshot with a compatible artifact and supported backend | Startup acceleration is separate from failed-worker selection | Snapshot, backend, and Operator review required |
-| Reduce model-loading time | ModelExpress with replacement capacity and backend readiness checks | Faster loading does not establish application readiness | ModelExpress, backend, and Operator review required |
-| Restore tensor-parallel or multinode capacity | Backend-specific recovery with the configured workload provider | Rank and cohort recovery behavior is not uniform | Backend and workload-provider review required |
+| Composition | Mechanisms | Current limit |
+| --- | --- | --- |
+| Request continuity during worker loss | Compatible spare workers, discovery, local inhibition, and request migration | Only eligible requests migrate, and compatible spare capacity must remain |
+| Planned rollout or scale-down | Graceful shutdown, sufficient Pod termination time, and request migration | Kubernetes can terminate the Pod when its deadline expires |
+| Disaggregated pool continuity | Spare prefill and decode capacity, discovery, request migration, and workload replacement | Transfer failure or loss of an entire pool can still fail a request |
+| Same-node process recovery | Shadow Engine Failover with GMS on a supported backend and topology | Does not preserve requests or KV cache and does not cover GPU or node loss |
+| Initialized-worker startup | Snapshot with a compatible artifact and supported backend | Accelerates startup but does not select failed-worker recovery |
+| Model-loading acceleration | ModelExpress with replacement capacity and backend readiness checks | Faster loading does not establish application readiness |
+| Tensor-parallel or multinode capacity restoration | Backend-specific recovery with the configured workload provider | Rank and cohort recovery behavior varies by backend and provider |
 
 ## Detection and Action Ownership
 
@@ -190,11 +189,11 @@ These combinations are starting points for owner review, not supported guidance.
 | Engine process exits | Process and Pod state | Backend wrapper and Kubernetes | Backend cleanup, then Kubernetes restart or replacement | Capacity is unavailable until a ready endpoint registers |
 | GPU or node fails | Device plugin, node, Pod, or infrastructure status | Kubernetes and cluster health integrations | Kubernetes and the configured workload provider | Affected endpoints disappear. Replacement behavior depends on deployment policy |
 | Tensor-parallel rank fails | Engine or collective failure | Inference engine and process group | Backend and configured workload provider | The cohort is unavailable. Replacement behavior depends on the backend and provider |
-| Shadow engine fails over | Active engine process exit and failover state | Operator failover workflow and backend integration. Exact ownership requires confirmation | Standby engine workflow. Exact action ownership requires confirmation | New traffic waits for the standby engine. In-flight requests and KV cache are not preserved |
+| Shadow engine fails over | Active engine process exit and failover state | Operator failover workflow and backend integration | Standby engine workflow | New traffic waits for the standby engine. In-flight requests and KV cache are not preserved |
 | Snapshot capture or restore fails | `SnapshotJob`, `PodSnapshot`, and Pod status | Standalone Snapshot operator and Dynamo Operator | Snapshot operator handles artifacts. DGD startup policy controls serving replica startup | `WaitForCheckpoint` keeps serving replicas gated. `Immediate` starts them cold |
 | NIXL transfer fails | Backend transfer error | Backend and NIXL | Request owner and backend | The request fails or migrates when eligible. NIXL does not restore the worker |
-| ModelExpress model loading fails | Loader, stream, or backend startup signal. Exact signal needs confirmation | ModelExpress and backend integration. Owner review required | Retry or fallback owner is unconfirmed | A failed replacement should remain unavailable. Registration and fallback behavior require owner confirmation |
-| NATS request or event transport fails | Client or transport signal. Exact signal needs confirmation | NATS deployment and calling component. Owner review required | Retry and recovery ownership require confirmation | Endpoint removal and rejoin behavior depend on the affected plane and remain unconfirmed |
+| ModelExpress model loading fails | Loader, stream, or backend startup signal | ModelExpress or backend integration, depending on the failure | Deployment or backend integration, depending on the configured fallback | ModelExpress does not establish backend readiness or endpoint eligibility |
+| NATS request or event transport fails | Client or transport signal | NATS client or calling component | NATS deployment or calling component | Recovery behavior depends on the affected request or event plane |
 
 Detection and recovery can have different owners. The Frontend may detect and
 retry a broken request, while Kubernetes restores the lost capacity.
@@ -207,11 +206,11 @@ replacement, and return-to-service ordering vary by backend and deployment.
 
 | Mechanism | Removal from traffic | Recovery or replacement | Return to service | Status |
 | --- | --- | --- | --- | --- |
-| Runtime discovery | Membership loss or local inhibition removes or suppresses an endpoint | A replacement is created outside discovery | Registration and membership propagation make the endpoint visible again | Backend-specific registration order requires runtime-owner confirmation |
+| Runtime discovery | Membership loss or local inhibition removes or suppresses an endpoint | A replacement is created outside discovery | Registration and membership propagation make the endpoint visible again | Registration order is backend-specific. Dynamo does not define one return-to-service sequence |
 | Kubernetes workload | Failed Pod or node removes capacity | Kubernetes or the configured workload provider restarts or replaces capacity | Pod readiness and Dynamo endpoint eligibility are separate checks | Current platform boundary. Application readiness is component-specific |
-| Shadow Engine Failover | Failed active engine stops serving | A standby engine takes over on the same healthy node and GPU allocation | Backend and endpoint health must succeed before traffic returns | Exact detection and readiness ownership require confirmation |
-| ModelExpress-assisted startup | A failed replacement should never join normal routing | Retry or fallback behavior is unconfirmed | Backend readiness and registration are required | Owner review required for signals, fallback, and registration order |
-| NATS transport | The affected request or event path may become unavailable without removing worker membership | Deployment or client recovery behavior is unconfirmed | Calling components resume when the required transport path is usable | Owner review required for every affected plane |
+| Shadow Engine Failover | Failed active engine stops serving | A standby engine takes over on the same healthy node and GPU allocation | Backend and endpoint health must succeed before traffic returns | Detection and readiness span Operator and backend-specific signals |
+| ModelExpress-assisted startup | ModelExpress does not control removal from normal routing | Retry and fallback behavior are backend-specific | Backend and runtime determine readiness and registration | Dynamo does not define one ModelExpress fallback or registration sequence |
+| NATS transport | The affected request or event path may become unavailable without removing worker membership | Deployment and client recovery are plane-specific | Calling components resume when the required transport path is usable | Dynamo does not define one recovery sequence across request and event planes |
 
 See [Distributed Runtime](../system-architecture/architecture.md#distributed-runtime)
 for discovery and lease behavior, [Request Migration](../../../../kubernetes/fault-tolerance/request-migration.md)
@@ -227,13 +226,13 @@ for endpoint health states.
 | Aggregated, multiple workers across nodes | Worker process, Pod, or node | Request migration and discovery-based rerouting when compatible capacity remains | Kubernetes restart or replacement | No shared recovery history across request and platform actions |
 | Disaggregated prefill and decode on one node | Individual prefill or decode worker, process, or Pod | Discovery rerouting and request migration when the request is eligible | Kubernetes restores the affected pool | A node failure can remove both pools |
 | Disaggregated prefill and decode across nodes | Individual worker, pool capacity, Pod, or node | Discovery rerouting and request migration when compatible pool capacity remains | Kubernetes restores the affected pool | No common operation coordinates request, KV-transfer, and worker recovery |
-| Tensor parallelism with all ranks on one node | Rank, process, Pod, or complete cohort | Engine-specific failure handling | Backend and workload-provider behavior requires owner confirmation | One node failure removes the cohort. Fixed-rank recovery support is backend-specific |
-| Tensor parallelism across nodes | Rank, process, Pod, node, or complete cohort | Engine-specific failure handling | Cohort-recreation behavior depends on the backend and workload provider and requires confirmation | No verified common fixed-rank or cohort-recovery behavior |
+| Tensor parallelism with all ranks on one node | Rank, process, Pod, or complete cohort | Engine-specific failure handling | Backend and workload-provider behavior is implementation-specific | One node failure removes the cohort. Fixed-rank recovery support is backend-specific |
+| Tensor parallelism across nodes | Rank, process, Pod, node, or complete cohort | Engine-specific failure handling | Cohort-recreation behavior depends on the backend and workload provider | Dynamo does not define common fixed-rank or cohort-recovery behavior |
 | Worker with GMS | Engine process on the same GPU | Backend-specific memory reuse | Process supervisor or Kubernetes | GMS alone does not configure failover |
 | Worker with Shadow Engine Failover | Active engine process on the same healthy node and GPU allocation | Standby engine takes over by using GMS-owned weights | Shadow Engine Failover workflow | No in-flight request or KV-cache preservation. No coverage for GMS, GPU, or node loss |
 | Worker with Snapshot | New Pod startup | Restore from a ready compatible checkpoint | Dynamo Operator, Snapshot, and Kubernetes | Artifact readiness is tracked separately from runtime failure recovery |
 | Worker with ModelExpress | New Pod startup | Faster weight delivery | Kubernetes plus ModelExpress | Startup acceleration does not verify application readiness |
-| Deployment using NATS | Request or event transport path | Calling-component retry or NATS deployment recovery, when configured | NATS deployment and calling component | Failure and recovery behavior depend on the affected plane and require owner confirmation |
+| Deployment using NATS | Request or event transport path | Calling-component retry or NATS deployment recovery, when configured | NATS deployment and calling component | Dynamo does not define common recovery behavior across request and event planes |
 
 ## Enablement and Status
 
@@ -259,16 +258,15 @@ Canary defaults depend on how the worker is launched and which runtime version
 the Operator resolves. See the [Dynamo v1.5.0 release notes](../../../../reference/general/releases/dynamo-v1-5-0.mdx#kubernetes-deployment)
 and [Health Check Reference](../../../../reference/observability/health-checks.mdx#active-canary-configuration).
 
-## Open Questions
+## Current Coverage Limits
 
-| Question | Classification | Required review |
-| --- | --- | --- |
-| What exact signal removes each backend endpoint from discovery and routing? | Backend-specific unknown | Runtime and backend owners |
-| What proves that replacement capacity is safe to receive traffic? | Unresolved readiness boundary | Frontend, runtime, backend, and Operator owners |
-| Which ModelExpress failures retry, fall back, or fail startup? | Unknown | ModelExpress, backend, and Operator owners |
-| How does NATS unavailability affect each request and event plane? | Unknown | NATS and calling-component owners |
-| Which tensor-parallel and multinode failures permit rank recovery versus cohort recreation? | Backend-specific unknown | Backend and workload-provider owners |
-| Which candidate combinations should become recommended guidance? | Proposal | Every component owner named by the combination |
+| Area | Current documented limit |
+| --- | --- |
+| Endpoint lifecycle | Removal and return-to-service signals vary by backend. Dynamo does not define one cross-backend sequence |
+| Replacement readiness | Kubernetes Pod readiness and Dynamo endpoint eligibility are separate. Dynamo does not define one end-to-end replacement-readiness contract |
+| ModelExpress fallback | Retry, fallback, and registration behavior vary by backend integration |
+| NATS recovery | Failure and recovery behavior depend on the request or event plane, NATS deployment, and calling component |
+| Tensor-parallel and multinode recovery | Rank recovery and cohort recreation depend on the backend and workload provider |
 
 ## Related Documentation
 
