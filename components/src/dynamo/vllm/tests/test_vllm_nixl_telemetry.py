@@ -121,6 +121,7 @@ def test_headless_clears_false_enable_before_workers(monkeypatch):
     }
 
 
+@pytest.mark.timeout(30)  # ~4s warm; a cold vLLM import is slower
 def test_vllm_general_plugin_clears_false_enable():
     pytest.importorskip("vllm")
     env = {
@@ -147,7 +148,7 @@ def test_vllm_general_plugin_clears_false_enable():
         env=env,
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=20,
         check=True,
     )
 
