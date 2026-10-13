@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Helpers shared by the Triton ``/v1/classify`` and ``/v1/embeddings`` workers.
+"""Helpers and base class shared by the Triton ``/v1/classify`` and
+``/v1/embeddings`` workers.
 
 Both handlers read the Triton model config directly from ``config.pbtxt``
 and reject token-ID input, because a Triton token-input ensemble uses
@@ -11,10 +12,20 @@ not carried on the OpenAI request.
 
 from __future__ import annotations
 
-from typing import Any, Final, Optional
+import logging
+from typing import Any, AsyncGenerator, Final, Optional
 
 import numpy as np
 import tritonclient.grpc.model_config_pb2 as mc
+from tritonserver import MemoryType as TritonMemoryType
+from tritonserver import Model as TritonModel
+from tritonserver import Server as TritonServer
+from tritonserver import Tensor as TritonTensor
+from tritonserver import TritonError
+
+from dynamo.common.backend.health_check import is_probe
+
+logger = logging.getLogger(__name__)
 
 TYPE_STRING: Final[int] = mc.DataType.TYPE_STRING
 TYPE_FP32: Final[int] = mc.DataType.TYPE_FP32
@@ -214,3 +225,165 @@ def extract_text_input(input_field: Any, task_label: str) -> list[str]:
         f"{task_label} 'input' has unsupported type {type(input_field).__name__}; "
         "expected str or list[str]"
     )
+
+
+class PoolingWorkerHandlerBase:
+    """Shared pipeline for the Triton ``/v1/classify`` and ``/v1/embeddings`` workers."""
+
+    task_label: str = ""
+    cli_input_flag: str = ""
+    cli_output_flag: str = ""
+    endpoint: str = ""
+    unsupported_controls: tuple[str, ...] = ()
+
+    def __init__(
+        self,
+        server: TritonServer,
+        model: TritonModel,
+        triton_model_config: mc.ModelConfig,
+        input_name: Optional[str] = None,
+        output_name: Optional[str] = None,
+    ) -> None:
+        self._server = server
+        self._model = model
+        self._config = triton_model_config
+        self._input_name = resolve_string_input_name(
+            self._config,
+            model.name,
+            input_name,
+            task_label=self.task_label,
+            cli_flag=self.cli_input_flag,
+        )
+        validate_string_input_dims(
+            self._config,
+            self._input_name,
+            model.name,
+            task_label=self.task_label,
+            endpoint=self.endpoint,
+        )
+        self._output_name = resolve_fp32_output_name(
+            self._config,
+            model.name,
+            output_name,
+            task_label=self.task_label,
+            cli_flag=self.cli_output_flag,
+        )
+        # Read batching from the parsed proto (not model.config()) so the
+        # disk-fallback path in main.py._read_model_config still routes
+        # batchable models through the [N, 1] BYTES shape when the
+        # runtime config is unavailable.
+        self._batched = self._config.max_batch_size > 0
+        logger.info(
+            "%s worker for model '%s' initialized: input=%s, output=%s, batched=%s",
+            self.task_label.capitalize(),
+            model.name,
+            self._input_name,
+            self._output_name,
+            self._batched,
+        )
+
+    async def generate(
+        self, request: dict, context: Any = None
+    ) -> AsyncGenerator[dict, None]:
+        logger.debug(
+            "Received %s request for model %s", self.task_label, self._model.name
+        )
+
+        if is_probe(request):
+            yield self._probe()
+            return
+
+        self._pre_dispatch(request)
+
+        async for response in self._run(request, context):
+            yield response
+
+    def _pre_dispatch(self, request: dict) -> None:
+        pass
+
+    async def _run(self, request: dict, context: Any) -> AsyncGenerator[dict, None]:
+        model_name = request.get("model") or self._model.name
+        prompts = extract_text_input(request.get("input"), task_label=self.task_label)
+        require_batched_or_single(
+            prompts,
+            self._batched,
+            self._model.name,
+            self._config.max_batch_size,
+            task_label=self.task_label,
+        )
+        reject_unsupported_controls(
+            request, self.unsupported_controls, task_label=self.task_label
+        )
+
+        # Send the whole batch through Triton in one InferRequest so the
+        # backend's dynamic batcher sees them together.
+        inference_request = self._model.create_request()
+        # Triton BYTES input: object array of bytes-strings with shape [N, 1]
+        # when the model is batchable (max_batch_size > 0), else [N].
+        arr = np.array([[s.encode()] for s in prompts], dtype=object)
+        if not self._batched:
+            arr = arr.reshape(-1)
+        inference_request.inputs[self._input_name] = arr
+
+        data: list[dict[str, Any]] = []
+
+        inference_responses = self._model.async_infer(inference_request)
+        async for inference_response in inference_responses:
+            output_tensor = inference_response.outputs[self._output_name]
+
+            if (
+                isinstance(output_tensor, TritonTensor)
+                and output_tensor.memory_type != TritonMemoryType.CPU
+            ):
+                output_tensor = output_tensor.to_host()
+            # copy=False makes astype a no-op on FP32 (the resolved output
+            # is FP32 by construction), avoiding a payload-sized copy.
+            arr_out = np.from_dlpack(output_tensor).astype(np.float32, copy=False)
+
+            arr_out = normalize_fp32_by_batching_contract(
+                arr_out,
+                self._batched,
+                self._model.name,
+                self._output_name,
+                self._config.max_batch_size,
+            )
+
+            for idx in range(arr_out.shape[0]):
+                row = self._row_from_output(arr_out[idx], inference_response)
+                row["index"] = len(data)
+                data.append(row)
+
+        # A batch of N inputs must produce exactly N rows. A non-batch-aligned
+        # Triton response (misconfigured ensemble, unbatched model, wrong
+        # output shape) would otherwise silently return an incomplete response
+        # with the wrong indices.
+        if len(data) != len(prompts):
+            raise RuntimeError(
+                f"Triton model '{self._model.name}' returned {len(data)} "
+                f"{self.task_label} row(s) for {len(prompts)} input(s); expected "
+                "one row per input. Check the model's batching config or "
+                "ensemble output shape."
+            )
+
+        yield self._response_envelope(data, model_name, request, context)
+
+    def _row_from_output(self, arr_row: np.ndarray, inference_response: Any) -> dict:
+        raise NotImplementedError
+
+    def _response_envelope(
+        self, data: list[dict], model_name: str, request: dict, context: Any
+    ) -> dict:
+        raise NotImplementedError
+
+    def _probe(self) -> dict:
+        try:
+            if not self._server.ready():
+                raise RuntimeError("server not ready")
+            if not self._model.ready():
+                raise RuntimeError(f"model {self._model.name} not ready")
+        except TritonError as exc:
+            raise RuntimeError(f"triton not ready: {exc}") from exc
+        return self._probe_envelope()
+
+    def _probe_envelope(self) -> dict:
+        raise NotImplementedError
