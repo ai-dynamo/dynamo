@@ -193,9 +193,7 @@ def _tag_xfail_for_datadog(item) -> None:
                 # two cannot be collapsed downstream.
                 "test.xfail_strict": str(
                     bool(
-                        marker.kwargs.get(
-                            "strict", item.config.getini("xfail_strict")
-                        )
+                        marker.kwargs.get("strict", item.config.getini("xfail_strict"))
                     )
                 ).lower(),
             }
