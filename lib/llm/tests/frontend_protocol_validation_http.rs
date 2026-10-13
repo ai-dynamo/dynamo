@@ -885,6 +885,51 @@ async fn anthropic_handler_errors_record_classification_with_response() {
     .await;
 }
 
+/// Invalid keys must produce HTTP 400 before generation, including before HTTP
+/// 200 streaming headers can be committed for a streaming request.
+#[tokio::test]
+#[serial]
+async fn completion_endpoints_reject_invalid_logit_bias_keys() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        for stream in [false, true] {
+            for (path, body) in [
+                (
+                    "/v1/chat/completions",
+                    json!({
+                        "model": MODEL,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "stream": stream,
+                        "logit_bias": {"not-a-token": 1.0}
+                    }),
+                ),
+                (
+                    "/v1/completions",
+                    json!({
+                        "model": MODEL,
+                        "prompt": "ping",
+                        "stream": stream,
+                        "logit_bias": {"not-a-token": 1.0}
+                    }),
+                ),
+            ] {
+                let response = post_json(&svc, path, body).await;
+                assert_openai_error(
+                    response,
+                    ExpectedError::Validation,
+                    "Logit bias key must be a non-negative 32-bit integer token id",
+                )
+                .await;
+            }
+        }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 // `reqwest::send` completes when response headers arrive. A 400 for `stream: true`
 // proves converted-request validation ran before the HTTP 200 SSE response was committed.
 #[tokio::test]

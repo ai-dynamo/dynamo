@@ -77,7 +77,7 @@ impl HarnessService {
             .port(port)
             .host("127.0.0.1")
             .enable_chat_endpoints(true)
-            .enable_cmpl_endpoints(false)
+            .enable_cmpl_endpoints(true)
             .enable_responses_endpoints(true)
             .enable_anthropic_endpoints(true)
             .build()
