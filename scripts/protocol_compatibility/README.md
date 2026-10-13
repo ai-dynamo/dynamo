@@ -15,8 +15,12 @@ This package composes and compares schemas from the independent native export;
 see the [composition guide](../../lib/llm/docs/protocol-openapi-composition.md).
 Native schema export is an independent prerequisite. Offline composition lives
 in this tooling package alongside independent request and response comparison.
-Native `/openapi.json` still contains explicit dependency import slots;
-composition does not modify the running frontend.
+Native `/openapi.json` still contains explicit dependency import slots because the
+pinned async-openai 0.42.1 types lack the schema annotations needed to compile them
+into the export. Composition is a temporary offline bridge and does not modify the
+running frontend. Async-openai 0.42.2 contains the annotations; track the remaining
+frontend-crates integration and removal of obsolete composition mappings in
+[frontend-crates issue #351](https://github.com/ai-dynamo/frontend-crates/issues/351).
 
 ## Installation
 
