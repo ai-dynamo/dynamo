@@ -277,18 +277,12 @@ impl PrefillLoadTracker {
                     .expect("unmodeled_prefill_count underflow");
             }
         }
+        let removed = self.prefill_order.remove(&tracked.order);
+        debug_assert_eq!(removed.as_ref(), Some(request_id));
         let removed_front = self
             .anchored_prefill
             .as_ref()
             .is_some_and(|(anchored_id, _)| anchored_id == request_id);
-        if removed_front {
-            self.prefill_order.pop_first();
-        } else {
-            self.prefill_order.remove(&tracked.order);
-        }
-        if self.prefill_order.is_empty() {
-            self.next_order = 0;
-        }
         if !removed_front && let Some(expected_prefill_duration) = prefill.expected_prefill_duration
         {
             self.shift_anchor_forward(expected_prefill_duration, decay_now);
