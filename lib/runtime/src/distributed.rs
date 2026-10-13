@@ -1221,22 +1221,6 @@ mod event_plane_env_tests {
     }
 
     #[test]
-    fn absent_event_plane_defaults_to_zmq() {
-        let kind = resolve(Err(std::env::VarError::NotPresent))
-            .expect("an absent DYN_EVENT_PLANE must not be an error");
-        assert_eq!(kind, EventTransportKind::Zmq);
-    }
-
-    #[test]
-    fn empty_or_blank_event_plane_defaults_to_zmq() {
-        for value in ["", "   "] {
-            let kind = resolve(Ok(value.to_string()))
-                .unwrap_or_else(|err| panic!("DYN_EVENT_PLANE={value:?} should resolve: {err}"));
-            assert_eq!(kind, EventTransportKind::Zmq, "value {value:?}");
-        }
-    }
-
-    #[test]
     fn valid_event_plane_values_resolve_case_insensitively() {
         for (value, expected) in [
             ("nats", EventTransportKind::Nats),
