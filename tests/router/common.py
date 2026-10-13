@@ -1056,9 +1056,8 @@ def _test_remote_indexer_decisions(
         }
 
         async def wait_for_serving_indexers(i: int, token_ids: list[int]) -> None:
-            # The consumer's remote queries round-robin across the serving routers, so
-            # every replica must have ingested the pinned requests' KV events, not just
-            # the one a single consumer-side check happens to reach.
+            # Remote queries round-robin across serving routers, so every replica
+            # must have ingested the pinned requests' KV events before scoring.
             deadline = time.monotonic() + 10
             for idx, serving_router in enumerate(serving_routers):
                 while True:
