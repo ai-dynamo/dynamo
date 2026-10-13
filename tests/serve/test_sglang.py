@@ -167,9 +167,13 @@ sglang_configs = {
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(3.7),  # same deployment as "aggregated"
-            pytest.mark.requested_sglang_kv_tokens(2048),
-            pytest.mark.timeout(360),  # same deployment as "aggregated"
+            pytest.mark.profiled_vram_gib(
+                3.9
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                512
+            ),  # 2x safety over min=256; payloads are ~16-token prompts + 30 max_tokens
+            pytest.mark.timeout(360),  # ~7x observed ~51s; CI machines are slower
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
