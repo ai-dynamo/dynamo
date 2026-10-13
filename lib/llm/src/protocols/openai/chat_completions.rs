@@ -514,6 +514,22 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     fn get_best_of(&self) -> Option<u8> {
         None // Not supported in chat completions
     }
+
+    /// Retrieves the logit_bias map with string token-ID keys converted to
+    /// `u32`. Validation rejects non-numeric keys before extraction.
+    fn get_logit_bias(&self) -> Option<HashMap<u32, f32>> {
+        self.inner
+            .logit_bias
+            .as_ref()
+            .filter(|bias| !bias.is_empty())
+            .map(|bias| {
+                bias.iter()
+                    .filter_map(|(token, value)| {
+                        Some((token.parse::<u32>().ok()?, value.as_f64()? as f32))
+                    })
+                    .collect()
+            })
+    }
 }
 
 /// Implements `CommonExtProvider` for `NvCreateChatCompletionRequest`,
@@ -1162,6 +1178,23 @@ mod tests {
 
         let err = ValidateRequest::validate(&request).expect_err("multi-choice token ids");
         assert!(err.to_string().contains("completion_token_ids"));
+    }
+
+    #[test]
+    fn test_logit_bias_reaches_sampling_options() {
+        let request = chat_request_with(&json!({"logit_bias": {"18": -100, "42": 5.5}}));
+        ValidateRequest::validate(&request).expect("valid logit_bias must pass validation");
+
+        let sampling_options = request
+            .extract_sampling_options()
+            .expect("logit_bias extraction failed");
+        let logit_bias = sampling_options
+            .logit_bias
+            .expect("logit_bias must survive extraction");
+
+        assert_eq!(logit_bias.len(), 2);
+        assert_eq!(logit_bias.get(&18), Some(&-100.0));
+        assert_eq!(logit_bias.get(&42), Some(&5.5));
     }
 
     #[test]

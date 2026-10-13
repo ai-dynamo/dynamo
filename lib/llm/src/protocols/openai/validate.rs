@@ -432,7 +432,8 @@ pub fn validate_min_p(min_p: Option<f32>) -> Result<(), anyhow::Error> {
 }
 
 /// Validates logit bias map: each key must be a token id (the string form of a
-/// `u32`) and each value a number within the allowed bias range.
+/// `u32`), each value a number within the allowed bias range, and no two keys
+/// may parse to the same token id.
 pub fn validate_logit_bias(
     logit_bias: &Option<std::collections::HashMap<String, serde_json::Value>>,
 ) -> Result<(), anyhow::Error> {
@@ -441,10 +442,15 @@ pub fn validate_logit_bias(
         None => return Ok(()),
     };
 
+    let mut seen_ids = std::collections::HashSet::new();
     for (token, bias_value) in logit_bias {
-        token.parse::<u32>().map_err(|_| {
+        let token_id = token.parse::<u32>().map_err(|_| {
             anyhow::anyhow!("Logit bias key must be a non-negative 32-bit integer token id")
         })?;
+
+        if !seen_ids.insert(token_id) {
+            anyhow::bail!("Logit bias token id {token_id} is specified more than once");
+        }
 
         let bias = bias_value.as_f64().ok_or_else(|| {
             anyhow::anyhow!(
@@ -1153,6 +1159,27 @@ mod tests {
         for key in ["0", "50256", "4294967295"] {
             assert!(validate_logit_bias(&bias(key)).is_ok(), "key: {key}");
         }
+    }
+
+    #[test]
+    fn test_validate_logit_bias_rejects_duplicate_token_ids() {
+        for second_key in ["+18", "018"] {
+            let bias = Some(HashMap::from([
+                ("18".to_string(), json!(-100)),
+                (second_key.to_string(), json!(100)),
+            ]));
+            let msg = validate_logit_bias(&bias).unwrap_err().to_string();
+            assert_eq!(
+                msg, "Logit bias token id 18 is specified more than once",
+                "second key: {second_key}"
+            );
+        }
+
+        let distinct = Some(HashMap::from([
+            ("18".to_string(), json!(-100)),
+            ("19".to_string(), json!(100)),
+        ]));
+        assert!(validate_logit_bias(&distinct).is_ok());
     }
 
     /// A valid token ID must still reach the numeric and range checks for its

@@ -232,6 +232,20 @@ impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
     fn get_best_of(&self) -> Option<u8> {
         self.inner.best_of
     }
+
+    fn get_logit_bias(&self) -> Option<std::collections::HashMap<u32, f32>> {
+        self.inner
+            .logit_bias
+            .as_ref()
+            .filter(|bias| !bias.is_empty())
+            .map(|bias| {
+                bias.iter()
+                    .filter_map(|(token, value)| {
+                        Some((token.parse::<u32>().ok()?, value.as_f64()? as f32))
+                    })
+                    .collect()
+            })
+    }
 }
 
 impl CommonExtProvider for NvCreateCompletionRequest {
@@ -656,6 +670,31 @@ mod tests {
             .expect("Failed to extract output options");
 
         assert_eq!(output_options.skip_special_tokens, None);
+    }
+
+    #[test]
+    fn test_empty_logit_bias_map_extracts_as_none() {
+        // `logit_bias: {}` is a no-op request. It must normalize to `None` so
+        // it serializes as `null` and stays safe for N-2 workers that predate
+        // the field (a `{}` would reach their sampling-options filter and
+        // fail on the unknown key).
+        let request: NvCreateCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "prompt": "Hello, world!",
+            "logit_bias": {}
+        }))
+        .expect("Failed to deserialize request");
+        ValidateRequest::validate(&request).expect("empty logit_bias must pass validation");
+
+        let sampling_options = request
+            .extract_sampling_options()
+            .expect("empty logit_bias extraction failed");
+
+        assert!(
+            sampling_options.logit_bias.is_none(),
+            "an empty logit_bias map must extract as None, got {:?}",
+            sampling_options.logit_bias
+        );
     }
 
     #[test]

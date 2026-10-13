@@ -247,6 +247,16 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             "beam search is not represented by SGLang's native gRPC proto",
         ));
     }
+    if request
+        .sampling_options
+        .logit_bias
+        .as_ref()
+        .is_some_and(|bias| !bias.is_empty())
+    {
+        return Err(client::invalid_request(
+            "logit_bias is not represented by SGLang's native gRPC proto",
+        ));
+    }
     if let Some(penalty) = request.sampling_options.length_penalty
         && (penalty - 1.0).abs() > f32::EPSILON
     {

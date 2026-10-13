@@ -411,6 +411,13 @@ fn unsupported_sampling_controls_are_rejected() {
             },
             "include_stop_str_in_output",
         ),
+        (
+            SamplingOptions {
+                logit_bias: Some(std::collections::HashMap::from([(18, -10.0)])),
+                ..Default::default()
+            },
+            "logit_bias",
+        ),
     ] {
         let mut request = request();
         request.sampling_options = options;
