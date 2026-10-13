@@ -28,7 +28,7 @@ def cap_output_tokens(
 def cap_sglang_output_tokens(
     sampling_params: dict[str, Any], limit: int | None, min_tokens: int | None = None
 ) -> dict[str, Any]:
-    ...
+    pass
 
 
 @overload
@@ -37,14 +37,14 @@ def cap_sglang_output_tokens(
     limit: int | None,
     min_tokens: int | None = None,
 ) -> list[dict[str, Any]]:
-    ...
+    pass
 
 
 @overload
 def cap_sglang_output_tokens(
     sampling_params: None, limit: int | None, min_tokens: int | None = None
 ) -> dict[str, Any] | None:
-    ...
+    pass
 
 
 def cap_sglang_output_tokens(
