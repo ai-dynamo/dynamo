@@ -11,7 +11,7 @@ use dynamo_backend_common::{
 };
 use serde_json::{Map, Value};
 
-use crate::client;
+use crate::client::{self, MediaSupport};
 use crate::proto as pb;
 
 const IMAGE_URL_KEY: &str = "image_url";
@@ -248,20 +248,32 @@ fn media_source(item: &MultimodalData) -> Result<String, DynamoError> {
     }
 }
 
-/// SGLang lists the `multimodal_inputs` gRPC feature only when it can consume
-/// media. Older servers and text-only models drop the media fields silently, so
-/// the model would answer without seeing the media.
+/// SGLang drops media that the server or the model cannot read without an error,
+/// so the model would answer without seeing it.
 pub(crate) fn require_media_support(
     request: &pb::GenerateRequest,
-    supports_multimodal_inputs: bool,
+    support: MediaSupport,
 ) -> Result<(), DynamoError> {
-    let has_media = !request.image_data.is_empty()
-        || !request.video_data.is_empty()
-        || !request.audio_data.is_empty();
-    if has_media && !supports_multimodal_inputs {
-        return Err(client::invalid_request(
-            "this SGLang server does not accept image, video, or audio inputs over gRPC; serve a multimodal model with an SGLang version that supports gRPC media",
-        ));
+    for (present, supported, message) in [
+        (
+            !request.image_data.is_empty(),
+            support.image,
+            "this SGLang server does not accept image inputs over gRPC; serve an image model with an SGLang version that supports gRPC media",
+        ),
+        (
+            !request.video_data.is_empty(),
+            support.video,
+            "this SGLang server does not accept video inputs over gRPC; serve a video model with an SGLang version that supports gRPC media",
+        ),
+        (
+            !request.audio_data.is_empty(),
+            support.audio,
+            "this SGLang server does not accept audio inputs over gRPC; serve an audio model with an SGLang version that supports gRPC media",
+        ),
+    ] {
+        if present && !supported {
+            return Err(client::invalid_request(message));
+        }
     }
     Ok(())
 }
