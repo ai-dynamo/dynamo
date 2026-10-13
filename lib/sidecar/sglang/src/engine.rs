@@ -24,12 +24,14 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, Client, Discovery, KV_CONFIG_KEY, NodeMetadata, Pool, WORKER_GROUP_KEY};
+use crate::client::{
+    self, Client, Discovery, KV_CONFIG_KEY, MediaSupport, NodeMetadata, Pool, WORKER_GROUP_KEY,
+};
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
     build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
-    meta_u32, output_ids_to_u32, terminal_from_meta,
+    meta_u32, output_ids_to_u32, require_media_support, terminal_from_meta,
 };
 
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
@@ -48,6 +50,7 @@ struct StartedState {
     pool: Pool,
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
+    media_support: MediaSupport,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -313,11 +316,13 @@ impl LLMEngine for SglangSidecarEngine {
             discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
+        let media_support = client::media_support(&discovery.server_info);
         self.state
             .set(StartedState {
                 pool,
                 native_http,
                 kv_event_sources,
+                media_support,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -325,6 +330,7 @@ impl LLMEngine for SglangSidecarEngine {
             mode = ?self.disaggregation_mode,
             connections = connection_count,
             kv_event_sources = kv_event_source_count,
+            media_support = ?media_support,
             "sglang sidecar started"
         );
         Ok(config)
@@ -367,6 +373,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
+        require_media_support(&grpc_request, state.media_support)?;
         let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
