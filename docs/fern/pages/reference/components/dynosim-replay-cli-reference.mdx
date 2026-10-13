@@ -177,8 +177,8 @@ AISimulate's Weka importer also changes two behaviors from the former Dynamo imp
   previously rejected. The fallback can affect inferred dependency edges and replay timing;
   it does not assert that the measured API duration was zero.
 
-`mooncake-delta`, `agentic_mooncake`, and `weka` require aggregated engine mode.
-The two agentic formats also require `trace_timestamps` and reject the virtual-time cutoff.
+`mooncake-delta` requires aggregated engine mode. `agentic_mooncake` and `weka`
+require `trace_timestamps`.
 `applied_compute_agentic` requires concurrency load.
 
 ### Canonical Python Engine Configuration
@@ -282,6 +282,54 @@ Agentic Mooncake v2 remains an optional materialized interchange format. Dynamo 
 not ship a Weka parser, lowering implementation, or Weka-to-v2 converter; those source semantics
 and any future materialization tooling belong to AISimulate.
 
+### AgentX host offload and lifecycle controls
+
+Configure G2 through `engine.workers.<role>.kv_cache.host_offload` in CLI YAML,
+or `engine.native_host_offload` in the canonical engine configuration passed to
+the Python replay API. Both use the existing offline replay
+path for every trace format, including ordinary Dynamo, Mooncake, and
+Mooncake-delta traces. No connector configuration is required.
+
+For AgentX graphs, G2 requires vLLM, one aggregated worker or one prefill plus
+one decode worker, attention DP=1 on every role, static worker pools, and no
+speculative decoding (`engine.aic_nextn` and
+`engine.timing_model.config.speculation` unset,
+`engine.decode_speedup_ratio=1.0`). Tensor parallelism may exceed one. These AgentX limits
+also apply when a Dynamo trace contains agent context but `agentic_lanes` is
+omitted. Ordinary traces retain their existing topology support; a standard
+Dynamo trace with two workers and attention DP=2 is covered by the G2 tests.
+G3 and online AgentX G2 replay are outside this support boundary.
+
+Each role can omit offload or select `dp_rank_local` or `cluster_shared`.
+Shared roles must agree on layout, total capacity, and shared directional
+bandwidths. `num_host_blocks` is the capacity of one shared pool and is counted
+once. AISimulate's public engine materializer derives the layout identity for
+CLI and ReplaySpec inputs; direct canonical configuration callers must supply
+a compatible `kv_layout_id` in `engine.native_host_offload` for a shared pool. Host-tier events
+remain distinct from GPU residency, while the KV router retains its configured
+host-tier weighting. P-to-D handoff uses GPU-resident hashes.
+
+`engine.kv_transfer_bytes_per_token` describes P-to-D transfer size;
+`engine.kv_cache_bytes_per_token` describes the physical cache footprint used by G2.
+G2 requires a resolved, positive physical cache size. Set the transfer size
+separately when the geometries differ.
+
+The Python `run_trace_replay` API also accepts `agentic_snapshot` (a mapping
+containing `seed`), `agentic_warmup` (default `False`), and `agentic_profile`
+(AISimulate's duration, response-grace, and cancellation-drain options).
+These phase controls require offline replay. Snapshots require positive
+`agentic_lanes`; warmup and profiling require a
+snapshot. Profiling cannot be combined with `max_sim_time_ms`. Warmup retains
+G1/G2 state across the measurement barrier. Results retain `agentic_snapshots`,
+`agentic_phases`, and `agentic_profile` when those phases are enabled.
+
+With per-request capture, inspect `first_admission_g1_reused_input_tokens`,
+`first_admission_host_reused_input_tokens`, and `admission_history` to distinguish
+G1 hits, completed G2 restores, and P/D admission. HBM-only reports may omit the
+host field. `g2_domains` reports shared capacity. This support is
+`functional_only`; it does not establish performance equivalence with a
+hardware offload recipe.
+
 ## Engine and Adapter Rules
 
 - `engine.mode: aggregated` requires `engine.workers.aggregated`.
@@ -299,7 +347,7 @@ and any future materialization tooling belong to AISimulate.
 - `timing.type: default` uses the AIConfigurator forward-pass model shipped in the `aisimulate`
   wheel. `fixed` requires both `prefill_ms` and `decode_ms`; `polynomial` selects the built-in
   polynomial model.
-- `router.policy: kv_router` requires more than one routable worker. Set
+- `router.policy: kv_router` supports one or more routable workers. Set
   `router.prefill_load_model.type` to `none` or `aic`.
 - `planner.policy` is `disabled` or `enabled`. Enabled settings use the production
   `PlannerConfig` defaults and normalization. The default target is `throughput`, which enables
