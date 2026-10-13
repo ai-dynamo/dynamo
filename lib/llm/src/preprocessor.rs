@@ -13689,10 +13689,8 @@ mod tests {
         }
     }
 
-    /// `/v1/completions` must forward an omitted or `null` `max_tokens` as
-    /// `None` so the backend applies its own generation default, matching
-    /// `/v1/chat/completions` and `/v1/responses`. A published token budget
-    /// must not be turned into a `combined_limit - prompt_len` default.
+    /// `/v1/completions` forwards an omitted or `null` `max_tokens` as `None`,
+    /// even when a token budget is published, so the backend applies its default.
     #[tokio::test]
     async fn test_completion_operator_forwards_omitted_max_tokens_as_none() {
         let mut mdc = ModelDeploymentCard::load_from_disk(

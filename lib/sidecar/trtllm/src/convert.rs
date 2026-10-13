@@ -147,11 +147,8 @@ pub(crate) fn build_generate_request(
 // `_default_max_tokens`); the sidecar rejects multimodal before dispatch, so
 // `token_ids.len()` is the true prompt length. `context_length` is resolved in
 // `engine::start`, where `--context-length` wins over the `GetModelInfo` report.
-// `/v1/chat/completions`, `/v1/responses`, and `/v1/completions` all reach this
-// fallback. Chat and responses set `PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY`,
-// which stops the frontend supplying its own default
-// (`preprocessor::omitted_max_tokens_default`); the completions operator never
-// applies that default, so it also forwards an omitted `max_tokens` as `None`.
+// `/v1/chat/completions`, `/v1/responses`, and `/v1/completions` all forward an
+// omitted `max_tokens` as `None`, so all three reach this fallback.
 //
 // Remove when https://github.com/NVIDIA/TensorRT-LLM/issues/16549 lands (gRPC
 // `max_tokens` made optional): drop this fallback and forward an omitted
