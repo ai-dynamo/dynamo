@@ -134,12 +134,12 @@ spec:
                       description: Metric is the scalar target when mode is Optimize.
                       enum:
                         - Throughput
-                        - ThroughputPerGpu
+                        - ThroughputPerGPU
                         - ThroughputPerUser
                         - TTFT
                         - E2ELatency
                         - Goodput
-                        - GoodputPerGpu
+                        - GoodputPerGPU
                       type: string
                     metrics:
                       description: Metrics lists two or more distinct scalar targets when mode is Pareto.
@@ -147,12 +147,12 @@ spec:
                         description: ObjectiveMetric is a metric optimized by AISimulate.
                         enum:
                           - Throughput
-                          - ThroughputPerGpu
+                          - ThroughputPerGPU
                           - ThroughputPerUser
                           - TTFT
                           - E2ELatency
                           - Goodput
-                          - GoodputPerGpu
+                          - GoodputPerGPU
                         type: string
                       minItems: 2
                       type: array
@@ -193,10 +193,10 @@ spec:
                   x-kubernetes-validations:
                     - message: Optimize requires metric; Pareto requires metrics
                       rule: (self.mode == 'Optimize' && has(self.metric) && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))
-                    - message: Goodput and GoodputPerGpu require at least one SLA bound
-                      rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGpu'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
-                    - message: Pareto metrics containing Goodput or GoodputPerGpu require at least one SLA bound
-                      rule: '!(has(self.metrics) && self.metrics.exists(m, m in [''Goodput'', ''GoodputPerGpu''])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
+                    - message: Goodput and GoodputPerGPU require at least one SLA bound
+                      rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGPU'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
+                    - message: Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound
+                      rule: '!(has(self.metrics) && self.metrics.exists(m, m in [''Goodput'', ''GoodputPerGPU''])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
                 recommendation:
                   default: {}
                   description: Recommendation controls bounded projection into DGDC resources.

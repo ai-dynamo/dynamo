@@ -4792,7 +4792,7 @@ ObjectiveMetric is a metric optimized by AISimulate.
 
 **Kind:** `type`
 **Underlying type:** `string`
-**Validation:** Enum: [Throughput ThroughputPerGpu ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGpu]
+**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]
 **Appears in:** [ObjectiveSpec](#objectivespec)
 </Accordion>
 
@@ -4851,13 +4851,13 @@ See [ObjectiveMode](#objectivemode).
 <ParamField path="metric" type="ObjectiveMetric">
 Metric is the scalar target when mode is Optimize.
 See [ObjectiveMetric](#objectivemetric).
-**Validation:** Enum: [Throughput ThroughputPerGpu ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGpu]  Optional: \&#123;\&#125;
+**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="metrics" type="ObjectiveMetric array">
 Metrics lists two or more distinct scalar targets when mode is Pareto.
 See [ObjectiveMetric](#objectivemetric).
-**Validation:** Enum: [Throughput ThroughputPerGpu ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGpu]  MinItems: 2  Optional: \&#123;\&#125;
+**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  MinItems: 2  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="sla" type="ObjectiveSLASpec" default="\{ itlMs:30 ttftMs:2000 \}">

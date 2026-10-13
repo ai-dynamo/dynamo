@@ -391,7 +391,7 @@ func TestGeneratedDGDRV1Beta2RequestSchema(t *testing.T) {
 				objective := requestObjective(object)
 				objective["mode"] = "Pareto"
 				delete(objective, "metric")
-				objective["metrics"] = []interface{}{"ThroughputPerGpu", "TTFT"}
+				objective["metrics"] = []interface{}{"ThroughputPerGPU", "TTFT"}
 			},
 		},
 		{
@@ -551,7 +551,7 @@ func validDGDRV1Beta2Request() map[string]interface{} {
 			},
 			"objective": map[string]interface{}{
 				"mode":   "Optimize",
-				"metric": "ThroughputPerGpu",
+				"metric": "ThroughputPerGPU",
 				"sla":    map[string]interface{}{},
 			},
 			"recommendation": map[string]interface{}{

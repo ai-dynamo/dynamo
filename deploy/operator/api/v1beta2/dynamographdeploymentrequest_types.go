@@ -121,7 +121,7 @@ const (
 )
 
 // ObjectiveMetric is a metric optimized by AISimulate.
-// +kubebuilder:validation:Enum=Throughput;ThroughputPerGpu;ThroughputPerUser;TTFT;E2ELatency;Goodput;GoodputPerGpu
+// +kubebuilder:validation:Enum=Throughput;ThroughputPerGPU;ThroughputPerUser;TTFT;E2ELatency;Goodput;GoodputPerGPU
 type ObjectiveMetric string
 
 // ObjectiveSLASpec defines per-request latency bounds used to calculate goodput.
@@ -149,8 +149,8 @@ type ObjectiveSLASpec struct {
 
 // ObjectiveSpec defines scalar optimization or a multi-objective Pareto search.
 // +kubebuilder:validation:XValidation:rule="(self.mode == 'Optimize' && has(self.metric) && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))",message="Optimize requires metric; Pareto requires metrics"
-// +kubebuilder:validation:XValidation:rule="!(has(self.metric) && self.metric in ['Goodput', 'GoodputPerGpu']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Goodput and GoodputPerGpu require at least one SLA bound"
-// +kubebuilder:validation:XValidation:rule="!(has(self.metrics) && self.metrics.exists(m, m in ['Goodput', 'GoodputPerGpu'])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Pareto metrics containing Goodput or GoodputPerGpu require at least one SLA bound"
+// +kubebuilder:validation:XValidation:rule="!(has(self.metric) && self.metric in ['Goodput', 'GoodputPerGPU']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Goodput and GoodputPerGPU require at least one SLA bound"
+// +kubebuilder:validation:XValidation:rule="!(has(self.metrics) && self.metrics.exists(m, m in ['Goodput', 'GoodputPerGPU'])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound"
 type ObjectiveSpec struct {
 	// Mode selects scalar optimization or a Pareto search.
 	// +optional
