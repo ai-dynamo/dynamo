@@ -78,7 +78,8 @@ type CompilationCacheConfig struct {
 //     `PodCliqueScalingGroupConfig`, according to the field location and
 //     component shape.
 //   - value may set topologyConstraint, and component contexts may set the
-//     native minAvailable field. Availability is not supported at root or role scope.
+//     native minAvailable field and rollingUpdate.maxUnavailable. Availability
+//     and rollout budgets are not supported at root or role scope.
 //
 // All other providers, versions, targets, and fields are rejected.
 type ProviderOverride struct {
@@ -100,6 +101,7 @@ type ProviderOverride struct {
 	// `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on
 	// PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the
 	// deprecated component field preserves its value and leaves the update strategy unchanged.
+	// Component contexts also accept rollingUpdate.maxUnavailable.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
