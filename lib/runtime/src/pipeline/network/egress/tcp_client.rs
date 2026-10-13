@@ -40,7 +40,7 @@ use tokio_rustls::TlsConnector;
 
 type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
 type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
-use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedRead;
 
@@ -157,8 +157,19 @@ impl TcpRequestConfig {
 struct PendingRequest {
     /// Request frame split into header and payload chunks.
     frame: TcpRequestFrame,
-    /// Oneshot channel to send response back to caller
+    response: PendingResponse,
+}
+
+struct PendingResponse {
     response_tx: oneshot::Sender<Result<Bytes>>,
+    permit: OwnedSemaphorePermit,
+}
+
+impl PendingResponse {
+    fn send(self, result: Result<Bytes>) {
+        drop(self.permit);
+        let _ = self.response_tx.send(result);
+    }
 }
 
 /// Buffered TCP writer for header coalescing and chunked payload writes.
@@ -290,22 +301,13 @@ impl TcpWriteBuffer {
     }
 }
 
-/// RAII guard that decrements the inflight counter on drop.
-///
-/// Guarantees `fetch_sub` runs on ALL exit paths from `send_request`:
-/// - Normal return (success or `?` propagation)
-/// - `tokio::time::timeout` cancellation (future dropped mid-await)
-/// - Any other future drop (e.g., `select!` branch cancellation)
-///
-/// Without this guard, a timeout drops the future at `response_rx.await`
-/// and the `fetch_sub` below it is never reached, permanently inflating
-/// the inflight counter and poisoning `available_capacity()`.
+/// Counts active callers; cancelled requests can still await an ACK on the wire.
 struct InflightGuard(Arc<AtomicU64>);
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        // Release: pairs with the Acquire loads in available_capacity() and
-        // cleanup_idle_hosts() so the decrement is visible to any reader that
+        // Release: pairs with the Acquire loads in cleanup_idle_hosts() and
+        // connection_counts() so the decrement is visible to any reader that
         // subsequently observes the updated counter value.
         self.0.fetch_sub(1, Ordering::Release);
     }
@@ -358,7 +360,7 @@ struct TcpConnection {
     /// Lock-free queue for callers to submit requests
     submit_queue: Arc<SegQueue<PendingRequest>>,
     /// Lock-free queue for writer→reader response_tx handoff
-    response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
+    response_queue: Arc<SegQueue<PendingResponse>>,
     /// Notify to wake writer when submit_queue transitions from empty
     writer_notify: Arc<tokio::sync::Notify>,
     /// Writer task handle for cleanup
@@ -371,16 +373,14 @@ struct TcpConnection {
     /// This closes the race where a request can enqueue after the final drain pass
     /// and then wait until the outer request timeout.
     closed: Arc<AtomicBool>,
-    /// Number of in-flight requests (for capacity heuristic)
+    /// Number of active callers (for idle cleanup and connection statistics)
     inflight: Arc<AtomicU64>,
-    /// Max inflight for capacity heuristic (matches channel_buffer)
-    channel_buffer: usize,
     /// Bounded admission semaphore (permits == channel_buffer).
     /// Callers must acquire a permit before pushing to submit_queue,
     /// enforcing channel_buffer as a hard limit and preventing unbounded
     /// SegQueue growth and heap OOM under sustained overload.
-    /// Permit is held for the lifetime of the call and released on drop
-    /// (success, error via `?`, or timeout/cancel future drop).
+    /// Queued requests and committed ACK waiters own their permits, including
+    /// when the caller has been cancelled.
     admission: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
     post_enqueue_barrier: Option<Arc<tokio::sync::Barrier>>,
@@ -577,7 +577,6 @@ impl TcpConnection {
             healthy,
             closed,
             inflight,
-            channel_buffer,
             admission,
             #[cfg(test)]
             post_enqueue_barrier: None,
@@ -643,21 +642,19 @@ impl TcpConnection {
     /// cleaned up, and callers receive a RecvError caught by the outer timeout.
     fn drain_pending(submit_queue: &SegQueue<PendingRequest>) {
         while let Some(req) = submit_queue.pop() {
-            let _ = req
-                .response_tx
-                .send(Err(anyhow::anyhow!("Connection closed")));
+            req.response.send(Err(anyhow::anyhow!("Connection closed")));
         }
     }
 
     /// Drain committed response waiters when the reader determines that no more
     /// responses can ever arrive on this connection.
     fn drain_response_waiters(
-        response_queue: &SegQueue<oneshot::Sender<Result<Bytes>>>,
+        response_queue: &SegQueue<PendingResponse>,
         err_msg: impl Into<String>,
     ) {
         let err_msg = err_msg.into();
         while let Some(tx) = response_queue.pop() {
-            let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
+            tx.send(Err(anyhow::anyhow!("{}", err_msg)));
         }
     }
 
@@ -681,14 +678,14 @@ impl TcpConnection {
     async fn writer_task(
         mut write_half: BoxWrite,
         submit_queue: Arc<SegQueue<PendingRequest>>,
-        response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
+        response_queue: Arc<SegQueue<PendingResponse>>,
         notify: Arc<tokio::sync::Notify>,
         healthy: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
     ) -> Result<()> {
         // Hoisted outside the loop to reuse allocations across drain cycles.
         let mut write_buf = TcpWriteBuffer::new();
-        let mut response_batch: Vec<oneshot::Sender<Result<Bytes>>> = Vec::with_capacity(64);
+        let mut response_batch: Vec<PendingResponse> = Vec::with_capacity(64);
         let trace = latency_trace_enabled();
 
         // Latency instrumentation accumulators
@@ -723,7 +720,7 @@ impl TcpConnection {
                 while let Some(req) = submit_queue.pop() {
                     count += 1;
                     write_buf.push_frame(req.frame);
-                    response_batch.push(req.response_tx);
+                    response_batch.push(req.response);
                     if write_buf.is_full() {
                         break;
                     }
@@ -750,7 +747,7 @@ impl TcpConnection {
                     write_buf.clear();
                     let err_msg = format!("Write failed: {}", e);
                     for tx in response_batch.drain(..) {
-                        let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
+                        tx.send(Err(anyhow::anyhow!("{}", err_msg)));
                     }
                     return Err(e.into());
                 }
@@ -765,7 +762,7 @@ impl TcpConnection {
                     write_buf.clear();
                     let err_msg = format!("Flush failed: {}", e);
                     for tx in response_batch.drain(..) {
-                        let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
+                        tx.send(Err(anyhow::anyhow!("{}", err_msg)));
                     }
                     return Err(e.into());
                 }
@@ -836,7 +833,7 @@ impl TcpConnection {
     /// via `writer_notify` so it can detect reader death and drain pending callers.
     async fn reader_task(
         read_half: BoxRead,
-        response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
+        response_queue: Arc<SegQueue<PendingResponse>>,
         healthy: Arc<AtomicBool>,
         writer_notify: Arc<tokio::sync::Notify>,
     ) -> Result<()> {
@@ -861,11 +858,11 @@ impl TcpConnection {
 
             match result {
                 Ok(response_msg) => {
-                    let _ = tx.send(Ok(response_msg.data));
+                    tx.send(Ok(response_msg.data));
                 }
                 Err(e) => {
                     let err_msg = format!("Failed to decode response: {}", e);
-                    let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
+                    tx.send(Err(anyhow::anyhow!("{}", err_msg)));
                     healthy.store(false, Ordering::Relaxed);
                     Self::drain_response_waiters(
                         &response_queue,
@@ -906,12 +903,11 @@ impl TcpConnection {
             None
         };
 
-        // Bounded admission keeps queued and in-flight frames at or below
-        // channel_buffer. The permit is released on every return, error, and
-        // cancellation path.
-        let _permit = self
+        // Admission follows the transport request, not the caller's future.
+        let permit = self
             .admission
-            .acquire()
+            .clone()
+            .acquire_owned()
             .await
             .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?;
 
@@ -931,19 +927,13 @@ impl TcpConnection {
             anyhow::bail!("Connection closed (writer exited)");
         }
 
-        // Increment inflight and attach a RAII guard that decrements it on ALL
-        // exit paths: normal return, `?` propagation, tokio::time::timeout
-        // cancellation, or any other future drop.  Without the guard a timeout
-        // drops the future at response_rx.await and fetch_sub is never reached,
-        // permanently inflating the counter and poisoning available_capacity().
-        // Release: symmetric with the Release in InflightGuard::drop so that
-        // Acquire loads in available_capacity() see a consistent value.
         self.inflight.fetch_add(1, Ordering::Release);
         let _inflight_guard = InflightGuard(self.inflight.clone());
-
-        // Lock-free submit: ~20-40ns
-        self.submit_queue
-            .push(PendingRequest { frame, response_tx });
+        let response = PendingResponse {
+            response_tx,
+            permit,
+        };
+        self.submit_queue.push(PendingRequest { frame, response });
 
         #[cfg(test)]
         if let Some(barrier) = &self.post_enqueue_barrier {
@@ -965,9 +955,7 @@ impl TcpConnection {
             }
         }
 
-        // Await response. On timeout the enclosing future is dropped here:
-        // `_inflight_guard` drops → fetch_sub(Release) runs automatically.
-        // `_permit` drops     → semaphore slot is released automatically.
+        // Cancelled callers still occupy their FIFO slot until the ACK arrives.
         let result = response_rx
             .await
             .map_err(|_| anyhow::anyhow!("Reader task closed"))?;
@@ -993,10 +981,7 @@ impl TcpConnection {
 
     /// Available capacity (advisory, for cold path growth heuristic)
     fn available_capacity(&self) -> usize {
-        // Acquire: pairs with Release in fetch_add/InflightGuard::drop so we
-        // observe the most recently committed inflight value from any thread.
-        let inflight = self.inflight.load(Ordering::Acquire) as usize;
-        self.channel_buffer.saturating_sub(inflight)
+        self.admission.available_permits()
     }
 }
 
@@ -3472,6 +3457,154 @@ mod tests {
         );
 
         cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_keeps_admission_until_ack() {
+        use crate::pipeline::network::codec::{TcpResponseMessage, ZeroCopyTcpDecoder};
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let conn = TcpConnection::connect_with_connector(
+                listener.local_addr().unwrap(),
+                Duration::from_secs(1),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+            let (peer, _) = listener.accept().await.unwrap();
+            let (mut read, mut write) = tokio::io::split(peer);
+            let mut requests = ZeroCopyTcpDecoder::new();
+            let mut headers = Headers::new();
+            headers.insert("x-endpoint-path".to_string(), "test".to_string());
+            let mut cancelled = Box::pin(conn.send_request(Bytes::from_static(b"cancelled"), &headers));
+            tokio::select! {
+                frame = requests.read_message(&mut read) => assert_eq!(frame.unwrap().payload(), b"cancelled"[..]),
+                result = &mut cancelled => panic!("request completed without an ACK: {result:?}"),
+            }
+            drop(cancelled);
+
+            assert_eq!(conn.admission.available_permits(), 0);
+            assert_eq!(conn.available_capacity(), 0);
+            assert_eq!(conn.inflight.load(Ordering::Acquire), 0);
+            assert!(tokio::time::timeout(
+                Duration::from_millis(20),
+                conn.send_request(Bytes::from_static(b"timed-out"), &headers),
+            )
+            .await
+            .is_err());
+
+            write
+                .write_all(&TcpResponseMessage::new(Bytes::from_static(b"old-ack")).encode().unwrap())
+                .await
+                .unwrap();
+            let mut live = Box::pin(conn.send_request(Bytes::from_static(b"live"), &headers));
+            tokio::select! {
+                frame = requests.read_message(&mut read) => assert_eq!(frame.unwrap().payload(), b"live"[..]),
+                result = &mut live => panic!("live request received the old ACK: {result:?}"),
+            }
+            write
+                .write_all(&TcpResponseMessage::new(Bytes::from_static(b"live-ack")).encode().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(live.await.unwrap(), b"live-ack"[..]);
+            assert_eq!(conn.admission.available_permits(), 1);
+            assert_eq!(conn.available_capacity(), 1);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn writer_failure_releases_cancelled_and_queued_requests() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let admission = Arc::new(tokio::sync::Semaphore::new(2));
+            let submit = Arc::new(SegQueue::new());
+            let responses = Arc::new(SegQueue::new());
+            for _ in 0..2 {
+                let (response_tx, response_rx) = oneshot::channel();
+                submit.push(PendingRequest {
+                    frame: TcpRequestMessage::new("test".to_string(), Bytes::from(vec![0; 65536]))
+                        .into_frame()
+                        .unwrap(),
+                    response: PendingResponse {
+                        response_tx,
+                        permit: admission.clone().acquire_owned().await.unwrap(),
+                    },
+                });
+                drop(response_rx);
+            }
+            let (write, mut peer) = tokio::io::duplex(1);
+            let writer = tokio::spawn(TcpConnection::writer_task(
+                Box::new(write),
+                submit.clone(),
+                responses.clone(),
+                Arc::new(tokio::sync::Notify::new()),
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+            ));
+            peer.read_exact(&mut [0]).await.unwrap();
+            assert_eq!(admission.available_permits(), 0);
+            assert_eq!(submit.len(), 1);
+            assert!(responses.is_empty());
+
+            drop(peer);
+            assert!(writer.await.unwrap().is_err());
+            assert_eq!(admission.available_permits(), 2);
+            assert!(submit.is_empty());
+            assert!(responses.is_empty());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reader_exit_releases_cancelled_and_live_ack_waiters() {
+        use crate::pipeline::network::codec::ZeroCopyTcpDecoder;
+
+        for truncated_reply in [false, true] {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let conn = TcpConnection::connect_with_connector(
+                    listener.local_addr().unwrap(),
+                    Duration::from_secs(1),
+                    2,
+                    None,
+                )
+                .await
+                .unwrap();
+                let (peer, _) = listener.accept().await.unwrap();
+                let (mut read, mut write) = tokio::io::split(peer);
+                let mut decoder = ZeroCopyTcpDecoder::new();
+                let mut headers = Headers::new();
+                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                let mut cancelled = Box::pin(conn.send_request(Bytes::from_static(b"first"), &headers));
+                tokio::select! {
+                    frame = decoder.read_message(&mut read) => assert_eq!(frame.unwrap().payload(), b"first"[..]),
+                    result = &mut cancelled => panic!("unexpected ACK: {result:?}"),
+                }
+                drop(cancelled);
+                let mut live = Box::pin(conn.send_request(Bytes::from_static(b"second"), &headers));
+                tokio::select! {
+                    frame = decoder.read_message(&mut read) => assert_eq!(frame.unwrap().payload(), b"second"[..]),
+                    result = &mut live => panic!("unexpected ACK: {result:?}"),
+                }
+                while conn.response_queue.len() < 2 {
+                    tokio::task::yield_now().await;
+                }
+                if truncated_reply {
+                    write.write_all(&[0, 0]).await.unwrap();
+                }
+                write.shutdown().await.unwrap();
+                assert!(live.await.is_err());
+                assert_eq!(conn.admission.available_permits(), 2);
+                assert_eq!(conn.available_capacity(), 2);
+                assert!(conn.response_queue.is_empty());
+            })
+            .await
+            .unwrap();
+        }
     }
 
     #[tokio::test]
