@@ -68,14 +68,29 @@ export CLUSTER_KUSTOMIZATION=/absolute/path/to/private/minimax-m3-cluster
 export DGD="minimax-m3-$PROFILE"
 ```
 
-Prepare and render the cluster configuration as described in
-[Edit and render](#edit-and-render), then apply the rendered manifest:
+Prepare and validate the cluster configuration as described in
+[Edit and render](#edit-and-render). Then include the selected profile's
+`worker-liveness` Component to extend worker liveness and readiness allowances
+for cold kernel compilation. The cluster validator accepts only cluster
+bindings, so compose this Component in a separate deployment directory:
 
 ```bash
+export DEPLOY_KUSTOMIZATION=/absolute/path/to/private/minimax-m3-deploy
+mkdir -p "$DEPLOY_KUSTOMIZATION"
+cat > "$DEPLOY_KUSTOMIZATION/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - $(realpath --relative-to="$DEPLOY_KUSTOMIZATION" "$CLUSTER_KUSTOMIZATION")
+components:
+  - $(realpath --relative-to="$DEPLOY_KUSTOMIZATION" "$RECIPE_DIR/kustomize/components/worker-liveness")
+EOF
+kustomize build --load-restrictor LoadRestrictionsNone \
+  "$DEPLOY_KUSTOMIZATION" > "$DEPLOY_KUSTOMIZATION/rendered.yaml"
 kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply --dry-run=server \
-  -f "$CLUSTER_KUSTOMIZATION/rendered.yaml"
+  -f "$DEPLOY_KUSTOMIZATION/rendered.yaml"
 kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply \
-  -f "$CLUSTER_KUSTOMIZATION/rendered.yaml"
+  -f "$DEPLOY_KUSTOMIZATION/rendered.yaml"
 ```
 
 ## Edit and render
@@ -113,44 +128,6 @@ kustomize build --load-restrictor LoadRestrictionsNone \
 Use `LoadRestrictionsNone` only with reviewed paths. Inspect the rendered
 ConfigMap, ComputeDomain, and DynamoGraphDeployment before applying them.
 Keep filled cluster values and rendered manifests outside the repository.
-
-### Worker Health Probes
-
-Select the optional [aggregated worker-liveness Component](vllm/agg-gb200-agentic/kustomize/components/worker-liveness/kustomization.yaml)
-or [disaggregated worker-liveness Component](vllm/disagg-gb200-agentic/kustomize/components/worker-liveness/kustomization.yaml)
-to allow cold FMHA kernel compilation to finish before a liveness restart.
-The disaggregated Component applies the same settings to both prefill and
-decode workers.
-It sets `/live` on port `9090` with a 10-second interval, a 10-second timeout,
-and 12 consecutive failures before restarting. It also sets readiness on
-`/health` with a 10-second interval, a 4-second timeout, and 18 consecutive
-failures before marking the worker unready. This allows brief health-check
-failures during compilation without removing the worker from discovery.
-A genuinely unready worker also remains eligible for traffic longer.
-The startup probe remains at the operator default.
-
-Validate the private cluster composition first using the commands above.
-The cluster validator accepts only cluster binding Components, so select
-this recipe Component in a separate outer Kustomization:
-
-```bash
-export LIVENESS_KUSTOMIZATION=/absolute/path/to/private/minimax-m3-liveness
-mkdir -p "$LIVENESS_KUSTOMIZATION"
-cat > "$LIVENESS_KUSTOMIZATION/kustomization.yaml" <<EOF
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - $(realpath --relative-to="$LIVENESS_KUSTOMIZATION" "$CLUSTER_KUSTOMIZATION")
-components:
-  - $(realpath --relative-to="$LIVENESS_KUSTOMIZATION" "$RECIPE_DIR/kustomize/components/worker-liveness")
-EOF
-kustomize build --load-restrictor LoadRestrictionsNone \
-  "$LIVENESS_KUSTOMIZATION" > "$LIVENESS_KUSTOMIZATION/rendered.yaml"
-```
-
-Set `RECIPE_DIR` to the selected profile and use a separate directory from
-`CLUSTER_KUSTOMIZATION`. Review and apply this rendered manifest using the
-commands in [Deploy](#deploy), with its path substituted.
 
 ## Smoke Test
 
