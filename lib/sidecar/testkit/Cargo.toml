@@ -20,6 +20,7 @@ futures = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+dynamo-sidecar-common = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 dynamo-mocker = { workspace = true }
 dynamo-vllm-mocker = { path = "../../mocker/servers/vllm" }

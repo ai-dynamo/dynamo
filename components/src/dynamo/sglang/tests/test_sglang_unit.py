@@ -10,7 +10,7 @@ import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
@@ -42,7 +42,7 @@ from dynamo.sglang.args import (
     should_fetch_model,
     use_modelexpress_remote_instance,
 )
-from dynamo.sglang.backend_args import DynamoSGLangConfig
+from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
@@ -104,6 +104,48 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+def test_freeze_gc_after_init_is_opt_in(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_FREEZE_GC_AFTER_INIT", raising=False)
+    parser = argparse.ArgumentParser()
+    DynamoSGLangArgGroup().add_arguments(parser)
+
+    assert not DynamoSGLangConfig.from_cli_args(
+        parser.parse_args([])
+    ).freeze_gc_after_init
+    assert DynamoSGLangConfig.from_cli_args(
+        parser.parse_args(["--freeze-gc-after-init"])
+    ).freeze_gc_after_init
+
+    monkeypatch.setenv("DYN_SGL_FREEZE_GC_AFTER_INIT", "true")
+    env_parser = argparse.ArgumentParser()
+    DynamoSGLangArgGroup().add_arguments(env_parser)
+    assert DynamoSGLangConfig.from_cli_args(
+        env_parser.parse_args([])
+    ).freeze_gc_after_init
+
+
+@pytest.mark.parametrize(
+    "mode, role_flags, supported",
+    [
+        ("null", {}, True),
+        ("decode", {}, True),
+        ("prefill", {}, False),
+        ("null", {"embedding_worker": True}, False),
+    ],
+)
+def test_freeze_gc_after_init_requires_decode_or_aggregated_mode(
+    mode, role_flags, supported
+):
+    server_args = SimpleNamespace(disaggregation_mode=mode)
+    dynamo_args = SimpleNamespace(freeze_gc_after_init=True, **role_flags)
+
+    if supported:
+        sglang_args.Config(server_args, dynamo_args)
+    else:
+        with pytest.raises(ValueError, match="--freeze-gc-after-init"):
+            sglang_args.Config(server_args, dynamo_args)
 
 
 def test_diffusion_generator_kwargs_maps_nccl_port_to_master_port():
@@ -615,13 +657,24 @@ async def test_prepare_snapshot_engine_rejects_dcp_before_warmup(monkeypatch):
     [
         {"dcp_size": 2, "attention_backend": "triton"},
         {"dcp_size": 1, "attention_backend": "fa3"},
-        {"dcp_size": 2, "attention_backend": "fa3", "use_mla_backend": lambda: True},
+        {
+            "dcp_size": 2,
+            "attention_backend": "flashinfer",
+            "use_mla_backend": lambda: True,
+        },
+        {
+            "dcp_size": 2,
+            "attention_backend": "fa3",
+            "disaggregation_mode": "prefill",
+            "use_mla_backend": lambda: True,
+        },
     ],
-    ids=["dcp-capable-backend", "dcp-disabled", "mla-model"],
+    ids=["dcp-capable-backend", "dcp-disabled", "mla-model", "mla-prefill-worker"],
 )
 async def test_parse_args_accepts_supported_dcp_configurations(
     monkeypatch, mock_sglang_cli, tmp_path, overrides
 ):
+    """Accept supported backends, disabled DCP, and MLA prefill-only workers."""
     server_args = _dcp_server_args_stub(**overrides)
     monkeypatch.setattr(
         "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
@@ -632,6 +685,169 @@ async def test_parse_args_accepts_supported_dcp_configurations(
 
     assert config.server_args is server_args
     assert config.use_resolved_server_args(server_args) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides, default_backend, expected_backend, automatic",
+    [
+        ({"attention_backend": "fa3"}, None, "fa3", False),
+        ({"decode_attention_backend": "fa4"}, None, "fa4", False),
+        ({"attention_backend": "flashmla"}, None, "flashmla", False),
+        # No backend passed: SGLang picks fa3 for MLA on Hopper.
+        ({}, "fa3", "fa3", True),
+    ],
+    ids=["explicit-fa3", "decode-fa4", "explicit-flashmla", "hopper-default-fa3"],
+)
+async def test_parse_args_rejects_mla_dcp_on_backend_without_dcp_decode(
+    monkeypatch,
+    mock_sglang_cli,
+    tmp_path,
+    overrides,
+    default_backend,
+    expected_backend,
+    automatic,
+):
+    """MLA DCP decode must reject a backend that returns no LSE before the engine.
+
+    Otherwise SGLang crashes at decode CUDA graph capture with
+    ``too many values to unpack (expected 2)``.
+    """
+    if automatic:
+        monkeypatch.setattr(
+            "dynamo.sglang._compat.sglang_get_default_attn_backend",
+            lambda *_: default_backend,
+        )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            dcp_size=2, use_mla_backend=lambda: True, **overrides
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path), **overrides)
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert f"decode attention backend '{expected_backend}'" in message
+    assert "--attention-backend flashinfer" in message
+    assert "--dcp-size 1" in message
+    assert ("automatically" in message) is automatic
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [{}, {"attention_backend": "dsa"}],
+    ids=["dsa-model-default", "explicit-dsa"],
+)
+async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
+    monkeypatch, mock_sglang_cli, tmp_path, overrides
+):
+    """SGLang overrides the default to dsa for DSA models, whose decode returns no LSE."""
+    # The platform default alone would accept; the DSA override must win.
+    monkeypatch.setattr(
+        "dynamo.sglang._compat.sglang_get_default_attn_backend",
+        lambda *_: "flashinfer",
+    )
+    hf_config = SimpleNamespace(
+        architectures=["DeepseekV32ForCausalLM"], index_topk=2048
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            dcp_size=2,
+            use_mla_backend=lambda: True,
+            get_model_config=lambda: SimpleNamespace(
+                is_multimodal=False, hf_config=hf_config
+            ),
+            **overrides,
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path), **overrides)
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "decode attention backend 'dsa'" in message
+    assert "Use --dcp-size 1." in message
+    assert "flashinfer" not in message
+    assert ("automatically" in message) is not overrides
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decode_backend", ["cutedsl_mla", "fa3"])
+async def test_kimi_k3_dcp_defers_automatic_backend_until_engine_resolution(
+    monkeypatch, mock_sglang_cli, tmp_path, decode_backend
+):
+    """Do not reject Kimi-K3 using Hopper's generic default; check resolved decode."""
+    platform_default = Mock(return_value="fa3")
+    monkeypatch.setattr(
+        "dynamo.sglang._compat.sglang_get_default_attn_backend", platform_default
+    )
+    hf_config = SimpleNamespace(architectures=["KimiK3ForConditionalGeneration"])
+    server_args = _dcp_server_args_stub(
+        dcp_size=2,
+        use_mla_backend=lambda: True,
+        get_model_config=lambda: SimpleNamespace(
+            is_multimodal=False, hf_config=hf_config
+        ),
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args is server_args
+    assert server_args.decode_attention_backend is None
+    platform_default.assert_not_called()
+    engine_args = SimpleNamespace(**vars(server_args))
+    engine_args.prefill_attention_backend = "trtllm_mla"
+    engine_args.decode_attention_backend = decode_backend
+    if decode_backend == "fa3":
+        with pytest.raises(ValueError, match="decode attention backend 'fa3'"):
+            config.use_resolved_server_args(engine_args)
+    else:
+        resolved = config.use_resolved_server_args(engine_args)
+        assert resolved.decode_attention_backend == "cutedsl_mla"
+        assert config.server_args is resolved
+
+
+def _raise_runtime_error(*_):
+    """Simulate a model-config lookup failure during backend prediction."""
+    raise RuntimeError("model config unavailable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "default_backend",
+    ["flashinfer", None, _raise_runtime_error],
+    ids=["dcp-capable-default", "unknown-default", "default-lookup-fails"],
+)
+async def test_parse_args_accepts_mla_dcp_when_default_backend_is_not_known_bad(
+    monkeypatch, mock_sglang_cli, tmp_path, default_backend, caplog
+):
+    """Keep valid or unknown MLA defaults usable, warning if prediction fails."""
+    helper = (
+        default_backend if callable(default_backend) else lambda *_: default_backend
+    )
+    monkeypatch.setattr("dynamo.sglang._compat.sglang_get_default_attn_backend", helper)
+    server_args = _dcp_server_args_stub(dcp_size=2, use_mla_backend=lambda: True)
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    with caplog.at_level(logging.WARNING):
+        config = await parse_args(sys.argv[1:])
+
+    assert config.server_args is server_args
+    lookup_failed = default_backend is _raise_runtime_error
+    assert ("Could not predict SGLang's default" in caplog.text) is lookup_failed
 
 
 @pytest.mark.asyncio
@@ -1168,6 +1384,18 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
 
     config = await parse_args(sys.argv[1:])
     assert config.dynamo_args.namespace == "custom-ns"
+
+
+@pytest.mark.asyncio
+async def test_rerank_worker_disables_radix_cache(monkeypatch, mock_sglang_cli):
+    """Rerank workers must run each sequence in one forward: no cached prefix, no chunks."""
+    monkeypatch.setattr(sglang_args, "fetch_model", AsyncMock())
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B", "--rerank-worker")
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.disable_radix_cache is True
+    assert config.server_args.chunked_prefill_size == -1
 
 
 @pytest.mark.parametrize(
